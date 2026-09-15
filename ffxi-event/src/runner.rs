@@ -561,10 +561,7 @@ mod tests {
             let Ok(edat) = EventDat::parse(&ebytes) else {
                 continue;
             };
-            let Some(sfid) = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone) else {
-                continue;
-            };
-            let Ok(sloc) = root.resolve(sfid) else {
+            let Ok(sloc) = root.resolve(ffxi_dat::zone_dat::string_dat_file_id(zone)) else {
                 continue;
             };
             let Ok(sbytes) = std::fs::read(sloc.path_under(&root)) else {
@@ -631,7 +628,7 @@ mod tests {
             .expect("resolve event DAT");
         let ebytes = std::fs::read(eloc.path_under(&root)).expect("read event dat");
         let edat = EventDat::parse(&ebytes).expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let sbytes = std::fs::read(sloc.path_under(&root)).expect("read string dat");
         let strings = StringDat::parse(&sbytes).expect("parse string dat");
@@ -687,7 +684,7 @@ mod tests {
             .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
@@ -742,7 +739,7 @@ mod tests {
             .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))

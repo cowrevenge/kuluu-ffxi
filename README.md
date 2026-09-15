@@ -282,9 +282,12 @@ reads them as identity DAT indexes and `horizonxi-2023` through the landmark
 reconciliation in `kuluu-session`.
 `vendor/POLUtils`' `ROMFileMappings.xml` (pinned 2020-07-19; last edited
 2018-08-18 for the Unity dialog tables, before that the 2015-11 Reisenjima
-update) keys on absolute file ids up to 86528; every one still resolves on
-both installs and retail's table now runs to 109480, so Square Enix appends
-and the 2018 mapping stays valid. `vendor/AltanaListener`'s `track_names.json`
+update) keys on absolute file ids up to 86528. Those ids still resolve on
+both installs, but the old zone associations and map counts can be wrong.
+Dialog DAT ids now follow the client's zone formula through VTABLE/FTABLE;
+map selection uses the installed DLL's zone-map records. Item and key-item
+autotranslate names come from the installed DATs, with the LSB dictionary
+as a fallback when a name is unavailable. `vendor/AltanaListener`'s `track_names.json`
 (v1.0.4, 2026-03-11) is a hand-curated 223-track name list, not a
 client-derived table, so it has no build to match; the repository is archived
 and the pin stays frozen.

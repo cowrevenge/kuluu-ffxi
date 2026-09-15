@@ -384,6 +384,11 @@ async fn run_map_session(
 
     let mut npc_name_resolver = NpcNameResolver::new(cfg.dat_root.clone());
     let mut emote_text_resolver = EmoteTextResolver::new(cfg.dat_root.clone());
+    let autotranslate_names = cfg
+        .dat_root
+        .as_deref()
+        .map(ffxi_dat::autotranslate_names::InstalledNames::open_from_root)
+        .unwrap_or_default();
     let mut sysmes_resolver = treasure::SysMesResolver::new(cfg.dat_root.clone());
     let mut treasure_pool = treasure::TreasurePool::default();
 
@@ -426,6 +431,7 @@ async fn run_map_session(
         &mut self_pos,
         &mut npc_name_resolver,
         &mut emote_text_resolver,
+        &autotranslate_names,
         &mut sysmes_resolver,
         &mut treasure_pool,
         &mut flood_in_mog_house,
@@ -479,6 +485,7 @@ async fn run_map_session(
                 &mut self_pos,
                 &mut npc_name_resolver,
                 &mut emote_text_resolver,
+                &autotranslate_names,
                 &mut sysmes_resolver,
                 &mut treasure_pool,
                 &mut flood_in_mog_house,
@@ -591,6 +598,7 @@ async fn run_map_session(
         enterzone_seen,
         npc_name_resolver,
         emote_text_resolver,
+        autotranslate_names,
         sysmes_resolver,
         treasure_pool,
         mog,
@@ -653,6 +661,7 @@ async fn drain_zone_flood(
     self_pos: &mut Position,
     npc_name_resolver: &mut NpcNameResolver,
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
     sysmes: &mut treasure::SysMesResolver,
     pool: &mut treasure::TreasurePool,
     was_in_mog_house: &mut bool,
@@ -708,6 +717,7 @@ async fn drain_zone_flood(
                         self_pos_seeded,
                         npc_name_resolver,
                         emote_text,
+                        autotranslate_names,
                         sysmes,
                         pool,
                         was_in_mog_house,
@@ -833,6 +843,7 @@ fn handle_sub_packet(
     npc_name_resolver: &mut NpcNameResolver,
 
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
 
     sysmes: &mut treasure::SysMesResolver,
 
@@ -1764,7 +1775,7 @@ fn handle_sub_packet(
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
         s2c::CHAT => {
-            if let Some((title, options)) = decode_custom_menu(sub.data) {
+            if let Some((title, options)) = decode_custom_menu(sub.data, autotranslate_names) {
                 // Retail renders a GMPROMPT/_CUSTOM_MENU as an interactive prompt,
                 // not a chat line (the packet's speaker is the player entity).
                 let dialog = crate::state::DialogState {
@@ -1777,7 +1788,7 @@ fn handle_sub_packet(
                     ..Default::default()
                 };
                 let _ = event_tx.send(AgentEvent::EventDialog { dialog });
-            } else if let Some(line) = decode_chat_std(sub.data) {
+            } else if let Some(line) = decode_chat_std(sub.data, autotranslate_names) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -2357,6 +2368,7 @@ async fn keepalive_loop(
     mut enterzone_seen: bool,
     mut npc_name_resolver: NpcNameResolver,
     mut emote_text_resolver: EmoteTextResolver,
+    autotranslate_names: ffxi_dat::autotranslate_names::InstalledNames,
     mut sysmes_resolver: treasure::SysMesResolver,
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
@@ -4485,6 +4497,7 @@ async fn keepalive_loop(
                                 &mut self_pos_seeded,
                                 &mut npc_name_resolver,
                                 &mut emote_text_resolver,
+                                &autotranslate_names,
                                 &mut sysmes_resolver,
                                 &mut treasure_pool,
                                 &mut self_in_mog_house,
@@ -6114,7 +6127,10 @@ fn emit_event_dialog(
     pending_event_end.push((dialog.npc_id, dialog.act_index, dialog.event_para));
 }
 
-fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
+fn decode_chat_std(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<ChatLine> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX {
         return None;
@@ -6129,7 +6145,7 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
     } else {
         trim_nul_string(&data[4..PREFIX])
     };
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     Some(ChatLine {
         spans: Vec::new(),
         channel: ChatChannel::from_chat_kind(kind),
@@ -6167,7 +6183,10 @@ const CUSTOM_MENU_CANCEL: &str = "Canceled.";
 
 /// Decode a customMenu prompt from a chat-std body, returning `(title, options)`.
 /// `None` for any non-customMenu chat so the caller falls back to a plain line.
-fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
+fn decode_custom_menu(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<(String, Vec<String>)> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX || data[0] != MESSAGE_GMPROMPT {
         return None;
@@ -6175,7 +6194,7 @@ fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
     if trim_nul_string(&data[4..PREFIX]) != CUSTOM_MENU_SENDER {
         return None;
     }
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     let mut parts = parse_quoted_concat(&text).into_iter();
     let title = parts.next()?;
     Some((title, parts.collect()))
@@ -6199,9 +6218,9 @@ fn custom_menu_reply(player: &str, title: &str, option: Option<&str>) -> String 
     format!("GMTELL({player}): Question({title}){CUSTOM_MENU_RESULT_MARKER}{result})")
 }
 
-fn decode_chat_text(bytes: &[u8]) -> String {
+fn decode_chat_text(bytes: &[u8], names: &impl ffxi_proto::autotranslate::NameResolver) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    ffxi_proto::autotranslate::decode(&bytes[..end])
+    ffxi_proto::autotranslate::decode_with(&bytes[..end], names)
 }
 
 fn trim_nul_string(bytes: &[u8]) -> String {

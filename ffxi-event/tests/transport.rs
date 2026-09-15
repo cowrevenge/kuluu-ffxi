@@ -138,7 +138,7 @@ fn retail_airship_exit_waits_for_both_acks_then_finishes_through_runner() {
         return;
     };
     let root = DatRoot::from_env_or_default().unwrap();
-    let strings_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(PORT_JEUNO).unwrap();
+    let strings_id = ffxi_dat::zone_dat::string_dat_file_id(PORT_JEUNO);
     let strings = StringDat::parse(
         &std::fs::read(root.resolve(strings_id).unwrap().path_under(&root)).unwrap(),
     )

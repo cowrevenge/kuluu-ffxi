@@ -25,7 +25,7 @@ fn main() {
     let bytes = std::fs::read(loc.path_under(&root)).expect("read event DAT");
     let dat = EventDat::parse(&bytes).expect("parse event DAT");
 
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone).expect("string DAT mapping");
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(zone);
     let sloc = root.resolve(file_id).expect("resolve string DAT");
     let sbytes = std::fs::read(sloc.path_under(&root)).expect("read string DAT");
     let strings = StringDat::parse(&sbytes).expect("parse string DAT");

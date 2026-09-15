@@ -19,8 +19,7 @@ use ffxi_dat::sysmes::SysMesDat;
 use ffxi_dat::ui_element::{find_ui_element_group, UI_SHEET_FILE_ID};
 use ffxi_dat::vtable::VTable;
 use ffxi_dat::zone_dat::{
-    moghouse_model_to_mzb_file_id, zone_id_to_string_file_id, STRING_DAT_TABLE, ZONE_DAT_TABLE,
-    ZONE_DAT_THRESHOLD,
+    moghouse_model_to_mzb_file_id, string_dat_file_id, ZONE_DAT_TABLE, ZONE_DAT_THRESHOLD,
 };
 use ffxi_dat::{ChunkKind, DatRoot};
 use ffxi_proto::fishing_messages::{kind, offset_text, FISHING_ZONE_OFFSET};
@@ -101,8 +100,7 @@ fn has_chunk(bytes: &[u8], kind: ChunkKind) -> bool {
 }
 
 fn parse_string_dat(root: &DatRoot, zone: u16) -> Result<StringDat, String> {
-    let file_id =
-        zone_id_to_string_file_id(zone).ok_or_else(|| format!("zone {zone}: no string DAT"))?;
+    let file_id = string_dat_file_id(zone);
     let bytes = read_file_id(root, file_id)?;
     StringDat::parse(&bytes).map_err(|e| format!("zone {zone} file id {file_id}: {e}"))
 }
@@ -481,9 +479,9 @@ fn event_dats_parse_and_pashhow_scripts_the_vendor_on_tahmasp() {
     );
 }
 
-/// Zone dialog tables of the POLUtils zone set that must parse; measured on
+/// Zone dialog tables of the LSB zone set that must parse; measured on
 /// both rows with a margin for a zone a patch relocates.
-const MIN_PARSED_STRING_ZONES: usize = 274;
+const MIN_PARSED_STRING_ZONES: usize = 294;
 const SOUTHERN_SAN_DORIA: u16 = 230;
 const KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
 /// Southern San d'Oria's KEYITEM_OBTAINED entry per row. LSB text ids are
@@ -504,7 +502,7 @@ fn dialog_tables_parse_and_the_fixed_tables_open() {
     };
     let mut parsed = 0usize;
     let mut failures = Vec::new();
-    for &(zone, _) in STRING_DAT_TABLE {
+    for &(zone, _) in ZONE_DAT_TABLE {
         match parse_string_dat(&root, zone) {
             Ok(_) => parsed += 1,
             Err(e) => failures.push(e),
@@ -514,11 +512,11 @@ fn dialog_tables_parse_and_the_fixed_tables_open() {
         parsed >= MIN_PARSED_STRING_ZONES,
         "{parsed} of {} zone dialog DATs parse, expected at least \
          {MIN_PARSED_STRING_ZONES}: {failures:?}",
-        STRING_DAT_TABLE.len()
+        ZONE_DAT_TABLE.len()
     );
     eprintln!(
         "dialog: {parsed}/{} zone dialog DATs parse",
-        STRING_DAT_TABLE.len()
+        ZONE_DAT_TABLE.len()
     );
 
     let dat = parse_string_dat(&root, SOUTHERN_SAN_DORIA).expect("Southern San d'Oria dialog");

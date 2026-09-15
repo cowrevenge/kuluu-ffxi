@@ -4,13 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::client_profile::ItemBlockLayout;
 use crate::map_image::{self, GraphicImage};
 
-// Retail packs item data into per-type DATs, each a gap-free ascending array of
-// fixed-size blocks keyed by item id (`ItemBlockLayout::stride`). The split matches XIM's InventoryItems
-// (research/xim/src/jsMain/kotlin/xim/resource/InventoryItemParser.kt InventoryItems itemListDats), itself a port of Windower
-// POLUtils Item.cs. Block index within a file is `item_id - base_id`, where
-// base_id is the id stored in the file's first block. Each DAT is named by its
-// VTABLE/FTABLE file id, with the ROM path it was measured at in `era_rom_path`.
-
+// vendor/POLUtils/PlayOnline.FFXI/Things/Item.cs Item: per-type item arrays keyed by the first block's id.
 /// General items, ids from 0x0000.
 pub const ITEM_DAT_GENERAL: u32 = 73;
 /// Usable items, ids from 0x1000.
@@ -19,21 +13,34 @@ pub const ITEM_DAT_USABLE: u32 = 74;
 pub const ITEM_DAT_WEAPON: u32 = 75;
 /// Armor, ids from 0x2800.
 pub const ITEM_DAT_ARMOR: u32 = 76;
+/// Puppet items, ids from 0x2000.
+pub const ITEM_DAT_PUPPET: u32 = 77;
 /// Currency.
 pub const ITEM_DAT_CURRENCY: u32 = 91;
+/// Vouchers and slips (maze tabulae and runes, storage slips, legion passes,
+/// grimoires), ids from 0x7000.
+pub const ITEM_DAT_VOUCHERS_AND_SLIPS: u32 = 55667;
 /// Expansion armor.
 pub const ITEM_DAT_ARMOR_EXPANSION: u32 = 55668;
+/// Monipulator species, ids from 0xF000.
+pub const ITEM_DAT_MONIPULATOR: u32 = 55669;
+/// Instincts, ids from 0x7400.
+pub const ITEM_DAT_INSTINCT: u32 = 55670;
 /// Expansion items.
 pub const ITEM_DAT_ITEMS_EXPANSION: u32 = 55671;
 
-/// Every per-type item DAT, in the order XIM lists them.
-pub const ITEM_DAT_FILE_IDS: [u32; 7] = [
+// vendor/POLUtils/PlayOnline.FFXI.Utils.DataBrowser/ROMFileMappings.xml Menu:ItemData / Menu:English.
+pub const ITEM_DAT_FILE_IDS: [u32; 11] = [
     ITEM_DAT_GENERAL,
     ITEM_DAT_USABLE,
     ITEM_DAT_WEAPON,
     ITEM_DAT_ARMOR,
+    ITEM_DAT_PUPPET,
     ITEM_DAT_CURRENCY,
+    ITEM_DAT_VOUCHERS_AND_SLIPS,
     ITEM_DAT_ARMOR_EXPANSION,
+    ITEM_DAT_MONIPULATOR,
+    ITEM_DAT_INSTINCT,
     ITEM_DAT_ITEMS_EXPANSION,
 ];
 
@@ -53,8 +60,12 @@ pub(crate) fn era_rom_path(file_id: u32) -> Option<&'static str> {
         ITEM_DAT_USABLE => "ROM/118/107.DAT",
         ITEM_DAT_WEAPON => "ROM/118/108.DAT",
         ITEM_DAT_ARMOR => "ROM/118/109.DAT",
+        ITEM_DAT_PUPPET => "ROM/118/110.DAT",
         ITEM_DAT_CURRENCY => "ROM/174/48.DAT",
+        ITEM_DAT_VOUCHERS_AND_SLIPS => "ROM/217/21.DAT",
         ITEM_DAT_ARMOR_EXPANSION => "ROM/286/73.DAT",
+        ITEM_DAT_MONIPULATOR => "ROM/288/67.DAT",
+        ITEM_DAT_INSTINCT => "ROM/288/80.DAT",
         ITEM_DAT_ITEMS_EXPANSION => "ROM/301/115.DAT",
         _ => return None,
     })
@@ -240,6 +251,7 @@ struct ItemDatFile {
 /// the file whose `[base, base + blocks)` covers the id, then read block
 /// `id - base`. Blocks are read on demand (and decoded with the per-byte
 /// rotate-right-5 obfuscation), so the table itself stays tiny.
+#[derive(Default)]
 pub struct ItemTable {
     files: Vec<ItemDatFile>,
     skipped: Vec<ItemDatError>,
@@ -356,6 +368,10 @@ impl ItemTable {
     pub fn lookup(&self, item_id: u16) -> Option<ItemStatic> {
         let (layout, block) = self.block(item_id)?;
         decode_item_static(&block, layout)
+    }
+
+    pub fn name(&self, item_id: u16) -> Option<String> {
+        read_item_strings(&self.block(item_id)?.1).map(|strings| strings.name)
     }
 
     pub fn icon(&self, item_id: u16) -> Option<GraphicImage> {

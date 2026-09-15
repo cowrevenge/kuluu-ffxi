@@ -1,6 +1,7 @@
 pub mod action;
 pub mod anim;
 pub mod archive;
+pub mod autotranslate_names;
 pub mod bone;
 pub mod chunk;
 pub mod cib;
@@ -21,6 +22,7 @@ pub mod generator;
 #[path = "../../ffxi-install/src/install_detect.rs"]
 pub mod install_detect;
 pub mod item_dat;
+pub mod key_item;
 pub mod kind;
 pub mod main_dll;
 pub mod map_image;
@@ -51,6 +53,7 @@ pub use archive::{discover_overlays, DatLocation, DatRoot};
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use client_profile::{ClientProfile, ItemBlockLayout};
 pub use item_dat::ItemStatic;
+pub use key_item::KeyItemTable;
 pub use kind::ChunkKind;
 pub use npc_names::{compose_id, split_id, NpcNameTable, NPC_LIST_FILE_ID_BASE};
 

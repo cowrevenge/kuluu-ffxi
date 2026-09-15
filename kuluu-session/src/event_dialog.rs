@@ -1095,13 +1095,7 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
 
 fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
     let root = root?;
-    let Some(file_id) = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone) else {
-        tracing::warn!(
-            zone,
-            "no string DAT mapping for zone; NPC dialog disabled for this zone"
-        );
-        return None;
-    };
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(zone);
     let loc = match root.resolve(file_id) {
         Ok(loc) => loc,
         Err(e) => {

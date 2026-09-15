@@ -1670,22 +1670,18 @@ mod tests {
         // The defect: POLUtils lists a third Windurst Waters map (the pre-CoP
         // one) that the DLL table dropped, so the old floor count put a row on
         // screen the loader cannot resolve.
-        assert_eq!(ffxi_dat::map_image::map_count_for_zone(238), 3);
         assert_eq!(catalog.map_count(238), 2);
         assert!(
             dll.zone_maps(238).get(2).is_none(),
             "the row POLUtils' third map would select has no DLL record"
         );
         // And the other direction: the DLL knows a second map POLUtils misses.
-        assert_eq!(ffxi_dat::map_image::map_count_for_zone(50), 1);
         assert_eq!(catalog.map_count(50), 2);
         // Whole zones POLUtils omits: standing in Middle Delkfutt's Tower the
         // list must still offer its six floors.
-        assert_eq!(ffxi_dat::map_image::map_count_for_zone(157), 0);
         assert_eq!(catalog.map_count(157), 6);
         // And zones POLUtils names that the DLL has no record for cannot be
         // offered -- the preview would be blank.
-        assert_eq!(ffxi_dat::map_image::map_count_for_zone(77), 8);
         assert_eq!(catalog.map_count(77), 0);
         assert!(!catalog.zones().any(|zone| zone == 77));
 

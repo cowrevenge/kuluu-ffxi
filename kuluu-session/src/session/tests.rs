@@ -3,6 +3,18 @@ use super::*;
 /// Drives the real [`handle_sub_packet`] arm for `opcode` and returns the
 /// events it emitted, in emission order.
 fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
+    sub_packet_events_with_names(
+        opcode,
+        body,
+        &ffxi_dat::autotranslate_names::InstalledNames::default(),
+    )
+}
+
+fn sub_packet_events_with_names(
+    opcode: u16,
+    body: &[u8],
+    names: &ffxi_dat::autotranslate_names::InstalledNames,
+) -> Vec<AgentEvent> {
     let (tx, mut rx) = broadcast::channel(64);
     handle_sub_packet(
         &framing::SubPacket {
@@ -25,6 +37,7 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
         &mut false,
         &mut NpcNameResolver::new(None),
         &mut EmoteTextResolver::new(None),
+        names,
         &mut treasure::SysMesResolver::new(None),
         &mut treasure::TreasurePool::default(),
         &mut false,
@@ -1277,8 +1290,7 @@ fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
         eprintln!("skipping: no FFXI install");
         return;
     };
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE230)
-        .expect("zone 230 has a string DAT mapping");
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(ZONE230);
     let loc = root.resolve(file_id).expect("string DAT resolves");
     let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
     let dat = ffxi_dat::dmsg::StringDat::parse(&bytes).expect("zone 230 dialog table parses");
@@ -3730,7 +3742,8 @@ fn chat_std_decoder_maps_each_channel() {
         body[0] = kind;
         body.extend_from_slice(b"Hello there");
         body.push(0);
-        let line = decode_chat_std(&body).expect("decoder accepts well-formed body");
+        let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames)
+            .expect("decoder accepts well-formed body");
         assert_eq!(line.channel, expected, "kind {kind} → {expected:?}");
         assert_eq!(line.text, "Hello there");
     }
@@ -3744,7 +3757,7 @@ fn chat_std_decoder_extracts_sender_and_message() {
 
     body.extend_from_slice(b"hi all");
     body.push(0);
-    let line = decode_chat_std(&body).unwrap();
+    let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames).unwrap();
     assert_eq!(line.sender, "Sylvie");
     assert_eq!(line.text, "hi all");
     assert_eq!(line.channel, ChatChannel::Say);
@@ -3752,9 +3765,9 @@ fn chat_std_decoder_extracts_sender_and_message() {
 
 #[test]
 fn chat_std_decoder_rejects_truncated_body() {
-    assert!(decode_chat_std(&[0u8; 5]).is_none());
-    assert!(decode_chat_std(&[0u8; 18]).is_none());
-    assert!(decode_chat_std(&[0u8; 19]).is_some());
+    assert!(decode_chat_std(&[0u8; 5], &ffxi_proto::autotranslate::FrozenNames).is_none());
+    assert!(decode_chat_std(&[0u8; 18], &ffxi_proto::autotranslate::FrozenNames).is_none());
+    assert!(decode_chat_std(&[0u8; 19], &ffxi_proto::autotranslate::FrozenNames).is_some());
 }
 
 fn chat_std_body(kind: u8, sender: &str, message: &str) -> Vec<u8> {
@@ -3776,13 +3789,18 @@ fn ns_chat_kind_blanks_sender() {
         "Oldman",
         "You can set this.",
     );
-    let line = decode_chat_std(&body).unwrap();
+    let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames).unwrap();
     assert_eq!(line.sender, "");
     assert_eq!(line.text, "You can set this.");
     assert_eq!(line.channel, ChatChannel::Say);
     // A plain SAY from the same NPC keeps its attribution.
     let say = chat_std_body(ffxi_proto::map::chat_kind::SAY, "Oldman", "hi");
-    assert_eq!(decode_chat_std(&say).unwrap().sender, "Oldman");
+    assert_eq!(
+        decode_chat_std(&say, &ffxi_proto::autotranslate::FrozenNames)
+            .unwrap()
+            .sender,
+        "Oldman"
+    );
 }
 
 #[test]
@@ -3792,7 +3810,8 @@ fn custom_menu_decodes_title_and_options() {
         CUSTOM_MENU_SENDER,
         r#""Set this as your current home point?""Yes""No""#,
     );
-    let (title, options) = decode_custom_menu(&body).expect("customMenu decodes");
+    let (title, options) = decode_custom_menu(&body, &ffxi_proto::autotranslate::FrozenNames)
+        .expect("customMenu decodes");
     assert_eq!(title, "Set this as your current home point?");
     assert_eq!(options, vec!["Yes".to_string(), "No".to_string()]);
 }
@@ -3801,10 +3820,10 @@ fn custom_menu_decodes_title_and_options() {
 fn custom_menu_gated_on_type_and_sender() {
     // Right sender, wrong type (a plain say) is an ordinary chat line.
     let say = chat_std_body(0, CUSTOM_MENU_SENDER, r#""Title""Yes""#);
-    assert!(decode_custom_menu(&say).is_none());
+    assert!(decode_custom_menu(&say, &ffxi_proto::autotranslate::FrozenNames).is_none());
     // Right type, ordinary sender is not a menu either.
     let other = chat_std_body(MESSAGE_GMPROMPT, "Oldman", r#""Title""Yes""#);
-    assert!(decode_custom_menu(&other).is_none());
+    assert!(decode_custom_menu(&other, &ffxi_proto::autotranslate::FrozenNames).is_none());
 }
 
 // Mirror the server's HandleCustomMenu extraction (luautils.cpp NA path):
@@ -4333,4 +4352,28 @@ fn bag_capacity_line_is_devhud_only() {
         format!("Bag capacities: c0={}", MAIN_BAG_WIRE_CAP - 1)
     );
     assert!(lines[0].text.is_ascii(), "{}", lines[0].text);
+}
+
+#[test]
+fn chat_packet_resolves_autotranslate_from_the_install() {
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
+    let expected = match root.profile().name() {
+        "horizonxi-2023" => "{Onion Greataxe} {Zeruhn report}",
+        "retail-2026-09" => "{Mandau} {Zeruhn report}",
+        _ => return,
+    };
+    let names = ffxi_dat::autotranslate_names::InstalledNames::open_from_root(&root);
+    // vendor/server/src/map/packets/s2c/0x017_chat_std.h GP_SERV_COMMAND_CHAT_STD::PacketData.
+    const CHAT_TEXT_OFFSET: usize = 19;
+    let mut body = vec![0; CHAT_TEXT_OFFSET];
+    body.extend_from_slice(&[
+        0xFD, 0x07, 0x02, 0x47, 0x5F, 0xFD, b' ', 0xFD, 0x15, 0x02, 0xFF, 0x01, 0xFD, 0,
+    ]);
+    let events = sub_packet_events_with_names(ffxi_proto::map::s2c::CHAT, &body, &names);
+    assert!(
+        matches!(events.as_slice(), [AgentEvent::ChatLine { line }] if line.text == expected),
+        "{events:?}"
+    );
 }

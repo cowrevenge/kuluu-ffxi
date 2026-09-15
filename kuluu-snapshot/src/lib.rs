@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+// v28: InventoryItem.use_delay_end_vana_ts + ready (enchanted-item equip delay).
 // v27: CharFlags.graph_size - Flags1.GraphSize, the server's per-entity size class.
 // It indexes the model's four authored CIB scales, so without it every entity
 // renders at the model's index-0 size and mob size variation is lost.
@@ -57,7 +58,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1311,6 +1312,12 @@ pub struct InventoryItem {
     /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    /// Equip-delay end in the same timestamp frame as `next_use_vana_ts`.
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    /// `GP_SERV_COMMAND_ITEM_ATTR` ready flag; `None` for non-charged items.
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -2199,8 +2206,8 @@ mod tests {
     }
 
     #[test]
-    fn ferry_protocol_26_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 26;
+    fn current_protocol_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 28;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

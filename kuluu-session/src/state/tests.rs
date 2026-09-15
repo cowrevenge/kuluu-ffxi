@@ -1549,6 +1549,8 @@ fn inventory_fold_slot_changed_inserts_then_updates_then_removes() {
         price: 0,
         charges_remaining: None,
         next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
     };
 
     s.apply_event(&AgentEvent::InventoryUpdated {
@@ -1609,6 +1611,8 @@ fn inventory_fold_quantity_changed_updates_existing_slot_only() {
                 price: 0,
                 charges_remaining: None,
                 next_use_vana_ts: None,
+                use_delay_end_vana_ts: None,
+                ready: None,
             },
         },
     });

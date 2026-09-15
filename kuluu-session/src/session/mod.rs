@@ -1978,6 +1978,8 @@ fn handle_sub_packet(
                             price: 0,
                             charges_remaining: None,
                             next_use_vana_ts: None,
+                            use_delay_end_vana_ts: None,
+                            ready: None,
                         },
                     },
                 });
@@ -2016,6 +2018,8 @@ fn handle_sub_packet(
                             price: a.price,
                             charges_remaining: ci.map(|c| c.charges),
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),
+                            use_delay_end_vana_ts: ci.map(|c| c.use_delay_end_vana_ts),
+                            ready: ci.map(|c| c.ready),
                         },
                     },
                 });

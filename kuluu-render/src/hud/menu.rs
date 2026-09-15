@@ -1818,6 +1818,8 @@ mod tests {
                         locked: false,
                         charges_remaining: None,
                         next_use_vana_ts: None,
+                        use_delay_end_vana_ts: None,
+                        ready: None,
                     })
                     .collect(),
             };
@@ -2380,6 +2382,8 @@ mod tests {
                     locked,
                     charges_remaining: None,
                     next_use_vana_ts: None,
+                    use_delay_end_vana_ts: None,
+                    ready: None,
                 }],
             }],
             ..Default::default()

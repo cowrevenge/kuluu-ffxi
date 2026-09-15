@@ -1082,6 +1082,10 @@ pub struct ItemSlot {
     pub charges_remaining: Option<u8>,
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

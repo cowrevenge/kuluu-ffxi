@@ -252,6 +252,8 @@ fn project_containers(s: &SessionState) -> Vec<wire::ContainerView> {
                     locked: slot.locked,
                     charges_remaining: slot.charges_remaining,
                     next_use_vana_ts: slot.next_use_vana_ts,
+                    use_delay_end_vana_ts: slot.use_delay_end_vana_ts,
+                    ready: slot.ready,
                 })
                 .collect(),
         })
@@ -1016,6 +1018,8 @@ mod tests {
                     price: 0,
                     charges_remaining: None,
                     next_use_vana_ts: None,
+                    use_delay_end_vana_ts: (id == 0 && i == 0).then_some(12_345),
+                    ready: (id == 0 && i == 0).then_some(false),
                 })
                 .collect();
             s.inventory
@@ -1039,6 +1043,8 @@ mod tests {
         );
         assert_eq!(out[1].capacity, 60);
         assert_eq!(out[0].items.len(), 2);
+        assert_eq!(out[0].items[0].use_delay_end_vana_ts, Some(12_345));
+        assert_eq!(out[0].items[0].ready, Some(false));
         assert_eq!(out[2].items[0].container, 4, "items tag their source bag");
     }
 
@@ -1428,6 +1434,8 @@ mod tests {
             price: 0,
             charges_remaining: None,
             next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
         });
         s.inventory.containers.insert(0, inv0);
 

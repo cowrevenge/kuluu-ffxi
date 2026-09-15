@@ -1,4 +1,0 @@
-first 215s (hit, 1 candidate file): Some(268) in 1.5136ms
-repeat 215s (memo): Some(268) in 2.6µs
-first zz99 (miss, own + 5 carrier candidates): None in 3.6422ms
-repeat zz99 (memo): None in 1.3µs

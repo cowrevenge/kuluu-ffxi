@@ -84,12 +84,10 @@ profile.json.gz
 # Verification evidence marker — per-machine, ephemeral.
 .verify/
 
-# Retail-client captures — SE-copyrighted, reference only, NEVER commit.
-# Exception, artifacts/verify/: derived scanner outputs (chunk censuses, probe
-# timings) are committed as evidence alongside their examples/zz-*.rs scanners,
-# force-added per item (git add -f). Live session logs, jsonl captures and
-# personal launch scripts under verify/ stay untracked.
-/artifacts/retail/
+# Retail-client captures and local verification evidence — NEVER commit.
+# artifacts/ is ignored wholesale: verify/ holds scanner censuses, live logs
+# and captures that stay on disk per machine. Code that genuinely requires an
+# artifact keeps that artifact in the tree next to the code.
 artifacts/
 
 # Chrome/Perfetto traces from --features trace runs

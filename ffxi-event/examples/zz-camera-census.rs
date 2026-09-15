@@ -321,7 +321,7 @@ fn main() {
         push(&format!("  {rel}: {n}"));
     }
 
-    // Land the output under artifacts/verify/ for the record.
+    // Land the report in the gitignored per-machine artifacts dir, for the record.
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let artifacts = workspace_root.join("artifacts").join("verify");
     std::fs::create_dir_all(&artifacts).ok();

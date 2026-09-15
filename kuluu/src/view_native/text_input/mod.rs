@@ -2457,6 +2457,10 @@ mod cs_input_lock_tests {
             .add_message::<kuluu_render::audio::SfxEvent>()
             .add_message::<crate::view_native::screenshot::ScreenshotRequest>()
             .add_message::<kuluu_render::hud::trade::TradeIntent>();
+        // The shutdown-counter feature adds a slash writer for this message;
+        // the bare app must register it or the gate's fetch panics.
+        #[cfg(feature = "enhanced-shutdown-counter")]
+        app.add_message::<kuluu_render::hud::logout_countdown::LogoutRequested>();
         // The rest of the parameters.
         app.insert_resource(CommandTx(cmd_tx));
         app.insert_resource(Bindings::default());
@@ -2496,6 +2500,7 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::hud::item_detail::SortOptions::default());
         app.insert_resource(kuluu_render::hud::item_detail::ItemMenuFocus::default());
         app.insert_resource(kuluu_render::hud::item_screen::ItemScreenContainer::default());
+        app.insert_resource(kuluu_render::hud::item_screen::ItemListViewport::default());
         app.insert_resource(kuluu_render::hud::check_view::CheckTarget::default());
         app.insert_resource(kuluu_render::hud::bazaar_view::BazaarScreenState::default());
         app.insert_resource(kuluu_render::hud::trade::TradeState::default());

@@ -1806,19 +1806,22 @@ fn horizontal_outcome_wall_hold_at_flat_wall() {
 }
 
 #[test]
-fn horizontal_outcome_wall_reversal_in_inside_corner() {
+fn horizontal_outcome_wall_hold_at_inside_corner() {
     let g = inside_corner();
     let obstacles = ObstacleSet::default();
     let mut state = Walker::default();
     let dt = 1.0 / 60.0;
     let m = RUN * dt / 2.0f32.sqrt(); // diagonal at run speed
-                                      // Walk diagonally into the corner's point: the slide dead-ends. The tick
-                                      // displacement must never exceed the input, and at the corner the body
-                                      // stops advancing.
-    let mut advanced = 0.0f32;
+    // Walk diagonally into the corner's point from the open quadrant: the
+    // slide along the first wall dead-ends on the second, so the body stops
+    // at the corner's standoff. The tick displacement must never exceed the
+    // input.
+    let mut x = 2.0f32;
+    let mut y = -2.0f32;
     for _ in 0..60 {
-        let res = tick(&g, &obstacles, &mut state, 2.0, 2.0, 0.0, -m, -m, false);
-        advanced += res.dx.abs() + res.dy.abs();
+        let res = tick(&g, &obstacles, &mut state, x, y, 0.0, -m, m, false);
+        x += res.dx;
+        y += res.dy;
         assert!(
             res.dx.abs() <= m + 1e-6 && res.dy.abs() <= m + 1e-6,
             "overshot the tick's input: ({:.4}, {:.4})",
@@ -1826,16 +1829,18 @@ fn horizontal_outcome_wall_reversal_in_inside_corner() {
             res.dy
         );
     }
+    // Stopped at the corner's standoff, well short of the start: the body
+    // advanced toward the point and then held.
     assert!(
-        advanced < m * 10.0,
-        "kept walking into the corner: advanced {advanced:.3} over 60 ticks"
+        (0.2..0.8).contains(&x) && (-0.8..-0.2).contains(&y),
+        "corner: body at wire ({x:.3}, {y:.3})"
     );
-    let res = tick(&g, &obstacles, &mut state, 2.0, 2.0, 0.0, -m, -m, false);
+    let res = tick(&g, &obstacles, &mut state, x, y, 0.0, -m, m, false);
     match res.outcome {
-        HorizontalOutcome::WallReversal { contact } => {
-            assert!(contact.is_some(), "reversal must carry the contact");
+        HorizontalOutcome::WallHold { contact } => {
+            assert!(contact.is_some(), "corner hold must carry the contact");
         }
-        other => panic!("inside corner must be WallReversal, got {other:?}"),
+        other => panic!("inside corner must be WallHold, got {other:?}"),
     }
 }
 
@@ -1890,7 +1895,9 @@ fn horizontal_outcome_slid_along_oblique_wall() {
 #[test]
 fn horizontal_outcome_actor_contact_carries_the_mob() {
     let g = flat_with_wall(30.0, 3.0, NO_SUB_AREA_LINK);
-    let mobs = mob_circle(7, 1.0, 0.0, 0.5);
+    // The projected body (one tick ahead) must sit inside the circle: the
+    // standoff gap must stay under the 0.9 combined radii or nothing blocks.
+    let mobs = mob_circle(7, 0.8, 0.0, 0.5);
     let mut state = Walker::default();
     let dt = 1.0 / 60.0;
     // One tick into the mob's circle: the move is withheld, not deflected.

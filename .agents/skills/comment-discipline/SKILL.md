@@ -75,7 +75,11 @@ elided path, a finding id, a retail-binary address whose comment block names
 no build. Everything else prints as advisory; read it and
 decide, then commit. `.githooks/pre-commit` runs the staged form on every
 commit once hooks are installed (`cargo xtask install-hooks`); pre-push and
-CI run the tree form.
+CI run the tree form. Every run first self-tests the dangling-citation
+detectors against a known offender and a published citation (Ericson §5.1.3
+must pass, `plan §2.5` / `Piece 3:` must fail) and fails the stage when a
+detector cannot fire - a clean tree is only meaningful while the detectors
+are proven live.
 
 ## Plans and handoffs
 

@@ -2018,7 +2018,7 @@ fn handle_passive_cursor_key(
             let max_back = kuluu_render::snapshot::rendered_chat(scene_state)
                 .iter()
                 .filter(|line| {
-                    active_chat_tab.0.accepts(line.channel)
+                    active_chat_tab.0.accepts_in_layout(line.channel, layout)
                         && kuluu_render::snapshot::chat_line_visible(line.channel, debug_chat)
                 })
                 .count();
@@ -2042,11 +2042,15 @@ fn handle_passive_cursor_key(
                 return None;
             }
             // Left/Right cycle which chat tab the focused log shows.
-            if bindings.matches_logical(Action::NavLeft, key) {
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavLeft, key)
+            {
                 active_chat_tab.0 = active_chat_tab.0.step(false, debug_chat);
                 return None;
             }
-            if bindings.matches_logical(Action::NavRight, key) {
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavRight, key)
+            {
                 active_chat_tab.0 = active_chat_tab.0.step(true, debug_chat);
                 return None;
             }
@@ -2110,6 +2114,44 @@ mod chat_window_tests {
     use kuluu_render::graphics_settings::ChatLayout;
     use kuluu_render::hud::chat_panel::ChatKind;
     use kuluu_render::input_mode::PassiveCursorState;
+
+    #[test]
+    fn unified_chat_keeps_focus_on_the_single_log() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Social);
+        let scene = SceneState::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        for key in [Key::ArrowLeft, Key::ArrowRight] {
+            handle_passive_cursor_key(
+                &key,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            );
+            assert_eq!(active.0, ChatKind::Social);
+        }
+        assert!(matches!(
+            handle_passive_cursor_key(
+                &Key::Character("f".into()),
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            ),
+            Some(InputMode::World)
+        ));
+    }
 
     #[test]
     fn compact_f_selects_second_split_log_before_releasing_focus() {

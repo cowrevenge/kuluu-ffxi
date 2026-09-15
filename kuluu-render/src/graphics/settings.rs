@@ -20,16 +20,23 @@ use crate::sun_moon::{IsMoon, IsSun};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ChatLayout {
     #[default]
+    Unified,
     Tabbed,
     Vertical,
     SideBySide,
 }
 
 impl ChatLayout {
-    pub const SLOTS: &[Self] = &[Self::Tabbed, Self::Vertical, Self::SideBySide];
+    pub const SLOTS: &[Self] = &[
+        Self::Unified,
+        Self::Tabbed,
+        Self::Vertical,
+        Self::SideBySide,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Unified => "Unified",
             Self::Tabbed => "Tabbed",
             Self::Vertical => "Vertical",
             Self::SideBySide => "Side by side",
@@ -2698,10 +2705,12 @@ mod tests {
     #[test]
     fn chat_layout_cycles_persists_and_defaults_for_old_settings() {
         let mut settings = GraphicsSettings::default();
+        assert_eq!(settings.chat_layout, ChatLayout::Unified);
         for expected in [
+            ChatLayout::Tabbed,
             ChatLayout::Vertical,
             ChatLayout::SideBySide,
-            ChatLayout::Tabbed,
+            ChatLayout::Unified,
         ] {
             settings.cycle(GraphicsField::ChatLayout, 1);
             assert_eq!(settings.chat_layout, expected);
@@ -2719,7 +2728,7 @@ mod tests {
             serde_json::from_value::<GraphicsSettings>(old)
                 .unwrap()
                 .chat_layout,
-            ChatLayout::Tabbed
+            ChatLayout::Unified
         );
     }
 

@@ -194,6 +194,22 @@ impl ChatKind {
         }
     }
 
+    pub fn accepts_in_layout(self, channel: ChatChannel, layout: ChatLayout) -> bool {
+        if layout == ChatLayout::Unified {
+            self == Self::Social
+        } else {
+            self.accepts(channel)
+        }
+    }
+
+    pub fn available_in_layout(layout: ChatLayout, debug_chat: bool) -> &'static [Self] {
+        if layout == ChatLayout::Unified {
+            &[Self::Social]
+        } else {
+            Self::available(debug_chat)
+        }
+    }
+
     pub fn available(debug_chat: bool) -> &'static [Self] {
         if debug_chat {
             &Self::TAB_ORDER
@@ -216,7 +232,7 @@ pub struct ChatPanel {
 }
 
 pub fn advance_split_focus(active: &mut ChatKind, layout: ChatLayout, debug_chat: bool) -> bool {
-    if layout == ChatLayout::Tabbed {
+    if matches!(layout, ChatLayout::Unified | ChatLayout::Tabbed) {
         return false;
     }
     let kinds = ChatKind::available(debug_chat);
@@ -446,7 +462,9 @@ pub fn update_chat_panel(
             all.iter()
                 .copied()
                 .filter(|l| {
-                    panel.kind.accepts(l.channel)
+                    panel
+                        .kind
+                        .accepts_in_layout(l.channel, graphics.chat_layout)
                         && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
                 })
                 .collect()
@@ -764,7 +782,7 @@ pub fn chat_wheel_scroll_system(
     let buffer_len = all
         .iter()
         .filter(|l| {
-            kind.accepts(l.channel)
+            kind.accepts_in_layout(l.channel, graphics.chat_layout)
                 && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
         })
         .count();
@@ -858,7 +876,8 @@ pub fn apply_chat_layout(
         .map(|node| node.size().y * node.inverse_scale_factor())
         .fold(0.0_f32, f32::max);
     let tabbed = graphics.chat_layout == ChatLayout::Tabbed;
-    let window_count = ChatKind::available(graphics.debug_chat).len();
+    let window_count =
+        ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat).len();
     let expanded = matches!(&*mode, InputMode::PassiveCursor(state) if state.chat_expanded);
     let preferred_height = if expanded {
         PANEL_EXPANDED_HEIGHT_PX
@@ -973,7 +992,8 @@ pub fn chat_auto_switch_and_unread_system(
     graphics: Res<GraphicsSettings>,
     mode: Res<InputMode>,
 ) {
-    if !ChatKind::available(graphics.debug_chat).contains(&active.0) {
+    if !ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat).contains(&active.0)
+    {
         active.0 = ChatKind::Social;
     }
     let all = rendered_chat(&state);
@@ -994,7 +1014,8 @@ pub fn chat_auto_switch_and_unread_system(
     for (kind, now_count, prev_count) in kinds {
         if now_count > prev_count
             && kind != active.0
-            && ChatKind::available(graphics.debug_chat).contains(&kind)
+            && ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+                .contains(&kind)
         {
             if !unread.get(kind) {
                 unread.set(kind, true);
@@ -1052,7 +1073,8 @@ pub fn update_chat_tab_visuals_system(
     >,
 ) {
     for (panel, mut node) in &mut panel_q {
-        let want = if ChatKind::available(graphics.debug_chat).contains(&panel.kind)
+        let want = if ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+            .contains(&panel.kind)
             && (graphics.chat_layout != ChatLayout::Tabbed || panel.kind == active.0)
         {
             Display::Flex
@@ -1064,9 +1086,10 @@ pub fn update_chat_tab_visuals_system(
         }
     }
 
-    let unread_color = Color::srgb(1.00, 0.85, 0.20);
     for (button, mut border, mut node, children) in &mut tab_q {
-        node.display = if ChatKind::available(graphics.debug_chat).contains(&button.kind) {
+        node.display = if ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+            .contains(&button.kind)
+        {
             Display::Flex
         } else {
             Display::None
@@ -1076,7 +1099,7 @@ pub fn update_chat_tab_visuals_system(
         let (border_c, label_c) = if is_active {
             (theme::CURSOR, theme::CURSOR)
         } else if is_unread {
-            (unread_color, unread_color)
+            (theme::FRAME_EDGE, theme::TEXT)
         } else {
             (theme::FRAME_EDGE, theme::MUTED)
         };
@@ -1119,6 +1142,58 @@ mod tests {
     use super::*;
 
     use kuluu_snapshot::ChatSpan;
+
+    #[test]
+    fn unified_log_clears_hidden_selection_and_reads_combined_history() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<ChatAutoSwitch>()
+            .init_resource::<ChatUnread>()
+            .init_resource::<ChatActivityTracker>()
+            .init_resource::<GraphicsSettings>()
+            .init_resource::<InputMode>()
+            .insert_resource(ActiveChatTab(ChatKind::Battle))
+            .add_systems(Update, chat_auto_switch_and_unread_system);
+        app.world_mut().resource_mut::<ChatUnread>().battle = true;
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .chat
+            .push(drop_line());
+        app.update();
+        assert_eq!(app.world().resource::<ActiveChatTab>().0, ChatKind::Social);
+        assert!(!app.world().resource::<ChatUnread>().battle);
+        app.world_mut()
+            .resource_mut::<GraphicsSettings>()
+            .chat_layout = ChatLayout::Tabbed;
+        app.update();
+        assert!(!app.world().resource::<ChatUnread>().battle);
+    }
+
+    #[test]
+    fn unified_log_combines_channels_without_hidden_window_focus() {
+        let layout = ChatLayout::default();
+        assert_eq!(layout, ChatLayout::Unified);
+        for debug_chat in [false, true] {
+            assert_eq!(
+                ChatKind::available_in_layout(layout, debug_chat),
+                &[ChatKind::Social]
+            );
+            let mut active = ChatKind::Social;
+            assert!(!advance_split_focus(&mut active, layout, debug_chat));
+            assert_eq!(active, ChatKind::Social);
+        }
+        for channel in [
+            ChatChannel::Say,
+            ChatChannel::Battle,
+            ChatChannel::System,
+            ChatChannel::Debug,
+        ] {
+            assert!(ChatKind::Social.accepts_in_layout(channel, layout));
+            assert!(!ChatKind::Battle.accepts_in_layout(channel, layout));
+            assert!(!ChatKind::Debug.accepts_in_layout(channel, layout));
+        }
+    }
 
     #[test]
     fn chat_fills_the_viewport_until_a_visible_hud_obstructs_it() {

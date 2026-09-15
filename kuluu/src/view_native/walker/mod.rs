@@ -112,6 +112,32 @@ pub struct StepResult {
     pub mode: WalkMode,
     /// What the vertical pass did.
     pub decision: VerticalDecision,
+    /// What the horizontal pass did (the panel's "why am I stopped").
+    pub outcome: HorizontalOutcome,
+}
+
+/// What this tick's horizontal pass did. One per tick; the panel shows the
+/// last two beside the vertical decisions, and the gizmo marks the blocking
+/// contact when the move was withheld.
+#[derive(Clone, Copy, Debug)]
+pub enum HorizontalOutcome {
+    /// No input this tick: the sweep and contact check ran with a zero move.
+    NoInput,
+    /// Full input length honored: the sweep was clear (or the body ran exactly
+    /// into a face) and no actor withheld the move.
+    Moved,
+    /// A wall clipped the move: `ratio` is allowed length over input length.
+    Slid { ratio: f32 },
+    /// The sweep found no usable slide direction and held this tick's
+    /// position; `contact` is the feet xz at the stop (bevy xz).
+    WallHold { contact: Option<Vec2> },
+    /// The sweep stopped on its boxed-in rule; `contact` as in WallHold.
+    WallReversal { contact: Option<Vec2> },
+    /// Retail's all-or-nothing actor contact withheld the move; `mob` is the
+    /// blocking actor's wire id and `contact` the projected feet xz.
+    ActorContact { mob: u32, contact: Option<Vec2> },
+    /// Noclip: the sweep and contact check were bypassed.
+    Noclip,
 }
 
 /// What this tick's vertical pass did. One per tick; the panel shows the last
@@ -143,6 +169,33 @@ pub enum VerticalDecision {
     /// off, height held. Distinct from Airborne — there is nothing to fall
     /// through until the geometry can answer column queries.
     NoGeometry,
+}
+
+impl HorizontalOutcome {
+    /// Compact ASCII label for the panel (the render crate can't name our
+    /// types). Kept short: the panel prints two of these on one line.
+    pub fn label(&self) -> String {
+        match self {
+            Self::NoInput => "NoInput".into(),
+            Self::Moved => "Moved".into(),
+            Self::Slid { ratio } => format!("Slid {ratio:.0}%"),
+            Self::WallHold { .. } => "WallHold".into(),
+            Self::WallReversal { .. } => "WallRev".into(),
+            Self::ActorContact { mob, .. } => format!("Actor #{mob}"),
+            Self::Noclip => "Noclip".into(),
+        }
+    }
+
+    /// The blocking contact point in bevy xz, when the move was withheld by a
+    /// wall or an actor (None: nothing to mark, or no contact info).
+    pub fn contact_point(&self) -> Option<Vec2> {
+        match self {
+            Self::WallHold { contact }
+            | Self::WallReversal { contact }
+            | Self::ActorContact { contact, .. } => *contact,
+            _ => None,
+        }
+    }
 }
 
 impl VerticalDecision {

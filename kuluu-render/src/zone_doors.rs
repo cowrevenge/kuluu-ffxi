@@ -24,7 +24,10 @@ use kuluu_snapshot::EntityLook;
 
 use crate::dat_mzb::placement_bevy_transform;
 use crate::scene::TrackedEntities;
-use crate::scheduler_runtime::{ActionAssets, ActiveScheduler, SchedulerStageEvent, ROUTINE_FPS};
+use crate::scheduler_runtime::{
+    flush_active_scheduler_inserts, ActionAssets, ActiveScheduler, ActiveSchedulers,
+    SchedulerStageEvent, ROUTINE_FPS,
+};
 use crate::snapshot::{effective_zone_file_id, SceneState};
 
 // The two door states LSB broadcasts (`ANIMATION_OPEN_DOOR` = 8 /
@@ -407,8 +410,10 @@ pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneD
 pub fn trigger_zone_doors(
     scene_state: Res<SceneState>,
     tracked: Res<TrackedEntities>,
+    mut pending_inserts: Local<std::collections::HashMap<Entity, Vec<ActiveScheduler>>>,
     mut doors: ResMut<ZoneDoors>,
     mut q_npc: Query<&mut ZoneDoorNpc>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
     mut commands: Commands,
 ) {
     if doors.dirs.is_empty() {
@@ -490,6 +495,7 @@ pub fn trigger_zone_doors(
             String::from_utf8_lossy(&routine)
         );
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 /// The pose a routine ends at, per addressed slot — what an on-arrival door
@@ -747,6 +753,7 @@ mod tests {
             .init_resource::<TrackedEntities>()
             .init_resource::<ZoneDoors>()
             .add_message::<SchedulerStageEvent>()
+            .add_message::<crate::scheduler_runtime::CutsceneMotionDone>()
             .add_systems(
                 Update,
                 (

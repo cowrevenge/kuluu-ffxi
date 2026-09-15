@@ -17,6 +17,11 @@ pub struct PosHead {
 
     pub y: f32,
 
+    /// POS block word 0x18. Bits 17..31 carry the head-look target (see `facetarget`); the low
+    /// 13 bits are LSB's moving step counter: entity_update.cpp CEntityUpdatePacket::updateWith
+    /// writes `ref<uint16>(0x18) = PEntity->loc.p.moving`, and pathfind.cpp CPathFind::StepTo
+    /// advances it by 0x35 per step (0x28 on a speed change), mod 0x2000. Retail phases walk/run
+    /// cycles off the delta between two POS updates.
     pub flags0: u32,
 
     pub speed: u8,
@@ -577,6 +582,33 @@ impl LookData {
             }
             _ => None,
         }
+    }
+
+    /// The retail entity Type byte (ent+0xEE) this 0x0E payload's SubKind
+    /// dispatch writes — the input the 0x5B/0x66 motion resource readers'
+    /// load gate reads. The vendored XiClient's RecvCharNpc switch mirrors
+    /// the SubKind dispatch (research/XiClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp).
+    /// CHAR_PC sets Type 0.
+    pub fn retail_type(opcode: u16, body: &[u8]) -> Option<u8> {
+        use crate::map::s2c;
+        if opcode == s2c::CHAR_PC {
+            return Some(0);
+        }
+        if opcode != s2c::CHAR_NPC {
+            return None;
+        }
+        let off = Self::LOOK_BODY_OFFSET;
+        let size = u16::from_le_bytes(body.get(off..off + 2)?.try_into().ok()?);
+        Some(match size & 7 {
+            0 => 2,
+            1 => 1,
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            5 => 6,
+            6 => 7,
+            _ => 8,
+        })
     }
 
     pub const CHAR_PC_GRAP_OFFSET: usize = 0x44;

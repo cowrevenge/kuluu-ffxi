@@ -281,6 +281,24 @@ run_comments() {
   # shellcheck source=../.agents/hooks/comment-rot.lib.sh
   . .agents/hooks/comment-rot.lib.sh
   local bad=0 lines text
+  # Self-test: the dangling-citation detectors must fire on a known offender
+  # and stay silent on a published citation, judged by the very expression the
+  # gate below uses. A green tree is meaningless if the detector cannot fire,
+  # so this runs before the scan and fails the stage when it cannot.
+  local cr_selftest_bad='// Dynamic obstacles (plan §2.5): RID door boxes
+//! Piece 3: the slide direction sweep
+// Step 2: rasterize'
+  local cr_selftest_good='// Ericson §5.1.3: the GJK distance iteration
+/// "Real-Time Collision Detection" §1.3.6
+// a zone step 42 marker'
+  if ! printf '%s\n' "$cr_selftest_bad" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector did not fire on a known offender" >&2
+    return 1
+  fi
+  if printf '%s\n' "$cr_selftest_good" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector fired on a published citation" >&2
+    return 1
+  fi
   if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
     lines=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
       git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #" || true
@@ -312,6 +330,13 @@ run_comments() {
   hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL" || true)
   if [ -n "$hits" ]; then
     echo "checks: comments - citation to a session artifact nobody can open: a private plan section or a bare ordinal step label. Restate the WHY inline, cite an in-tree symbol, or delete the comment:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
+  hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_COW_DOC" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation to a local-only Cow_doc path nobody else has. Restate the fact against a public anchor (research/, the code, a regression test) or delete the citation:" >&2
     printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
     bad=1
   fi

@@ -3221,7 +3221,15 @@ pub fn cull_entities_by_distance(
     draw: Res<DrawDistance>,
     table: Res<EntityTable>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
-    mut ent_q: Query<(&WorldEntity, &GlobalTransform, &mut Visibility), Without<IsSelf>>,
+    mut ent_q: Query<
+        (
+            &WorldEntity,
+            &GlobalTransform,
+            Option<&crate::scheduler_runtime::CutsceneHidden>,
+            &mut Visibility,
+        ),
+        Without<IsSelf>,
+    >,
 ) {
     let Ok(self_t) = self_q.single() else {
         return;
@@ -3229,7 +3237,15 @@ pub fn cull_entities_by_distance(
     let self_pos = self_t.translation();
     let cull_sq = draw.mob * draw.mob;
 
-    for (ent, ent_t, mut vis) in ent_q.iter_mut() {
+    for (ent, ent_t, cutscene_hidden, mut vis) in ent_q.iter_mut() {
+        // Cutscene-hidden models are owned by the running event's choreography; keep them hidden
+        // while the marker is present so an in-range cull pass does not re-show them mid-scene.
+        if cutscene_hidden.is_some() {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
+        }
         // Server-invisible models are owned by sync_entities_system; resetting them to
         // Inherited would re-show the model every frame. Kind-agnostic on purpose.
         if table.get(ent.id).is_some_and(|r| r.is_invisible()) {
@@ -4528,6 +4544,62 @@ mod cull_tests {
             *app.world().get::<Visibility>(vis_out_of_range).unwrap(),
             Visibility::Hidden,
             "out-of-range visible entity is hidden by distance-culling (control)"
+        );
+    }
+
+    /// A model hidden by a running cutscene's EVENT_HIDE cue carries the CutsceneHidden marker;
+    /// an in-range cull pass must not reset its Visibility back to Inherited, or event 503's
+    /// knights re-appear mid-scene. Unmarked entities keep normal cull behavior.
+    #[test]
+    fn cull_respects_cutscene_hidden_entities() {
+        let mut app = App::new();
+        app.init_resource::<DrawDistance>()
+            .init_resource::<EntityTable>()
+            .add_systems(Update, cull_entities_by_distance);
+
+        // Self at origin; cull needs exactly one IsSelf.
+        app.world_mut().spawn((
+            IsSelf,
+            GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),
+        ));
+
+        let cs_hidden_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 1,
+                    act_index: 0,
+                    kind: EntityKind::Pc,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                crate::scheduler_runtime::CutsceneHidden,
+                Visibility::Inherited,
+            ))
+            .id();
+        let vis_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 2,
+                    act_index: 0,
+                    kind: EntityKind::Pc,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(cs_hidden_in_range).unwrap(),
+            Visibility::Hidden,
+            "cutscene-hidden entity must stay hidden; cull must not reset it to Inherited"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_in_range).unwrap(),
+            Visibility::Inherited,
+            "unmarked in-range entity keeps normal cull behavior (control)"
         );
     }
 }

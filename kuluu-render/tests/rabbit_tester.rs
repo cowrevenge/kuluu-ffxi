@@ -1,4 +1,4 @@
-//! Rabbit (Savanna Rarab) front-to-end animation tester - kuluu-df9t.
+//! Rabbit (Savanna Rarab) front-to-end animation tester.
 //!
 //! Drives a deterministic Bevy app with the real `SchedulerRuntimePlugin` plus the pose path,
 //! feeds hand-packed BATTLE2 bytes through the real session decoder, and asserts what the
@@ -78,7 +78,13 @@ const WALKER_W: u32 = 9_000_007;
 const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
 fn install() -> Option<ffxi_dat::DatRoot> {
-    ffxi_dat::archive::open_test_install()
+    match ffxi_dat::archive::open_test_install() {
+        Some(root) => Some(root),
+        None => {
+            eprintln!("skipping rabbit_tester: no retail DAT install available");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +170,9 @@ fn action_event(bytes: &[u8]) -> ViewerEvent {
         action_id: h.action_id,
         action_kind: h.action_kind,
         target_id: h.primary_target_id,
-        result: h.first_result.map(|r| r.to_wire()),
+        result: h
+            .first_result
+            .map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
         animation: h.animation,
         outcome: h.first_outcome.map(|o| o.to_wire()),
     }
@@ -192,6 +200,9 @@ fn build_app() -> App {
     app.init_resource::<bevy::asset::Assets<bevy::prelude::Mesh>>();
     app.init_resource::<bevy::asset::Assets<kuluu_render::ffxi_particle_material::FfxiParticleMaterial>>();
     app.init_resource::<bevy::asset::Assets<bevy::image::Image>>();
+    // The plugin's Update chain includes poll_action_dat_tasks, which takes a bare
+    // Res<CameraMode>; a bare app has no such resource, so the first update panics.
+    app.init_resource::<kuluu_render::camera::CameraMode>();
     app.add_plugins(SchedulerRuntimePlugin);
     // The plugin's chain is .after(dispatch_action_overlay), and
     // stop_cast_effects_when_cast_ends is .after(tick_live_ffxi_actors) - register both, in the
@@ -341,15 +352,20 @@ fn load_humem() -> Option<LoadedActor> {
         (1u16..=5)
             .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
     );
-    load_pc(
+    match load_pc(
         1,
         false,
         &equipment,
         None,
         Some(HUME_M_MAIN_WEAPON_FILE),
         None,
-    )
-    .ok()
+    ) {
+        Ok(loaded) => Some(loaded),
+        Err(e) => {
+            eprintln!("skipping rabbit_tester: HumeM PC failed to load: {e}");
+            None
+        }
+    }
 }
 
 fn step(app: &mut App) {
@@ -477,7 +493,7 @@ fn s1_spawn_settles_on_idle() {
 
 fn moving_sample(speed: f32) -> MotionSample {
     // Only `moving` drives the pose pass in this rig (track_entity_motion_system is not
-    // registered); the speed value no longer feeds gait selection.
+    // registered); gait selection reads speed > speed_base, not this value.
     MotionSample {
         speed,
         moving: true,
@@ -575,14 +591,15 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
         "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
-         packet arrival"
+         packet arrival",
     );
 }
 
 /// S5b: same swing, victim = a second Rarab. Retail's dam0 branch table routes every non-crit
 /// Hit to damg/damh - both carry the 0x21 flinch stage (ROM/0/0.DAT), so the mob victim runs
 /// its own `damg` and flinches with dfi? on a normal hit. This is the "animations not playing"
-/// case: before kuluu-df9t's damg routing, sdam-shipping models like Rarab got sound-only hits.
+/// case: sdam-shipping models like Rarab must get a visible flinch on normal hits (sdam is
+/// sound-only).
 #[test]
 fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
     let Some(rarab) = load_rarab() else { return };
@@ -746,10 +763,10 @@ fn live_root_probe(
 /// the actor; the walker's scale byte (100) must leave it at exactly 1.0 with Walking.
 #[test]
 fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
-    let Some(bat) = install().and_then(|_| load_npc(BAT_FILE).ok()) else {
+    let Some(bat) = load_model(BAT_FILE) else {
         return;
     };
-    let Some(walker) = install().and_then(|_| load_npc(WALKER_FILE).ok()) else {
+    let Some(walker) = load_model(WALKER_FILE) else {
         return;
     };
 
@@ -1048,7 +1065,7 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
 /// bti0 rather than falling back.
 #[test]
 fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
-    let Some(loaded) = install().and_then(|_| load_npc(LIMB_MODEL_FILE).ok()) else {
+    let Some(loaded) = load_model(LIMB_MODEL_FILE) else {
         return;
     };
     // The limb model must actually carry bti0 with a Motion clip, or the scenario is void.

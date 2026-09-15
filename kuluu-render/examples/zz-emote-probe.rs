@@ -13,7 +13,8 @@ fn main() {
             println!("off {off}: unreadable {path:?}");
             continue;
         };
-        let (scheds, assets) = kuluu_render::scheduler_runtime::parse_action_bytes(&bytes);
+        let (scheds, assets, _cameras) =
+            kuluu_render::scheduler_runtime::parse_action_bytes(&bytes);
         let mut ems: Vec<_> = scheds
             .iter()
             .filter(|s| s.name.starts_with(b"em"))

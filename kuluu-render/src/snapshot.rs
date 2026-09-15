@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bevy::prelude::*;
 use kuluu_snapshot::{
     ChatChannel, ChatLine, Entity, PartyMember, SceneDelta, SceneSnapshot, ViewerEvent,
@@ -34,6 +36,15 @@ pub struct SceneState {
     /// Session chat lines seen so far, in absolute history indices. Stamped onto
     /// each local toast as the point in the server stream it follows.
     pub server_chat_seen: u64,
+
+    /// When the player answered a dialog frame manually (Enter, or a click on a
+    /// choice row). The auto-enter clock (view_native text_input
+    /// auto_enter_cs_system) holds its fire while this timestamp is inside its
+    /// guard window: the session round-trip takes a frame or two, so the
+    /// snapshot still shows the pre-advance frame briefly after a manual
+    /// advance, and an auto-enter fire in that window would make the session
+    /// dismiss the frame the manual advance just opened.
+    pub last_manual_dialog_advance: Option<Instant>,
 }
 
 pub const LOCAL_TOAST_CAP: usize = 256;

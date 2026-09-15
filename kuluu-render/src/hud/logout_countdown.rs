@@ -398,8 +398,7 @@ mod tests {
             shutdown: false,
         };
 
-        // 10s after the request with no tick: still hidden (the old code would
-        // have shown "Logout in 20s" here).
+        // 10s after the request with no tick: still hidden.
         assert_eq!(compute_display(10.0, None, pending), DisplayMode::Hidden);
 
         // The first tick (para=30, leavegame.lua onEffectGain) starts it:

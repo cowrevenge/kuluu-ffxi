@@ -12,6 +12,7 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
 use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image, D3mBlendMode};
+use crate::env_flags::env_flag;
 use crate::ffxi_actor_render::FfxiRenderActor;
 use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
@@ -959,10 +960,6 @@ fn reap_expired(g: &mut LiveGenerator) {
     } else {
         g.particles.retain(|p| p.age_frames < p.life_frames);
     }
-}
-
-fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
-    *cell.get_or_init(|| std::env::var_os(name).is_some())
 }
 
 fn trace_celestial() -> bool {

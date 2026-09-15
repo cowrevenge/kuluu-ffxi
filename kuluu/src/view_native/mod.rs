@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
+pub mod cutscene_motion_done;
 pub mod debug_heights;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
@@ -630,6 +631,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             despawn_ingame_entities,
             drain_entity_prediction,
+            drain_motion_probe,
             drain_entity_table,
             input::reset_local_movement,
             kuluu_render::camera::reset_camera_follow,
@@ -731,14 +733,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::delivery_mode_sync_system,
             text_input::bazaar_mode_sync_system,
             text_input::auction_mode_sync_system,
+            text_input::event_map_sync_system,
             input::handle_input_system,
             text_input::text_input_system,
+            text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,
             input::dispatch_target_change_system,
             input::sync_target_lock_system,
             input::tab_cycle_invalidate_system,
             key_items::key_items_mark_seen_system,
             sub_area_report::report_sub_area_system,
+            cutscene_motion_done::report_cutscene_motion_done_system,
         )
             .chain()
             .after(kuluu_render::chase_camera_system)
@@ -801,6 +806,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         Update,
         camera_collision::resolve_camera
             .before(kuluu_render::nameplate_billboard::update_nameplate_billboards_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
+    // The cutscene's camera route owns the operator camera while it runs: after resolve_camera,
+    // so its transform and focal writes win any same-frame collision push.
+    app.add_systems(
+        Update,
+        kuluu_render::cutscene_camera::advance_cutscene_camera_task
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 
@@ -868,8 +882,15 @@ fn arm_exit_watchdog_on_appexit(mut exits: MessageReader<AppExit>) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisconnectKind {
+    /// A clean `/logout`: the account session is retained, so the launcher
+    /// resumes the character list.
     Clean,
 
+    /// A clean `/shutdown`: retail returns to the login/server-select screen
+    /// (the launcher front), not the character list (issue #156).
+    Shutdown,
+
+    /// A forced / unexpected disconnect: the launcher front with an error toast.
     Forced,
 }
 
@@ -881,6 +902,8 @@ pub(crate) struct ResumeCharListAfterLogout;
 fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
     if reason.starts_with("server logout state=") {
         DisconnectKind::Clean
+    } else if reason.starts_with("server shutdown state=") {
+        DisconnectKind::Shutdown
     } else {
         DisconnectKind::Forced
     }
@@ -982,6 +1005,10 @@ fn drain_entity_table(mut table: ResMut<kuluu_render::entity_table::EntityTable>
 
 fn drain_entity_prediction(mut prediction: ResMut<kuluu_render::combat_stance::EntityPrediction>) {
     prediction.by_id.clear();
+}
+
+fn drain_motion_probe(mut probe: ResMut<kuluu_render::combat_stance::MotionProbe>) {
+    probe.drain();
 }
 
 fn drain_mzb_load_state(
@@ -1140,6 +1167,20 @@ mod disconnect_tests {
         assert_eq!(
             classify_disconnect_reason("server logout state=2"),
             DisconnectKind::Clean
+        );
+    }
+
+    #[test]
+    fn server_shutdown_classified_shutdown() {
+        // Retail's /shutdown returns to the login/server-select screen, not the
+        // character list: it must classify as Shutdown, distinct from Clean.
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=1"),
+            DisconnectKind::Shutdown
+        );
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=2"),
+            DisconnectKind::Shutdown
         );
     }
 

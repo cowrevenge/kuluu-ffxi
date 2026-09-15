@@ -127,13 +127,31 @@ fn depenetrate(src: &impl WallSource, mut xz: Vec2, feet_y: f32) -> Vec2 {
     xz
 }
 
+/// How the slide loop ended. `step` maps this onto the tick's
+/// `HorizontalOutcome` together with the returned displacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SweepExit {
+    /// No wall stopped the move: either the whole input was clear, or the
+    /// body ran exactly into a face and the displacement is the full input.
+    Clean,
+    /// A wall clipped the move and the body slid along it; the displacement is
+    /// nonzero and shorter than (or rotated from) the input.
+    Slid,
+    /// Stopped at the contact with no usable slide direction: a degenerate
+    /// face normal, or a head-on hit whose clip consumed the remainder.
+    Hold,
+    /// Boxed in: the slide points back more than 90 degrees from the input, or
+    /// two planes' crease dead-ends.
+    Reversal,
+}
+
 /// Clamp a horizontal move against walls (MZB + closed doors): depenetrate an
 /// embedded start, then sweep + slide (Quake III `PM_SlideMove` clip planes).
 /// A slide against a face keeps full speed along it. Returns the allowed
-/// displacement in bevy xz; `feet_y` is the pre-move height (the body's
-/// vertical position does not change inside the loop — `step.rs` owns that
-/// after the sweep).
-pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> Vec2 {
+/// displacement in bevy xz and which exit of the slide loop produced it;
+/// `feet_y` is the pre-move height (the body's vertical position does not
+/// change inside the loop — `step.rs` owns that after the sweep).
+pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> (Vec2, SweepExit) {
     let mut p = depenetrate(src, xz, feet_y);
     let mut d = d_in;
     let want_len = d.length();
@@ -153,15 +171,16 @@ pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> Vec2 {
     // crease; only a true reversal stops us.
     let mut normals: [Vec2; 4] = [Vec2::ZERO; 4];
     let mut n_count: usize = 0;
+    let mut exit = SweepExit::Clean;
 
     for _ in 0..SLIDE_ITERATIONS {
         if d.length() < 1e-6 {
-            break;
+            break; // the clip that produced d already decided the exit
         }
         let (t, hit) = body_sweep(src, p, feet_y, d);
         p += d * t;
         let Some(hit) = hit else {
-            return p - xz;
+            return (p - xz, SweepExit::Clean);
         };
         let rem = d * (1.0 - t);
         let rem_len = rem.length();
@@ -217,6 +236,7 @@ pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> Vec2 {
                     // dead-end pocket. Otherwise ride it.
                     if crease.dot(normals[j]) < -1e-3 {
                         vel = Vec2::ZERO;
+                        exit = SweepExit::Reversal;
                         break 'planes;
                     }
                     v = crease * rem_len2;
@@ -231,13 +251,20 @@ pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> Vec2 {
         if want_dir != Vec2::ZERO && vel.length() > 1e-6 {
             let vd = vel / vel.length();
             if vd.dot(want_dir) < -0.01 {
+                exit = SweepExit::Reversal;
                 break;
             }
+        }
+        if vel.length() < 1e-6 {
+            // Head-on hit: the clip consumed the whole remaining velocity, so
+            // there is no slide direction left to ride.
+            exit = SweepExit::Hold;
+            break;
         }
         d = vel;
     }
 
-    p - xz
+    (p - xz, exit)
 }
 
 /// Ceiling hold: before applying a rise from `feet_old` to

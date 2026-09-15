@@ -97,31 +97,40 @@ fn special_log_enabled() -> bool {
 // `tick_live_ffxi_actors` (serial section), read from the parallel pose pass.
 static SPECIAL_LOG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// CLIP_WARN is a tracing::debug! event on target "clip": a selected clip that resolves to nothing
+// in the model DAT is always worth one line (it is how a frozen-mob regression announces itself),
+// visible under RUST_LOG=clip or =debug. KULUU_CLIP_LOG additionally prints CLIP_OK for successful
+// resolutions, which is chatty enough to stay gated.
+fn clip_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::env_flags::env_flag(&ENABLED, "KULUU_CLIP_LOG")
+}
+
 // Once-per-(world_id, clip, reason) dedupe for CLIP_WARN: a miss repeats every frame while the
 // pose is held, and the diagnosis only needs the first sighting per entity per requested clip.
 // The reason stays in the key so two distinct diagnostics on one pair (a not_found that also
 // leaves current_clip untouched) both get their line instead of deduping into one.
 static CLIP_WARN_SEEN: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<(u32, DatId, &'static str)>>,
+    std::sync::Mutex<std::collections::HashSet<(u32, String, &'static str)>>,
 > = std::sync::OnceLock::new();
 
 // Returns true when this call printed the line (first sighting of the pair), false when the
 // dedupe set already had it. Callers do not branch on it; tests use it to pin the dedupe key.
-fn clip_warn_once(id: u32, model: &str, clip: &DatId, reason: &'static str) -> bool {
+fn clip_warn_once(id: u32, name: &str, model: &str, clip: &DatId, reason: &'static str) -> bool {
     let seen = CLIP_WARN_SEEN.get_or_init(Default::default);
     let Ok(mut guard) = seen.lock() else {
         return false;
     };
-    if !guard.insert((id, *clip, reason)) {
+    if !guard.insert((id, clip.as_str(), reason)) {
         return false;
     }
-    tracing::warn!(
+    tracing::debug!(
         target: "clip",
-        id = format_args!("{id:#x}"),
+        "CLIP_WARN id={id:#x} name={} model={} clip={} reason={}",
+        name,
         model,
-        clip = %clip.as_str(),
-        reason,
-        "CLIP_WARN"
+        clip.as_str(),
+        reason
     );
     true
 }
@@ -130,7 +139,14 @@ fn clip_warn_once(id: u32, model: &str, clip: &DatId, reason: &'static str) -> b
 // when the model's DAT walk saw the chunk but parse rejected it, not_found_override_skipped when
 // an override tier (special/fishing) asked for a clip the model does not ship, and not_found
 // otherwise. The reason stays in the dedupe key so two distinct misses on one pair both print.
-fn clip_miss(id: u32, model: &str, clip: &DatId, rejected_clips: &[DatId], tier: PoseTier) {
+fn clip_miss(
+    id: u32,
+    name: &str,
+    model: &str,
+    clip: &DatId,
+    rejected_clips: &[DatId],
+    tier: PoseTier,
+) {
     let reason = if rejected_clips.iter().any(|r| r.parameterized_match(clip)) {
         "seq_load_error"
     } else if matches!(tier, PoseTier::Special | PoseTier::Fishing) {
@@ -138,18 +154,20 @@ fn clip_miss(id: u32, model: &str, clip: &DatId, rejected_clips: &[DatId], tier:
     } else {
         "not_found"
     };
-    clip_warn_once(id, model, clip, reason);
+    clip_warn_once(id, name, model, clip, reason);
 }
 
 fn clip_ok(id: u32, asked: &DatId, resolved: &SkeletonAnimation, movement_type: MovementType) {
+    if !clip_log_enabled() {
+        return;
+    }
     tracing::debug!(
         target: "clip",
-        id = format_args!("{id:#x}"),
-        clip = %asked.as_str(),
-        resolved = %resolved.id.as_str(),
-        frames = resolved.num_frames,
-        movement = %movement_type,
-        "CLIP_OK"
+        "CLIP_OK id={id:#x} clip={} -> {} frames={} move={}",
+        asked.as_str(),
+        resolved.id.as_str(),
+        resolved.num_frames,
+        movement_type
     );
 }
 
@@ -187,6 +205,12 @@ pub struct LoadedActor {
     /// apart from "the model ships no such clip at all" (not_found).
     rejected_clips: Vec<DatId>,
 
+    /// Named-play routines present in this model's DAT walk whose scheduler parse was rejected;
+    /// CLIP_WARN must tell "the routine chunk is there but broken" (seq_load_error) apart from
+    /// "the model ships no such routine at all" (not_found). The reason itself lives on
+    /// `LoadedActor.rejected_routines`.
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
+
     /// The primary model DAT as `{rom_dir}/{dir}/{file}.DAT` (e.g. ROM/4/109.DAT), for the
     /// CLIP_WARN line's `model=` field.
     model_dat: String,
@@ -208,8 +232,8 @@ fn is_usable_clip(anim: &SkeletonAnimation) -> bool {
 
 // Clip/scheduler parsing is the expensive tail of an actor load; deriving it here
 // keeps it on the loader task instead of the render main thread, and the Arcs let
-// consumers share the parsed sets without deep-cloning keyframe data. The fourth
-// return value lists the motion chunks seen in the DAT walk but rejected by parse,
+// consumers share the parsed sets without deep-cloning keyframe data. The fourth and
+// fifth return values list the chunks seen in the DAT walk but rejected by parse,
 // so CLIP_WARN can name a seq_load_error instead of a not_found.
 fn derive_animation_sets(
     anim_dirs: &[ResourceDir],
@@ -219,6 +243,7 @@ fn derive_animation_sets(
     Arc<Vec<SkeletonAnimation>>,
     Arc<HashMap<DatId, Scheduler>>,
     Vec<DatId>,
+    Vec<ffxi_dat::resource_dir::RejectedRoutine>,
 ) {
     let animations = dedup_clips(anim_dirs.iter());
     let battle_clips = dedup_clips(battle_dirs.iter());
@@ -229,8 +254,11 @@ fn derive_animation_sets(
         .map(|a| a.id)
         .collect();
     let mut routines: HashMap<DatId, Scheduler> = HashMap::new();
+    let mut rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine> = Vec::new();
     for dir in battle_dirs.iter().chain(anim_dirs.iter()) {
-        for sched in dir.collect_schedulers() {
+        let (scheds, rejected) = dir.collect_schedulers_with_rejections();
+        rejected_routines.extend(rejected);
+        for sched in scheds {
             routines
                 .entry(DatId::from_name(&sched.name))
                 .or_insert(sched);
@@ -241,6 +269,7 @@ fn derive_animation_sets(
         Arc::new(battle_clips),
         Arc::new(routines),
         rejected_clips,
+        rejected_routines,
     )
 }
 
@@ -575,7 +604,8 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     let mut effect_meshes = Vec::new();
     collect_d3m(&tree, &mut effect_meshes);
 
-    let (_schedulers, action_assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+    let (_schedulers, action_assets, _cameras) =
+        crate::scheduler_runtime::parse_action_bytes(&bytes);
     // A D3m referenced by a particle generator is drawn by the particle stream
     // (XIM ParticleMeshResource, Particle.kt shouldSnapAlpha) with its own unlit additive/blend
     // material; rendering it as a static child too would double-draw it through the
@@ -591,7 +621,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     effect_meshes.retain(|d| !particle_meshes.contains(&d.name));
 
     let anim_dirs = vec![ResourceDir::from_bytes(bytes)];
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -603,6 +633,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(action_assets),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, file_id),
         cib: dir.first_cib(),
     })
@@ -687,7 +718,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         return Err(format!("no body meshes for mount race {race}"));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -699,6 +730,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         // The mount's own Info chunk uses the `mount` layout (rotation/poseType at +0x02/+0x0A,
         // research/xim resource/InfoSection.kt readMountDefinition); parsing it with the info
@@ -930,7 +962,7 @@ pub fn load_pc(
         ));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &battle_dirs);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -943,6 +975,7 @@ pub fn load_pc(
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs, &battle_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         cib: race_cib,
     })
@@ -1234,6 +1267,7 @@ pub struct FfxiRenderActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
     rejected_clips: Vec<DatId>,
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
     model_dat: String,
     coordinator: SkeletonAnimationCoordinator,
     skin_slot: u32,
@@ -1250,6 +1284,10 @@ pub struct FfxiRenderActor {
     /// The model's Cib Info movement byte (Unset when the DAT carries no CIB). Gates whether
     /// the wire AnimationSpeed stride scale applies to locomotion clip playback.
     movement_type: MovementType,
+
+    /// The model's 0x45 Info waist byte (0 when the DAT carries no CIB): which of a 0x66 Tpc
+    /// package's two tag-2 containers the renderer loads.
+    body_armour_waist: u8,
 
     current_clip: Option<(DatId, bool)>,
 
@@ -1294,6 +1332,12 @@ impl FfxiRenderActor {
     /// CIB); gates the wire stride scale on locomotion clip playback.
     pub fn movement_type(&self) -> MovementType {
         self.movement_type
+    }
+
+    /// The 0x45 Info waist byte this model was loaded with (0 when the DAT carries no CIB):
+    /// which of a 0x66 Tpc package's two tag-2 containers the renderer loads.
+    pub fn body_armour_waist(&self) -> u8 {
+        self.body_armour_waist
     }
 
     /// The completion motion's clip while `action` is held - what a routine's Motion stage (or
@@ -1374,8 +1418,8 @@ impl FfxiRenderActor {
             looping: num_loops.is_some(),
             remaining: len.max(motion.duration_frames * 0.5).max(1.0),
             num_loops,
-            transition_in: half_frames(motion.transition_in),
-            transition_out: half_frames(motion.transition_out),
+            transition_in: motion.transition_in.whole_frames(),
+            transition_out: motion.transition_out.whole_frames(),
             cast_pose: false,
         });
     }
@@ -1391,12 +1435,39 @@ enum EngageMachine {
     Sheathing { remaining: f32 },
 }
 
+/// DAT transition fields are authored in half-frames: a stored value V plays as V/2 whole frames.
+/// research/xim EffectRoutineInterpolatedEffects.kt divides the parsed u16 by 2 before handing it
+/// to the skeleton domain, which ticks at half the routine clock (FRAME_RATE above).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HalfFrames(u16);
+
+impl HalfFrames {
+    pub const ZERO: Self = Self(0);
+
+    /// A DAT-parsed transition field is already in this unit.
+    pub const fn from_dat(v: u16) -> Self {
+        Self(v)
+    }
+
+    /// A flinch transition derived from its stage's animationDuration in whole frames. XIM plays
+    /// each side for duration/2 (EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance), and
+    /// V half-frames play as V/2, so the stored value is the total itself.
+    pub fn from_flinch_total(total_whole_frames: f32) -> Self {
+        Self((total_whole_frames.max(0.0)) as u16)
+    }
+
+    /// Whole-frame count this value plays as.
+    pub const fn whole_frames(self) -> f32 {
+        self.0 as f32 * 0.5
+    }
+}
+
 pub struct CompletionMotion<'a> {
     pub local_clips: &'a [SkeletonAnimation],
     pub duration_frames: f32,
     pub max_loops: u16,
-    pub transition_in: u16,
-    pub transition_out: u16,
+    pub transition_in: HalfFrames,
+    pub transition_out: HalfFrames,
 }
 
 fn half_frames(v: u16) -> f32 {
@@ -1765,6 +1836,7 @@ pub fn make_render_actor(
         routines: loaded.all_routines(),
         action_assets: Arc::clone(&loaded.action_assets),
         rejected_clips: loaded.rejected_clips.clone(),
+        rejected_routines: loaded.rejected_routines.clone(),
         model_dat: loaded.model_dat.clone(),
         coordinator: SkeletonAnimationCoordinator::new(),
         skin_slot,
@@ -1777,6 +1849,7 @@ pub fn make_render_actor(
             .cib
             .map(|c| c.movement_type)
             .unwrap_or(MovementType::Unset),
+        body_armour_waist: loaded.cib.map(|c| c.body_armour_waist).unwrap_or(0),
         current_clip: None,
         rest_phase: RestPlayback::Inactive,
         death_phase: actor_state::DeathPhase::Unobserved,
@@ -1808,8 +1881,41 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
         routines: Arc::default(),
         action_assets: Arc::default(),
         rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
         model_dat: String::new(),
         cib: None,
+    };
+    FfxiRenderActor {
+        world_pose,
+        ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
+    }
+}
+
+// A render actor with no model behind it, carrying an explicit 0x45 Info movement byte, for the
+// remote-grounding test that gates on MovementType and needs nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_with_movement_for_test(
+    skeleton: Skeleton,
+    world_pose: Vec<Mat4>,
+    movement_type: MovementType,
+) -> FfxiRenderActor {
+    let cib = Cib {
+        movement_type,
+        ..Cib::parse(*b"cib0", &[0u8; ffxi_dat::cib::CIB_LEN]).unwrap()
+    };
+    let loaded = LoadedActor {
+        skeleton: Arc::new(skeleton),
+        skel_meshes: Vec::new(),
+        effect_meshes: Vec::new(),
+        textures: Vec::new(),
+        animations: Arc::default(),
+        battle_clips: Arc::default(),
+        routines: Arc::default(),
+        action_assets: Arc::default(),
+        rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
+        model_dat: String::new(),
+        cib: Some(cib),
     };
     FfxiRenderActor {
         world_pose,
@@ -1903,7 +2009,7 @@ pub fn advance_actor_pose_standalone(
     elapsed_frames: f32,
     mount: Option<MountAttach>,
 ) {
-    advance_actor_pose(actor, elapsed_frames, None, mount, false);
+    advance_actor_pose(actor, elapsed_frames, None, mount, false, None);
 }
 
 pub fn tick_ffxi_render_actors(
@@ -1913,7 +2019,7 @@ pub fn tick_ffxi_render_actors(
 ) {
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     q_actors.par_iter_mut().for_each(|mut actor| {
-        advance_actor_pose(&mut actor, elapsed_frames, None, None, false);
+        advance_actor_pose(&mut actor, elapsed_frames, None, None, false, None);
     });
     for actor in &q_actors {
         registry
@@ -2024,27 +2130,74 @@ fn advance_rest_phase(
     }
 }
 
-fn routine_motion_clip(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> Option<DatId> {
-    let sched = routines.get(&routine)?;
-    sched
-        .stages
-        .iter()
-        .find(|t| t.stage.kind == StageKind::Motion)
-        .map(|t| DatId::from_name(&t.stage.id))
+// Why a requested routine yielded no motion clip. Each case gets its own CLIP_WARN reason so
+// the miss names itself instead of degrading to locomotion silently.
+#[derive(Debug)]
+enum RoutineMiss {
+    /// No scheduler chunk with this name in the model's sets: retail is a no-op here too.
+    NotFound,
+    /// A chunk with this name was seen in the DAT walk but its parse was rejected; the parse
+    /// reason itself lives on `LoadedActor.rejected_routines`.
+    SeqLoadError,
+    /// The routine parsed fine but carries no Motion stage.
+    NoMotionStage,
 }
 
-/// The routine's *last* Motion stage. Every `fsh<n>` routine carries two — a
-/// wind-up and the pose it settles into (`fsh0` = `fh0?` cast then `fh1?` wait,
-/// `fsh1` = `fh8?` set-the-hook then `fh2?` fight). A phase the client holds for
-/// an indefinite time has to loop the settled stage; looping the wind-up instead
-/// replays the cast over and over.
-fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> Option<DatId> {
-    let sched = routines.get(&routine)?;
-    sched
-        .stages
-        .iter()
-        .rfind(|t| t.stage.kind == StageKind::Motion)
-        .map(|t| DatId::from_name(&t.stage.id))
+/// `last_stage` picks which Motion stage the caller wants. Every `fsh<n>` routine carries two
+/// (a wind-up and the pose it settles into; `fsh0` = `fh0?` cast then `fh1?` wait, `fsh1` =
+/// `fh8?` set-the-hook then `fh2?` fight). A phase the client holds for an indefinite time has to
+/// loop the settled stage; looping the wind-up instead replays the cast over and over.
+fn routine_motion_lookup(
+    routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
+    routine: DatId,
+    last_stage: bool,
+) -> Result<Option<DatId>, RoutineMiss> {
+    let Some(sched) = routines.get(&routine) else {
+        return Err(if rejected_routines.iter().any(|r| r.name == routine.0) {
+            RoutineMiss::SeqLoadError
+        } else {
+            RoutineMiss::NotFound
+        });
+    };
+    let motion = if last_stage {
+        sched
+            .stages
+            .iter()
+            .rev()
+            .find(|t| t.stage.kind == StageKind::Motion)
+    } else {
+        sched
+            .stages
+            .iter()
+            .find(|t| t.stage.kind == StageKind::Motion)
+    };
+    match motion {
+        Some(t) => Ok(Some(DatId::from_name(&t.stage.id))),
+        None => Err(RoutineMiss::NoMotionStage),
+    }
+}
+
+fn routine_motion_clip(
+    routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
+    routine: DatId,
+) -> Option<DatId> {
+    routine_motion_lookup(routines, rejected_routines, routine, false)
+        .ok()
+        .flatten()
+}
+
+// CLIP_WARN for a requested routine that yielded no motion clip; the routine name stands in for
+// the clip field because there is no motion clip to name. As with `clip_miss`, the reason stays
+// in the dedupe key so two distinct misses on one pair both print.
+fn routine_motion_miss(id: u32, name: &str, model: &str, routine: DatId, miss: &RoutineMiss) {
+    let reason = match miss {
+        RoutineMiss::NotFound => "routine_not_found",
+        RoutineMiss::SeqLoadError => "routine_seq_load_error",
+        RoutineMiss::NoMotionStage => "routine_no_motion_stage",
+    };
+    clip_warn_once(id, name, model, &routine, reason);
 }
 
 /// The `ded?` collapse clip and the routine-authored frames retail plays it for
@@ -2122,13 +2275,14 @@ fn advance_engage(
     machine: &mut EngageMachine,
     want_engaged: bool,
     routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
     animations: &[SkeletonAnimation],
     elapsed_frames: f32,
 ) -> actor_state::EngageAnimationState {
     use actor_state::EngageAnimationState as S;
 
     let transition_len = |routine: &str| -> f32 {
-        routine_motion_clip(routines, DatId::from_str(routine))
+        routine_motion_clip(routines, rejected_routines, DatId::from_str(routine))
             .map(|clip| rest_clip_len_frames(animations, clip))
             .unwrap_or(0.0)
     };
@@ -2217,7 +2371,7 @@ enum PoseTier {
 
 // `animation_locked` is always false here: the action was just cleared above, so no lock can
 // be in effect on the re-pose.
-fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
+fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name: Option<&str>) {
     actor.inputs = ActorAnimInputs::default();
     actor.rest_phase = RestPlayback::Inactive;
 
@@ -2225,7 +2379,7 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
     actor.engage = EngageMachine::NotEngaged;
     actor.coordinator.clear();
     actor.current_clip = None;
-    advance_actor_pose(actor, elapsed_frames, None, None, false);
+    advance_actor_pose(actor, elapsed_frames, None, None, false, name);
     // Ordered after the re-pose, whose default (alive) inputs would otherwise read
     // as having watched this actor alive: retail only plays `ded?` for a death it
     // saw, so a KO'd zone-in resumes on the held corpse frame.
@@ -2240,6 +2394,7 @@ fn advance_actor_pose(
     look: Option<(Mat4, Vec3)>,
     mount: Option<MountAttach>,
     animation_locked: bool,
+    name: Option<&str>,
 ) {
     let FfxiRenderActor {
         skeleton,
@@ -2264,6 +2419,7 @@ fn advance_actor_pose(
         world_pose,
         pose_work,
         rejected_clips,
+        rejected_routines,
         model_dat,
         ..
     } = actor;
@@ -2289,8 +2445,26 @@ fn advance_actor_pose(
     };
 
     let engage_overlay = match *engage {
-        EngageMachine::Drawing { .. } => routine_motion_clip(routines, DatId::from_str("in 0")),
-        EngageMachine::Sheathing { .. } => routine_motion_clip(routines, DatId::from_str("out0")),
+        EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. } => {
+            let routine = if matches!(*engage, EngageMachine::Drawing { .. }) {
+                DatId::from_str("in 0")
+            } else {
+                DatId::from_str("out0")
+            };
+            match routine_motion_lookup(routines, rejected_routines, routine, false) {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        routine,
+                        &miss,
+                    );
+                    None
+                }
+            }
+        }
         _ => None,
     };
 
@@ -2309,10 +2483,22 @@ fn advance_actor_pose(
             // A looping phase (cast/wait, fighting) is held for an indefinite
             // time, so it settles on the routine's last Motion stage; a
             // resolution phase plays its wind-up once and holds.
-            let motion = if fc.looping {
-                routine_motion_clip_last(routines, fc.id)
+            let motion = match if fc.looping {
+                routine_motion_lookup(routines, rejected_routines, fc.id, true)
             } else {
-                routine_motion_clip(routines, fc.id)
+                routine_motion_lookup(routines, rejected_routines, fc.id, false)
+            } {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        fc.id,
+                        &miss,
+                    );
+                    None
+                }
             };
             motion.map(|id| actor_state::FishingClip {
                 id,
@@ -2326,14 +2512,33 @@ fn advance_actor_pose(
     // asks for that routine's first Motion stage clip; models without the routine (or without a
     // usable chunk for it) fall through to locomotion like any other miss. No per-mob
     // interpretation: what the sub value does on this model is defined by its DAT alone.
-    let special_clip_id = inputs.special.active_routine.and_then(|name| {
-        let routine = DatId::from_name(&name);
-        let clip = routine_motion_clip(routines, routine);
-        if clip.is_none() {
-            clip_warn_once(actor.world_id, model_dat, &routine, "routine_not_found");
-        }
-        clip
-    });
+    //
+    // The pose is held by whichever retail mechanism is active: the wire slot (a sub change on a
+    // live actor - the dig's buried pose, held until the sub clears or the resurface) or the
+    // routine's own AnimationLock (the resurface's 'init' on retail's slot-less fresh actor).
+    // Once both lapse the pose falls to idle even if the server keeps the sub set: the server
+    // never has to stop the animation.
+    let special_held = inputs.special.slot_held || animation_locked;
+    let special_clip_id = inputs
+        .special
+        .active_routine
+        .filter(|_| special_held)
+        .and_then(|routine_name| {
+            let routine = DatId::from_name(&routine_name);
+            match routine_motion_lookup(routines, rejected_routines, routine, false) {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        routine,
+                        &miss,
+                    );
+                    None
+                }
+            }
+        });
 
     // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
     // heads the selection chain; when its timer expires the held `cor?` takes over through the
@@ -2389,7 +2594,14 @@ fn advance_actor_pose(
         if usable(&resolve(id)) {
             Some((id, is_idle, tier))
         } else {
-            clip_miss(actor.world_id, model_dat, &id, rejected_clips, tier);
+            clip_miss(
+                actor.world_id,
+                name.unwrap_or("-"),
+                model_dat,
+                &id,
+                rejected_clips,
+                tier,
+            );
             None
         }
     };
@@ -2423,6 +2635,7 @@ fn advance_actor_pose(
         None => {
             clip_warn_once(
                 actor.world_id,
+                name.unwrap_or("-"),
                 model_dat,
                 &DatId::from_str("idl?"),
                 "not_found",
@@ -2437,6 +2650,7 @@ fn advance_actor_pose(
     if matches.is_empty() {
         clip_warn_once(
             actor.world_id,
+            name.unwrap_or("-"),
             model_dat,
             &selected_id,
             "no_match_kept_previous",
@@ -3204,6 +3418,7 @@ pub fn chocobo_seat_local(mount_pose: &[Mat4], above_back: f32) -> Option<Vec3> 
 // Clone only (not Copy): `name` is a String.
 #[derive(Clone)]
 pub struct SnapshotActorState {
+    name: Option<String>,
     pos: kuluu_snapshot::Vec3,
     // Head-look: facetarget is a targid (act_index), so resolve it to the world_id
     // the position maps are keyed by. Distinct from bt_target_id (the combat-claim
@@ -3261,11 +3476,28 @@ pub struct LiveSnapshotIndex {
 /// Per-frame scratch maps rebuilt every tick by [`tick_live_ffxi_actors`]. Grouped into one
 /// `Local` so the system stays within Bevy's 16-parameter fn-item arity limit. `pub` like
 /// [`LiveSnapshotIndex`]: a Local parameter type must be visible to modules that schedule this
-/// system with `.before()`/`.after()`.
+/// system with `.before()`/`.after()`. The two `prev_` fields are cross-snapshot memory, not
+/// per-frame scratch: they persist across frames and are pruned only on despawn.
 #[derive(Default)]
 pub struct FrameScratch {
     actor_world: HashMap<u32, Vec3>,
     mount_attach: HashMap<u32, MountAttach>,
+    // The 0x0E hp_pct last observed per entity id. A 0 -> >0 transition on the next snapshot is
+    // a Raise and clears that entity's Defeated latch (DeadFromAction).
+    prev_hp: HashMap<u32, Option<u8>>,
+    // Self's deadness as of the previous snapshot (party row / homepoint timer channel; self's
+    // own entity hp_pct only updates when CHAR_PC carries UPDATE_HP). A true -> false transition
+    // is a Raise of self.
+    prev_self_dead: Option<bool>,
+    // This pass's live entity ids and raised set, cleared at the top of each changed-snapshot
+    // pass instead of allocated per frame (the actor_world/mount_attach pattern below).
+    live_ids: std::collections::HashSet<u32>,
+    raised: std::collections::HashSet<u32>,
+    // Routines queued this frame onto entities that had no ActiveSchedulers yet; flushed after
+    // the special-pose loop so same-batch queues merge instead of overwriting. The system sits
+    // at Bevy's 16-parameter limit, so this rides in FrameScratch rather than as a Local.
+    pending_routine_inserts:
+        std::collections::HashMap<Entity, Vec<crate::scheduler_runtime::ActiveScheduler>>,
 }
 
 pub fn tick_live_ffxi_actors(
@@ -3281,8 +3513,9 @@ pub fn tick_live_ffxi_actors(
     // Model-root Visibility is written here only for entities with an active special state;
     // every other entity's root stays owned by scene::apply_invis_flag_system (invis-flag PCs).
     // The fourth slot is the Defeated latch: a killing result starts the death path on
-    // this frame instead of waiting for the next 0x0E hp_pct.
+    // this frame instead of waiting for the next 0x0E hp_pct; a raise clears it.
     mut q_actors: Query<(
+        Entity,
         &mut FfxiRenderActor,
         &GlobalTransform,
         &mut Visibility,
@@ -3302,15 +3535,23 @@ pub fn tick_live_ffxi_actors(
     // The entity-level routine vecs: the special-pose routine firing below and the
     // AnimationLock set built before the parallel pass both read through this one query. Sixteen
     // parameters (Bevy's fn-item arity limit); new state goes into FrameScratch, not here.
-    q_scheds: Query<(
-        &crate::components::WorldEntity,
-        &crate::scheduler_runtime::ActiveSchedulers,
-    )>,
+    mut q_scheds: Query<&mut crate::scheduler_runtime::ActiveSchedulers>,
 ) {
     use ffxi_actor::actor_state::RestKind;
 
+    frame_scratch.pending_routine_inserts.clear();
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     let self_id = state.snapshot.self_char_id;
+
+    // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
+    // carries UPDATE_HP) and via the party row (absent/stale when solo).
+    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
+    // both gated on hpp == 0. Hoisted above the snapshot-change block so a raise
+    // transition can be detected there; the pose pass below reads the same value.
+    let self_dead = state.snapshot.death_homepoint_secs.is_some()
+        || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
+            .map(|m| m.hp_pct == 0)
+            .unwrap_or(false);
 
     // Special-pose effect routines queued by this frame's wire-state transitions, mirroring
     // retail: a sub change on a live actor plays table[sub] on the model
@@ -3328,9 +3569,25 @@ pub fn tick_live_ffxi_actors(
 
         index.by_id.clear();
         index.id_by_targid.clear();
-        let mut live_ids = std::collections::HashSet::new();
+        frame_scratch.live_ids.clear();
+        // World ids whose 0x0E hp_pct just went 0 -> >0 on this snapshot (a Raise): the wire
+        // owns death state again, so their Defeated latch is cleared below.
+        frame_scratch.raised.clear();
+        // World ids whose 0x0E hp_pct is 0 on this snapshot: a kill that did not arrive as a
+        // BATTLE2 Defeated result still latches the death path below (the wire byte is the only
+        // signal; see the latch block after the loop).
+        let mut dead_now = std::collections::HashSet::<u32>::new();
         for e in &state.snapshot.entities {
-            live_ids.insert(e.id);
+            frame_scratch.live_ids.insert(e.id);
+            // A Raise is a 0 -> >0 transition of this entity's 0x0E hp_pct on this snapshot.
+            let prev_hp = frame_scratch.prev_hp.get(&e.id).copied();
+            frame_scratch.prev_hp.insert(e.id, e.hp_pct);
+            if matches!(prev_hp, Some(Some(0))) && e.hp_pct.is_some_and(|p| p > 0) {
+                frame_scratch.raised.insert(e.id);
+            }
+            if e.hp_pct == Some(0) {
+                dead_now.insert(e.id);
+            }
             let mounted = state.snapshot.mount_of(e).is_some();
             // Advance the special-pose wire state from last frame to this snapshot's
             // status/animationsub. A no-op (stays plain) for entities with no sub and a visible
@@ -3370,6 +3627,7 @@ pub fn tick_live_ffxi_actors(
             index.by_id.insert(
                 e.id,
                 SnapshotActorState {
+                    name: e.name.clone(),
                     pos: e.pos,
                     face_target: e.face_target,
                     engaged: e.animation == ffxi_proto::decode::animation::ATTACK,
@@ -3399,6 +3657,7 @@ pub fn tick_live_ffxi_actors(
                 index.by_id.insert(
                     crate::scene::mount_actor_id(e.id),
                     SnapshotActorState {
+                        name: None,
                         pos: e.pos,
                         face_target: 0,
                         engaged: false,
@@ -3421,7 +3680,47 @@ pub fn tick_live_ffxi_actors(
                 );
             }
         }
-        // Drop states for entities that despawned so the cache stays bounded.
+        // Self's raise arrives through the party row / homepoint timer channel instead of an
+        // entity hp_pct (see self_dead above): a true -> false transition of self-deadness.
+        if let Some(sid) = self_id {
+            if frame_scratch.prev_self_dead == Some(true) && !self_dead {
+                frame_scratch.raised.insert(sid);
+            }
+        }
+        frame_scratch.prev_self_dead = Some(self_dead);
+
+        // Latch the death path on entities whose 0x0E hp_pct is 0 on this snapshot: consumers of
+        // DeadFromAction beyond the pose pass (remote grounding) read the latch, and a kill that
+        // did not arrive as a BATTLE2 Defeated result has no other signal. Mount actors carry
+        // synthetic ids disjoint from server ids, so they never match dead_now.
+        if !dead_now.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_none() && dead_now.contains(&actor.world_id) {
+                    commands
+                        .entity(entity)
+                        .insert(crate::scheduler_runtime::DeadFromAction::default());
+                }
+            }
+        }
+
+        // Clear the Defeated latch on raised entities (see DeadFromAction). Commands apply at
+        // end of system, so this frame's pose pass still sees the latch for one more frame;
+        // from the next frame the wire's hp_pct owns death state again.
+        if !frame_scratch.raised.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_some() && frame_scratch.raised.contains(&actor.world_id) {
+                    commands
+                        .entity(entity)
+                        .remove::<crate::scheduler_runtime::DeadFromAction>();
+                }
+            }
+        }
+
+        // Drop states for entities that despawned so the cache stays bounded. Field borrows go
+        // through a materialized &mut (the mount_attach_scratch pattern below): split borrows do
+        // not propagate through Bevy's Local deref when one side is captured by a closure.
+        let frame_scratch = &mut *frame_scratch;
+        let live_ids = &frame_scratch.live_ids;
         special_mem.retain(|id, _| live_ids.contains(id));
     }
 
@@ -3435,7 +3734,9 @@ pub fn tick_live_ffxi_actors(
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
         // sound are lost. Acceptable degradation — the load lands within a few frames.
-        let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == world_id)
+        let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == world_id)
         else {
             continue;
         };
@@ -3455,6 +3756,11 @@ pub fn tick_live_ffxi_actors(
             .try_insert_if_new(actor.action_assets().clone())
             .try_insert_if_new(crate::scheduler_runtime::ActionTarget(None));
     }
+    crate::scheduler_runtime::flush_active_scheduler_inserts(
+        &mut frame_scratch.pending_routine_inserts,
+        &mut q_scheds,
+        &mut commands,
+    );
 
     if special_log_enabled() {
         SPECIAL_LOG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3474,7 +3780,7 @@ pub fn tick_live_ffxi_actors(
     actor_world_scratch.extend(
         q_actors
             .iter()
-            .map(|(a, gt, _, _)| (a.world_id, gt.translation())),
+            .map(|(_, a, gt, _, _)| (a.world_id, gt.translation())),
     );
     let actor_world_by_id: &HashMap<u32, Vec3> = actor_world_scratch;
 
@@ -3485,7 +3791,7 @@ pub fn tick_live_ffxi_actors(
     // the two actors are posed in the same pass and a frame of lag on a seat is
     // not visible.
     mount_attach_scratch.clear();
-    for (a, _, _, _) in &q_actors {
+    for (_, a, _, _, _) in &q_actors {
         let Some(rider_id) = crate::scene::mount_actor_rider(a.world_id) else {
             continue;
         };
@@ -3516,18 +3822,22 @@ pub fn tick_live_ffxi_actors(
     // the pose pass must not release the routine's Motion clip - a one-shot pins its end frame in
     // the coordinator, so this is what holds buried/emerged poses until the lock lapses. Built
     // serially before the parallel pass; the set is read-only inside it.
-    // dead_fall_pending: world ids whose Defeated latch is up but the `dead` routine's
-    // fall-over Motion has not fired yet: hold idle across that gap instead of flashing cor?.
-    let mut animation_locked = std::collections::HashSet::new();
-    let mut dead_fall_pending = std::collections::HashSet::new();
-    for (world, scheds) in &q_scheds {
-        if scheds.is_locked_now() {
-            animation_locked.insert(world.id);
-        }
-        if scheds.dead_fall_over_pending() {
-            dead_fall_pending.insert(world.id);
-        }
-    }
+    let animation_locked: std::collections::HashSet<u32> = tracked
+        .by_id
+        .iter()
+        .filter(|(_id, e)| q_scheds.get(**e).is_ok_and(|s| s.is_locked_now()))
+        .map(|(id, _)| *id)
+        .collect();
+
+    // World ids whose Defeated latch is up but the `dead` routine's fall-over
+    // Motion has not fired yet: hold idle across that gap instead of flashing cor?. Same
+    // serial-build/read-in-parallel pattern as animation_locked.
+    let dead_fall_pending: std::collections::HashSet<u32> = tracked
+        .by_id
+        .iter()
+        .filter(|(_id, e)| q_scheds.get(**e).is_ok_and(|s| s.dead_fall_over_pending()))
+        .map(|(id, _)| *id)
+        .collect();
 
     let self_engaged_predicted = matches!(
         state.snapshot.current_goal,
@@ -3561,19 +3871,9 @@ pub fn tick_live_ffxi_actors(
     let (self_move_forward, self_move_strafe, self_move_moving) =
         (self_move.forward, self_move.strafe, self_move.moving);
 
-    // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
-    // carries UPDATE_HP) and via the party row (absent/stale when solo).
-    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
-    // both gated on hpp == 0.
-    let self_dead = state.snapshot.death_homepoint_secs.is_some()
-        || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
-            .map(|m| m.hp_pct == 0)
-            .unwrap_or(false);
-
     let motion = &*motion;
-    q_actors
-        .par_iter_mut()
-        .for_each(|(mut actor, actor_global, mut vis, dead_from_action)| {
+    q_actors.par_iter_mut().for_each(
+        |(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
             let world_id = actor.world_id;
             if world_id == 0 {
                 return;
@@ -3583,7 +3883,11 @@ pub fn tick_live_ffxi_actors(
             let snap = index.by_id.get(&world_id);
 
             if zone_changed || (!is_self && snap.is_none()) {
-                reset_actor_pose_state(&mut actor, elapsed_frames);
+                reset_actor_pose_state(
+                    &mut actor,
+                    elapsed_frames,
+                    snap.and_then(|s| s.name.as_deref()),
+                );
                 return;
             }
 
@@ -3595,8 +3899,8 @@ pub fn tick_live_ffxi_actors(
 
             let engaged =
                 snap.map(|s| s.engaged).unwrap_or(false) || (is_self && self_engaged_predicted);
-            // a Defeated result latches the death path on this frame; the 0x0E hp_pct
-            // takes over from there. while the `dead` routine is queued but its
+            // A Defeated result latches the death path on this frame (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"); the 0x0E hp_pct
+            // takes over from there. While the `dead` routine is queued but its
             // fall-over has not started, hold idle instead of flashing cor? for the gap frame;
             // once ded? owns the pose via the completion motion, dead may be true again.
             let dead = ((is_self && self_dead)
@@ -3654,6 +3958,7 @@ pub fn tick_live_ffxi_actors(
                     &mut actor.engage,
                     engaged,
                     &actor.routines,
+                    &actor.rejected_routines,
                     &actor.battle_clips,
                     elapsed_frames,
                 )
@@ -3740,6 +4045,7 @@ pub fn tick_live_ffxi_actors(
                 look,
                 mount_attach,
                 animation_locked.contains(&world_id),
+                snap.and_then(|s| s.name.as_deref()),
             );
 
             // Special-pose visibility: status INVISIBLE hides the model root outright (retail
@@ -3751,9 +4057,10 @@ pub fn tick_live_ffxi_actors(
             if special.hidden {
                 *vis = Visibility::Hidden;
             }
-        });
+        },
+    );
 
-    for (actor, _, _, _) in &q_actors {
+    for (_, actor, _, _, _) in &q_actors {
         registry
             .skin_mut(actor.skin_slot)
             .joints
@@ -3761,7 +4068,10 @@ pub fn tick_live_ffxi_actors(
     }
 
     if let Some(self_id) = self_id {
-        if let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == self_id) {
+        if let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == self_id)
+        {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
     }
@@ -3858,11 +4168,14 @@ pub fn dispatch_action_overlay(
                 // a limb this model does not carry (no bti0/cti0/dti0 Motion
                 // clip in its DAT) falls back to ati0 before the silent skip below.
                 if action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK
-                    && routine_motion_clip(&actor.routines, routine).is_none()
+                    && routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                        .is_none()
                 {
                     (routine, looping) = (DatId::from_str("ati0"), false);
                 }
-                let Some(clip_id) = routine_motion_clip(&actor.routines, routine) else {
+                let Some(clip_id) =
+                    routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                else {
                     continue;
                 };
 
@@ -4235,6 +4548,7 @@ mod mesh_dedup_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };
@@ -4452,9 +4766,10 @@ mod pose_resolution_tests {
             }
             let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
             // sub=1 keeps the ini1 override active (the model ships no clip for it); every other
-            // sub here settles to plain locomotion.
-            let healthy =
-                moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
+            // sub here settles to plain locomotion. The wire slot is what holds a special pose
+            // between packets; the load routine's lock alone lapses on its own, so a non-selector
+            // sub must leave the slot clear for the model to keep idle-animating.
+            let healthy = moved && (animationsub == 1 || !actor.inputs.special.slot_held);
             results.push((
                 healthy,
                 format!(
@@ -4484,9 +4799,15 @@ mod pose_resolution_tests {
             load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         // sub=1 names the ini1 routine; its first Motion stage is the dig clip (the clip
-        // comes from the routine record, not a hard-coded mapping).
-        let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
-            .expect("worm ini1 routine carries a motion stage");
+        // comes from the routine record, not a hard-coded mapping). The wire slot is what
+        // holds the pose here: the standalone path has no schedulers, so no lock is in
+        // effect and only the slot keeps the override selected.
+        let dig = routine_motion_clip(
+            &actor.routines,
+            &actor.rejected_routines,
+            DatId::from_name(b"ini1"),
+        )
+        .expect("worm ini1 routine carries a motion stage");
         assert!(
             dig.parameterized_match(&DatId::from_str("sp1?")),
             "worm dig clip is sp1?"
@@ -4499,6 +4820,7 @@ mod pose_resolution_tests {
             .fold(0.0f32, f32::max);
         assert!(duration > 0.0, "worm has dedicated dig clips");
         actor.inputs.special.active_routine = Some(*b"ini1");
+        actor.inputs.special.slot_held = true;
         for _ in 0..(duration.ceil() as usize * 2 + 1) {
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
@@ -5115,8 +5437,15 @@ mod pose_resolution_tests {
                 "race {race} collapse length"
             );
             assert_eq!(
-                routine_motion_clip_last(&routines, actor_state::death_routine_id())
-                    .map(|d| d.as_str()),
+                routine_motion_lookup(
+                    &routines,
+                    &actor.rejected_routines,
+                    actor_state::death_routine_id(),
+                    true,
+                )
+                .ok()
+                .flatten()
+                .map(|d| d.as_str()),
                 Some("cor?".to_string()),
                 "race {race} dead routine settles on the corpse pose"
             );
@@ -5249,7 +5578,7 @@ mod pose_resolution_tests {
 
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         advance_actor_pose_standalone(&mut actor, 1.0, None);
-        reset_actor_pose_state(&mut actor, 1.0);
+        reset_actor_pose_state(&mut actor, 1.0, None);
         actor.inputs.dead = true;
 
         for _ in 0..600 {
@@ -5266,21 +5595,296 @@ mod pose_resolution_tests {
             .is_some_and(|c| c.parameterized_match(&actor_state::corpse_pose_id())));
     }
 
+    // A Raise is a 0 -> >0 transition of that entity's 0x0E hp_pct on the snapshot: the wire
+    // owns death state again, so tick_live_ffxi_actors clears the Defeated latch that a killing
+    // result started (DeadFromAction) and the pose falls back to idle. Self's raise arrives
+    // through the party row / homepoint timer channel instead of an entity hp_pct. The `dead`
+    // routine is dispatched only by dispatch_melee_action_started on INFO_DEFEATED, so a raise
+    // must not re-fire it: no ActiveScheduler named `dead` may exist after the raise tick.
+    #[test]
+    fn a_raise_clears_the_defeated_latch_and_returns_to_idle() {
+        if DatRoot::from_env_or_default().is_err() {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        }
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<combat_stance::EntityMotion>()
+            .init_resource::<combat_stance::RestStance>()
+            .init_resource::<combat_stance::WalkMode>()
+            .init_resource::<combat_stance::SelfMoveIntent>()
+            .init_resource::<FfxiSkinRegistry>()
+            .init_resource::<crate::scene::Target>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .add_systems(Update, tick_live_ffxi_actors);
+
+        let tick = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / FRAME_RATE));
+            app.update();
+        };
+        let set_hp = |app: &mut App, id: u32, hp_pct: Option<u8>| {
+            for e in &mut app
+                .world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .entities
+            {
+                if e.id == id {
+                    e.hp_pct = hp_pct;
+                }
+            }
+        };
+        let no_dead_routine = |app: &mut App| {
+            // Bevy 0.19: World::query takes &mut self (archetype refresh) and QueryState::iter
+            // takes the world separately.
+            let mut q = app
+                .world_mut()
+                .query::<&crate::scheduler_runtime::ActiveSchedulers>();
+            q.iter(app.world())
+                .all(|s| !s.routine_names().any(|n| n == *b"dead"))
+        };
+
+        // Mob case: the latch is what dispatch_melee_action_started inserts on a Defeated
+        // result; here it is inserted directly and the wire hp_pct owns death state.
+        let loaded = load_npc(1568).expect("installed retail NPC DAT"); // Hare
+        let skin = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_skin();
+        let actor_entity = app
+            .world_mut()
+            .spawn((
+                make_render_actor(&loaded, skin, Vec::new(), 1, 0.0, 1.0),
+                GlobalTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let snapshot = &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot;
+        snapshot.zone_id = Some(103);
+        snapshot.entities.push(kuluu_snapshot::Entity {
+            id: 1,
+            act_index: 1,
+            kind: kuluu_snapshot::EntityKind::Mob,
+            name: Some("Hare".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(0),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 1,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        });
+        app.world_mut()
+            .entity_mut(actor_entity)
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
+
+        tick(&mut app);
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(actor.inputs.dead, "the Defeated latch holds the death pose");
+        assert!(app
+            .world()
+            .entity(actor_entity)
+            .contains::<crate::scheduler_runtime::DeadFromAction>());
+
+        // Raise: the wire hp_pct goes 0 -> >0. The removal is a command, so it lands after this
+        // frame's pose pass; from the next frame the latch must be gone and dead false.
+        set_hp(&mut app, 1, Some(50));
+        tick(&mut app);
+        tick(&mut app);
+        assert!(
+            !app.world()
+                .entity(actor_entity)
+                .contains::<crate::scheduler_runtime::DeadFromAction>(),
+            "the raise clears the Defeated latch"
+        );
+        assert!(
+            no_dead_routine(&mut app),
+            "a raise must not re-fire the dead routine"
+        );
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(!actor.inputs.dead, "the wire hp_pct owns death state again");
+
+        // Idle within the death-clip length: with no collapse clip to play (or once it has run),
+        // the pose resolves back to the idle family.
+        let bound = death_collapse_clip(&actor.routines)
+            .map_or(1.0, |(_, f)| f.max(1.0))
+            .ceil() as usize
+            + 2;
+        for _ in 0..bound {
+            tick(&mut app);
+        }
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&DatId::from_str("idl?"))),
+            "the raised mob returns to idle within the death-clip length"
+        );
+
+        // Self case: self's entity hp_pct stays 100 (it only updates when CHAR_PC carries
+        // UPDATE_HP), so death and raise both arrive through the party row / homepoint timer
+        // channel that self_dead reads.
+        let loaded = load_pc(1, false, &[], None, None, None).expect("installed retail PC DAT");
+        let skin = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_skin();
+        let self_entity = app
+            .world_mut()
+            .spawn((
+                make_render_actor(&loaded, skin, Vec::new(), 42, 0.0, 1.0),
+                GlobalTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let snapshot = &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot;
+        snapshot.self_char_id = Some(42);
+        snapshot.entities.push(kuluu_snapshot::Entity {
+            id: 42,
+            act_index: 42,
+            kind: kuluu_snapshot::EntityKind::Pc,
+            name: Some("Self".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 1,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        });
+        snapshot.party.push(kuluu_snapshot::PartyMember {
+            id: 42,
+            act_index: 42,
+            name: Some("Self".into()),
+            hp: 0,
+            mp: 0,
+            tp: 0,
+            hp_pct: 0,
+            mp_pct: 0,
+            zone_no: 103,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            in_mog_house: false,
+            party_no: 0,
+        });
+        snapshot.death_homepoint_secs = Some(30);
+        app.world_mut()
+            .entity_mut(self_entity)
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
+
+        tick(&mut app);
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(
+            actor.inputs.dead,
+            "the party row / homepoint channel holds self's death pose"
+        );
+
+        // Raise: the party row recovers and the homepoint timer clears.
+        for m in &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .party
+        {
+            if m.id == 42 {
+                m.hp = 500;
+                m.hp_pct = 50;
+            }
+        }
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .death_homepoint_secs = None;
+        tick(&mut app);
+        tick(&mut app);
+        assert!(
+            !app.world()
+                .entity(self_entity)
+                .contains::<crate::scheduler_runtime::DeadFromAction>(),
+            "the raise clears self's Defeated latch"
+        );
+        assert!(
+            no_dead_routine(&mut app),
+            "a raise must not re-fire the dead routine for self"
+        );
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(
+            !actor.inputs.dead,
+            "the party row / homepoint channel owns self's death state"
+        );
+
+        let bound = death_collapse_clip(&actor.routines)
+            .map_or(1.0, |(_, f)| f.max(1.0))
+            .ceil() as usize
+            + 2;
+        for _ in 0..bound {
+            tick(&mut app);
+        }
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&DatId::from_str("idl?"))),
+            "the raised self returns to idle within the death-clip length"
+        );
+    }
+
     #[test]
     fn routine_motion_clip_resolves_first_motion_stage() {
         let routines = synth_routines(&[(b"ati0", b"at0?"), (b"in 0", b"ind?")]);
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("ati0")).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], DatId::from_str("ati0")).map(|d| d.as_str()),
             Some("at0?".to_string())
         );
 
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("in 0")).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], DatId::from_str("in 0")).map(|d| d.as_str()),
             Some("ind?".to_string())
         );
 
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("cawh")),
+            routine_motion_clip(&routines, &[], DatId::from_str("cawh")),
             None
         );
     }
@@ -5306,13 +5910,13 @@ mod pose_resolution_tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (schedulers, _, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         let routines: HashMap<DatId, Scheduler> = schedulers
             .into_iter()
             .map(|s| (DatId::from_name(&s.name), s))
             .collect();
         assert_eq!(
-            routine_motion_clip(&routines, routine).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], routine).map(|d| d.as_str()),
             Some("mb0?".to_string()),
             "the cast pose clip is still resolved from the caster's own routine"
         );
@@ -5425,7 +6029,8 @@ mod pose_resolution_tests {
 
         let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
         let mut m = EngageMachine::NotEngaged;
-        let step = |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &anims, 1.0);
+        let step =
+            |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &[], &anims, 1.0);
 
         assert_eq!(step(&mut m, true), S::Engaging);
         assert_eq!(step(&mut m, true), S::Engaging);
@@ -5445,11 +6050,11 @@ mod pose_resolution_tests {
         let anims: Vec<SkeletonAnimation> = Vec::new();
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &anims, 1.0),
+            advance_engage(&mut m, true, &routines, &[], &anims, 1.0),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &anims, 1.0),
+            advance_engage(&mut m, false, &routines, &[], &anims, 1.0),
             S::NotEngaged
         );
     }
@@ -5459,7 +6064,12 @@ mod pose_resolution_tests {
         let Some(actor) = load_hume_m() else { return };
         let routines = actor.all_routines();
         let clip = |routine: &str| {
-            routine_motion_clip(&routines, DatId::from_str(routine)).map(|d| d.as_str())
+            routine_motion_clip(
+                &routines,
+                &actor.rejected_routines,
+                DatId::from_str(routine),
+            )
+            .map(|d| d.as_str())
         };
 
         assert_eq!(clip("ati0").as_deref(), Some("at0?"), "swing routine");
@@ -5471,7 +6081,9 @@ mod pose_resolution_tests {
             "white-magic cast routine"
         );
 
-        let swing = routine_motion_clip(&routines, DatId::from_str("ati0")).unwrap();
+        let swing =
+            routine_motion_clip(&routines, &actor.rejected_routines, DatId::from_str("ati0"))
+                .unwrap();
         let anims = actor.all_animations();
         let battle = actor.all_battle_clips();
         let ids: Vec<String> = pose_clip_matches(&anims, battle.iter(), swing)
@@ -5711,6 +6323,7 @@ mod actor_bounds_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };
@@ -5854,17 +6467,23 @@ mod clip_warn_tests {
         let id_b = 0xC0DE_0002;
         let wlk = DatId::from_str("wlk?");
 
-        assert!(clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "not_found"));
+        assert!(clip_warn_once(
+            id_a,
+            "dedupe-a",
+            "ROM/4/999.DAT",
+            &wlk,
+            "not_found"
+        ));
         assert!(
-            !clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "not_found"),
+            !clip_warn_once(id_a, "dedupe-a", "ROM/4/999.DAT", &wlk, "not_found"),
             "second sighting of the same pair stays quiet"
         );
         assert!(
-            clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "seq_load_error"),
+            clip_warn_once(id_a, "dedupe-a", "ROM/4/999.DAT", &wlk, "seq_load_error"),
             "a different reason on the same pair gets its own line"
         );
         assert!(
-            clip_warn_once(id_b, "ROM/4/999.DAT", &wlk, "not_found"),
+            clip_warn_once(id_b, "dedupe-b", "ROM/4/999.DAT", &wlk, "not_found"),
             "a different entity id gets its own line"
         );
     }

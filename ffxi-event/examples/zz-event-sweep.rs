@@ -109,6 +109,14 @@ fn main() {
                             last = "wait";
                             vm.tick(OFFLINE_WAIT_SKIP_SECS)
                         }
+                        // No server offline: answer the tag immediately. Events
+                        // whose loop condition only a PENDINGNUM side effect
+                        // would move reach the step limit here rather than
+                        // burning one step's opcode budget.
+                        StepResult::AwaitServerAck(_) => {
+                            last = "pending";
+                            vm.ack_server()
+                        }
                     }
                 }
             }

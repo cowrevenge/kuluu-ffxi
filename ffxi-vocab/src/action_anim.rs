@@ -10,7 +10,6 @@ const SPELL_FILE_TABLE_OFFSET: u32 = 0xAF0;
 const ABILITY_FILE_TABLE_OFFSET: u32 = 0x113C;
 const TRUST_FILE_ID: u32 = 0xE9B;
 const TRUST_SPELL_ID_MIN: u16 = 896;
-
 fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
     table
         .binary_search_by_key(&id, |&(k, _)| k)

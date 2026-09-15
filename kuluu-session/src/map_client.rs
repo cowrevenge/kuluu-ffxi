@@ -78,6 +78,11 @@ impl MapClient {
     ) -> Result<Self> {
         let std_socket =
             std::net::UdpSocket::bind(local).with_context(|| format!("UDP bind {local}"))?;
+        // tokio's `from_std` debug-asserts on Unix that the fd is already
+        // non-blocking; the std bind above is blocking, so flip it first.
+        std_socket
+            .set_nonblocking(true)
+            .with_context(|| "set UDP socket non-blocking")?;
         Self::finish(server, seed, UdpSocket::from_std(std_socket)?)
     }
 

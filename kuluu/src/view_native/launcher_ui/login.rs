@@ -22,7 +22,7 @@ use super::server_edit::ver_lock_label;
 use super::server_version_check::{ServerVersionStatus, VersionViolation};
 use super::{
     Credentials, DatSetupReturn, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField,
-    LoginForm, ServerInfo, ServerSelectForm,
+    LoginForm, ServerEditForm, ServerInfo, ServerSelectForm,
 };
 use crate::view_native::widgets::text_field::{text_field, TextField, TextFieldSubmitted};
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
@@ -418,27 +418,33 @@ const BANNER_BLOCK_TEXT: Color = Color::srgb(1.0, 0.40, 0.40);
 /// Kuluu app-version banner above it.
 fn client_era_message(era: &ClientEraStatus) -> Option<String> {
     let lock = era.lock.map(ver_lock_label).unwrap_or("not enforced");
+    let install = format!(
+        "the selected install '{}' is era {}",
+        era.install_name(),
+        era.install_stamp()
+    );
     let mut msg = match era.verdict {
         EraVerdict::Unchecked | EraVerdict::Ok => return None,
         EraVerdict::Refused => format!(
-            "This server expects a FINAL FANTASY XI client from era {} ({lock}); your selected \
-             install '{}' is era {}. Its lobby would refuse this install.",
-            era.expected,
-            era.install_name(),
-            era.install_stamp(),
+            "This server admits FINAL FANTASY XI clients from era {} ({lock}); {install} and \
+             its lobby would refuse it.",
+            era.expected
         ),
         EraVerdict::Warn if era.install_stamp() == "unknown" => format!(
-            "This server expects a FINAL FANTASY XI client from era {} ({lock}); the patch \
-             stamp of your selected install '{}' could not be read.",
-            era.expected,
+            "The patch stamp of the selected install '{}' could not be read; this server \
+             admits FINAL FANTASY XI clients from era {} ({lock}).",
             era.install_name(),
+            era.expected
+        ),
+        EraVerdict::Warn if !era.configured => format!(
+            "This server entry does not record which FINAL FANTASY XI client era it admits; \
+             {install}. Current LandSandBoat servers expect {} ({lock}).",
+            era.expected
         ),
         EraVerdict::Warn if era.preferred_mismatch().is_none() => format!(
-            "This server expects a FINAL FANTASY XI client from era {} ({lock}); your selected \
-             install '{}' is era {}. Zone text and cast timing may come from the wrong era.",
-            era.expected,
-            era.install_name(),
-            era.install_stamp(),
+            "This server admits FINAL FANTASY XI clients from era {} ({lock}); {install}. Zone \
+             text and cast timing may come from the wrong era.",
+            era.expected
         ),
         EraVerdict::Warn => String::new(),
     };
@@ -447,7 +453,7 @@ fn client_era_message(era: &ClientEraStatus) -> Option<String> {
             msg.push(' ');
         }
         msg.push_str(&format!(
-            "This server entry prefers the '{preferred}' install; '{}' is selected.",
+            "This entry prefers the '{preferred}' install; '{}' is selected.",
             era.install_name()
         ));
     }
@@ -463,14 +469,12 @@ fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStat
     } else {
         (BANNER_WARN_BORDER, BANNER_WARN_TEXT)
     };
+    let server_name = era.server_name.clone();
     panel
         .spawn((
             Node {
                 width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                flex_wrap: FlexWrap::Wrap,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(8.0),
+                flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
                 border: UiRect::all(Val::Px(1.0)),
@@ -482,9 +486,7 @@ fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStat
         .with_children(|bar| {
             bar.spawn((
                 Node {
-                    flex_grow: 1.0,
-                    flex_basis: Val::Px(0.0),
-                    min_width: Val::Px(240.0),
+                    width: Val::Percent(100.0),
                     ..default()
                 },
                 Text::new(msg),
@@ -495,19 +497,42 @@ fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStat
                 TextColor(text_color),
                 ThemedText,
             ));
-            bar.spawn(button_bundle(
-                ButtonBundleProps::default(),
-                (),
-                Spawn((Text::new("Choose install..."), ThemedText)),
-            ))
-            .observe(
-                |_ev: On<Activate>,
-                 mut ret: ResMut<DatSetupReturn>,
-                 mut next: ResMut<NextState<LauncherState>>| {
-                    ret.0 = Some(LauncherState::Login);
-                    next.set(LauncherState::DatSetup);
-                },
-            );
+            bar.spawn(row()).with_children(|r| {
+                r.spawn(button_bundle(
+                    ButtonBundleProps::default(),
+                    (),
+                    Spawn((Text::new("Choose install..."), ThemedText)),
+                ))
+                .observe(
+                    |_ev: On<Activate>,
+                     mut ret: ResMut<DatSetupReturn>,
+                     mut next: ResMut<NextState<LauncherState>>| {
+                        ret.0 = Some(LauncherState::Login);
+                        next.set(LauncherState::DatSetup);
+                    },
+                );
+                if let Some(name) = server_name {
+                    r.spawn(button_bundle(
+                        ButtonBundleProps::default(),
+                        (),
+                        Spawn((Text::new("Edit server..."), ThemedText)),
+                    ))
+                    .observe(
+                        move |_ev: On<Activate>,
+                              mut form: ResMut<ServerEditForm>,
+                              mut next: ResMut<NextState<LauncherState>>| {
+                            let store = launcher_store::load();
+                            let Some(idx) = store.servers.iter().position(|p| p.name == name)
+                            else {
+                                return;
+                            };
+                            *form = ServerEditForm::from_profile(&store.servers[idx]);
+                            form.editing_index = Some(idx);
+                            next.set(LauncherState::ServerEdit);
+                        },
+                    );
+                }
+            });
         });
 }
 

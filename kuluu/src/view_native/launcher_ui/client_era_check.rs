@@ -16,9 +16,11 @@ pub(crate) enum EraVerdict {
     #[default]
     Unchecked,
     Ok,
-    /// The lobby would admit the install, but it is not the era the server
-    /// was built against, or it is not the entry's preferred install.
+    /// The lobby would admit the install but it is not the era the server
+    /// was built against, the entry prefers another install, or the entry
+    /// records no era and the vendored pin alone would refuse it.
     Warn,
+    /// The entry records the era its lobby admits and
     /// vendor/server/src/login/view_session.cpp view_session::read_func
     /// case 0x26 would reject this patch stamp.
     Refused,
@@ -32,7 +34,10 @@ pub(crate) struct ActiveInstall {
 
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClientEraStatus {
+    pub server_name: Option<String>,
     pub expected: String,
+    /// Whether `expected` came from the entry rather than the vendored pin.
+    pub configured: bool,
     pub lock: Option<VerLock>,
     pub install: Option<ActiveInstall>,
     pub preferred_client: Option<String>,
@@ -69,8 +74,14 @@ pub(crate) fn classify(profile: &ServerProfile, install: Option<ActiveInstall>) 
     let expected = profile.expected_client_ver().to_string();
     let lock = profile.ver_lock();
     let preferred_client = profile.preferred_client.clone();
+    let configured = profile
+        .client_ver
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty());
     let mut status = ClientEraStatus {
+        server_name: Some(profile.name.clone()),
         expected,
+        configured,
         lock: Some(lock),
         install,
         preferred_client,
@@ -82,7 +93,11 @@ pub(crate) fn classify(profile: &ServerProfile, install: Option<ActiveInstall>) 
     status.verdict = match install.patch_version.as_deref() {
         None => EraVerdict::Warn,
         Some(stamp) if !lobby_accepts_client_ver(stamp, &status.expected, lock) => {
-            EraVerdict::Refused
+            if configured {
+                EraVerdict::Refused
+            } else {
+                EraVerdict::Warn
+            }
         }
         Some(stamp) if compare_client_ver_era(stamp, &status.expected) != Ordering::Equal => {
             EraVerdict::Warn
@@ -152,7 +167,9 @@ fn evaluate_on_enter(
 pub(super) fn register(app: &mut App) {
     app.init_resource::<ClientEraStatus>().add_systems(
         OnEnter(LauncherState::Login),
-        evaluate_on_enter.before(super::login::spawn_login_ui),
+        evaluate_on_enter
+            .after(super::decide_initial_screen)
+            .before(super::login::spawn_login_ui),
     );
 }
 
@@ -229,6 +246,20 @@ mod tests {
             install("retail", Some("30260904_1")),
         );
         assert_eq!(s.verdict, EraVerdict::Refused);
+    }
+
+    #[test]
+    fn an_entry_without_a_recorded_era_warns_instead_of_blocking() {
+        let s = classify(&profile(None, None), install("hxi", Some("30230905_0")));
+        assert_eq!(s.verdict, EraVerdict::Warn);
+        assert!(!s.configured);
+        assert!(!s.blocks_login());
+        let s = classify(
+            &profile(Some("  "), None),
+            install("hxi", Some("30230905_0")),
+        );
+        assert_eq!(s.verdict, EraVerdict::Warn);
+        assert!(!s.configured);
     }
 
     #[test]

@@ -142,6 +142,12 @@ pub async fn run(
                 if user_requested_disconnect {
                     return Err(e);
                 }
+                if crate::auth_client::is_auth_rejected(&e) {
+                    let _ = event_tx.send(AgentEvent::Error {
+                        message: format!("login rejected by the server; not retrying: {e:#}"),
+                    });
+                    return Err(e);
+                }
                 e
             }
             AttemptOutcome::ReactorPanic(msg) => anyhow!("reactor task panic: {msg}"),

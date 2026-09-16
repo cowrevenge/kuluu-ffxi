@@ -12,6 +12,50 @@ use tokio_rustls::TlsConnector;
 
 use crate::auth_binary::{self, BinaryAuthError, Command as BinCommand, PayloadBuilder};
 use crate::tls::TofuVerifier;
+use ffxi_proto::login::login_cmd::{LOGIN_ATTEMPT, LOGIN_CHANGE_PASSWORD, LOGIN_CREATE};
+use ffxi_proto::login::login_result::*;
+
+/// The auth server answered and said no. The same inputs get the same
+/// answer, so a supervisor must surface it rather than retry it as a
+/// transport blip.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct AuthRejected(pub String);
+
+pub fn is_auth_rejected(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AuthRejected>().is_some())
+}
+
+/// vendor/server/src/login/auth_session.cpp auth_session::read_func: a
+/// JSON-only `error_message` (the loader-version text) is sent instead of a
+/// `result`, so it is checked first; a `result` other than the success code
+/// for the request is the server's verdict on the credentials.
+fn json_result(resp: &Value, request: &str) -> Result<u8> {
+    if let Some(msg) = resp.get("error_message").and_then(Value::as_str) {
+        return Err(AuthRejected(format!("{request}: {}", msg.trim().replace('\n', " "))).into());
+    }
+    let result = resp
+        .get("result")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("{request} response missing `result`: {resp}"))?;
+    Ok(result as u8)
+}
+
+fn describe_login_result(code: u8) -> String {
+    match code {
+        LOGIN_FAIL => "login failed".into(),
+        LOGIN_ERROR => "invalid username or password".into(),
+        LOGIN_ERROR_ALREADY_LOGGED_IN => "account already logged in".into(),
+        LOGIN_ERROR_VERSION_UNSUPPORTED => "loader version not supported by this server".into(),
+        LOGIN_ERROR_TRUST_TOKEN_INVALID => "trust token rejected".into(),
+        LOGIN_ERROR_CREATE_DISABLED => "account creation is disabled on this server".into(),
+        LOGIN_ERROR_CREATE_TAKEN => "username already taken".into(),
+        LOGIN_ERROR_CREATE => "account creation failed".into(),
+        LOGIN_ERROR_CHANGE_PASSWORD => "password change failed".into(),
+        other => format!("server result {other:#04x}"),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthFlavor {
@@ -107,19 +151,6 @@ fn parse_version_triple(s: &str) -> Option<[u8; 3]> {
     }
 }
 
-const LOGIN_ATTEMPT: u8 = 0x10;
-const LOGIN_CREATE: u8 = 0x20;
-const LOGIN_CHANGE_PASSWORD: u8 = 0x30;
-
-pub const LOGIN_FAIL: u8 = 0x00;
-pub const LOGIN_SUCCESS: u8 = 0x01;
-pub const LOGIN_ERROR: u8 = 0x02;
-pub const LOGIN_SUCCESS_CREATE: u8 = 0x03;
-pub const LOGIN_ERROR_CREATE_TAKEN: u8 = 0x04;
-pub const LOGIN_SUCCESS_CHANGE_PASSWORD: u8 = 0x06;
-pub const LOGIN_ERROR_CHANGE_PASSWORD: u8 = 0x07;
-pub const LOGIN_ERROR_CREATE_DISABLED: u8 = 0x08;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
     pub account_id: u32,
@@ -190,16 +221,11 @@ impl AuthClient {
             "version": self.version,
         });
         let resp = self.exchange(&payload).await?;
-        let result = resp
-            .get("result")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("LOGIN_CREATE response missing `result`: {resp}"))?
-            as u8;
-        match result {
-            LOGIN_SUCCESS_CREATE => Ok(()),
-            LOGIN_ERROR_CREATE_TAKEN => Ok(()),
-            LOGIN_ERROR_CREATE_DISABLED => bail!("server disabled account creation"),
-            other => bail!("LOGIN_CREATE failed with result {other:#x}: {resp}"),
+        match json_result(&resp, "LOGIN_CREATE")? {
+            LOGIN_SUCCESS_CREATE | LOGIN_ERROR_CREATE_TAKEN => Ok(()),
+            other => {
+                Err(AuthRejected(format!("LOGIN_CREATE: {}", describe_login_result(other))).into())
+            }
         }
     }
 
@@ -220,14 +246,13 @@ impl AuthClient {
             "version": self.version,
         });
         let resp = self.exchange(&payload).await?;
-        let result = resp
-            .get("result")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("LOGIN_CHANGE_PASSWORD response missing `result`: {resp}"))?
-            as u8;
-        match result {
+        match json_result(&resp, "LOGIN_CHANGE_PASSWORD")? {
             LOGIN_SUCCESS_CHANGE_PASSWORD => Ok(()),
-            other => bail!("LOGIN_CHANGE_PASSWORD failed with result {other:#x}: {resp}"),
+            other => Err(AuthRejected(format!(
+                "LOGIN_CHANGE_PASSWORD: {}",
+                describe_login_result(other)
+            ))
+            .into()),
         }
     }
 
@@ -242,13 +267,11 @@ impl AuthClient {
             "version": self.version,
         });
         let resp = self.exchange(&payload).await?;
-        let result = resp
-            .get("result")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("LOGIN_ATTEMPT response missing `result`: {resp}"))?
-            as u8;
+        let result = json_result(&resp, "LOGIN_ATTEMPT")?;
         if result != LOGIN_SUCCESS {
-            bail!("LOGIN_ATTEMPT failed with result {result:#x}: {resp}");
+            return Err(
+                AuthRejected(format!("LOGIN_ATTEMPT: {}", describe_login_result(result))).into(),
+            );
         }
 
         let account_id =
@@ -325,6 +348,14 @@ impl AuthClient {
             .map_err(|e| anyhow!("build binary login payload: {e}"))?;
         let reply = self.exchange_binary(&payload).await?;
         let (account_id, session_hash) = auth_binary::parse_response(&reply, builder.version)
+            .map_err(|e| match e {
+                BinaryAuthError::LoginFailed
+                | BinaryAuthError::AlreadyLoggedIn
+                | BinaryAuthError::VersionMismatch { .. } => {
+                    anyhow::Error::from(AuthRejected(format!("binary login: {e}")))
+                }
+                other => anyhow::Error::from(other),
+            })
             .with_context(|| {
                 format!(
                     "binary login (server={}:{}, user={username})",
@@ -432,6 +463,43 @@ mod tests {
             ffxi_proto::login::SUPPORTED_XILOADER_VERSION,
             LSB_SUPPORTED_XILOADER_VERSION
         );
+    }
+
+    #[test]
+    fn error_message_is_a_rejection_even_without_a_result() {
+        let resp = json!({"error_message": "Your xiloader is too old.\nPlease update to version '2.1.x'."});
+        let err = json_result(&resp, "LOGIN_ATTEMPT").unwrap_err();
+        assert!(is_auth_rejected(&err));
+        assert_eq!(
+            err.to_string(),
+            "LOGIN_ATTEMPT: Your xiloader is too old. Please update to version '2.1.x'."
+        );
+    }
+
+    #[test]
+    fn missing_result_is_not_a_rejection() {
+        let err = json_result(&json!({"junk": 1}), "LOGIN_ATTEMPT").unwrap_err();
+        assert!(!is_auth_rejected(&err));
+    }
+
+    #[test]
+    fn result_codes_describe_the_server_verdict() {
+        assert_eq!(
+            json_result(&json!({"result": 1}), "x").unwrap(),
+            LOGIN_SUCCESS
+        );
+        assert_eq!(
+            describe_login_result(LOGIN_ERROR),
+            "invalid username or password"
+        );
+        assert_eq!(describe_login_result(0x7F), "server result 0x7f");
+    }
+
+    #[test]
+    fn rejection_survives_a_context_chain() {
+        let err = anyhow::Error::from(AuthRejected("no".into())).context("auth login");
+        assert!(is_auth_rejected(&err));
+        assert!(!is_auth_rejected(&anyhow!("connection reset")));
     }
 
     #[test]

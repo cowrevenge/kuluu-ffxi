@@ -68,6 +68,15 @@ mod tests {
     const LSB_PINNED_VER_LOCK: u8 = 2;
 
     #[test]
+    fn scraped_auth_enums_match_the_pinned_lsb_tree() {
+        assert_eq!(login_cmd::LOGIN_ATTEMPT, 0x10);
+        assert_eq!(login_result::LOGIN_SUCCESS, 0x01);
+        assert_eq!(login_result::LOGIN_ERROR, 0x02);
+        assert_eq!(login_result::LOGIN_ERROR_ALREADY_LOGGED_IN, 0x0A);
+        assert_eq!(login_result::LOGIN_ERROR_VERSION_UNSUPPORTED, 0x0B);
+    }
+
+    #[test]
     fn scraped_login_settings_match_the_pinned_lsb_tree() {
         assert_eq!(LSB_CLIENT_VER, LSB_PINNED_CLIENT_VER);
         assert_eq!(LSB_DEFAULT_VER_LOCK, LSB_PINNED_VER_LOCK);

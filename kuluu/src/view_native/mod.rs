@@ -902,8 +902,9 @@ pub(crate) enum DisconnectKind {
     /// resumes the character list.
     Clean,
 
-    /// A clean `/shutdown`: retail returns to the login/server-select screen
-    /// (the launcher front), not the character list (issue #156).
+    /// A clean `/shutdown`: the client closes rather than returning to the
+    /// launcher front (issue #156 differentiated the destinations; Kuluu's
+    /// launcher front is a login screen, so shutdown exits the app instead).
     Shutdown,
 
     /// A forced / unexpected disconnect: the launcher front with an error toast.
@@ -1101,6 +1102,7 @@ fn return_to_launcher_on_disconnect(
     events: Option<Res<EventLog>>,
     mut err: ResMut<LoginErrorMsg>,
     mut next_phase: ResMut<NextState<AppPhase>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     let Some(scene) = scene else { return };
     if scene.snapshot.stage != WireStage::Disconnected {
@@ -1120,8 +1122,17 @@ fn return_to_launcher_on_disconnect(
     if matches!(kind, DisconnectKind::Forced) && err.0.is_empty() {
         err.0 = "Disconnected from server. Press Esc to return to login.".into();
     }
-    if matches!(kind, DisconnectKind::Clean) {
-        commands.insert_resource(ResumeCharListAfterLogout);
+    match kind {
+        DisconnectKind::Clean => {
+            commands.insert_resource(ResumeCharListAfterLogout);
+        }
+        // /shutdown closes the client: the state transition still runs so the
+        // OnExit(InGame) teardown fires, then the AppExit the winit loop
+        // observes after this frame ends the process.
+        DisconnectKind::Shutdown => {
+            exit.write_default();
+        }
+        DisconnectKind::Forced => {}
     }
     tracing::info!(?kind, "disconnect-watcher: returning AppPhase to Launcher");
     next_phase.set(AppPhase::Launcher);
@@ -1225,8 +1236,9 @@ mod disconnect_tests {
 
     #[test]
     fn server_shutdown_classified_shutdown() {
-        // Retail's /shutdown returns to the login/server-select screen, not the
-        // character list: it must classify as Shutdown, distinct from Clean.
+        // The /shutdown flavor must classify as Shutdown, distinct from Clean:
+        // the watcher closes the client on Shutdown and resumes the character
+        // list only on Clean.
         assert_eq!(
             classify_disconnect_reason("server shutdown state=1"),
             DisconnectKind::Shutdown
@@ -1248,6 +1260,93 @@ mod disconnect_tests {
             DisconnectKind::Forced
         );
         assert_eq!(classify_disconnect_reason(""), DisconnectKind::Forced);
+    }
+
+    #[cfg(test)]
+    mod watcher {
+        use super::super::{
+            return_to_launcher_on_disconnect, AppPhase, LoginErrorMsg, ResumeCharListAfterLogout,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        use kuluu_render::{EventLog, SceneState};
+        use kuluu_snapshot::{Stage, ViewerEvent};
+
+        fn watcher_app(reason: &str) -> App {
+            let mut app = App::new();
+            let mut scene = SceneState::default();
+            scene.snapshot.stage = Stage::Disconnected;
+            app.insert_resource(scene);
+            let mut log = EventLog::default();
+            log.recent.push_back(ViewerEvent::Disconnected {
+                reason: reason.into(),
+            });
+            app.insert_resource(log);
+            app.init_resource::<LoginErrorMsg>();
+            app.insert_resource(NextState::<AppPhase>::default());
+            app
+        }
+
+        #[test]
+        fn shutdown_disconnect_closes_the_client() {
+            let mut app = watcher_app("server shutdown state=1");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                1,
+                "/shutdown must close the client"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_none(),
+                "/shutdown must not resume the character list"
+            );
+        }
+
+        #[test]
+        fn logout_disconnect_resumes_the_character_list() {
+            let mut app = watcher_app("server logout state=1");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                0,
+                "/logout must keep the app open"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_some(),
+                "/logout must resume the character list"
+            );
+        }
+
+        #[test]
+        fn forced_disconnect_stays_on_the_launcher_front() {
+            let mut app = watcher_app("no server packets for 60s");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                0,
+                "a forced disconnect must not close the client"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_none(),
+                "a forced disconnect must not resume the character list"
+            );
+            assert!(
+                !app.world().resource::<LoginErrorMsg>().0.is_empty(),
+                "a forced disconnect must keep its error toast"
+            );
+        }
     }
 }
 

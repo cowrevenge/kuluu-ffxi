@@ -1196,10 +1196,20 @@ fn open_sub_target(
     scene_state: &mut SceneState,
     return_to: InputMode,
 ) -> Option<InputMode> {
+    use kuluu_render::input_mode::SubTargetAction;
     use kuluu_render::sub_target;
     let flags = sub_target::action_flags(action);
     let ents = gather_sub_target_entities(scene_state);
-    let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
+    // "Switch Target" picks a *different* target: parking the cursor on the
+    // main target would make the first confirm a no-op (sub == main, the
+    // frame still shows the main target), so the picker starts on the
+    // nearest valid candidate other than it (self, per the retail default).
+    let parked = if matches!(action, SubTargetAction::PickSub) {
+        None
+    } else {
+        current_target
+    };
+    let Some(candidate) = sub_target::initial_candidate(flags, parked, &ents) else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
         return None;
     };
@@ -2978,5 +2988,153 @@ mod auto_enter_tests {
             dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty(),
             "the manual-advance guard must hold the fire"
         );
+    }
+}
+
+/// "Switch Target" (PickSub) must park the sub-target cursor off the main
+/// target and confirm into the sub slot: parking on the main target made the
+/// first Enter a no-op (sub == main, the frame kept showing the main target).
+#[cfg(test)]
+mod sub_target_pick_tests {
+    use super::*;
+    use kuluu_render::input_mode::SubTargetAction;
+    use kuluu_snapshot::{Entity, EntityKind, PartyMember, Vec3};
+
+    fn ent(id: u32, kind: EntityKind, x: f32) -> Entity {
+        Entity {
+            id,
+            act_index: 0,
+            kind,
+            name: Some(format!("e{id}")),
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            name_vis: None,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: Default::default(),
+            monstrosity: false,
+        }
+    }
+
+    fn party_member(id: u32) -> PartyMember {
+        PartyMember {
+            id,
+            act_index: 0,
+            name: Some(format!("p{id}")),
+            hp: 100,
+            mp: 100,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        }
+    }
+
+    const SELF_ID: u32 = 0x0100_0001;
+    const MOB_ID: u32 = 0x0200_0001;
+    const PARTY_ID: u32 = 0x0100_0002;
+
+    /// Self at the origin, the engaged mob 5 yalms out, a party member 3 yalms out.
+    fn battle_scene() -> SceneState {
+        let mut s = SceneState::default();
+        s.snapshot.self_char_id = Some(SELF_ID);
+        s.snapshot.entities = vec![
+            ent(SELF_ID, EntityKind::Pc, 0.0),
+            ent(MOB_ID, EntityKind::Mob, 5.0),
+            ent(PARTY_ID, EntityKind::Pc, 3.0),
+        ];
+        s.snapshot.party = vec![party_member(PARTY_ID)];
+        s
+    }
+
+    #[test]
+    fn pick_sub_does_not_park_on_the_main_target() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .expect("the picker must open with candidates in range");
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker, got {mode:?}");
+        };
+        assert_ne!(
+            st.candidate,
+            Some(MOB_ID),
+            "Switch Target must not park on the main target: the first Enter would be a no-op"
+        );
+    }
+
+    #[test]
+    fn pick_sub_confirms_into_the_sub_slot() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        let mut sub = kuluu_render::scene::SubTarget::default();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        let next = handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+            &mut sub,
+        );
+        assert!(
+            matches!(next, Some(InputMode::World)),
+            "confirm must return to the world mode: {next:?}"
+        );
+        assert_eq!(
+            sub.id, st.candidate,
+            "the confirmed candidate must land in the sub slot"
+        );
+        assert_ne!(sub.id, Some(MOB_ID));
+    }
+
+    #[test]
+    fn spell_prompt_still_parks_on_the_current_target() {
+        // The retail "confirm on the current target" rule stays for actions:
+        // Cure on a valid party target parks on it, not on self.
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::Spell(1),
+            Some(PARTY_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker");
+        };
+        assert_eq!(st.candidate, Some(PARTY_ID));
     }
 }

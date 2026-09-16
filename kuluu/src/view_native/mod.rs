@@ -940,7 +940,10 @@ fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
 
 fn despawn_ingame_entities(
     mut commands: Commands,
-    q: Query<Entity, With<InGameEntity>>,
+    (q, mut shop): (
+        Query<Entity, With<InGameEntity>>,
+        ResMut<kuluu_render::hud::shop::ShopScreenState>,
+    ),
     mut scene: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
     mut tracked: ResMut<TrackedEntities>,
@@ -976,6 +979,7 @@ fn despawn_ingame_entities(
         count += 1;
     }
 
+    shop.reset();
     tracked.by_id.clear();
     // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
     // arrays and `cell_index` must go together, or a stale cell index will hand
@@ -1393,6 +1397,7 @@ mod zone_teardown_tests {
     fn world_with_teardown_resources() -> World {
         let mut world = World::new();
         world.init_resource::<super::SceneState>();
+        world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();

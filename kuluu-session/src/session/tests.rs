@@ -3567,11 +3567,20 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
 /// a multi-packet stock and the window's lifetime are exercised the way the
 /// wire delivers them rather than through the decoders alone.
 fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
+    shop_session_events_from(
+        ShopSession {
+            last_talk_target: 0x0100_0007,
+            ..Default::default()
+        },
+        packets,
+    )
+}
+
+fn shop_session_events_from(
+    mut shop: ShopSession,
+    packets: &[(u16, Vec<u8>)],
+) -> (ShopSession, Vec<AgentEvent>) {
     let (tx, mut rx) = broadcast::channel(64);
-    let mut shop = ShopSession {
-        last_talk_target: 0x0100_0007,
-        ..Default::default()
-    };
     for (opcode, body) in packets {
         handle_sub_packet(
             &framing::SubPacket {
@@ -5043,4 +5052,79 @@ fn chat_packet_resolves_autotranslate_from_the_install() {
         matches!(events.as_slice(), [AgentEvent::ChatLine { line }] if line.text == expected),
         "{events:?}"
     );
+}
+
+#[test]
+fn shop_appraisals_use_the_latest_slot_and_quantity() {
+    let mut shop = ShopSession::default();
+    let request = |quantity, item_index| PendingShopAppraisal {
+        item_no: 4096,
+        quantity,
+        item_index,
+    };
+    shop.pending_sell = Some(request(1, 1));
+    shop.pending_sell = Some(request(12, 1));
+    assert_eq!(shop.appraisal_request(1).unwrap().quantity, 12);
+    assert_eq!(shop.appraisal_request(1).unwrap().quantity, 12);
+    shop.retire_appraisals();
+    assert!(shop.appraisal_request(1).is_none());
+    shop.pending_sell = Some(request(10, 2));
+    assert!(shop.appraisal_request(1).is_none());
+    let second = shop.appraisal_request(2).unwrap();
+    assert_eq!((second.item_index, second.quantity), (2, 10));
+}
+
+#[test]
+fn shop_missing_appraisals_do_not_block_later_requests() {
+    let mut shop = ShopSession::default();
+    for item_index in [1, 1, 2] {
+        shop.retire_appraisals();
+        shop.pending_sell = Some(PendingShopAppraisal {
+            item_no: 4096,
+            quantity: 1,
+            item_index,
+        });
+        assert_eq!(
+            shop.appraisal_request(item_index).unwrap().item_index,
+            item_index
+        );
+    }
+}
+
+#[test]
+fn shop_raw_appraisal_ignores_other_slots_and_survives_duplicate_unit_quotes() {
+    let body = |slot| {
+        let mut packet = vec![0; 12];
+        packet[..4].copy_from_slice(&20u32.to_le_bytes());
+        packet[4] = slot;
+        packet
+    };
+    let (shop, events) = shop_session_events_from(
+        ShopSession {
+            open: Some(ShopState::default()),
+            pending_sell: Some(PendingShopAppraisal {
+                item_no: 4096,
+                quantity: 10,
+                item_index: 2,
+            }),
+            ..Default::default()
+        },
+        &[
+            (ffxi_proto::map::s2c::SHOP_SELL, body(1)),
+            (ffxi_proto::map::s2c::SHOP_SELL, body(2)),
+            (ffxi_proto::map::s2c::SHOP_SELL, body(2)),
+        ],
+    );
+    let quotes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ShopSellAppraisal {
+                item_index, count, ..
+            } => Some((*item_index, *count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quotes, vec![(2, 10), (2, 10)]);
+    let sale = shop.open.unwrap().pending_sale.unwrap();
+    assert_eq!((sale.item_index, sale.count), (2, 10));
 }

@@ -1644,11 +1644,6 @@ pub fn filtered_listings(
         .collect()
 }
 
-/// Retail's active-digit field tint (red/pink) and just-edited digit colour
-/// (orange) — deliberate approximations of the recording's colours.
-const SPINNER_ACTIVE_BG: Color = Color::srgba(0.85, 0.25, 0.35, 0.85);
-const SPINNER_EDITED: Color = Color::srgb(1.0, 0.62, 0.25);
-
 #[allow(clippy::type_complexity)]
 pub(crate) fn update_auction_screen(
     state: Res<SceneState>,
@@ -1934,22 +1929,7 @@ fn spinner_cell_value(spinner: &DigitSpinner, cell: usize) -> (String, Color, Co
     if power as usize >= width {
         return (String::new(), theme::TEXT, Color::NONE);
     }
-    let ch = spinner.digit_at(power).to_string();
-    let active = spinner.column == SpinnerColumn::Digit(power);
-    let edited = spinner.edited & (1 << power) != 0;
-    let color = if active {
-        Color::WHITE
-    } else if edited {
-        SPINNER_EDITED
-    } else {
-        theme::TEXT
-    };
-    let bg = if active {
-        SPINNER_ACTIVE_BG
-    } else {
-        Color::NONE
-    };
-    (ch, color, bg)
+    crate::hud::digit_spinner::column_style(spinner, SpinnerColumn::Digit(power))
 }
 
 // ---------------------------------------------------------------------------

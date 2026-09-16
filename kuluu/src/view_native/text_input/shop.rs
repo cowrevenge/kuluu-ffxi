@@ -1,9 +1,9 @@
 use super::*;
 
+use kuluu_render::hud::digit_spinner::DigitSpinner;
 use kuluu_render::hud::shop::{
     self, ShopFocus, ShopMode, ShopRow, ShopScreenState, SHOP_NO, VENDOR_RANGE_YALMS,
 };
-use kuluu_render::hud::spinner::Spinner;
 
 /// Keeps the shop window in step with the world around it. The shop has no
 /// close packet (research/XiPackets client 0x0082 is deprecated and GM-only),
@@ -195,12 +195,19 @@ fn handle_list_key(
             // the quote: appraise a single unit and let the picker show what
             // each one is worth before the player commits to a count.
             if matches!(screen.mode, ShopMode::Sell) {
+                clear_appraisal(scene_state);
                 request_appraisal(cmd_tx, &row, 1);
             }
             screen.quantity = Some(spinner);
             screen.focus = ShopFocus::Quantity;
         }
         None => commit_quantity(screen, scene_state, cmd_tx, &row, 1),
+    }
+}
+
+fn clear_appraisal(scene_state: &mut SceneState) {
+    if let Some(shop) = scene_state.snapshot.shop.as_mut() {
+        shop.pending_sale = None;
     }
 }
 
@@ -225,7 +232,7 @@ fn handle_quantity_key(
         return;
     };
     if bindings.matches_logical(Action::NavConfirm, key) {
-        let quantity = spinner.confirm();
+        let quantity = spinner.value;
         match rows.get(screen.cursor).copied() {
             Some(row) => commit_quantity(screen, scene_state, cmd_tx, &row, quantity),
             None => {
@@ -248,11 +255,11 @@ fn handle_quantity_key(
     } else if bindings.matches_logical(Action::NavDown, key) {
         spinner.down();
     } else if bindings.matches_logical(Action::NavRight, key) {
-        spinner.jump_up();
+        spinner.right();
     } else if bindings.matches_logical(Action::NavLeft, key) {
-        spinner.jump_down();
+        spinner.left();
     } else if matches!(key, Key::Tab) {
-        spinner.set_all();
+        spinner.value = spinner.cap;
     }
 }
 
@@ -304,7 +311,7 @@ fn handle_confirm_key(
         ShopMode::Sell => {
             // The appraisal is what the player is answering; until it lands
             // there is no price to say yes to.
-            if shop_pending_sale(scene_state).is_none() {
+            if shop::confirmed_sale(screen, &scene_state.snapshot).is_none() {
                 return;
             }
             let _ = cmd_tx.try_send(AgentCommand::ShopSellConfirm);
@@ -323,21 +330,17 @@ fn decline(screen: &mut ShopScreenState, cmd_tx: &Sender<AgentCommand>) {
     screen.focus = ShopFocus::List;
 }
 
-fn shop_pending_sale(scene_state: &SceneState) -> Option<&kuluu_snapshot::ShopSale> {
-    scene_state.snapshot.shop.as_ref()?.pending_sale.as_ref()
-}
-
 /// The quantity picker for a row, or `None` when there is only one to move —
 /// retail commits a lone item outright rather than asking for a count. Buy
 /// stacks are bounded by the item's stack size (LSB clamps anything larger:
 /// vendor/server/src/map/packets/c2s/0x083_shop_buy.cpp process); sell stacks
 /// by what the player is holding.
-fn begin_quantity(mode: ShopMode, row: &ShopRow) -> Option<Spinner> {
+fn begin_quantity(mode: ShopMode, row: &ShopRow) -> Option<DigitSpinner> {
     let max = match mode {
         ShopMode::Buy => ffxi_vocab::item_flags::stack_size(row.item_no) as u32,
         ShopMode::Sell => row.quantity,
     };
-    (max > 1).then(|| Spinner::item(max))
+    (max > 1).then(|| DigitSpinner::item(max))
 }
 
 /// Take the sized amount into the priced step. A buy prices itself from the
@@ -361,9 +364,11 @@ fn commit_quantity(
         }
         ShopMode::Sell => {
             screen.quantity = None;
+            screen.pending_sell = Some((row.index, row.item_no, quantity));
             screen.enter_confirm();
             // Re-price at the chosen count: the quote shown while sizing was
             // for one unit, and the confirm prompt states the whole sale.
+            clear_appraisal(scene_state);
             request_appraisal(cmd_tx, row, quantity);
         }
     }
@@ -376,6 +381,71 @@ mod tests {
 
     fn at(x: f32, y: f32, z: f32) -> Vec3 {
         Vec3 { x, y, z }
+    }
+
+    #[test]
+    fn second_stack_quantity_and_confirmation_use_its_slot() {
+        let bindings = Bindings::default();
+        let rows = [
+            ShopRow {
+                index: 1,
+                item_no: 4096,
+                quantity: 12,
+                price: 0,
+            },
+            ShopRow {
+                index: 2,
+                item_no: 4096,
+                quantity: 10,
+                price: 0,
+            },
+        ];
+        let mut screen = ShopScreenState {
+            mode: ShopMode::Sell,
+            focus: ShopFocus::Quantity,
+            cursor: 1,
+            quantity: begin_quantity(ShopMode::Sell, &rows[1]),
+            ..Default::default()
+        };
+        let mut scene = SceneState {
+            snapshot: SceneSnapshot {
+                shop: Some(kuluu_snapshot::ShopState::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        for key in [Key::ArrowDown, Key::ArrowLeft, Key::ArrowLeft, Key::ArrowUp] {
+            handle_quantity_key(&key, &bindings, &mut screen, &mut scene, &tx, &rows);
+        }
+        assert_eq!(screen.quantity.as_ref().unwrap().value, rows[1].quantity);
+        handle_quantity_key(&Key::Enter, &bindings, &mut screen, &mut scene, &tx, &rows);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentCommand::ShopSellReq {
+                item_index: 2,
+                qty: 10,
+                ..
+            })
+        ));
+        handle_confirm_key(&Key::Enter, &bindings, &mut screen, &mut scene, &tx);
+        assert!(rx.try_recv().is_err());
+        scene.snapshot.shop.as_mut().unwrap().pending_sale = Some(kuluu_snapshot::ShopSale {
+            item_index: 1,
+            item_no: rows[0].item_no,
+            count: rows[0].quantity,
+            unit_price: 20,
+        });
+        handle_confirm_key(&Key::Enter, &bindings, &mut screen, &mut scene, &tx);
+        assert!(rx.try_recv().is_err());
+        scene.snapshot.shop.as_mut().unwrap().pending_sale = Some(kuluu_snapshot::ShopSale {
+            item_index: rows[1].index,
+            item_no: rows[1].item_no,
+            count: rows[1].quantity,
+            unit_price: 20,
+        });
+        handle_confirm_key(&Key::Enter, &bindings, &mut screen, &mut scene, &tx);
+        assert!(matches!(rx.try_recv(), Ok(AgentCommand::ShopSellConfirm)));
     }
 
     #[test]

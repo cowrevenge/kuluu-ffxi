@@ -18,9 +18,9 @@ use kuluu_snapshot::{SceneSnapshot, ShopItem};
 
 use crate::hud::bazaar_view::{group_digits, item_name};
 use crate::hud::delivery::current_gil;
+use crate::hud::digit_spinner::{DigitSpinner, SpinnerColumn};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
-use crate::hud::spinner::Spinner;
 use crate::snapshot::SceneState;
 
 /// Rows the ware list keeps drawn, filled or not — the page size retail's item
@@ -99,11 +99,12 @@ pub struct ShopScreenState {
     /// rather than centring the cursor
     /// (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
     pub page_start: usize,
-    pub quantity: Option<Spinner>,
+    pub quantity: Option<DigitSpinner>,
     /// A buy the player has sized, awaiting the yes/no. Sell confirmations are
     /// driven by `snapshot.shop.pending_sale` instead, because their price
     /// comes from the server.
     pub pending_buy: Option<PendingBuy>,
+    pub pending_sell: Option<(u8, u16, u32)>,
 
     /// The client has closed the window but the snapshot still carries the
     /// stock: `CloseShop` has to reach the session and the cleared state has to
@@ -129,6 +130,7 @@ impl Default for ShopScreenState {
             page_start: 0,
             quantity: None,
             pending_buy: None,
+            pending_sell: None,
             dismissed: false,
             confirm_yes: CONFIRM_DEFAULT_YES,
         }
@@ -349,7 +351,7 @@ pub fn confirm_line(state: &ShopScreenState, snap: &SceneSnapshot) -> Option<Str
             ))
         }
         ShopMode::Sell => {
-            let sale = snap.shop.as_ref()?.pending_sale.as_ref()?;
+            let sale = confirmed_sale(state, snap)?;
             Some(sale_prompt(
                 &item_name(sale.item_no, None),
                 sale.count,
@@ -357,6 +359,14 @@ pub fn confirm_line(state: &ShopScreenState, snap: &SceneSnapshot) -> Option<Str
             ))
         }
     }
+}
+
+pub fn confirmed_sale<'a>(
+    state: &ShopScreenState,
+    snap: &'a SceneSnapshot,
+) -> Option<&'a kuluu_snapshot::ShopSale> {
+    let sale = snap.shop.as_ref()?.pending_sale.as_ref()?;
+    (state.pending_sell == Some((sale.item_index, sale.item_no, sale.count))).then_some(sale)
 }
 
 const SHOP_TITLE: &str = "Shop";
@@ -378,7 +388,8 @@ enum ShopTextRole {
     MenuTitle,
     GilLabel,
     GilValue,
-    ConfirmChoices,
+    ConfirmChoice(bool),
+    QuantityColumn(SpinnerColumn),
     DetailName,
     DetailBody,
 }
@@ -519,12 +530,33 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                         text_font(13.0),
                         TextColor(theme::TEXT),
                     ));
-                    g.spawn((
-                        ShopText(ShopTextRole::ConfirmChoices),
-                        Text::new(""),
-                        text_font(13.0),
-                        TextColor(theme::TEXT),
-                    ));
+                    g.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        for column in std::iter::once(SpinnerColumn::All).chain(
+                            (0..crate::hud::digit_spinner::PRICE_DIGITS)
+                                .rev()
+                                .map(SpinnerColumn::Digit),
+                        ) {
+                            row.spawn((
+                                ShopText(ShopTextRole::QuantityColumn(column)),
+                                Text::new(""),
+                                text_font(13.0),
+                                TextColor(theme::TEXT),
+                                BackgroundColor(Color::NONE),
+                            ));
+                        }
+                    });
+                    for yes in [true, false] {
+                        g.spawn((
+                            ShopText(ShopTextRole::ConfirmChoice(yes)),
+                            Text::new(""),
+                            text_font(13.0),
+                            TextColor(theme::TEXT),
+                        ));
+                    }
                 });
 
                 let (mut n, bg, bd) = framed_box();
@@ -580,7 +612,15 @@ pub(crate) fn update_shop_panel_system(
             Without<ShopDetailIcon>,
         ),
     >,
-    mut text_q: Query<(&ShopText, &mut Text, &mut TextColor), Without<ShopRowIcon>>,
+    mut text_q: Query<
+        (
+            &ShopText,
+            &mut Text,
+            &mut TextColor,
+            Option<&mut BackgroundColor>,
+        ),
+        Without<ShopRowIcon>,
+    >,
     mut icon_q: Query<(&ShopRowIcon, &mut ImageNode), Without<ShopDetailIcon>>,
     mut detail_icon_q: Query<&mut ImageNode, With<ShopDetailIcon>>,
 ) {
@@ -614,7 +654,7 @@ pub(crate) fn update_shop_panel_system(
         &mut icon_cache,
     );
 
-    for (tag, mut text, mut color) in text_q.iter_mut() {
+    for (tag, mut text, mut color, background) in text_q.iter_mut() {
         let (want, want_color) = match tag.0 {
             ShopTextRole::RowName(i) => match rows.get(start + i) {
                 Some(row) => (
@@ -659,7 +699,7 @@ pub(crate) fn update_shop_panel_system(
             // stack is being sized. The priced step then labels what the figure
             // under it is, so it cannot be misread as the player's purse.
             ShopTextRole::GilLabel => match (screen.quantity.as_ref(), screen.focus) {
-                (Some(spin), _) => (spin.label(), theme::TITLE),
+                (Some(spin), _) => (format!("Quantity /{}", spin.cap), theme::TITLE),
                 (None, ShopFocus::Confirm) => (confirm_total_label(screen.mode), theme::MUTED),
                 (None, _) => ("Current Gil".to_string(), theme::MUTED),
             },
@@ -677,10 +717,28 @@ pub(crate) fn update_shop_panel_system(
             // The yes/no the priced question is asking for. Retail puts this
             // box lower-left, under the figure
             // (.agents/skills/retail-observe/references/auction-house.md).
-            ShopTextRole::ConfirmChoices => match screen.focus {
-                ShopFocus::Confirm => (confirm_choices(screen.confirm_yes), theme::CURSOR),
+            ShopTextRole::ConfirmChoice(yes) => match screen.focus {
+                ShopFocus::Confirm => (
+                    format!(
+                        "{}{}",
+                        item_ui::cursor_prefix(screen.confirm_yes == yes),
+                        if yes { "Yes" } else { "No" }
+                    ),
+                    row_color(screen.confirm_yes == yes, true),
+                ),
                 _ => (String::new(), theme::TEXT),
             },
+            ShopTextRole::QuantityColumn(column) => {
+                let (label, tint, bg) = screen
+                    .quantity
+                    .as_ref()
+                    .map(|spinner| crate::hud::digit_spinner::column_style(spinner, column))
+                    .unwrap_or((String::new(), theme::TEXT, Color::NONE));
+                if let Some(mut background) = background {
+                    background.0 = bg;
+                }
+                (label, tint)
+            }
             ShopTextRole::DetailName => match (screen.focus, focused) {
                 (ShopFocus::Confirm, _) => match confirm_line(&screen, snap) {
                     Some(line) => (line, theme::CURSOR),
@@ -756,15 +814,10 @@ fn running_total(
     match screen.focus {
         ShopFocus::Confirm => match screen.mode {
             ShopMode::Buy => screen.pending_buy.map(|b| b.total_gil),
-            ShopMode::Sell => snap
-                .shop
-                .as_ref()?
-                .pending_sale
-                .as_ref()
-                .map(|s| s.total_gil()),
+            ShopMode::Sell => confirmed_sale(screen, snap).map(|sale| sale.total_gil()),
         },
         ShopFocus::Quantity => {
-            let picked = screen.quantity.as_ref()?.confirm();
+            let picked = screen.quantity.as_ref()?.value;
             let unit = match screen.mode {
                 ShopMode::Buy => row?.price,
                 ShopMode::Sell => sell_unit_price(screen, snap, row)?,
@@ -882,6 +935,89 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_renders_only_the_selected_answer_yellow() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<ItemDatRoot>()
+            .init_resource::<ItemIconCache>()
+            .insert_resource(SceneState {
+                snapshot: SceneSnapshot {
+                    shop: Some(shop_with(&[])),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .insert_resource(ShopScreenState {
+                focus: ShopFocus::Confirm,
+                ..Default::default()
+            })
+            .add_systems(Startup, spawn_shop_panel)
+            .add_systems(Update, update_shop_panel_system);
+        for selected in [true, false] {
+            app.world_mut()
+                .resource_mut::<ShopScreenState>()
+                .confirm_yes = selected;
+            app.update();
+            let mut query = app.world_mut().query::<(&ShopText, &TextColor)>();
+            let answers: Vec<_> = query
+                .iter(app.world())
+                .filter_map(|(tag, tint)| {
+                    if let ShopTextRole::ConfirmChoice(yes) = tag.0 {
+                        Some((yes, tint.0))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(answers.len(), 2);
+            for (yes, color) in answers {
+                assert_eq!(
+                    color,
+                    if yes == selected {
+                        theme::CURSOR
+                    } else {
+                        theme::TEXT
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_rejects_a_quote_for_another_stack_or_quantity() {
+        let state = ShopScreenState {
+            mode: ShopMode::Sell,
+            pending_sell: Some((2, 4096, 10)),
+            ..Default::default()
+        };
+        let mut snap = SceneSnapshot {
+            shop: Some(ShopState {
+                pending_sale: Some(ShopSale {
+                    item_index: 1,
+                    item_no: 4096,
+                    count: 12,
+                    unit_price: 20,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(confirmed_sale(&state, &snap).is_none());
+        let sale = snap.shop.as_mut().unwrap().pending_sale.as_mut().unwrap();
+        sale.item_index = 2;
+        sale.count = 1;
+        assert!(confirmed_sale(&state, &snap).is_none());
+        snap.shop
+            .as_mut()
+            .unwrap()
+            .pending_sale
+            .as_mut()
+            .unwrap()
+            .count = 10;
+        assert!(confirmed_sale(&state, &snap).is_some());
+    }
+
+    #[test]
     fn buy_rows_come_from_the_shop_stock() {
         let snap = SceneSnapshot {
             shop: Some(shop_with(&[(0, 4096, 100), (1, 4097, 250)])),
@@ -949,7 +1085,7 @@ mod tests {
     fn staging_a_buy_prices_it_and_moves_to_the_confirm_step() {
         let mut s = ShopScreenState {
             focus: ShopFocus::Quantity,
-            quantity: Some(Spinner::item(12)),
+            quantity: Some(DigitSpinner::item(12)),
             ..Default::default()
         };
         let row = ShopRow {
@@ -1048,7 +1184,7 @@ mod tests {
         let sell = ShopScreenState {
             mode: ShopMode::Sell,
             focus: ShopFocus::Quantity,
-            quantity: Some(Spinner::item(12)),
+            quantity: Some(DigitSpinner::item(12)),
             ..Default::default()
         };
         assert_eq!(sell_unit_price(&sell, &snap, Some(&row)), Some(10));
@@ -1085,8 +1221,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut spin = Spinner::item(12);
-        spin.set_all();
+        let mut spin = DigitSpinner::item(12);
+        spin.value = spin.cap;
         let s = ShopScreenState {
             mode: ShopMode::Sell,
             focus: ShopFocus::Quantity,
@@ -1141,6 +1277,7 @@ mod tests {
         let sell_state = ShopScreenState {
             mode: ShopMode::Sell,
             focus: ShopFocus::Confirm,
+            pending_sell: Some((5, 4096, 6)),
             ..Default::default()
         };
         let line = confirm_line(&sell_state, &sell_snap).expect("sell prompt");

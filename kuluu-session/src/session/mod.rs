@@ -137,14 +137,31 @@ struct ShopSession {
     /// `sendMenu`), so it names the vendor the SHOP_OPEN belongs to.
     last_talk_target: u32,
 
-    /// `(item_no, quantity)` of the SHOP_SELL_REQ awaiting an appraisal. LSB's
-    /// 0x03D leaves `Count` at 0
-    /// (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp), so the reply's
-    /// quantity comes from here.
-    pending_sell: Option<(u16, u32)>,
+    pending_sell: Option<PendingShopAppraisal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingShopAppraisal {
+    item_no: u16,
+    quantity: u32,
+    item_index: u8,
 }
 
 impl ShopSession {
+    fn retire_appraisals(&mut self) {
+        self.pending_sell = None;
+        if let Some(open) = self.open.as_mut() {
+            open.pending_sale = None;
+        }
+    }
+
+    // vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp GP_SERV_COMMAND_SHOP_SELL
+    // echoes only the slot and unit price; quantity belongs to the latest request.
+    fn appraisal_request(&self, item_index: u8) -> Option<PendingShopAppraisal> {
+        self.pending_sell
+            .filter(|request| request.item_index == item_index)
+    }
+
     fn close(&mut self, event_tx: &broadcast::Sender<AgentEvent>) {
         self.pending_sell = None;
         if self.open.take().is_some() {
@@ -1515,13 +1532,11 @@ fn handle_sub_packet(
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
-                // The appraisal the confirm re-sends to satisfy the server's
-                // prior-packet check answers back too, with nothing waiting on
-                // it. Surfacing that echo would re-prompt a sale already made.
-                let Some((item_no, qty)) = shop.pending_sell.take() else {
+                let Some(request) = shop.appraisal_request(item_index) else {
                     return;
                 };
-                let count = if count == 0 { qty } else { count };
+                let item_no = request.item_no;
+                let count = if count == 0 { request.quantity } else { count };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
@@ -3496,10 +3511,7 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellCancel) => {
-                        shop_session.pending_sell = None;
-                        if let Some(open) = shop_session.open.as_mut() {
-                            open.pending_sale = None;
-                        }
+                        shop_session.retire_appraisals();
                         shop_session.publish(&event_tx);
                     }
                     Some(AgentCommand::CloseShop) => {
@@ -3510,7 +3522,13 @@ async fn keepalive_loop(
                         item_no,
                         item_index,
                     }) => {
-                        shop_session.pending_sell = Some((item_no, qty));
+                        shop_session.retire_appraisals();
+                        shop_session.pending_sell = Some(PendingShopAppraisal {
+                            item_no,
+                            quantity: qty,
+                            item_index,
+                        });
+                        shop_session.publish(&event_tx);
                         let payload =
                             build_subpacket_shop_sell_req(sub_seq, qty, item_no, item_index);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3557,10 +3575,7 @@ async fn keepalive_loop(
                         // ITEM_SAME rather than another 0x03D
                         // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
                         // process), so the appraisal is retired here.
-                        shop_session.pending_sell = None;
-                        if let Some(open) = shop_session.open.as_mut() {
-                            open.pending_sale = None;
-                        }
+                        shop_session.retire_appraisals();
                         shop_session.publish(&event_tx);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)

@@ -1,8 +1,4 @@
-//! Retail AH "Price Set" digit spinner: `All ◄ [0] G ▶` over `/999,999,999 G`
-//! (.agents/skills/retail-observe/references/auction-house.md). Left/Right move
-//! the active digit column ("All" = the whole-value column at the far left),
-//! Up/Down step the active digit by its place value. Pure logic (no Bevy) so
-//! bazaar/delivery gil entry can converge on it later.
+//! .agents/skills/retail-observe/references/auction-house.md Price Set
 
 /// Digit columns rendered/steppable: the AH price validator caps at
 /// 999,999,999 (GP_CLI_COMMAND_AUC::validate, ffxi_proto::decode::auction::
@@ -21,6 +17,7 @@ pub enum SpinnerColumn {
 pub struct DigitSpinner {
     pub value: u32,
     pub cap: u32,
+    pub min: u32,
     pub column: SpinnerColumn,
     /// Bitmask of 10^p places the user has stepped (retail tints just-edited
     /// digits orange).
@@ -49,13 +46,19 @@ impl DigitSpinner {
         Self {
             value: 0,
             cap,
+            min: 0,
             column: SpinnerColumn::Digit(0),
             edited: 0,
         }
     }
 
-    /// A spinner re-opened at a previously entered value (backing out of a
-    /// confirm returns to Price Set with the price intact).
+    pub fn item(cap: u32) -> Self {
+        Self {
+            min: 1,
+            ..Self::with_value(cap.max(1), 1)
+        }
+    }
+
     pub fn with_value(cap: u32, value: u32) -> Self {
         Self {
             value: value.min(cap),
@@ -99,12 +102,12 @@ impl DigitSpinner {
     }
 
     /// `▼ −`: subtract the active place value (borrowing from higher digits —
-    /// 600 on the tens steps to 590), floored at 0; All resets to 0.
+    /// 600 on the tens steps to 590), bounded by the minimum.
     pub fn down(&mut self) {
         match self.column {
-            SpinnerColumn::All => self.value = 0,
+            SpinnerColumn::All => self.value = self.min,
             SpinnerColumn::Digit(p) => {
-                self.value = self.value.saturating_sub(pow10(p));
+                self.value = self.value.saturating_sub(pow10(p)).max(self.min);
                 self.edited |= 1 << p;
             }
         }
@@ -139,9 +142,70 @@ pub fn format_gil(n: u32) -> String {
     out
 }
 
+pub fn column_style(
+    spinner: &DigitSpinner,
+    column: SpinnerColumn,
+) -> (String, bevy::prelude::Color, bevy::prelude::Color) {
+    use crate::hud::item_ui::theme;
+    use bevy::prelude::Color;
+    match column {
+        SpinnerColumn::All => (
+            "All ".into(),
+            if spinner.column == column {
+                theme::CURSOR
+            } else {
+                theme::TEXT
+            },
+            Color::NONE,
+        ),
+        SpinnerColumn::Digit(power) => {
+            if !spinner.visible_powers().any(|p| p == power) {
+                return (String::new(), theme::TEXT, Color::NONE);
+            }
+            let active = spinner.column == column;
+            (
+                spinner.digit_at(power).to_string(),
+                if active {
+                    Color::WHITE
+                } else if spinner.edited & (1 << power) != 0 {
+                    SPINNER_EDITED
+                } else {
+                    theme::TEXT
+                },
+                if active {
+                    SPINNER_ACTIVE_BG
+                } else {
+                    Color::NONE
+                },
+            )
+        }
+    }
+}
+
+// Approximate the active and edited tints in the auction-house.md recording.
+const SPINNER_ACTIVE_BG: bevy::prelude::Color = bevy::prelude::Color::srgba(0.85, 0.25, 0.35, 0.85);
+const SPINNER_EDITED: bevy::prelude::Color = bevy::prelude::Color::srgb(1.0, 0.62, 0.25);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shop_quantity_bounds_apply_to_digits_and_all() {
+        let mut spinner = DigitSpinner::item(12);
+        spinner.down();
+        assert_eq!(spinner.value, 1);
+        spinner.left();
+        spinner.up();
+        assert_eq!(spinner.value, 11);
+        spinner.up();
+        assert_eq!(spinner.value, 12);
+        spinner.left();
+        spinner.down();
+        assert_eq!(spinner.value, 1);
+        spinner.up();
+        assert_eq!(spinner.value, 12);
+    }
 
     #[test]
     fn opens_on_ones_at_zero() {

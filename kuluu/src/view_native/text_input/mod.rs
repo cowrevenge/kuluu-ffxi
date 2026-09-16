@@ -182,6 +182,16 @@ pub struct NavmeshOverlay<'w> {
     pub state: Res<'w, super::navmesh_overlay::NavmeshState>,
 }
 
+/// The two optional session-gate resources ride in together: bevy_ecs's
+/// `impl_system_function` tops out at 16 parameters and `text_input_system`
+/// sits at that cap on unix, so the pair cannot both take a slot.
+#[derive(SystemParam)]
+pub(crate) struct SessionGates<'w> {
+    #[cfg(unix)]
+    pub agent_paused: Option<Res<'w, super::AgentPaused>>,
+    pub session_event_tx: Option<Res<'w, super::SessionEventTx>>,
+}
+
 #[derive(SystemParam)]
 pub struct MenuConfirmWriters<'w> {
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,
@@ -216,8 +226,7 @@ pub(crate) fn text_input_system(
     mut exit: MessageWriter<AppExit>,
     mut navmesh: NavmeshOverlay,
 
-    #[cfg(unix)] agent_paused: Option<Res<super::AgentPaused>>,
-    session_event_tx: Option<Res<super::SessionEventTx>>,
+    session_gates: SessionGates,
 
     mut slash_writers: SlashWriters,
 
@@ -390,8 +399,8 @@ pub(crate) fn text_input_system(
                     &mut bindings,
                     &mut keybinds_state,
                     #[cfg(unix)]
-                    agent_paused.as_deref(),
-                    session_event_tx.as_deref(),
+                    session_gates.agent_paused.as_deref(),
+                    session_gates.session_event_tx.as_deref(),
                     fishing_gate,
                     &mut slash_writers,
                     &mut draw_distance,

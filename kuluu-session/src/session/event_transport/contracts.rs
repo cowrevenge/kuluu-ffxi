@@ -480,10 +480,10 @@ fn end_event(host: &mut Host) {
 /// Shoot, Weaponskill, MonsterSkill, Fish and Mount while the character is
 /// InEvent, so the client must not spend a 0x01A on one until its 0x05B
 /// EVENT_END has gone out.
-fn action_event_gate_contract() {
+async fn action_event_gate_contract() {
     const ACTION_ID: std::ops::Range<usize> = 10..12;
 
-    let mut host = Host::new(position_dat(true), FARE);
+    let mut host = Host::new(position_dat(true), FARE).await;
     let open = super::super::in_event(&host.dialog, &host.pending);
     assert!(open, "the fixture event is open before its EVENT_END");
     for (kind, blocked) in action_kinds() {
@@ -516,11 +516,11 @@ fn action_event_gate_contract() {
 /// vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp
 /// GP_CLI_COMMAND_ITEM_STACK::validate refuses the sort while InEvent and
 /// accepts only a container id PacketValidator::isValidContainer admits.
-fn item_stack_gate_contract() {
+async fn item_stack_gate_contract() {
     use ffxi_proto::map::container;
     const CATEGORY: std::ops::Range<usize> = 4..8;
 
-    let mut host = Host::new(position_dat(true), FARE);
+    let mut host = Host::new(position_dat(true), FARE).await;
     let open = super::super::in_event(&host.dialog, &host.pending);
     assert!(open, "the fixture event is open before its EVENT_END");
     for container in 0..=container::MAX_CONTAINER_ID {
@@ -587,7 +587,7 @@ async fn event_state_contract() {
     numeric_contract().await;
     acknowledgement_contract().await;
     abort_contract().await;
-    action_event_gate_contract();
-    item_stack_gate_contract();
+    action_event_gate_contract().await;
+    item_stack_gate_contract().await;
     pos_finite_contract();
 }

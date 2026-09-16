@@ -3517,8 +3517,10 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
 /// wire delivers them rather than through the decoders alone.
 fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
     let (tx, mut rx) = broadcast::channel(64);
-    let mut shop = ShopSession::default();
-    shop.last_talk_target = 0x0100_0007;
+    let mut shop = ShopSession {
+        last_talk_target: 0x0100_0007,
+        ..Default::default()
+    };
     for (opcode, body) in packets {
         handle_sub_packet(
             &framing::SubPacket {
@@ -3532,6 +3534,7 @@ fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEve
             0,
             "Tester",
             &mut None,
+            &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
@@ -4752,7 +4755,11 @@ async fn enterzone_in_gameok_reply() {
             let (size, client) = server.recv_from(&mut bytes).await.unwrap();
             count += 1;
             if count == 1 {
-                let connected = MapClient::connect(client, FIXTURE_SEED).await.unwrap();
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
+                let connected = MapClient::connect_with_local(client, FIXTURE_SEED, "0.0.0.0:0")
+                    .await
+                    .unwrap();
                 connected.send_encrypted(&login, 1, 0).await.unwrap();
                 peer = Some(connected);
             }
@@ -4789,7 +4796,11 @@ async fn enterzone_in_gameok_reply() {
             }
         }
     });
-    let mut map = MapClient::connect(address, FIXTURE_SEED).await.unwrap();
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+    // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
+    let mut map = MapClient::connect_with_local(address, FIXTURE_SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
     let cfg = fixture_config();
     let auth = crate::auth_client::AuthSession {
         account_id: 1,

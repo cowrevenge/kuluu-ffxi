@@ -1062,11 +1062,16 @@ mod tests {
     fn find_steam_root_requires_a_userdata_dir() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        assert_eq!(find_steam_root(home), None);
-        let candidate = steam_root_candidates(home)
+        // Windows candidates are machine-level Program Files paths, and a
+        // real Steam install on the dev box would shadow the fixture, so
+        // the end-to-end pin only runs where candidates are home-relative.
+        let Some(candidate) = steam_root_candidates(home)
             .into_iter()
             .find(|c| c.starts_with(home))
-            .unwrap();
+        else {
+            return;
+        };
+        assert_eq!(find_steam_root(home), None);
         fs::create_dir_all(candidate.join("userdata")).unwrap();
         assert_eq!(find_steam_root(home), Some(candidate));
     }

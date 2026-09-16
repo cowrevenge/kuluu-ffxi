@@ -369,7 +369,7 @@ pub fn update_nameplate_billboards_system(
                 &mut materials,
                 id,
                 rec.entity.kind,
-                name,
+                &name,
             );
             have.insert(id);
         }
@@ -1686,6 +1686,7 @@ mod tests {
             .init_resource::<crate::nameplate_icons::NameplateIcons>()
             .init_resource::<NameplateBillboardDebug>()
             .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::cutscene::EventNameOverrides>()
             .add_systems(Update, update_nameplate_billboards_system);
         app.world_mut().spawn((
             OperatorCamera,

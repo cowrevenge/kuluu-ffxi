@@ -299,7 +299,7 @@ mod tests {
             return;
         };
         let defs = zone_static_defs(&bytes);
-        let (_, assets) = parse_action_bytes(&bytes);
+        let (_, assets, _) = parse_action_bytes(&bytes);
         for name in [*b"myl7", *b"SPLT"] {
             let d = defs
                 .iter()

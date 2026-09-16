@@ -16,7 +16,7 @@ pub(super) fn handle_world_key(
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
         return Some(InputMode::Chat(ChatBuffer::empty()));
@@ -56,7 +56,7 @@ pub(super) fn handle_world_key(
                         scene_state,
                         check_target,
                         trade_state,
-                        select_target,
+                        lock_on,
                     )
                 }
             }
@@ -76,7 +76,7 @@ pub(super) fn handle_world_key(
                 scene_state,
                 check_target,
                 trade_state,
-                select_target,
+                lock_on,
             ),
         };
     }
@@ -99,7 +99,7 @@ fn open_target_action_menu(
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -126,7 +126,7 @@ fn open_target_action_menu(
             cmd_tx,
             check_target,
             trade_state,
-            select_target,
+            lock_on,
         );
     }
     Some(InputMode::TargetAction(state))

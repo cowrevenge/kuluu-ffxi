@@ -4790,6 +4790,7 @@ mod actor_texture_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         }

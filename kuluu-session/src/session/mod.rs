@@ -442,7 +442,6 @@ async fn run_map_session(
     let mut self_pos = Position::default();
 
     let mut self_pos_seeded = false;
-    let mut enterzone_seen = false;
 
     // Set by drain_zone_flood when ENTERZONE (s2c 0x008) lands inside a flood;
     // consumed by keepalive_loop to fire the post-GAMEOK handshake.

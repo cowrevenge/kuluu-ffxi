@@ -362,7 +362,7 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &mut slash_writers.check_target,
                     &mut slash_writers.trade_state,
-                    &mut slash_writers.select_target,
+                    &mut slash_writers.lock_on,
                 ) {
                     *mode = next;
                 }
@@ -2695,6 +2695,7 @@ mod cs_input_lock_tests {
         stack.push(MenuKind::Map);
         app.insert_resource(InputMode::Menu(stack));
         app.insert_resource(Target::default());
+        app.insert_resource(kuluu_render::SubTarget::default());
         app.insert_resource(kuluu_render::LockOn::default());
         app.insert_resource(SceneState::default());
         // The plugin initializes this in production; the gate reads it unconditionally.
@@ -2726,11 +2727,13 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::hud::check_view::CheckTarget::default());
         app.insert_resource(kuluu_render::hud::bazaar_view::BazaarScreenState::default());
         app.insert_resource(kuluu_render::hud::trade::TradeState::default());
+        app.insert_resource(kuluu_render::hud::shop::ShopScreenState::default());
         app.insert_resource(kuluu_render::hud::delivery::DeliveryScreenState::default());
         app.insert_resource(kuluu_render::hud::delivery::DeliveryInventory::default());
         app.insert_resource(kuluu_render::hud::auction::AuctionScreenState::default());
         app.insert_resource(kuluu_render::hud::auction::AuctionSellInventory::default());
         app.insert_resource(crate::view_native::input::SelectTargetMode::default());
+        app.insert_resource(crate::view_native::command_surface::CommandSurface::default());
         app.insert_resource(kuluu_render::fishing_spot::FishingSpot::default());
         app.insert_resource(ActiveChatTab::default());
         app.insert_resource(ChatHistory::default());
@@ -2742,6 +2745,8 @@ mod cs_input_lock_tests {
         app.insert_resource(crate::view_native::DatRootRes(None));
         app.insert_resource(kuluu_render::dat_mzb::DrawDistance::default());
         app.insert_resource(ChatScroll::default());
+        app.insert_resource(kuluu_render::hud::chat_panel::BattleScroll::default());
+        app.insert_resource(kuluu_render::hud::chat_panel::DebugScroll::default());
         app.insert_resource(kuluu_render::hud::menu::DynamicMenu::default());
         app.add_systems(Update, text_input_system);
         app

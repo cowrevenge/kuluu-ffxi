@@ -105,10 +105,12 @@ fn main() {
     let mut a2_5b: BTreeMap<u32, usize> = BTreeMap::new();
     let mut a2_66: BTreeMap<u32, usize> = BTreeMap::new();
 
-    for &(zone, _, _, _) in event_locate::EVENT_DAT_LOCATIONS {
-        let loc = event_locate::zone_id_to_event_location(zone).expect("location");
-        let path = loc.path_under(&root);
-        let Ok(bytes) = std::fs::read(&path) else {
+    for zone in event_locate::event_dat_zones(&root) {
+        let Ok(loc) = root.resolve(event_locate::event_dat_file_id(zone)) else {
+            files_bad += 1;
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             files_bad += 1;
             continue;
         };

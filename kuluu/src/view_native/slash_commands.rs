@@ -3901,13 +3901,13 @@ mod tests {
         let entities = vec![e];
         let out = parse_slash(
             "/attack",
+            &test_surface(),
             &entities,
             origin(),
             Some(42),
             None,
             Some(0x0100_0001),
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         );
         assert!(matches!(

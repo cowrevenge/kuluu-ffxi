@@ -1011,7 +1011,7 @@ pub fn sync_particle_meshes(
     // XiZone::GetDrawDistance, the band a 0x0A block with no authored maximum falls back to.
     let zone_draw = draw
         .map(|d| d.world)
-        .unwrap_or(crate::dat_mzb::DEFAULT_WORLD_DRAW_DISTANCE);
+        .unwrap_or(crate::dat_mzb::RETAIL_FALLBACK_DRAW_DISTANCE);
     let clock = sim.clock;
     let trace_celestial = trace_celestial();
     let trace_rebuilds = trace_particle_rebuilds();

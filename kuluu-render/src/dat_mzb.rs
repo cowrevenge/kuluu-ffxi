@@ -19,8 +19,22 @@ use crate::entity_table::EntityTable;
 use crate::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
 
-pub const DEFAULT_WORLD_DRAW_DISTANCE: f32 = 80.0;
-pub const DEFAULT_MOB_DRAW_DISTANCE: f32 = 50.0;
+/// XiZone.cpp XiZone::XiZone MinimumDrawDistance — the floor XiZone::GetDrawDistance
+/// clamps the scaled distance to.
+pub const RETAIL_MIN_DRAW_DISTANCE: f32 = 43.0;
+/// XiZone.cpp XiZone::GetDrawDistance v9 — what an area with no world environment draws to.
+pub const RETAIL_FALLBACK_DRAW_DISTANCE: f32 = 100.0;
+
+/// XiZone.cpp XiZone::GetDrawDistance: the weather record's world draw distance
+/// (WorldParameters field_C, ffxi-dat `max_far_clip`) times the multiplier
+/// XiArea::GetAnotherSomething returns, floored at MinimumDrawDistance. Retail
+/// culls zone chunks (ZoneRenderer::RenderChunk2), hides actors
+/// (SkeletalMeshActor.cpp) and bounds unauthored generator ranges
+/// (CYyGenerator.cpp) at this one distance.
+pub fn zone_draw_distance(rec: Option<&ffxi_dat::weather::WeatherRecord>, draw_scale: f32) -> f32 {
+    let authored = rec.map_or(RETAIL_FALLBACK_DRAW_DISTANCE, |r| r.max_far_clip);
+    (authored * draw_scale).max(RETAIL_MIN_DRAW_DISTANCE)
+}
 
 pub const MMB_LOAD_DISTANCE_MARGIN: f32 = 1.25;
 
@@ -124,9 +138,10 @@ pub struct DrawDistance {
 
 impl Default for DrawDistance {
     fn default() -> Self {
+        let retail = zone_draw_distance(None, mzb::RETAIL_DRAW_DISTANCE_SCALE);
         Self {
-            world: DEFAULT_WORLD_DRAW_DISTANCE,
-            mob: DEFAULT_MOB_DRAW_DISTANCE,
+            world: retail,
+            mob: retail,
             zone_geom_mode: ZoneGeomMode::default(),
             camera_collision_source: CameraCollisionSource::default(),
         }
@@ -1440,9 +1455,20 @@ pub struct ZoneMeshLod {
     pub uses_lod_rendering: bool,
 }
 
+/// The two culls ZoneRenderer::RenderChunk2 picks between per chunk.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneChunkCull {
+    pub draw_distance_sq: f32,
+    pub draw_scale: f32,
+}
+
 impl ZoneMeshLod {
-    pub fn is_drawn_at(&self, camera_dist_sq: f32) -> bool {
-        if self.uses_lod_rendering && mzb::beyond_lod_far_cull(camera_dist_sq, self.thresholds) {
+    pub fn is_drawn_at(&self, camera_dist_sq: f32, cull: ZoneChunkCull) -> bool {
+        if self.uses_lod_rendering {
+            if mzb::beyond_lod_far_cull(camera_dist_sq, self.thresholds, cull.draw_scale) {
+                return false;
+            }
+        } else if camera_dist_sq > cull.draw_distance_sq {
             return false;
         }
         self.thresholds.select(camera_dist_sq).mask() & self.level_mask != 0
@@ -1788,10 +1814,6 @@ pub fn build_zone_mmb_spawns(
         if variants.len() > 1 {
             lod_families += 1;
         }
-        // A placement whose three bands all land on one mesh and that carries no
-        // far cull has nothing to decide per frame, so it stays a plain always-on
-        // spawn rather than paying for a distance query.
-        let needs_lod_component = variants.len() > 1 || uses_lod_rendering;
         let door = door_leaf_slots
             .get(&placement_idx)
             .map(|slot| crate::zone_doors::ZoneDoorLeaf::new(*slot, p));
@@ -1804,7 +1826,7 @@ pub fn build_zone_mmb_spawns(
                 water: None,
                 door,
                 sub_area_link: p.sub_area_link,
-                lod: needs_lod_component.then(|| ZoneMeshLod {
+                lod: Some(ZoneMeshLod {
                     thresholds: p.lod_thresholds(),
                     level_mask: lod_set.level_mask(local),
                     uses_lod_rendering,
@@ -2574,7 +2596,7 @@ pub fn spawn_zone_water(
     mut materials: ResMut<Assets<crate::ffxi_zone_material::FfxiZoneMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut water_mat: ResMut<ZoneWaterMaterial>,
-    settings: Res<crate::graphics::GraphicsSettings>,
+    draw: Res<DrawDistance>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
 ) {
     if pending.specs.is_empty() {
@@ -2587,7 +2609,7 @@ pub fn spawn_zone_water(
             water_dist_sq_xz(a, self_pos).total_cmp(&water_dist_sq_xz(b, self_pos))
         });
     }
-    let load_radius = settings.view_distance * MMB_LOAD_DISTANCE_MARGIN;
+    let load_radius = draw.world * MMB_LOAD_DISTANCE_MARGIN;
     let load_radius_sq = load_radius * load_radius;
     let simple_mat = water_mat
         .0
@@ -3222,6 +3244,8 @@ pub fn main_zone_floor_ready(
 pub fn select_zone_mmb_lod(
     camera_q: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
     active: Res<crate::sub_area_activation::SubAreaActivation>,
+    draw: Res<DrawDistance>,
+    settings: Res<crate::graphics::GraphicsSettings>,
     mut lod_q: Query<(
         &GlobalTransform,
         &ZoneMeshLod,
@@ -3233,18 +3257,41 @@ pub fn select_zone_mmb_lod(
         return;
     };
     let eye = camera_t.translation();
+    let cull = ZoneChunkCull {
+        draw_distance_sq: draw.world * draw.world,
+        draw_scale: settings.draw_distance_scale,
+    };
 
     for (chunk_t, lod, link, mut vis) in lod_q.iter_mut() {
         let suppressed = link.is_some_and(|l| mzb::is_suppressed_placeholder(l.0, active.active()));
-        let want = if !suppressed && lod.is_drawn_at(chunk_t.translation().distance_squared(eye)) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        let want =
+            if !suppressed && lod.is_drawn_at(chunk_t.translation().distance_squared(eye), cull) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         if *vis != want {
             *vis = want;
         }
     }
+}
+
+/// Rewrites [`DrawDistance`] only when the zone's authored distance or the
+/// setting moves, so a `/drawdistance` override holds until the next change.
+pub fn resolve_draw_distance(
+    zone_weather: Res<crate::weather::ZoneWeather>,
+    settings: Res<crate::graphics::GraphicsSettings>,
+    mut draw: ResMut<DrawDistance>,
+    mut last: Local<Option<f32>>,
+) {
+    let rec = zone_weather.area_current.or(zone_weather.current);
+    let want = zone_draw_distance(rec.as_ref(), settings.draw_distance_scale);
+    if *last == Some(want) {
+        return;
+    }
+    *last = Some(want);
+    draw.world = want;
+    draw.mob = want;
 }
 
 pub fn cull_mzb_by_distance(
@@ -3935,6 +3982,13 @@ mod lod_tests {
         }
     }
 
+    // No zone draw-distance cull at all, at retail's multiplier, so only the band
+    // logic under test decides.
+    const FAR_ZONE: ZoneChunkCull = ZoneChunkCull {
+        draw_distance_sq: f32::INFINITY,
+        draw_scale: mzb::RETAIL_DRAW_DISTANCE_SCALE,
+    };
+
     // The three spawned variants of one placement partition the distance line, so
     // exactly one is ever drawn.
     #[test]
@@ -3947,14 +4001,14 @@ mod lod_tests {
         for dist in [0.0f32, 9.9, 10.0, 10.1, 99.9, 100.0, 100.1, 5_000.0] {
             let drawn = variants
                 .iter()
-                .filter(|v| v.is_drawn_at(dist * dist))
+                .filter(|v| v.is_drawn_at(dist * dist, FAR_ZONE))
                 .count();
             assert_eq!(drawn, 1, "distance {dist}");
         }
 
-        assert!(variants[0].is_drawn_at(10.0 * 10.0));
-        assert!(variants[1].is_drawn_at(100.0 * 100.0));
-        assert!(variants[2].is_drawn_at(100.1 * 100.1));
+        assert!(variants[0].is_drawn_at(10.0 * 10.0, FAR_ZONE));
+        assert!(variants[1].is_drawn_at(100.0 * 100.0, FAR_ZONE));
+        assert!(variants[2].is_drawn_at(100.1 * 100.1, FAR_ZONE));
     }
 
     // A placement whose bands collapse onto one mesh serves every band.
@@ -3966,8 +4020,31 @@ mod lod_tests {
             uses_lod_rendering: false,
         };
         for dist in [0.0f32, 50.0, 500.0, 100_000.0] {
-            assert!(all.is_drawn_at(dist * dist));
+            assert!(all.is_drawn_at(dist * dist, FAR_ZONE));
         }
+    }
+
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — a chunk without the LOD flag is
+    // culled by the zone draw distance alone, whatever its authored far.
+    #[test]
+    fn unflagged_chunks_are_culled_at_the_zone_draw_distance() {
+        let plain = ZoneMeshLod {
+            thresholds: thresholds(10.0, 100.0, 1000.0),
+            level_mask: ALL_BANDS,
+            uses_lod_rendering: false,
+        };
+        let cull = ZoneChunkCull {
+            draw_distance_sq: 300.0 * 300.0,
+            draw_scale: mzb::RETAIL_DRAW_DISTANCE_SCALE,
+        };
+        assert!(plain.is_drawn_at(299.0 * 299.0, cull));
+        assert!(!plain.is_drawn_at(301.0 * 301.0, cull));
+
+        let flagged = ZoneMeshLod {
+            uses_lod_rendering: true,
+            ..plain
+        };
+        assert!(flagged.is_drawn_at(301.0 * 301.0, cull));
     }
 
     // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — the far cull only applies to chunks that opted
@@ -3979,11 +4056,34 @@ mod lod_tests {
         let mut prop = lod(mzb::MmbLodLevel::Low, true);
         prop.thresholds = thresholds(10.0, 100.0, 40.0);
         prop.level_mask = ALL_BANDS;
-        assert!(prop.is_drawn_at(39.0 * 39.0));
-        assert!(!prop.is_drawn_at(41.0 * 41.0));
+        assert!(prop.is_drawn_at(39.0 * 39.0, FAR_ZONE));
+        assert!(!prop.is_drawn_at(41.0 * 41.0, FAR_ZONE));
 
         prop.uses_lod_rendering = false;
-        assert!(prop.is_drawn_at(41.0 * 41.0));
+        assert!(prop.is_drawn_at(41.0 * 41.0, FAR_ZONE));
+    }
+
+    // XiZone.cpp XiZone::GetDrawDistance — authored distance times the multiplier,
+    // never below MinimumDrawDistance, and the no-environment fallback scales too.
+    #[test]
+    fn zone_draw_distance_scales_the_authored_value_above_the_retail_floor() {
+        let rec = ffxi_dat::weather::WeatherRecord {
+            max_far_clip: 302.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_draw_distance(Some(&rec), mzb::RETAIL_DRAW_DISTANCE_SCALE),
+            302.0
+        );
+        assert_eq!(zone_draw_distance(Some(&rec), 2.0), 604.0);
+        assert_eq!(
+            zone_draw_distance(Some(&rec), 0.1),
+            RETAIL_MIN_DRAW_DISTANCE
+        );
+        assert_eq!(
+            zone_draw_distance(None, 2.0),
+            RETAIL_FALLBACK_DRAW_DISTANCE * 2.0
+        );
     }
 }
 

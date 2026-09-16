@@ -130,9 +130,9 @@ impl ZoneWeather {
 
     /// The far end of the linear fog ramp for the record the player's own area is
     /// fogged through, i.e. the range past which DAT fog leaves no contrast.
-    pub fn fog_visibility_dist(&self) -> Option<f32> {
+    pub fn fog_visibility_dist(&self, draw_scale: f32) -> Option<f32> {
         let rec = self.area_current.or(self.current)?;
-        Some(fog_visibility_dist(&rec))
+        Some(fog_visibility_dist(&rec, draw_scale))
     }
 }
 
@@ -140,22 +140,23 @@ impl ZoneWeather {
 // carrying 0 keeps a usable reach instead of collapsing it.
 const MIN_FOG_VISIBILITY_DIST: f32 = 80.0;
 
-pub fn fog_visibility_dist(rec: &WeatherRecord) -> f32 {
-    rec.max_fog_dist_landscape.max(MIN_FOG_VISIBILITY_DIST)
+pub fn fog_visibility_dist(rec: &WeatherRecord, draw_scale: f32) -> f32 {
+    (rec.max_fog_dist_landscape * draw_scale).max(MIN_FOG_VISIBILITY_DIST)
 }
 
 // XiArea.cpp XiArea::GetFog bumps an end at or below the start one unit past it.
 const FOG_END_PAST_START: f32 = 1.0;
 
 /// XiArea.cpp XiArea::GetFog: FOGSTART is the terrain block's min fog distance and FOGEND
-/// its max (the registry multiplier is 1.0 by default); ZoneRenderer.cpp
+/// its max, both times the XiArea::GetAnotherSomething draw-distance multiplier
+/// (`draw_scale`, 1.0 in an unpatched client); ZoneRenderer.cpp
 /// ZoneRenderer::RenderChunk2 and CMoElem.cpp CMoElem::PrepDX draw terrain and elements
 /// through that ramp as D3DFOG_LINEAR, independent of the fog colour.
-pub fn zone_distance_fog(rec: &WeatherRecord) -> DistanceFog {
+pub fn zone_distance_fog(rec: &WeatherRecord, draw_scale: f32) -> DistanceFog {
     let [r, g, b, _] = rec.fog_landscape;
     let color = Color::srgb(r, g, b);
-    let start = rec.min_fog_dist_landscape;
-    let mut end = rec.max_fog_dist_landscape;
+    let start = rec.min_fog_dist_landscape * draw_scale;
+    let mut end = rec.max_fog_dist_landscape * draw_scale;
     if end <= start {
         end = start + FOG_END_PAST_START;
     }
@@ -669,7 +670,7 @@ pub fn apply_zone_weather(
     // row is off (the strip block above already removed both layers).
     if !panels.fog_off {
         if let Ok((cam_entity, dist_slot, vol_slot)) = cam_q.single_mut() {
-            let want = zone_distance_fog(&area_rec);
+            let want = zone_distance_fog(&area_rec, settings.draw_distance_scale);
             match dist_slot {
                 Some(mut existing) => *existing = want,
                 None => {
@@ -756,22 +757,27 @@ mod tests {
     // ray may see; it must stay the area-fogged record apply_zone_weather hands FogFalloff.
     #[test]
     fn zone_weather_reports_the_area_records_fog_visibility() {
+        const RETAIL: f32 = ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE;
         let mut zone = ZoneWeather::default();
-        assert_eq!(zone.fog_visibility_dist(), None);
+        assert_eq!(zone.fog_visibility_dist(RETAIL), None);
 
         let mut zone_rec = rec_with_fog([0.5; 4]);
         zone_rec.max_fog_dist_landscape = 900.0;
         zone.current = Some(zone_rec);
-        assert_eq!(zone.fog_visibility_dist(), Some(900.0));
+        assert_eq!(zone.fog_visibility_dist(RETAIL), Some(900.0));
 
         let mut area_rec = zone_rec;
         area_rec.max_fog_dist_landscape = 300.0;
         zone.area_current = Some(area_rec);
-        assert_eq!(zone.fog_visibility_dist(), Some(300.0));
+        assert_eq!(zone.fog_visibility_dist(RETAIL), Some(300.0));
+        assert_eq!(zone.fog_visibility_dist(2.0), Some(600.0));
 
         area_rec.max_fog_dist_landscape = 0.0;
         zone.area_current = Some(area_rec);
-        assert_eq!(zone.fog_visibility_dist(), Some(MIN_FOG_VISIBILITY_DIST));
+        assert_eq!(
+            zone.fog_visibility_dist(RETAIL),
+            Some(MIN_FOG_VISIBILITY_DIST)
+        );
     }
 
     #[test]
@@ -779,7 +785,7 @@ mod tests {
         let mut rec = rec_with_fog([0.10, 0.11, 0.18, 1.0]);
         rec.min_fog_dist_landscape = 0.0;
         rec.max_fog_dist_landscape = 500.0;
-        let fog = zone_distance_fog(&rec);
+        let fog = zone_distance_fog(&rec, ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE);
         assert_color_close(fog.color, Color::srgb(0.10, 0.11, 0.18));
         match fog.falloff {
             FogFalloff::Linear { start, end } => {
@@ -790,12 +796,28 @@ mod tests {
         }
     }
 
+    // XiArea.cpp XiArea::GetFog multiplies both ends of the ramp by the draw-distance
+    // multiplier, so a raised setting pushes the fog out with the geometry.
+    #[test]
+    fn the_draw_scale_stretches_both_ends_of_the_fog_ramp() {
+        let mut rec = rec_with_fog([0.5; 4]);
+        rec.min_fog_dist_landscape = 100.0;
+        rec.max_fog_dist_landscape = 400.0;
+        match zone_distance_fog(&rec, 1.5).falloff {
+            FogFalloff::Linear { start, end } => {
+                assert_eq!(start, 150.0);
+                assert_eq!(end, 600.0);
+            }
+            other => panic!("expected a linear ramp, got {other:?}"),
+        }
+    }
+
     #[test]
     fn zone_fog_end_is_bumped_past_a_start_that_meets_it() {
         let mut rec = rec_with_fog([0.5; 4]);
         rec.min_fog_dist_landscape = 300.0;
         rec.max_fog_dist_landscape = 300.0;
-        match zone_distance_fog(&rec).falloff {
+        match zone_distance_fog(&rec, ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE).falloff {
             FogFalloff::Linear { start, end } => {
                 assert_eq!(start, 300.0);
                 assert_eq!(end, 300.0 + FOG_END_PAST_START);

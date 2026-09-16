@@ -33,12 +33,11 @@ pub const SKY_SORT_DEPTH_CLOUDS: f32 = SKY_SORT_DEPTH_STARS + SKY_LAYER_SORT_STE
 
 const SKY_LAYER_SORT_STEP: f32 = 1.0;
 
-/// Camera far plane for a graphics-menu draw distance.
+/// Camera far plane.
 ///
-/// The sky sits at fixed world radii and looks identical at every draw
-/// distance; what the setting scales is the world — the MZB/MMB load radius and
-/// the DAT fog — so the frustum reaches past the dome even at the 200 the menu
-/// offers. Costs nothing: bevy's perspective is
+/// The sky sits at fixed world radii and the world ends at the zone draw
+/// distance (dat_mzb.rs zone_draw_distance, a few thousand yalms at most), so
+/// the frustum only has to reach past the dome. Costs nothing: bevy's perspective is
 /// `Mat4::perspective_infinite_reverse_rh(fov, aspect, near)`
 /// (bevy_camera-0.19.0 src/projection.rs `impl CameraProjection for PerspectiveProjection`), so `far` feeds frustum culling only and
 /// never the depth range.
@@ -50,9 +49,8 @@ const SKY_LAYER_SORT_STEP: f32 = 1.0;
 /// collapsed the canopy onto the camera at 200 (`layer_scale`'s rim factor
 /// clamps at 1.0, so one cloud tile filled the sky) and left the discs behind
 /// terrain.
-pub fn camera_far(view_distance: f32) -> f32 {
-    view_distance.max(SKYBOX_RADIUS + SKY_FAR_MARGIN)
-}
+pub const CAMERA_FAR: f32 = SKYBOX_RADIUS + SKY_FAR_MARGIN;
+const _: () = assert!(CAMERA_FAR > SKYBOX_RADIUS);
 
 #[derive(Clone, Debug, ShaderType)]
 pub struct SkyboxUniform {
@@ -117,33 +115,6 @@ impl Material for SkyboxGradientMaterial {
 #[cfg(test)]
 mod frustum_shell_tests {
     use super::*;
-
-    /// Every draw distance the graphics menu offers. Kept in step with
-    /// `graphics::settings::VIEW_DISTANCE_SLOTS`.
-    const OFFERED_VIEW_DISTANCES: [f32; 6] = [200.0, 500.0, 700.0, 1100.0, 2300.0, 6100.0];
-
-    // The sky must be in view at every setting, including the smallest. Clipping
-    // it is what a plain `far = view_distance` did: at 200 the dome, the ~5400
-    // canopy rim and the 4000 discs were all outside the frustum.
-    #[test]
-    fn every_offered_draw_distance_keeps_the_whole_dome_inside_the_frustum() {
-        for view_distance in OFFERED_VIEW_DISTANCES {
-            let far = camera_far(view_distance);
-            assert!(
-                far > SKYBOX_RADIUS,
-                "view distance {view_distance}: far {far} clips the {SKYBOX_RADIUS} dome"
-            );
-        }
-    }
-
-    // The sky ignores the setting outright — same radii, so the same apparent
-    // size — and the setting still governs the world at every value that asks
-    // for more than the sky needs.
-    #[test]
-    fn the_far_plane_only_ever_grows_to_clear_the_sky() {
-        assert_eq!(camera_far(6100.0), 6100.0);
-        assert_eq!(camera_far(200.0), camera_far(2300.0));
-    }
 
     // Bevy sorts Transparent3d ascending on view-space Z, so a *smaller* sort
     // depth draws earlier. Every sky layer must therefore land at or behind the

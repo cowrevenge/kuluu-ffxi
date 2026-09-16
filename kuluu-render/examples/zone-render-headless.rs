@@ -47,9 +47,9 @@ struct P {
     tgt: Vec3,
     fog: bool,
     sky: bool,
-    /// Draw-distance override (the graphics-menu value, not the far plane), so a
-    /// verification run can exercise the sky at more than one preset.
-    far: Option<f32>,
+    /// Cull placements at the zone's retail draw distance times this
+    /// graphics-menu multiplier; unset draws everything the zone loads.
+    draw_scale: Option<f32>,
     hour: f32,
     // Reproduce the live client's sun exactly: sun_moon.rs bias values,
     // cascade_config_from_settings(High preset), 4096 shadow map, and the
@@ -103,7 +103,7 @@ fn main() {
         tgt: Vec3::ZERO,
         fog: false,
         sky: false,
-        far: None,
+        draw_scale: None,
         hour: 12.0,
         client_sun: false,
         weather: None,
@@ -166,8 +166,8 @@ fn main() {
                 p.sky = true;
                 i += 1;
             }
-            "--far" => {
-                p.far = Some(a[i + 1].parse().unwrap());
+            "--draw-scale" => {
+                p.draw_scale = Some(a[i + 1].parse().unwrap());
                 i += 2;
             }
             "--hour" => {
@@ -354,6 +354,19 @@ fn main() {
                     .chain(),
             );
     }
+    if let Some(draw_scale) = app.world().resource::<P>().draw_scale {
+        app.world_mut()
+            .resource_mut::<GraphicsSettings>()
+            .draw_distance_scale = draw_scale;
+        app.add_systems(
+            Update,
+            (
+                kuluu_render::dat_mzb::resolve_draw_distance,
+                kuluu_render::dat_mzb::select_zone_mmb_lod,
+            )
+                .chain(),
+        );
+    }
     app.run();
 }
 fn spawn_npcs(
@@ -451,8 +464,10 @@ fn setup(
     settings: Res<GraphicsSettings>,
 ) {
     d.zone_geom_mode = p.mode;
-    d.world = 1e5;
-    d.mob = 1e5;
+    if p.draw_scale.is_none() {
+        d.world = 1e5;
+        d.mob = 1e5;
+    }
     // Off-screen render target (see CapTarget).
     let size = bevy::render::render_resource::Extent3d {
         width: 1280,
@@ -547,10 +562,7 @@ fn setup(
                 ..Bloom::NATURAL
             },
             Projection::Perspective(PerspectiveProjection {
-                far: p
-                    .far
-                    .map(kuluu_render::skybox::camera_far)
-                    .unwrap_or_else(|| kuluu_render::skybox::camera_far(settings.view_distance)),
+                far: kuluu_render::skybox::CAMERA_FAR,
                 fov: settings.fov_deg.to_radians(),
                 ..default()
             }),
@@ -698,16 +710,25 @@ fn cap(
     water: Res<PendingWaterSpawns>,
     target: Res<CapTarget>,
     time: Res<Time>,
+    draw: Res<DrawDistance>,
+    placements: Query<&Visibility, With<kuluu_render::dat_mzb::ZoneMeshLod>>,
     mut frame_secs: Local<f32>,
 ) {
     f.0 += 1;
     *frame_secs += time.delta_secs();
     if f.0.is_multiple_of(40) {
+        let hidden = placements
+            .iter()
+            .filter(|v| **v == Visibility::Hidden)
+            .count();
         eprintln!(
-            "frame {} pending={} water_pending={} avg_frame_ms={:.2}",
+            "frame {} pending={} water_pending={} placements={} hidden={} draw={:.0} avg_frame_ms={:.2}",
             f.0,
             queue.pending.len(),
             water.specs.len(),
+            placements.iter().count(),
+            hidden,
+            draw.world,
             *frame_secs / 40.0 * 1000.0
         );
         *frame_secs = 0.0;

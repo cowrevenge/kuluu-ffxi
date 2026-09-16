@@ -57,11 +57,11 @@ fn mmb_repass_needed(
     new_events: bool,
     parse_completed: bool,
     budget_deferred: bool,
-    settings_changed: bool,
+    draw_distance_changed: bool,
     last_eval_pos: Option<Vec3>,
     self_pos: Option<Vec3>,
 ) -> bool {
-    if new_events || parse_completed || budget_deferred || settings_changed {
+    if new_events || parse_completed || budget_deferred || draw_distance_changed {
         return true;
     }
     match (last_eval_pos, self_pos) {
@@ -287,6 +287,7 @@ impl Plugin for DatOverlayPlugin {
             .add_systems(
                 Update,
                 (
+                    crate::dat_mzb::resolve_draw_distance,
                     crate::dat_mzb::cull_entities_by_distance,
                     crate::dat_mzb::select_zone_mmb_lod,
                     crate::dat_mzb::apply_sub_area_shell_visibility,
@@ -472,6 +473,7 @@ pub fn process_load_mmb_requests(
     mut parse_cache: ResMut<MmbParseCache>,
     mut tex_pools_res: ResMut<MmbTexPools>,
     settings: Res<GraphicsSettings>,
+    draw: Res<crate::dat_mzb::DrawDistance>,
     self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
     mut in_flight: ResMut<MmbLoadInFlight>,
     actor_root: Res<crate::ffxi_actor_render::ActorDatRoot>,
@@ -508,7 +510,7 @@ pub fn process_load_mmb_requests(
         new_events,
         parse_completed,
         queue.budget_deferred,
-        settings.is_changed(),
+        draw.is_changed(),
         queue.last_eval_pos,
         self_pos,
     ) {
@@ -522,7 +524,7 @@ pub fn process_load_mmb_requests(
             mmb_load_order_key(a, self_pos).total_cmp(&mmb_load_order_key(b, self_pos))
         });
     }
-    let load_radius = settings.view_distance * crate::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
+    let load_radius = draw.world * crate::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
     let load_radius_sq = load_radius * load_radius;
 
     let mut mmb_logged: std::collections::HashSet<(u32, usize)> = std::collections::HashSet::new();

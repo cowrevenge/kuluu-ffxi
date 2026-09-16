@@ -4,9 +4,12 @@ use tokio::{
     net::TcpStream,
 };
 
-use ffxi_proto::login::IXFF_TERMINATOR;
+use ffxi_proto::login::{
+    expansion_display, feature_display, lobby_error, CLIENT_VER_ENV, IXFF_TERMINATOR,
+    LSB_CLIENT_VER,
+};
 
-use crate::auth_client::AuthSession;
+use crate::auth_client::{AuthRejected, AuthSession};
 
 const DATA_CHARLIST_SIZE: usize = 0x148;
 
@@ -31,7 +34,28 @@ const CAP_WORD_OFFSET: usize = 6;
 const KULUU_CAP_KEY: u32 = 867309;
 pub const CAP_SKIP_INTRO_CS: u32 = 1 << 0;
 
-const VIEW_CMD_REGISTER: u32 = 0x00;
+// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md: retail's first
+// lobby packet; vendor/server/src/login/view_session.cpp view_session::read_func
+// case 0x26 reads only versionCode from it.
+const VIEW_CMD_LOBBY_LOGIN: u32 = 0x26;
+const LOBBY_LOGIN_PACKET_SIZE: usize = 0x98;
+const LOBBY_LOGIN_CLIENT_CODE_OFFSET: usize = 0x2C;
+const LOBBY_LOGIN_VERSION_OFFSET: usize = 0x74;
+const LOBBY_LOGIN_VERSION_LEN: usize = 16;
+const LOBBY_LOGIN_EXCODE_OFFSET: usize = 0x84;
+/// client_code[0] as the XiPackets capture of an English client shows it; the
+/// doc describes it as language plus a first-launch render flag, 3 or 5.
+const LOBBY_LOGIN_CLIENT_CODE_ENGLISH: u8 = 5;
+
+// research/XiPackets/lobby/S2C_0x0005_ResponseKey.md
+const VIEW_RESP_KEY: u32 = 0x05;
+const KEY_PACKET_SIZE: usize = 0x28;
+const KEY_OFFSET: usize = 0x1C;
+const KEY_EXCODE_SERVER_OFFSET: usize = 0x20;
+const KEY_EXCODE_SERVER2_OFFSET: usize = 0x24;
+// vendor/server/src/login/login_helpers.cpp generateErrorMessage
+const VIEW_ERROR_CODE_OFFSET: usize = 0x20;
+
 const VIEW_CMD_SELECT: u32 = 0x07;
 
 const VIEW_CMD_DELETE_CHAR: u32 = 0x14;
@@ -115,6 +139,68 @@ pub struct LobbyClient {
     pub host: String,
     pub data_port: u16,
     pub view_port: u16,
+    /// versionCode for the 0x26; `None` resolves [`client_version_code`] at
+    /// open time.
+    pub version_code: Option<String>,
+}
+
+/// S2C 0x05: the lobby admitted the client version; the bitmasks say which
+/// expansions the server serves and which account features are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LobbyKey {
+    pub key: u32,
+    pub excode_server: u16,
+    pub excode_server2: u16,
+}
+
+impl LobbyKey {
+    pub fn expansion_names(&self) -> Vec<&'static str> {
+        expansion_display::NAMES
+            .iter()
+            .filter(|(bit, name)| self.excode_server & bit != 0 && !name.starts_with("UNUSED_"))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
+    pub fn feature_names(&self) -> Vec<&'static str> {
+        feature_display::NAMES
+            .iter()
+            .filter(|(bit, name)| self.excode_server2 & bit != 0 && !name.starts_with("UNUSED_"))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+}
+
+/// The patch stamp the 0x26 versionCode carries: [`CLIENT_VER_ENV`], else the
+/// install every `DatRoot::from_env_or_default` in this process loads, else
+/// the vendored pin (a session with no install is not a client the lobby can
+/// judge, and the pin keeps a DAT-less agent session reachable).
+pub fn client_version_code() -> String {
+    if let Some(v) = std::env::var(CLIENT_VER_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return v;
+    }
+    let root = std::env::var_os(ffxi_dat::archive::DAT_PATH_ENV)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var(ffxi_dat::archive::CLIENT_TARGET_ENV)
+                .ok()
+                .and_then(|name| ffxi_dat::archive::workspace_target(&name))
+        })
+        .or_else(ffxi_dat::archive::workspace_default);
+    match root.and_then(|r| ffxi_dat::client_profile::patch_version_at(&r)) {
+        Some(stamp) => stamp,
+        None => {
+            tracing::warn!(
+                pin = LSB_CLIENT_VER,
+                "no FFXI install to read a patch stamp from; the lobby login carries the LSB pin"
+            );
+            LSB_CLIENT_VER.to_string()
+        }
+    }
 }
 
 pub struct LobbyHandle {
@@ -124,11 +210,16 @@ pub struct LobbyHandle {
     chars: Vec<CharSlot>,
     session_hash: [u8; 16],
     server_caps: u32,
+    key: LobbyKey,
 }
 
 impl LobbyHandle {
     pub fn chars(&self) -> &[CharSlot] {
         &self.chars
+    }
+
+    pub fn key(&self) -> LobbyKey {
+        self.key
     }
 
     /// Caps word echoed by this lobby connection's char-list reply. Zero until
@@ -330,7 +421,13 @@ impl LobbyClient {
             host: host.into(),
             data_port,
             view_port,
+            version_code: None,
         }
+    }
+
+    pub fn with_version_code(mut self, version_code: Option<String>) -> Self {
+        self.version_code = version_code;
+        self
     }
 
     pub async fn open(&self, auth: &AuthSession) -> Result<LobbyHandle> {
@@ -339,16 +436,25 @@ impl LobbyClient {
         let mut data = self.connect(self.data_port).await?;
         tracing::info!("lobby: data socket connected");
 
-        let register = ixff_header(
-            IXFF_HEADER_SIZE as u32,
-            VIEW_CMD_REGISTER,
+        let version_code = self
+            .version_code
+            .clone()
+            .unwrap_or_else(client_version_code);
+        let login = build_lobby_login(
             &auth.session_hash,
+            &version_code,
+            expansion_display::ALL_KNOWN,
         );
-        view.write_all(&register).await?;
+        view.write_all(&login).await?;
         view.flush().await?;
-        tracing::info!("lobby: VIEW_CMD_REGISTER sent");
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tracing::info!(version_code, "lobby: 0x26 lobby login sent");
+        let key = lobby_io("0x05 key (view)", read_key_reply(&mut view)).await?;
+        tracing::info!(
+            key = format_args!("{:#010x}", key.key),
+            expansions = ?key.expansion_names(),
+            features = ?key.feature_names(),
+            "lobby: 0x05 key received"
+        );
 
         let req_a1 = build_data_a1(auth.account_id, 0, &auth.session_hash);
         data.write_all(&req_a1).await?;
@@ -378,6 +484,7 @@ impl LobbyClient {
             chars,
             session_hash: auth.session_hash,
             server_caps,
+            key,
         })
     }
 
@@ -474,15 +581,6 @@ impl LobbyClient {
     }
 }
 
-fn ixff_header(packet_size: u32, command: u32, session_hash: &[u8; 16]) -> [u8; 28] {
-    let mut buf = [0u8; 28];
-    buf[0..4].copy_from_slice(&packet_size.to_le_bytes());
-    buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
-    buf[8..12].copy_from_slice(&command.to_le_bytes());
-    buf[12..28].copy_from_slice(session_hash);
-    buf
-}
-
 fn build_data_a1(account_id: u32, search_server_ip: u32, session_hash: &[u8; 16]) -> Vec<u8> {
     let mut buf = vec![0u8; 28];
     buf[0] = DATA_CMD_CHAR_LIST;
@@ -490,6 +588,76 @@ fn build_data_a1(account_id: u32, search_server_ip: u32, session_hash: &[u8; 16]
     buf[5..9].copy_from_slice(&search_server_ip.to_le_bytes());
     buf[12..28].copy_from_slice(session_hash);
     buf
+}
+
+fn build_lobby_login(session_hash: &[u8; 16], version_code: &str, excode_client: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; LOBBY_LOGIN_PACKET_SIZE];
+    buf[0..4].copy_from_slice(&(LOBBY_LOGIN_PACKET_SIZE as u32).to_le_bytes());
+    buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
+    buf[8..12].copy_from_slice(&VIEW_CMD_LOBBY_LOGIN.to_le_bytes());
+    buf[12..28].copy_from_slice(session_hash);
+    buf[LOBBY_LOGIN_CLIENT_CODE_OFFSET] = LOBBY_LOGIN_CLIENT_CODE_ENGLISH;
+    let version = version_code.as_bytes();
+    let n = version.len().min(LOBBY_LOGIN_VERSION_LEN - 1);
+    buf[LOBBY_LOGIN_VERSION_OFFSET..LOBBY_LOGIN_VERSION_OFFSET + n].copy_from_slice(&version[..n]);
+    buf[LOBBY_LOGIN_EXCODE_OFFSET..LOBBY_LOGIN_EXCODE_OFFSET + 4]
+        .copy_from_slice(&u32::from(excode_client).to_le_bytes());
+    buf
+}
+
+fn parse_key_reply(buf: &[u8; KEY_PACKET_SIZE]) -> Result<LobbyKey> {
+    let term = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if term != IXFF_TERMINATOR {
+        bail!("0x05 key: bad terminator {term:#x}");
+    }
+    let cmd = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    if cmd != VIEW_RESP_KEY {
+        bail!("0x05 key: unexpected command {cmd:#x}");
+    }
+    let word = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+    Ok(LobbyKey {
+        key: word(KEY_OFFSET),
+        excode_server: word(KEY_EXCODE_SERVER_OFFSET) as u16,
+        excode_server2: word(KEY_EXCODE_SERVER2_OFFSET) as u16,
+    })
+}
+
+/// The 0x26 is answered with the 0x28-byte key on success or LSB's 0x24-byte
+/// error frame when the version lock rejects the client; the latter is a
+/// verdict on this install, so it is an [`AuthRejected`], not a retry.
+async fn read_key_reply(stream: &mut TcpStream) -> Result<LobbyKey> {
+    let mut size_bytes = [0u8; 4];
+    stream
+        .read_exact(&mut size_bytes)
+        .await
+        .context("reading 0x05 key reply size (server may have closed socket)")?;
+    let size = u32::from_le_bytes(size_bytes) as usize;
+    match size {
+        KEY_PACKET_SIZE => {
+            let mut buf = [0u8; KEY_PACKET_SIZE];
+            buf[0..4].copy_from_slice(&size_bytes);
+            stream
+                .read_exact(&mut buf[4..])
+                .await
+                .context("reading 0x05 key reply body")?;
+            parse_key_reply(&buf)
+        }
+        VIEW_REPLY_ERROR_SIZE => {
+            let mut rest = vec![0u8; size - 4];
+            stream
+                .read_exact(&mut rest)
+                .await
+                .context("reading 0x26 error reply body")?;
+            let at = VIEW_ERROR_CODE_OFFSET - 4;
+            let code = u16::from_le_bytes(rest[at..at + 2].try_into().unwrap());
+            Err(AuthRejected(format!(
+                "lobby login: server rejected the client version with loginErrors code {code} ({})",
+                lobby_error::name(code).unwrap_or("unknown")
+            ))
+            .into())
+        }
+        other => bail!("0x26 reply: implausible size {other:#x} (want 0x28 or 0x24)"),
+    }
 }
 
 fn build_data_a2(key3: &[u8; 20]) -> Vec<u8> {
@@ -637,23 +805,10 @@ async fn read_create_reply(stream: &mut TcpStream, stage: &str) -> Result<()> {
             let err = u16::from_le_bytes(rest[28..30].try_into().unwrap());
             bail!(
                 "{stage}: server rejected with loginErrors code {err} ({})",
-                login_error_name(err)
+                lobby_error::name(err).unwrap_or("unknown")
             );
         }
         _ => bail!("{stage}: unexpected reply size={size:#x} result={result:#x}"),
-    }
-}
-
-fn login_error_name(code: u16) -> &'static str {
-    match code {
-        305 => "UNABLE_TO_CONNECT_TO_WORLD_SERVER",
-        313 => "CHARACTER_NAME_UNAVAILABLE",
-        201 => "CHARACTER_ALREADY_LOGGED_IN",
-        314 => "FAILED_TO_REGISTER_WITH_THE_NAME_SERVER",
-        321 => "CHARACTERS_PARAMETERS_ARE_INCORRECT",
-        331 => "GAMES_DATA_HAS_BEEN_UPDATED",
-        332 => "COULD_NOT_CONNECT_TO_LOBBY_SERVER",
-        _ => "unknown",
     }
 }
 
@@ -997,6 +1152,105 @@ mod tests {
         assert_eq!(parse_server_caps(&buf), 0);
     }
 
+    const FAKE_EXCODE_SERVER: u16 = expansion_display::RISE_OF_ZILART
+        | expansion_display::CHAINS_OF_PROMATHIA
+        | expansion_display::BASE_GAME;
+
+    fn key_packet(excode_server: u16) -> Vec<u8> {
+        let mut buf = vec![0u8; KEY_PACKET_SIZE];
+        buf[0..4].copy_from_slice(&(KEY_PACKET_SIZE as u32).to_le_bytes());
+        buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
+        buf[8..12].copy_from_slice(&VIEW_RESP_KEY.to_le_bytes());
+        buf[KEY_OFFSET..KEY_OFFSET + 4].copy_from_slice(&0xAD5D_E04Fu32.to_le_bytes());
+        buf[KEY_EXCODE_SERVER_OFFSET..KEY_EXCODE_SERVER_OFFSET + 4]
+            .copy_from_slice(&u32::from(excode_server).to_le_bytes());
+        buf
+    }
+
+    /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md example packet
+    /// (session-specific bytes replaced): the fields the lobby reads sit where
+    /// retail puts them.
+    #[test]
+    fn lobby_login_matches_the_retail_layout() {
+        let hash = [0x48u8; 16];
+        let buf = build_lobby_login(&hash, "30220329_2", 0x0FFF);
+        assert_eq!(buf.len(), 0x98);
+        assert_eq!(&buf[0..4], &[0x98, 0, 0, 0]);
+        assert_eq!(&buf[4..8], b"IXFF");
+        assert_eq!(&buf[8..12], &[0x26, 0, 0, 0]);
+        assert_eq!(&buf[12..28], &hash);
+        assert_eq!(&buf[0x1C..0x2C], &[0u8; 16], "pol_account is nulled");
+        assert_eq!(&buf[0x2C..0x34], &[5, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&buf[0x74..0x7F], b"30220329_2\0");
+        assert_eq!(&buf[0x84..0x88], &[0xFF, 0x0F, 0, 0]);
+        assert_eq!(&buf[0x88..0x98], &[0u8; 16]);
+        // LSB reads six bytes at 0x74 and pads; an overlong stamp cannot spill
+        // past the 16-byte field.
+        let long = build_lobby_login(&hash, "30220329_2_this_is_too_long", 0);
+        assert_eq!(long[0x74 + LOBBY_LOGIN_VERSION_LEN - 1], 0);
+        assert_eq!(&long[0x84..0x88], &[0, 0, 0, 0]);
+    }
+
+    /// research/XiPackets/lobby/S2C_0x0005_ResponseKey.md example packet.
+    #[test]
+    fn key_reply_parses_the_retail_example() {
+        let mut buf = [0u8; KEY_PACKET_SIZE];
+        buf.copy_from_slice(&key_packet(0x0FFF));
+        buf[KEY_OFFSET..KEY_OFFSET + 4].copy_from_slice(&[0xBB, 0x87, 0x75, 0xCF]);
+        buf[KEY_EXCODE_SERVER2_OFFSET..KEY_EXCODE_SERVER2_OFFSET + 4]
+            .copy_from_slice(&[1, 0, 0, 0]);
+        let key = parse_key_reply(&buf).unwrap();
+        assert_eq!(key.key, 0xCF75_87BB);
+        assert_eq!(key.excode_server, 0x0FFF);
+        assert_eq!(key.excode_server2, 0x0001);
+        assert_eq!(key.expansion_names().len(), 12);
+        assert_eq!(key.feature_names(), vec!["SECURE_TOKEN"]);
+        buf[8] = 0x04;
+        assert!(parse_key_reply(&buf).is_err());
+    }
+
+    /// vendor/server/src/login/view_session.cpp view_session::read_func case
+    /// 0x26 under a fatal version lock: generateErrorMessage(GAMES_DATA_HAS_BEEN_UPDATED).
+    #[tokio::test]
+    async fn version_lock_rejection_is_a_typed_non_retryable_error() {
+        use crate::auth_client::is_auth_rejected;
+        let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let view_port = view.local_addr().unwrap().port();
+        let data_port = data.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut view, _) = view.accept().await.unwrap();
+            let (_data, _) = data.accept().await.unwrap();
+            let mut login = [0u8; LOBBY_LOGIN_PACKET_SIZE];
+            view.read_exact(&mut login).await.unwrap();
+            assert_eq!(&login[0x74..0x7E], b"30230905_0");
+            let mut err = vec![0u8; VIEW_REPLY_ERROR_SIZE];
+            err[0] = VIEW_REPLY_ERROR_SIZE as u8;
+            err[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
+            err[8] = 0x04;
+            err[VIEW_ERROR_CODE_OFFSET..VIEW_ERROR_CODE_OFFSET + 2]
+                .copy_from_slice(&lobby_error::GAMES_DATA_HAS_BEEN_UPDATED.to_le_bytes());
+            view.write_all(&err).await.unwrap();
+        });
+        let auth = AuthSession {
+            account_id: 1,
+            session_hash: [7u8; 16],
+        };
+        let err = match LobbyClient::new("127.0.0.1", data_port, view_port)
+            .with_version_code(Some("30230905_0".into()))
+            .open(&auth)
+            .await
+        {
+            Ok(_) => panic!("a version-lock refusal must fail the open"),
+            Err(e) => e,
+        };
+        assert!(is_auth_rejected(&err), "{err:#}");
+        assert!(
+            err.to_string().contains("GAMES_DATA_HAS_BEEN_UPDATED"),
+            "{err:#}"
+        );
+    }
+
     fn next_login_packet(char_id: u32, name: &str) -> Vec<u8> {
         let mut buf = vec![0u8; NEXT_LOGIN_PACKET_SIZE as usize];
         buf[0..4].copy_from_slice(&NEXT_LOGIN_PACKET_SIZE.to_le_bytes());
@@ -1024,8 +1278,10 @@ mod tests {
         let (mut view, _) = view.accept().await.ok()?;
         let (mut data, _) = data.accept().await.ok()?;
 
-        let mut register = [0u8; IXFF_HEADER_SIZE];
-        view.read_exact(&mut register).await.ok()?;
+        let mut login = [0u8; LOBBY_LOGIN_PACKET_SIZE];
+        view.read_exact(&mut login).await.ok()?;
+        assert_eq!(&login[8..12], &VIEW_CMD_LOBBY_LOGIN.to_le_bytes());
+        view.write_all(&key_packet(FAKE_EXCODE_SERVER)).await.ok()?;
         let mut req_charlist = [0u8; IXFF_HEADER_SIZE];
         data.read_exact(&mut req_charlist).await.ok()?;
 

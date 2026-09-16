@@ -10,7 +10,33 @@ use bevy::ui_widgets::Activate;
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_back_titlebar, spawn_breadcrumb, Crumb,
 };
-use super::{CharListData, Credentials, DefaultCharName, LauncherState, SelectedChar, ServerInfo};
+use super::{
+    CharListData, Credentials, DefaultCharName, LauncherState, OpenedLobby, SelectedChar,
+    ServerInfo,
+};
+
+fn title_case(name: &str) -> String {
+    name.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_ascii_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The lobby's 0x05 expansion mask, worded for the character screen.
+fn expansions_line(names: &[&str]) -> Option<String> {
+    let listed: Vec<String> = names
+        .iter()
+        .filter(|n| **n != "BASE_GAME")
+        .map(|n| title_case(n))
+        .collect();
+    (!listed.is_empty()).then(|| format!("Server expansions: {}", listed.join(", ")))
+}
 
 /// Keeps the character panel off the right edge so the backdrop flythrough
 /// stays visible beside it.
@@ -31,7 +57,14 @@ pub(super) fn spawn_char_list_ui(
     default_name: Res<DefaultCharName>,
     server: Res<ServerInfo>,
     creds: Res<Credentials>,
+    opened: Res<OpenedLobby>,
 ) {
+    let expansions = opened
+        .0
+        .lock()
+        .ok()
+        .and_then(|slot| slot.handle.as_ref().map(|h| h.key().expansion_names()))
+        .and_then(|names| expansions_line(&names));
     let new_char_index = chars.0.len();
     let initial_cursor = default_name
         .0
@@ -74,6 +107,9 @@ pub(super) fn spawn_char_list_ui(
             spawn_breadcrumb(root, &server, &[Crumb::Sign(sign_label), Crumb::Characters]);
             root.spawn(panel_node(420.0)).with_children(|panel| {
                 spawn_back_titlebar(panel, "Select character");
+                if let Some(line) = expansions.as_deref() {
+                    panel.spawn(hint(line.to_string()));
+                }
                 if chars.0.is_empty() {
                     panel.spawn(hint("No characters on this account yet."));
                 }
@@ -318,5 +354,20 @@ pub(super) fn delete_confirm_keyboard_system(
             next_state.set(LauncherState::CharList);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansions_line_titles_names_and_hides_the_base_game_bit() {
+        assert_eq!(
+            expansions_line(&["BASE_GAME", "RISE_OF_ZILART", "CHAINS_OF_PROMATHIA"]).as_deref(),
+            Some("Server expansions: Rise Of Zilart, Chains Of Promathia")
+        );
+        assert_eq!(expansions_line(&["BASE_GAME"]), None);
+        assert_eq!(expansions_line(&[]), None);
     }
 }

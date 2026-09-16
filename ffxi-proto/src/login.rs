@@ -2,6 +2,10 @@ use std::cmp::Ordering;
 
 include!(concat!(env!("OUT_DIR"), "/xiloader_version_table.rs"));
 include!(concat!(env!("OUT_DIR"), "/login_settings_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/lobby_tables.rs"));
+
+/// Overrides the patch stamp the lobby login (C2S 0x26 versionCode) carries.
+pub const CLIENT_VER_ENV: &str = "FFXI_CLIENT_VER";
 
 pub const IXFF_TERMINATOR: u32 = u32::from_le_bytes(*b"IXFF");
 
@@ -66,6 +70,19 @@ mod tests {
     // pin bump updates both literals alongside the scrape.
     const LSB_PINNED_CLIENT_VER: &str = "30260904_1";
     const LSB_PINNED_VER_LOCK: u8 = 2;
+
+    /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md example
+    /// packet: excode_client 0x0FFF, i.e. every expansion bit LSB names.
+    #[test]
+    fn scraped_lobby_tables_match_the_pinned_lsb_tree_and_the_retail_capture() {
+        assert_eq!(expansion_display::ALL_KNOWN, 0x0FFF);
+        assert_eq!(expansion_display::RISE_OF_ZILART, 0x0002);
+        assert_eq!(expansion_display::SEEKERS_OF_ADOULIN, 0x0800);
+        assert_eq!(feature_display::SECURE_TOKEN, 0x0001);
+        assert_eq!(lobby_error::GAMES_DATA_HAS_BEEN_UPDATED, 331);
+        assert_eq!(lobby_error::name(331), Some("GAMES_DATA_HAS_BEEN_UPDATED"));
+        assert_eq!(lobby_error::name(1), None);
+    }
 
     #[test]
     fn scraped_auth_enums_match_the_pinned_lsb_tree() {

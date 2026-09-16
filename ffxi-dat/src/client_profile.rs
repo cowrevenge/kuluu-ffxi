@@ -208,6 +208,14 @@ pub struct ClientProfile {
     pub item_layout: Option<ItemBlockLayout>,
 }
 
+/// The install's latest patch stamp alone, for callers that need the version
+/// string the client puts on the wire without hashing FFXiMain.dll.
+pub fn patch_version_at(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(PATCH_CFG))
+        .ok()
+        .and_then(|cfg| latest_patch_version(&cfg))
+}
+
 pub fn latest_patch_version(patch_cfg: &str) -> Option<String> {
     patch_cfg
         .lines()
@@ -260,9 +268,7 @@ impl ClientProfile {
             .and_then(|hash| KNOWN_CLIENTS.iter().find(|k| k.ffximain_sha256 == hash));
         let item_layout =
             ItemBlockLayout::probe_file(item_layout_dat).or(known.map(|k| k.item_layout));
-        let patch_version = std::fs::read_to_string(root.join(PATCH_CFG))
-            .ok()
-            .and_then(|cfg| latest_patch_version(&cfg));
+        let patch_version = patch_version_at(root);
         ClientProfile {
             known,
             ffximain_sha256,

@@ -712,6 +712,12 @@ pub(crate) fn update_shop_panel_system(
                         theme::DANGER
                     },
                 ),
+                // A sell total only exists once the server answers, and the
+                // label above already promises a figure for this sale — the
+                // purse under it would read as that figure.
+                None if !matches!(screen.focus, ShopFocus::List | ShopFocus::Menu) => {
+                    (APPRAISING.to_string(), theme::MUTED)
+                }
                 None => (format!("{} G", group_digits(gil)), theme::TEXT),
             },
             // The yes/no the priced question is asking for. Retail puts this
@@ -1329,6 +1335,34 @@ mod tests {
         let (title, hint) = help_bar_content(&s, &snap);
         assert_eq!(title, "Buy", "the bar still says where you are");
         assert!(hint.is_empty());
+    }
+
+    /// The gil box's label and its figure have to agree: while a sell quote is
+    /// outstanding the label promises this sale's total, so the purse must not
+    /// sit under it.
+    #[test]
+    fn an_unanswered_sale_shows_no_figure_rather_than_the_purse() {
+        let snap = SceneSnapshot {
+            shop: Some(shop_with(&[])),
+            containers: vec![ContainerView {
+                id: ffxi_proto::map::container::LOC_INVENTORY,
+                capacity: 30,
+                items: vec![inv_item(0, ffxi_proto::map::GIL_ITEM_NO, 921, false)],
+            }],
+            ..Default::default()
+        };
+        let mut s = ShopScreenState::opened();
+        s.mode = ShopMode::Sell;
+
+        s.focus = ShopFocus::List;
+        assert_eq!(running_total(&s, &snap, None), None, "the list shows the purse");
+
+        s.enter_confirm();
+        assert_eq!(
+            running_total(&s, &snap, None),
+            None,
+            "no quote yet, so no total to show"
+        );
     }
 
     #[test]

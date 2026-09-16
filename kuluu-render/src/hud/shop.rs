@@ -16,7 +16,7 @@
 use bevy::prelude::*;
 use kuluu_snapshot::{SceneSnapshot, ShopItem};
 
-use crate::hud::bazaar_view::{group_digits, item_name, viewport_start};
+use crate::hud::bazaar_view::{group_digits, item_name};
 use crate::hud::delivery::current_gil;
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
@@ -95,11 +95,23 @@ pub struct ShopScreenState {
     pub menu_cursor: usize,
     /// Cursor into the list the active mode shows.
     pub cursor: usize,
+    /// First row the list is drawing. Retail's item lists keep an explicit page
+    /// rather than centring the cursor
+    /// (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
+    pub page_start: usize,
     pub quantity: Option<Spinner>,
     /// A buy the player has sized, awaiting the yes/no. Sell confirmations are
     /// driven by `snapshot.shop.pending_sale` instead, because their price
     /// comes from the server.
     pub pending_buy: Option<PendingBuy>,
+
+    /// The client has closed the window but the snapshot still carries the
+    /// stock: `CloseShop` has to reach the session and the cleared state has to
+    /// come back, which is several frames. Without this latch the sync system
+    /// sees a live shop with the cursor back in the world and immediately
+    /// reopens it, so the window and its help bar strobe until the round trip
+    /// lands. Cleared when the snapshot's shop finally goes away.
+    pub dismissed: bool,
 }
 
 /// A purchase the player has sized but not yet confirmed.
@@ -122,11 +134,50 @@ impl ShopScreenState {
         *self = Self::default();
     }
 
+    /// Give up the window without forgetting that we did. Everything else
+    /// resets; [`Self::dismissed`] stays set until the snapshot catches up.
+    pub fn dismiss(&mut self) {
+        self.reset();
+        self.dismissed = true;
+    }
+
+    /// Up/Down: one row, clamped at both ends (retail's item lists do not
+    /// wrap). Leaving the drawn page scrolls it by a single row, leaving the
+    /// cursor on the edge row.
     pub fn move_cursor(&mut self, dy: i32, len: usize) {
         if len == 0 {
             return;
         }
-        self.cursor = (self.cursor as i32 + dy).rem_euclid(len as i32) as usize;
+        self.cursor = (self.cursor as i32 + dy).clamp(0, len as i32 - 1) as usize;
+        self.follow_cursor(len);
+    }
+
+    /// Left/Right: cursor and page both step a whole page, each clamped on its
+    /// own, so the cursor keeps its offset within the page except where the
+    /// clamp bites. Observed sequence (cursor/page): 10/1 -> 20/11 -> 30/21.
+    pub fn page(&mut self, dx: i32, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let step = dx * LIST_ROWS as i32;
+        self.cursor = (self.cursor as i32 + step).clamp(0, len as i32 - 1) as usize;
+        self.page_start =
+            (self.page_start as i32 + step).clamp(0, Self::max_page_start(len) as i32) as usize;
+        self.follow_cursor(len);
+    }
+
+    fn max_page_start(len: usize) -> usize {
+        len.saturating_sub(LIST_ROWS)
+    }
+
+    /// Pull the page just far enough to keep the cursor drawn.
+    fn follow_cursor(&mut self, len: usize) {
+        self.page_start = self.page_start.min(Self::max_page_start(len));
+        if self.cursor < self.page_start {
+            self.page_start = self.cursor;
+        } else if self.cursor >= self.page_start + LIST_ROWS {
+            self.page_start = self.cursor + 1 - LIST_ROWS;
+        }
     }
 
     pub fn move_menu_cursor(&mut self, dy: i32) {
@@ -143,6 +194,7 @@ impl ShopScreenState {
         self.mode = self.menu_mode();
         self.focus = ShopFocus::List;
         self.cursor = 0;
+        self.page_start = 0;
         self.quantity = None;
         self.pending_buy = None;
     }
@@ -150,6 +202,7 @@ impl ShopScreenState {
     /// Keep the cursor inside a list the server or the player's bag shrank.
     pub fn clamp(&mut self, len: usize) {
         self.cursor = self.cursor.min(len.saturating_sub(1));
+        self.follow_cursor(len);
         if len == 0 && matches!(self.focus, ShopFocus::List | ShopFocus::Quantity) {
             self.focus = ShopFocus::Menu;
             self.quantity = None;
@@ -495,7 +548,7 @@ pub(crate) fn update_shop_panel_system(
         return;
     };
     let snap: &SceneSnapshot = &state.snapshot;
-    if snap.shop.is_none() {
+    if snap.shop.is_none() || screen.dismissed {
         if panel.display != Display::None {
             panel.display = Display::None;
         }
@@ -507,7 +560,7 @@ pub(crate) fn update_shop_panel_system(
 
     let rows = rows_for(screen.mode, snap);
     let gil = current_gil(snap);
-    let start = viewport_start(screen.cursor, rows.len());
+    let start = screen.page_start.min(ShopScreenState::max_page_start(rows.len()));
     let focused = rows.get(screen.cursor).copied();
     let list_active = !matches!(screen.focus, ShopFocus::Menu);
 
@@ -542,27 +595,33 @@ pub(crate) fn update_shop_panel_system(
                 None => (String::new(), theme::TEXT),
             },
             ShopTextRole::MenuTitle => (SHOP_TITLE.to_string(), theme::TITLE),
+            // The picker always marks one row: the one the cursor is on while
+            // it has focus, and the side being browsed once the list takes over.
             ShopTextRole::MenuRow(i) => {
                 let mode = ShopMode::ROWS[i];
-                let on_cursor = !list_active && screen.menu_cursor == i;
+                let marked = if list_active {
+                    screen.mode == mode
+                } else {
+                    screen.menu_cursor == i
+                };
                 (
-                    format!("{}{}", item_ui::cursor_prefix(on_cursor), mode.label()),
-                    if on_cursor {
-                        theme::CURSOR
-                    } else if list_active && screen.mode == mode {
-                        theme::TITLE
-                    } else {
-                        theme::TEXT
+                    format!("{}{}", item_ui::cursor_prefix(marked), mode.label()),
+                    match (marked, list_active) {
+                        (true, false) => theme::CURSOR,
+                        (true, true) => theme::TITLE,
+                        (false, _) => theme::TEXT,
                     },
                 )
             }
             // Retail swaps the Current Gil box for the quantity picker while a
-            // stack is being sized.
-            ShopTextRole::GilLabel => match screen.quantity.as_ref() {
-                Some(spin) => (spin.label(), theme::TITLE),
-                None => ("Current Gil".to_string(), theme::MUTED),
+            // stack is being sized. The priced step then labels what the figure
+            // under it is, so it cannot be misread as the player's purse.
+            ShopTextRole::GilLabel => match (screen.quantity.as_ref(), screen.focus) {
+                (Some(spin), _) => (spin.label(), theme::TITLE),
+                (None, ShopFocus::Confirm) => (confirm_total_label(screen.mode), theme::MUTED),
+                (None, _) => ("Current Gil".to_string(), theme::MUTED),
             },
-            ShopTextRole::GilValue => match confirm_total(&screen, snap) {
+            ShopTextRole::GilValue => match running_total(&screen, snap, focused.as_ref()) {
                 Some(total) => (
                     format!("{} G?", group_digits(total)),
                     if screen.mode == ShopMode::Sell || total <= gil {
@@ -578,7 +637,18 @@ pub(crate) fn update_shop_panel_system(
                     Some(line) => (line, theme::CURSOR),
                     None => (APPRAISING.to_string(), theme::MUTED),
                 },
-                (_, Some(_)) => (detail_name.clone(), theme::TITLE),
+                (_, Some(row)) => match sell_unit_price(&screen, snap, Some(&row)) {
+                    Some(unit) => (
+                        format!("{detail_name} - {} gil each", group_digits(unit)),
+                        theme::TITLE,
+                    ),
+                    None if screen.mode == ShopMode::Sell
+                        && matches!(screen.focus, ShopFocus::Quantity) =>
+                    {
+                        (format!("{detail_name} - {APPRAISING}"), theme::MUTED)
+                    }
+                    None => (detail_name.clone(), theme::TITLE),
+                },
                 (_, None) => (empty_list_prompt(screen.mode).to_string(), theme::MUTED),
             },
             ShopTextRole::DetailBody => {
@@ -611,20 +681,56 @@ pub(crate) fn update_shop_panel_system(
     }
 }
 
-/// The gil figure the confirm step is asking about, or `None` when nothing is
-/// pending.
-fn confirm_total(screen: &ShopScreenState, snap: &SceneSnapshot) -> Option<u32> {
-    if !matches!(screen.focus, ShopFocus::Confirm) {
+/// The per-unit price the server quoted for the focused sell row, once its
+/// appraisal has come back. `None` on the buy side (the list already prices
+/// every row) and while a sell quote is still in flight.
+pub fn sell_unit_price(
+    screen: &ShopScreenState,
+    snap: &SceneSnapshot,
+    row: Option<&ShopRow>,
+) -> Option<u32> {
+    if screen.mode != ShopMode::Sell {
         return None;
     }
-    match screen.mode {
-        ShopMode::Buy => screen.pending_buy.map(|b| b.total_gil),
-        ShopMode::Sell => snap
-            .shop
-            .as_ref()?
-            .pending_sale
-            .as_ref()
-            .map(|s| s.total_gil()),
+    let sale = snap.shop.as_ref()?.pending_sale.as_ref()?;
+    let row = row?;
+    (sale.item_index == row.index && sale.item_no == row.item_no).then_some(sale.unit_price)
+}
+
+/// The gil figure the box is asking about: the priced confirm step, or the
+/// amount a stack being sized is worth so far.
+fn running_total(
+    screen: &ShopScreenState,
+    snap: &SceneSnapshot,
+    row: Option<&ShopRow>,
+) -> Option<u32> {
+    match screen.focus {
+        ShopFocus::Confirm => match screen.mode {
+            ShopMode::Buy => screen.pending_buy.map(|b| b.total_gil),
+            ShopMode::Sell => snap
+                .shop
+                .as_ref()?
+                .pending_sale
+                .as_ref()
+                .map(|s| s.total_gil()),
+        },
+        ShopFocus::Quantity => {
+            let picked = screen.quantity.as_ref()?.confirm();
+            let unit = match screen.mode {
+                ShopMode::Buy => row?.price,
+                ShopMode::Sell => sell_unit_price(screen, snap, row)?,
+            };
+            Some(unit.saturating_mul(picked))
+        }
+        _ => None,
+    }
+}
+
+/// What the gil box is showing while a transaction is priced.
+fn confirm_total_label(mode: ShopMode) -> String {
+    match mode {
+        ShopMode::Buy => "Total Cost".to_string(),
+        ShopMode::Sell => "You Receive".to_string(),
     }
 }
 
@@ -798,6 +904,138 @@ mod tests {
         assert_eq!((buy.shop_index, buy.quantity, buy.total_gil), (3, 4, 1000));
         assert!(s.quantity.is_none(), "the picker closes behind the prompt");
         assert_eq!(s.focus, ShopFocus::Confirm);
+    }
+
+    /// The observed retail sequence, 0-based (cursor/page start):
+    /// 10/1 -> 20/11 -> 30/21 -> 40/31 -> 50/41 -> 58/49 (clamped) -> Left -> 48/39
+    /// (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
+    #[test]
+    fn left_right_page_the_list_the_way_retail_does() {
+        const LEN: usize = 59;
+        let mut s = ShopScreenState {
+            focus: ShopFocus::List,
+            cursor: 10,
+            page_start: 1,
+            ..Default::default()
+        };
+        for expected in [(20, 11), (30, 21), (40, 31), (50, 41), (58, 49)] {
+            s.page(1, LEN);
+            assert_eq!((s.cursor, s.page_start), expected);
+        }
+        s.page(1, LEN);
+        assert_eq!(
+            (s.cursor, s.page_start),
+            (58, 49),
+            "both ends clamp instead of wrapping"
+        );
+        s.page(-1, LEN);
+        assert_eq!((s.cursor, s.page_start), (48, 39));
+    }
+
+    #[test]
+    fn up_down_clamp_and_scroll_the_page_one_row() {
+        const LEN: usize = 30;
+        let mut s = ShopScreenState {
+            focus: ShopFocus::List,
+            ..Default::default()
+        };
+        s.move_cursor(-1, LEN);
+        assert_eq!((s.cursor, s.page_start), (0, 0), "the top row holds");
+
+        for _ in 0..LIST_ROWS {
+            s.move_cursor(1, LEN);
+        }
+        assert_eq!(
+            (s.cursor, s.page_start),
+            (LIST_ROWS, 1),
+            "leaving the page scrolls it by one row, cursor on the edge"
+        );
+
+        for _ in 0..LEN {
+            s.move_cursor(1, LEN);
+        }
+        assert_eq!((s.cursor, s.page_start), (LEN - 1, LEN - LIST_ROWS));
+    }
+
+    #[test]
+    fn a_short_list_never_scrolls() {
+        let mut s = ShopScreenState {
+            focus: ShopFocus::List,
+            ..Default::default()
+        };
+        s.page(1, 4);
+        assert_eq!((s.cursor, s.page_start), (3, 0));
+    }
+
+    #[test]
+    fn a_sell_quote_prices_the_focused_row_only() {
+        let row = ShopRow {
+            index: 8,
+            item_no: 16992,
+            price: 0,
+            quantity: 12,
+        };
+        let snap = SceneSnapshot {
+            shop: Some(ShopState {
+                pending_sale: Some(ShopSale {
+                    item_index: 8,
+                    item_no: 16992,
+                    unit_price: 10,
+                    count: 1,
+                }),
+                ..shop_with(&[])
+            }),
+            ..Default::default()
+        };
+        let sell = ShopScreenState {
+            mode: ShopMode::Sell,
+            focus: ShopFocus::Quantity,
+            quantity: Some(Spinner::item(12)),
+            ..Default::default()
+        };
+        assert_eq!(sell_unit_price(&sell, &snap, Some(&row)), Some(10));
+
+        // A quote for a different slot must not price this row.
+        let other = ShopRow { index: 9, ..row };
+        assert_eq!(sell_unit_price(&sell, &snap, Some(&other)), None);
+
+        // The buy side prices itself off the listed price, never the quote.
+        let buy = ShopScreenState {
+            mode: ShopMode::Buy,
+            ..sell.clone()
+        };
+        assert_eq!(sell_unit_price(&buy, &snap, Some(&row)), None);
+    }
+
+    #[test]
+    fn sizing_a_stack_shows_what_it_is_worth_so_far() {
+        let row = ShopRow {
+            index: 8,
+            item_no: 16992,
+            price: 0,
+            quantity: 12,
+        };
+        let snap = SceneSnapshot {
+            shop: Some(ShopState {
+                pending_sale: Some(ShopSale {
+                    item_index: 8,
+                    item_no: 16992,
+                    unit_price: 10,
+                    count: 1,
+                }),
+                ..shop_with(&[])
+            }),
+            ..Default::default()
+        };
+        let mut spin = Spinner::item(12);
+        spin.set_all();
+        let s = ShopScreenState {
+            mode: ShopMode::Sell,
+            focus: ShopFocus::Quantity,
+            quantity: Some(spin),
+            ..Default::default()
+        };
+        assert_eq!(running_total(&s, &snap, Some(&row)), Some(120));
     }
 
     #[test]

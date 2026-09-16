@@ -29,12 +29,23 @@ pub fn shop_mode_sync_system(
     }
 
     let Some(shop) = state.snapshot.shop.as_ref() else {
-        if matches!(*mode, InputMode::Shop) {
+        if screen.dismissed || matches!(*mode, InputMode::Shop) {
             screen.reset();
+        }
+        if matches!(*mode, InputMode::Shop) {
             *mode = InputMode::World;
         }
         return;
     };
+
+    // Closed on this side already; the snapshot just has not caught up. Do not
+    // reopen the window on top of the player.
+    if screen.dismissed {
+        if matches!(*mode, InputMode::Shop) {
+            *mode = InputMode::World;
+        }
+        return;
+    }
 
     if zoned {
         close_shop(&cmd_tx, &mut mode, &mut screen);
@@ -62,7 +73,7 @@ pub fn shop_mode_sync_system(
 
 fn close_shop(cmd_tx: &CommandTx, mode: &mut InputMode, screen: &mut ShopScreenState) {
     let _ = cmd_tx.0.try_send(AgentCommand::CloseShop);
-    screen.reset();
+    screen.dismiss();
     *mode = InputMode::World;
 }
 
@@ -95,8 +106,7 @@ pub(super) fn handle_shop_key(
     scene_state: &mut SceneState,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
-    if scene_state.snapshot.shop.is_none() {
-        screen.reset();
+    if scene_state.snapshot.shop.is_none() || screen.dismissed {
         return Some(InputMode::World);
     }
     let rows = shop::rows_for(screen.mode, &scene_state.snapshot);
@@ -134,7 +144,7 @@ fn handle_menu_key(
     }
     if bindings.matches_logical(Action::NavCancel, key) {
         let _ = cmd_tx.try_send(AgentCommand::CloseShop);
-        screen.reset();
+        screen.dismiss();
         return Some(InputMode::World);
     }
     if bindings.matches_logical(Action::NavConfirm, key) {
@@ -159,6 +169,16 @@ fn handle_list_key(
         screen.move_cursor(1, rows.len());
         return;
     }
+    // Retail's item lists page ten rows on Left/Right
+    // (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
+    if bindings.matches_logical(Action::NavLeft, key) {
+        screen.page(-1, rows.len());
+        return;
+    }
+    if bindings.matches_logical(Action::NavRight, key) {
+        screen.page(1, rows.len());
+        return;
+    }
     if bindings.matches_logical(Action::NavCancel, key) {
         screen.focus = ShopFocus::Menu;
         return;
@@ -171,11 +191,25 @@ fn handle_list_key(
     };
     match begin_quantity(screen.mode, &row) {
         Some(spinner) => {
+            // A sell row carries no price of its own, so the first confirm buys
+            // the quote: appraise a single unit and let the picker show what
+            // each one is worth before the player commits to a count.
+            if matches!(screen.mode, ShopMode::Sell) {
+                request_appraisal(cmd_tx, &row, 1);
+            }
             screen.quantity = Some(spinner);
             screen.focus = ShopFocus::Quantity;
         }
         None => commit_quantity(screen, scene_state, cmd_tx, &row, 1),
     }
+}
+
+fn request_appraisal(cmd_tx: &Sender<AgentCommand>, row: &ShopRow, qty: u32) {
+    let _ = cmd_tx.try_send(AgentCommand::ShopSellReq {
+        qty,
+        item_no: row.item_no,
+        item_index: row.index,
+    });
 }
 
 fn handle_quantity_key(
@@ -202,6 +236,9 @@ fn handle_quantity_key(
         return;
     }
     if bindings.matches_logical(Action::NavCancel, key) {
+        if matches!(screen.mode, ShopMode::Sell) {
+            let _ = cmd_tx.try_send(AgentCommand::ShopSellCancel);
+        }
         screen.quantity = None;
         screen.focus = ShopFocus::List;
         return;
@@ -301,11 +338,9 @@ fn commit_quantity(
         ShopMode::Sell => {
             screen.quantity = None;
             screen.focus = ShopFocus::Confirm;
-            let _ = cmd_tx.try_send(AgentCommand::ShopSellReq {
-                qty: quantity,
-                item_no: row.item_no,
-                item_index: row.index,
-            });
+            // Re-price at the chosen count: the quote shown while sizing was
+            // for one unit, and the confirm prompt states the whole sale.
+            request_appraisal(cmd_tx, row, quantity);
         }
     }
 }
@@ -349,5 +384,51 @@ mod tests {
     fn a_shop_with_no_resolved_vendor_is_never_range_closed() {
         let snap = SceneSnapshot::default();
         assert!(!vendor_out_of_range(&snap, 0));
+    }
+
+    /// Closing is a client decision that takes a round trip to reach the
+    /// snapshot. Until it lands, the sync system must leave the still-present
+    /// stock alone instead of reopening the window on top of the player — that
+    /// oscillation strobed the window and its help bar every frame.
+    #[test]
+    fn a_dismissed_shop_is_not_reopened_while_the_stock_lingers() {
+        let mut app = App::new();
+        app.init_resource::<InputMode>()
+            .init_resource::<ShopScreenState>()
+            .insert_resource(CommandTx(tokio::sync::mpsc::channel(8).0))
+            .insert_resource(SceneState {
+                snapshot: SceneSnapshot {
+                    zone_id: Some(245),
+                    shop: Some(kuluu_snapshot::ShopState {
+                        opened: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        app.add_systems(Update, shop_mode_sync_system);
+
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::Shop),
+            "a live shop takes the cursor"
+        );
+
+        app.world_mut().resource_mut::<ShopScreenState>().dismiss();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::World;
+
+        for _ in 0..5 {
+            app.update();
+            assert!(
+                matches!(*app.world().resource::<InputMode>(), InputMode::World),
+                "the window must stay closed until the snapshot catches up"
+            );
+        }
+
+        // The session finally clears the stock: the latch lifts.
+        app.world_mut().resource_mut::<SceneState>().snapshot.shop = None;
+        app.update();
+        assert!(!app.world().resource::<ShopScreenState>().dismissed);
     }
 }

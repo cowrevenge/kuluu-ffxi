@@ -1515,10 +1515,13 @@ fn handle_sub_packet(
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
-                let (item_no, count) = match shop.pending_sell.take() {
-                    Some((item_no, qty)) => (item_no, if count == 0 { qty } else { count }),
-                    None => (0, count),
+                // The appraisal the confirm re-sends to satisfy the server's
+                // prior-packet check answers back too, with nothing waiting on
+                // it. Surfacing that echo would re-prompt a sale already made.
+                let Some((item_no, qty)) = shop.pending_sell.take() else {
+                    return;
                 };
+                let count = if count == 0 { qty } else { count };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
@@ -3522,16 +3525,43 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellConfirm) => {
+                        // SHOP_SELL_SET is validated against the *immediately*
+                        // preceding c2s packet — `m_LastPacketType`, stamped per
+                        // accepted packet in vendor/server/src/map/packet_system.cpp
+                        // ValidatedPacketHandler — so the 200ms tick's position
+                        // update between the appraisal and the confirm is enough
+                        // to get the sale refused. Retail re-sends the appraisal
+                        // every time for exactly this reason ("Even if the client
+                        // has already price checked an item in the same menu, it
+                        // will send both packets every time" — research/XiPackets
+                        // client 0x0085), so both ride one datagram, whose header
+                        // carries the last subpacket's sync.
+                        let Some(sale) = shop_session
+                            .open
+                            .as_ref()
+                            .and_then(|open| open.pending_sale.clone())
+                        else {
+                            tracing::warn!("sell confirm with no appraisal pending");
+                            continue;
+                        };
+                        let mut payload = build_subpacket_shop_sell_req(
+                            sub_seq,
+                            sale.count,
+                            sale.item_no,
+                            sale.item_index,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        payload.extend_from_slice(&build_subpacket_shop_sell_set(sub_seq));
+                        sub_seq = sub_seq.wrapping_add(1);
                         // The server answers a completed sale with MESSAGE +
                         // ITEM_SAME rather than another 0x03D
                         // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
                         // process), so the appraisal is retired here.
+                        shop_session.pending_sell = None;
                         if let Some(open) = shop_session.open.as_mut() {
                             open.pending_sale = None;
                         }
                         shop_session.publish(&event_tx);
-                        let payload = build_subpacket_shop_sell_set(sub_seq);
-                        sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
                             .await

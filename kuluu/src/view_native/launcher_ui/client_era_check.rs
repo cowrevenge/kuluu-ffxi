@@ -192,22 +192,13 @@ pub(super) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launcher_store::AuthFlavorKind;
     use ffxi_proto::login::{LSB_CLIENT_VER, LSB_DEFAULT_VER_LOCK};
 
     fn profile(client_ver: Option<&str>, ver_lock: Option<u8>) -> ServerProfile {
         ServerProfile {
-            name: "local".into(),
-            host: "127.0.0.1".into(),
-            auth_port: 54231,
-            data_port: 54230,
-            view_port: 54001,
-            flavor: AuthFlavorKind::Json,
-            xiloader_version: None,
-            version_check_url: None,
             client_ver: client_ver.map(str::to_string),
             ver_lock,
-            preferred_client: None,
+            ..ServerProfile::lsb_defaults("local", launcher_store::LOCALHOST)
         }
     }
 

@@ -80,9 +80,9 @@ impl ServerProfile {
         Self {
             name: name.to_string(),
             host: host.to_string(),
-            auth_port: ffxi_proto::login::LSB_LOGIN_AUTH_PORT,
-            data_port: ffxi_proto::login::LSB_LOGIN_DATA_PORT,
-            view_port: ffxi_proto::login::LSB_LOGIN_VIEW_PORT,
+            auth_port: ffxi_proto::login::LOGIN_AUTH_PORT,
+            data_port: ffxi_proto::login::LOGIN_DATA_PORT,
+            view_port: ffxi_proto::login::LOGIN_VIEW_PORT,
             flavor: AuthFlavorKind::Json,
             xiloader_version: None,
             version_check_url: None,
@@ -399,10 +399,7 @@ mod tests {
             Some(HORIZONXI_XILOADER_VERSION)
         );
         assert_eq!(hxi.profile.client_ver.as_deref(), Some("30230905_0"));
-        assert_eq!(
-            hxi.profile.auth_port,
-            ffxi_proto::login::LSB_LOGIN_AUTH_PORT
-        );
+        assert_eq!(hxi.profile.auth_port, ffxi_proto::login::LOGIN_AUTH_PORT);
         let local = templates
             .iter()
             .find(|t| t.label == "Local LandSandBoat")
@@ -417,9 +414,14 @@ mod tests {
 
     #[test]
     fn profile_without_era_fields_parses_and_falls_back_to_the_lsb_pin() {
-        let j = r#"{"name":"local","host":"127.0.0.1","auth_port":54231,
-            "data_port":54230,"view_port":54001,"flavor":"json"}"#;
-        let p: ServerProfile = serde_json::from_str(j).unwrap();
+        let j = format!(
+            r#"{{"name":"local","host":"127.0.0.1","auth_port":{},
+            "data_port":{},"view_port":{},"flavor":"json"}}"#,
+            ffxi_proto::login::LOGIN_AUTH_PORT,
+            ffxi_proto::login::LOGIN_DATA_PORT,
+            ffxi_proto::login::LOGIN_VIEW_PORT
+        );
+        let p: ServerProfile = serde_json::from_str(&j).unwrap();
         assert_eq!(p.client_ver, None);
         assert_eq!(p.ver_lock, None);
         assert_eq!(p.preferred_client, None);

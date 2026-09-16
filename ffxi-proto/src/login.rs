@@ -9,10 +9,6 @@ pub const CLIENT_VER_ENV: &str = "FFXI_CLIENT_VER";
 
 pub const IXFF_TERMINATOR: u32 = u32::from_le_bytes(*b"IXFF");
 
-pub const LOGIN_AUTH_PORT: u16 = 54231;
-pub const LOGIN_DATA_PORT: u16 = 54230;
-pub const LOGIN_VIEW_PORT: u16 = 54001;
-
 // vendor/server/src/login/view_session.cpp view_session::read_func case 0x26:
 // the lobby compares only the first six characters of the client's patch
 // stamp against login.CLIENT_VER, replacing the rest with a fixed suffix.
@@ -70,10 +66,11 @@ mod tests {
     // pin bump updates both literals alongside the scrape.
     const LSB_PINNED_CLIENT_VER: &str = "30260904_1";
     const LSB_PINNED_VER_LOCK: u8 = 2;
-    // vendor/server/settings/default/network.lua LOGIN_*_PORT
+    // vendor/server/settings/default/network.lua LOGIN_*_PORT / MAP_PORT
     const LSB_PINNED_LOGIN_AUTH_PORT: u16 = 54231;
     const LSB_PINNED_LOGIN_DATA_PORT: u16 = 54230;
     const LSB_PINNED_LOGIN_VIEW_PORT: u16 = 54001;
+    const LSB_PINNED_MAP_PORT: u16 = 54230;
 
     /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md example
     /// packet: excode_client 0x0FFF, i.e. every expansion bit LSB names.
@@ -101,9 +98,10 @@ mod tests {
     fn scraped_login_settings_match_the_pinned_lsb_tree() {
         assert_eq!(LSB_CLIENT_VER, LSB_PINNED_CLIENT_VER);
         assert_eq!(LSB_DEFAULT_VER_LOCK, LSB_PINNED_VER_LOCK);
-        assert_eq!(LSB_LOGIN_AUTH_PORT, LSB_PINNED_LOGIN_AUTH_PORT);
-        assert_eq!(LSB_LOGIN_DATA_PORT, LSB_PINNED_LOGIN_DATA_PORT);
-        assert_eq!(LSB_LOGIN_VIEW_PORT, LSB_PINNED_LOGIN_VIEW_PORT);
+        assert_eq!(LOGIN_AUTH_PORT, LSB_PINNED_LOGIN_AUTH_PORT);
+        assert_eq!(LOGIN_DATA_PORT, LSB_PINNED_LOGIN_DATA_PORT);
+        assert_eq!(LOGIN_VIEW_PORT, LSB_PINNED_LOGIN_VIEW_PORT);
+        assert_eq!(crate::map::MAP_PORT, LSB_PINNED_MAP_PORT);
     }
 
     #[test]

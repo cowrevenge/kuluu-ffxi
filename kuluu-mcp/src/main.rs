@@ -1020,9 +1020,9 @@ async fn main() -> Result<()> {
         Some(session::Config {
             server: read_env("FFXI_SERVER").unwrap_or_else(|_| "127.0.0.1".into()),
             map_host_override: std::env::var("FFXI_MAP_HOST_OVERRIDE").ok(),
-            auth_port: parse_port("FFXI_AUTH_PORT", 54231)?,
-            data_port: parse_port("FFXI_DATA_PORT", 54230)?,
-            view_port: parse_port("FFXI_VIEW_PORT", 54001)?,
+            auth_port: parse_port("FFXI_AUTH_PORT", ffxi_proto::login::LOGIN_AUTH_PORT)?,
+            data_port: parse_port("FFXI_DATA_PORT", ffxi_proto::login::LOGIN_DATA_PORT)?,
+            view_port: parse_port("FFXI_VIEW_PORT", ffxi_proto::login::LOGIN_VIEW_PORT)?,
             user: read_env("FFXI_USER")?,
             password: read_env("FFXI_PASS")?,
             char_selection,

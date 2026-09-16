@@ -4410,6 +4410,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "ffxi-dat",
+ "ffxi-proto",
  "kuluu-session",
  "rmcp",
  "schemars",

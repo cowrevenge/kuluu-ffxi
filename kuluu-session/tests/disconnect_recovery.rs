@@ -29,7 +29,7 @@ async fn disconnect_recovery_reconnects_after_map_restart() {
     let auth_port: u16 = std::env::var("AUTH_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(54231);
+        .unwrap_or(ffxi_proto::login::LOGIN_AUTH_PORT);
 
     if !is_reachable(&server_host, auth_port).await {
         eprintln!("skipping: LSB stack not reachable at {server_host}:{auth_port}");

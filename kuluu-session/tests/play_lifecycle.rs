@@ -31,9 +31,9 @@ async fn play_lifecycle_against_live_lsb() {
     let auth_port = std::env::var("AUTH_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(54231);
-    let data_port = 54230;
-    let view_port = 54001;
+        .unwrap_or(ffxi_proto::login::LOGIN_AUTH_PORT);
+    let data_port = ffxi_proto::login::LOGIN_DATA_PORT;
+    let view_port = ffxi_proto::login::LOGIN_VIEW_PORT;
 
     if !is_reachable(&server_host, auth_port).await {
         eprintln!(

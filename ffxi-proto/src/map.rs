@@ -1,4 +1,4 @@
-pub const MAP_PORT: u16 = 54230;
+include!(concat!(env!("OUT_DIR"), "/map_settings_table.rs"));
 
 pub const MAX_DATAGRAM: usize = 2500;
 

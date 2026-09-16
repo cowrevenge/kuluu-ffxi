@@ -1085,7 +1085,7 @@ mod tests {
     const SESSION_HASH: [u8; 16] = [0x5A; 16];
     const KEY3: [u8; 20] = [0x11; 20];
     const HANDOFF_SERVER_IP: u32 = 0x0100_007F;
-    const HANDOFF_SERVER_PORT: u16 = 54230;
+    const HANDOFF_SERVER_PORT: u16 = ffxi_proto::map::MAP_PORT;
     const DATA_ACK_SELECT: [u8; 5] = [DATA_RESP_SELECT_ACK, 0, 0, 0, 0];
 
     fn slot(char_id: u32, name: &str) -> CharSlot {

@@ -834,9 +834,9 @@ mod era_tests {
         ServerProfile {
             name: name.into(),
             host: "127.0.0.1".into(),
-            auth_port: 54231,
-            data_port: 54230,
-            view_port: 54001,
+            auth_port: ffxi_proto::login::LOGIN_AUTH_PORT,
+            data_port: ffxi_proto::login::LOGIN_DATA_PORT,
+            view_port: ffxi_proto::login::LOGIN_VIEW_PORT,
             flavor: AuthFlavorKind::Json,
             xiloader_version: None,
             version_check_url: None,

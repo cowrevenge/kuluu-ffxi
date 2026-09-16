@@ -44,7 +44,7 @@ fn json_result(resp: &Value, request: &str) -> Result<u8> {
 
 fn describe_login_result(code: u8) -> String {
     match code {
-        LOGIN_FAIL => "login failed".into(),
+        LOGIN_FAIL => "account status does not permit login (banned or suspended)".into(),
         LOGIN_ERROR => "invalid username or password".into(),
         LOGIN_ERROR_ALREADY_LOGGED_IN => "account already logged in".into(),
         LOGIN_ERROR_VERSION_UNSUPPORTED => "loader version not supported by this server".into(),

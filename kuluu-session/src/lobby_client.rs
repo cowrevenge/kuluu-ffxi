@@ -36,7 +36,10 @@ pub const CAP_SKIP_INTRO_CS: u32 = 1 << 0;
 
 // research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md: retail's first
 // lobby packet; vendor/server/src/login/view_session.cpp view_session::read_func
-// case 0x26 reads only versionCode from it.
+// case 0x26 reads only versionCode from it. The header's identifer is an MD5
+// of the packet on retail (research/XiPackets/lobby/Header.md) but the auth
+// session hash on LSB (vendor/server/src/login/login_helpers.cpp
+// getHashFromPacket); LSB is the connect target, so the hash goes there.
 const VIEW_CMD_LOBBY_LOGIN: u32 = 0x26;
 const LOBBY_LOGIN_PACKET_SIZE: usize = 0x98;
 const LOBBY_LOGIN_CLIENT_CODE_OFFSET: usize = 0x2C;
@@ -149,15 +152,18 @@ pub struct LobbyClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LobbyKey {
     pub key: u32,
-    pub excode_server: u16,
-    pub excode_server2: u16,
+    /// uint32 on the wire; LSB fills the low half from a uint16 bitmask.
+    pub excode_server: u32,
+    pub excode_server2: u32,
 }
 
 impl LobbyKey {
     pub fn expansion_names(&self) -> Vec<&'static str> {
         expansion_display::NAMES
             .iter()
-            .filter(|(bit, name)| self.excode_server & bit != 0 && !name.starts_with("UNUSED_"))
+            .filter(|(bit, name)| {
+                self.excode_server & u32::from(*bit) != 0 && !name.starts_with("UNUSED_")
+            })
             .map(|(_, name)| *name)
             .collect()
     }
@@ -165,7 +171,9 @@ impl LobbyKey {
     pub fn feature_names(&self) -> Vec<&'static str> {
         feature_display::NAMES
             .iter()
-            .filter(|(bit, name)| self.excode_server2 & bit != 0 && !name.starts_with("UNUSED_"))
+            .filter(|(bit, name)| {
+                self.excode_server2 & u32::from(*bit) != 0 && !name.starts_with("UNUSED_")
+            })
             .map(|(_, name)| *name)
             .collect()
     }
@@ -181,7 +189,14 @@ pub fn client_version_code() -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
     {
-        return v;
+        if v.len() >= ffxi_proto::login::CLIENT_VER_ERA_LEN {
+            return v;
+        }
+        tracing::warn!(
+            value = %v,
+            "{CLIENT_VER_ENV} is shorter than the {} bytes the lobby compares; ignoring it",
+            ffxi_proto::login::CLIENT_VER_ERA_LEN
+        );
     }
     let root = std::env::var_os(ffxi_dat::archive::DAT_PATH_ENV)
         .map(std::path::PathBuf::from)
@@ -617,8 +632,8 @@ fn parse_key_reply(buf: &[u8; KEY_PACKET_SIZE]) -> Result<LobbyKey> {
     let word = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
     Ok(LobbyKey {
         key: word(KEY_OFFSET),
-        excode_server: word(KEY_EXCODE_SERVER_OFFSET) as u16,
-        excode_server2: word(KEY_EXCODE_SERVER2_OFFSET) as u16,
+        excode_server: word(KEY_EXCODE_SERVER_OFFSET),
+        excode_server2: word(KEY_EXCODE_SERVER2_OFFSET),
     })
 }
 
@@ -648,6 +663,13 @@ async fn read_key_reply(stream: &mut TcpStream) -> Result<LobbyKey> {
                 .read_exact(&mut rest)
                 .await
                 .context("reading 0x26 error reply body")?;
+            let term = u32::from_le_bytes(rest[0..4].try_into().unwrap());
+            if term != IXFF_TERMINATOR {
+                bail!("0x26 error reply: bad terminator {term:#x}");
+            }
+            if rest[4] != VIEW_REPLY_ERROR_RESULT {
+                bail!("0x26 error reply: unexpected result {:#x}", rest[4]);
+            }
             let at = VIEW_ERROR_CODE_OFFSET - 4;
             let code = u16::from_le_bytes(rest[at..at + 2].try_into().unwrap());
             Err(AuthRejected(format!(
@@ -777,6 +799,7 @@ fn build_view_register_char(
 // result reply on success, loginHelpers::generateErrorMessage otherwise.
 const VIEW_REPLY_RESULT_SIZE: usize = 0x20;
 const VIEW_REPLY_ERROR_SIZE: usize = 0x24;
+const VIEW_REPLY_ERROR_RESULT: u8 = 0x04;
 
 async fn read_create_reply(stream: &mut TcpStream, stage: &str) -> Result<()> {
     let mut size_bytes = [0u8; 4];
@@ -1152,18 +1175,18 @@ mod tests {
         assert_eq!(parse_server_caps(&buf), 0);
     }
 
-    const FAKE_EXCODE_SERVER: u16 = expansion_display::RISE_OF_ZILART
+    const FAKE_EXCODE_SERVER: u32 = (expansion_display::RISE_OF_ZILART
         | expansion_display::CHAINS_OF_PROMATHIA
-        | expansion_display::BASE_GAME;
+        | expansion_display::BASE_GAME) as u32;
 
-    fn key_packet(excode_server: u16) -> Vec<u8> {
+    fn key_packet(excode_server: u32) -> Vec<u8> {
         let mut buf = vec![0u8; KEY_PACKET_SIZE];
         buf[0..4].copy_from_slice(&(KEY_PACKET_SIZE as u32).to_le_bytes());
         buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
         buf[8..12].copy_from_slice(&VIEW_RESP_KEY.to_le_bytes());
         buf[KEY_OFFSET..KEY_OFFSET + 4].copy_from_slice(&0xAD5D_E04Fu32.to_le_bytes());
         buf[KEY_EXCODE_SERVER_OFFSET..KEY_EXCODE_SERVER_OFFSET + 4]
-            .copy_from_slice(&u32::from(excode_server).to_le_bytes());
+            .copy_from_slice(&excode_server.to_le_bytes());
         buf
     }
 
@@ -1205,6 +1228,12 @@ mod tests {
         assert_eq!(key.excode_server2, 0x0001);
         assert_eq!(key.expansion_names().len(), 12);
         assert_eq!(key.feature_names(), vec!["SECURE_TOKEN"]);
+        buf[KEY_EXCODE_SERVER_OFFSET + 2] = 0x01;
+        assert_eq!(
+            parse_key_reply(&buf).unwrap().excode_server,
+            0x0001_0FFF,
+            "the wire field is 32 bits wide; the high half is kept"
+        );
         buf[8] = 0x04;
         assert!(parse_key_reply(&buf).is_err());
     }

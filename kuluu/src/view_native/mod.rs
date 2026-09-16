@@ -3,6 +3,7 @@ pub mod camera_collision;
 pub mod collision_bvh;
 pub mod cutscene_motion_done;
 pub mod debug_heights;
+pub mod engage;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
 mod gamepad_input;
@@ -739,6 +740,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,
             input::dispatch_target_change_system,
+            input::engage_locks_target_system,
             input::sync_target_lock_system,
             input::tab_cycle_invalidate_system,
             key_items::key_items_mark_seen_system,

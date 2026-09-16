@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn engaged_goal_does_not_create_or_replace_a_camera_lock() {
+    fn auto_clear_never_invents_a_camera_lock() {
         let mut scene = crate::snapshot::SceneState::default();
         scene.snapshot.current_goal = Some(kuluu_snapshot::ReactorGoal::Engaged {
             target_id: 42,
@@ -119,10 +119,14 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(scene);
         world.insert_resource(crate::scene::Target::default());
+        world.insert_resource(crate::scene::SubTarget::default());
         world.insert_resource(LockOn::default());
         world
             .run_system_once(crate::scene::auto_clear_target_system)
             .unwrap();
+        // Lock creation is engage_locks_target_system's job
+        // (kuluu/src/view_native/input.rs); auto-clear only drops a lock
+        // whose entity is gone or no longer targetable.
         assert_eq!(world.resource::<LockOn>().target_id, None);
 
         world.resource_mut::<LockOn>().target_id = Some(7);

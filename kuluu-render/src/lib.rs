@@ -132,7 +132,7 @@ pub use picking::{
 pub use scene::{
     entity_visual_height, ffxi_to_bevy, process_entity_look_changes, setup_world,
     sync_aggro_system, sync_entities_system, sync_entity_looks_system, Aggroing, BakedActor,
-    EntityMaterials, EntityMesh, Target, TrackedEntities,
+    EntityMaterials, EntityMesh, SubTarget, Target, TrackedEntities,
 };
 pub use snapshot::{
     apply_delta, drain_toast_events, ingest_system, EventLog, SceneState, ToastEvent,
@@ -259,6 +259,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<TrackedEntities>()
             .init_resource::<EntityTable>()
             .init_resource::<Target>()
+            .init_resource::<SubTarget>()
             .init_resource::<InputMode>()
             .init_resource::<ChatHistory>()
             .init_resource::<Bindings>()

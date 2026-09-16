@@ -111,7 +111,8 @@ pub(super) fn handle_target_action_key(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
-    select_target: &mut SelectTargetMode,
+    sub_target: &mut kuluu_render::scene::SubTarget,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
     use kuluu_render::input_mode::SubAction;
@@ -130,6 +131,7 @@ pub(super) fn handle_target_action_key(
             current_target,
             entities,
             cmd_tx,
+            sub_target,
         );
     }
 
@@ -184,7 +186,7 @@ pub(super) fn handle_target_action_key(
             cmd_tx,
             check_target,
             trade_state,
-            select_target,
+            lock_on,
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
@@ -203,7 +205,7 @@ pub(super) fn confirm_target_action_at_cursor(
     cmd_tx: &Sender<AgentCommand>,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::TargetActionId;
 
@@ -222,7 +224,19 @@ pub(super) fn confirm_target_action_at_cursor(
         TargetActionId::Attack => {
             match target_ent {
                 Some(e) => {
-                    if let Err(err) = cmd_tx.try_send(AgentCommand::Engage { target_id: e.id }) {
+                    // The server's engage rejections, answered locally before the
+                    // command goes out (the server's own 0x029 lines still land
+                    // in the main log; these save the round trip).
+                    if let Some(line) = crate::view_native::engage::rejection_line(
+                        e,
+                        scene_state.snapshot.self_pos.pos,
+                        scene_state.snapshot.self_char_id,
+                        &scene_state.snapshot.party,
+                    ) {
+                        push_system_chat_line(scene_state, line);
+                    } else if let Err(err) =
+                        cmd_tx.try_send(AgentCommand::Engage { target_id: e.id })
+                    {
                         push_system_chat_line(
                             scene_state,
                             format!("[menu] Attack dispatch dropped: {err}"),
@@ -234,15 +248,16 @@ pub(super) fn confirm_target_action_at_cursor(
             Some(InputMode::World)
         }
         TargetActionId::SwitchTarget => {
-            select_target.active = true;
-            select_target.prev = current_target;
-            push_system_chat_line(
-                scene_state,
-                "[menu] Switch Target — Tab to cycle, Enter to confirm, Esc to cancel".to_string(),
-            );
-            Some(InputMode::World)
+            // Retail's "Switch Target" opens the sub-target picker: the chosen
+            // candidate becomes the sub slot (drawn in place of the main target)
+            // rather than retargeting the main slot.
+            let sub_action = kuluu_render::input_mode::SubTargetAction::PickSub;
+            let return_to = InputMode::TargetAction(state.clone());
+            open_sub_target(sub_action, current_target, scene_state, return_to)
         }
         TargetActionId::Disengage => {
+            // Disengage releases the camera lock like the H toggle.
+            lock_on.target_id = None;
             if let Err(err) = cmd_tx.try_send(AgentCommand::Cancel) {
                 push_system_chat_line(
                     scene_state,
@@ -360,6 +375,7 @@ fn handle_abilities_group_key(
     current_target: Option<u32>,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    sub_target: &mut kuluu_render::scene::SubTarget,
 ) -> Option<InputMode> {
     let rows = kuluu_render::hud::menu::ability_group_rows(&scene_state.snapshot, group);
     let count = rows.len();
@@ -389,7 +405,25 @@ fn handle_abilities_group_key(
     if bindings.matches_logical(Action::NavConfirm, key) {
         if let Some(row) = rows.get(sub.cursor) {
             let action = row.action;
-            if let Some(sub_action) = sub_target_action_for(action) {
+            let sub_action = sub_target_action_for(action);
+            // A set sub-target that is valid for this action is used in place
+            // of the main target and consumed when the action fires on it.
+            if let (Some(sub_action), Some(sub_id)) = (sub_action, sub_target.id) {
+                if selected_target_valid(sub_action, Some(sub_id), scene_state) {
+                    sub_target.id = None;
+                    let self_pos = scene_state.snapshot.self_pos.pos;
+                    dispatch_dynamic_menu_action(
+                        action,
+                        Some(sub_id),
+                        self_pos,
+                        entities,
+                        cmd_tx,
+                        scene_state,
+                    );
+                    return Some(InputMode::World);
+                }
+            }
+            if let Some(sub_action) = sub_action {
                 if !selected_target_valid(sub_action, current_target, scene_state) {
                     // No valid target selected: retail's flashing sub-target
                     // cursor asks "on whom?" first. Esc returns here with the

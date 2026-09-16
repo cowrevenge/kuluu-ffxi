@@ -54,6 +54,11 @@ pub(super) fn apply_slash_outcome(
                     .write(kuluu_render::hud::logout_countdown::LogoutRequested { shutdown });
             }
             mirror_heal_stance(&cmd, &mut slash_writers.rest_stance);
+            // Disengage (/disengage, /cancel) releases the camera lock like the
+            // H toggle; the lock is a client-side latch the wire cancel never touches.
+            if matches!(cmd, AgentCommand::Cancel) {
+                slash_writers.lock_on.target_id = None;
+            }
             let send_result = cmd_tx.try_send(cmd);
             if let Err(e) = send_result {
                 push_system_chat_line(scene_state, format!("command dropped (channel issue): {e}"));

@@ -58,6 +58,9 @@ pub enum SubTargetAction {
         index: u8,
         item_no: u16,
     },
+    /// "Switch Target": pick a sub-target to store in the slot; nothing is
+    /// fired on confirm, the candidate just becomes the new sub-target.
+    PickSub,
 }
 
 #[derive(Debug, Clone)]

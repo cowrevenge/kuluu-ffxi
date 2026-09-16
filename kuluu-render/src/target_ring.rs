@@ -81,6 +81,9 @@ fn action_max_range(action: crate::input_mode::SubTargetAction) -> f32 {
         S::Spell(_) | S::Ranged => RANGE_SPELL_RANGED,
         S::Ability(_) | S::WeaponSkill(_) => RANGE_ABILITY_WS,
         S::Item { .. } => RANGE_ITEM,
+        // "Switch Target" is bound to no action range: the candidate radius
+        // (entity_valid's cap) is the only range the picker has.
+        S::PickSub => crate::sub_target::SUB_TARGET_RANGE,
     }
 }
 

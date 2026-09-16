@@ -5262,6 +5262,25 @@ fn emit_battle_message_audio_event(
     }
 }
 
+// vendor/server/src/map/enums/msg_basic.h MsgBasic — the ids whose client text reports a
+// refused action (the engage refusals "Unable to see <target>." / "<target> is out of
+// range.", plus the spell/item/pet refusal family). The Battle tab is display-hidden by
+// default, so a refused action whose only feedback parks there reads as nothing happened;
+// these route to the main log instead.
+const BATTLE_REJECTION_IDS: &[u16] = &[
+    4, 5, 12, 16, 18, 22, 34, 35, 36, 39, 40, 47, 49, 56, 62, 71, 76, 78, 87, 88, 89, 92, 94, 155,
+    190, 191, 192, 199, 210, 215, 216, 217, 218, 235, 307, 313, 315, 316, 328, 337, 339, 347, 356,
+    428, 429, 445, 446, 512, 574, 575, 660, 661, 662, 665, 666, 700, 717, 742, 745, 773,
+];
+
+fn battle_line_channel(message_num: u16) -> ChatChannel {
+    if BATTLE_REJECTION_IDS.contains(&message_num) {
+        ChatChannel::System
+    } else {
+        ChatChannel::Battle
+    }
+}
+
 fn decode_battle_message(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
@@ -5291,7 +5310,7 @@ fn decode_battle_message(
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
         return Some(ChatLine {
             spans: Vec::new(),
-            channel: ChatChannel::Battle,
+            channel: battle_line_channel(message_num),
             sender: cas_name,
             text,
             server_ts: 0,
@@ -5311,8 +5330,7 @@ fn decode_battle_message(
     );
     Some(ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
-
+        channel: battle_line_channel(message_num),
         sender: if subject_is_tar(message_num) {
             tar_name
         } else {
@@ -5642,7 +5660,7 @@ fn build_battle2_line(
     );
     Some(ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
+        channel: battle_line_channel(message_num),
         sender: if subject_is_tar(message_num) {
             tar_name.to_string()
         } else {

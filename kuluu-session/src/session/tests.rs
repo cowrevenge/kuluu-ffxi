@@ -2398,6 +2398,78 @@ fn template_overrides_only_shadow_msg_basic_deliberately() {
 }
 
 #[test]
+fn battle_rejection_ids_route_to_the_main_log() {
+    for &id in BATTLE_REJECTION_IDS {
+        assert_eq!(
+            battle_line_channel(id),
+            ChatChannel::System,
+            "id {id} must reach the main log"
+        );
+    }
+}
+
+#[test]
+fn battle_result_and_state_ids_stay_on_the_battle_tab() {
+    // Per-swing/per-cast results (1, 2, 3, 15) and one-shot state events
+    // (6, 8, 9, 38, 53, 97, 203, 253) keep the Battle tab.
+    for id in [1u16, 2, 3, 6, 8, 9, 15, 38, 53, 97, 203, 253] {
+        assert_eq!(
+            battle_line_channel(id),
+            ChatChannel::Battle,
+            "id {id} must stay on the Battle tab"
+        );
+    }
+}
+
+#[test]
+fn battle_rejection_ids_all_resolve_in_the_scrape() {
+    // A rejection id with no msg_basic template would be dropped by
+    // template_for_id, hiding the refusal again; fail the build on scrape drift.
+    for &id in BATTLE_REJECTION_IDS {
+        assert!(
+            ffxi_vocab::msg_basic::lookup(id).is_some(),
+            "id {id} has no msg_basic template"
+        );
+    }
+}
+
+#[test]
+fn battle_message_5_unable_to_see_routes_to_the_main_log() {
+    use std::collections::HashMap;
+
+    let mut data = vec![0u8; 24];
+    data[0..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    data[20..22].copy_from_slice(&5u16.to_le_bytes());
+
+    let mut cache = HashMap::new();
+    cache.insert(0x1111_1111u32, "Sylvie".to_string());
+    cache.insert(0x2222_2222u32, "Mandy".to_string());
+
+    let line = decode_battle_message(&data, &cache, &HashMap::new(), true).expect("decoded");
+    assert_eq!(line.channel, ChatChannel::System);
+    assert!(line.text.contains("Mandy"), "got: {}", line.text);
+}
+
+#[test]
+fn battle_message_4_out_of_range_routes_to_the_main_log() {
+    use std::collections::HashMap;
+
+    let mut data = vec![0u8; 24];
+    data[0..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    data[20..22].copy_from_slice(&4u16.to_le_bytes());
+
+    let mut cache = HashMap::new();
+    cache.insert(0x1111_1111u32, "Sylvie".to_string());
+    cache.insert(0x2222_2222u32, "Mandy".to_string());
+
+    let line = decode_battle_message(&data, &cache, &HashMap::new(), true).expect("decoded");
+    assert_eq!(line.channel, ChatChannel::System);
+    assert!(line.text.contains("Mandy"), "got: {}", line.text);
+}
+
+#[test]
 fn substitute_status_placeholder_resolves_effect_name() {
     let s = substitute_battle_placeholders(
         "gains the effect of <status>.",

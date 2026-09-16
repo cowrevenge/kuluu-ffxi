@@ -99,6 +99,11 @@ pub struct SlashWriters<'w, 's> {
 
     pub rest_stance: ResMut<'w, kuluu_render::combat_stance::RestStance>,
 
+    /// Disengage releases the camera lock the same as the H toggle; the slash
+    /// and menu paths both funnel through here, so the writer rides the bundle
+    /// (text_input_system is at the 16-param cap on unix).
+    pub lock_on: ResMut<'w, kuluu_render::LockOn>,
+
     pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
 
     pub sort_options: ResMut<'w, kuluu_render::hud::item_detail::SortOptions>,
@@ -197,6 +202,7 @@ pub(crate) fn text_input_system(
     mut keybinds_state: ResMut<KeybindsStateRes>,
     mut mode: ResMut<InputMode>,
     mut target: ResMut<Target>,
+    mut sub_target: ResMut<kuluu_render::scene::SubTarget>,
     mut scene_state: ResMut<SceneState>,
     mut exit: MessageWriter<AppExit>,
     mut navmesh: NavmeshOverlay,
@@ -391,6 +397,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.item_viewport,
                     &dynamic_menu,
                     current_target,
+                    &mut sub_target,
                     self_pos,
                     &mut slash_writers.map_screen_state,
                     slash_writers.map_markers.reborrow(),
@@ -451,7 +458,8 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.check_target,
                     &mut slash_writers.trade_state,
                     &mut slash_writers.trade_intent,
-                    &mut slash_writers.select_target,
+                    &mut sub_target,
+                    &mut slash_writers.lock_on,
                 ) {
                     *mode = next;
                 }
@@ -464,6 +472,7 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &entities,
                     &cmd_tx.0,
+                    &mut sub_target,
                 ) {
                     *mode = next;
                 }
@@ -1068,6 +1077,9 @@ fn dynamic_action_for(
             index,
             item_no,
         },
+        // PickSub never fires an action — handle_sub_target_key stores the
+        // candidate in the sub slot before this is ever called.
+        S::PickSub => unreachable!("PickSub is resolved before dispatch"),
     }
 }
 
@@ -1156,8 +1168,10 @@ fn handle_sub_target_key(
     scene_state: &mut SceneState,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    sub_target: &mut kuluu_render::scene::SubTarget,
 ) -> Option<InputMode> {
     use ffxi_vocab::valid_target::TargetFlags;
+    use kuluu_render::input_mode::SubTargetAction;
     use kuluu_render::sub_target;
 
     let flags = TargetFlags(state.flags);
@@ -1191,6 +1205,18 @@ fn handle_sub_target_key(
             push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
             return None;
         };
+        if matches!(state.action, SubTargetAction::PickSub) {
+            // "Switch Target": store the candidate in the sub slot; the target
+            // frame now shows it in place of the main target until it is
+            // consumed by a firing action or cleared.
+            sub_target.id = Some(id);
+            return Some(InputMode::World);
+        }
+        // Consuming the sub only happens when this action fired on it; firing
+        // on the main target (or another candidate) leaves the slot intact.
+        if sub_target.id == Some(id) {
+            sub_target.id = None;
+        }
         let self_pos = scene_state.snapshot.self_pos.pos;
         dispatch_dynamic_menu_action(
             dynamic_action_for(state.action),
@@ -1592,12 +1618,13 @@ pub fn mouse_nav_dispatch_system(
     mut keybinds_state: ResMut<KeybindsStateRes>,
     mut mode: ResMut<InputMode>,
     target: Res<Target>,
+    mut sub_target: ResMut<kuluu_render::scene::SubTarget>,
     mut scene_state: ResMut<SceneState>,
     mut menu_writers: MenuConfirmWriters,
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
     mut check_target: ResMut<kuluu_render::hud::check_view::CheckTarget>,
     mut trade_state: ResMut<kuluu_render::hud::trade::TradeState>,
-    mut select_target: ResMut<SelectTargetMode>,
+    mut lock_on: ResMut<kuluu_render::LockOn>,
 ) {
     let entities = scene_state.snapshot.entities.clone();
     let current_target = target.id;
@@ -1625,6 +1652,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut menu_writers.vana_clock_visible,
                 &dynamic_menu,
                 current_target,
+                &mut sub_target,
                 self_pos,
             ) {
                 *mode = next;
@@ -1683,7 +1711,7 @@ pub fn mouse_nav_dispatch_system(
                 &cmd_tx.0,
                 &mut check_target,
                 &mut trade_state,
-                &mut select_target,
+                &mut lock_on,
             ) {
                 *mode = next;
             }
@@ -2474,6 +2502,7 @@ mod cs_input_lock_tests {
         stack.push(MenuKind::Map);
         app.insert_resource(InputMode::Menu(stack));
         app.insert_resource(Target::default());
+        app.insert_resource(kuluu_render::LockOn::default());
         app.insert_resource(SceneState::default());
         // The plugin initializes this in production; the gate reads it unconditionally.
         app.insert_resource(kuluu_render::cutscene::CutsceneMode::default());

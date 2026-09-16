@@ -128,6 +128,16 @@ pub fn action_flags(action: SubTargetAction) -> TargetFlags {
             TargetFlags(TargetFlags::ENEMY)
         }
         SubTargetAction::Item { .. } => TargetFlags(TargetFlags::SELF),
+        // "Switch Target" accepts any targetable entity — the sub slot is not
+        // bound to one action's valid-target set.
+        SubTargetAction::PickSub => TargetFlags(
+            TargetFlags::SELF
+                | TargetFlags::PLAYER_PARTY
+                | TargetFlags::ENEMY
+                | TargetFlags::PLAYER_ALLIANCE
+                | TargetFlags::PLAYER
+                | TargetFlags::NPC,
+        ),
     }
 }
 

@@ -122,6 +122,7 @@ pub(super) fn confirm_menu_at_cursor(
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
+    sub_target: &mut kuluu_render::scene::SubTarget,
     self_pos: kuluu_snapshot::Vec3,
 ) -> Option<InputMode> {
     let (kind, cursor) = {
@@ -302,7 +303,25 @@ pub(super) fn confirm_menu_at_cursor(
                 );
                 return None;
             }
-            if let Some(sub_action) = sub_target_action_for(action) {
+            let sub_action = sub_target_action_for(action);
+            // A set sub-target that is valid for this action is used in place
+            // of the main target and consumed when the action fires on it.
+            if let (Some(sub_action), Some(sub_id)) = (sub_action, sub_target.id) {
+                if selected_target_valid(sub_action, Some(sub_id), scene_state) {
+                    sub_target.id = None;
+                    let entities = scene_state.snapshot.entities.clone();
+                    dispatch_dynamic_menu_action(
+                        action,
+                        Some(sub_id),
+                        self_pos,
+                        &entities,
+                        cmd_tx,
+                        scene_state,
+                    );
+                    return Some(InputMode::World);
+                }
+            }
+            if let Some(sub_action) = sub_action {
                 if !selected_target_valid(sub_action, target_id, scene_state) {
                     // No valid target selected: retail's sub-target confirm step
                     // fires the action only after the flashing cursor is confirmed.
@@ -612,6 +631,7 @@ pub(super) fn handle_menu_key(
     item_viewport: &mut kuluu_render::hud::item_screen::ItemListViewport,
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
+    sub_target: &mut kuluu_render::scene::SubTarget,
     self_pos: kuluu_snapshot::Vec3,
     map_state: &mut kuluu_render::hud::map_screen::MapScreenState,
     // `Mut` (not `&mut` off a call-site `ResMut` deref, which flags the
@@ -917,6 +937,7 @@ pub(super) fn handle_menu_key(
             vana_clock_visible,
             dynamic,
             target_id,
+            sub_target,
             self_pos,
         );
         // Commands > Items always opens on the inventory; only the Mog Menu
@@ -967,6 +988,7 @@ mod menu_key_tests {
         item_bag: kuluu_render::hud::item_screen::ItemScreenContainer,
         item_viewport: kuluu_render::hud::item_screen::ItemListViewport,
         dynamic: kuluu_render::hud::menu::DynamicMenu,
+        sub_target: kuluu_render::scene::SubTarget,
         map_state: MapScreenState,
         map_view: MapView,
         minimap_state: MinimapState,
@@ -999,6 +1021,7 @@ mod menu_key_tests {
                 item_bag: Default::default(),
                 item_viewport: Default::default(),
                 dynamic: Default::default(),
+                sub_target: Default::default(),
                 map_state: MapScreenState::default(),
                 map_view: MapView::default(),
                 minimap_state: MinimapState::default(),
@@ -1036,6 +1059,7 @@ mod menu_key_tests {
                 &mut self.item_viewport,
                 &self.dynamic,
                 None,
+                &mut self.sub_target,
                 kuluu_snapshot::Vec3::default(),
                 &mut self.map_state,
                 map_markers,

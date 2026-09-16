@@ -101,6 +101,16 @@ pub struct Target {
     pub id: Option<u32>,
 }
 
+/// Second target slot (retail's sub-target): always exists beside [`Target`],
+/// drawn in its place in the target frame while set, and consumed when the
+/// pending spell/ability fires on it. Set by the sub-target cursor ("Switch
+/// Target"); cleared by [`auto_clear_target_system`] when its entity dies or
+/// leaves, like the main target.
+#[derive(Resource, Default)]
+pub struct SubTarget {
+    pub id: Option<u32>,
+}
+
 pub fn should_clear_target(id: Option<u32>, entities: &[kuluu_snapshot::Entity]) -> bool {
     let Some(id) = id else {
         return false;
@@ -114,11 +124,15 @@ pub fn should_clear_target(id: Option<u32>, entities: &[kuluu_snapshot::Entity])
 pub fn auto_clear_target_system(
     state: Res<SceneState>,
     mut target: ResMut<Target>,
+    mut sub_target: ResMut<SubTarget>,
     mut lock_on: ResMut<crate::lock_on::LockOn>,
 ) {
     let entities = &state.snapshot.entities;
     if should_clear_target(target.id, entities) {
         target.id = None;
+    }
+    if should_clear_target(sub_target.id, entities) {
+        sub_target.id = None;
     }
     if should_clear_target(lock_on.target_id, entities) {
         lock_on.target_id = None;

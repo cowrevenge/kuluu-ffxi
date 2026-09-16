@@ -456,6 +456,86 @@ fn emits_idle_goal(events: &[AgentEvent]) -> bool {
 }
 
 #[test]
+fn cancel_while_engaged_sends_attack_off_to_the_wire() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let routing = r.handle_command(AgentCommand::Cancel);
+    assert!(
+        matches!(r.current_goal(), Goal::Idle),
+        "cancel must leave the engage goal"
+    );
+    assert!(
+        matches!(
+            routing.forward,
+            Some(AgentCommand::Action {
+                target_id: 99,
+                target_index: 7,
+                kind: ActionKind::AttackOff,
+            })
+        ),
+        "the wire disengage is AttackOff; a goal-only cancel leaves the server auto-swinging"
+    );
+}
+
+#[test]
+fn target_change_while_engaged_reaims_the_goal() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.observe_event(&upsert(77, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let derived = r.observe_event(&AgentEvent::TargetChanged {
+        target_id: Some(77),
+    });
+    assert!(
+        matches!(
+            r.current_goal(),
+            Goal::Engaged {
+                target_id: 77,
+                attack_issued: true,
+            }
+        ),
+        "the 0x058 push must re-aim the goal; the server already attacks the new target"
+    );
+    assert!(
+        derived.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::ReactorGoalChanged {
+                    goal: ReactorGoalSnapshot::Engaged { target_id: 77, .. }
+                }
+            )
+        }),
+        "the re-aim must be emitted so the folded current_goal updates"
+    );
+}
+
+#[test]
+fn target_cleared_while_engaged_disengages() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let derived = r.observe_event(&AgentEvent::TargetChanged { target_id: None });
+    assert!(
+        matches!(r.current_goal(), Goal::Idle),
+        "a cleared battle target must end the engage"
+    );
+    assert!(
+        emits_idle_goal(&derived),
+        "the reset must be emitted so the folded current_goal updates"
+    );
+}
+
+#[test]
 fn death_timer_disengages_and_emits_goal_change() {
     let mut r = Reactor::new(step_test_cfg());
     r.observe_event(&connected(1));

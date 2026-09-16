@@ -51,8 +51,11 @@ pub struct DispatchLocals {
     /// Latched world-space run heading for pure W/S: (forward sign, motion
     /// heading). Sampled from the camera frame when the key state changes,
     /// then held fixed so the camera's auto-recenter can swing behind
-    /// without dragging the run direction with it.
+    /// without dragging the run direction with it. A Q/E carve rotates this
+    /// latch in place rather than resampling it.
     pub steer_latch: Option<(i32, u8)>,
+    /// Which key family currently holds the turn axis (see [`TurnAxisOwner`]).
+    pub turn_owner: TurnAxisOwner,
     /// Rising-edge memory for pad stick just_pressed emulation.
     pub pad_edges: PadEdges,
     pub walker: super::walker::Walker,
@@ -210,6 +213,36 @@ pub fn advance_heading_turn(
     let whole = accum_units.trunc();
     *accum_units -= whole;
     (whole as i32, float_delta)
+}
+
+/// The two turn families compete for one axis: A/D steer the run in the camera
+/// frame, Q/E rotate the body. Held together they would fight (one re-aims the
+/// run at the camera every tick, the other turns the body away from it), so the
+/// family that took the axis keeps it until its own keys come up.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TurnAxisOwner {
+    #[default]
+    None,
+    Steer,
+    Rotate,
+}
+
+/// `prev` keeps the axis while its keys are still down; otherwise the one held
+/// family takes it. A same-frame tie with no incumbent goes to the steer keys.
+pub fn arbitrate_turn_axis(
+    prev: TurnAxisOwner,
+    steer_held: bool,
+    rotate_held: bool,
+) -> TurnAxisOwner {
+    match prev {
+        TurnAxisOwner::Steer if steer_held => TurnAxisOwner::Steer,
+        TurnAxisOwner::Rotate if rotate_held => TurnAxisOwner::Rotate,
+        _ => match (steer_held, rotate_held) {
+            (true, _) => TurnAxisOwner::Steer,
+            (false, true) => TurnAxisOwner::Rotate,
+            (false, false) => TurnAxisOwner::None,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1080,15 +1113,28 @@ pub fn dispatch_movement_system(
     let locked = lock_on.target_id.is_some();
     let first_person = matches!(*camera_mode, CameraMode::FirstPerson);
 
+    let turn_left = bindings.pressed(Action::TurnLeft, keys);
+    let turn_right = bindings.pressed(Action::TurnRight, keys);
+    let rotate_left = bindings.pressed(Action::RotateLeft, keys);
+    let rotate_right = bindings.pressed(Action::RotateRight, keys);
+    locals.turn_owner = arbitrate_turn_axis(
+        locals.turn_owner,
+        turn_left || turn_right || pad_move.x != 0.0,
+        rotate_left || rotate_right,
+    );
+    let steer_owns = locals.turn_owner != TurnAxisOwner::Rotate;
+    let rotate_owns = locals.turn_owner != TurnAxisOwner::Steer;
+    let pad_steer_x = if steer_owns { pad_move.x } else { 0.0 };
+
     let mut resolved = resolve_move_inputs(
         bindings.pressed(Action::MoveForward, keys),
         bindings.pressed(Action::MoveBackward, keys),
-        bindings.pressed(Action::TurnLeft, keys),
-        bindings.pressed(Action::TurnRight, keys),
+        turn_left && steer_owns,
+        turn_right && steer_owns,
         bindings.pressed(Action::StrafeLeft, keys),
         bindings.pressed(Action::StrafeRight, keys),
-        bindings.pressed(Action::RotateLeft, keys),
-        bindings.pressed(Action::RotateRight, keys),
+        rotate_left && rotate_owns,
+        rotate_right && rotate_owns,
         autorun.phantom_forward,
         locked,
     );
@@ -1128,11 +1174,11 @@ pub fn dispatch_movement_system(
     let ps = if first_person || locked {
         0.0
     } else {
-        pick_mag(resolved.steer as f32, pad_move.x)
+        pick_mag(resolved.steer as f32, pad_steer_x)
     };
     if locked {
         forward = merge_dir(forward, pad_move.y);
-        strafe = merge_dir(strafe, pad_move.x);
+        strafe = merge_dir(strafe, pad_steer_x);
     } else if first_person {
         forward = merge_dir(forward, pad_move.y);
     }
@@ -1140,7 +1186,7 @@ pub fn dispatch_movement_system(
     // runs sideways); only first person keeps the arrow-turn pivot.
     // In first person A/D (and the stick's x axis) rotate the view like Q/E.
     let fp_rotate = if first_person {
-        pick_mag(resolved.steer as f32, pad_move.x)
+        pick_mag(resolved.steer as f32, pad_steer_x)
     } else {
         0.0
     };
@@ -1157,9 +1203,12 @@ pub fn dispatch_movement_system(
         || env.pointer.left
         || env.pointer.right
         || drive_c != 0;
-    // A/D carve, Q/E rotate, and camera panning recompute the run direction
-    // against the live camera every frame; anything else holds the latch.
-    if !steer_in_chase || ps != 0.0 || resolved.rotate_dir != 0 || camera_panning {
+    // Q/E held with W/S turns the run itself: the latch becomes the rotating
+    // run heading, so neither the camera frame nor a camera pan re-aims it.
+    let rotate_carve = steer_in_chase && resolved.rotate_dir != 0;
+    // A/D carve and camera panning recompute the run direction against the
+    // live camera every frame; anything else holds the latch.
+    if !rotate_carve && (!steer_in_chase || ps != 0.0 || camera_panning) {
         locals.steer_latch = None;
     }
 
@@ -1365,19 +1414,31 @@ pub fn dispatch_movement_system(
     let mut turn_dy: f32 = 0.0;
     if steer_in_chase {
         let camera_forward_h = heading_for_yaw(chase.yaw);
-        let continuous = ps != 0.0 || resolved.rotate_dir != 0 || camera_panning;
-        let motion_h = if continuous {
+        let pf_sign = if pf > 0.0 { 1 } else { -1 };
+        let latched = match locals.steer_latch {
+            Some((f, h)) if f == pf_sign => Some(h),
+            _ => None,
+        };
+        let continuous = ps != 0.0 || camera_panning;
+        let motion_h = if rotate_carve {
+            // Q/E owns the run direction while W/S is held: turn the run
+            // heading at the key rate and keep travelling along it, so the
+            // body carves instead of the camera frame pulling it straight
+            // back every tick.
+            let base = latched.unwrap_or_else(|| {
+                camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0)
+            });
+            let h = base.wrapping_add(player_rotate_u8.rem_euclid(256) as u8);
+            locals.steer_latch = Some((pf_sign, h));
+            h
+        } else if continuous {
             camera_relative_motion_heading(camera_forward_h, pf, ps)
         } else {
-            let pf_sign = if pf > 0.0 { 1 } else { -1 };
-            match locals.steer_latch {
-                Some((f, h)) if f == pf_sign => h,
-                _ => {
-                    let h = camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0);
-                    locals.steer_latch = Some((pf_sign, h));
-                    h
-                }
-            }
+            latched.unwrap_or_else(|| {
+                let h = camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0);
+                locals.steer_latch = Some((pf_sign, h));
+                h
+            })
         };
 
         if raw_step > 0.0 {
@@ -1976,6 +2037,7 @@ pub fn camera_polish_system(
     state: Res<SceneState>,
     lock_on: Res<LockOn>,
     pointer: Res<kuluu_render::MousePointer>,
+    locals: Res<DispatchLocals>,
     mut chase: ResMut<ChaseCamera>,
     mut recenter: ResMut<CameraAutoRecenter>,
     self_q: Query<&Transform, (With<IsSelf>, Without<OperatorCamera>)>,
@@ -2014,9 +2076,12 @@ pub fn camera_polish_system(
         && !recenter.manual_override
         && matches!(*camera_mode, CameraMode::Chase)
     {
-        let carving = bindings.pressed(Action::TurnLeft, &keys)
-            || bindings.pressed(Action::TurnRight, &keys)
-            || pad.movement.x != 0.0;
+        // Only a steer that actually owns the turn axis carves; A/D suppressed
+        // by a Q/E hold must not slow the follow below the body's rotate rate.
+        let carving = locals.turn_owner != TurnAxisOwner::Rotate
+            && (bindings.pressed(Action::TurnLeft, &keys)
+                || bindings.pressed(Action::TurnRight, &keys)
+                || pad.movement.x != 0.0);
         let rate = if carving {
             CARVE_FOLLOW_RATE
         } else {
@@ -3377,7 +3442,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_key_is_independent_of_steer() {
+    fn rotate_and_steer_decode_to_separate_axes() {
         let r = resolve(MoveKeys {
             rotate_left: true,
             turn_right: true,
@@ -3385,6 +3450,209 @@ mod tests {
         });
         assert_eq!(r.rotate_dir, -1);
         assert_eq!(r.steer, 1);
+    }
+
+    #[test]
+    fn turn_axis_stays_with_the_family_that_took_it() {
+        // A/D down first: a later Q/E press is dead until A/D comes up.
+        let owner = arbitrate_turn_axis(TurnAxisOwner::None, true, false);
+        assert_eq!(owner, TurnAxisOwner::Steer);
+        assert_eq!(
+            arbitrate_turn_axis(owner, true, true),
+            TurnAxisOwner::Steer,
+            "A/D held keeps the axis while Q/E is pressed"
+        );
+        assert_eq!(
+            arbitrate_turn_axis(owner, false, true),
+            TurnAxisOwner::Rotate,
+            "releasing A/D hands the axis to the held Q/E"
+        );
+
+        // Q/E down first: the mirror case.
+        let owner = arbitrate_turn_axis(TurnAxisOwner::None, false, true);
+        assert_eq!(owner, TurnAxisOwner::Rotate);
+        assert_eq!(
+            arbitrate_turn_axis(owner, true, true),
+            TurnAxisOwner::Rotate
+        );
+        assert_eq!(
+            arbitrate_turn_axis(owner, true, false),
+            TurnAxisOwner::Steer
+        );
+
+        // Nothing held releases the axis; a same-frame tie goes to the steer keys.
+        assert_eq!(
+            arbitrate_turn_axis(TurnAxisOwner::Rotate, false, false),
+            TurnAxisOwner::None
+        );
+        assert_eq!(
+            arbitrate_turn_axis(TurnAxisOwner::None, true, true),
+            TurnAxisOwner::Steer
+        );
+    }
+
+    /// Drives the real movement system one retail tick at a time, mirroring each
+    /// emitted Move back into the snapshot the way the session mirrors our own
+    /// commands, and reporting the resulting heading and position per tick.
+    struct MoveDrive {
+        app: App,
+        commands: mpsc::Receiver<AgentCommand>,
+    }
+
+    impl MoveDrive {
+        fn new() -> Self {
+            let (mut app, commands) = movement_app();
+            app.insert_resource(slab_collision(0.0));
+            app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
+            let file_id = {
+                let mut scene = app.world_mut().resource_mut::<SceneState>();
+                scene.snapshot.zone_id = Some(100);
+                scene.snapshot.self_pos.speed = kuluu_session::state::BASE_PACKET_SPEED;
+                kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+            };
+            app.world_mut()
+                .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+                .file_id = file_id;
+            let mut drive = Self { app, commands };
+            drive.tick();
+            drive
+        }
+
+        fn press(&mut self, key: KeyCode) {
+            self.app
+                .world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(key);
+        }
+
+        fn tick(&mut self) -> (u8, Vec2) {
+            self.app
+                .world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(Duration::from_secs_f32(1.0 / RETAIL_MOVE_TICKS_PER_SEC));
+            self.app.update();
+            let mut echo = None;
+            while let Ok(cmd) = self.commands.try_recv() {
+                if let AgentCommand::Move { x, y, z, heading } = cmd {
+                    echo = Some((x, y, z, heading));
+                }
+            }
+            let mut scene = self.app.world_mut().resource_mut::<SceneState>();
+            if let Some((x, y, z, heading)) = echo {
+                scene.snapshot.self_pos.pos = WireVec3 { x, y, z };
+                scene.snapshot.self_pos.heading = heading;
+            }
+            let pos = scene.snapshot.self_pos.pos;
+            (scene.snapshot.self_pos.heading, Vec2::new(pos.x, pos.y))
+        }
+
+        fn run(&mut self, ticks: usize) -> Vec<(u8, Vec2)> {
+            (0..ticks).map(|_| self.tick()).collect()
+        }
+    }
+
+    /// Long enough for the body to settle onto its run heading before the
+    /// rotate key joins it.
+    const SETTLE_TICKS: usize = 10;
+    /// Half a second of held rotate: ~40 heading units at the Q/E key rate,
+    /// far past the couple of units of lerp round-trip noise.
+    const ROTATE_TICKS: usize = 30;
+
+    fn turned_units(from: u8, to: u8) -> i32 {
+        let raw = i32::from(to) - i32::from(from);
+        (raw + 128).rem_euclid(256) - 128
+    }
+
+    /// Heading units a standing character sweeps over `ROTATE_TICKS` of held Q -
+    /// the rotate-in-place rate every moving case is measured against.
+    fn standing_rotate_units() -> i32 {
+        let mut drive = MoveDrive::new();
+        let (start, _) = drive.tick();
+        drive.press(KeyCode::KeyQ);
+        let ticks = drive.run(ROTATE_TICKS);
+        turned_units(start, ticks.last().expect("ticks").0)
+    }
+
+    /// Q held with `move_key` must turn the run at the rotate-in-place rate while
+    /// every tick still travels a full run step along the body's own heading.
+    fn assert_rotating_run(move_key: KeyCode) {
+        let mut drive = MoveDrive::new();
+        drive.press(move_key);
+        let settled = drive.run(SETTLE_TICKS);
+        let (start_heading, start_pos) = *settled.last().expect("settle ticks");
+        drive.press(KeyCode::KeyQ);
+        let ticks = drive.run(ROTATE_TICKS);
+
+        let mut prev = start_pos;
+        for (heading, pos) in &ticks {
+            let step = *pos - prev;
+            prev = *pos;
+            assert!(
+                close(step.length(), RUN_STEP),
+                "{move_key:?}+Q must keep the full run step, got {}",
+                step.length()
+            );
+            let (fx, fy) = heading_to_forward(*heading);
+            let along = step.normalize().dot(Vec2::new(fx, fy));
+            assert!(
+                along > 0.999,
+                "{move_key:?}+Q must travel along the body heading, got {along}"
+            );
+        }
+
+        let turned = turned_units(start_heading, ticks.last().expect("ticks").0);
+        let standing = standing_rotate_units();
+        assert!(
+            (turned - standing).abs() <= 2,
+            "{move_key:?}+Q turned {turned} units, rotate-in-place turns {standing}"
+        );
+    }
+
+    #[test]
+    fn rotate_key_turns_a_forward_run() {
+        assert_rotating_run(KeyCode::KeyW);
+    }
+
+    #[test]
+    fn rotate_key_turns_a_backward_run() {
+        assert_rotating_run(KeyCode::KeyS);
+    }
+
+    /// Both turn families held: the trajectory must match the one the
+    /// first-pressed family produces on its own.
+    fn assert_turn_axis_owner(first: KeyCode, second: KeyCode) {
+        // Both standing and running: standing exposes a stray steer starting a
+        // sideways run, running exposes a stray rotate bending the carve.
+        for run_key in [None, Some(KeyCode::KeyW)] {
+            let trajectory = |late: Option<KeyCode>| {
+                let mut drive = MoveDrive::new();
+                if let Some(key) = run_key {
+                    drive.press(key);
+                }
+                drive.press(first);
+                drive.run(SETTLE_TICKS);
+                if let Some(key) = late {
+                    drive.press(key);
+                }
+                drive.run(ROTATE_TICKS)
+            };
+            assert_eq!(
+                trajectory(None),
+                trajectory(Some(second)),
+                "{second:?} pressed after {first:?} (run key {run_key:?}) must not \
+                 touch the turn axis"
+            );
+        }
+    }
+
+    #[test]
+    fn held_steer_locks_out_a_later_rotate() {
+        assert_turn_axis_owner(KeyCode::KeyA, KeyCode::KeyQ);
+    }
+
+    #[test]
+    fn held_rotate_locks_out_a_later_steer() {
+        assert_turn_axis_owner(KeyCode::KeyQ, KeyCode::KeyA);
     }
 
     #[test]
@@ -3956,8 +4224,8 @@ pub struct StairDrive {
     pub f: i32,
     pub s: i32,
     pub t: i32,
-    /// Chase-camera yaw pan axis (W is camera-relative in chase mode; the body
-    /// turn `t` does NOT re-aim forward).
+    /// Chase-camera yaw pan axis (a standing `f` is camera-relative in chase
+    /// mode; holding `t` with it carves the run like Q/E).
     pub c: i32,
     /// Hold expiry; `None` means never armed (fresh handle has no live hold).
     until: Option<Instant>,

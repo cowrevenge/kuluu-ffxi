@@ -101,9 +101,16 @@ use kuluu_session::state::{ActionKind, AgentCommand, FishingInput};
 // 2026-07-20: ~71 heading-units over a 2s hold ≈ 0.87 rad/s).
 pub const HEADING_TURN_RATE: f32 = 0.86;
 
-// Q/E rotate-in-place has no retail 3rd-person counterpart; 0.86 felt too
-// sluggish in play-testing, so it gets its own snappier rate.
-pub const ROTATE_KEY_RATE_RAD_PER_SEC: f32 = 2.0;
+// Retail third person has no body-rotate key at all - its turn keys orbit the
+// camera and the body inherits the heading from the camera-relative move
+// vector. Its one true character-yaw rate is the autorun steer, two degrees per
+// movement tick applied to the autorun direction
+// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+// ControllableActor::HandleThirdPersonControl, is_auto_running branch), which
+// is the same "turn the run, let the body follow" motion Q/E drives here.
+const RETAIL_AUTORUN_STEER_DEG_PER_TICK: f32 = 2.0;
+pub const ROTATE_KEY_RATE_RAD_PER_SEC: f32 =
+    RETAIL_AUTORUN_STEER_DEG_PER_TICK * (std::f32::consts::PI / 180.0) * RETAIL_MOVE_TICKS_PER_SEC;
 
 const CAMERA_YAW_RATE: f32 = HEADING_TURN_RATE * 4.0;
 
@@ -3672,6 +3679,26 @@ mod tests {
     #[test]
     fn held_rotate_locks_out_a_later_steer() {
         assert_turn_axis_owner(KeyCode::KeyQ, KeyCode::KeyA);
+    }
+
+    #[test]
+    fn a_held_rotate_key_sweeps_the_retail_autorun_steer() {
+        let mut accum = 0.0_f32;
+        let mut units = 0;
+        for _ in 0..RETAIL_MOVE_TICKS_PER_SEC as usize {
+            units += advance_heading_turn(
+                &mut accum,
+                ROTATE_KEY_RATE_RAD_PER_SEC,
+                1.0 / RETAIL_MOVE_TICKS_PER_SEC,
+            )
+            .0;
+        }
+        let degrees = units as f32 * 360.0 / 256.0;
+        let want = RETAIL_AUTORUN_STEER_DEG_PER_TICK * RETAIL_MOVE_TICKS_PER_SEC;
+        assert!(
+            (degrees - want).abs() < 1.0,
+            "a second of held Q/E sweeps {degrees} degrees, retail steers {want}"
+        );
     }
 
     #[test]

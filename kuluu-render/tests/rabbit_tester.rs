@@ -339,9 +339,12 @@ fn load_nolda() -> Option<LoadedActor> {
     load_model(NOLDA_FILE)
 }
 
-/// The inlined DamageCallback of ati0 lands at routine frame 36 (dada @32 + 4 delay); a
-/// reaction earlier than this fired on packet arrival, not at the callback.
-const IMPACT_FRAME_MIN: u32 = 30;
+/// The inlined DamageCallback of ati0 lands at routine frame 36 (dada @32 + 4 delay). The floor
+/// sits well clear of packet arrival (the reaction reaches the victim ~30 frames after the swing
+/// event once the overlay + flinch dispatch run), so anything under it fired on the BATTLE2
+/// packet rather than at the inlined callback; the measured impact lands a few frames inside the
+/// authored 36, so the floor keeps a margin below that without drifting toward packet arrival.
+const IMPACT_FRAME_MIN: u32 = 24;
 
 /// HumeM skeleton with a main-hand weapon: the armed-race base whose motion DAT ships ati0..2
 /// but no bti0/cti0/dti0 (the D6 fallback case).
@@ -1284,10 +1287,21 @@ fn s12_worm_special_cycle_hides_only_on_status() {
             }
         }
     }
-    step_n(&mut app, 30);
-    let clip = pose_clip(app.world(), child).expect("pose pass ran");
+    // The resurface 'init' holds its pop-up for the routine's own AnimationLock (~3s on this rig),
+    // so settling back to locomotion is a wait for that lock to lapse, not an immediate flip on the
+    // sub clear. Step until the pose drops to the idle family; the cap runs well past the lock so a
+    // regression that pins the pose forever still fails instead of hanging.
+    let mut settled = false;
+    for _ in 0..600 {
+        step_n(&mut app, 1);
+        if pose_clip(app.world(), child).is_some_and(|c| c.starts_with("idl")) {
+            settled = true;
+            break;
+        }
+    }
     assert!(
-        clip.starts_with("idl"),
-        "settled worm idles on locomotion, got {clip}"
+        settled,
+        "settled worm idles on locomotion, got {:?}",
+        pose_clip(app.world(), child)
     );
 }

@@ -19,6 +19,10 @@ pub struct DigitSpinner {
     pub cap: u32,
     pub min: u32,
     pub column: SpinnerColumn,
+    /// Whether the whole-value "All" column is offered. Retail's Price Set has
+    /// one; a stack quantity does not need it, because stepping the top digit
+    /// already saturates at the cap.
+    pub all_column: bool,
     /// Bitmask of 10^p places the user has stepped (retail tints just-edited
     /// digits orange).
     pub edited: u16,
@@ -48,13 +52,16 @@ impl DigitSpinner {
             cap,
             min: 0,
             column: SpinnerColumn::Digit(0),
+            all_column: true,
             edited: 0,
         }
     }
 
+    /// A stack-quantity picker over `1..=cap`, digits only.
     pub fn item(cap: u32) -> Self {
         Self {
             min: 1,
+            all_column: false,
             ..Self::with_value(cap.max(1), 1)
         }
     }
@@ -71,11 +78,18 @@ impl DigitSpinner {
         digit_count(self.cap).min(PRICE_DIGITS) - 1
     }
 
-    /// `◀`: toward higher place values, ending on the All column.
+    /// `◀`: toward higher place values, ending on the All column where one is
+    /// offered and on the top digit otherwise.
     pub fn left(&mut self) {
         self.column = match self.column {
             SpinnerColumn::All => SpinnerColumn::All,
-            SpinnerColumn::Digit(p) if p >= self.max_power() => SpinnerColumn::All,
+            SpinnerColumn::Digit(p) if p >= self.max_power() => {
+                if self.all_column {
+                    SpinnerColumn::All
+                } else {
+                    SpinnerColumn::Digit(p)
+                }
+            }
             SpinnerColumn::Digit(p) => SpinnerColumn::Digit(p + 1),
         };
     }
@@ -120,6 +134,14 @@ impl DigitSpinner {
 
     /// The columns to draw, most significant first: enough places for the
     /// current value and to keep the active column visible.
+    /// Every column this spinner offers, most significant first.
+    pub fn columns(&self) -> impl Iterator<Item = SpinnerColumn> {
+        self.all_column
+            .then_some(SpinnerColumn::All)
+            .into_iter()
+            .chain((0..=self.max_power()).rev().map(SpinnerColumn::Digit))
+    }
+
     pub fn visible_powers(&self) -> impl DoubleEndedIterator<Item = u32> {
         let need = match self.column {
             SpinnerColumn::All => digit_count(self.value),
@@ -149,6 +171,7 @@ pub fn column_style(
     use crate::hud::item_ui::theme;
     use bevy::prelude::Color;
     match column {
+        SpinnerColumn::All if !spinner.all_column => (String::new(), theme::TEXT, Color::NONE),
         SpinnerColumn::All => (
             "All ".into(),
             if spinner.column == column {
@@ -191,20 +214,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shop_quantity_bounds_apply_to_digits_and_all() {
+    fn shop_quantity_bounds_apply_to_every_digit() {
         let mut spinner = DigitSpinner::item(12);
         spinner.down();
-        assert_eq!(spinner.value, 1);
+        assert_eq!(spinner.value, 1, "a quantity floors at one, not zero");
         spinner.left();
         spinner.up();
         assert_eq!(spinner.value, 11);
         spinner.up();
-        assert_eq!(spinner.value, 12);
-        spinner.left();
+        assert_eq!(spinner.value, 12, "the tens digit saturates at the stack");
         spinner.down();
-        assert_eq!(spinner.value, 1);
+        assert_eq!(spinner.value, 2);
+    }
+
+    /// A stack quantity offers digits only: stepping the top digit already
+    /// saturates at the cap, so a separate whole-value column would be a second
+    /// way to say the same thing.
+    #[test]
+    fn a_quantity_picker_has_no_all_column() {
+        let mut spinner = DigitSpinner::item(12);
+        assert_eq!(
+            spinner.columns().collect::<Vec<_>>(),
+            vec![SpinnerColumn::Digit(1), SpinnerColumn::Digit(0)]
+        );
+
+        spinner.left();
+        spinner.left();
+        assert_eq!(
+            spinner.column,
+            SpinnerColumn::Digit(1),
+            "left stops on the top digit instead of stepping onto All"
+        );
+        assert_eq!(column_style(&spinner, SpinnerColumn::All).0, "");
+
         spinner.up();
-        assert_eq!(spinner.value, 12);
+        assert_eq!(spinner.value, 11);
+        spinner.up();
+        assert_eq!(
+            spinner.value, 12,
+            "the top digit still reaches the whole stack"
+        );
+    }
+
+    /// Retail's Price Set does have one
+    /// (.agents/skills/retail-observe/references/auction-house.md), so the
+    /// auction house keeps it.
+    #[test]
+    fn a_price_picker_keeps_its_all_column() {
+        let mut spinner = DigitSpinner::new(crate::hud::auction::PRICE_CAP);
+        assert!(spinner.columns().any(|c| c == SpinnerColumn::All));
+        for _ in 0..PRICE_DIGITS + 1 {
+            spinner.left();
+        }
+        assert_eq!(spinner.column, SpinnerColumn::All);
+        assert_eq!(column_style(&spinner, SpinnerColumn::All).0, "All ");
     }
 
     #[test]

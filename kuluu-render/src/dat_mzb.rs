@@ -1478,13 +1478,18 @@ pub fn placement_bevy_transform(scale: Vec3, rot: Vec3, trans: Vec3) -> Mat4 {
         )
 }
 
-pub(crate) fn water_generator_model(body: &[u8]) -> Option<ffxi_dat::generator::ModelSpawnDef> {
+pub(crate) fn water_generator_model(
+    body: &[u8],
+) -> Option<(
+    ffxi_dat::generator::ModelSpawnDef,
+    ffxi_dat::particle_gen::ParticleGeneratorDef,
+)> {
     let def = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(body).ok()??;
     if def.camera_relative || def.max_life_frames != 0.0 {
         return None;
     }
     let model = ffxi_dat::generator::Generator::parse_model_spawn(body).ok()??;
-    (model.uv_scroll != [0.0, 0.0]).then_some(model)
+    (model.uv_scroll != [0.0, 0.0]).then_some((model, def))
 }
 
 pub(crate) fn water_generator_offsets(bytes: &[u8]) -> std::collections::HashSet<usize> {
@@ -1515,7 +1520,7 @@ pub(crate) fn water_generator_offsets(bytes: &[u8]) -> std::collections::HashSet
             if c.kind != ChunkKind::Generator as u8 {
                 return None;
             }
-            let model = water_generator_model(c.data)?;
+            let (model, _) = water_generator_model(c.data)?;
             let name = model.model_name_str().trim_end();
             (ids.contains(name) || mzb::resolve_mmb_index(name, &prefix, &names).is_some())
                 .then_some(c.offset)
@@ -1832,7 +1837,7 @@ pub fn build_zone_mmb_spawns(
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        let Some(ms) = water_generator_model(c.data) else {
+        let Some((ms, gen_def)) = water_generator_model(c.data) else {
             continue;
         };
         let name = ms.model_name_str().trim_end();
@@ -1884,6 +1889,7 @@ pub fn build_zone_mmb_spawns(
                 uv_scroll: Vec2::new(ms.uv_scroll[0], ms.uv_scroll[1]),
                 world_min,
                 world_max,
+                sort_bias: crate::element_sort::transparent_sort_bias(&gen_def, c.offset),
             }),
             // Generator sheets carry no placement record, so no LOD triple, no
             // `_`/`@` group membership and no sub-area shell role.

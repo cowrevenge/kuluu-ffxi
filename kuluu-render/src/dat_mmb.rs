@@ -131,6 +131,9 @@ pub struct GenWater {
     /// where the retail sheet already covers the surface.
     pub world_min: Vec3,
     pub world_max: Vec3,
+    /// The sheet is a generator element like any other, so it ranks in the transparent
+    /// sort by retail's element key (element_sort.rs), not by its mesh alone.
+    pub sort_bias: f32,
 }
 
 #[derive(Message, Debug, Clone, Copy)]
@@ -801,32 +804,35 @@ pub fn process_load_mmb_requests(
                     // sheet gets its OWN material (never the shared cache) so its
                     // per-layer UV-scroll animates independently.
                     let mat_handle = if let Some(w) = req.water {
-                        materials.add(FfxiZoneMaterial::new(
-                            sub_texture,
-                            crate::skinned_ffxi_material::FfxiMaterialFlags {
-                                flags: Vec4::new(
-                                    has_texture,
-                                    1.0,
-                                    crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
-                                    0.0,
-                                ),
-                            },
-                            w.tint,
-                            Vec4::ZERO,
-                            AlphaMode::Blend,
-                            crate::ffxi_zone_material::FfxiZoneMaterialKey {
-                                back_face_culling: false,
-                                mirrored,
-                                // A full water sheet is not a coplanar decal:
-                                // decal z-bias would pull it toward the camera and
-                                // let it float over terrain that should occlude it.
-                                z_bias_level: 0,
-                                depth_write: false,
-                                // A sea sheet hangs off a water generator, so it takes the
-                                // two-stage CMoD3m chain with `w.tint` as its TEXTUREFACTOR.
-                                generator_stage_chain: true,
-                            },
-                        ))
+                        materials.add(
+                            FfxiZoneMaterial::new(
+                                sub_texture,
+                                crate::skinned_ffxi_material::FfxiMaterialFlags {
+                                    flags: Vec4::new(
+                                        has_texture,
+                                        1.0,
+                                        crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
+                                        0.0,
+                                    ),
+                                },
+                                w.tint,
+                                Vec4::ZERO,
+                                AlphaMode::Blend,
+                                crate::ffxi_zone_material::FfxiZoneMaterialKey {
+                                    back_face_culling: false,
+                                    mirrored,
+                                    // A full water sheet is not a coplanar decal:
+                                    // decal z-bias would pull it toward the camera and
+                                    // let it float over terrain that should occlude it.
+                                    z_bias_level: 0,
+                                    depth_write: false,
+                                    // A sea sheet hangs off a water generator, so it takes the
+                                    // two-stage CMoD3m chain with `w.tint` as its TEXTUREFACTOR.
+                                    generator_stage_chain: true,
+                                },
+                            )
+                            .with_sort_depth_bias(w.sort_bias),
+                        )
                     } else {
                         handle_cache
                             .material

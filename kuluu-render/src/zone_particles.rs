@@ -27,6 +27,8 @@ pub(crate) fn is_zone_static(def: &ParticleGeneratorDef) -> bool {
 pub(crate) struct ZoneStaticDef {
     pub name: [u8; 4],
     pub def: ParticleGeneratorDef,
+    // The chunk's byte offset in the zone DAT: the element_sort.rs tie-break.
+    pub dat_offset: usize,
 }
 
 // The same emitter is sometimes authored twice (West Ronfaure's effe/fir1 campfire subtree
@@ -59,7 +61,11 @@ fn zone_static_defs(bytes: &[u8]) -> Vec<ZoneStaticDef> {
                 continue;
             }
             if seen.insert((c.name, def.mesh_id, def.base_position.map(f32::to_bits))) {
-                out.push(ZoneStaticDef { name: c.name, def });
+                out.push(ZoneStaticDef {
+                    name: c.name,
+                    def,
+                    dat_offset: c.offset,
+                });
             }
         }
     }
@@ -118,7 +124,12 @@ fn sync_zone_particles(
     let global = global.as_ref().map(|g| &g.assets);
     let mut spawned = 0usize;
     let mut unresolved: Vec<String> = Vec::new();
-    for ZoneStaticDef { name, def } in zone_static_defs(&bytes) {
+    for ZoneStaticDef {
+        name,
+        def,
+        dat_offset,
+    } in zone_static_defs(&bytes)
+    {
         let bp = def.base_position;
         let origin = if def.camera_relative {
             // Placeholder: track_zone_particles rewrites it from the camera before the first
@@ -133,6 +144,7 @@ fn sync_zone_particles(
         };
         let opts = ZoneGeneratorOptions {
             camera_relative: def.camera_relative,
+            dat_offset,
             ..Default::default()
         };
         let entity = spawn_zone_particle_generator(

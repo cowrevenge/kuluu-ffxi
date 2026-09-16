@@ -365,7 +365,7 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
                 BANNER_WARN_BORDER,
                 BANNER_WARN_TEXT,
                 format!(
-                    "This server recommends client {rec}; you are on {}. Some features may not work.",
+                    "This server recommends Kuluu {rec}; you are running Kuluu {}. Some features may not work.",
                     version.current
                 ),
             )
@@ -376,7 +376,7 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
                 BANNER_BLOCK_BORDER,
                 BANNER_BLOCK_TEXT,
                 format!(
-                    "This server requires client {min}; you are on {}. Update before logging in.",
+                    "This server requires Kuluu {min}; you are running Kuluu {}. Update before logging in.",
                     version.current
                 ),
             )

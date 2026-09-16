@@ -1091,12 +1091,11 @@ pub fn dispatch_movement_system(
         autorun.phantom_forward = false;
     }
 
-    // Retail autorun is steerable: A/D carve the run without cancelling it.
-    // Held strafe or Q/E rotate cancels after a short grace.
+    // Retail autorun is steerable, and neither turn family cancels it: A/D
+    // carve in the camera frame, Q/E turn the body. A held strafe or stick
+    // deflection leaves the aimed run behind, so that cancels after a grace.
     let any_strafe = bindings.pressed(Action::StrafeLeft, keys)
         || bindings.pressed(Action::StrafeRight, keys)
-        || bindings.pressed(Action::RotateLeft, keys)
-        || bindings.pressed(Action::RotateRight, keys)
         || pad_move.x != 0.0;
     if any_strafe {
         let now = Instant::now();
@@ -3525,6 +3524,26 @@ mod tests {
                 .press(key);
         }
 
+        fn release(&mut self, key: KeyCode) {
+            self.app
+                .world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(key);
+        }
+
+        /// The toggle itself lives in the key-action system, which this harness
+        /// does not run; engage the latch the way that system would.
+        fn engage_autorun(&mut self) {
+            self.app
+                .world_mut()
+                .resource_mut::<AutoRun>()
+                .phantom_forward = true;
+        }
+
+        fn autorun_engaged(&self) -> bool {
+            self.app.world().resource::<AutoRun>().phantom_forward
+        }
+
         fn tick(&mut self) -> (u8, Vec2) {
             self.app
                 .world_mut()
@@ -3653,6 +3672,38 @@ mod tests {
     #[test]
     fn held_rotate_locks_out_a_later_steer() {
         assert_turn_axis_owner(KeyCode::KeyQ, KeyCode::KeyA);
+    }
+
+    #[test]
+    fn rotate_aims_an_autorun_instead_of_cancelling_it() {
+        let mut drive = MoveDrive::new();
+        drive.engage_autorun();
+        drive.run(SETTLE_TICKS);
+        let (start, _) = drive.tick();
+        drive.press(KeyCode::KeyQ);
+        let mut turning = drive.run(ROTATE_TICKS / 2);
+        // The cancel grace is wall-clock, not tick-driven, so a hold this test
+        // can cancel on has to outlast it in real time.
+        std::thread::sleep(Duration::from_millis(STRAFE_CANCEL_MS * 2));
+        turning.extend(drive.run(ROTATE_TICKS / 2));
+        drive.release(KeyCode::KeyQ);
+        let after = drive.run(ROTATE_TICKS);
+
+        assert!(
+            drive.autorun_engaged(),
+            "a held Q must steer the autorun, not cancel it"
+        );
+        let turned = turned_units(start, turning.last().expect("ticks").0);
+        assert!(
+            (turned - standing_rotate_units()).abs() <= 2,
+            "autorun+Q turned {turned} units"
+        );
+        let (_, before_release) = *turning.last().expect("ticks");
+        let (_, settled) = *after.last().expect("ticks");
+        assert!(
+            (settled - before_release).length() > 1.0,
+            "the autorun must keep running once Q comes up"
+        );
     }
 
     #[test]

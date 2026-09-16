@@ -216,8 +216,8 @@ fn main() -> ExitCode {
             "  1. log into zone {zone_id}; target an NPC of interest (e.g. Well, modelid {}).",
             standard.keys().next().copied().unwrap_or(0),
         );
-        println!("  2. run `/look <name>` to read its modelid from the wire.");
-        println!("  3. run `/load_mmb_on <entity_id> <file_id> <chunk_idx>` against candidates");
+        println!("  2. run `//look <name>` to read its modelid from the wire.");
+        println!("  3. run `//load_mmb_on <entity_id> <file_id> <chunk_idx>` against candidates");
         println!("     until the mesh visually matches.");
         println!("  4. add the confirmed row to MODELID_TABLE in");
         println!("     `kuluu-render/src/look_resolver.rs`.");
@@ -317,7 +317,7 @@ fn main() -> ExitCode {
 
     println!();
     println!("Next step: pick one (modelid, file_id) pair, run");
-    println!("  /load_mmb_on <entity_id> <file_id> <modelid>");
+    println!("  //load_mmb_on <entity_id> <file_id> <modelid>");
     println!("against an NPC of that modelid. If the mesh matches, add the row to");
     println!("kuluu-render/src/look_resolver.rs:MODELID_TABLE.");
 

@@ -1,4 +1,4 @@
-//! `/actordiag` — the field-report answer machine for "my character has no
+//! `//actordiag` — the field-report answer machine for "my character has no
 //! head" (kuluu-39fi). Re-runs the exact look -> file-id -> DAT -> mesh ->
 //! texture chain the renderer uses and reports every step into chat, so a
 //! user who cannot capture stderr can screenshot the diagnosis instead.

@@ -184,7 +184,7 @@ pub fn terrain_point_light_indices(
 
 /// Pick the `count` nearest in-range lights to `pos` (`count` clamped to
 /// `MAX_POINT_LIGHTS`), as indices into `lights`. The fallback for zones that
-/// ship no authored binding table, and for the `/lights` emitters no zone
+/// ship no authored binding table, and for the `//lights` emitters no zone
 /// authors; the caller may cache the selection while the light set and the actor
 /// hold still, repacking live colors per frame via [`point_light_arrays_for`].
 pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: usize) -> Vec<u32> {
@@ -741,7 +741,7 @@ mod tests {
         assert!(authored_point_light_indices(&lights, &slots(&[])).is_empty());
     }
 
-    // `/lights` emitters carry UNAUTHORED_LIGHT_ID; a chunk binding must never
+    // `//lights` emitters carry UNAUTHORED_LIGHT_ID; a chunk binding must never
     // resolve onto one.
     #[test]
     fn emitters_are_never_bound_by_a_chunk() {

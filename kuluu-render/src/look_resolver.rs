@@ -108,7 +108,7 @@ pub fn face_dat_id(dll: &MainDll, face: u8, race: u8) -> Option<u32> {
 /// [`face_dat_id`] against the install the environment names
 /// (`scheduler_runtime::main_dll_from_env`), for callers that open their
 /// `DatRoot` from the environment the same way (the launcher's character
-/// preview, `/actordiag`). In-world dispatch reads the wired [`ActionMainDll`].
+/// preview, `//actordiag`). In-world dispatch reads the wired [`ActionMainDll`].
 pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     face_dat_id(&*main_dll_from_env()?, face, race)
 }

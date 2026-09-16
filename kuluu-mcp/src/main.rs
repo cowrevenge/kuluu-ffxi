@@ -274,7 +274,7 @@ impl FfxiServer {
     }
 
     #[tool(
-        description = "Focus-less GUI driving: trigger the client's `/debug heights` grounding dump at the current position. Server/nav/mzb heights are written to the client log under target `debug_heights` (grep the client log; not returned here). GUI session only."
+        description = "Focus-less GUI driving: trigger the client's `//debug heights` grounding dump at the current position. Server/nav/mzb heights are written to the client log under target `debug_heights` (grep the client log; not returned here). GUI session only."
     )]
     async fn debug_heights(&self) -> Result<CallToolResult, McpError> {
         self.send(AgentCommand::DebugHeights).await

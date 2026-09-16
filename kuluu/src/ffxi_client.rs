@@ -1,15 +1,14 @@
-//! Which FFXI client install kuluu loads, and the verbs that manage the
-//! per-user client directory. The checkout-side installs under
-//! `vendor/game-files` belong to `cargo xtask ffxi-client`; this module reads
-//! those, the launcher's saved choice, and the clients it downloaded itself,
-//! and settles them into one `FFXI_DAT_PATH` for the rest of the process.
+//! Which FFXI install kuluu loads, and the verbs that manage the registry
+//! (`ffxi_dat::install`). The launcher's saved `dat_path` is a legacy tier
+//! that a `use` clears; the `default` pointer is the saved choice.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use ffxi_dat::archive::{self, CLIENT_TARGET_ENV, DAT_PATH_ENV};
+use ffxi_dat::archive::DAT_PATH_ENV;
 use ffxi_dat::client_profile::ClientProfile;
+use ffxi_dat::install;
 use ffxi_dat::install_detect;
 
 use crate::launcher_store::{self, EnvOverride, Settings};
@@ -17,35 +16,24 @@ use crate::launcher_store::{self, EnvOverride, Settings};
 pub const DEFAULT_DOWNLOAD_NAME: &str = "retail";
 pub const DEFAULT_REGION: &str = "us";
 const INSTALLER_CACHE_DIR: &str = "ffxi-installer";
-/// Display name of the unnamed checkout install.
-pub const WORKSPACE_DEFAULT_NAME: &str = "default";
+pub use ffxi_dat::install::{same_dir, valid_name};
 pub use ffxi_install::{INSTALLER_SIZE_NOTE, PATCH_SIZE_NOTE};
 
-pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
+/// The registry directory, where downloads land.
 pub fn user_clients_dir() -> Option<PathBuf> {
-    kuluu_session::config_dir::clients_dir().ok()
+    install::installs_dir()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    UserClient,
-    WorkspaceTarget,
-    WorkspaceDefault,
+    Registered,
     Detected,
 }
 
 impl Origin {
     pub fn label(self) -> &'static str {
         match self {
-            Origin::UserClient => "user",
-            Origin::WorkspaceTarget => "workspace",
-            Origin::WorkspaceDefault => "default",
+            Origin::Registered => "installed",
             Origin::Detected => "detected",
         }
     }
@@ -58,26 +46,6 @@ pub struct Install {
     pub path: PathBuf,
 }
 
-pub fn same_dir(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => a == b,
-    }
-}
-
-fn child_dirs(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    names.sort();
-    names
-}
-
 /// The directory above `SquareEnix/`, which is how a detected install is
 /// usually recognised (`HorizonXI`, `PlayOnline`, a bottle name).
 fn detected_name(root: &Path) -> String {
@@ -88,9 +56,9 @@ fn detected_name(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// Every install kuluu can see: user clients, then workspace targets, the
-/// workspace default, then auto-detected third-party installs. A directory
-/// reachable under several names is listed once, under the first.
+/// Every install kuluu can see: the registry, then auto-detected third-party
+/// installs. A directory reachable under several names is listed once, under
+/// the first.
 pub fn installs() -> Vec<Install> {
     let mut out: Vec<Install> = Vec::new();
     let mut push = |name: String, origin: Origin, path: PathBuf| {
@@ -98,24 +66,8 @@ pub fn installs() -> Vec<Install> {
             out.push(Install { name, origin, path });
         }
     };
-    if let Some(dir) = user_clients_dir() {
-        for name in child_dirs(&dir) {
-            let path = archive::target_install_dir(&dir, &name);
-            push(name, Origin::UserClient, path);
-        }
-    }
-    if let Some(targets) = archive::workspace_targets_dir() {
-        for name in child_dirs(&targets) {
-            let path = archive::target_install_dir(&targets, &name);
-            push(name, Origin::WorkspaceTarget, path);
-        }
-    }
-    if let Some(path) = archive::workspace_default() {
-        push(
-            WORKSPACE_DEFAULT_NAME.to_string(),
-            Origin::WorkspaceDefault,
-            path,
-        );
+    for i in install::list() {
+        push(i.name, Origin::Registered, i.path);
     }
     for path in install_detect::detect() {
         push(detected_name(&path), Origin::Detected, path);
@@ -123,12 +75,8 @@ pub fn installs() -> Vec<Install> {
     out
 }
 
-/// A named client: the user directory first, then the checkout's targets.
 pub fn named(name: &str) -> Option<PathBuf> {
-    user_clients_dir()
-        .map(|dir| archive::target_install_dir(&dir, name))
-        .filter(|p| install_detect::is_ffxi_root(p))
-        .or_else(|| archive::workspace_target(name))
+    install::named(name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,8 +85,7 @@ pub enum Source {
     ConfigOverride,
     EnvPath,
     Config,
-    EnvTarget(String),
-    WorkspaceDefault,
+    Default(String),
 }
 
 impl fmt::Display for Source {
@@ -147,14 +94,9 @@ impl fmt::Display for Source {
             Source::ConfigOverride => {
                 write!(f, "launcher.json (its Override tick beats the environment)")
             }
-            Source::EnvPath => write!(f, "{DAT_PATH_ENV} from the environment"),
+            Source::EnvPath => install::Source::EnvPath.fmt(f),
             Source::Config => write!(f, "launcher.json"),
-            Source::EnvTarget(name) => {
-                write!(f, "{CLIENT_TARGET_ENV}={name} from the environment")
-            }
-            Source::WorkspaceDefault => {
-                write!(f, "the checkout default, {}", archive::DEFAULT_INSTALL_DIR)
-            }
+            Source::Default(name) => install::Source::Default(name.clone()).fmt(f),
         }
     }
 }
@@ -167,13 +109,16 @@ pub struct Located {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unresolved {
-    pub source: Source,
+    pub source: Option<Source>,
     pub reason: String,
 }
 
 impl fmt::Display for Unresolved {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.reason, self.source)
+        match &self.source {
+            Some(s) => write!(f, "{} ({s})", self.reason),
+            None => f.write_str(&self.reason),
+        }
     }
 }
 
@@ -190,57 +135,52 @@ pub fn shell_dat_path() -> Option<&'static str> {
 }
 
 /// The install the process will load, and why: the launcher's saved path when
-/// its override tick is set, else `FFXI_DAT_PATH`, else `FFXI_CLIENT_TARGET`
-/// by name, else the launcher's saved path, else the checkout default.
+/// its override tick is set, else `FFXI_DAT_PATH`, else the registry's
+/// `default` install, else the launcher's saved path. A saved path that no
+/// longer holds an install is skipped, never loaded.
 pub fn resolve(settings: &Settings) -> Result<Located, Unresolved> {
     let env_path = shell_dat_path().map(PathBuf::from);
-    let config = settings.dat_path.value.trim();
-    let from_config = |source: Source| Located {
-        path: PathBuf::from(config),
-        source,
-    };
-    if !config.is_empty() && settings.dat_path.override_env {
-        let source = if env_path.is_some() || env_string(CLIENT_TARGET_ENV).is_some() {
+    let config = Some(settings.dat_path.value.trim())
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| install_detect::is_ffxi_root(p));
+    if let (Some(path), true) = (&config, settings.dat_path.override_env) {
+        let source = if env_path.is_some() {
             Source::ConfigOverride
         } else {
             Source::Config
         };
-        return Ok(from_config(source));
-    }
-    if let Some(path) = env_path {
         return Ok(Located {
-            path,
-            source: Source::EnvPath,
+            path: path.clone(),
+            source,
         });
     }
-    if let Some(name) = env_string(CLIENT_TARGET_ENV) {
-        let source = Source::EnvTarget(name.clone());
-        return match named(&name) {
-            Some(path) => Ok(Located { path, source }),
-            None => Err(Unresolved {
-                source,
-                reason: format!(
-                    "no client named `{name}` under {} or {}",
-                    user_clients_dir()
-                        .map(|d| d.display().to_string())
-                        .unwrap_or_else(|| "the user client directory".into()),
-                    archive::TARGETS_DIR
-                ),
+    match install::resolve_in(install::installs_dir().as_deref(), env_path) {
+        Ok(r) => Ok(Located {
+            path: r.path,
+            source: match r.source {
+                install::Source::EnvPath => Source::EnvPath,
+                install::Source::Default(name) => Source::Default(name),
+            },
+        }),
+        Err(u) if u.source == Some(install::Source::EnvPath) => Err(Unresolved {
+            source: Some(Source::EnvPath),
+            reason: u.reason,
+        }),
+        Err(u) => match config {
+            Some(path) => Ok(Located {
+                path,
+                source: Source::Config,
             }),
-        };
+            None => Err(Unresolved {
+                source: u.source.map(|s| match s {
+                    install::Source::EnvPath => Source::EnvPath,
+                    install::Source::Default(name) => Source::Default(name),
+                }),
+                reason: u.reason,
+            }),
+        },
     }
-    if !config.is_empty() {
-        return Ok(from_config(Source::Config));
-    }
-    archive::workspace_default()
-        .map(|path| Located {
-            path,
-            source: Source::WorkspaceDefault,
-        })
-        .ok_or_else(|| Unresolved {
-            source: Source::WorkspaceDefault,
-            reason: "no install wired and nothing configured".to_string(),
-        })
 }
 
 /// Settle the choice into the environment so every `DatRoot::from_env_or_default`
@@ -264,18 +204,34 @@ pub fn export(settings: &Settings) -> Result<Located, Unresolved> {
     located
 }
 
-/// Persist `path` as the launcher's install. The override tick is left off so
-/// a shell env var still wins for one-off runs; the settings screen can set it.
-pub fn persist(path: &Path) -> Result<(), String> {
-    let mut store = launcher_store::load();
-    store.settings.dat_path = EnvOverride {
-        value: path.display().to_string(),
-        override_env: false,
+/// Make `root` the `default` install, registering it by link first when it
+/// lies outside the registry, and clear the launcher's legacy saved path so
+/// the pointer is the one saved choice.
+pub fn persist(root: &Path) -> Result<String, String> {
+    let name = match install::name_of(root) {
+        Some(name) => name,
+        None => {
+            let name = detected_name(root);
+            if !valid_name(&name) {
+                return Err(format!(
+                    "`{name}` is not usable as an install name; link it with `kuluu install link NAME {}`",
+                    root.display()
+                ));
+            }
+            install::link(&name, root, false).map_err(|e| e.to_string())?;
+            name
+        }
     };
-    launcher_store::save(&store).map_err(|e| format!("writing launcher.json: {e}"))
+    install::set_default(&name).map_err(|e| e.to_string())?;
+    let mut store = launcher_store::load();
+    if !store.settings.dat_path.value.trim().is_empty() {
+        store.settings.dat_path = EnvOverride::default();
+        launcher_store::save(&store).map_err(|e| format!("writing launcher.json: {e}"))?;
+    }
+    Ok(name)
 }
 
-/// `spec` is a client name or a path (an install root or a directory above one).
+/// `spec` is an install name or a path (an install root or a directory above one).
 pub fn locate_spec(spec: &str) -> Result<PathBuf, String> {
     let as_path = Path::new(spec);
     if as_path.is_dir() {
@@ -289,7 +245,7 @@ pub fn locate_spec(spec: &str) -> Result<PathBuf, String> {
         .into_iter()
         .find(|i| i.name == spec)
         .map(|i| i.path)
-        .ok_or_else(|| format!("`{spec}` is neither a directory nor a known client name"))
+        .ok_or_else(|| format!("`{spec}` is neither a directory nor a known install name"))
 }
 
 pub fn use_install(spec: &str) -> Result<PathBuf, String> {
@@ -298,8 +254,8 @@ pub fn use_install(spec: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Fetch Square Enix's installer into the user client directory as `name`.
-/// Returns the DAT root; the 2019 base image still needs [`update`].
+/// Fetch Square Enix's installer into the registry as `name`. Returns the
+/// DAT root; the 2019 base image still needs [`update`].
 pub fn download(
     name: &str,
     region: &str,
@@ -308,11 +264,11 @@ pub fn download(
 ) -> Result<PathBuf, String> {
     if !valid_name(name) {
         return Err(format!(
-            "client name `{name}` must be [A-Za-z0-9_-]+ (it becomes a directory name)"
+            "install name `{name}` must be [A-Za-z0-9_-]+ (it becomes a directory name)"
         ));
     }
-    let clients = user_clients_dir().ok_or("no user data directory on this system")?;
-    let target_root = clients.join(name);
+    let installs = user_clients_dir().ok_or("no user data directory on this system")?;
+    let target_root = installs.join(name);
     let installer_dir =
         kuluu_session::config_dir::cache_dir(INSTALLER_CACHE_DIR).map_err(|e| e.to_string())?;
     let plan = ffxi_install::Plan {
@@ -321,7 +277,7 @@ pub fn download(
         target_root: &target_root,
     };
     ffxi_install::download_and_unpack(&plan, cancel, report)?;
-    let root = target_root.join(archive::INSTALL_SUBDIR);
+    let root = install::install_root_in(&installs, name);
     if !install_detect::is_ffxi_root(&root) {
         return Err(format!(
             "unpack finished but {} does not validate ({} missing)",
@@ -377,7 +333,7 @@ pub struct SetupOutcome {
     pub update: Option<Option<ffxi_install::update::Outcome>>,
 }
 
-/// One shot from nothing to a current retail client: reuse a client already
+/// One shot from nothing to a current retail client: reuse an install already
 /// carrying `name` (never re-downloaded over), else download it, then patch
 /// it. Selecting it is the caller's decision.
 pub fn setup(
@@ -482,16 +438,32 @@ pub mod cli {
 
     #[derive(Debug, Subcommand)]
     pub enum Action {
-        /// Every install kuluu can see, with the active one marked.
-        List,
-        /// The install the client will load, and why.
+        /// Every install kuluu can see, with the default marked.
+        List {
+            /// Print only the DAT roots, one per line.
+            #[arg(long)]
+            roots: bool,
+        },
+        /// The install kuluu will load, and why.
         Which,
-        /// Make a client (by name or path) the launcher's install.
+        /// Make an install (by name or path) the default. A path outside the
+        /// registry is linked under its folder name first.
         Use { install: String },
+        /// Print the DAT root of a named install.
+        Path { name: String },
+        /// Register an existing install under NAME by symlink (or --copy).
+        Link {
+            name: String,
+            /// An install root or a directory above one; auto-detected when omitted.
+            path: Option<PathBuf>,
+            #[arg(long)]
+            copy: bool,
+        },
         /// Get a current retail client in one shot: download (or reuse) a
-        /// named client, patch it, and select it. Prompts for anything not
-        /// given unless --yes.
-        Setup {
+        /// named install, patch it, and make it the default. Prompts for
+        /// anything not given unless --yes.
+        #[command(alias = "setup")]
+        Get {
             #[arg(long)]
             name: Option<String>,
             #[arg(long)]
@@ -502,11 +474,11 @@ pub mod cli {
             /// Leave the 2019 base image unpatched.
             #[arg(long)]
             no_update: bool,
-            /// Do not make it the launcher's install.
+            /// Do not make it the default.
             #[arg(long)]
             no_use: bool,
         },
-        /// Patch a client (by name or path) to the current retail version.
+        /// Patch an install (by name or path) to the current retail version.
         Update {
             install: String,
             /// Re-check every file, not just the manifest stamp.
@@ -519,24 +491,32 @@ pub mod cli {
 
     pub fn run(action: &Action) -> Result<(), String> {
         match action {
-            Action::List => list(),
+            Action::List { roots } => list(*roots),
             Action::Which => which(),
             Action::Use { install } => {
-                let path = use_install(install)?;
+                let path = locate_spec(install)?;
+                let name = persist(&path)?;
                 println!(
-                    "launcher.json now selects {}\n  {}",
+                    "`{name}` is now the default install\n  {}\n  {}",
                     path.display(),
                     describe(&path)
                 );
                 Ok(())
             }
-            Action::Setup {
+            Action::Path { name } => {
+                let path = named(name)
+                    .ok_or_else(|| format!("no install named `{name}` (kuluu install list)"))?;
+                println!("{}", path.display());
+                Ok(())
+            }
+            Action::Link { name, path, copy } => link_cli(name, path.as_deref(), *copy),
+            Action::Get {
                 name,
                 region,
                 yes,
                 no_update,
                 no_use,
-            } => setup_cli(
+            } => get_cli(
                 name.as_deref(),
                 region.as_deref(),
                 *yes,
@@ -557,9 +537,15 @@ pub mod cli {
             .map(|l| l.path)
     }
 
-    fn list() -> Result<(), String> {
-        let active = active_path();
+    fn list(roots: bool) -> Result<(), String> {
         let installs = installs();
+        if roots {
+            for i in installs.iter().filter(|i| i.origin == Origin::Registered) {
+                println!("{}", i.path.display());
+            }
+            return Ok(());
+        }
+        let active = active_path();
         if installs.is_empty() {
             println!("no FFXI installs found");
         }
@@ -585,9 +571,9 @@ pub mod cli {
             );
         }
         if let Some(dir) = user_clients_dir() {
-            println!("\nuser clients: {}", dir.display());
+            println!("\nregistry: {}", dir.display());
         }
-        println!("* = what `kuluu play` will load; change it with `kuluu ffxi-client use NAME`");
+        println!("* = what `kuluu play` will load; change it with `kuluu install use NAME`");
         Ok(())
     }
 
@@ -609,9 +595,44 @@ pub mod cli {
             }
             Err(u) => Err(format!(
                 "no install will load: {u}\n  \
-                 pick one with `kuluu ffxi-client use NAME|PATH`, or run `kuluu ffxi-client setup`"
+                 pick one with `kuluu install use NAME|PATH`, or run `kuluu install get`"
             )),
         }
+    }
+
+    fn link_cli(name: &str, path: Option<&Path>, copy: bool) -> Result<(), String> {
+        let source = match path {
+            Some(p) => install_detect::find_ffxi_root(p, install_detect::DEFAULT_SEARCH_DEPTH)
+                .ok_or_else(|| format!("no FFXI install at or under {}", p.display()))?,
+            None => {
+                let mut hits = install_detect::detect();
+                hits.dedup();
+                match hits.len() {
+                    0 => return Err("no FFXI install detected; pass a path".to_string()),
+                    1 => hits.remove(0),
+                    _ => {
+                        let mut msg = String::from("several installs detected; pass one:\n");
+                        for h in &hits {
+                            msg.push_str(&format!(
+                                "  kuluu install link {name} \"{}\"\n",
+                                h.display()
+                            ));
+                        }
+                        return Err(msg);
+                    }
+                }
+            }
+        };
+        if copy {
+            println!("Copying {} (this can be ~19 GB) ...", source.display());
+        }
+        let root = install::link(name, &source, copy).map_err(|e| e.to_string())?;
+        println!(
+            "`{name}` registered\n  {}\n  {}\nMake it the default with `kuluu install use {name}`",
+            root.display(),
+            describe(&root)
+        );
+        Ok(())
     }
 
     fn read_line(prompt: &str) -> Result<String, String> {
@@ -643,7 +664,7 @@ pub mod cli {
         })
     }
 
-    fn setup_cli(
+    fn get_cli(
         name: Option<&str>,
         region: Option<&str>,
         yes: bool,
@@ -653,11 +674,11 @@ pub mod cli {
         let name = match name {
             Some(n) => n.to_string(),
             None if yes => DEFAULT_DOWNLOAD_NAME.to_string(),
-            None => ask("Client name", DEFAULT_DOWNLOAD_NAME)?,
+            None => ask("Install name", DEFAULT_DOWNLOAD_NAME)?,
         };
         if !valid_name(&name) {
             return Err(format!(
-                "client name `{name}` must be [A-Za-z0-9_-]+ (it becomes a directory name)"
+                "install name `{name}` must be [A-Za-z0-9_-]+ (it becomes a directory name)"
             ));
         }
         let existing = named(&name);
@@ -668,10 +689,10 @@ pub mod cli {
             (None, None) => ask("Region (us|eu)", DEFAULT_REGION)?,
         };
         ffxi_install::region(&region)?;
-        let clients = user_clients_dir().ok_or("no user data directory on this system")?;
+        let installs = user_clients_dir().ok_or("no user data directory on this system")?;
         match &existing {
             Some(root) => println!(
-                "Reusing the client already named `{name}`:\n  {}\n  {}",
+                "Reusing the install already named `{name}`:\n  {}\n  {}",
                 root.display(),
                 describe(root)
             ),
@@ -679,7 +700,7 @@ pub mod cli {
                 "This downloads Square Enix's official FINAL FANTASY XI client installer\n\
                  ({INSTALLER_SIZE_NOTE}) from {}/{region}/ and unpacks it into\n  {}",
                 ffxi_install::CDN_BASE,
-                clients.join(&name).display(),
+                installs.join(&name).display(),
             ),
         }
         if !no_update {
@@ -711,7 +732,7 @@ pub mod cli {
             None => println!("  left unpatched (--no-update)"),
         }
         if no_use {
-            println!("Select it later with:\n  kuluu ffxi-client use {name}");
+            println!("Make it the default later with:\n  kuluu install use {name}");
             return Ok(());
         }
         let current = active_path();
@@ -719,17 +740,17 @@ pub mod cli {
             .as_deref()
             .is_some_and(|c| same_dir(c, &outcome.root))
         {
-            println!("It is already the launcher's install.");
+            println!("It is already the default install.");
             return Ok(());
         }
         if let Some(c) = &current {
-            println!("The launcher currently loads {}", c.display());
+            println!("kuluu currently loads {}", c.display());
         }
-        if yes || confirm("Make it the launcher's install?", true)? {
+        if yes || confirm("Make it the default install?", true)? {
             persist(&outcome.root)?;
-            println!("launcher.json now selects `{name}`");
+            println!("`{name}` is now the default install");
         } else {
-            println!("Left as is. Select it later with:\n  kuluu ffxi-client use {name}");
+            println!("Left as is. Make it the default later with:\n  kuluu install use {name}");
         }
         Ok(())
     }
@@ -786,13 +807,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn names_are_directory_safe() {
-        assert!(valid_name("retail"));
-        assert!(valid_name("retail-eu_2"));
-        assert!(!valid_name(""));
-        assert!(!valid_name("../x"));
-        assert!(!valid_name("a b"));
+    fn fake_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("kuluu-ffxi-client-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("ROM")).unwrap();
+        std::fs::write(root.join(install_detect::VTABLE_MARKER), b"").unwrap();
+        root
     }
 
     #[test]
@@ -807,19 +827,35 @@ mod tests {
     // orderings against whatever the test runner's shell had.
     #[test]
     fn config_beats_the_shell_only_with_its_override_tick() {
+        let cfg = fake_root("cfg");
         let shell = shell_dat_path().map(PathBuf::from);
-        let l = resolve(&settings("/cfg", true)).unwrap();
-        assert_eq!(l.path, PathBuf::from("/cfg"));
-        let l = resolve(&settings("/cfg", false)).unwrap();
+        let l = resolve(&settings(&cfg.display().to_string(), true)).unwrap();
+        assert_eq!(l.path, cfg);
+        let l = resolve(&settings(&cfg.display().to_string(), false));
         match shell {
-            Some(p) => {
+            Some(p) if install_detect::is_ffxi_root(&p) => {
+                let l = l.unwrap();
                 assert_eq!(l.path, p);
                 assert_eq!(l.source, Source::EnvPath);
             }
-            None => {
-                assert_eq!(l.path, PathBuf::from("/cfg"));
-                assert_eq!(l.source, Source::Config);
-            }
+            Some(_) => assert_eq!(l.unwrap_err().source, Some(Source::EnvPath)),
+            None => match l {
+                Ok(l) => assert!(
+                    matches!(l.source, Source::Default(_) | Source::Config),
+                    "{:?}",
+                    l.source
+                ),
+                Err(u) => panic!("nothing resolved: {u}"),
+            },
+        }
+    }
+
+    #[test]
+    fn a_stale_saved_path_is_skipped_even_with_its_tick() {
+        let l = resolve(&settings("/nowhere/at/all", true));
+        if let Ok(l) = l {
+            assert_ne!(l.path, PathBuf::from("/nowhere/at/all"));
+            assert!(!matches!(l.source, Source::Config | Source::ConfigOverride));
         }
     }
 }

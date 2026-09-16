@@ -9,7 +9,6 @@ publish = false
 # depend on workspace crates whose build scripts read vendor/ (e.g. ffxi-dat).
 # ffxi-install has no build script.
 [dependencies]
-ffxi-install = { path = "../ffxi-install" }
 
 # Project automation, never a shipped artifact — keep dist's release packaging
 # focused on kuluu.

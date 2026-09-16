@@ -155,14 +155,7 @@ impl Default for BgmSlots {
 }
 
 fn resolve_install_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("FFXI_DAT_PATH") {
-        return Some(PathBuf::from(root));
-    }
-    let fallback = PathBuf::from(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-    if fallback.join("sound/win").is_dir() {
-        return Some(fallback);
-    }
-    None
+    ffxi_dat::install::resolve().ok().map(|r| r.path)
 }
 
 // research/xim resource/table/ZoneSettingsTable.kt getZoneIds: the retail client

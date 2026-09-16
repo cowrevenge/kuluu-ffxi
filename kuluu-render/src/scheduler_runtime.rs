@@ -1969,22 +1969,12 @@ pub fn reload_main_dll_for_root(
     main_dll_for_root(root)
 }
 
-/// The install `DatRoot::from_env_or_default` would open (same precedence:
-/// `FFXI_DAT_PATH`, then the `FFXI_CLIENT_TARGET` checkout target, then the
-/// checkout default), without opening it: callers that only need the dll must
-/// not pay the VTABLE/FTABLE parse a `DatRoot` costs. kuluu settles the
-/// launcher's choice into `FFXI_DAT_PATH` before any of this runs
-/// (kuluu/src/ffxi_client.rs), so this agrees with the wired `ActionDatRoot`.
+/// The install `DatRoot::from_env_or_default` would open
+/// (`ffxi_dat::install::resolve`), without opening it: callers that only need
+/// the dll must not pay the VTABLE/FTABLE parse a `DatRoot` costs.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install_root_from_env() -> Option<std::path::PathBuf> {
-    use ffxi_dat::archive::{workspace_default, workspace_target, CLIENT_TARGET_ENV, DAT_PATH_ENV};
-    if let Some(path) = std::env::var_os(DAT_PATH_ENV) {
-        return Some(std::path::PathBuf::from(path));
-    }
-    if let Some(name) = std::env::var_os(CLIENT_TARGET_ENV) {
-        return workspace_target(&name.to_string_lossy());
-    }
-    workspace_default()
+    ffxi_dat::install::resolve().ok().map(|r| r.path)
 }
 
 /// [`main_dll_for_root`] for [`install_root_from_env`]; the entry point for

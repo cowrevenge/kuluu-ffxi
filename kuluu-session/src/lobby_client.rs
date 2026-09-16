@@ -180,9 +180,9 @@ impl LobbyKey {
 }
 
 /// The patch stamp the 0x26 versionCode carries: [`CLIENT_VER_ENV`], else the
-/// install every `DatRoot::from_env_or_default` in this process loads, else
-/// the vendored pin (a session with no install is not a client the lobby can
-/// judge, and the pin keeps a DAT-less agent session reachable).
+/// install `ffxi_dat::install::resolve` names, else the vendored pin (a
+/// session with no install is not a client the lobby can judge, and the pin
+/// keeps a DAT-less agent session reachable).
 pub fn client_version_code() -> String {
     if let Some(v) = std::env::var(CLIENT_VER_ENV)
         .ok()
@@ -198,14 +198,7 @@ pub fn client_version_code() -> String {
             ffxi_proto::login::CLIENT_VER_ERA_LEN
         );
     }
-    let root = std::env::var_os(ffxi_dat::archive::DAT_PATH_ENV)
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var(ffxi_dat::archive::CLIENT_TARGET_ENV)
-                .ok()
-                .and_then(|name| ffxi_dat::archive::workspace_target(&name))
-        })
-        .or_else(ffxi_dat::archive::workspace_default);
+    let root = ffxi_dat::install::resolve().ok().map(|r| r.path);
     match root.and_then(|r| ffxi_dat::client_profile::patch_version_at(&r)) {
         Some(stamp) => stamp,
         None => {

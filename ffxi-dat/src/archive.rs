@@ -17,64 +17,8 @@ const MAX_ROM_INDEX: u8 = 19;
 
 pub const DAT_PATH_ENV: &str = "FFXI_DAT_PATH";
 
-pub const DEFAULT_INSTALL_DIR: &str = "vendor/game-files/SquareEnix/FINAL FANTASY XI";
-
-/// Named installs live side by side here so one checkout can target several
-/// client generations; `cargo xtask ffxi-client link --target <name>` wires them.
-pub const TARGETS_DIR: &str = "vendor/game-files/targets";
-
-/// Selects a named install under [`TARGETS_DIR`]. `FFXI_DAT_PATH` wins when
-/// both are set, so an explicit path is never silently redirected.
-pub const CLIENT_TARGET_ENV: &str = "FFXI_CLIENT_TARGET";
-
+/// The DAT root's path inside an install directory.
 pub const INSTALL_SUBDIR: &str = "SquareEnix/FINAL FANTASY XI";
-
-pub fn target_install_dir(targets_dir: &Path, name: &str) -> PathBuf {
-    targets_dir.join(name).join(INSTALL_SUBDIR)
-}
-
-fn is_install(dir: &Path) -> bool {
-    dir.join("VTABLE.DAT").exists()
-}
-
-/// Workspace-relative paths are tried against the cwd first; cargo runs each
-/// test binary with cwd set to its own package root, so the workspace root
-/// resolved from this crate's manifest dir is the fallback (absent in a
-/// shipped binary, which is why cwd is still tried first).
-fn workspace_bases() -> Vec<PathBuf> {
-    let mut bases = Vec::new();
-    if let Ok(cwd) = env::current_dir() {
-        bases.push(cwd);
-    }
-    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-        bases.push(root.to_path_buf());
-    }
-    bases
-}
-
-/// The checkout's [`TARGETS_DIR`], if the checkout is reachable.
-pub fn workspace_targets_dir() -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| b.join(TARGETS_DIR))
-        .find(|p| p.is_dir())
-}
-
-/// The named checkout target, if it holds an install.
-pub fn workspace_target(name: &str) -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| target_install_dir(&b.join(TARGETS_DIR), name))
-        .find(|p| is_install(p))
-}
-
-/// The checkout's [`DEFAULT_INSTALL_DIR`], if it holds an install.
-pub fn workspace_default() -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| b.join(DEFAULT_INSTALL_DIR))
-        .find(|p| is_install(p))
-}
 
 /// Overlay roots searched before the base install, in order, separated by the
 /// platform path separator. A startup override; see [`discover_overlays`] for
@@ -96,9 +40,9 @@ const PIVOT_INI: &str = "config/pivot/pivot.ini";
 const PIVOT_DAT_DIR: &str = "polplugins/DATs";
 
 /// The game directory holding Pivot's config and overlays, given a DAT root of
-/// `<game>/SquareEnix/FINAL FANTASY XI`. A root that is itself a symlink (the
-/// checkout default pointing into a named target) is followed first, since
-/// the config sits beside the real tree, not the link.
+/// `<game>/SquareEnix/FINAL FANTASY XI`. A root that is itself a symlink (an
+/// install registered by link) is followed first, since the config sits
+/// beside the real tree, not the link.
 fn game_dir(install_root: &Path) -> Option<PathBuf> {
     let real = match std::fs::read_link(install_root) {
         Ok(target) => install_root
@@ -116,8 +60,8 @@ fn game_dir(install_root: &Path) -> Option<PathBuf> {
 /// Pivot indexes them `0=`, `1=`, … and we search in that order, first match
 /// wins. That precedence is NOT confirmed against Pivot's source (none is
 /// vendored) and the shipped `pivotSettingsHolder.ini` comment contradicts its
-/// own entries; it is unobservable on the horizonxi-2023 target
-/// (vendor/game-files/targets/hxi), where no two overlays claim the same path.
+/// own entries; it is unobservable on the horizonxi-2023 install, where no two
+/// overlays claim the same path.
 fn parse_pivot_ini(ini: &str) -> (Option<PathBuf>, Vec<String>) {
     let mut root_path = None;
     let mut entries: Vec<(u32, String)> = Vec::new();
@@ -393,24 +337,13 @@ impl DatRoot {
         Self::open(PathBuf::from(root))
     }
 
-    /// `FFXI_DAT_PATH`, else the checkout target named by `FFXI_CLIENT_TARGET`,
-    /// else the checkout default. Product-side sources (the launcher's saved
-    /// choice, the per-user client directory) are settled into `FFXI_DAT_PATH`
-    /// by kuluu before this runs.
+    /// The install [`crate::install::resolve`] names: `FFXI_DAT_PATH`, else
+    /// the registry's `default` pointer.
     pub fn from_env_or_default() -> Result<Self> {
-        if let Some(root) = env::var_os(DAT_PATH_ENV) {
-            return Self::open(PathBuf::from(root));
-        }
-        if let Some(name) = env::var_os(CLIENT_TARGET_ENV) {
-            let name = name.to_string_lossy();
-            return match workspace_target(&name) {
-                Some(p) => Self::open(p),
-                None => Err(DatError::TargetMissing {
-                    name: name.into_owned(),
-                }),
-            };
-        }
-        Self::open(workspace_default().ok_or(DatError::EnvMissing)?)
+        let resolved = crate::install::resolve().map_err(|u| DatError::NoInstall {
+            reason: u.to_string(),
+        })?;
+        Self::open(resolved.path)
     }
 
     pub fn root(&self) -> &Path {
@@ -458,51 +391,27 @@ impl DatRoot {
 }
 
 /// Test-support entry point, `pub` only so real-DAT guards in sibling crates can
-/// share it. Opens `FFXI_DAT_PATH` if set and usable, else the checkout target
-/// named by `FFXI_CLIENT_TARGET`, else the default install resolved relative to
-/// the crate (works regardless of the test CWD, unlike
-/// [`DatRoot::from_env_or_default`]'s relative path). `None` — with a printed
-/// reason, so a vacuous pass is never mistaken for a real one — when no install
-/// is present.
+/// share it. Opens the install [`crate::install::resolve`] names; `None` with a
+/// printed reason, so a vacuous pass is never mistaken for a real one, when
+/// nothing resolves or the install does not open. A set but unusable
+/// `FFXI_DAT_PATH` is a skip that says so, never a fallthrough to another
+/// install.
 #[doc(hidden)]
 pub fn open_test_install() -> Option<DatRoot> {
-    match DatRoot::from_env() {
-        Ok(root) => return Some(root),
-        Err(DatError::EnvMissing) => {}
-        // A stale FFXI_DAT_PATH in a shell must not turn every real-DAT test into a silent
-        // skip, so say so and still try the vendored install.
-        Err(e) => eprintln!(
-            "real-DAT guard: {DAT_PATH_ENV} unusable ({e}); trying the vendored install instead"
-        ),
-    }
-    if let Some(name) = env::var_os(CLIENT_TARGET_ENV) {
-        let name = name.to_string_lossy();
-        match workspace_target(&name).map(DatRoot::open) {
-            Some(Ok(root)) => return Some(root),
-            Some(Err(e)) => eprintln!(
-                "real-DAT guard: {CLIENT_TARGET_ENV}={name} unusable ({e}); trying the vendored install instead"
-            ),
-            None => eprintln!(
-                "real-DAT guard: {CLIENT_TARGET_ENV}={name} names no install under {TARGETS_DIR}; trying the vendored install instead"
-            ),
+    let resolved = match crate::install::resolve() {
+        Ok(r) => r,
+        Err(u) => {
+            eprintln!("SKIP (real-DAT guard): {u}");
+            return None;
         }
-    }
-    let default = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(DEFAULT_INSTALL_DIR);
-    if !default.join("VTABLE.DAT").exists() {
-        eprintln!(
-            "SKIP (real-DAT guard): no retail install — {DAT_PATH_ENV} unset and {} has no VTABLE.DAT",
-            default.display()
-        );
-        return None;
-    }
-    match DatRoot::open(&default) {
+    };
+    match DatRoot::open(&resolved.path) {
         Ok(root) => Some(root),
         Err(e) => {
             eprintln!(
-                "SKIP (real-DAT guard): {} is not a usable install: {e}",
-                default.display()
+                "SKIP (real-DAT guard): {} ({}) is not a usable install: {e}",
+                resolved.path.display(),
+                resolved.source
             );
             None
         }

@@ -386,14 +386,13 @@ mod tests {
         assert_eq!(latest_patch_version("file x {\n}\n"), None);
     }
 
-    /// The `retail` named target, when a developer has downloaded and updated
-    /// it; skips otherwise.
+    /// The install registered as `retail`, when a developer has downloaded
+    /// and updated it; skips otherwise.
     #[test]
-    fn retail_target_is_a_known_client() {
-        let targets = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(crate::archive::TARGETS_DIR);
-        let root = crate::archive::target_install_dir(&targets, "retail");
+    fn retail_install_is_a_known_client() {
+        let Some(root) = crate::install::named("retail") else {
+            return;
+        };
         if !root.join(FFXIMAIN_DLL).is_file() {
             return;
         }

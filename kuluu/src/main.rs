@@ -52,8 +52,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Manage which FFXI client install kuluu loads.
-    FfxiClient {
+    /// Manage the FFXI installs kuluu loads.
+    Install {
         #[command(subcommand)]
         action: kuluu::ffxi_client::cli::Action,
     },
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
         .with_env_filter(env_filter)
         .init();
 
-    if let Command::FfxiClient { action } = &args.command {
+    if let Command::Install { action } = &args.command {
         return kuluu::ffxi_client::cli::run(action).map_err(|e| anyhow::anyhow!(e));
     }
     if let Command::SteamShortcut { action } = &args.command {
@@ -270,7 +270,7 @@ fn resolve_dat_root(require_dat: bool) -> Result<Option<std::sync::Arc<ffxi_dat:
 
 async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<()> {
     match args.command {
-        Command::FfxiClient { .. } | Command::SteamShortcut { .. } => {
+        Command::Install { .. } | Command::SteamShortcut { .. } => {
             unreachable!("handled before the runtime starts")
         }
         Command::Provision { user, password } => {

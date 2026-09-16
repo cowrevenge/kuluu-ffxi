@@ -1422,13 +1422,7 @@ const ZONE230_KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
 const ZONE230: u16 = 230;
 
 fn test_dat_root() -> Option<ffxi_dat::DatRoot> {
-    if let Ok(root) = ffxi_dat::DatRoot::from_env() {
-        return Some(root);
-    }
-    let default = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-    ffxi_dat::DatRoot::open(default).ok()
+    ffxi_dat::archive::open_test_install()
 }
 
 /// Full 0x02A chat composition against the retail DAT: the zone string's

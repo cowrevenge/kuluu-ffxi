@@ -367,7 +367,6 @@ run_comments() {
     local path root
     path=$(printf '%s' "$tok" | sed -E 's/[.,;:)]+$//; s#/$##')
     case "$path" in
-      vendor/game-files*) continue ;;
       vendor/*|research/*)
         root=$(printf '%s' "$path" | cut -d/ -f1-2)
         [ -d "$root" ] && [ -n "$(ls -A "$root" 2>/dev/null)" ] || continue ;;
@@ -525,25 +524,30 @@ run_test() {
 }
 
 run_install() {
-  # Retail-DAT conformance against every client install on disk: each checkout
-  # target plus FFXI_DAT_PATH when it names a different one. CI has no game
+  # Retail-DAT conformance against every registered install (the registry
+  # ffxi_dat::install owns, listed by its example so the convention has one
+  # source) plus FFXI_DAT_PATH when it names a different one. CI has no game
   # assets, so an empty root list skips rather than fails. Per root the
-  # overlay/target env is cleared so the suites read exactly that install.
-  # env(1) would bypass the cargo guard function above, hence the subshell.
-  local roots=() root rp seen='|'
-  for root in vendor/game-files/targets/*/SquareEnix/"FINAL FANTASY XI" "${FFXI_DAT_PATH:-}"; do
+  # overlay env is cleared so the suites read exactly that install. env(1)
+  # would bypass the cargo guard function above, hence the subshell.
+  local roots=() root rp seen='|' registered
+  registered=$(cargo run -q -p ffxi-dat --example dat-installs -- --roots 2>/dev/null || true)
+  while IFS= read -r root || [ -n "$root" ]; do
     [ -n "$root" ] && [ -f "$root/VTABLE.DAT" ] || continue
     rp=$(cd "$root" && pwd -P)
     case "$seen" in *"|$rp|"*) continue ;; esac
     seen+="$rp|"
     roots+=("$rp")
-  done
+  done <<EOF
+$registered
+${FFXI_DAT_PATH:-}
+EOF
   if [ ${#roots[@]} -eq 0 ]; then
-    echo "checks: install — no client install under vendor/game-files/targets/ or FFXI_DAT_PATH; skipping"
+    echo "checks: install — no registered install (kuluu install list) and no FFXI_DAT_PATH; skipping"
     return 0
   fi
   install_cargo() { # $1=install root, rest=cargo args
-    ( unset FFXI_DAT_OVERLAYS FFXI_CLIENT_TARGET; export FFXI_DAT_PATH="$1"; shift; cargo "$@" )
+    ( unset FFXI_DAT_OVERLAYS; export FFXI_DAT_PATH="$1"; shift; cargo "$@" )
   }
   for root in ${roots[@]+"${roots[@]}"}; do
     echo "checks: install — $root"

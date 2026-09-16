@@ -106,8 +106,8 @@ fn spw_no_loop_sentinel_is_handled() {
 
 #[test]
 fn real_install_smoke() {
-    let Ok(install) = std::env::var("FFXI_INSTALL") else {
-        eprintln!("skipping: FFXI_INSTALL not set");
+    let Ok(install) = std::env::var("FFXI_DAT_PATH") else {
+        eprintln!("skipping: FFXI_DAT_PATH not set");
         return;
     };
     let install = PathBuf::from(install);
@@ -120,7 +120,7 @@ fn real_install_smoke() {
             break;
         }
     }
-    let (_, _, decoded) = found.expect("no BGM found under FFXI_INSTALL");
+    let (_, _, decoded) = found.expect("no BGM found under FFXI_DAT_PATH");
     assert!(decoded.channels >= 1 && decoded.channels <= 2);
     assert!(decoded.sample_rate >= 8000.0 && decoded.sample_rate <= 48000.0);
     assert!(decoded.frames() > 100);

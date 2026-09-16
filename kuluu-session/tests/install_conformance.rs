@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ffxi_dat::archive::{open_test_install, workspace_target, CLIENT_TARGET_ENV, DAT_PATH_ENV};
+use ffxi_dat::archive::{open_test_install, DAT_PATH_ENV};
 use ffxi_dat::client_profile::{ItemBlockLayout, KNOWN_CLIENTS};
 use ffxi_dat::dmsg::{EmoteTextDat, StringDat, MARKER_KEY_ITEM};
 use ffxi_dat::event_dat::EventDat;
@@ -39,17 +39,10 @@ fn install() -> Option<DatRoot> {
     Some(root)
 }
 
-/// `open_test_install` falls back to the vendored default when the requested
-/// install is unusable; a per-install gate must fail there rather than measure
-/// the fallback and report it as the target it was pointed at.
+/// A per-install gate measures the install it was pointed at and nothing
+/// else; this pins that `open_test_install` honoured `FFXI_DAT_PATH`.
 fn refuse_fallback(root: &DatRoot) {
-    let requested = std::env::var_os(DAT_PATH_ENV)
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os(CLIENT_TARGET_ENV)
-                .and_then(|name| workspace_target(&name.to_string_lossy()))
-        });
-    let Some(requested) = requested else {
+    let Some(requested) = std::env::var_os(DAT_PATH_ENV).map(PathBuf::from) else {
         return;
     };
     let same = matches!(
@@ -58,7 +51,7 @@ fn refuse_fallback(root: &DatRoot) {
     );
     assert!(
         same,
-        "{DAT_PATH_ENV}/{CLIENT_TARGET_ENV} name an unusable install ({}); refusing to measure the fallback {}",
+        "{DAT_PATH_ENV} names {} but the opened install is {}",
         requested.display(),
         root.root().display()
     );

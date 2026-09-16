@@ -202,7 +202,6 @@ impl Plugin for UiElementAtlasPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn dxt3_ui_alpha_modulates_before_saturating() {
@@ -223,13 +222,7 @@ mod tests {
     }
 
     fn test_dat_root() -> Option<UiElementDatRoot> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-        if !root.join("VTABLE.DAT").exists() {
-            return None;
-        }
-        let root = DatRoot::open(root).ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         Some(UiElementDatRoot(Some(Arc::new(root))))
     }
 

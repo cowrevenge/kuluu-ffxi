@@ -15,6 +15,7 @@ use kuluu_snapshot::EntityKind;
 /// files that follow it): the FFXiMain.dll battle-animation table
 /// (`MainDll::base_battle_animation_index`), else the shipped fallback when the
 /// dll is unreadable.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) -> Option<u32> {
     dll.and_then(|dll| dll.base_battle_animation_index(race))
         .map(u32::from)
@@ -26,6 +27,7 @@ pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) 
 /// the animation caches below and the legacy VOS2 path carry instead of a race.
 /// The dll's race-config table inverts the id to its race; a non-PC id (an NPC
 /// model DAT) matches no row and, as before, has no battle DAT here.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
     if let Some(dll) = crate::scheduler_runtime::main_dll_from_env() {
         let race = crate::look_resolver::PC_LOOK_RACES
@@ -33,6 +35,13 @@ pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
             .find(|&race| dll.base_race_config_index(race).map(u32::from) == Some(skel_file_id))?;
         return motion_dat_for_race(Some(&dll), race);
     }
+    motion_dat_fallback(skel_file_id)
+}
+
+/// The browser viewer renders from relayed snapshots and never resolves an
+/// install root, so there is no FFXiMain.dll to invert a skeleton id through.
+#[cfg(target_arch = "wasm32")]
+pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
     motion_dat_fallback(skel_file_id)
 }
 
@@ -850,7 +859,7 @@ pub struct UpdateOutcome {
     pub speed: u8,
 
     /// The 0x0E animationSpeed byte (LSB `animationSpeed`, never multiplied by the run factor;
-    /// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed writes the
+    /// vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed writes the
     /// movement speed only). Feeds the gait rule and the clip playback-rate scale.
     pub speed_base: u8,
 
@@ -986,7 +995,7 @@ impl EntityPrediction {
     /// AI logic tick rate in Hz. vendor/server/src/map/map_constants.h kLogicUpdateRate = 2.5f,
     /// with kLogicUpdateInterval = 1000 / kLogicUpdateRate ms (one 400 ms tick). A moving mob's
     /// path step runs on that tick and ends in updatemask |= UPDATE_POS exactly once per step
-    /// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo), so one POS update lands
+    /// (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo), so one POS update lands
     /// per tick: the cadence engine below seeds and bounds from this period.
     const LSB_LOGIC_UPDATE_RATE_HZ: f32 = 2.5;
 
@@ -1029,12 +1038,12 @@ impl EntityPrediction {
     const JITTER_HISTORY_SAMPLES: usize = 8;
 
     /// Per-AI-tick step distance a moving mob advances, in yalms, from the wire speed byte.
-    /// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo (pinned vendor/server):
+    /// vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo (pinned vendor/server):
     /// `float stepDistance = speed / (run ? 50 : 40);` on every logic tick. The run flag is
     /// `m_pathFlags & PATHFLAG_RUN` at the StepTo call site, which
     /// vendor/server/src/map/ai/controllers/mob_controller.cpp passes for chase/follow/return-home
     /// and leaves clear while roaming: roam = walk (/40), engaged = run (/50).
-    /// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed multiplies only the movement speed by
+    /// vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed multiplies only the movement speed by
     /// the run factor, never animationSpeed, so the client's gait signal is already `run = speed >
     /// speed_base` (wire bytes) and the divisor is chosen from that same comparison. These two
     /// divisors are LSB constants; they are the only literals this step model may use.
@@ -1042,10 +1051,10 @@ impl EntityPrediction {
 
     pub const LSB_WALK_STEP_DIVISOR: f32 = 40.0;
 
-    /// The speed StepTo substitutes for a burrowing mob whose GetSpeed() == 0:
-    /// `if (PMobEntity->GetSpeed() == 0 && (m_roamFlags & ROAMFLAG_WORM)) { speed = 20; }`
-    /// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo; ROAMFLAG_WORM in
-    /// vendor/server/src/map/entities/mobentity.h). The
+    /// The speed StepTo substitutes for a burrowing mob whose base speed is 0:
+    /// `if (baseSpeed == 0 && ((roamFlags_ & xi::RoamFlag::Worm) != xi::RoamFlag::None) && owner_->isMobEntity())`
+    /// returns 20 (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepToInternal;
+    /// xi::RoamFlag::Worm from vendor/server/data/enums/roam_flag.yaml). The
     /// substitute is a local that is never written back to the entity, so the wire speed byte stays
     /// 0 while the worm still advances 20 / divisor per tick. expected_step_yalms mirrors it: a 0
     /// byte on an update that actually moved means the server used this value.
@@ -1159,14 +1168,14 @@ pub fn forward_from_rad(rad: f32) -> Vec3 {
 
 /// Per-AI-tick step distance in yalms for the incoming wire speed bytes.
 ///
-/// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo (pinned vendor/server) advances
+/// vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo (pinned vendor/server) advances
 /// a moving mob by `speed / (run ? 50 : 40)` each tick;
-/// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed
+/// vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed
 /// multiplies only the movement speed by the run factor, never animationSpeed, so the run/walk
 /// split is read straight off the wire as `speed > speed_base` (the same comparison the gait rule
 /// uses). No mount or retail-yps factor: this is the server's own per-tick budget.
 ///
-/// StepTo also substitutes a local `speed = 20` for ROAMFLAG_WORM mobs whose GetSpeed() == 0, and
+/// StepTo also substitutes a local `speed = 20` for xi::RoamFlag::Worm mobs whose base speed is 0, and
 /// never writes it back, so the wire byte stays 0 while the worm still moves. This function is only
 /// ever called on an update that actually moved (observe gates on SAMPLE_EPSILON_SQ), so a 0 speed
 /// byte here means the server used that substitute.
@@ -1202,7 +1211,7 @@ fn advance_prediction(s: &mut PredictSample, dt: f32, record_outcome: bool) -> (
         // Step-relative snap band, decided BEFORE the tween runs. jump is what LSB actually moved
         // on this tick: the XZ distance between consecutive confirmed server positions (observe()
         // stores it), never where we are rendering -- render lag is not a teleport. step is what
-        // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo).
+        // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo).
         // The bands are a ratio to that step, never a flat distance, so a fast mob's legitimate
         // per-tick move stays in Normal. XZ only: Y is assigned directly below and
         // must not inflate the jump with a floor-height change. Distance-only: a stale sample
@@ -1342,8 +1351,8 @@ static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = O
 /// Per-frame remote grounding, run after the prediction tween.
 ///
 /// LSB grounds mobs to the Detour navmesh, not the render mesh: waypoints come from Detour
-/// (vendor/server/src/map/navmesh.cpp CNavMesh::findPath / findRandomPosition over
-/// DetourNavMeshQuery) and vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo walks Y
+/// (vendor/server/src/map/navmesh/detour_navmesh.cpp DetourNavMesh::findPath / findRandomPosition over
+/// DetourNavMeshQuery) and vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo walks Y
 /// to that waypoint. Detour poly heights differ from the MZB collision surface by up to a navmesh
 /// cell height, so the POS packet Y is approximate: it picks the level, and this system places
 /// remote ground movers on their own collision mesh. Kuluu inference from the LSB navmesh model,
@@ -1828,7 +1837,7 @@ mod tests {
 
     #[test]
     fn prediction_y_assigns_server_directly() {
-        // Y is fully server-resolved (vendor/server/src/map/ai/helpers/pathfind.cpp
+        // Y is fully server-resolved (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp
         // CPathFind::StepTo walks it along the slope and
         // snaps it onto target.y on arrival): it lands on server.y in one update with no exp
         // smoothing. A floor-height change must not inflate the XZ jump into a Pop either.
@@ -2636,9 +2645,9 @@ mod tests {
 
     #[test]
     fn worm_speed_zero_mirrors_the_server_substitute_step() {
-        // vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo substitutes speed = 20
-        // for a ROAMFLAG_WORM mob whose
-        // GetSpeed() == 0 and never writes it back, so the wire byte stays 0 while the server still
+        // vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp CPathFind::StepTo substitutes speed = 20
+        // for a xi::RoamFlag::Worm mob whose
+        // base speed is 0 and never writes it back, so the wire byte stays 0 while the server still
         // advances 20 / divisor per tick. A 0 byte on an update that actually moved must band off
         // that substitute step: successive 0.5 yalms hops are exactly one walk step each -> Normal,
         // chase, never Pop.

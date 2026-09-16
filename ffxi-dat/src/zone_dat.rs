@@ -1,5 +1,4 @@
 include!(concat!(env!("OUT_DIR"), "/zone_dat_table.rs"));
-include!(concat!(env!("OUT_DIR"), "/string_dat_table.rs"));
 
 pub fn zone_id_to_mzb_file_id(zone_id: u16) -> Option<u32> {
     ZONE_DAT_TABLE
@@ -51,18 +50,37 @@ pub fn effective_zone_dat_file_id(zone_id: Option<u16>, myroom_model: Option<u16
         .or_else(|| zone_id.and_then(zone_id_to_mzb_file_id))
 }
 
-/// VTABLE/FTABLE file id of a zone's English dialog string DAT
-/// ([`crate::dmsg::StringDat`]), or `None` if the zone has no entry.
-pub fn zone_id_to_string_file_id(zone_id: u16) -> Option<u32> {
-    STRING_DAT_TABLE
-        .binary_search_by_key(&zone_id, |(z, _)| *z)
-        .ok()
-        .map(|i| STRING_DAT_TABLE[i].1)
+// research/xi-tools/docs/reference/ps2_decomp_crosscheck.md "Per-zone DAT ids": xievent.cpp.
+pub const STRING_DAT_LO_OFFSET: u32 = 6420;
+
+// research/XiEvents/Event DAT Files.md Feretory NA row; verified on horizonxi-2023 and retail-2026-09.
+pub const STRING_DAT_HI_OFFSET: u32 = 85335;
+
+pub fn string_dat_file_id(zone_id: u16) -> u32 {
+    let id = u32::from(zone_id);
+    if zone_id < ZONE_DAT_THRESHOLD {
+        id + STRING_DAT_LO_OFFSET
+    } else {
+        id + STRING_DAT_HI_OFFSET
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_dat_offsets_switch_at_the_zone_dat_threshold() {
+        assert_eq!(string_dat_file_id(0), STRING_DAT_LO_OFFSET);
+        assert_eq!(
+            string_dat_file_id(ZONE_DAT_THRESHOLD - 1),
+            u32::from(ZONE_DAT_THRESHOLD - 1) + STRING_DAT_LO_OFFSET
+        );
+        assert_eq!(
+            string_dat_file_id(ZONE_DAT_THRESHOLD),
+            u32::from(ZONE_DAT_THRESHOLD) + STRING_DAT_HI_OFFSET
+        );
+    }
 
     #[test]
     fn konschtat_highlands_maps_to_file_208() {

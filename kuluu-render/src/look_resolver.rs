@@ -108,7 +108,7 @@ pub fn face_dat_id(dll: &MainDll, face: u8, race: u8) -> Option<u32> {
 /// [`face_dat_id`] against the install the environment names
 /// (`scheduler_runtime::main_dll_from_env`), for callers that open their
 /// `DatRoot` from the environment the same way (the launcher's character
-/// preview, `/actordiag`). In-world dispatch reads the wired [`ActionMainDll`].
+/// preview, `//actordiag`). In-world dispatch reads the wired [`ActionMainDll`].
 pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     face_dat_id(&*main_dll_from_env()?, face, race)
 }
@@ -161,7 +161,10 @@ pub fn dispatch_mount_models(
                     warn!("mount id {mount_id} is outside the mount model block");
                     continue;
                 };
-                crate::ffxi_actor_render::ActorSubject::Npc { file_id }
+                crate::ffxi_actor_render::ActorSubject::Npc {
+                    file_id,
+                    graph_size: 0,
+                }
             }
         };
         load_actor_tx.write(crate::ffxi_actor_render::LoadActorRequest {
@@ -216,11 +219,19 @@ pub fn dispatch_look_driven_models(
         .filter(|e| state.snapshot.mount_of(e).is_some())
         .map(|e| e.id)
         .collect();
+    let graph_size_by_id: std::collections::HashMap<u32, u8> = state
+        .snapshot
+        .entities
+        .iter()
+        .map(|e| (e.id, e.char_flags.graph_size))
+        .collect();
     for (we, look, current_model) in q_changed.iter() {
         let mounted = mounted_riders.contains(&we.id);
+        let graph_size = graph_size_by_id.get(&we.id).copied().unwrap_or_default();
         let signature = EntityModel {
             look: look.0,
             mounted,
+            graph_size,
         };
         if current_model == Some(&signature) {
             continue;
@@ -347,7 +358,10 @@ pub fn dispatch_look_driven_models(
 
         load_actor_tx.write(crate::ffxi_actor_render::LoadActorRequest {
             entity_id: we.id,
-            subject: crate::ffxi_actor_render::ActorSubject::Npc { file_id: dat_id },
+            subject: crate::ffxi_actor_render::ActorSubject::Npc {
+                file_id: dat_id,
+                graph_size,
+            },
         });
         info!(
             "actor dispatch (npc): entity_id={} modelid={} dat_id={}",

@@ -13,6 +13,10 @@ pub(super) fn handle_world_key(
     usable_items_available: bool,
     can_fish: bool,
     cmd_tx: &Sender<AgentCommand>,
+    scene_state: &mut SceneState,
+    check_target: &mut kuluu_render::hud::check_view::CheckTarget,
+    trade_state: &mut kuluu_render::hud::trade::TradeState,
+    select_target: &mut SelectTargetMode,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
         return Some(InputMode::Chat(ChatBuffer::empty()));
@@ -48,6 +52,11 @@ pub(super) fn handle_world_key(
                         engaged,
                         usable_items_available,
                         can_fish,
+                        cmd_tx,
+                        scene_state,
+                        check_target,
+                        trade_state,
+                        select_target,
                     )
                 }
             }
@@ -63,12 +72,20 @@ pub(super) fn handle_world_key(
                 engaged,
                 usable_items_available,
                 can_fish,
+                cmd_tx,
+                scene_state,
+                check_target,
+                trade_state,
+                select_target,
             ),
         };
     }
     None
 }
 
+/// Opens the target's Command Menu — or, when the menu holds a single
+/// non-destructive entry, runs that entry instead of asking for a second
+/// confirm ([`action_model::sole_auto_confirm_entry`]).
 #[allow(clippy::too_many_arguments)]
 fn open_target_action_menu(
     current_target: Option<u32>,
@@ -78,6 +95,11 @@ fn open_target_action_menu(
     engaged: bool,
     usable_items_available: bool,
     can_fish: bool,
+    cmd_tx: &Sender<AgentCommand>,
+    scene_state: &mut SceneState,
+    check_target: &mut kuluu_render::hud::check_view::CheckTarget,
+    trade_state: &mut kuluu_render::hud::trade::TradeState,
+    select_target: &mut SelectTargetMode,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -89,14 +111,25 @@ fn open_target_action_menu(
         usable_items_available,
         can_fish,
     );
-    if action_model::build_target_action_entries(&ctx, &kuluu_render::hud::overlay::RETAIL)
-        .is_empty()
-    {
+    let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&ctx);
+    if entries.is_empty() {
         return None;
     }
-    Some(InputMode::TargetAction(
-        kuluu_render::input_mode::TargetActionState::open(ctx),
-    ))
+    let mut state = kuluu_render::input_mode::TargetActionState::open(ctx);
+    if action_model::sole_auto_confirm_entry(&entries).is_some() {
+        return confirm_target_action_at_cursor(
+            &mut state,
+            &entries,
+            scene_state,
+            current_target,
+            entities,
+            cmd_tx,
+            check_target,
+            trade_state,
+            select_target,
+        );
+    }
+    Some(InputMode::TargetAction(state))
 }
 
 #[allow(clippy::too_many_arguments)]

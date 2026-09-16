@@ -252,6 +252,8 @@ fn project_containers(s: &SessionState) -> Vec<wire::ContainerView> {
                     locked: slot.locked,
                     charges_remaining: slot.charges_remaining,
                     next_use_vana_ts: slot.next_use_vana_ts,
+                    use_delay_end_vana_ts: slot.use_delay_end_vana_ts,
+                    ready: slot.ready,
                 })
                 .collect(),
         })
@@ -306,6 +308,15 @@ pub fn shop_to_wire(s: &ShopState) -> wire::ShopState {
         offset_index: s.offset_index,
         items: s.items.iter().map(shop_item_to_wire).collect(),
         opened: s.opened,
+        expected_items: s.expected_items,
+        complete: s.complete,
+        vendor_id: s.vendor_id,
+        pending_sale: s.pending_sale.as_ref().map(|p| wire::ShopSale {
+            item_index: p.item_index,
+            item_no: p.item_no,
+            unit_price: p.unit_price,
+            count: p.count,
+        }),
     }
 }
 
@@ -700,10 +711,10 @@ pub fn vec3_to_wire(v: Vec3) -> wire::Vec3 {
     }
 }
 
-// MOUNTTYPE, vendor/server/src/map/entities/baseentity.h. Noble Chocobo
+// MOUNTTYPE, vendor/server/src/map/entities/base_entity.h. Noble Chocobo
 // is a chocobo despite sitting at the far end of the enum — the server routes it
 // through ANIMATION_CHOCOBO like the plain one
-// (charentity.cpp, CCharEntity::tryStartNextEvent).
+// (char_entity.cpp, CCharEntity::tryStartNextEvent).
 const MOUNT_CHOCOBO: u8 = 0;
 const MOUNT_NOBLE_CHOCOBO: u8 = 34;
 
@@ -767,6 +778,7 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         linkdead: f.linkdead,
         gm_level: f.gm_level,
         bazaar: f.bazaar,
+        graph_size: f.graph_size,
         linkshell_color: f.linkshell_color,
         charm: f.charm,
         gm_icon: f.gm_icon,
@@ -1107,6 +1119,8 @@ mod tests {
                     price: 0,
                     charges_remaining: None,
                     next_use_vana_ts: None,
+                    use_delay_end_vana_ts: (id == 0 && i == 0).then_some(12_345),
+                    ready: (id == 0 && i == 0).then_some(false),
                 })
                 .collect();
             s.inventory
@@ -1130,6 +1144,8 @@ mod tests {
         );
         assert_eq!(out[1].capacity, 60);
         assert_eq!(out[0].items.len(), 2);
+        assert_eq!(out[0].items[0].use_delay_end_vana_ts, Some(12_345));
+        assert_eq!(out[0].items[0].ready, Some(false));
         assert_eq!(out[2].items[0].container, 4, "items tag their source bag");
     }
 
@@ -1519,6 +1535,8 @@ mod tests {
             price: 0,
             charges_remaining: None,
             next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
         });
         s.inventory.containers.insert(0, inv0);
 

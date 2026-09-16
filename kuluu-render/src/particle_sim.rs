@@ -11,7 +11,7 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
-use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image, D3mBlendMode};
+use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image};
 use crate::env_flags::env_flag;
 use crate::ffxi_actor_render::FfxiRenderActor;
 use crate::ffxi_particle_material::FfxiParticleMaterial;
@@ -146,6 +146,12 @@ const D3M_STAGE1_ALPHA_GAIN: f32 = 4.0;
 // normalise (ffxi_dat::d3m::VERTEX_COLOR_DIVISOR). NonZeroOneTSS's SELECTARG1 does not double, so
 // the ignore-texture-alpha table divides it back out.
 const D3M_VERTEX_BAKED_GAIN: f32 = 2.0;
+// ZoneRenderer.cpp ZoneRenderer::DoD3mDraw, the `Texture == nullptr` branch: stage 0 is
+// MODULATE2X(CURRENT, TFACTOR) for rgb and MODULATE4X(CURRENT, TFACTOR) for alpha with stage 1
+// disabled — totals 2 and 4, half the textured table's. The /128 normalise already supplies
+// one doubling of each, so the CPU gains are the textured ones halved.
+const D3M_UNTEXTURED_RGB_GAIN: f32 = D3M_STAGE1_RGB_GAIN / 2.0;
+const D3M_UNTEXTURED_ALPHA_GAIN: f32 = D3M_STAGE1_ALPHA_GAIN / 2.0;
 // D3D saturates every texture-stage result. Stage 0's texture argument is only available in the
 // sampler, so the CPU keeps only the clamp it can evaluate exactly — stage 0's, which is exact
 // wherever the vertex colour is at or below the /128 midpoint (D * T <= 1 then, so the clamp is
@@ -162,6 +168,9 @@ const D3M_STAGE_CLAMP: f32 = 1.0;
 enum D3mDrawPath {
     D3m,
     Mmb,
+    // ZoneRenderer.cpp ZoneRenderer::DoD3mDraw — a submesh whose texture pointer is null
+    // takes the one-stage table instead of the textured two-stage one.
+    MmbUntextured,
 }
 
 // CMoD3mElem.cpp CMoD3mElem::DoMMBDraw — DoMMBDraw forces the ignore-texture-alpha table at this blend byte,
@@ -212,9 +221,16 @@ fn d3m_stage_chain(
     f_rgb: Vec3,
     f_alpha: f32,
     ignore_texture_alpha: bool,
+    path: D3mDrawPath,
 ) -> (Vec3, f32) {
     let clamp = Vec3::splat(D3M_STAGE_CLAMP);
     let stage0_rgb = vertex_rgb.min(clamp);
+    if path == D3mDrawPath::MmbUntextured {
+        return (
+            stage0_rgb * f_rgb * D3M_UNTEXTURED_RGB_GAIN,
+            vertex_alpha.min(D3M_STAGE_CLAMP) * f_alpha * D3M_UNTEXTURED_ALPHA_GAIN,
+        );
+    }
     let stage0_alpha = if ignore_texture_alpha {
         vertex_alpha / D3M_VERTEX_BAKED_GAIN
     } else {
@@ -294,9 +310,15 @@ const UNSCALED_EMISSION: f32 = 1.0;
 
 // Spawn-time knobs a zone/weather caller sets that the generator body cannot carry: retail derives
 // each of them from where the chunk sits in the DAT tree, not from its own fields.
+// element_sort.rs keeps equal sort keys in DAT chunk order; an effect DAT's routines carry no
+// such order, so their elements pass this and tie on the key alone.
+pub const NO_DAT_ORDER: usize = 0;
+
 #[derive(Clone, Copy)]
 pub struct ZoneGeneratorOptions {
     pub camera_relative: bool,
+    // The generator chunk's byte offset in the zone DAT (element_sort.rs tie-break).
+    pub dat_offset: usize,
     pub emit_scale: f32,
     // Set only by the weat/<type>/ celestial set, whose sheets carry FFXI's stored 4-bit alpha
     // dither at a fixed on-screen size: see `dat_d3m::decoded_sky_texture_to_image`.
@@ -307,6 +329,7 @@ impl Default for ZoneGeneratorOptions {
     fn default() -> Self {
         Self {
             camera_relative: false,
+            dat_offset: NO_DAT_ORDER,
             emit_scale: UNSCALED_EMISSION,
             resolve_alpha_dither: false,
         }
@@ -522,12 +545,7 @@ pub fn spawn_particle_generators(
             attach_pose(origin_entity, &q_children, &q_xf, &q_render),
             other_world,
         );
-        let blend = match def.blend {
-            ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
-            ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
-            ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
-        };
-        let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
+        let mat = mats.add(FfxiParticleMaterial::for_def(&def, tex, NO_DAT_ORDER));
         let mesh = meshes.add(empty_mesh());
 
         let entity = commands
@@ -626,12 +644,7 @@ pub fn spawn_actor_auto_run_particles(
             else {
                 continue;
             };
-            let blend = match def.blend {
-                ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
-                ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
-                ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
-            };
-            let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
+            let mat = mats.add(FfxiParticleMaterial::for_def(&def, tex, NO_DAT_ORDER));
             let mesh = meshes.add(empty_mesh());
 
             let entity = commands
@@ -712,12 +725,7 @@ pub fn spawn_zone_particle_generator(
     let (template, sprite_frames, tex, draw_path) =
         resolve_zone_mesh(assets, &def, images, undither)
             .or_else(|| global.and_then(|g| resolve_zone_mesh(g, &def, images, undither)))?;
-    let blend = match def.blend {
-        ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
-        ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
-        ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
-    };
-    let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
+    let mat = mats.add(FfxiParticleMaterial::for_def(&def, tex, opts.dat_offset));
     let mesh = meshes.add(empty_mesh());
 
     let entity = commands
@@ -1181,17 +1189,14 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         .as_ref()
         .map(|t| t.sample_from(progress, Some(p.scale.y)))
         .unwrap_or(p.scale.y);
-    // Additive blend ignores alpha, so the alpha track drives brightness. With
-    // no track, a transient spray fades linearly to nothing over life; a
-    // continuous generator (one particle re-emitted on expiry — the steady
-    // crystal body) holds full opacity, or each re-emit cycle would fade the
-    // single particle out and strobe the whole model transparent.
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp HandleOne
+    // initializes field_F8 from opcode 0x16; persistent effects retain its authored alpha.
     let alpha = g
         .alpha
         .as_ref()
         .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
-        .unwrap_or(if g.def.continuous {
-            1.0
+        .unwrap_or(if g.def.continuous || g.def.is_singleton() {
+            g.def.init_color[3]
         } else {
             1.0 - progress
         });
@@ -1258,6 +1263,7 @@ fn vertex_color(g: &LiveGenerator, draw: &ParticleDraw, vertex: Vec4) -> [f32; 4
         draw.factor_rgb,
         draw.factor_alpha,
         ignores_texture_alpha(&g.def, g.draw_path),
+        g.draw_path,
     );
     // An additive/subtractive element draws `SRCALPHA * colour`, so its alpha channel is a
     // brightness factor rather than a coverage one. We stand the raw life curve in for
@@ -1271,7 +1277,7 @@ fn vertex_color(g: &LiveGenerator, draw: &ParticleDraw, vertex: Vec4) -> [f32; 4
         // An MMB's own vertex alpha is the shape, not a uniform: the sun/moon glow domes are
         // untextured gradients that ramp 128 at the centre to 0 at the rim, so folding the life
         // curve onto a flat 1.0 would draw them as hard-edged discs.
-        (_, D3mDrawPath::Mmb) => [
+        (_, D3mDrawPath::Mmb | D3mDrawPath::MmbUntextured) => [
             stage_rgb.x,
             stage_rgb.y,
             stage_rgb.z,
@@ -1598,7 +1604,12 @@ fn resolve_zone_mesh(
         .images_by_name
         .get(&mmb.texture_name)
         .map(|t| images.add(to_image(t, undither)));
-    Some((template, Vec::new(), tex, D3mDrawPath::Mmb))
+    let path = if tex.is_some() {
+        D3mDrawPath::Mmb
+    } else {
+        D3mDrawPath::MmbUntextured
+    };
+    Some((template, Vec::new(), tex, path))
 }
 
 fn keyframe(
@@ -1773,6 +1784,10 @@ mod tests {
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
             blend_byte: 0x48,
             ignore_texture_alpha: false,
+            fog_enabled: true,
+            draw_priority: Default::default(),
+            sort_offset: 0.0,
+            depth_write: false,
             scale_x_track: None,
             scale_y_track: None,
             alpha_track: None,
@@ -2329,8 +2344,14 @@ mod tests {
         // NonZeroTwoTSS: rgb = 4*D*T*F, alpha = 8*D.a*T.a*F.a, with T left to the sampler.
         #[test]
         fn textured_default_reaches_the_retail_totals_below_saturation() {
-            let (rgb, alpha) =
-                d3m_stage_chain(Vec3::splat(0.25), 0.25, Vec3::splat(0.25), 0.25, false);
+            let (rgb, alpha) = d3m_stage_chain(
+                Vec3::splat(0.25),
+                0.25,
+                Vec3::splat(0.25),
+                0.25,
+                false,
+                D3mDrawPath::D3m,
+            );
             assert_eq!(rgb, Vec3::splat(4.0 * 0.125 * 0.25));
             assert_eq!(alpha, 8.0 * 0.125 * 0.25);
         }
@@ -2339,8 +2360,22 @@ mod tests {
         // with the texture alpha, so the total is 4*D.a*F.a — half the default, rgb untouched.
         #[test]
         fn ignoring_texture_alpha_halves_the_alpha_total() {
-            let two = d3m_stage_chain(Vec3::splat(0.25), 0.25, Vec3::splat(0.25), 0.25, false);
-            let one = d3m_stage_chain(Vec3::splat(0.25), 0.25, Vec3::splat(0.25), 0.25, true);
+            let two = d3m_stage_chain(
+                Vec3::splat(0.25),
+                0.25,
+                Vec3::splat(0.25),
+                0.25,
+                false,
+                D3mDrawPath::D3m,
+            );
+            let one = d3m_stage_chain(
+                Vec3::splat(0.25),
+                0.25,
+                Vec3::splat(0.25),
+                0.25,
+                true,
+                D3mDrawPath::D3m,
+            );
             assert_eq!(one.1, two.1 / 2.0);
             assert_eq!(one.0, two.0);
         }
@@ -2350,7 +2385,14 @@ mod tests {
         #[test]
         fn stage_zero_saturates_before_the_stage_one_gain() {
             let vert = u8::MAX as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR;
-            let (rgb, alpha) = d3m_stage_chain(Vec3::splat(vert), vert, Vec3::ONE, 0.15, false);
+            let (rgb, alpha) = d3m_stage_chain(
+                Vec3::splat(vert),
+                vert,
+                Vec3::ONE,
+                0.15,
+                false,
+                D3mDrawPath::D3m,
+            );
             assert_eq!(alpha, D3M_STAGE_CLAMP * 0.15 * D3M_STAGE1_ALPHA_GAIN);
             assert_eq!(rgb, Vec3::splat(D3M_STAGE_CLAMP * D3M_STAGE1_RGB_GAIN));
         }
@@ -2360,9 +2402,52 @@ mod tests {
         // unable to lift a sub-unit texel to retail's ceiling.
         #[test]
         fn the_stage_one_gain_leaves_the_cpu_unsaturated_for_the_shader_to_clamp() {
-            let (rgb, alpha) = d3m_stage_chain(Vec3::ONE, 1.0, Vec3::ONE, 1.0, false);
+            let (rgb, alpha) =
+                d3m_stage_chain(Vec3::ONE, 1.0, Vec3::ONE, 1.0, false, D3mDrawPath::D3m);
             assert_eq!(rgb, Vec3::splat(D3M_STAGE1_RGB_GAIN));
             assert_eq!(alpha, D3M_STAGE1_ALPHA_GAIN);
+        }
+
+        // ZoneRenderer.cpp ZoneRenderer::DoD3mDraw — with no texture bound the chain is a single
+        // MODULATE2X / MODULATE4X stage against TEXTUREFACTOR, so an identity (0x80) vertex under
+        // an identity generator colour stays mid-grey rather than doubling to white. Lower
+        // Jeuno's sea base plane (`col1` -> tshimonolowcol, untextured) is exactly that case.
+        #[test]
+        fn an_untextured_mmb_takes_the_one_stage_table() {
+            let identity = 0x80 as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR;
+            let factor = 0x80 as f32 / u8::MAX as f32;
+            let (rgb, alpha) = d3m_stage_chain(
+                Vec3::splat(identity),
+                identity,
+                Vec3::splat(factor),
+                factor,
+                false,
+                D3mDrawPath::MmbUntextured,
+            );
+            assert!((rgb.x - identity * factor).abs() < 1e-6, "rgb {rgb}");
+            assert!(
+                (alpha - identity * factor * 2.0).abs() < 1e-6,
+                "alpha {alpha}"
+            );
+            let (textured, _) = d3m_stage_chain(
+                Vec3::splat(identity),
+                identity,
+                Vec3::splat(factor),
+                factor,
+                false,
+                D3mDrawPath::Mmb,
+            );
+            assert!((textured.x - rgb.x * 2.0).abs() < 1e-6);
+            // The forced ignore-texture-alpha table has no texture alpha to ignore here.
+            let (_, forced) = d3m_stage_chain(
+                Vec3::splat(identity),
+                identity,
+                Vec3::splat(factor),
+                factor,
+                true,
+                D3mDrawPath::MmbUntextured,
+            );
+            assert_eq!(forced, alpha);
         }
 
         // CMoD3mElem.cpp CMoD3mElem::DoMMBDraw — DoMMBDraw forces the ignore-texture-alpha table at blend byte
@@ -3410,13 +3495,12 @@ mod tests {
     #[test]
     fn zone_210_lunar_halo_is_dark_except_near_full_moon() {
         const F_RO: u32 = 210;
-        const SPRITE_MIN_ALPHA: f32 = 0.5;
+        const SPRITE_MIN_ALPHA: f32 = 0.42;
         // `kasa`'s 0x4F alpha lane as shipped, dumped byte-for-byte from f_ro.
         const HALO_PHASE_ALPHA_BYTE: [u8; ffxi_dat::particle_gen::MOON_PHASES] =
             [0, 0, 0, 0, 0, 60, 128, 60, 0, 0, 0, 0];
-        // The rest of `kasa`'s modulate chain (its day-of-week lane and init colour, both
-        // phase-independent) is a constant gain on that lane: 160/255 as shipped.
-        const HALO_CHAIN_GAIN: f32 = 160.0 / u8::MAX as f32;
+        // DAT 210 kasa: initializer alpha 128/255 and weekday/phase modulation gain 160/255.
+        const HALO_CHAIN_GAIN: f32 = (128.0 / 255.0) * (160.0 / 255.0);
         const ALPHA_EPS: f32 = 1e-6;
 
         let Some(bytes) = zone_bytes(F_RO) else {
@@ -3424,7 +3508,9 @@ mod tests {
             return;
         };
         let halo = moon_attached_def(&bytes, b"kasa");
+        assert_eq!(halo.init_color[3], 128.0 / 255.0);
         let sprite = moon_attached_def(&bytes, b"moon");
+        assert_eq!(sprite.init_color[3], 128.0 / 255.0);
         let halo_table = halo
             .moon_phase_color
             .expect("the halo generator carries a moon-phase colour table");
@@ -3446,7 +3532,9 @@ mod tests {
             );
             assert!(
                 phase_alpha(&sprite, phase) > SPRITE_MIN_ALPHA,
-                "the moon disc itself stays visible at phase {phase}"
+                "moon phase {phase}: alpha {}, initializer {}",
+                phase_alpha(&sprite, phase),
+                sprite.init_color[3]
             );
         }
     }
@@ -3651,10 +3739,6 @@ mod tests {
 
     #[test]
     fn continuous_trackless_generator_holds_constant_alpha() {
-        // A continuous generator holds one particle re-emitted on expiry (the
-        // steady crystal body). Track-less, it must stay fully opaque — if it fell
-        // back to the 1.0-progress spray fade, the single particle would fade out
-        // each cycle and strobe the whole model transparent.
         use ffxi_dat::particle_gen::ParticleBlend;
         let mut base = def(4.0, 1.0, 1);
         base.blend = ParticleBlend::Blend;
@@ -3698,13 +3782,32 @@ mod tests {
 
         let expected = |curve: f32| VERT_ALPHA * curve * D3M_STAGE1_ALPHA_GAIN;
         assert!(
-            (alpha_of(&cont) - expected(1.0)).abs() < 1e-4,
-            "continuous body stays fully opaque, not the life fade"
+            (alpha_of(&cont) - expected(base.init_color[3])).abs() < 1e-4,
+            "continuous body keeps authored opacity"
         );
         assert!(
             (alpha_of(&spray) - expected(0.25)).abs() < 1e-4,
             "a transient spray still fades 1.0-progress over life"
         );
+    }
+
+    #[test]
+    fn real_dat_monument_shaft_retains_authored_alpha() {
+        const LOWER_JEUNO_DAT: u32 = 345;
+        const SHAFT_ALPHA: f32 = 50.0 / 255.0;
+        let Some(assets) = retail_assets(LOWER_JEUNO_DAT) else {
+            return;
+        };
+        let def = *assets.particle_defs.get(b"SPLT").expect("monument shaft");
+        assert!(def.is_singleton());
+        assert_eq!(def.init_color[3], SHAFT_ALPHA);
+        let mut g = celestial(def);
+        g.particles[0].life_frames = f32::INFINITY;
+        for age in [0.0, 300.0, 30_000.0] {
+            g.particles[0].age_frames = age;
+            let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
+            assert_eq!(draw.factor_alpha, SHAFT_ALPHA);
+        }
     }
 
     #[test]

@@ -1408,6 +1408,8 @@ fn spawn_ffxi_actor(
             flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
             tint: Vec4::ONE,
             skin_slot,
+            reveal: 1.0,
+            opacity: 1.0,
         });
         out_slots.push(instance_slot);
 

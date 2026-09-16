@@ -93,7 +93,6 @@ pub struct EntityMesh {
     pub pc: Handle<Mesh>,
     pub mob: Handle<Mesh>,
     pub pet: Handle<Mesh>,
-    pub morph_orb: Handle<Mesh>,
 }
 
 #[derive(Resource, Default)]
@@ -300,7 +299,6 @@ pub fn setup_world(
         pc: orb_mesh(0.28, 1.05, &mut meshes),
         mob: orb_mesh(0.36, 0.85, &mut meshes),
         pet: orb_mesh(0.22, 0.62, &mut meshes),
-        morph_orb: meshes.add(Sphere::new(0.22).mesh().build()),
     });
 
     commands.insert_resource(crate::picking::HitboxAssets::new(
@@ -637,7 +635,7 @@ pub fn sync_entities_system(
 /// targeting is untouched.
 ///
 /// Runs every frame; it owns nodes nothing else writes (the actor root's Visibility is set
-/// only at spawn and here, the morph column's at spawn and here), so there is no fight. The
+/// only at spawn and here), so there is no fight. The
 /// orb material restore is owned by sync_entities_system: the same UPDATE_HP delta that
 /// clears the bit marks state dirty and resets it to the kind handle.
 pub fn apply_invis_flag_system(
@@ -646,7 +644,6 @@ pub fn apply_invis_flag_system(
     mut q_roots: Query<(
         Entity,
         &WorldEntity,
-        Option<&MorphIn>,
         Option<&mut MeshMaterial3d<StandardMaterial>>,
     )>,
     mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
@@ -654,7 +651,7 @@ pub fn apply_invis_flag_system(
         &crate::ffxi_actor_render::FfxiRenderRoot,
     >,
 ) {
-    for (_bevy_entity, ent, morph, orb_mat) in &mut q_roots {
+    for (_bevy_entity, ent, orb_mat) in &mut q_roots {
         let hide = table.get(ent.id).is_some_and(|r| r.invis_flag());
 
         // The skinned model is a separate root synced by world_id; hiding it never
@@ -666,22 +663,6 @@ pub fn apply_invis_flag_system(
                     Visibility::Hidden
                 } else {
                     Visibility::default()
-                };
-                if *v != want {
-                    *v = want;
-                }
-            }
-        }
-
-        // The morph-in light column (transient child, <= MORPH_DURATION after model load):
-        // an invisible player's model arriving must not flash a pillar where retail shows
-        // nothing. Spawn value is Inherited, so both directions are owned here.
-        if let Some(orb_e) = morph.and_then(|m| m.orb) {
-            if let Ok(mut v) = other_vis.get_mut(orb_e) {
-                let want = if hide {
-                    Visibility::Hidden
-                } else {
-                    Visibility::Inherited
                 };
                 if *v != want {
                     *v = want;
@@ -994,7 +975,6 @@ mod tests {
                 pc: Handle::default(),
                 mob: Handle::default(),
                 pet: Handle::default(),
-                morph_orb: Handle::default(),
             })
             .insert_resource(dummy_materials())
             .add_systems(Update, sync_entities_system);

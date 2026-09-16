@@ -255,6 +255,7 @@ fn setup(
         FfxiZoneMaterialKey::LEGACY,
     ));
     let material = materials.add(FfxiSkinnedMaterial {
+        fading: false,
         base_color_texture: None,
     });
     let receive = !matches!(run.mode.as_str(), "off" | "valid-off" | "point-off");
@@ -294,6 +295,8 @@ fn setup(
             ),
             tint: Vec4::splat(ALBEDO),
             skin_slot: skin,
+            reveal: 1.0,
+            opacity: 1.0,
         });
         commands.spawn((
             Mesh3d(meshes.add(skinned_cuboid(size))),

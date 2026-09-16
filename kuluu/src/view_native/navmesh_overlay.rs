@@ -112,7 +112,7 @@ fn ground_snap_needed(current_y: f32, ground_y: f32) -> bool {
 
 // Remote Mob/Pc/Pet/Npc ground movers are grounded by combat_stance::ground_remote_movers_system
 // on the MZB collision mesh every frame: LSB grounds them to the Detour navmesh (pathfind.cpp
-// CPathFind::StepTo walks Y to a waypoint from navmesh.cpp), so the POS packet Y only picks the
+// CPathFind::StepTo walks Y to a waypoint from detour_navmesh.cpp), so the POS packet Y only picks the
 // level. This system keeps two jobs: snapping self onto its wire Y when no collision is loaded,
 // and grounding the static Other kind (doors/transports), whose wire position is an authored
 // placement rather than a pathfind step.

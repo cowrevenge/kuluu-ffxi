@@ -65,12 +65,18 @@ pub fn build_subpacket_shop_sell_set(sync: u16) -> Vec<u8> {
     buf
 }
 
+/// `Err` for what vendor/server/src/map/packets/c2s/0x01a_action.cpp
+/// GP_CLI_COMMAND_ACTION::validate refuses under BlockedState::InEvent.
 pub fn build_subpacket_action(
     sync: u16,
     unique_no: u32,
     act_index: u16,
     kind: &crate::state::ActionKind,
-) -> Vec<u8> {
+    in_event: bool,
+) -> Result<Vec<u8>, &'static str> {
+    if in_event && kind.blocked_in_event() {
+        return Err("busy with an event");
+    }
     let mut buf = vec![0u8; 28];
     buf[0..4].copy_from_slice(&build_subpacket_header(
         ffxi_proto::map::c2s::ACTION,
@@ -83,7 +89,7 @@ pub fn build_subpacket_action(
     let mut action_buf = [0u8; 16];
     kind.fill_action_buf(&mut action_buf);
     buf[12..28].copy_from_slice(&action_buf);
-    buf
+    Ok(buf)
 }
 
 pub const C2S_ACTION_LOG_TARGET: &str = "c2s_action";
@@ -313,10 +319,23 @@ pub fn build_subpacket_equip_set(
     buf
 }
 
-// GP_CLI_COMMAND_ITEM_STACK, vendor/server/src/map/packets/c2s/0x03a_item_stack.h:
-// `uint32_t Category` (container id) after the 4-byte subpacket header, so 8 bytes
-// total (size_words = 2). The server consolidates same-id partial stacks.
-pub fn build_subpacket_item_stack(sync: u16, container: u8) -> Vec<u8> {
+/// GP_CLI_COMMAND_ITEM_STACK, vendor/server/src/map/packets/c2s/0x03a_item_stack.h:
+/// `uint32_t Category` (container id) after the 4-byte subpacket header, so 8 bytes
+/// total (size_words = 2). The server consolidates same-id partial stacks.
+/// `Err` for what 0x03a_item_stack.cpp GP_CLI_COMMAND_ITEM_STACK::validate
+/// refuses: blockedBy InEvent, and a Category
+/// PacketValidator::isValidContainer rejects.
+pub fn build_subpacket_item_stack(
+    sync: u16,
+    container: u8,
+    in_event: bool,
+) -> Result<Vec<u8>, &'static str> {
+    if in_event {
+        return Err("busy with an event");
+    }
+    if !ffxi_proto::map::container::is_valid(container) {
+        return Err("not a valid container");
+    }
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
         ffxi_proto::map::c2s::ITEM_STACK,
@@ -325,7 +344,7 @@ pub fn build_subpacket_item_stack(sync: u16, container: u8) -> Vec<u8> {
     ));
     buf[4..8].copy_from_slice(&(container as u32).to_le_bytes());
 
-    buf
+    Ok(buf)
 }
 
 // GP_CLI_COMMAND_TROPHY_ENTRY / GP_CLI_COMMAND_TROPHY_ABSENCE,
@@ -954,6 +973,8 @@ pub(crate) fn emote_send_block_reason(
     None
 }
 
+/// vendor/server/src/map/packets/c2s/0x015_pos.cpp GP_CLI_COMMAND_POS::process
+/// discards the update when x, y or z is not finite.
 pub(crate) fn build_subpacket_pos(
     sync: u16,
     x: f32,
@@ -961,7 +982,10 @@ pub(crate) fn build_subpacket_pos(
     z: f32,
     heading: u8,
     face_target: u16,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
+    if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+        return None;
+    }
     let mut buf = vec![0u8; 32];
     buf[0..4].copy_from_slice(&build_subpacket_header(ffxi_proto::map::c2s::POS, 8, sync));
     buf[4..8].copy_from_slice(&x.to_le_bytes());
@@ -977,7 +1001,7 @@ pub(crate) fn build_subpacket_pos(
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
     buf[24..28].copy_from_slice(&now.to_le_bytes());
-    buf
+    Some(buf)
 }
 
 #[cfg(test)]

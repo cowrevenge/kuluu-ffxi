@@ -1125,16 +1125,63 @@ pub enum CutsceneCue {
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name
-/// (vendor/server/src/map/enums/music_slot.h `MusicSlot`, ZoneDay..Fishing).
+/// (vendor/server/data/enums/music_slot.yaml `MusicSlot`, ZoneDay..Fishing).
 /// The 0x5D event opcode sets retail's single master music volume, so it is
 /// carried as the same volume on every slot.
 pub const MUSIC_SLOT_COUNT: u8 = 8;
 
+/// Wares an NPC shop can hold. The retail client's shop table is a fixed
+/// 80-entry array (research/XIClient GC_SHOP_SYS `Entries`), and the server
+/// fills it 19 rows at a time.
+pub const SHOP_TABLE_CAPACITY: usize = 80;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShopState {
+    /// `ShopItemOffsetIndex` of the most recent s2c 0x03C. Rows accumulate at
+    /// that offset rather than replacing the table, so a shop wider than one
+    /// packet lists in full.
     pub offset_index: u16,
     pub items: Vec<ShopItem>,
+    /// s2c 0x03E SHOP_OPEN arrived: the window is up even before any row does.
     pub opened: bool,
+
+    /// `ShopListNum` from s2c 0x03E — how many rows the server intends to send.
+    #[serde(default)]
+    pub expected_items: u16,
+
+    /// The final s2c 0x03C (Flags bit 0) has landed, so `items` is the whole
+    /// stock.
+    #[serde(default)]
+    pub complete: bool,
+
+    /// The NPC this shop belongs to — the entity the client last sent an
+    /// `ActionKind::Talk` at. 0 when nothing was resolved (a shop opened from a
+    /// server-driven menu rather than a trigger). The window closes when this
+    /// entity leaves range or the zone.
+    #[serde(default)]
+    pub vendor_id: u32,
+
+    /// The appraisal a SHOP_SELL_REQ came back with (s2c 0x03D), awaiting the
+    /// player's yes/no before the SHOP_SELL_SET that completes the sale.
+    #[serde(default)]
+    pub pending_sale: Option<ShopSale>,
+}
+
+/// A sale the server has priced but the player has not yet confirmed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShopSale {
+    /// LOC_INVENTORY slot being sold (`PropertyItemIndex`).
+    pub item_index: u8,
+    pub item_no: u16,
+    /// Per-unit price the server appraised the item at.
+    pub unit_price: u32,
+    pub count: u32,
+}
+
+impl ShopSale {
+    pub fn total_gil(&self) -> u32 {
+        self.unit_price.saturating_mul(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1170,6 +1217,10 @@ pub struct ItemSlot {
     pub charges_remaining: Option<u8>,
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2321,18 +2372,25 @@ impl SessionState {
                 self.shop = Some(shop.clone());
                 changed
             }
+            AgentEvent::ShopClosed => {
+                let changed = self.shop.is_some();
+                self.shop = None;
+                changed
+            }
+            // The appraisal that reaches `shop.pending_sale` rides the
+            // `ShopUpdated` that follows this event; this arm only echoes it.
             AgentEvent::ShopSellAppraisal {
                 price,
                 item_index,
                 count,
+                item_no: _,
             } => {
                 self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<shop>".into(),
                     text: format!(
-                        "Appraisal: slot {item_index} x{count} sells for {price} gil each \
-                         — `/sell confirm` to accept"
+                        "Appraisal: slot {item_index} x{count} sells for {price} gil each"
                     ),
                     server_ts: 0,
                 });
@@ -2399,10 +2457,12 @@ impl SessionState {
                 changed
             }
             AgentEvent::EventEnded => {
-                let changed = self.dialog.is_some() || self.shop.is_some();
+                // The shop is deliberately untouched: it is not event-scoped
+                // (a vendor runs `showText` + `sendMenu`, not `startEvent` —
+                // vendor/server/scripts/globals/shop.lua), and the server even
+                // refuses SHOP_BUY while InEvent. `ShopClosed` owns its close.
+                let changed = self.dialog.is_some();
                 self.dialog = None;
-
-                self.shop = None;
                 changed
             }
             AgentEvent::SelfServerStatus { status, mount_id } => {
@@ -2695,11 +2755,23 @@ pub enum AgentEvent {
         shop: ShopState,
     },
 
+    /// The shop window went away. There is no close-shop packet — c2s 0x082
+    /// SHOP_REQ is deprecated and GM-only (research/XiPackets client 0x0082) —
+    /// so every close is a client decision: cancel, walking out of the vendor's
+    /// range, or a zone change.
+    ShopClosed,
+
     /// Server appraisal answer to a SHOP_SELL_REQ (s2c 0x03D): `price` is per unit.
+    /// `count` is the quantity the request asked for — LSB leaves the packet's
+    /// `Count` at 0 (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp sets
+    /// only Price/PropertyItemIndex/Type), so the session substitutes the
+    /// quantity it sent.
     ShopSellAppraisal {
         price: u32,
         item_index: u8,
         count: u32,
+        #[serde(default)]
+        item_no: u16,
     },
 
     StatusIconsUpdated {
@@ -2998,7 +3070,7 @@ pub enum AgentEvent {
     },
 
     /// The whole 0x037 animation byte for self (`ANIMATION_*` in
-    /// vendor/server/src/map/entities/baseentity.h). The server owns this — it
+    /// vendor/server/data/enums/animation.yaml). The server owns this — it
     /// starts and ends resting on its own (damage, status effects) — so the
     /// renderer reconciles its optimistic local stance against it.
     SelfServerStatus {
@@ -3510,6 +3582,18 @@ pub enum AgentCommand {
     /// Confirm the pending sell appraisal (0x085 SHOP_SELL_SET).
     ShopSellConfirm,
 
+    /// Walk back from an appraised sale without completing it. Sends nothing:
+    /// the server parks the item in its shop container on SHOP_SELL_REQ and
+    /// only moves it on SHOP_SELL_SET
+    /// (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp process), so
+    /// declining is just the client dropping the quote.
+    ShopSellCancel,
+
+    /// Drop the open shop window. Sends nothing — the shop has no close packet
+    /// (research/XiPackets client 0x0082 is deprecated and GM-only), so this is
+    /// purely the client forgetting the stock it was shown.
+    CloseShop,
+
     CheckTarget {
         target_id: u32,
         target_index: u16,
@@ -3982,6 +4066,37 @@ impl ActionKind {
             ActionKind::Blockaid { .. } => 0x18,
             ActionKind::MonsterSkill { .. } => 0x19,
             ActionKind::Mount { .. } => 0x1A,
+        }
+    }
+
+    /// The action ids vendor/server/src/map/packets/c2s/0x01a_action.cpp
+    /// GP_CLI_COMMAND_ACTION::validate refuses with BlockedState::InEvent.
+    /// Exhaustive on purpose: a new action must state its answer.
+    pub fn blocked_in_event(&self) -> bool {
+        match self {
+            ActionKind::Attack
+            | ActionKind::CastMagic { .. }
+            | ActionKind::JobAbility { .. }
+            | ActionKind::Shoot
+            | ActionKind::Weaponskill { .. }
+            | ActionKind::MonsterSkill { .. }
+            | ActionKind::Fish
+            | ActionKind::Mount { .. } => true,
+            ActionKind::Talk
+            | ActionKind::AttackOff
+            | ActionKind::Help
+            | ActionKind::HomepointMenu { .. }
+            | ActionKind::Assist
+            | ActionKind::RaiseMenu { .. }
+            | ActionKind::ChangeTarget
+            | ActionKind::ChocoboDig
+            | ActionKind::Dismount
+            | ActionKind::TractorMenu { .. }
+            | ActionKind::SendResRdy
+            | ActionKind::Quarry
+            | ActionKind::Sprint
+            | ActionKind::Scout
+            | ActionKind::Blockaid { .. } => false,
         }
     }
 

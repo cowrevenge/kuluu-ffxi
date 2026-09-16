@@ -13,34 +13,27 @@ enum MenuDispatch {
     NotImplemented(String),
 }
 
-fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::GraphicsSettings) {
-    // The page carries two non-field action rows ("DLSS Config" under the DLSS
-    // on/off row, "Reset to High" at the bottom), so the cursor slot does not
-    // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
-    if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
+/// Header and action rows carry no value, so a cursor on one cycles nothing.
+fn apply_settings_cycle(
+    kind: MenuKind,
+    cursor: usize,
+    delta: i32,
+    graphics: &mut kuluu_render::GraphicsSettings,
+) {
+    if let Some(field) =
+        kuluu_render::hud::menu::settings_field_at(kind, cursor, graphics.dlss_supported)
     {
         graphics.cycle(field, delta);
     }
 }
 
-/// Same shape for the DLSS Config submenu: slot -> DLSS_CONFIG_FIELDS. The
-/// reset row sits one past the fields and is handled by the caller, so a
-/// cursor there is a no-op here (get returns None), matching apply_graphics_cycle.
-fn apply_graphics_dlss_cycle(
-    cursor: usize,
-    delta: i32,
-    graphics: &mut kuluu_render::GraphicsSettings,
-) {
-    use kuluu_render::graphics_settings::DLSS_CONFIG_FIELDS;
-    if let Some(&field) = DLSS_CONFIG_FIELDS.get(cursor) {
-        graphics.cycle(field, delta);
-    }
-}
-
 fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
-    use kuluu_render::hud::menu::{COMM_EMOTE_LIST, CONFIG_CONTROLS, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
+    use kuluu_render::graphics_settings::MenuAction;
+    use kuluu_render::hud::menu::{COMM_EMOTE_LIST, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
     match (kind, label) {
-        (MenuKind::Config, CONFIG_CONTROLS) => MenuDispatch::OpenSubmenu(MenuKind::Controls),
+        (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
+            MenuDispatch::OpenSubmenu(MenuKind::Controls)
+        }
         (MenuKind::Communication, l) if l == COMM_EMOTE_LIST => {
             MenuDispatch::OpenSubmenu(MenuKind::EmoteList)
         }
@@ -200,32 +193,23 @@ pub(super) fn confirm_menu_at_cursor(
         }
         return None;
     }
-    if kind == MenuKind::Config {
-        if let Some(&field) = kuluu_render::CONFIG_FIELDS.get(cursor) {
-            graphics.cycle(field, 1);
-            return None;
-        }
-    }
-
-    if matches!(kind, MenuKind::Graphics) {
-        let dlss_supported = graphics.dlss_supported;
-        if cursor == kuluu_render::hud::menu::graphics_reset_slot(dlss_supported) {
-            graphics.reset_to_default();
-            push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
-        } else if dlss_supported && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
-            stack.push(MenuKind::GraphicsDlss);
-        } else {
-            apply_graphics_cycle(cursor, 1, graphics);
-        }
-        return None;
-    }
-
-    if matches!(kind, MenuKind::GraphicsDlss) {
-        if cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_RESET_SLOT {
-            graphics.reset_dlss_config();
-            push_system_chat_line(scene_state, "[menu] DLSS config reset to defaults".into());
-        } else {
-            apply_graphics_dlss_cycle(cursor, 1, graphics);
+    if matches!(
+        kind,
+        MenuKind::Config | MenuKind::Graphics | MenuKind::GraphicsDlss
+    ) {
+        use kuluu_render::graphics_settings::{MenuAction, MenuRow};
+        match kuluu_render::hud::menu::settings_row_at(kind, cursor, graphics.dlss_supported) {
+            Some(MenuRow::Action(MenuAction::ResetToMinimum)) => {
+                graphics.reset_to_minimum();
+                push_system_chat_line(scene_state, "[menu] Graphics reset to Minimum".into());
+            }
+            Some(MenuRow::Action(MenuAction::ResetDlssConfig)) => {
+                graphics.reset_dlss_config();
+                push_system_chat_line(scene_state, "[menu] DLSS config reset to defaults".into());
+            }
+            Some(MenuRow::Action(MenuAction::DlssConfig)) => stack.push(MenuKind::GraphicsDlss),
+            Some(MenuRow::Action(MenuAction::Controls)) => stack.push(MenuKind::Controls),
+            _ => apply_settings_cycle(kind, cursor, 1, graphics),
         }
         return None;
     }
@@ -809,37 +793,16 @@ pub(super) fn handle_menu_key(
         }
     }
 
-    if kind == MenuKind::Config {
-        if let Some(&field) = kuluu_render::CONFIG_FIELDS.get(cursor) {
-            if bindings.matches_logical(Action::NavLeft, key) {
-                graphics.cycle(field, -1);
-                return None;
-            }
-            if bindings.matches_logical(Action::NavRight, key) {
-                graphics.cycle(field, 1);
-                return None;
-            }
-        }
-    }
-
-    if matches!(kind, MenuKind::Graphics) {
+    if matches!(
+        kind,
+        MenuKind::Config | MenuKind::Graphics | MenuKind::GraphicsDlss
+    ) {
         if bindings.matches_logical(Action::NavLeft, key) {
-            apply_graphics_cycle(cursor, -1, graphics);
+            apply_settings_cycle(kind, cursor, -1, graphics);
             return None;
         }
         if bindings.matches_logical(Action::NavRight, key) {
-            apply_graphics_cycle(cursor, 1, graphics);
-            return None;
-        }
-    }
-
-    if matches!(kind, MenuKind::GraphicsDlss) {
-        if bindings.matches_logical(Action::NavLeft, key) {
-            apply_graphics_dlss_cycle(cursor, -1, graphics);
-            return None;
-        }
-        if bindings.matches_logical(Action::NavRight, key) {
-            apply_graphics_dlss_cycle(cursor, 1, graphics);
+            apply_settings_cycle(kind, cursor, 1, graphics);
             return None;
         }
     }
@@ -908,17 +871,21 @@ pub(super) fn handle_menu_key(
 
     if bindings.matches_logical(Action::NavUp, key) {
         let level = stack.current_mut()?;
-        level.cursor = if cursor == 0 {
+        let up = if cursor == 0 {
             entry_count.saturating_sub(1)
         } else {
             cursor - 1
         };
+        level.cursor =
+            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, up, false);
         return None;
     }
     if bindings.matches_logical(Action::NavDown, key) {
         let level = stack.current_mut()?;
         let next = cursor + 1;
-        level.cursor = if next >= entry_count { 0 } else { next };
+        let down = if next >= entry_count { 0 } else { next };
+        level.cursor =
+            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, down, true);
         return None;
     }
     if bindings.matches_logical(Action::NavConfirm, key) {
@@ -1079,11 +1046,18 @@ mod menu_key_tests {
 
     #[test]
     fn config_keys_cycle_radar_and_open_controls_without_changing_bindings() {
-        use kuluu_render::{MinimapRadar, CONFIG_FIELDS};
+        use kuluu_render::graphics_settings::config_rows;
+        use kuluu_render::graphics_settings::{MenuAction, MenuRow};
+        use kuluu_render::hud::menu::settle_cursor;
+        use kuluu_render::MinimapRadar;
         let mut harness = Harness::new();
         let mut world = marker_world();
         let mut stack = MenuStack::root();
         stack.push(MenuKind::Config);
+        // Row 0 is the "Interface" section header; the cursor settles onto the
+        // first selectable row below it.
+        let minimap_slot = settle_cursor(MenuKind::Config, false, 0, true);
+        stack.current_mut().unwrap().cursor = minimap_slot;
         for (key, code, expected) in [
             (Key::ArrowRight, KeyCode::ArrowRight, MinimapRadar::Enhanced),
             (Key::ArrowLeft, KeyCode::ArrowLeft, MinimapRadar::Vanilla),
@@ -1091,10 +1065,14 @@ mod menu_key_tests {
         ] {
             harness.key(&key, code, &mut stack, world.resource_mut::<MapMarkers>());
             assert_eq!(harness.graphics.minimap_radar, expected);
-            assert_eq!(stack.current().unwrap().cursor, 0);
+            assert_eq!(stack.current().unwrap().cursor, minimap_slot);
             assert_eq!(stack.current().unwrap().kind, MenuKind::Config);
         }
-        stack.current_mut().unwrap().cursor = CONFIG_FIELDS.len();
+        let controls_slot = config_rows()
+            .iter()
+            .position(|r| *r == MenuRow::Action(MenuAction::Controls))
+            .expect("Controls row");
+        stack.current_mut().unwrap().cursor = controls_slot;
         harness.key(
             &Key::Enter,
             KeyCode::Enter,

@@ -25,6 +25,7 @@ pub mod dat_mzb;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;
+pub mod element_sort;
 pub mod entity_table;
 pub mod env_flags;
 pub mod equip_slot;
@@ -35,6 +36,7 @@ pub mod ffxi_particle_material;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_zone_material;
 pub mod fishing_spot;
+pub mod gpu_assets;
 pub mod graphics;
 pub use graphics::settings as graphics_settings;
 pub mod hud;
@@ -113,9 +115,9 @@ pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use cutscene_camera::{advance_cutscene_camera_task, CutsceneCameraTasks};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
-    AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
-    MinimapRadar, QualityPreset, TextureFiltering, ZoneLineDisplay, CONFIG_FIELDS,
-    DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+    config_fields, dlss_config_fields, graphics_fields, AaMode, CharacterRenderPath, DlssQuality,
+    DynamicLights, GraphicsField, GraphicsSettings, MinimapRadar, ParityValue, QualityPreset,
+    TextureFiltering, ZoneLineDisplay,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{

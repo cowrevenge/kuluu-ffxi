@@ -3,13 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
     check_scrape_count, parse_cpp_plain_enum, parse_cpp_u32_str_map, parse_int_lit,
-    parse_lua_scalar_field, parse_packet_enum, write_u16_table, write_u16_u16_table,
+    parse_lua_scalar_field, parse_packet_enum, parse_yaml_enum_values, write_u16_table,
+    write_u16_u16_table,
 };
 
 const LSB_BLOWFISH_CPP: &str = "../vendor/server/src/common/blowfish.cpp";
 const LSB_COMPRESS_DAT: &str = "../vendor/server/res/compress.dat";
 const LSB_DECOMPRESS_DAT: &str = "../vendor/server/res/decompress.dat";
-const LSB_ZONE_LUA: &str = "../vendor/server/scripts/enum/zone.lua";
+const LSB_ZONE_YAML: &str = "../vendor/server/data/enums/zone.yaml";
 const LSB_ZONE_SCRIPTS_DIR: &str = "../vendor/server/scripts/zones";
 const LSB_FISHINGUTILS_H: &str = "../vendor/server/src/map/utils/fishingutils.h";
 const LSB_PACKET_S2C_H: &str = "../vendor/server/src/map/enums/packet_s2c.h";
@@ -23,6 +24,52 @@ const LSB_AUTOTRANSLATE_CPP: &str = "../vendor/server/src/map/autotranslate.cpp"
 /// autotranslate.cpp.
 const AUTOTRANSLATE_DAT: &str = "ROM/168/25.DAT";
 const LSB_AUTOTRANSLATE_MAP_DECL: &str = "const std::map<unsigned int, const char*> values =";
+const LSB_S2C_PACKET_DIR: &str = "../vendor/server/src/map/packets/s2c";
+
+/// The `xi::` enums LSB generates from `data/enums/*.yaml` at its own build
+/// time: their headers are not in the tree, so a struct member typed with one
+/// only has a width if the yaml's `meta.cpp.underlying` supplies it.
+const LSB_GENERATED_ENUMS: &[(&str, &str)] = &[
+    ("xi::Job", "../vendor/server/data/enums/job.yaml"),
+    ("xi::Weather", "../vendor/server/data/enums/weather.yaml"),
+];
+
+/// The s2c bodies ffxi-proto decodes by hard-coded offset, as
+/// (emitted module, header, struct whose `offsetof` the decoder must match).
+/// Each entry's offsets reach the decoders as `ffxi_proto::s2c_layout::<module>`
+/// consts and are const-asserted there against the hand-written ones.
+const S2C_LAYOUTS: &[(&str, &str, &str)] = &[
+    (
+        "login",
+        "0x00a_login.h",
+        "GP_SERV_COMMAND_LOGIN::PacketData",
+    ),
+    (
+        "grap_list",
+        "0x051_grap_list.h",
+        "GP_SERV_COMMAND_GRAP_LIST::PacketData",
+    ),
+    (
+        "weather",
+        "0x057_weather.h",
+        "GP_SERV_COMMAND_WEATHER::PacketData",
+    ),
+    (
+        "clistatus",
+        "0x061_clistatus.h",
+        "GP_SERV_COMMAND_CLISTATUS::PacketData",
+    ),
+    (
+        "group_list",
+        "0x0dd_group_list.h",
+        "GP_SERV_COMMAND_GROUP_LIST::PacketData",
+    ),
+    (
+        "abil_recast",
+        "0x119_abil_recast.h",
+        "GP_SERV_COMMAND_ABIL_RECAST::PacketData",
+    ),
+];
 const PATCH_STAMP_DATE_LEN: usize = 8;
 const SUBKEY_LEN: usize = 4168;
 const SEARCH_BASE_KEY_LEN: usize = 24;
@@ -44,6 +91,7 @@ mod floor {
     pub const PACKET_NAMES_C2S: usize = scrape_floor(130);
     pub const TCP_REQUEST_TYPE: usize = scrape_floor(8);
     pub const AUTOTRANSLATE: usize = scrape_floor(28347);
+    pub const S2C_LAYOUT_FIELD: usize = scrape_floor(158);
 }
 
 fn main() -> Result<()> {
@@ -51,7 +99,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_BLOWFISH_CPP}");
     println!("cargo:rerun-if-changed={LSB_COMPRESS_DAT}");
     println!("cargo:rerun-if-changed={LSB_DECOMPRESS_DAT}");
-    println!("cargo:rerun-if-changed={LSB_ZONE_LUA}");
+    println!("cargo:rerun-if-changed={LSB_ZONE_YAML}");
     println!("cargo:rerun-if-changed={LSB_ZONE_SCRIPTS_DIR}");
     println!("cargo:rerun-if-changed={LSB_FISHINGUTILS_H}");
     println!("cargo:rerun-if-changed={LSB_PACKET_S2C_H}");
@@ -257,6 +305,7 @@ fn main() -> Result<()> {
         floor::TCP_REQUEST_TYPE,
     )?;
 
+    write_s2c_layouts(&out_dir.join("s2c_layout.rs"))?;
     write_login_settings(&out_dir.join("login_settings_table.rs"))?;
     write_autotranslate_table(&out_dir.join("autotranslate_table.rs"))?;
 
@@ -480,23 +529,17 @@ fn parse_module_u16_consts(src: &str, module: &str) -> Result<Vec<(String, u32)>
 /// needs the base to recover which fishing message a MesNum is.
 fn parse_zone_fishing_message_offsets() -> Result<Vec<(u16, u16)>> {
     let zone_src =
-        fs::read_to_string(LSB_ZONE_LUA).with_context(|| format!("reading {LSB_ZONE_LUA}"))?;
-    let mut zone_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
-    for line in zone_src.lines() {
-        let Some((name, rest)) = line.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-            continue;
-        }
-        if let Ok(id) = rest.trim().trim_end_matches(',').parse::<u16>() {
-            zone_ids.insert(name.to_string(), id);
-        }
-    }
-    if zone_ids.is_empty() {
-        bail!("parsed no zone ids out of {LSB_ZONE_LUA}");
-    }
+        fs::read_to_string(LSB_ZONE_YAML).with_context(|| format!("reading {LSB_ZONE_YAML}"))?;
+    // IDs.lua keys `zones[xi.zone.SELBINA]`; the lua enum is the yaml key upper-cased.
+    let zone_ids: std::collections::HashMap<String, u16> = parse_yaml_enum_values(&zone_src)
+        .with_context(|| format!("parsing {LSB_ZONE_YAML}"))?
+        .into_iter()
+        .map(|(name, id)| {
+            u16::try_from(id)
+                .map(|id| (name.to_ascii_uppercase(), id))
+                .with_context(|| format!("zone `{name}` id {id} overflows u16"))
+        })
+        .collect::<Result<_>>()?;
 
     let mut out = Vec::new();
     let dir = fs::read_dir(LSB_ZONE_SCRIPTS_DIR)
@@ -616,4 +659,140 @@ fn write_fish_message_tables(
     out.push_str("];\n");
     fs::write(out_path, &out)?;
     Ok(())
+}
+
+/// `offsetof` for each [`S2C_LAYOUTS`] body, emitted as a module of `usize`
+/// consts per packet. Array members also get `_COUNT`/`_STRIDE`/`_LEN`, and
+/// bit-fields a `_SHIFT`/`_BITS`/`_MASK` triple over the storage unit at their
+/// offset.
+fn write_s2c_layouts(out_path: &std::path::Path) -> Result<()> {
+    let mut out = format!(
+        "// AUTO-GENERATED by ffxi-proto/build.rs from {LSB_S2C_PACKET_DIR}/*.h.\n\
+         // Do not edit by hand.\n"
+    );
+    let mut total_fields = 0usize;
+    for (module, header, struct_name) in S2C_LAYOUTS {
+        let path = format!("{LSB_S2C_PACKET_DIR}/{header}");
+        println!("cargo:rerun-if-changed={path}");
+        let src = fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+
+        let mut layouts = lsb_scrape::Layouts::new();
+        for (cpp_name, yaml_path) in LSB_GENERATED_ENUMS {
+            println!("cargo:rerun-if-changed={yaml_path}");
+            let yaml_src =
+                fs::read_to_string(yaml_path).with_context(|| format!("reading {yaml_path}"))?;
+            let underlying = lsb_scrape::parse_yaml(&yaml_src)
+                .with_context(|| format!("parsing {yaml_path}"))?
+                .get("meta")
+                .and_then(|meta| meta.get("cpp"))
+                .and_then(|cpp| cpp.get("underlying"))
+                .and_then(|node| node.as_str())
+                .map(str::to_string)
+                .with_context(|| format!("{yaml_path} has no meta.cpp.underlying"))?;
+            layouts.register_scalar(cpp_name, &underlying)?;
+        }
+        layouts
+            .scan(&src)
+            .with_context(|| format!("scanning {path}"))?;
+        let layout = layouts
+            .layout(struct_name)
+            .with_context(|| format!("laying out {struct_name} from {path}"))?;
+
+        out.push_str(&format!(
+            "\n/// `{struct_name}`, {LSB_S2C_PACKET_DIR}/{header}.\npub mod {module} {{\n"
+        ));
+        out.push_str(&format!(
+            "    pub const SIZE: usize = {:#X};\n",
+            layout.size
+        ));
+        let mut emitted = std::collections::HashSet::new();
+        for field in &layout.fields {
+            let name = screaming_snake_path(&field.path);
+            let mut push = |suffix: &str, decl: String| -> Result<()> {
+                if !emitted.insert(format!("{name}{suffix}")) {
+                    bail!("{struct_name} emits `{name}{suffix}` twice — two members collide");
+                }
+                out.push_str(&decl);
+                Ok(())
+            };
+            push(
+                "",
+                format!("    pub const {name}: usize = {:#X};\n", field.offset),
+            )?;
+            if let Some(count) = field.count {
+                push(
+                    "_COUNT",
+                    format!("    pub const {name}_COUNT: usize = {count};\n"),
+                )?;
+                push(
+                    "_STRIDE",
+                    format!("    pub const {name}_STRIDE: usize = {};\n", field.stride),
+                )?;
+                push(
+                    "_LEN",
+                    format!("    pub const {name}_LEN: usize = {};\n", field.len()),
+                )?;
+            }
+            if let Some(bits) = field.bits {
+                let mask = (u64::MAX >> (u64::BITS - bits.width)) as u32;
+                push(
+                    "_SHIFT",
+                    format!("    pub const {name}_SHIFT: u32 = {};\n", bits.shift),
+                )?;
+                push(
+                    "_BITS",
+                    format!("    pub const {name}_BITS: u32 = {};\n", bits.width),
+                )?;
+                push(
+                    "_MASK",
+                    format!("    pub const {name}_MASK: u32 = {mask:#X};\n"),
+                )?;
+            }
+            total_fields += 1;
+        }
+        out.push_str("}\n");
+    }
+    fs::write(out_path, &out)?;
+    check_scrape_count(
+        "s2c PacketData members",
+        LSB_S2C_PACKET_DIR,
+        total_fields,
+        floor::S2C_LAYOUT_FIELD,
+    )
+}
+
+/// A C++ member chain as one SCREAMING_SNAKE const name: `PosHead.GrapIDTbl`
+/// becomes `POS_HEAD_GRAP_ID_TBL`.
+fn screaming_snake_path(path: &[String]) -> String {
+    path.iter()
+        .map(|part| screaming_snake(part))
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn screaming_snake(ident: &str) -> String {
+    let chars: Vec<char> = ident.chars().collect();
+    let mut out = String::with_capacity(ident.len() + 4);
+    for (i, c) in chars.iter().enumerate() {
+        if *c == '_' {
+            if !out.is_empty() && !out.ends_with('_') {
+                out.push('_');
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| chars[p]);
+        let starts_word = c.is_ascii_uppercase()
+            && match prev {
+                Some(p) if p.is_ascii_lowercase() => true,
+                Some(p) if p.is_ascii_uppercase() => {
+                    chars.get(i + 1).is_some_and(char::is_ascii_lowercase)
+                }
+                _ => false,
+            };
+        if starts_word && !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
 }

@@ -1,7 +1,7 @@
 include!(concat!(env!("OUT_DIR"), "/ability_valid_target_table.rs"));
 include!(concat!(env!("OUT_DIR"), "/spell_valid_target_table.rs"));
 
-// vendor/server/src/map/entities/battleentity.h — TARGETTYPE bitmask.
+// vendor/server/src/map/entities/battle_entity.h — TARGETTYPE bitmask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetFlags(pub u16);
 

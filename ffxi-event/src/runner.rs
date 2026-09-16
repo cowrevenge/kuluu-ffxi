@@ -650,7 +650,7 @@ mod tests {
         let mut stopped: std::collections::BTreeMap<u8, usize> = Default::default();
 
         for zone in 1u16..60 {
-            let Some(eloc) = ffxi_dat::event_locate::zone_id_to_event_location(zone) else {
+            let Ok(eloc) = root.resolve(ffxi_dat::event_locate::event_dat_file_id(zone)) else {
                 continue;
             };
             let Ok(ebytes) = std::fs::read(eloc.path_under(&root)) else {
@@ -659,10 +659,7 @@ mod tests {
             let Ok(edat) = EventDat::parse(&ebytes) else {
                 continue;
             };
-            let Some(sfid) = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone) else {
-                continue;
-            };
-            let Ok(sloc) = root.resolve(sfid) else {
+            let Ok(sloc) = root.resolve(ffxi_dat::zone_dat::string_dat_file_id(zone)) else {
                 continue;
             };
             let Ok(sbytes) = std::fs::read(sloc.path_under(&root)) else {
@@ -726,10 +723,12 @@ mod tests {
         const TALK_EVENT: u16 = 32759; // guardEvent (Harara_WW.lua), sent as EventPara
         const ACT_INDEX: u16 = 0xBF;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let ebytes = std::fs::read(eloc.path_under(&root)).expect("read event dat");
         let edat = EventDat::parse(&ebytes).expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let sbytes = std::fs::read(sloc.path_under(&root)).expect("read string dat");
         let strings = StringDat::parse(&sbytes).expect("parse string dat");
@@ -782,10 +781,12 @@ mod tests {
         const TALK_EVENT: u16 = 32759;
         const ACT_INDEX: u16 = 0xBF;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
@@ -837,10 +838,12 @@ mod tests {
         /// The rental's "yes" menu option.
         const RENT_OPTION: u32 = 0;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))

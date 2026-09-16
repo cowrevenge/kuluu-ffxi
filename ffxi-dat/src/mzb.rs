@@ -412,6 +412,9 @@ const COLL_OBJECT_FLAGS: usize = 2 * COLL_OBJECT_MATRIX_LEN + COLL_OBJECT_NORMAL
 /// interior replaces this object. `CollisionManager::KO_CharaCollision` and three
 /// sibling walkers skip the object while that sub-area is the active one.
 const COLL_OBJECT_SUB_AREA_LINK: usize = COLL_OBJECT_FLAGS + 0x18;
+// FFXiMain.dll retail-2026-09 RVA 0x169A47 / 0x169A53 reads CollisionObjectData area and light references.
+const COLL_OBJECT_LIGHT_REFS: usize = COLL_OBJECT_FLAGS + 8;
+const COLL_OBJECT_AREA: usize = COLL_OBJECT_LIGHT_REFS + LIGHT_REFERENCE_COUNT;
 /// `something2` closes the record.
 const COLL_OBJECT_RECORD_LEN: usize = COLL_OBJECT_SUB_AREA_LINK + 4;
 
@@ -613,6 +616,12 @@ pub fn parse_all(encrypted_body: &[u8]) -> Result<(MzbHeader, Vec<MzbMesh>)> {
     Ok((header, meshes))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollisionLighting {
+    pub area: u32,
+    pub light_references: [u8; LIGHT_REFERENCE_COUNT],
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MzbPlacement {
     pub geometry_offset: u32,
@@ -627,6 +636,7 @@ pub struct MzbPlacement {
     pub grid_y: u16,
 
     pub water_height: Option<f32>,
+    pub lighting: Option<CollisionLighting>,
 
     /// `CollisionObjectData::something2`: the sub-area whose interior stands in
     /// for this object, `0` for ordinary zone collision. Feed it to
@@ -839,6 +849,17 @@ pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacem
                     grid_x: x as u16,
                     grid_y: y as u16,
                     water_height,
+                    lighting: has_tail.then(|| CollisionLighting {
+                        area: u32::from_le_bytes(
+                            body[mat_off + COLL_OBJECT_AREA..mat_off + COLL_OBJECT_AREA + 4]
+                                .try_into()
+                                .unwrap(),
+                        ),
+                        light_references: body[mat_off + COLL_OBJECT_LIGHT_REFS
+                            ..mat_off + COLL_OBJECT_LIGHT_REFS + LIGHT_REFERENCE_COUNT]
+                            .try_into()
+                            .unwrap(),
+                    }),
                     sub_area_link,
                     object_index,
                 });
@@ -1498,6 +1519,18 @@ pub fn resolve_chunk_lights(
     out
 }
 
+// FFXiMain.dll retail-2026-09 RVA 0x181AA0 resolves ground-light slots and excludes the lgb suffix.
+pub fn resolve_actor_lights(
+    references: &[u8; LIGHT_REFERENCE_COUNT],
+    bindings: &[LightId],
+) -> [Option<LightId>; LIGHT_REFERENCE_COUNT] {
+    references.map(|reference| {
+        let index = usize::from(reference).checked_sub(1)?;
+        let id = *bindings.get(index)?;
+        (id != 0 && &id.to_le_bytes()[1..] != b"lgb").then_some(id)
+    })
+}
+
 pub fn resolve_mmb_index(
     placement_id: &str,
     zone_prefix: &str,
@@ -2031,9 +2064,35 @@ mod tests {
         );
     }
 
-    /// `CollisionObjectData::something2` closes the 0xC0-byte record, so it shares
-    /// the version gate `flags` is under, and the object's slot is its distance from
-    /// `CollisionDataHeader::SomeOffset` in whole records.
+    #[test]
+    fn collision_lighting_reads_floor_metadata_and_filters_landscape_lights() {
+        const MAT_OFF: usize = 0x220;
+        const AREA: u32 = u32::from_le_bytes(*b"ev01");
+        let mut body = synth_mzb_with_placement();
+        body.resize(MAT_OFF + COLL_OBJECT_RECORD_LEN, 0);
+        body[3] = LEGACY_COLLISION_OBJECT_MAX_VERSION + 1;
+        body[MAT_OFF + COLL_OBJECT_AREA..MAT_OFF + COLL_OBJECT_AREA + 4]
+            .copy_from_slice(&AREA.to_le_bytes());
+        body[MAT_OFF + COLL_OBJECT_LIGHT_REFS
+            ..MAT_OFF + COLL_OBJECT_LIGHT_REFS + LIGHT_REFERENCE_COUNT]
+            .copy_from_slice(&[2, 1, 0, 9]);
+        let header = MzbHeader::parse(&body).unwrap();
+        let lighting = parse_placements(&body, &header).unwrap()[0]
+            .lighting
+            .unwrap();
+        assert_eq!(lighting.area, AREA);
+        assert_eq!(lighting.light_references, [2, 1, 0, 9]);
+        let character = u32::from_le_bytes(*b"c14 ");
+        let landscape = u32::from_le_bytes(*b"0lgb");
+        assert_eq!(
+            resolve_actor_lights(&lighting.light_references, &[landscape, character]),
+            [Some(character), None, None, None]
+        );
+        body[3] = LEGACY_COLLISION_OBJECT_MAX_VERSION;
+        let header = MzbHeader::parse(&body).unwrap();
+        assert_eq!(parse_placements(&body, &header).unwrap()[0].lighting, None);
+    }
+
     #[test]
     fn collision_sub_area_link_and_object_index_come_from_the_record_tail() {
         const COLL_HEADER: usize = 0x20;

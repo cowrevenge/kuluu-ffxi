@@ -13,14 +13,14 @@ pub const SIT: u8 = 47;
 /// `D_CLOSE`), so this one byte is the whole of what the server says about a
 /// door — the swing itself is the client's, driven from the zone DAT's per-door
 /// `open`/`clos` routines (`enum ANIMATIONTYPE`,
-/// vendor/server/src/map/entities/baseentity.h).
+/// vendor/server/data/enums/animation.yaml).
 pub const OPEN_DOOR: u8 = 8;
 pub const CLOSE_DOOR: u8 = 9;
 
 /// Riding a chocobo — the classic mount, which retail renders from a dedicated
 /// PC race config rather than the generic mount model block. Noble Chocobo also
 /// arrives as `CHOCOBO`; the two differ only in `CustomProperties[1]`
-/// (vendor/server/src/map/entities/charentity.cpp,
+/// (vendor/server/src/map/entities/char_entity.cpp,
 /// CCharEntity::tryStartNextEvent).
 pub const CHOCOBO: u8 = 5;
 
@@ -28,14 +28,14 @@ pub const CHOCOBO: u8 = 5;
 /// index, not from this byte.
 pub const MOUNT: u8 = 85;
 
-/// `CBattleEntity::isMounted` (vendor/server/src/map/entities/battleentity.cpp)
+/// `CBattleEntity::isMounted` (vendor/server/src/map/entities/battle_entity.cpp)
 /// — the single predicate the server itself uses to gate mount speed and to refuse
 /// actions, so the client must agree with it exactly.
 pub fn is_mounted(animation: u8) -> bool {
     animation == CHOCOBO || animation == MOUNT
 }
 
-// ANIMATIONTYPE, vendor/server/src/map/entities/baseentity.h. The server writes
+// ANIMATIONTYPE, vendor/server/data/enums/animation.yaml. The server writes
 // these into the entity's server_status (the 0x0D/0x37 animation byte) and broadcasts
 // them; the client maps each to the matching fsh* model clip (research/xim Actor.kt updateFishingState).
 // The pre-overhaul (38-43,50) and current (56-62) fishing systems share fsh0..fsh6.

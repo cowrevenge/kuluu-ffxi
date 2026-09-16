@@ -569,7 +569,7 @@ impl Reactor {
                         forward: None,
                         derived_events: vec![AgentEvent::ChatLine {
                             line: debug_pathto_line(format!(
-                                "pathto: no walkable route to ({x:.0}, {y:.0}, {z:.0}) — use /pathtoforce or /warp"
+                                "pathto: no walkable route to ({x:.0}, {y:.0}, {z:.0}) — use //pathtoforce or //warp"
                             )),
                         }],
                     };

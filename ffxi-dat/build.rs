@@ -20,9 +20,6 @@ const ZONE_DAT_FORMULA: Formula = Formula {
 
 const ZONE_SETTINGS_SQL: &str = "../vendor/server/sql/zone_settings.sql";
 
-const ROM_FILE_MAPPINGS_XML: &str =
-    "../vendor/POLUtils/PlayOnline.FFXI.Utils.DataBrowser/ROMFileMappings.xml";
-
 /// Smallest row count each scrape can return and still plausibly have parsed
 /// its source; the argument is the count the pinned vendor tree yields today
 /// (kuluu-m4yk).
@@ -30,14 +27,11 @@ mod floor {
     use lsb_scrape::scrape_floor;
 
     pub const ZONE_SETTINGS: usize = scrape_floor(299);
-    pub const MAP_ENTRY: usize = scrape_floor(569);
-    pub const DIALOG_STRING: usize = scrape_floor(280);
 }
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={ZONE_SETTINGS_SQL}");
-    println!("cargo:rerun-if-changed={ROM_FILE_MAPPINGS_XML}");
 
     let formula = ZONE_DAT_FORMULA;
     let zones = parse_zone_ids(Path::new(ZONE_SETTINGS_SQL))
@@ -48,49 +42,6 @@ fn main() -> Result<()> {
         zones.len(),
         floor::ZONE_SETTINGS,
     )?;
-
-    // An unreadable or wholly unrecognizable vendor/POLUtils is a deinitialized
-    // submodule, so its table degrades to empty; a subtree that walks but yields
-    // few rows is drift, and fails the build.
-    let map_entries = match parse_map_table(Path::new(ROM_FILE_MAPPINGS_XML)) {
-        Ok(v) => {
-            check_scrape_count(
-                "map entries",
-                ROM_FILE_MAPPINGS_XML,
-                v.len(),
-                floor::MAP_ENTRY,
-            )?;
-            v
-        }
-        Err(e) => {
-            println!(
-                "cargo:warning=ffxi-dat: skipping map_dat_table.rs scrape ({e}); \
-                 retail minimap mode will have no zone lookups"
-            );
-            Vec::new()
-        }
-    };
-    emit_map_table(&map_entries)?;
-
-    let string_entries = match parse_string_dat_table(Path::new(ROM_FILE_MAPPINGS_XML)) {
-        Ok(v) => {
-            check_scrape_count(
-                "dialog string entries",
-                ROM_FILE_MAPPINGS_XML,
-                v.len(),
-                floor::DIALOG_STRING,
-            )?;
-            v
-        }
-        Err(e) => {
-            println!(
-                "cargo:warning=ffxi-dat: skipping string_dat_table.rs scrape ({e}); \
-                 zone dialog strings will have no lookups"
-            );
-            Vec::new()
-        }
-    };
-    emit_string_dat_table(&string_entries)?;
 
     let mut rows: Vec<(u16, u32)> = zones
         .iter()
@@ -189,204 +140,4 @@ fn parse_zone_ids(path: &Path) -> Result<Vec<u16>> {
         out.push(zid);
     }
     Ok(out)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MapEntry {
-    zone_id: u16,
-    map_index: u8,
-    file_id: u32,
-}
-
-fn parse_map_table(path: &Path) -> Result<Vec<MapEntry>> {
-    let src = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let needle = r#"<category><name><i18n-string id="Menu:Maps"/></name>"#;
-    let Some(maps_start) = src.find(needle) else {
-        bail!(
-            "could not find `Menu:Maps` category in {} — XML format may have changed",
-            path.display()
-        );
-    };
-
-    let mut entries: Vec<MapEntry> = Vec::new();
-    let mut cur_zone_for_block: Option<u16> = None;
-    let mut next_map_index: u8 = 0;
-    let mut depth: i32 = 0;
-
-    for (line_no, line) in src[maps_start..].lines().enumerate() {
-        let opens = line.matches("<category>").count() as i32;
-        let closes = line.matches("</category>").count() as i32;
-        depth += opens;
-        depth -= closes;
-        if depth <= 0 {
-            break;
-        }
-
-        let trim = line.trim();
-
-        if let Some(zone) = extract_category_area_name(trim) {
-            cur_zone_for_block = Some(zone);
-            next_map_index = 0;
-            continue;
-        }
-
-        if trim.starts_with("</category>") {
-            cur_zone_for_block = None;
-            continue;
-        }
-
-        let Some(file_id) = extract_rom_file_id(trim) else {
-            continue;
-        };
-        if trim.contains(r#"<i18n-string id="Menu:Highlight"/>"#) {
-            continue;
-        }
-
-        if let Some(zone) = extract_inline_area_name(trim) {
-            entries.push(MapEntry {
-                zone_id: zone,
-                map_index: 0,
-                file_id,
-            });
-        } else if let Some(zone) = cur_zone_for_block {
-            entries.push(MapEntry {
-                zone_id: zone,
-                map_index: next_map_index,
-                file_id,
-            });
-            next_map_index = next_map_index.saturating_add(1);
-        } else {
-            let _ = line_no;
-        }
-    }
-
-    Ok(entries)
-}
-
-/// Scrape `(zone_id, file_id)` for English zone dialog string DATs from the
-/// `Menu:DialogTables` → `Menu:English` subtree. Each leaf is
-/// `<rom-file id="NNNNN"><area-name id="ZZZ"/></rom-file>` (zone = area-name).
-fn parse_string_dat_table(path: &Path) -> Result<Vec<(u16, u32)>> {
-    let src = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let dialog = src
-        .find(r#"<i18n-string id="Menu:DialogTables"/>"#)
-        .context("could not find Menu:DialogTables category")?;
-    let english_marker = dialog
-        + src[dialog..]
-            .find(r#"<i18n-string id="Menu:English"/>"#)
-            .context("could not find Menu:English under Menu:DialogTables")?;
-    // Start at the beginning of the line that opens the English `<category>`, so
-    // its opening tag is counted; stop once that category's depth returns to 0.
-    let line_start = src[..english_marker].rfind('\n').map_or(0, |i| i + 1);
-
-    let mut entries: Vec<(u16, u32)> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut entered = false;
-    for line in src[line_start..].lines() {
-        depth += line.matches("<category>").count() as i32;
-        depth -= line.matches("</category>").count() as i32;
-        if depth > 0 {
-            entered = true;
-        }
-        let trim = line.trim();
-        if let (Some(file_id), Some(zone)) =
-            (extract_rom_file_id(trim), extract_inline_area_name(trim))
-        {
-            entries.push((zone, file_id));
-        }
-        if entered && depth <= 0 {
-            break;
-        }
-    }
-    Ok(entries)
-}
-
-fn emit_string_dat_table(entries: &[(u16, u32)]) -> Result<()> {
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").context("OUT_DIR not set")?);
-    let out_path = out_dir.join("string_dat_table.rs");
-
-    let mut sorted: Vec<(u16, u32)> = entries.to_vec();
-    sorted.sort_by_key(|&(z, _)| z);
-    sorted.dedup_by_key(|&mut (z, _)| z);
-
-    let mut s = String::new();
-    s.push_str("// AUTO-GENERATED by ffxi-dat/build.rs — do not edit by hand.\n");
-    s.push_str(&format!(
-        "// Source: vendored from {ROM_FILE_MAPPINGS_XML}\n"
-    ));
-    s.push_str("// Menu:DialogTables / Menu:English. License: Apache-2.0 (POLUtils).\n\n");
-    s.push_str("/// `(zone_id, file_id)` for English zone dialog string DATs,\n");
-    s.push_str("/// sorted by `zone_id` for binary search.\n");
-    s.push_str("pub const STRING_DAT_TABLE: &[(u16, u32)] = &[\n");
-    for (z, f) in &sorted {
-        s.push_str(&format!("    ({z}, {f}),\n"));
-    }
-    s.push_str("];\n");
-
-    fs::write(&out_path, &s).with_context(|| format!("writing {}", out_path.display()))?;
-    println!(
-        "ffxi-dat: generated string_dat_table.rs with {} zones",
-        sorted.len()
-    );
-    Ok(())
-}
-
-fn extract_category_area_name(line: &str) -> Option<u16> {
-    let cat_marker = r#"<category><name><area-name id=""#;
-    let rest = line
-        .find(cat_marker)
-        .map(|i| &line[i + cat_marker.len()..])?;
-    let end = rest.find('"')?;
-    rest[..end].parse().ok()
-}
-
-fn extract_rom_file_id(line: &str) -> Option<u32> {
-    let marker = r#"<rom-file id=""#;
-    let rest = line.find(marker).map(|i| &line[i + marker.len()..])?;
-    let end = rest.find('"')?;
-
-    rest[..end].parse().ok()
-}
-
-fn extract_inline_area_name(line: &str) -> Option<u16> {
-    let marker = r#"<area-name id=""#;
-    let rest = line.find(marker).map(|i| &line[i + marker.len()..])?;
-    let end = rest.find('"')?;
-    rest[..end].parse().ok()
-}
-
-fn emit_map_table(entries: &[MapEntry]) -> Result<()> {
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").context("OUT_DIR not set")?);
-    let out_path = out_dir.join("map_dat_table.rs");
-
-    let mut sorted: Vec<MapEntry> = entries.to_vec();
-    sorted.sort_by_key(|e| (e.zone_id, e.map_index));
-
-    let mut s = String::new();
-    s.push_str("// AUTO-GENERATED by ffxi-dat/build.rs — do not edit by hand.\n");
-    s.push_str("//\n");
-    s.push_str(&format!(
-        "// Source: vendored from {ROM_FILE_MAPPINGS_XML}\n"
-    ));
-    s.push_str(&format!("// Entries: {}\n", sorted.len()));
-    s.push_str("//\n");
-    s.push_str("// License: Apache-2.0 (POLUtils, Windower Team)\n\n");
-    s.push_str("/// `(zone_id, map_index, file_id)`. Sorted by `(zone_id, map_index)`\n");
-    s.push_str("/// so a binary search by zone_id + linear scan over its block\n");
-    s.push_str("/// resolves the per-floor map.\n");
-    s.push_str("pub const MAP_DAT_TABLE: &[(u16, u8, u32)] = &[\n");
-    for e in &sorted {
-        s.push_str(&format!(
-            "    ({}, {}, {}),\n",
-            e.zone_id, e.map_index, e.file_id
-        ));
-    }
-    s.push_str("];\n");
-
-    fs::write(&out_path, &s).with_context(|| format!("writing {}", out_path.display()))?;
-    println!(
-        "ffxi-dat: generated map_dat_table.rs with {} map entries",
-        sorted.len()
-    );
-    Ok(())
 }

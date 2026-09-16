@@ -1,3 +1,5 @@
+#import kuluu_render::actor_reveal::{reveal_threshold, reveal_edge}
+
 // FFXI faithful skinned-character shader — a WGSL port of FFXI's
 // skinned-character shader (cross-referenced against research/xim's
 // poc/gl/XimSkinnedShader.kt).
@@ -84,6 +86,8 @@ struct FfxiInstance {
     flags: vec4<f32>,
     tint: vec4<f32>,
     skin_slot: u32,
+    reveal: f32,
+    opacity: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage, read> skins: array<FfxiSkin>;
@@ -111,6 +115,7 @@ struct VertexOutput {
     @location(2) world_position: vec3<f32>,
     @location(3) color: vec4<f32>,
     @location(4) @interpolate(flat) inst_idx: u32,
+    @location(5) lit_color: vec3<f32>,
 };
 
 @vertex
@@ -141,7 +146,35 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.uv = v.uv;
     out.color = v.color;
     out.inst_idx = inst;
+    out.lit_color = vec3<f32>(0.0);
+    if (instances[inst].flags.y <= 0.5 && instances[inst].flags.z <= 0.5) {
+        out.lit_color = saturate(vertex_irradiance(si, out.world_normal, out.world_position) * v.color.rgb);
+    }
     return out;
+}
+
+// research/XIClient/src/XIClient/source/Rendering/Direct3D8Manager.cpp InitializeRenderStateBlocks.
+fn vertex_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+    var rgb = skins[si].lighting.ambient.rgb;
+    rgb += max(dot(n, -skins[si].lighting.dir0_dir.xyz), 0.0) * skins[si].lighting.dir0_color.rgb * skins[si].lighting.dir0_color.w;
+    rgb += max(dot(n, -skins[si].lighting.dir1_dir.xyz), 0.0) * skins[si].lighting.dir1_color.rgb * skins[si].lighting.dir1_color.w;
+    for (var i = 0u; i < 16u; i += 1u) {
+        let range = skins[si].lighting.point_color[i].w;
+        if (range < 0.0) {
+            rgb += max(dot(n, skins[si].lighting.point_pos[i].xyz), 0.0) * skins[si].lighting.point_color[i].rgb;
+            continue;
+        }
+        if (range <= 0.0) { continue; }
+        let to_light = skins[si].lighting.point_pos[i].xyz - p;
+        let dist = length(to_light);
+        if (dist > range) { continue; }
+        let a = skins[si].lighting.point_atten[i].xyz;
+        let denom = a.x + a.y * dist + a.z * dist * dist;
+        if (denom <= 0.0) { continue; }
+        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+        rgb += nl * skins[si].lighting.point_color[i].rgb / denom;
+    }
+    return rgb;
 }
 
 fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale: vec2<f32>, point_shadows: bool, frag_coord: vec2<f32>) -> vec3<f32> {
@@ -152,8 +185,11 @@ fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale
     rgb += shadow_scale.y * nl1 * skins[si].lighting.dir1_color.rgb * skins[si].lighting.dir1_color.w;
     // 16 = MAX_POINT_LIGHTS (skinned_ffxi_material.rs); empty slots have range 0.
     for (var i = 0u; i < 16u; i = i + 1u) {
-        // `.w` of the color carries the light's range; <= 0 means an empty slot.
         let range = skins[si].lighting.point_color[i].w;
+        if (range < 0.0) {
+            rgb += max(dot(n, skins[si].lighting.point_pos[i].xyz), 0.0) * skins[si].lighting.point_color[i].rgb;
+            continue;
+        }
         if (range > 0.0) {
             // XIM's `pointLightCalc` (ShaderConstants.kt:186-198): diffuse N·L,
             // `1/(c + l·d + q·d²)` falloff, hard-cut past `range`. Vertex color
@@ -205,6 +241,12 @@ fn apply_distance_fog(color: vec4<f32>, world_pos: vec3<f32>) -> vec4<f32> {
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rec = instances[in.inst_idx];
     let si = rec.skin_slot;
+    var arrival_light = vec3<f32>(0.0);
+    if (rec.reveal < 1.0) {
+        let threshold = reveal_threshold(in.uv);
+        if (rec.reveal < threshold) { discard; }
+        arrival_light = reveal_edge(rec.reveal, threshold);
+    }
     // Untextured FFXI meshes (C/CS ops) carry a null TextureLink: treat the
     // texel as white opaque and skip the alpha-test so the vertex color shows.
     let has_texture = rec.flags.x > 0.5;
@@ -255,10 +297,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let albedo = texel.rgb * in.color.rgb * rec.tint.rgb;
         let irr = scene_irradiance(si, n, in.world_position, 0.3, shadow_scale, receive_shadows, in.clip_position.xy);
         let rgb = albedo * (irr * EXPOSURE + vec3<f32>(AMBIENT_FLOOR));
-        // Opaque output (AlphaMode::Mask already discarded cut-out texels). A
-        // sub-1 alpha here would let the preview camera composite the character
-        // see-through over the launcher backdrop.
-        return apply_distance_fog(vec4<f32>(rgb + highlight, 1.0), in.world_position);
+        return apply_distance_fog(vec4<f32>(rgb + highlight + arrival_light, rec.opacity), in.world_position);
     }
 
     // FFXI-faithful: flat per-vertex light * vertex color through the single
@@ -267,11 +306,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // and emits a D3DCOLOR, so the lit vertex term saturates before the stage.
     //
     shadow_scale = mix(vec2<f32>(FFXI_SHADOW_FLOOR), vec2<f32>(1.0), shadow_scale);
-    let lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, shadow_scale, receive_shadows, in.clip_position.xy) * in.color.rgb);
+    var lit = in.lit_color;
+    if (receive_shadows) {
+        lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, shadow_scale, true, in.clip_position.xy) * in.color.rgb);
+    }
     let rgb = saturate(D3D_MODULATE_2X * lit * texel.rgb * rec.tint.rgb);
-    // Opaque output (AlphaMode::Mask already discarded cut-out texels). A sub-1
-    // alpha here would let the preview camera composite the character see-
-    // through over the launcher backdrop. The depth-only cast-shadow / prepass
-    // path lives in the separate skinned_ffxi_prepass.wgsl module.
-    return apply_distance_fog(vec4<f32>(rgb + highlight, 1.0), in.world_position);
+    return apply_distance_fog(vec4<f32>(rgb + highlight + arrival_light, rec.opacity), in.world_position);
 }

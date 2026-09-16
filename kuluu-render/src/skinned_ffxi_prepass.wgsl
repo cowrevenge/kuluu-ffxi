@@ -1,3 +1,5 @@
+#import kuluu_render::actor_reveal::{reveal_threshold, reveal_edge}
+
 // FFXI skinned-character prepass shader. Twin of skinned_ffxi.wgsl, modelled on
 // Bevy's prepass.wgsl (bevy_pbr 0.18). Serves TWO render passes:
 //
@@ -66,6 +68,8 @@ struct FfxiInstance {
     flags: vec4<f32>,
     tint: vec4<f32>,
     skin_slot: u32,
+    reveal: f32,
+    opacity: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage, read> skins: array<FfxiSkin>;
@@ -148,6 +152,10 @@ fn vertex(v: Vertex) -> PrepassVertexOutput {
 // write solid depth/normals or cast solid-block shadows. Mirrors the lit
 // fragment's discard threshold (69/255). Untextured C/CS meshes never discard.
 fn prepass_alpha_discard(uv: vec2<f32>, inst_idx: u32) {
+    let coverage = min(instances[inst_idx].reveal, instances[inst_idx].opacity);
+    if (coverage < 1.0) {
+        if (coverage < reveal_threshold(uv)) { discard; }
+    }
     let has_texture = instances[inst_idx].flags.x > 0.5;
     if (has_texture) {
         let texel = textureSample(base_tex, base_samp, uv);

@@ -2,6 +2,10 @@ use crate::{DatError, Result};
 
 pub const CIB_LEN: usize = 15;
 
+/// Entries in the `GraphSize`-indexed scale table (the field is two bits wide
+/// in vendor/server/src/map/packets/entity_update.cpp `flags1_t`).
+pub const SCALE_COUNT: usize = 4;
+
 /// The Info byte value every field treats as "not set" (research/xim resource/InfoSection.kt
 /// nullIf0xFF).
 pub const CIB_UNSET: u8 = 0xFF;
@@ -145,15 +149,16 @@ pub struct Cib {
     /// where plate legs get trousers.
     pub body_armour_waist: u8,
 
-    /// Model scale in percent (viewer parseInspectInfo b[10], "Scale"). Retail divides by 100
-    /// with only `CIB_UNSET` meaning default (research/xim poc/Model.kt NpcModel.getScale).
-    pub scale: u8,
-
-    /// Scale in percent for static NPCs that are not sitting in a chair; retail swaps it in
-    /// for `scale` there (research/xim poc/Actor.kt getScale).
-    pub static_npc_scale: u8,
-    pub unknown7: u8,
-    pub unknown8: u8,
+    /// Four authored model scales in percent, selected by the entity's
+    /// `GraphSize` (research/XIClient/src/XIClient/include/CYy/Model/KzCib.h
+    /// `KzCib::scale`; the index comes from
+    /// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp
+    /// `SkeletalMeshActor::GetCibScaleIndex`). Index 1 is the reference size a
+    /// mounted rider normalises against
+    /// (`SkeletalMeshActor::VirtActor209`'s `scale / GetScale(1)`), which is
+    /// why xim reads that entry alone as a static-NPC scale
+    /// (research/xim poc/Actor.kt getScale).
+    pub scale: [u8; SCALE_COUNT],
 
     /// The Info range byte (viewer parseInspectInfo b[14]).
     pub range_type: RangeType,
@@ -180,23 +185,27 @@ impl Cib {
             unknown2: body[0x07],
             weapon_unknown3: body[0x08],
             body_armour_waist: body[0x09],
-            scale: body[0x0A],
-            static_npc_scale: body[0x0B],
-            unknown7: body[0x0C],
-            unknown8: body[0x0D],
+            scale: [body[0x0A], body[0x0B], body[0x0C], body[0x0D]],
             range_type: RangeType::from_u8(body[0x0E]),
         })
     }
 
-    /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only `CIB_UNSET`
-    /// meaning "default" (research/xim poc/Model.kt NpcModel.getScale, poc/Actor.kt getScale;
-    /// xim's nullIf0xFF in research/xim resource/InfoSection.kt). 100 therefore lands on 1.0 by
-    /// the division itself, and a shipped 0 renders at zero size exactly as retail would.
-    pub fn scale_factor(&self) -> f32 {
-        if self.scale == CIB_UNSET {
+    /// The model multiplier for one `GraphSize`, per
+    /// research/XIClient/src/XIClient/source/CYy/Model/KzCibCollect.cpp
+    /// `KzCibCollect::GetScale`: an out-of-range index falls back to 0,
+    /// `CIB_UNSET` means "no scale authored" and yields 1.0, and every other
+    /// byte is a percentage. 100 therefore lands on 1.0 by the division
+    /// itself, and a shipped 0 renders at zero size exactly as retail would.
+    pub fn scale_factor(&self, graph_size: u8) -> f32 {
+        let byte = self
+            .scale
+            .get(usize::from(graph_size))
+            .copied()
+            .unwrap_or(self.scale[0]);
+        if byte == CIB_UNSET {
             1.0
         } else {
-            self.scale as f32 / 100.0
+            f32::from(byte) / 100.0
         }
     }
 }
@@ -215,11 +224,27 @@ mod tests {
         assert_eq!(c.footstep_material, 0x02);
         assert_eq!(c.footstep_size, 0x01);
         assert_eq!(c.motion_index, 0x05);
-        assert_eq!(c.scale, 0x80);
+        assert_eq!(c.scale, [0x80, 0x81, 0x82, 0x83]);
         // The movement byte is outside the viewer's MOVEMENT_TYPE table; xim would throw, we keep it.
         assert_eq!(c.movement_type, MovementType::Unknown(0x10));
         // The range byte is one of xim's documented gaps; xim reads it as Unset.
         assert_eq!(c.range_type, RangeType::Unknown(0x07));
+    }
+
+    #[test]
+    fn scale_factor_matches_getscale() {
+        let mut body = [0u8; CIB_LEN];
+        body[0x0A] = 100;
+        body[0x0B] = 85;
+        body[0x0C] = CIB_UNSET;
+        body[0x0D] = 0;
+        let c = Cib::parse(*b"scal", &body).unwrap();
+
+        assert_eq!(c.scale_factor(0), 1.0);
+        assert_eq!(c.scale_factor(1), 0.85);
+        assert_eq!(c.scale_factor(2), 1.0, "CIB_UNSET is 'no scale authored'");
+        assert_eq!(c.scale_factor(3), 0.0, "a shipped 0 really is zero-size");
+        assert_eq!(c.scale_factor(4), c.scale_factor(0), "out of range -> 0");
     }
 
     #[test]
@@ -255,22 +280,12 @@ mod tests {
         ];
         let c = Cib::parse(*b"cib0", &body).unwrap();
         assert_eq!(c.movement_type, MovementType::Flying);
-        assert_eq!(c.scale, 85);
-        assert_eq!(c.static_npc_scale, 100);
+        // The four GraphSize entries are a size ladder, which is what the
+        // field being an index rather than a multiplier looks like on disk.
+        assert_eq!(c.scale, [85, 100, 115, 140]);
         assert_eq!(c.range_type, RangeType::Unset);
-        assert!((c.scale_factor() - 0.85).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn scale_factor_rules() {
-        let parse = |scale: u8| {
-            let mut body = [0u8; CIB_LEN];
-            body[0x0A] = scale;
-            Cib::parse(*b"cib0", &body).unwrap()
-        };
-        assert!((parse(100).scale_factor() - 1.0).abs() < f32::EPSILON);
-        assert!((parse(0xFF).scale_factor() - 1.0).abs() < f32::EPSILON);
-        assert!((parse(85).scale_factor() - 0.85).abs() < f32::EPSILON);
+        assert!((c.scale_factor(0) - 0.85).abs() < f32::EPSILON);
+        assert!((c.scale_factor(3) - 1.40).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -1016,9 +1016,10 @@ impl InputModeKind {
             crate::InputMode::SubTarget(_) => Self::QuickAction,
             crate::InputMode::Dialog(_) => Self::Dialog,
             crate::InputMode::DeliveryBox => Self::Dialog,
-            crate::InputMode::Check | crate::InputMode::Bazaar | crate::InputMode::Auction => {
-                Self::Menu
-            }
+            crate::InputMode::Check
+            | crate::InputMode::Bazaar
+            | crate::InputMode::Auction
+            | crate::InputMode::Shop => Self::Menu,
             crate::InputMode::PassiveCursor(_) => Self::PassiveCursor,
         }
     }

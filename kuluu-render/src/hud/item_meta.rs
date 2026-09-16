@@ -52,10 +52,24 @@ pub fn item_unusable(item: &InventoryItem, now_vana: u32) -> bool {
     match item.charges_remaining {
         None => false,
         Some(0) => true,
-        Some(_) => item
-            .next_use_vana_ts
-            .is_some_and(|ts| ts != 0 && ts > now_vana),
+        Some(_) => {
+            item.ready == Some(false)
+                || latest_ready_timestamp(item).is_some_and(|ts| ts > now_vana)
+        }
     }
+}
+
+fn latest_ready_timestamp(item: &InventoryItem) -> Option<u32> {
+    item.next_use_vana_ts
+        .into_iter()
+        .chain(item.use_delay_end_vana_ts)
+        .max()
+}
+
+fn recast_remaining(item: &InventoryItem, now_vana: u32) -> u32 {
+    latest_ready_timestamp(item)
+        .map(|ts| ts.saturating_sub(now_vana))
+        .unwrap_or(0)
 }
 
 /// The exact inventory instance at `(container, index)`. Charges/recast are
@@ -97,8 +111,7 @@ pub fn compose_item_detail(
     let recast = dat.as_ref().and_then(|d| d.recast_base).map(|base| {
         let now_vana = now_vana_ts();
         let remaining = slot
-            .and_then(|s| s.next_use_vana_ts)
-            .map(|ts| ts.saturating_sub(now_vana))
+            .map(|item| recast_remaining(item, now_vana))
             .unwrap_or(0);
         (remaining, base)
     });
@@ -116,7 +129,12 @@ pub fn compose_item_detail(
 mod tests {
     use super::*;
 
-    fn charged(charges: Option<u8>, next_use: Option<u32>) -> InventoryItem {
+    fn charged(
+        charges: Option<u8>,
+        next_use: Option<u32>,
+        use_delay_end: Option<u32>,
+        ready: Option<bool>,
+    ) -> InventoryItem {
         InventoryItem {
             container: 0,
             index: 0,
@@ -125,28 +143,49 @@ mod tests {
             locked: false,
             charges_remaining: charges,
             next_use_vana_ts: next_use,
+            use_delay_end_vana_ts: use_delay_end,
+            ready,
         }
     }
 
     #[test]
     fn non_charged_item_is_never_unusable() {
-        assert!(!item_unusable(&charged(None, None), 1000));
+        assert!(!item_unusable(&charged(None, None, None, None), 1000));
     }
 
     #[test]
     fn empty_charges_is_unusable() {
-        assert!(item_unusable(&charged(Some(0), Some(0)), 1000));
+        assert!(item_unusable(
+            &charged(Some(0), Some(0), Some(0), Some(true)),
+            1000
+        ));
     }
 
     #[test]
     fn charged_item_on_cooldown_is_unusable() {
-        assert!(item_unusable(&charged(Some(1), Some(2000)), 1000));
+        assert!(item_unusable(
+            &charged(Some(1), Some(2000), None, Some(false)),
+            1000
+        ));
     }
 
     #[test]
     fn charged_item_ready_is_usable() {
-        assert!(!item_unusable(&charged(Some(1), Some(0)), 1000));
-        assert!(!item_unusable(&charged(Some(1), Some(500)), 1000));
+        assert!(!item_unusable(
+            &charged(Some(1), Some(0), Some(0), Some(true)),
+            1000
+        ));
+        assert!(!item_unusable(
+            &charged(Some(1), Some(500), Some(700), Some(true)),
+            1000
+        ));
+    }
+
+    #[test]
+    fn clear_ready_bit_blocks_use_with_past_recast_timestamp() {
+        let item = charged(Some(1), Some(500), Some(2000), Some(false));
+        assert!(item_unusable(&item, 1000));
+        assert_eq!(recast_remaining(&item, 1000), 1000);
     }
 
     #[test]
@@ -162,6 +201,8 @@ mod tests {
             locked: false,
             charges_remaining: Some(1),
             next_use_vana_ts: Some(0),
+            use_delay_end_vana_ts: Some(0),
+            ready: Some(true),
         };
         let cooling = InventoryItem {
             container: 0,

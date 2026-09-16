@@ -274,7 +274,7 @@ impl FfxiServer {
     }
 
     #[tool(
-        description = "Focus-less GUI driving: trigger the client's `/debug heights` grounding dump at the current position. Server/nav/mzb heights are written to the client log under target `debug_heights` (grep the client log; not returned here). GUI session only."
+        description = "Focus-less GUI driving: trigger the client's `//debug heights` grounding dump at the current position. Server/nav/mzb heights are written to the client log under target `debug_heights` (grep the client log; not returned here). GUI session only."
     )]
     async fn debug_heights(&self) -> Result<CallToolResult, McpError> {
         self.send(AgentCommand::DebugHeights).await
@@ -731,7 +731,7 @@ async fn read_resource(
 }
 
 const SCENE_ENTITIES_CAP: usize = 30;
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE UPDATE_NAME
 const SEND_FLAG_NAME: u8 = 0x08;
 
 fn entities_view(state: &SessionState) -> serde_json::Value {
@@ -1350,6 +1350,8 @@ mod tests {
                     price: 0,
                     charges_remaining: None,
                     next_use_vana_ts: None,
+                    use_delay_end_vana_ts: None,
+                    ready: None,
                 },
             },
         };

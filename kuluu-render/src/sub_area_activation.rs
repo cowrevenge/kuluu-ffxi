@@ -35,7 +35,7 @@ pub struct SubAreaChanged {
     pub sub_area: Option<u32>,
 }
 
-/// Puts the latch into a sub-area without a trigger crossing (`/subarea`). The
+/// Puts the latch into a sub-area without a trigger crossing (`//subarea`). The
 /// ordinary clear rule applies from there, so the interior still drops when the
 /// player walks clear of it.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]

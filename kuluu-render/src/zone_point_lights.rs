@@ -10,54 +10,8 @@ use crate::snapshot::SceneState;
 
 const FAITHFUL_LIGHT_INTENSITY: f32 = 25_000.0;
 
-// Shared point-light model for the FFXI custom materials (zone + skinned). The
-// shader computes `nl * (1/(const + lin*d + quad*d²)) * color`, so colour
-// carries strength and the quad term is the per-light falloff.
-// Constant term of the inverse-square falloff: peak surface factor is 1/const at
-// the lamp base. 1.0 keeps the base a gentle wash (the outer 2x overbright in
-// zone_ffxi.wgsl still lifts it) rather than the blinding 2x spotlight 0.5 gave.
-const SCENE_LIGHT_CONST_ATTEN: f32 = 1.0;
-// Widen reach and use a gentle quad falloff so lanterns light a usable pool
-// rather than only a tight base, and so a light entering/leaving the nearest-N
-// set near the (now larger) range edge contributes little — softening the pop.
-const ZONE_LIGHT_REACH_SCALE: f32 = 2.4;
-const SCENE_LIGHT_FALLOFF_K: f32 = 3.0;
-
-// Below this night factor the lamps are treated as fully off (skip the feed
-// entirely so daytime costs nothing and surfaces go dark).
-const LAMP_OFF_EPSILON: f32 = 0.02;
-
-/// Faithful streetlamp/brazier day-night gate: lamps light at dusk and go out at
-/// dawn, driven by the Vana'diel sun altitude (radians, +π/2 zenith, −π/2 nadir).
-/// Returns 1.0 once the sun is below the twilight band, 0.0 in full daylight, and
-/// a smooth ramp through dusk/dawn. This is a client clock behaviour, not an
-/// Events/NPC effect.
-pub fn lamp_night_factor(sun_altitude: f32) -> f32 {
-    // ~±7° around the horizon: full on just after the sun dips, off just after
-    // it rises.
-    const LO: f32 = -0.12;
-    const HI: f32 = 0.12;
-    let t = ((HI - sun_altitude) / (HI - LO)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Indoor zones (DAT F1 indoors flag) never see the sun, so their lamps burn
-/// around the clock; so do zones whose DAT sun diffuse is black in daylight
-/// (Upper Jeuno's covered streets — retail 2026-07-19 capture: lamps lit at
-/// 08:14). Only true open-sky zones follow the dusk/dawn ramp.
-/// `day_sun_k` is the ZONE record's daytime landscape sun brightness (None when
-/// no record is loaded) — deliberately not the player's area's: this gate lights
-/// every Generator light in the zone at once, so an interior area's black sun
-/// diffuse must not switch the whole zone's lamps on as the player walks in.
-pub fn lamp_lit_factor(indoors: bool, day_sun_k: Option<f32>, sun_altitude: f32) -> f32 {
-    if indoors {
-        return 1.0;
-    }
-    if sun_altitude > 0.0 && day_sun_k.is_some_and(|k| k <= f32::EPSILON) {
-        return 1.0;
-    }
-    lamp_night_factor(sun_altitude)
-}
+// FFXiMain.dll retail-2026-09 RVA 0x178610 InitLight zeroes Attenuation0/1.
+const SCENE_LIGHT_CONST_ATTEN: f32 = 0.0;
 
 // Retail lamps/braziers visibly waver (2026-07-19 MH capture); the DAT ships no
 // flicker keyframes to scrape, so the shape is hand-tuned to the footage: a slow
@@ -82,7 +36,7 @@ pub fn lamp_flicker(t: f32, seed: f32) -> f32 {
 /// ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight).
 pub const UNAUTHORED_LIGHT_ID: mzb::LightId = 0;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ZonePointLight {
     /// FourCC of the Generator chunk that defines this light — the `LightID` an
     /// MZB chunk binding names; [`UNAUTHORED_LIGHT_ID`] for a light no zone
@@ -96,6 +50,8 @@ pub struct ZonePointLight {
     pub range: f32,
 
     pub attenuation: f32,
+    pub theta_track: Option<std::sync::Arc<ffxi_dat::particle_gen::KeyFrameTrack>>,
+    pub theta_multiplier: f32,
 }
 
 #[derive(Resource, Default)]
@@ -117,41 +73,52 @@ pub struct ActiveSceneLights {
 pub fn build_active_scene_lights(
     faithful: Res<ZonePointLights>,
     vana_clock: Res<crate::vana_time::VanaClock>,
-    zone_lighting: Option<Res<crate::weather::ZoneDirectionalLighting>>,
-    time: Res<bevy::time::Time>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut active: ResMut<ActiveSceneLights>,
 ) {
-    active.lights.clear();
-    if !settings.dynamic_lights.faithful_enabled() {
-        return;
+    let day = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
+    let enabled = settings.dynamic_lights.faithful_enabled();
+    let source = if enabled {
+        faithful.lights.as_slice()
+    } else {
+        &[]
+    };
+    let mut changed = active.lights.len() != source.len();
+    {
+        let target = &mut active.bypass_change_detection().lights;
+        target.truncate(source.len());
+        for (index, light) in source.iter().enumerate() {
+            let evaluated = light.at_time(day);
+            if let Some(old) = target.get_mut(index) {
+                changed |= old.light_id != evaluated.light_id
+                    || old.world_pos != evaluated.world_pos
+                    || old.color != evaluated.color
+                    || old.range != evaluated.range
+                    || old.attenuation != evaluated.attenuation;
+                *old = evaluated;
+            } else {
+                target.push(evaluated);
+            }
+        }
     }
-    let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
-    let (indoors, day_sun_k) = zone_lighting
-        .as_deref()
-        .filter(|z| z.valid)
-        .map(|z| (z.indoors, Some(z.zone_sun_k)))
-        .unwrap_or((false, None));
-    let night = lamp_lit_factor(indoors, day_sun_k, sky.sun_altitude);
-    if night <= LAMP_OFF_EPSILON {
-        return;
+    if changed {
+        active.set_changed();
     }
-    let t = time.elapsed_secs_wrapped();
-    let flicker_on = settings.light_flicker;
-    for (i, l) in faithful.lights.iter().enumerate() {
-        let range = l.range * ZONE_LIGHT_REACH_SCALE;
-        let flick = if flicker_on {
-            lamp_flicker(t, i as f32)
-        } else {
-            1.0
-        };
-        active.lights.push(ZonePointLight {
-            light_id: l.light_id,
-            world_pos: l.world_pos,
-            color: l.color * night * flick,
-            range,
-            attenuation: SCENE_LIGHT_FALLOFF_K / (range * range),
-        });
+}
+
+impl ZonePointLight {
+    fn at_time(&self, day: f32) -> Self {
+        let mut light = self.clone();
+        if let Some(track) = &self.theta_track {
+            let theta = (track.sample(day).max(0.0) * self.theta_multiplier).max(0.0);
+            if theta > 0.0 {
+                light.attenuation = theta.recip();
+            } else {
+                light.color = Vec3::ZERO;
+                light.attenuation = 1.0;
+            }
+        }
+        light
     }
 }
 
@@ -165,9 +132,9 @@ pub type PointLightArrays = (
 
 /// Pack the selected lights into the `(point_pos, point_color, point_atten)`
 /// arrays of `FfxiLightingUniform`. `point_color.w` carries range (the shader
-/// treats slots with range <= 0 as empty); `point_atten` is
+/// treats zero-range slots as empty); `point_atten` is
 /// `(const, linear, quad, _)`. Excess beyond `MAX_POINT_LIGHTS` is dropped.
-fn pack_point_light_arrays<'a>(
+pub(crate) fn pack_point_light_arrays<'a>(
     selected: impl Iterator<Item = &'a ZonePointLight>,
 ) -> PointLightArrays {
     let mut point_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
@@ -205,9 +172,19 @@ pub fn authored_point_light_indices(
         .collect()
 }
 
+// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp UpdateBlockLightSettings.
+pub fn terrain_point_light_indices(
+    lights: &[ZonePointLight],
+    authored: &[Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+) -> Vec<u32> {
+    const ACTOR_ONLY_PREFIX: u8 = b'c';
+    let eligible = authored.map(|id| id.filter(|id| id.to_le_bytes()[0] != ACTOR_ONLY_PREFIX));
+    authored_point_light_indices(lights, &eligible)
+}
+
 /// Pick the `count` nearest in-range lights to `pos` (`count` clamped to
 /// `MAX_POINT_LIGHTS`), as indices into `lights`. The fallback for zones that
-/// ship no authored binding table, and for the `/lights` emitters no zone
+/// ship no authored binding table, and for the `//lights` emitters no zone
 /// authors; the caller may cache the selection while the light set and the actor
 /// hold still, repacking live colors per frame via [`point_light_arrays_for`].
 pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: usize) -> Vec<u32> {
@@ -240,6 +217,42 @@ pub fn point_light_arrays_for(lights: &[ZonePointLight], indices: &[u32]) -> Poi
     pack_point_light_arrays(indices.iter().filter_map(|&i| lights.get(i as usize)))
 }
 
+// FFXiMain.dll retail-2026-09 RVA 0xCB698 keeps one point light; RVA 0xCB845 converts it to directional.
+pub fn actor_directional_point_light(
+    pos: Vec3,
+    lights: &[ZonePointLight],
+    indices: &[u32],
+) -> PointLightArrays {
+    const MIN_ATTENUATION_DENOMINATOR: f32 = 0.0001;
+    const DIRECTIONAL_RANGE_MARKER: f32 = -1.0;
+    let mut strongest = None;
+    let mut strength = 0.0;
+    for &index in indices {
+        let Some(light) = lights.get(index as usize) else {
+            continue;
+        };
+        let offset = light.world_pos - pos;
+        let distance_sq = offset.length_squared();
+        if light.range <= 0.0 || distance_sq > light.range * light.range {
+            continue;
+        }
+        let intensity = (distance_sq * light.attenuation)
+            .max(MIN_ATTENUATION_DENOMINATOR)
+            .recip();
+        if intensity > strength {
+            strength = intensity;
+            strongest = Some((light, offset.normalize_or_zero()));
+        }
+    }
+    let mut positions = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    let mut colors = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    if let Some((light, direction)) = strongest {
+        positions[0] = direction.extend(0.0);
+        colors[0] = (light.color * strength).extend(DIRECTIONAL_RANGE_MARKER);
+    }
+    (positions, colors, [Vec4::ZERO; MAX_POINT_LIGHTS])
+}
+
 pub fn nearest_point_light_arrays(
     pos: Vec3,
     lights: &[ZonePointLight],
@@ -269,6 +282,16 @@ impl ZonePointLights {
 }
 
 fn point_lights_from_dat(bytes: &[u8]) -> Vec<ZonePointLight> {
+    let tracks: std::collections::HashMap<_, _> = walk(bytes)
+        .flatten()
+        .filter(|c| c.kind == ChunkKind::KeyFrame as u8)
+        .map(|c| {
+            (
+                c.name,
+                std::sync::Arc::new(ffxi_dat::particle_gen::KeyFrameTrack::parse(c.data)),
+            )
+        })
+        .collect();
     walk(bytes)
         .flatten()
         .filter(|c| ChunkKind::from_u8(c.kind) == Some(ChunkKind::Generator))
@@ -288,6 +311,8 @@ fn point_lights_from_dat(bytes: &[u8]) -> Vec<ZonePointLight> {
                 color: Vec3::new(pl.color[0], pl.color[1], pl.color[2]),
                 range: pl.range,
                 attenuation: pl.attenuation,
+                theta_track: pl.theta_track.and_then(|id| tracks.get(&id).cloned()),
+                theta_multiplier: pl.theta_multiplier,
             })
         })
         .collect()
@@ -322,18 +347,9 @@ fn load_zone_point_lights(
 
 #[derive(Component)]
 struct FaithfulZoneLight {
-    base_intensity: f32,
-    base_range: f32,
-    flicker_seed: f32,
+    index: usize,
 }
 
-// No separate glow sprite is drawn for a lamp: the FFXI DAT stores no association
-// between a Generator point light and the fixture mesh it belongs to, and the two
-// are routinely metres apart (Port Windurst DAT 340 lights 4-7 sit ~1.3m inward of
-// their wall lanterns; most Lower Jeuno lights have no fixture placement at all),
-// so any separately-positioned halo floats off the lamp. Retail draws none either
-// — its lanterns read from any distance through their pre-lit vertex colours,
-// which FfxiZoneMaterial reproduces.
 fn sync_faithful_zone_light_entities(
     mut commands: Commands,
     store: Res<ZonePointLights>,
@@ -345,74 +361,52 @@ fn sync_faithful_zone_light_entities(
     for e in &existing {
         commands.entity(e).try_despawn();
     }
-    for (i, l) in store.lights.iter().enumerate() {
-        let peak = l.color.max_element().max(1e-3);
-        let hue = l.color / peak;
-        // Every zone light is a real Bevy PointLight so clustered forward lighting
-        // (zone_ffxi.wgsl) illuminates the whole zone with no pop-in.
+    for (index, l) in store.lights.iter().enumerate() {
         commands.spawn((
-            FaithfulZoneLight {
-                base_intensity: FAITHFUL_LIGHT_INTENSITY * peak,
-                base_range: l.range,
-                flicker_seed: i as f32,
-            },
+            FaithfulZoneLight { index },
             InGameEntity,
             PointLight {
-                color: Color::srgb(hue.x, hue.y, hue.z),
-                intensity: FAITHFUL_LIGHT_INTENSITY * peak,
-                range: l.range * ZONE_LIGHT_REACH_SCALE,
-                radius: 0.05,
+                range: l.range,
                 shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_translation(l.world_pos),
-            Visibility::default(),
+            Visibility::Hidden,
         ));
     }
 }
 
-// Faithful Generator lights are real Bevy point lights (they light StandardMaterial
-// props and feed clustered lighting); gate their intensity by the same dusk/dawn
-// ramp as the custom-material feed so towns light up only at night.
 fn animate_faithful_zone_lights(
-    vana_clock: Res<crate::vana_time::VanaClock>,
-    zone_lighting: Option<Res<crate::weather::ZoneDirectionalLighting>>,
+    active: Res<ActiveSceneLights>,
     time: Res<bevy::time::Time>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut q: Query<(&FaithfulZoneLight, &mut PointLight, &mut Visibility)>,
 ) {
-    let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
-    let (indoors, day_sun_k) = zone_lighting
-        .as_deref()
-        .filter(|z| z.valid)
-        .map(|z| (z.indoors, Some(z.zone_sun_k)))
-        .unwrap_or((false, None));
-    let night = lamp_lit_factor(indoors, day_sun_k, sky.sun_altitude);
-    let t = time.elapsed_secs_wrapped();
-    let flicker_on = settings.light_flicker;
-    let faithful_on = settings.dynamic_lights.faithful_enabled();
-    let lit = faithful_on && night > LAMP_OFF_EPSILON;
-    for (l, mut pl, mut vis) in &mut q {
-        let flick = if flicker_on {
-            lamp_flicker(t, l.flicker_seed)
+    let enhanced = settings.dynamic_lights.point_shadows_enabled();
+    for (source, mut pl, mut vis) in &mut q {
+        let Some(light) = active.lights.get(source.index) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let peak = light.color.max_element();
+        let hue = if peak > 0.0 {
+            light.color / peak
+        } else {
+            Vec3::ZERO
+        };
+        let flicker = if enhanced && settings.light_flicker {
+            lamp_flicker(time.elapsed_secs_wrapped(), source.index as f32)
         } else {
             1.0
         };
-        pl.intensity = if faithful_on {
-            l.base_intensity * night * flick
-        } else {
-            0.0
-        };
-        pl.range = l.base_range * ZONE_LIGHT_REACH_SCALE;
-
-        let want = if lit {
+        pl.color = Color::linear_rgb(hue.x, hue.y, hue.z);
+        pl.intensity = FAITHFUL_LIGHT_INTENSITY * peak * flicker;
+        pl.range = light.range;
+        *vis = if enhanced && peak > 0.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-        if *vis != want {
-            *vis = want;
-        }
     }
 }
 
@@ -491,8 +485,8 @@ impl Plugin for ZonePointLightsPlugin {
                     load_zone_point_lights
                         .after(crate::sub_area_activation::drive_sub_area_activation),
                     sync_faithful_zone_light_entities,
-                    animate_faithful_zone_lights,
                     build_active_scene_lights,
+                    animate_faithful_zone_lights,
                 )
                     .chain(),
             );
@@ -502,6 +496,33 @@ impl Plugin for ZonePointLightsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_samples_the_strongest_point_once_at_its_origin() {
+        const RANGE: f32 = 10.0;
+        const NEAR: f32 = 2.0;
+        const FAR: f32 = 4.0;
+        let make = |height| ZonePointLight {
+            light_id: UNAUTHORED_LIGHT_ID,
+            world_pos: Vec3::Y * height,
+            color: Vec3::ONE,
+            range: RANGE,
+            attenuation: 1.0,
+            theta_track: None,
+            theta_multiplier: 1.0,
+        };
+        let lights = [make(FAR), make(NEAR)];
+        let (positions, colors, attenuation) =
+            actor_directional_point_light(Vec3::ZERO, &lights, &[0, 1]);
+        assert_eq!(positions[0].truncate(), Vec3::Y);
+        assert!(colors[0].w < 0.0);
+        assert_eq!(colors[0].truncate(), Vec3::splat((NEAR * NEAR).recip()));
+        assert!(colors[1..].iter().all(|color| *color == Vec4::ZERO));
+        assert!(attenuation.iter().all(|value| *value == Vec4::ZERO));
+        let (_, absent, _) =
+            actor_directional_point_light(Vec3::X * (RANGE + FAR), &lights, &[0, 1]);
+        assert!(absent.iter().all(|color| *color == Vec4::ZERO));
+    }
 
     #[test]
     fn active_interior_lights_join_main_and_leave_on_deactivation_or_disconnect() {
@@ -575,6 +596,69 @@ mod tests {
             .all(|l| l.range > 0.0 && l.color.max_element() > 0.0));
     }
 
+    #[test]
+    fn vanilla_feed_preserves_monument_light_and_uses_outdoor_clock_track() {
+        const LOWER_JEUNO_DAT: u32 = 345;
+        let Some(bytes) = crate::weather_particles::tests::zone_dat(LOWER_JEUNO_DAT) else {
+            return;
+        };
+        let lights = point_lights_from_dat(&bytes);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ActiveSceneLights>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
+            .insert_resource(ZonePointLights {
+                file_id: Some(LOWER_JEUNO_DAT),
+                sub_area_file_id: None,
+                lights,
+            })
+            .add_systems(Update, build_active_scene_lights);
+        app.update();
+        let active = app.world().resource::<ActiveSceneLights>();
+        let indoor = active
+            .lights
+            .iter()
+            .find(|l| l.light_id == u32::from_le_bytes(*b"c14\0"))
+            .unwrap();
+        assert_eq!(indoor.range, 18.0);
+        assert_eq!(indoor.attenuation, 0.05);
+        assert_eq!(indoor.color, Vec3::new(99.0, 74.0, 42.0) / 128.0);
+        let outdoor = active
+            .lights
+            .iter()
+            .find(|l| l.light_id == u32::from_le_bytes(*b"pl00"))
+            .unwrap();
+        assert_eq!(outdoor.color, Vec3::ZERO);
+        let night = outdoor.at_time(0.0);
+        assert_eq!(night.attenuation, 1.0 / 3.5);
+        let (pos, colors, atten) =
+            nearest_point_light_arrays(indoor.world_pos, std::slice::from_ref(indoor), 1);
+        assert_eq!(colors[0].w, 18.0);
+        assert_eq!(atten[0], Vec4::new(0.0, 0.0, 0.05, 0.0));
+        assert_eq!(pos[0].xyz(), indoor.world_pos);
+    }
+
+    #[test]
+    fn terrain_bindings_exclude_character_lights_and_unbound_neighbors() {
+        let lights = [
+            authored_light(b"pl00", Vec3::ZERO),
+            authored_light(b"c14\0", Vec3::ZERO),
+            authored_light(b"pl01", Vec3::ZERO),
+        ];
+        let bindings = [
+            Some(lights[2].light_id),
+            Some(lights[1].light_id),
+            None,
+            None,
+        ];
+        assert_eq!(terrain_point_light_indices(&lights, &bindings), [2]);
+        assert_eq!(authored_point_light_indices(&lights, &bindings), [2, 1]);
+        assert!(
+            terrain_point_light_indices(&lights, &[None; mzb::LIGHT_REFERENCE_COUNT]).is_empty()
+        );
+    }
+
     fn light(pos: Vec3, range: f32) -> ZonePointLight {
         ZonePointLight {
             light_id: UNAUTHORED_LIGHT_ID,
@@ -582,6 +666,8 @@ mod tests {
             color: Vec3::splat(1.0),
             range,
             attenuation: 0.25,
+            theta_track: None,
+            theta_multiplier: 1.0,
         }
     }
 
@@ -655,7 +741,7 @@ mod tests {
         assert!(authored_point_light_indices(&lights, &slots(&[])).is_empty());
     }
 
-    // `/lights` emitters carry UNAUTHORED_LIGHT_ID; a chunk binding must never
+    // `//lights` emitters carry UNAUTHORED_LIGHT_ID; a chunk binding must never
     // resolve onto one.
     #[test]
     fn emitters_are_never_bound_by_a_chunk() {
@@ -685,94 +771,6 @@ mod tests {
                 .iter()
                 .all(|c| c.w > 0.0),
             "every authored slot reaches the shader"
-        );
-    }
-
-    #[test]
-    fn lamp_night_factor_on_at_night_off_by_day() {
-        assert_eq!(lamp_night_factor(-1.0), 1.0, "deep night: lamps full on");
-        assert_eq!(lamp_night_factor(1.0), 0.0, "high noon: lamps off");
-        let dusk = lamp_night_factor(0.0);
-        assert!(
-            dusk > 0.0 && dusk < 1.0,
-            "horizon (dusk/dawn) is a partial ramp, got {dusk}"
-        );
-        assert!(
-            lamp_night_factor(-0.05) > lamp_night_factor(0.05),
-            "ramp rises as the sun sinks"
-        );
-    }
-
-    #[test]
-    fn indoor_lamps_ignore_the_sun() {
-        assert_eq!(
-            lamp_lit_factor(true, Some(0.8), 1.0),
-            1.0,
-            "indoors: lit at high noon"
-        );
-        assert_eq!(
-            lamp_lit_factor(false, Some(0.8), 1.0),
-            0.0,
-            "open sky: day gate applies"
-        );
-        assert_eq!(
-            lamp_lit_factor(false, Some(0.0), 1.0),
-            1.0,
-            "black daytime sun diffuse (covered streets): lit all day"
-        );
-        assert_eq!(
-            lamp_lit_factor(false, None, 1.0),
-            0.0,
-            "no record: day gate"
-        );
-        assert_eq!(lamp_lit_factor(false, Some(0.8), -1.0), 1.0);
-    }
-
-    // The gate is whole-zone: `build_active_scene_lights` either feeds every
-    // Generator light or none. Reading the area-resolved `sun_k` (which follows the
-    // player into a sunless interior area) would switch the entire zone's lamps on
-    // at noon the moment the player crossed that area's boundary, so it reads
-    // `zone_sun_k`.
-    #[test]
-    fn lamps_stay_out_when_only_the_players_area_is_sunless() {
-        const NOON_VANA_HOUR: f32 = 12.0;
-        const ZONE_DAYLIGHT_SUN_K: f32 = 0.9;
-
-        fn active_lamp_count(sun_k: f32, zone_sun_k: f32) -> usize {
-            let mut app = App::new();
-            app.add_plugins(MinimalPlugins)
-                .init_resource::<ActiveSceneLights>()
-                .init_resource::<crate::graphics_settings::GraphicsSettings>()
-                .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
-                    NOON_VANA_HOUR,
-                ))
-                .insert_resource(ZonePointLights {
-                    file_id: None,
-                    sub_area_file_id: None,
-                    lights: vec![light(Vec3::ZERO, 10.0)],
-                })
-                .insert_resource(crate::weather::ZoneDirectionalLighting {
-                    valid: true,
-                    indoors: false,
-                    sun_k,
-                    zone_sun_k,
-                    ..Default::default()
-                })
-                .add_systems(Update, build_active_scene_lights);
-            app.update();
-            app.world().resource::<ActiveSceneLights>().lights.len()
-        }
-
-        assert_eq!(
-            active_lamp_count(0.0, ZONE_DAYLIGHT_SUN_K),
-            0,
-            "an open-sky zone's lamps must stay out at noon while the player stands \
-             in a sunless area"
-        );
-        assert_eq!(
-            active_lamp_count(0.0, 0.0),
-            1,
-            "a zone whose own daytime sun diffuse is black still burns all day"
         );
     }
 

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v35: InventoryItem.use_delay_end_vana_ts + ready (enchanted-item equip delay).
+// v34: CharFlags.graph_size - Flags1.GraphSize, the server's per-entity size class.
+// It indexes the model's four authored CIB scales, so without it every entity
+// renders at the model's index-0 size and mob size variation is lost.
 // v31: CutsceneCue::ExtScheduler.motion - the 0x66 Tpc package now carries its two
 // container file ids (A + the CIB-waist-selected B) instead of one flat id; None is the
 // out-of-range package, which loads nothing.
@@ -77,7 +81,7 @@ use serde::{Deserialize, Serialize};
 // global title-screen scene DAT.
 // v32: CutsceneCue::EntityName (0xB5 case 0 display-name change, fed by the
 // s2c 0x005D PENDINGSTR table via 0xB4 case 1).
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -85,7 +89,7 @@ pub const PROTOCOL_VERSION: u32 = 33;
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
 
-/// vendor/server/src/map/entities/baseentity.h NAMEVIS VIS_HIDE_NAME
+/// vendor/server/data/enums/name_vis.yaml NAMEVIS VIS_HIDE_NAME
 pub const NAMEVIS_HIDE_NAME: u8 = 0x08;
 
 /// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
@@ -151,7 +155,7 @@ pub enum BlowfishStatus {
     PendingZone,
 }
 
-// vendor/server/src/map/enums/weather.h Weather (None=0..Darkness=19)
+// vendor/server/data/enums/weather.yaml Weather (None=0..Darkness=19)
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Weather {
@@ -181,7 +185,7 @@ pub enum Weather {
 impl Weather {
     pub fn from_lsb(n: u16) -> Self {
         use Weather::*;
-        // vendor/server/src/map/enums/weather.h Weather
+        // vendor/server/data/enums/weather.yaml Weather
         const TABLE: [Weather; 20] = [
             None,
             Sunshine,
@@ -316,6 +320,7 @@ pub struct CharFlags {
     pub linkdead: bool,
     pub gm_level: u8,
     pub bazaar: bool,
+    pub graph_size: u8,
     pub linkshell_color: [u8; 3],
     pub charm: bool,
     pub gm_icon: bool,
@@ -438,15 +443,15 @@ pub struct Entity {
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith.
     /// `None` until the first General-block update carries it; treated as visible,
-    /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
-    /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
+    /// matching the server's VIS_NONE default (base_entity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
+    /// (vendor/server/data/enums/name_vis.yaml): 0x01 icon, 0x08 hide-name,
     /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
     /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
     #[serde(default)]
     pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// LSB STATUS_TYPE. vendor/server/data/enums/status.yaml.
 // Public so the renderer can hide models on INVISIBLE without re-declaring
 // the byte (single source of truth).
 pub mod status_type {
@@ -483,7 +488,7 @@ pub mod speed {
     pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
 
     /// The speed LSB sends an unmounted PC, which every "step per tick" budget in the reactor is
-    /// calibrated against (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed).
+    /// calibrated against (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed).
     pub const BASE_PACKET_SPEED: u8 = 50;
 
     /// The movement rate a walk/run clip is authored at: the base packet speed decoded to yalms per
@@ -542,7 +547,7 @@ impl Entity {
     }
 
     /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
-    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp CBaseEntity::IsNameHidden
+    /// cutscene actors. vendor/server/src/map/entities/base_entity.cpp CBaseEntity::IsNameHidden
     /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
@@ -601,7 +606,7 @@ impl Entity {
     /// The server-side precondition for a door Talk to fire its onTrigger:
     /// LSB's general trigger path (`GP_CLI_COMMAND_ACTION::process`,
     /// vendor/server/src/map/packets/c2s/0x01a_action.cpp) requires
-    /// `status == STATUS_TYPE::NORMAL` (vendor/server/src/map/entities/baseentity.h).
+    /// `status == STATUS_TYPE::NORMAL` (vendor/server/data/enums/status.yaml).
     /// Otherwise nothing triggers and the handler falls through to the
     /// `GP_SERV_COMMAND_EVENTUCOFF` release it answers every unlocked Talk with.
     /// Doors do ship with other statuses (DISAPPEAR, STATUS_4, CUTSCENE_ONLY in
@@ -1330,6 +1335,12 @@ pub struct InventoryItem {
     /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    /// Equip-delay end in the same timestamp frame as `next_use_vana_ts`.
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    /// `GP_SERV_COMMAND_ITEM_ATTR` ready flag; `None` for non-charged items.
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1499,6 +1510,37 @@ pub struct ShopState {
     pub items: Vec<ShopItem>,
 
     pub opened: bool,
+
+    /// How many rows s2c 0x03E SHOP_OPEN said to expect.
+    #[serde(default)]
+    pub expected_items: u16,
+
+    /// The final s2c 0x03C page has landed, so `items` is the whole stock.
+    #[serde(default)]
+    pub complete: bool,
+
+    /// The vendor NPC's entity id, or 0 when it could not be resolved.
+    #[serde(default)]
+    pub vendor_id: u32,
+
+    /// A sale the server has priced, awaiting the player's yes/no.
+    #[serde(default)]
+    pub pending_sale: Option<ShopSale>,
+}
+
+/// A sale appraised by s2c 0x03D and not yet confirmed with c2s 0x085.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShopSale {
+    pub item_index: u8,
+    pub item_no: u16,
+    pub unit_price: u32,
+    pub count: u32,
+}
+
+impl ShopSale {
+    pub fn total_gil(&self) -> u32 {
+        self.unit_price.saturating_mul(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2334,8 +2376,8 @@ mod tests {
     }
 
     #[test]
-    fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 33;
+    fn current_protocol_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 35;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2418,6 +2460,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.zone_generation = 128;
         snapshot.entities[0].char_flags.untargetable = true;
+        snapshot.entities[0].char_flags.graph_size = 3;
         snapshot.entities[0].name_vis = Some(0x08);
         snapshot.death_menu_offer = Some(DeathMenuOffer::Tractor);
         let bytes = postcard::to_allocvec(&Frame::Snapshot(Box::new(snapshot))).unwrap();
@@ -2426,6 +2469,7 @@ mod tests {
         };
         assert_eq!(decoded.zone_generation, 128);
         assert!(decoded.entities[0].char_flags.untargetable);
+        assert_eq!(decoded.entities[0].char_flags.graph_size, 3);
         assert_eq!(decoded.entities[0].name_vis, Some(0x08));
         assert_eq!(decoded.chat[0].text, "hi");
         assert_eq!(decoded.death_menu_offer, Some(DeathMenuOffer::Tractor));

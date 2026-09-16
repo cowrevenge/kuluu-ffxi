@@ -140,7 +140,14 @@ fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls default crypto provider");
 
-    let args = Args::parse();
+    let cli_args = std::env::args_os().collect::<Vec<_>>();
+    #[cfg(feature = "native-window")]
+    let cli_args = if cli_args.len() == 1 {
+        cli_args.into_iter().chain(["play".into()]).collect()
+    } else {
+        cli_args
+    };
+    let args = Args::parse_from(cli_args);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -285,7 +292,9 @@ fn warn_on_client_ver_era_mismatch(profile: &ffxi_dat::client_profile::ClientPro
             LSB_CLIENT_VER,
             VerLock::from_setting(LSB_DEFAULT_VER_LOCK)
         ),
-        "FFXI client patch era differs from the pinned LSB login.CLIENT_VER"
+        "FFXI client patch era differs from the pinned LSB login.CLIENT_VER: zone text ids are \
+         reconciled by landmark, and cast bars timed from the client's spell DAT end when the \
+         server's MAGIC_FINISH arrives"
     );
 }
 

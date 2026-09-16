@@ -4,7 +4,7 @@
 //! placement group, the name of the zone-DAT directory holding its `open`/`clos`
 //! routines, and the key those two are joined on; the server sends only which
 //! state it is in, on the entity animation byte (`enum ANIMATIONTYPE`,
-//! vendor/server/src/map/entities/baseentity.h).
+//! vendor/server/data/enums/animation.yaml).
 
 use std::collections::HashMap;
 
@@ -30,8 +30,8 @@ use crate::scheduler_runtime::{
 };
 use crate::snapshot::{effective_zone_file_id, SceneState};
 
-// The two door states LSB broadcasts (`ANIMATION_OPEN_DOOR` = 8 /
-// `ANIMATION_CLOSE_DOOR` = 9, set e.g. in vendor/server/src/map/transport.cpp)
+// The two door states LSB broadcasts (`xi::Animation::OpenDoor` = 8 /
+// `xi::Animation::CloseDoor` = 9, set e.g. in vendor/server/src/map/transports/ship.cpp)
 // each name the zone-DAT Scheduler the client runs for it — Southern San d'Oria's
 // Chocobo Stables door is `/t_sa/door/_6ey/{open,clos}`.
 const ROUTINE_OPEN: [u8; 4] = *b"open";

@@ -775,7 +775,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     let bat_cib = bat.cib().expect("bat DAT carries a 0x45 Info chunk");
     assert_eq!(bat_cib.movement_type, ffxi_dat::cib::MovementType::Flying);
     assert!(
-        (bat_cib.scale_factor() - 0.85).abs() < f32::EPSILON,
+        (bat_cib.scale_factor(0) - 0.85).abs() < f32::EPSILON,
         "scale byte 85 -> 0.85"
     );
     let walker_cib = walker.cib().expect("walker DAT carries a 0x45 Info chunk");
@@ -784,7 +784,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
         ffxi_dat::cib::MovementType::Walking
     );
     assert!(
-        (walker_cib.scale_factor() - 1.0).abs() < f32::EPSILON,
+        (walker_cib.scale_factor(0) - 1.0).abs() < f32::EPSILON,
         "scale byte 100 -> 1.0"
     );
 
@@ -796,13 +796,15 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     app.init_resource::<bevy::asset::Assets<StandardMaterial>>();
     app.insert_resource(kuluu_render::graphics_settings::GraphicsSettings::default());
     app.init_resource::<ActorLoadInFlight>();
+    app.insert_resource(kuluu_render::ffxi_actor_render::ActorDatRoot(
+        install().map(Arc::new),
+    ));
     app.add_message::<LoadActorRequest>();
     app.insert_resource(EntityMesh {
         default: bevy::asset::Handle::default(),
         pc: bevy::asset::Handle::default(),
         mob: bevy::asset::Handle::default(),
         pet: bevy::asset::Handle::default(),
-        morph_orb: bevy::asset::Handle::default(),
     });
     app.add_systems(
         Update,
@@ -820,7 +822,10 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
             .resource_mut::<bevy::ecs::message::Messages<LoadActorRequest>>()
             .write(LoadActorRequest {
                 entity_id: id,
-                subject: ActorSubject::Npc { file_id: file },
+                subject: ActorSubject::Npc {
+                    file_id: file,
+                    graph_size: 0,
+                },
             });
     }
 

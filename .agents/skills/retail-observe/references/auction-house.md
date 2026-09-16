@@ -75,7 +75,7 @@ Two consequences for the client:
   redundant `MORE` re-dumps land behind the pages still being read and are
   dropped when the socket closes at the final page.
 
-## Category tree (observed; ids from `vendor/server/documentation/Auction Categories.txt`)
+## Category tree (observed; ids from `vendor/server/docs/Auction Categories.txt`)
 
 Top level, fixed order, one AH-wide root: **Weapons, Armor, Scrolls, Medicines,
 Furnishings, Materials, Food, Crystals, Others**. Medicines/Furnishings/Crystals

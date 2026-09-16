@@ -188,35 +188,36 @@ fn encode_scene_actions(
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     for action in actions {
-        match action {
+        let encoded = match action {
             SceneAction::PlayerPosition(next) => {
                 *position = session_position(next, *position);
                 let _ = events.send(AgentEvent::PositionChanged { pos: *position });
                 // vendor/server/src/map/packets/c2s/0x015_pos.cpp GP_CLI_COMMAND_POS::process
                 // accepts scripted walking in-event; the final POS must precede EVENTEND.
-                payload.extend(build_subpacket_pos(
+                build_subpacket_pos(
                     *sequence,
                     position.pos.x,
                     position.pos.y,
                     position.pos.z,
                     position.heading,
                     0,
-                ));
+                )
             }
             SceneAction::PositionUpdate {
                 position: next,
                 end_para,
-            } => {
-                payload.extend(build_subpacket_event_position(
-                    *sequence,
-                    identity,
-                    zone,
-                    end_para,
-                    session_position(next, *position),
-                ));
-            }
+            } => Some(build_subpacket_event_position(
+                *sequence,
+                identity,
+                zone,
+                end_para,
+                session_position(next, *position),
+            )),
+        };
+        if let Some(sub_packet) = encoded {
+            payload.extend(sub_packet);
+            *sequence = sequence.wrapping_add(1);
         }
-        *sequence = sequence.wrapping_add(1);
     }
     payload
 }

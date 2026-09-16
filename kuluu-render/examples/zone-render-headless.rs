@@ -248,6 +248,7 @@ fn main() {
         .init_resource::<MmbLoadQueue>()
         .init_resource::<MmbParseCache>()
         .init_resource::<MmbTexPools>()
+        .init_resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
         .init_resource::<TrackedEntities>()
         .init_resource::<SceneState>()
         .init_resource::<ZoneWeather>()

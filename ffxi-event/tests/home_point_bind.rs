@@ -23,9 +23,11 @@ const MAX_STEPS: usize = 40;
 
 fn load() -> Option<(EventDat, StringDat)> {
     let root = DatRoot::from_env_or_default().ok()?;
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(BASTOK_MARKETS)?;
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(BASTOK_MARKETS))
+        .ok()?;
     let dat = EventDat::parse(&std::fs::read(loc.path_under(&root)).ok()?).ok()?;
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(BASTOK_MARKETS)?;
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(BASTOK_MARKETS);
     let sloc = root.resolve(file_id).ok()?;
     let strings = StringDat::parse(&std::fs::read(sloc.path_under(&root)).ok()?).ok()?;
     Some((dat, strings))

@@ -31,7 +31,7 @@ fn main() {
             .filter_map(|s| s.parse().ok())
             .collect();
         if named.is_empty() {
-            (0..=299).collect()
+            ffxi_dat::event_locate::event_dat_zones(&root)
         } else {
             named
         }
@@ -46,7 +46,7 @@ fn main() {
     let mut limited_by: BTreeMap<&'static str, usize> = BTreeMap::new();
 
     for zone in zones {
-        let Some(loc) = ffxi_dat::event_locate::zone_id_to_event_location(zone) else {
+        let Ok(loc) = root.resolve(ffxi_dat::event_locate::event_dat_file_id(zone)) else {
             continue;
         };
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {

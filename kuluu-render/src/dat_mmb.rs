@@ -26,12 +26,17 @@ pub struct MmbOverlay;
 #[derive(Resource, Default)]
 pub struct MmbHandleCache {
     pub mesh: std::collections::HashMap<(u32, usize, usize), bevy::asset::Handle<Mesh>>,
-    /// Keyed by (file_id, chunk_idx, sub_index, mirrored). The mirror bit is
-    /// part of the pipeline key (front-face flip for negative-determinant
-    /// placements — xim GLDrawer.kt drawXim face), so the same submesh placed both
-    /// ways needs two material instances.
-    pub material:
-        std::collections::HashMap<(u32, usize, usize, bool), bevy::asset::Handle<FfxiZoneMaterial>>,
+    pub material: std::collections::HashMap<
+        (
+            u32,
+            usize,
+            usize,
+            bool,
+            crate::ffxi_zone_material::ZoneLightBindings,
+            u32,
+        ),
+        bevy::asset::Handle<FfxiZoneMaterial>,
+    >,
 }
 
 #[derive(Resource, Default)]
@@ -73,6 +78,21 @@ pub struct MmbParseCache {
     pub by_asset: std::collections::HashMap<(u32, usize), Option<LoadedMmb>>,
 }
 
+/// Release the decoded texels every cached chunk of `file_id` holds, once that
+/// file's `MmbTexPools` entry owns the uploaded handles. A file's Img chunks are
+/// collected into *every* chunk's `LoadedMmb`, so the cache otherwise keeps one
+/// full copy of the file's texture set per cached chunk index.
+fn drop_pooled_textures(cache: &mut MmbParseCache, file_id: u32) {
+    for ((fid, _), entry) in cache.by_asset.iter_mut() {
+        if *fid != file_id {
+            continue;
+        }
+        if let Some(loaded) = entry {
+            loaded.textures = Vec::new();
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct MmbLoadInFlight {
     pub tasks: std::collections::HashMap<(u32, usize), Task<Option<LoadedMmb>>>,
@@ -111,10 +131,15 @@ pub struct GenWater {
     /// where the retail sheet already covers the surface.
     pub world_min: Vec3,
     pub world_max: Vec3,
+    /// The sheet is a generator element like any other, so it ranks in the transparent
+    /// sort by retail's element key (element_sort.rs), not by its mesh alone.
+    pub sort_bias: f32,
 }
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct LoadMmbRequest {
+    pub area_id: u32,
+    pub light_bindings: crate::ffxi_zone_material::ZoneLightBindings,
     pub voyage_backdrop: bool,
     pub file_id: u32,
     pub chunk_idx: usize,
@@ -219,7 +244,8 @@ pub struct DatOverlayPlugin;
 
 impl Plugin for DatOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(crate::ffxi_actor_render::despawn_morph_column);
+        app.add_plugins(crate::gpu_assets::GpuAssetResidencyPlugin);
+        app.add_observer(crate::ffxi_actor_render::finish_actor_reveal);
         app.add_message::<LoadMmbRequest>()
             .add_message::<crate::dat_vos2::LoadVos2Request>()
             .add_message::<crate::ffxi_actor_render::LoadActorRequest>()
@@ -243,6 +269,7 @@ impl Plugin for DatOverlayPlugin {
             .init_resource::<crate::dat_mzb::PendingWaterSpawns>()
             .init_resource::<crate::dat_mzb::ZoneWaterMaterial>()
             .init_resource::<crate::ffxi_actor_render::ActorLoadInFlight>()
+            .init_resource::<crate::ffxi_actor_render::ActorDatRoot>()
             .add_systems(
                 Update,
                 (
@@ -306,10 +333,18 @@ pub struct LoadedMmb {
 pub fn load_mmb(file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
     let root =
         DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
+    load_mmb_with_root(&root, file_id, chunk_idx)
+}
+
+pub fn load_mmb_with_root(
+    root: &DatRoot,
+    file_id: u32,
+    chunk_idx: usize,
+) -> Result<LoadedMmb, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
@@ -439,6 +474,7 @@ pub fn process_load_mmb_requests(
     settings: Res<GraphicsSettings>,
     self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
     mut in_flight: ResMut<MmbLoadInFlight>,
+    actor_root: Res<crate::ffxi_actor_render::ActorDatRoot>,
 ) {
     let mut newly_parsed: Vec<((u32, usize), Option<LoadedMmb>)> = Vec::new();
     in_flight.tasks.retain(
@@ -451,7 +487,12 @@ pub fn process_load_mmb_requests(
         },
     );
     let parse_completed = !newly_parsed.is_empty();
-    for (asset, result) in newly_parsed {
+    for (asset, mut result) in newly_parsed {
+        if tex_pools_res.by_file.contains_key(&asset.0) {
+            if let Some(loaded) = result.as_mut() {
+                loaded.textures = Vec::new();
+            }
+        }
         parse_cache.by_asset.entry(asset).or_insert(result);
     }
 
@@ -508,6 +549,7 @@ pub fn process_load_mmb_requests(
     const HEAVY: usize = 8;
     const MMB_MAX_INFLIGHT: usize = 64;
     let mut spawned = 0usize;
+    let mut newly_pooled: Vec<u32> = Vec::new();
     let mut retained: std::collections::VecDeque<LoadMmbRequest> =
         std::collections::VecDeque::with_capacity(queue.pending.len());
 
@@ -566,7 +608,9 @@ pub fn process_load_mmb_requests(
                         std::collections::HashMap::with_capacity(texture_count);
                     let mut first: Option<Handle<Image>> = None;
                     for nt in &loaded.textures {
-                        let handle = images.add(decoded_texture_to_image(&nt.texture, quality));
+                        let mut image = decoded_texture_to_image(&nt.texture, quality);
+                        image.asset_usage = RenderAssetUsages::RENDER_WORLD;
+                        let handle = images.add(image);
                         if first.is_none() {
                             first = Some(handle.clone());
                         }
@@ -578,8 +622,14 @@ pub fn process_load_mmb_requests(
                 });
                 let tex_by_name = &pool.0;
                 let first_texture = pool.1.clone();
+                if !pool_exists {
+                    newly_pooled.push(req.file_id);
+                }
+                let texture_count = texture_count.max(tex_by_name.len());
 
-                if mmb_logged.insert((req.file_id, req.chunk_idx)) {
+                if tracing::enabled!(target: "kuluu_render::dat_mmb", tracing::Level::DEBUG)
+                    && mmb_logged.insert((req.file_id, req.chunk_idx))
+                {
                     let mut img_stats: Vec<(String, u8, u8)> = loaded
                         .textures
                         .iter()
@@ -754,52 +804,66 @@ pub fn process_load_mmb_requests(
                     // sheet gets its OWN material (never the shared cache) so its
                     // per-layer UV-scroll animates independently.
                     let mat_handle = if let Some(w) = req.water {
-                        materials.add(FfxiZoneMaterial::new(
-                            sub_texture,
-                            crate::skinned_ffxi_material::FfxiMaterialFlags {
-                                flags: Vec4::new(
-                                    has_texture,
-                                    1.0,
-                                    crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
-                                    0.0,
-                                ),
-                            },
-                            w.tint,
-                            Vec4::ZERO,
-                            AlphaMode::Blend,
-                            crate::ffxi_zone_material::FfxiZoneMaterialKey {
-                                back_face_culling: false,
-                                mirrored,
-                                // A full water sheet is not a coplanar decal:
-                                // decal z-bias would pull it toward the camera and
-                                // let it float over terrain that should occlude it.
-                                z_bias_level: 0,
-                                depth_write: false,
-                                // A sea sheet hangs off a water generator, so it takes the
-                                // two-stage CMoD3m chain with `w.tint` as its TEXTUREFACTOR.
-                                generator_stage_chain: true,
-                            },
-                        ))
+                        materials.add(
+                            FfxiZoneMaterial::new(
+                                sub_texture,
+                                crate::skinned_ffxi_material::FfxiMaterialFlags {
+                                    flags: Vec4::new(
+                                        has_texture,
+                                        1.0,
+                                        crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
+                                        0.0,
+                                    ),
+                                },
+                                w.tint,
+                                Vec4::ZERO,
+                                AlphaMode::Blend,
+                                crate::ffxi_zone_material::FfxiZoneMaterialKey {
+                                    back_face_culling: false,
+                                    mirrored,
+                                    // A full water sheet is not a coplanar decal:
+                                    // decal z-bias would pull it toward the camera and
+                                    // let it float over terrain that should occlude it.
+                                    z_bias_level: 0,
+                                    depth_write: false,
+                                    // A sea sheet hangs off a water generator, so it takes the
+                                    // two-stage CMoD3m chain with `w.tint` as its TEXTUREFACTOR.
+                                    generator_stage_chain: true,
+                                },
+                            )
+                            .with_sort_depth_bias(w.sort_bias),
+                        )
                     } else {
                         handle_cache
                             .material
-                            .entry((cache_key.0, cache_key.1, cache_key.2, mirrored))
+                            .entry((
+                                cache_key.0,
+                                cache_key.1,
+                                cache_key.2,
+                                mirrored,
+                                req.light_bindings,
+                                req.area_id,
+                            ))
                             .or_insert_with(|| {
-                                materials.add(FfxiZoneMaterial::new(
-                                    sub_texture,
-                                    crate::skinned_ffxi_material::FfxiMaterialFlags {
-                                        flags: Vec4::new(
-                                            has_texture,
-                                            blend_flag,
-                                            crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
-                                            discard_threshold,
-                                        ),
-                                    },
-                                    Vec4::ONE,
-                                    Vec4::ZERO,
-                                    alpha_mode,
-                                    render_key,
-                                ))
+                                materials.add(
+                                    FfxiZoneMaterial::new(
+                                        sub_texture,
+                                        crate::skinned_ffxi_material::FfxiMaterialFlags {
+                                            flags: Vec4::new(
+                                                has_texture,
+                                                blend_flag,
+                                                crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
+                                                discard_threshold,
+                                            ),
+                                        },
+                                        Vec4::ONE,
+                                        Vec4::ZERO,
+                                        alpha_mode,
+                                        render_key,
+                                    )
+                                    .with_light_bindings(req.light_bindings)
+                                    .with_area(req.area_id),
+                                )
                             })
                             .clone()
                     };
@@ -886,9 +950,14 @@ pub fn process_load_mmb_requests(
                 {
                     let pool = AsyncComputeTaskPool::get();
                     let (file_id, chunk_idx) = (req.file_id, req.chunk_idx);
+                    let root_arc = actor_root.0.clone();
                     in_flight.tasks.insert(
                         asset,
-                        pool.spawn(async move { load_mmb(file_id, chunk_idx).ok() }),
+                        pool.spawn(async move {
+                            let root =
+                                crate::ffxi_actor_render::resolve_actor_root(root_arc).ok()?;
+                            load_mmb_with_root(&root, file_id, chunk_idx).ok()
+                        }),
                     );
                 }
                 retained.push_back(req);
@@ -896,6 +965,9 @@ pub fn process_load_mmb_requests(
         }
     }
     queue.pending = retained;
+    for file_id in newly_pooled {
+        drop_pooled_textures(&mut parse_cache, file_id);
+    }
 
     if diag_file_id.is_some() {
         for (fid, examples) in &diag_zero_submesh {
@@ -978,6 +1050,10 @@ pub fn apply_texture_filtering_system(
     }
     let mut patch = |handle: &Handle<Image>| {
         if let Some(mut img) = images.get_mut(handle) {
+            // Re-extract sampler metadata without asking Bevy to take consumed pixel data again.
+            if img.data.is_none() {
+                img.asset_usage = RenderAssetUsages::default();
+            }
             img.sampler = bevy::image::ImageSampler::Descriptor(
                 crate::zone_texture::sampler_descriptor(aniso),
             );
@@ -1008,12 +1084,14 @@ fn mesh_debug_bundle(
 #[cfg(test)]
 mod tests {
     use super::{
-        mmb_dist_sq_xz, mmb_load_order_key, mmb_repass_needed, submesh_alpha_mode, LoadMmbRequest,
+        drop_pooled_textures, mmb_dist_sq_xz, mmb_load_order_key, mmb_repass_needed,
+        submesh_alpha_mode, LoadMmbRequest, LoadedMmb, MmbParseCache, NamedTexture,
         MMB_REEVAL_MOVE_YALMS,
     };
     use crate::zone_texture::ffxi_alpha_remap;
     use bevy::prelude::{AlphaMode, Mat4, Vec3};
     use ffxi_dat::mzb::NO_SUB_AREA_LINK;
+    use ffxi_dat::texture::{DecodedTexture, TexFormat};
 
     #[test]
     fn repass_triggers_on_events_parses_budget_or_settings() {
@@ -1045,6 +1123,8 @@ mod tests {
 
     fn zone_placement_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            area_id: 0,
+            light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,
             world_pos: Vec3::ZERO,
@@ -1061,6 +1141,8 @@ mod tests {
 
     fn entity_spawn_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            area_id: 0,
+            light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,
             world_pos: pos,
@@ -1160,6 +1242,50 @@ mod tests {
                 "raw {raw} should saturate to 255"
             );
         }
+    }
+
+    #[test]
+    fn pooled_file_drops_its_decoded_texture_bytes() {
+        fn chunk() -> Option<LoadedMmb> {
+            Some(LoadedMmb {
+                submeshes: Vec::new(),
+                textures: vec![NamedTexture {
+                    name: "tex".to_string(),
+                    texture: DecodedTexture {
+                        width: 1,
+                        height: 1,
+                        format_tag: TexFormat::Bgra32,
+                        rgba: vec![0xFF; 4],
+                    },
+                }],
+                asset_name: "asset".to_string(),
+                zone_mesh_name: "mesh".to_string(),
+            })
+        }
+
+        let mut cache = MmbParseCache::default();
+        cache.by_asset.insert((10, 0), chunk());
+        cache.by_asset.insert((10, 1), chunk());
+        cache.by_asset.insert((11, 0), chunk());
+
+        drop_pooled_textures(&mut cache, 10);
+
+        for idx in [0usize, 1] {
+            let entry = cache.by_asset[&(10, idx)].as_ref().expect("cached chunk");
+            assert!(
+                entry.textures.is_empty(),
+                "a pooled file's chunks must not keep a duplicate of its decoded texels"
+            );
+        }
+        assert_eq!(
+            cache.by_asset[&(11, 0)]
+                .as_ref()
+                .expect("cached chunk")
+                .textures
+                .len(),
+            1,
+            "an unpooled file must keep its texels: it has no uploaded handles yet"
+        );
     }
 }
 

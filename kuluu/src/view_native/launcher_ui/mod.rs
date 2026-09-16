@@ -1,5 +1,6 @@
 mod account_create;
 mod async_work;
+mod brand;
 mod change_password;
 mod char_create;
 mod char_create_preview;
@@ -889,6 +890,7 @@ pub(crate) fn register(
 
     updater::register(app);
 
+    brand::register(app);
     footer::register(app);
 
     server_version_check::register(app);

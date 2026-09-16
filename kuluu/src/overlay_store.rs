@@ -93,7 +93,7 @@ impl OverlayStore {
 }
 
 /// The store at the default config path; `None` when no config dir resolves, in
-/// which case discovery is the only source and `/overlay` cannot persist.
+/// which case discovery is the only source and `//overlay` cannot persist.
 pub fn default_store() -> Option<OverlayStore> {
     match OverlayStore::default_path() {
         Ok(p) => Some(OverlayStore::new(p)),

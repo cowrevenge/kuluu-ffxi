@@ -77,6 +77,8 @@ impl Generator {
 pub struct PointLightDef {
     pub range: f32,
     pub attenuation: f32,
+    pub theta_multiplier: f32,
+    pub theta_track: Option<[u8; 4]>,
     pub color: [f32; 4],
     pub base_position: [f32; 3],
 }
@@ -558,6 +560,13 @@ impl Generator {
     }
 }
 
+// FFXiMain.dll retail-2026-09 RVA 0x178530 UpdateLight: RGB bytes / 128;
+// RVA 0x56400 OnDraw passes authored range and theta, and InitLight at RVA
+// 0x178610 zeroes the constant and linear attenuation coefficients.
+const POINT_LIGHT_COLOR_SCALE: f32 = 1.0 / 128.0;
+const POINT_LIGHT_THETA_TRACK_SETUP: u8 = 0x6C;
+const POINT_LIGHT_THETA_CLOCK_UPDATE: u8 = 0x49;
+
 impl Generator {
     const LINKED_DATA_POINT_LIGHT: u8 = 0x47;
 
@@ -580,6 +589,7 @@ impl Generator {
         let mut base_position = [0.0f32; 3];
         let mut color = [1.0f32; 4];
 
+        let mut theta_track = None;
         let mut params: Option<(f32, f32, f32, f32)> = None;
 
         while cursor + 4 <= body.len() {
@@ -612,9 +622,9 @@ impl Generator {
                 0x16 => {
                     if payload + 4 <= body.len() {
                         color = [
-                            body[payload] as f32 / 255.0,
-                            body[payload + 1] as f32 / 255.0,
-                            body[payload + 2] as f32 / 255.0,
+                            body[payload] as f32 * POINT_LIGHT_COLOR_SCALE,
+                            body[payload + 1] as f32 * POINT_LIGHT_COLOR_SCALE,
+                            body[payload + 2] as f32 * POINT_LIGHT_COLOR_SCALE,
                             body[payload + 3] as f32 / 255.0,
                         ];
                     }
@@ -623,9 +633,12 @@ impl Generator {
                     params = Some((
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
-                        map_multiplier(f32_le(body, payload + 8)),
-                        map_multiplier(f32_le(body, payload + 12)),
+                        1.0 + f32_le(body, payload + 8),
+                        1.0 + f32_le(body, payload + 12),
                     ));
+                }
+                POINT_LIGHT_THETA_TRACK_SETUP if payload + 12 <= cursor + block_len => {
+                    theta_track = clock_track_id(body, payload + 4);
                 }
                 _ => {}
             }
@@ -638,24 +651,33 @@ impl Generator {
         let Some((range, theta, range_mult, theta_mult)) = params else {
             return Ok(None);
         };
-        let denom = theta * theta_mult;
-        let attenuation = if denom.abs() > 1e-9 { 1.0 / denom } else { 0.0 };
+        let mut clock_driven = false;
+        let tick_offset = u32_le(body, 0x78) as usize;
+        if tick_offset >= 16 {
+            let mut cursor = tick_offset - 16;
+            while cursor + 4 <= body.len() {
+                let opcode = body[cursor];
+                let len = (body[cursor + 1] & SIZE_WORDS_MASK) as usize * 4;
+                if opcode == OPCODE_END || len == 0 || cursor + len > body.len() {
+                    break;
+                }
+                clock_driven |= opcode == POINT_LIGHT_THETA_CLOCK_UPDATE;
+                cursor += len;
+            }
+        }
+        let denom = (theta.max(0.0) * theta_mult).max(0.0);
+        let attenuation = if denom > 0.0 { 1.0 / denom } else { 1.0 };
+        if denom <= 0.0 && (!clock_driven || theta_track.is_none()) {
+            color[..3].fill(0.0);
+        }
         Ok(Some(PointLightDef {
             range: range * range_mult,
             attenuation,
-            color: [color[0] * 2.0, color[1] * 2.0, color[2] * 2.0, color[3]],
+            theta_multiplier: theta_mult,
+            theta_track: theta_track.filter(|_| clock_driven),
+            color,
             base_position,
         }))
-    }
-}
-
-fn map_multiplier(base: f32) -> f32 {
-    if base >= 0.0 {
-        2.0f32.powf(base)
-    } else if base >= -1.0 {
-        1.0 + base
-    } else {
-        0.0
     }
 }
 
@@ -909,9 +931,28 @@ mod tests {
         assert_eq!(pl.attenuation, 0.5, "atten = 1/(theta * thetaMult)");
         assert_eq!(pl.base_position, [1.0, 2.0, 3.0]);
 
-        assert_eq!(pl.color[0], 2.0);
-        assert!((pl.color[1] - (128.0 / 255.0) * 2.0).abs() < 1e-6);
+        assert_eq!(pl.color[0], 255.0 / 128.0);
+        assert_eq!(pl.color[1], 1.0);
         assert_eq!(pl.color[3], 1.0, "alpha is not doubled");
+    }
+
+    #[test]
+    fn point_light_multipliers_are_additive_offsets() {
+        let mut body = make_body();
+        let mut setup = vec![0u8; 32];
+        setup[29] = Generator::LINKED_DATA_POINT_LIGHT;
+        push_block(&mut body, 0x01, 9, &setup);
+        push_block(&mut body, 0x16, 2, &[128, 64, 32, 128]);
+        let params: Vec<_> = [4.0f32, 2.0, 2.0, 2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        push_block(&mut body, 0x58, 5, &params);
+        body.extend([0; 4]);
+        let light = Generator::parse_point_light(&body).unwrap().unwrap();
+        assert_eq!(light.range, 12.0);
+        assert_eq!(light.attenuation, 1.0 / 6.0);
+        assert_eq!(light.color[..3], [1.0, 0.5, 0.25]);
     }
 
     #[test]
@@ -1084,13 +1125,5 @@ mod tests {
         assert!(!g.follow_camera);
         assert!(g.is_sun_attached());
         assert!(!g.is_camera_cloud());
-    }
-
-    #[test]
-    fn map_multiplier_branches() {
-        assert_eq!(map_multiplier(0.0), 1.0);
-        assert_eq!(map_multiplier(1.0), 2.0);
-        assert_eq!(map_multiplier(-0.5), 0.5);
-        assert_eq!(map_multiplier(-2.0), 0.0);
     }
 }

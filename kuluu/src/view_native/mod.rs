@@ -1,6 +1,8 @@
+mod app_icon;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
+pub mod command_surface;
 pub mod cutscene_motion_done;
 pub mod debug_heights;
 pub mod engage;
@@ -256,12 +258,20 @@ pub(crate) fn insert_dat_roots(
     sink.put(kuluu_render::scheduler_runtime::ActionDatRoot(
         dat_root.clone(),
     ));
+    sink.put(kuluu_render::ffxi_actor_render::ActorDatRoot(
+        dat_root.clone(),
+    ));
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
     // Same latch on the map DLL: without this the map calibration and the
     // Change Map catalog keep answering from the previous install (kuluu-u8p1).
     sink.put(kuluu_render::minimap::retail::MapCalibration::default());
+    // Which slash commands exist is the new install's answer, not the previous
+    // one's: a server shipping a patched client renames or drops them.
+    sink.put(command_surface::CommandSurface::from_dat_root(
+        dat_root.as_deref(),
+    ));
     sink.put(DatRootRes(dat_root));
 }
 
@@ -365,6 +375,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("kuluu — {server}"),
+            name: Some(app_icon::APP_ID.into()),
             resolution: resolution.into(),
             mode: window_mode,
             // Lets gamescope surface the Steam Deck's on-screen keyboard when a
@@ -394,6 +405,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+    app_icon::install(&mut app);
     app.add_plugins(walker::WalkerPlugin);
     app.add_systems(
         Update,
@@ -631,6 +643,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         OnExit(AppPhase::InGame),
         (
             despawn_ingame_entities,
+            kuluu_render::hud::chat_panel::reset_chat_session,
             drain_entity_prediction,
             drain_motion_probe,
             drain_entity_table,
@@ -735,6 +748,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::bazaar_mode_sync_system,
             text_input::auction_mode_sync_system,
             text_input::event_map_sync_system,
+            text_input::shop_mode_sync_system,
             input::handle_input_system,
             text_input::text_input_system,
             text_input::auto_enter_cs_system,
@@ -926,6 +940,8 @@ fn despawn_ingame_entities(
         ResMut<kuluu_render::zone_point_lights::ZonePointLights>,
         ResMut<kuluu_render::zone_point_lights::ActiveSceneLights>,
         ResMut<kuluu_render::zone_doors::ZoneDoors>,
+        ResMut<kuluu_render::ffxi_actor_render::ActorLoadInFlight>,
+        ResMut<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>,
     ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
@@ -958,6 +974,8 @@ fn despawn_ingame_entities(
     *zone_geom.4 = kuluu_render::zone_point_lights::ZonePointLights::default();
     *zone_geom.5 = kuluu_render::zone_point_lights::ActiveSceneLights::default();
     *zone_geom.6 = kuluu_render::zone_doors::ZoneDoors::default();
+    *zone_geom.7 = kuluu_render::ffxi_actor_render::ActorLoadInFlight::default();
+    *zone_geom.8 = kuluu_render::ffxi_zone_material::ZoneGlobalLighting::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -1056,7 +1074,11 @@ fn drain_mmb_load_state(
 // Particle generators hold mesh-entity handles in a resource Vec; the entities are despawned by
 // despawn_ingame_entities (they carry InGameEntity), but the Vec itself must be cleared so it
 // doesn't leak stale generators across a zone change.
-fn drain_particle_simulator(mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>) {
+fn drain_particle_simulator(
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut zone_particles: ResMut<kuluu_render::zone_particles::ZoneParticles>,
+) {
+    *zone_particles = default();
     let dropped = sim.drain_entities().len();
     if dropped > 0 {
         tracing::info!(dropped, "OnExit(InGame): drained live particle generators");
@@ -1154,6 +1176,35 @@ mod dat_root_wiring_tests {
             "every consumer reads one install"
         );
     }
+
+    #[test]
+    fn insert_dat_roots_hands_the_actor_loader_the_shared_root() {
+        let mut app = App::new();
+        insert_dat_roots(&mut app, None);
+        assert!(
+            app.world()
+                .get_resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+                .is_some(),
+            "ActorDatRoot must be wired even when there is no install"
+        );
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let root = Arc::new(root);
+        insert_dat_roots(&mut app, Some(root.clone()));
+
+        let actor_root = app
+            .world()
+            .resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+            .0
+            .clone()
+            .expect("the wired root reaches the actor loader");
+        assert!(
+            Arc::ptr_eq(&actor_root, &root),
+            "load_pc/load_npc must share the launcher's root, not open their own"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1240,6 +1291,8 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::zone_point_lights::ZonePointLights>();
         world.init_resource::<kuluu_render::zone_point_lights::ActiveSceneLights>();
         world.init_resource::<kuluu_render::zone_doors::ZoneDoors>();
+        world.init_resource::<kuluu_render::ffxi_actor_render::ActorLoadInFlight>();
+        world.init_resource::<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>();
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();
@@ -1258,6 +1311,8 @@ mod zone_teardown_tests {
         use kuluu_render::zone_point_lights::{ActiveSceneLights, ZonePointLight, ZonePointLights};
         let mut world = world_with_teardown_resources();
         let light = ZonePointLight {
+            theta_track: None,
+            theta_multiplier: 1.0,
             light_id: u32::from_le_bytes(*b"l_01"),
             world_pos: Vec3::ZERO,
             color: Vec3::ONE,
@@ -1267,7 +1322,7 @@ mod zone_teardown_tests {
         world.insert_resource(ZonePointLights {
             file_id: Some(348),
             sub_area_file_id: Some(585),
-            lights: vec![light],
+            lights: vec![light.clone()],
         });
         world.insert_resource(ActiveSceneLights {
             lights: vec![light],

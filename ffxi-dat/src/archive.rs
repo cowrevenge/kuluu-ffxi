@@ -333,14 +333,17 @@ impl DatRoot {
         }
 
         let overlays = RwLock::new(discover_overlays(&root));
-        let profile = ClientProfile::probe(&root);
-        Ok(Self {
+        // The profile's item-layout probe resolves a file id, so it needs the
+        // assembled tables and overlay search path: build the root, then fill it in.
+        let mut root = Self {
             root,
-            profile,
+            profile: ClientProfile::default(),
             apps,
             skipped,
             overlays,
-        })
+        };
+        root.profile = ClientProfile::probe_in(&root);
+        Ok(root)
     }
 
     /// Replace the overlay search path. Every constructor already seeds it from

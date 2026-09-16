@@ -1726,6 +1726,8 @@ fn inv_slot(container: u8, index: u8, item_no: u16) -> AgentEvent {
                 price: 0,
                 charges_remaining: None,
                 next_use_vana_ts: None,
+                use_delay_end_vana_ts: None,
+                ready: None,
             },
         },
     }

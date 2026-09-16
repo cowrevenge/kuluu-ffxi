@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::abil_recast as lsb;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MagicData<'a> {
@@ -53,6 +54,52 @@ impl<'a> CommandData<'a> {
         })
     }
 }
+
+/// s2c 0x119 GP_SERV_COMMAND_ABIL_RECAST: `recasttimer_t Timers[31]`, then the
+/// mount recast pair. `Timer` counts down in seconds and `TimerId` is the
+/// recast group; an entry with `Timer == 0` is an unused slot.
+/// vendor/server/src/map/packets/s2c/0x119_abil_recast.h GP_SERV_COMMAND_ABIL_RECAST.
+pub struct AbilRecast;
+
+impl AbilRecast {
+    pub const ENTRY_COUNT: usize = 31;
+    pub const ENTRY_STRIDE: usize = 8;
+    pub const TIMER_OFFSET: usize = 0;
+    pub const TIMER_ID_OFFSET: usize = 3;
+    pub const MOUNT_RECAST_OFFSET: usize = 0xF8;
+    pub const MOUNT_RECAST_ID_OFFSET: usize = 0xFC;
+}
+
+pin_s2c_offset!(
+    AbilRecast::ENTRY_COUNT,
+    lsb::TIMERS_COUNT,
+    "GP_SERV_COMMAND_ABIL_RECAST.Timers length"
+);
+pin_s2c_offset!(
+    AbilRecast::ENTRY_STRIDE,
+    lsb::TIMERS_STRIDE,
+    "GP_SERV_COMMAND_ABIL_RECAST.Timers stride"
+);
+pin_s2c_offset!(
+    AbilRecast::TIMER_OFFSET,
+    lsb::TIMERS_TIMER,
+    "recasttimer_t.Timer"
+);
+pin_s2c_offset!(
+    AbilRecast::TIMER_ID_OFFSET,
+    lsb::TIMERS_TIMER_ID,
+    "recasttimer_t.TimerId"
+);
+pin_s2c_offset!(
+    AbilRecast::MOUNT_RECAST_OFFSET,
+    lsb::MOUNT_RECAST,
+    "GP_SERV_COMMAND_ABIL_RECAST.MountRecast"
+);
+pin_s2c_offset!(
+    AbilRecast::MOUNT_RECAST_ID_OFFSET,
+    lsb::MOUNT_RECAST_ID,
+    "GP_SERV_COMMAND_ABIL_RECAST.MountRecastId"
+);
 
 pub fn collect_set_bits(bitmap: &[u8]) -> Vec<u16> {
     let mut out = Vec::new();

@@ -7,6 +7,14 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 
+pub mod cpp_layout;
+pub mod yaml;
+pub use cpp_layout::{BitSpan, Field, Layouts, StructLayout};
+pub use yaml::{
+    parse_u32_lit, parse_yaml, parse_yaml_enum_values, parse_yaml_npcs, zone_data_files,
+    zone_files, Yaml,
+};
+
 pub fn parse_int_lit(s: &str) -> Option<u16> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u16::from_str_radix(hex, 16).ok()

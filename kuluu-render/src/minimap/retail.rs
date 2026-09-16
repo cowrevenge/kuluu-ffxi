@@ -305,7 +305,7 @@ pub fn process_load_retail_map_requests(
     }
 }
 
-/// Why a map DAT would not decode, for the `/minimap` status line.
+/// Why a map DAT would not decode, for the `//minimap` status line.
 fn describe_map_load_failure(dat_root: &ffxi_dat::DatRoot, file_id: u32) -> String {
     let path = match dat_root.resolve(file_id) {
         Ok(loc) => loc.path_under(dat_root),

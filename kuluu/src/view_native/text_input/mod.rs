@@ -31,6 +31,10 @@ pub use event_map::event_map_sync_system;
 mod auto_enter;
 pub use auto_enter::auto_enter_cs_system;
 
+mod shop;
+use shop::handle_shop_key;
+pub use shop::shop_mode_sync_system;
+
 mod map_screen;
 
 mod menu;
@@ -51,6 +55,7 @@ pub struct CaptureMode {
 
 #[derive(SystemParam)]
 pub struct SlashWriters<'w, 's> {
+    pub command_surface: Res<'w, crate::view_native::command_surface::CommandSurface>,
     pub load_mmb: MessageWriter<'w, LoadMmbRequest>,
     pub load_mzb: MessageWriter<'w, LoadMzbRequest>,
     pub set_sub_area: MessageWriter<'w, kuluu_render::sub_area_activation::SetSubArea>,
@@ -130,11 +135,15 @@ pub struct SlashWriters<'w, 's> {
 
     pub auction_inv: Res<'w, kuluu_render::hud::auction::AuctionSellInventory>,
 
+    pub shop_state: ResMut<'w, kuluu_render::hud::shop::ShopScreenState>,
+
     pub select_target: ResMut<'w, SelectTargetMode>,
 
     pub fishing_spot: Res<'w, kuluu_render::fishing_spot::FishingSpot>,
 
     pub active_chat_tab: ResMut<'w, ActiveChatTab>,
+    pub battle_scroll: ResMut<'w, kuluu_render::hud::chat_panel::BattleScroll>,
+    pub debug_scroll: ResMut<'w, kuluu_render::hud::chat_panel::DebugScroll>,
 
     pub chat_history: ResMut<'w, ChatHistory>,
 
@@ -150,7 +159,7 @@ pub struct SlashWriters<'w, 's> {
 
     pub(crate) dat_root: Res<'w, super::DatRootRes>,
 
-    /// Absent when no config dir resolved, which makes `/overlay` read-only.
+    /// Absent when no config dir resolved, which makes `//overlay` read-only.
     pub overlay_store: Option<Res<'w, crate::overlay_store::OverlayStoreRes>>,
 }
 
@@ -324,23 +333,36 @@ pub(crate) fn text_input_system(
                     }
                 }
                 if bindings.matches_logical(Action::SelectActiveWindow, &ev.logical_key) {
+                    if slash_writers.graphics.chat_layout
+                        != kuluu_render::graphics_settings::ChatLayout::Tabbed
+                    {
+                        slash_writers.active_chat_tab.0 =
+                            kuluu_render::hud::chat_panel::ChatKind::Social;
+                    }
                     *mode = InputMode::PassiveCursor(
                         kuluu_render::input_mode::PassiveCursorState::fresh_chat(),
                     );
                     continue;
                 }
+                let self_char_id = scene_state.snapshot.self_char_id;
+                let usable_items = kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot);
+                let can_fish = slash_writers.fishing_spot.0.is_ready();
                 if let Some(next) = handle_world_key(
                     &ev.logical_key,
                     &bindings,
                     current_target,
                     &entities,
                     self_pos,
-                    scene_state.snapshot.self_char_id,
+                    self_char_id,
                     target_changed,
                     engaged,
-                    kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot),
-                    slash_writers.fishing_spot.0.is_ready(),
+                    usable_items,
+                    can_fish,
                     &cmd_tx.0,
+                    &mut scene_state,
+                    &mut slash_writers.check_target,
+                    &mut slash_writers.trade_state,
+                    &mut slash_writers.select_target,
                 ) {
                     *mode = next;
                 }
@@ -434,12 +456,20 @@ pub(crate) fn text_input_system(
                 }
             }
             InputMode::PassiveCursor(state) => {
+                use kuluu_render::hud::chat_panel::ChatKind;
+                let scroll_rows = match slash_writers.active_chat_tab.0 {
+                    ChatKind::Social => &mut chat_scroll.rows,
+                    ChatKind::Battle => &mut slash_writers.battle_scroll.rows,
+                    ChatKind::Debug => &mut slash_writers.debug_scroll.rows,
+                };
                 if let Some(next) = handle_passive_cursor_key(
                     &ev.logical_key,
                     &bindings,
                     state,
-                    &mut chat_scroll,
+                    scroll_rows,
                     &mut slash_writers.active_chat_tab,
+                    slash_writers.graphics.chat_layout,
+                    slash_writers.graphics.debug_chat,
                     &scene_state,
                     &cmd_tx.0,
                 ) {
@@ -504,6 +534,17 @@ pub(crate) fn text_input_system(
                     &ev.logical_key,
                     &bindings,
                     &mut slash_writers.bazaar_state,
+                    &mut scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+            }
+            InputMode::Shop => {
+                if let Some(next) = handle_shop_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.shop_state,
                     &mut scene_state,
                     &cmd_tx.0,
                 ) {
@@ -878,13 +919,13 @@ fn apply_chat_action(
             if trimmed.starts_with('/') {
                 let outcome = parse_slash(
                     trimmed,
+                    &slash_writers.command_surface,
                     entities,
                     self_pos,
                     current_target,
                     scene_state.snapshot.zone_id,
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
-                    scene_state.snapshot.myroom,
                     fishing_gate,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");
@@ -2058,8 +2099,10 @@ fn handle_passive_cursor_key(
     key: &Key,
     bindings: &Bindings,
     state: &mut kuluu_render::input_mode::PassiveCursorState,
-    chat_scroll: &mut ChatScroll,
+    scroll_rows: &mut usize,
     active_chat_tab: &mut ActiveChatTab,
+    layout: kuluu_render::graphics_settings::ChatLayout,
+    debug_chat: bool,
     scene_state: &SceneState,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
@@ -2067,9 +2110,17 @@ fn handle_passive_cursor_key(
 
     let icons = &scene_state.snapshot.status_icons;
 
-    // F advances focus across windows: Chat -> StatusIcons (when buffs exist)
-    // -> World (unfocused), matching retail's window-change cycle.
     if bindings.matches_logical(Action::SelectActiveWindow, key) {
+        if state.focus == PassiveCursorFocus::Chat
+            && kuluu_render::hud::chat_panel::advance_split_focus(
+                &mut active_chat_tab.0,
+                layout,
+                debug_chat,
+            )
+        {
+            state.chat_expanded = false;
+            return None;
+        }
         return Some(match state.focus {
             PassiveCursorFocus::Chat if !icons.is_empty() => {
                 InputMode::PassiveCursor(PassiveCursorState::fresh_status())
@@ -2080,33 +2131,43 @@ fn handle_passive_cursor_key(
 
     match state.focus {
         PassiveCursorFocus::Chat => {
-            let max_back = kuluu_render::snapshot::rendered_chat(scene_state).len();
+            let max_back = kuluu_render::snapshot::rendered_chat(scene_state)
+                .iter()
+                .filter(|line| {
+                    active_chat_tab.0.accepts_in_layout(line.channel, layout)
+                        && kuluu_render::snapshot::chat_line_visible(line.channel, debug_chat)
+                })
+                .count();
             if bindings.matches_logical(Action::NavUp, key) {
-                if chat_scroll.rows + 1 < max_back {
-                    chat_scroll.rows += 1;
+                if *scroll_rows + 1 < max_back {
+                    *scroll_rows += 1;
                 }
                 return None;
             }
             if bindings.matches_logical(Action::NavDown, key) {
-                chat_scroll.rows = chat_scroll.rows.saturating_sub(1);
+                *scroll_rows = scroll_rows.saturating_sub(1);
                 return None;
             }
             if bindings.matches_logical(Action::PageUp, key) {
-                let next = chat_scroll.rows.saturating_add(CHAT_SCROLL_PAGE_ROWS);
-                chat_scroll.rows = next.min(max_back.saturating_sub(1));
+                let next = scroll_rows.saturating_add(CHAT_SCROLL_PAGE_ROWS);
+                *scroll_rows = next.min(max_back.saturating_sub(1));
                 return None;
             }
             if bindings.matches_logical(Action::PageDown, key) {
-                chat_scroll.rows = chat_scroll.rows.saturating_sub(CHAT_SCROLL_PAGE_ROWS);
+                *scroll_rows = scroll_rows.saturating_sub(CHAT_SCROLL_PAGE_ROWS);
                 return None;
             }
             // Left/Right cycle which chat tab the focused log shows.
-            if bindings.matches_logical(Action::NavLeft, key) {
-                active_chat_tab.0 = active_chat_tab.0.cycle_prev();
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavLeft, key)
+            {
+                active_chat_tab.0 = active_chat_tab.0.step(false, debug_chat);
                 return None;
             }
-            if bindings.matches_logical(Action::NavRight, key) {
-                active_chat_tab.0 = active_chat_tab.0.cycle_next();
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavRight, key)
+            {
+                active_chat_tab.0 = active_chat_tab.0.step(true, debug_chat);
                 return None;
             }
             // Confirm expands the log to full-screen; cancel contracts it,
@@ -2160,6 +2221,138 @@ fn handle_passive_cursor_key(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_window_tests {
+    use super::*;
+    use kuluu_render::graphics_settings::ChatLayout;
+    use kuluu_render::hud::chat_panel::ChatKind;
+    use kuluu_render::input_mode::PassiveCursorState;
+
+    #[test]
+    fn unified_chat_keeps_focus_on_the_single_log() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Social);
+        let scene = SceneState::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        for key in [Key::ArrowLeft, Key::ArrowRight] {
+            handle_passive_cursor_key(
+                &key,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            );
+            assert_eq!(active.0, ChatKind::Social);
+        }
+        assert!(matches!(
+            handle_passive_cursor_key(
+                &Key::Character("f".into()),
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            ),
+            Some(InputMode::World)
+        ));
+    }
+
+    #[test]
+    fn compact_f_selects_second_split_log_before_releasing_focus() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Social);
+        let scene = SceneState::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        let key = Key::Character("f".into());
+        for layout in [ChatLayout::Vertical, ChatLayout::SideBySide] {
+            active.0 = ChatKind::Social;
+            assert!(handle_passive_cursor_key(
+                &key,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                layout,
+                false,
+                &scene,
+                &tx
+            )
+            .is_none());
+            assert_eq!(active.0, ChatKind::Battle);
+            assert!(matches!(
+                handle_passive_cursor_key(
+                    &key,
+                    &bindings,
+                    &mut state,
+                    &mut rows,
+                    &mut active,
+                    layout,
+                    false,
+                    &scene,
+                    &tx
+                ),
+                Some(InputMode::World)
+            ));
+        }
+    }
+
+    #[test]
+    fn backscroll_is_bounded_by_the_selected_log() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Battle);
+        let mut scene = SceneState::default();
+        for channel in [
+            kuluu_snapshot::ChatChannel::Say,
+            kuluu_snapshot::ChatChannel::System,
+            kuluu_snapshot::ChatChannel::Battle,
+        ] {
+            let mut line = kuluu_render::snapshot::system_chat_line("message".into());
+            line.channel = channel;
+            scene.snapshot.chat.push(line);
+        }
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        for _ in 0..3 {
+            handle_passive_cursor_key(
+                &Key::ArrowUp,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::SideBySide,
+                false,
+                &scene,
+                &tx,
+            );
+        }
+        assert_eq!(rows, 1);
+        handle_passive_cursor_key(
+            &Key::ArrowDown,
+            &bindings,
+            &mut state,
+            &mut rows,
+            &mut active,
+            ChatLayout::SideBySide,
+            false,
+            &scene,
+            &tx,
+        );
+        assert_eq!(rows, 0);
     }
 }
 

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use kuluu_session::search_client::{self, SEARCH_PORT};
 
-// vendor/server/documentation/Auction Categories.txt (item_basic.aH).
+// vendor/server/docs/Auction Categories.txt (item_basic.aH).
 const AH_CATEGORY_CRYSTALS: u8 = 35;
 
 // Body armor: hundreds of items in any stock item DB, so the catalog spans

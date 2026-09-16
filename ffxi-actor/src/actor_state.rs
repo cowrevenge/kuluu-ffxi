@@ -93,7 +93,7 @@ pub struct SpecialPose {
     pub slot_held: bool,
 }
 
-/// LSB `STATUS_TYPE::INVISIBLE` (vendor/server/src/map/entities/baseentity.h): the server hides
+/// LSB `STATUS_TYPE::INVISIBLE` (vendor/server/data/enums/status.yaml): the server hides
 /// the model entirely while a burrowing mob is underground.
 pub const INVISIBLE_STATUS: u8 = 3;
 
@@ -173,7 +173,7 @@ pub fn next_special_pose(prev: &SpecialPose, status: u8, animationsub: u8) -> Sp
 }
 
 /// Gait from the wire speed bytes. LSB's UpdateSpeed(run) multiplies `speed` only and never
-/// touches animationSpeed (vendor/server/src/map/entities/battleentity.cpp), so a speed byte
+/// touches animationSpeed (vendor/server/src/map/entities/battle_entity.cpp), so a speed byte
 /// above the base means the server is running this entity; at or below it, walking. Applies to
 /// server-paced kinds (Mob/Pet/Npc): a PC's walk toggle rides the 0x00D RunMode bit and its
 /// speed bytes stay at base either way.

@@ -297,6 +297,16 @@ pub mod container {
     pub const LOC_WARDROBE8: u8 = 16;
     pub const LOC_RECYCLEBIN: u8 = 17;
 
+    /// vendor/server/src/map/item_container.h CONTAINER_ID MAX_CONTAINER_ID.
+    pub const MAX_CONTAINER_ID: u8 = LOC_RECYCLEBIN + 1;
+
+    /// The container ids a c2s packet may name
+    /// (vendor/server/src/map/packets/c2s/validation.cpp
+    /// PacketValidator::isValidContainer).
+    pub fn is_valid(id: u8) -> bool {
+        id < MAX_CONTAINER_ID
+    }
+
     /// Retail bag names as the item window shows them.
     pub fn name(id: u8) -> Option<&'static str> {
         Some(match id {

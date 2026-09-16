@@ -71,6 +71,24 @@ pub(crate) fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item
 }
 
 impl ZoneWeather {
+    pub fn sample_for_area(&self, area: AreaResourceId, minutes: u32) -> Option<WeatherRecord> {
+        let (want, indoor) = self.selected?;
+        let by_type = self.sets.area_by_type(area);
+        let set = weather_type_preference(want)
+            .find_map(|id| by_type.get(&id))
+            .or_else(|| by_type.values().next());
+        let records = set.map(|set| {
+            if indoor && !set.indoor.is_empty() {
+                &set.indoor
+            } else {
+                &set.outdoor
+            }
+        });
+        records
+            .and_then(|records| sample_weather(records, minutes))
+            .or(self.current)
+    }
+
     // The weat/<type> subdirectory the zone's environment is actually being read from —
     // `selected` after the same fallback `select_records` applies, so a consumer walking the
     // DAT tree lands in the subtree whose records are live rather than one the zone omits.
@@ -193,11 +211,6 @@ pub struct ZoneDirectionalLighting {
     pub moon_k: f32,
     pub ambient_landscape: Vec3,
 
-    /// The ZONE record's landscape sun brightness, held apart from `sun_k` for
-    /// consumers whose decision is whole-zone rather than per-block: the lamp
-    /// day/night gate ([`crate::zone_point_lights::lamp_lit_factor`]) lights every
-    /// Generator light in the zone at once, so it must not flip because the player
-    /// stepped into one dark area.
     pub zone_sun_k: f32,
 }
 
@@ -291,13 +304,17 @@ pub const ZONE_WIDE_AREA: AreaResourceId = 0;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_zone_area(
     mut zone_weather: ResMut<ZoneWeather>,
-    area_map: Res<crate::dat_mzb::ZoneAreaMap>,
+    collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
     self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
 ) {
     let area = self_q
         .single()
         .ok()
-        .and_then(|t| area_map.area_at(t.translation()))
+        .and_then(|t| {
+            collision
+                .lighting_at(t.translation())
+                .map(|lighting| lighting.area)
+        })
         .unwrap_or(ZONE_WIDE_AREA);
     if area == zone_weather.area {
         return;

@@ -14,7 +14,9 @@ const MAX_STEPS: usize = 1000;
 
 fn dat(zone: u16) -> Option<Arc<EventDat>> {
     let root = DatRoot::from_env_or_default().ok()?;
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(zone)?;
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
+        .ok()?;
     let bytes = std::fs::read(loc.path_under(&root)).ok()?;
     Some(Arc::new(EventDat::parse(&bytes).unwrap()))
 }
@@ -136,7 +138,7 @@ fn retail_airship_exit_waits_for_both_acks_then_finishes_through_runner() {
         return;
     };
     let root = DatRoot::from_env_or_default().unwrap();
-    let strings_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(PORT_JEUNO).unwrap();
+    let strings_id = ffxi_dat::zone_dat::string_dat_file_id(PORT_JEUNO);
     let strings = StringDat::parse(
         &std::fs::read(root.resolve(strings_id).unwrap().path_under(&root)).unwrap(),
     )

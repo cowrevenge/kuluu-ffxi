@@ -146,20 +146,35 @@ fn mip_level_count(w: u32, h: u32) -> u32 {
     32 - w.max(h).max(1).leading_zeros()
 }
 
+fn mip_chain_byte_len(w: u32, h: u32, levels: u32) -> usize {
+    let (mut w, mut h) = (w, h);
+    let mut total = 0usize;
+    for _ in 0..levels {
+        total += (w as usize) * (h as usize) * 4;
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    total
+}
+
+// Each level downsamples from the slice it already occupies in the accumulating
+// chain: a separate `prev` buffer costs a second full-size copy for the whole build.
 fn build_mip_chain(mip0: Vec<u8>, w: u32, h: u32, target_cov: Option<f32>) -> (Vec<u8>, u32) {
     let levels = mip_level_count(w, h);
-    let mut data = mip0.clone();
-    let mut prev = mip0;
+    let mut data = mip0;
+    data.reserve_exact(mip_chain_byte_len(w, h, levels).saturating_sub(data.len()));
+    let mut prev_off = 0usize;
     let (mut pw, mut ph) = (w, h);
     for _ in 1..levels {
         let nw = (pw / 2).max(1);
         let nh = (ph / 2).max(1);
-        let mut next = downsample_box_srgb(&prev, pw, ph, nw, nh);
+        let prev_len = (pw as usize) * (ph as usize) * 4;
+        let mut next = downsample_box_srgb(&data[prev_off..prev_off + prev_len], pw, ph, nw, nh);
         if let Some(cov) = target_cov {
             rescale_alpha_to_coverage(&mut next, cov);
         }
+        prev_off += prev_len;
         data.extend_from_slice(&next);
-        prev = next;
         pw = nw;
         ph = nh;
     }
@@ -331,6 +346,74 @@ mod tests {
             h = (h / 2).max(1);
         }
         assert_eq!(img.data.as_ref().unwrap().len(), expected);
+    }
+
+    #[test]
+    fn mip_levels_match_the_box_filter_reference() {
+        fn box_filter(src: &[u8], sw: usize, x: usize, y: usize) -> [u8; 4] {
+            let texel = |x: usize, y: usize| -> &[u8] {
+                let o = (y * sw + x) * 4;
+                &src[o..o + 4]
+            };
+            let quad = [
+                texel(x * 2, y * 2),
+                texel(x * 2 + 1, y * 2),
+                texel(x * 2, y * 2 + 1),
+                texel(x * 2 + 1, y * 2 + 1),
+            ];
+            let mut out = [255u8; 4];
+            for (c, slot) in out.iter_mut().take(3).enumerate() {
+                *slot = linear_to_srgb(
+                    quad.iter().map(|t| srgb_to_linear(t[c])).sum::<f32>() / quad.len() as f32,
+                );
+            }
+            out[3] =
+                (quad.iter().map(|t| t[3] as f32).sum::<f32>() / quad.len() as f32).round() as u8;
+            out
+        }
+
+        // Distinct opaque texels: a uniform image hides an offset slip, and alpha
+        // stays at 255 so the cutout coverage rescale never engages.
+        let rgba: Vec<u8> = (0..16)
+            .flat_map(|i: u8| [i.wrapping_mul(17), 255 - i * 15, i * 3 + 7, 255])
+            .collect();
+        let img = decoded_texture_to_image(
+            &tex(4, 4, rgba.clone()),
+            TextureQuality {
+                mipmaps: true,
+                anisotropy: 1,
+            },
+        );
+        assert_eq!(img.texture_descriptor.mip_level_count, 3, "4x4 -> 4,2,1");
+        let data = img.data.expect("mip chain");
+
+        let mut mip1: Vec<u8> = Vec::new();
+        for y in 0..2 {
+            for x in 0..2 {
+                mip1.extend_from_slice(&box_filter(&rgba, 4, x, y));
+            }
+        }
+        assert_eq!(&data[64..80], &mip1[..], "mip 1 must box-filter mip 0");
+        assert_eq!(
+            &data[80..84],
+            &box_filter(&mip1, 2, 0, 0)[..],
+            "mip 2 must box-filter mip 1 — reading the wrong chain offset still \
+             yields the right byte count and passes every length assert"
+        );
+    }
+
+    #[test]
+    fn zone_images_stay_cpu_readable() {
+        let img =
+            decoded_texture_to_image(&tex(1, 1, vec![1, 2, 3, 255]), TextureQuality::default());
+        assert_eq!(
+            img.asset_usage,
+            RenderAssetUsages::default(),
+            "dat_mmb::apply_texture_filtering_system patches the sampler of pooled zone \
+             textures through Assets<Image>::get_mut; a RENDER_WORLD-only image fails \
+             re-extraction (GpuImage::take_gpu_data -> AlreadyExtracted) and the Texture \
+             Filtering setting silently stops applying"
+        );
     }
 
     #[test]

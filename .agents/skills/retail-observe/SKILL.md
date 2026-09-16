@@ -30,6 +30,10 @@ whether the question is already answered here before spending a login on it.
   (Use/Drop), verbatim help-bar strings.
 - [Auction House](references/auction-house.md) — category tree, screens, sell
   flow, Sales Status, bid/browse, and how catalog paging is pull-based.
+- [NPC shop window](references/2026-09-15-shop-window.md) — why a shop is not an
+  event and has no close packet, the client's 80-entry zone-scoped stock table,
+  the four `shop*` menu primitives, and the sell handshake. Binary/packet-doc
+  observation; the on-screen layout is still unpinned.
 - [Mog House menu](references/2026-07-17-moghouse-menu.md) — exact entry order
   for the main menu, Storage, Delivery Box send/receive, Change Jobs.
 - [Compass radar](references/2026-09-09-compass-radar.md) — establishes the
@@ -222,7 +226,7 @@ chat) is usually readable straight off the full screenshot.
   tooltips are unreadable — → Enter → Enter ("Log in with <name>?").
 - **City navigation by screenshot is slow and error-prone** (wall-hugging,
   camera collisions). Before wandering: pull exact coords from LSB
-  (`vendor/server/sql/zonelines.sql`, npc_list) or the wiki, and if the user
+  (`vendor/server/data/zones/<zone>/zone.yaml` zonelines, npc_list) or the wiki, and if the user
   is around, a 20-second walk from them beats 15 minutes of capture golf.
 
 ## Delegating the drive loop (cheap models)

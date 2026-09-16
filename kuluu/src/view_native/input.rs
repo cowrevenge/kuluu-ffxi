@@ -409,6 +409,7 @@ pub fn mode_cancels_autorun(mode: &InputMode) -> bool {
             | InputMode::Check
             | InputMode::Bazaar
             | InputMode::Auction
+            | InputMode::Shop
     )
 }
 
@@ -2496,6 +2497,7 @@ mod tests {
             submesh_idx: 0,
             bevy_transform: bevy::prelude::Transform::IDENTITY,
             water_height_bevy: None,
+            lighting: None,
             sub_area_link: 0,
         };
         MzbCollisionGeometry::from_block(build_collision_geometry(&[sub], &[inst], None))
@@ -3492,6 +3494,7 @@ mod tests {
             InputMode::Check,
             InputMode::Bazaar,
             InputMode::Auction,
+            InputMode::Shop,
         ] {
             assert!(mode_cancels_autorun(&mode), "{mode:?}");
             assert!(!mode_swallows_keys(&mode), "{mode:?}");

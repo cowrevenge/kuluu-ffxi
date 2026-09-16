@@ -1,8 +1,72 @@
 use super::*;
 
+/// Every battle-line expectation below is the no-install wording, so these
+/// shadow the real entry points with the basic-message table absent: what a
+/// session composes with one is pinned against a real install in
+/// `tests/install_conformance.rs`.
+fn decode_battle_message(
+    data: &[u8],
+    name_cache: &std::collections::HashMap<u32, String>,
+    kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+    is_029: bool,
+) -> Option<ChatLine> {
+    super::decode_battle_message(data, name_cache, kind_cache, is_029, None)
+        .into_iter()
+        .next()
+}
+
+fn decode_battle2_action(
+    data: &[u8],
+    name_cache: &std::collections::HashMap<u32, String>,
+    kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+) -> Vec<ChatLine> {
+    super::decode_battle2_action(data, name_cache, kind_cache, None)
+}
+
+fn build_battle2_line(
+    message_num: u16,
+    cas_name: &str,
+    tar_name: &str,
+    cas_is_pc: bool,
+    tar_is_pc: bool,
+    amount: u32,
+    action_id: u32,
+    category: u8,
+) -> Option<ChatLine> {
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = action_id as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = amount as i64;
+    super::build_battle2_line(
+        None,
+        message_num,
+        cas_name,
+        tar_name,
+        cas_is_pc,
+        tar_is_pc,
+        amount,
+        action_id,
+        category,
+        numbers,
+    )
+    .into_iter()
+    .next()
+}
+
 /// Drives the real [`handle_sub_packet`] arm for `opcode` and returns the
 /// events it emitted, in emission order.
 fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
+    sub_packet_events_with_names(
+        opcode,
+        body,
+        &ffxi_dat::autotranslate_names::InstalledNames::default(),
+    )
+}
+
+fn sub_packet_events_with_names(
+    opcode: u16,
+    body: &[u8],
+    names: &ffxi_dat::autotranslate_names::InstalledNames,
+) -> Vec<AgentEvent> {
     let (tx, mut rx) = broadcast::channel(64);
     handle_sub_packet(
         &framing::SubPacket {
@@ -26,10 +90,13 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
         &mut false,
         &mut NpcNameResolver::new(None),
         &mut EmoteTextResolver::new(None),
+        names,
         &mut treasure::SysMesResolver::new(None),
+        &mut MesBasicResolver::new(None),
         &mut treasure::TreasurePool::default(),
         &mut false,
         &mut SelfMogState::default(),
+        &mut ShopSession::default(),
         None,
     );
     let mut out = Vec::new();
@@ -790,7 +857,7 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
 }
 
 /// End-to-end HP chain for the delta bridge: when a mob takes damage, LSB sets UPDATE_HP on
-/// its next 0x00E (battleentity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
+/// its next 0x00E (battle_entity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
 /// writes HPP at 0x1E under that bit and broadcasts to every char who spawned the entity).
 /// The fold must mark the entity pending so the O(changed) delta carries the new hpp — this
 /// is what drives the live nameplate HP bar. Regression: "HP bars never move".
@@ -1375,8 +1442,7 @@ fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
         eprintln!("skipping: no FFXI install");
         return;
     };
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE230)
-        .expect("zone 230 has a string DAT mapping");
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(ZONE230);
     let loc = root.resolve(file_id).expect("string DAT resolves");
     let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
     let dat = ffxi_dat::dmsg::StringDat::parse(&bytes).expect("zone 230 dialog table parses");
@@ -1967,7 +2033,7 @@ const OUTPOST_VENDOR_EVENT: u16 = 32756;
 const OUTPOST_VENDOR_TEXT_ZONE: u16 = 230;
 
 // The conquest outpost vendor: LSB's conquest.lua xi.conquest.vendorOnTrigger
-// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee, getCP(), 0, 0, 0),
+// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee / 10, getCP(), 0, 0, 0),
 // packed into num[0..7] by 0x034_eventnum.cpp
 // GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the
 // floor leaves every {Num:N} marker in the vendor dialog unresolved.
@@ -2365,7 +2431,7 @@ fn battle_message_565_obtains_gil_override_appends_unit() {
 #[test]
 fn battle2_self_ja_uses_ability_line_resolves_from_override() {
     // msg 116 (Boost/Warcry "uses" line) is absent from LSB's msg_basic.h; the
-    // TEMPLATE_OVERRIDES entry must fill it so a self JA-finish (category 6) still logs.
+    // FALLBACK_TEMPLATES entry must fill it so a self JA-finish (category 6) still logs.
     let line = build_battle2_line(116, "Nicotine", "Nicotine", true, true, 0, 39, 6)
         .expect("msg 116 must resolve via override");
     assert!(
@@ -2375,9 +2441,130 @@ fn battle2_self_ja_uses_ability_line_resolves_from_override() {
     );
 }
 
+/// The whole battle path against a real install: an id the scrape cannot serve
+/// ("The <player> uses .." in msg_basic.h) must come out of the client's own
+/// basic-message table instead, with the ability named and no elision left.
+/// Row-keyed wording is pinned in ffxi-dat tests/mesbasic.rs; this pins the
+/// wiring. Self-skips without game files.
 #[test]
-fn template_overrides_only_shadow_msg_basic_deliberately() {
-    for &(id, template) in TEMPLATE_OVERRIDES {
+fn a_job_ability_line_is_composed_from_the_installed_table() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    // Boost is ability 39 (vendor/server/sql/abilities.sql), whose message1 is
+    // the elided UsesJobAbility line.
+    const BOOST: u32 = 39;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        100,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        0,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[0].channel, ChatChannel::Battle);
+    assert_eq!(lines[0].sender, "Daisy");
+    assert_eq!(
+        lines[0]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>(),
+        lines[0].text,
+        "span text must reconstruct the line"
+    );
+}
+
+/// A two-clause entry is two retail log lines, not one wrapped one.
+/// Self-skips without game files.
+#[test]
+fn a_two_clause_entry_becomes_two_chat_lines() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    const BOOST: u32 = 39;
+    const DAMAGE: u32 = 42;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = DAMAGE as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        317,
+        "Daisy",
+        "Rock Lizard",
+        true,
+        false,
+        DAMAGE,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[1].text, "The Rock Lizard takes 42 points of damage.");
+}
+
+/// Msg 116 has no msg_basic.h enumerator at all, so without the installed table
+/// the line only exists because FALLBACK_TEMPLATES carries it. With one, both
+/// clauses come from the client's own wording. Self-skips without game files.
+#[test]
+fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    const BOOST: u32 = 39;
+    assert!(
+        ffxi_vocab::msg_basic::lookup(116).is_none(),
+        "the scrape gained an entry for 116; this test no longer proves what it says"
+    );
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        116,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        0,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[1].text, "Daisy's attacks are enhanced.");
+}
+
+/// vendor/server/src/map/enums/action/category.h ActionCategory AbilityFinish.
+const JOB_ABILITY_FINISH_CATEGORY: u8 = 6;
+
+#[test]
+fn fallback_templates_only_shadow_msg_basic_deliberately() {
+    for &(id, template) in FALLBACK_TEMPLATES {
         match ffxi_vocab::msg_basic::lookup(id) {
             None => assert!(
                 !DELIBERATE_SHADOWS.contains(&id),
@@ -2618,7 +2805,7 @@ fn battle2_header_reports_primary_target() {
 
 // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
+// (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
@@ -3311,14 +3498,204 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
     data[20..22].copy_from_slice(&256u16.to_le_bytes());
     data[22] = 1;
 
-    let shop = decode_shop_list(&data).expect("decoded");
-    assert_eq!(shop.offset_index, 5);
-    assert_eq!(shop.items.len(), 2);
-    assert_eq!(shop.items[0].price, 100);
-    assert_eq!(shop.items[0].item_no, 4096);
-    assert_eq!(shop.items[1].item_no, 256);
-    assert_eq!(shop.items[1].price, 99999);
-    assert!(!shop.opened);
+    let page = decode_shop_list(&data).expect("decoded");
+    assert_eq!(page.offset_index, 5);
+    assert!(!page.last, "Flags bit 0 clear means more pages follow");
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.rows[0].price, 100);
+    assert_eq!(page.rows[0].item_no, 4096);
+    // The row's own ShopIndex byte (0 and 1 here) is ignored: the index is
+    // ShopItemOffsetIndex plus the row's position in the page.
+    assert_eq!(page.rows[0].shop_index, 5);
+    assert_eq!(page.rows[1].item_no, 256);
+    assert_eq!(page.rows[1].price, 99999);
+    assert_eq!(page.rows[1].shop_index, 6);
+}
+
+/// Drives the real [`handle_sub_packet`] shop arms over one `ShopSession`, so
+/// a multi-packet stock and the window's lifetime are exercised the way the
+/// wire delivers them rather than through the decoders alone.
+fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
+    let (tx, mut rx) = broadcast::channel(64);
+    let mut shop = ShopSession::default();
+    shop.last_talk_target = 0x0100_0007;
+    for (opcode, body) in packets {
+        handle_sub_packet(
+            &framing::SubPacket {
+                opcode: *opcode,
+                sequence: 0,
+                data: body,
+            },
+            &tx,
+            &mut Vec::new(),
+            &mut crate::event_dialog::CutsceneScope::default(),
+            0,
+            "Tester",
+            &mut None,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut 0,
+            &mut Position::default(),
+            &mut false,
+            &mut NpcNameResolver::new(None),
+            &mut EmoteTextResolver::new(None),
+            &ffxi_dat::autotranslate_names::InstalledNames::default(),
+            &mut treasure::SysMesResolver::new(None),
+            &mut MesBasicResolver::new(None),
+            &mut treasure::TreasurePool::default(),
+            &mut false,
+            &mut SelfMogState::default(),
+            &mut shop,
+            None,
+        );
+    }
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    (shop, out)
+}
+
+fn shop_open_body(expected: u16) -> Vec<u8> {
+    let mut body = vec![0u8; 4];
+    body[0..2].copy_from_slice(&expected.to_le_bytes());
+    body
+}
+
+fn shop_list_body(offset: u16, last: bool, rows: &[(u16, u32)]) -> Vec<u8> {
+    let mut body = vec![0u8; 4 + 12 * rows.len()];
+    body[0..2].copy_from_slice(&offset.to_le_bytes());
+    body[2] = if last { 0x89 } else { 0x00 };
+    for (i, (item_no, price)) in rows.iter().enumerate() {
+        let off = 4 + i * 12;
+        body[off..off + 4].copy_from_slice(&price.to_le_bytes());
+        body[off + 4..off + 6].copy_from_slice(&item_no.to_le_bytes());
+    }
+    body
+}
+
+/// vendor/server/src/map/lua/lua_base_entity.cpp sendMenu case 2 pushes
+/// SHOP_OPEN then SHOP_LIST; vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp
+/// splits stock past 19 rows across pages, the last flagged 0x89.
+#[test]
+fn a_two_page_shop_opens_once_and_lists_every_row() {
+    let (shop, events) = shop_session_events(&[
+        (ffxi_proto::map::s2c::SHOP_OPEN, shop_open_body(3)),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(0, false, &[(4096, 100), (4097, 200)]),
+        ),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(2, true, &[(4098, 300)]),
+        ),
+    ]);
+
+    let open = shop.open.expect("window open");
+    assert!(open.opened);
+    assert!(open.complete);
+    assert_eq!(open.expected_items, 3);
+    assert_eq!(open.vendor_id, 0x0100_0007, "the NPC we talked to");
+    assert_eq!(
+        open.items
+            .iter()
+            .map(|i| (i.shop_index, i.item_no, i.price))
+            .collect::<Vec<_>>(),
+        vec![(0, 4096, 100), (1, 4097, 200), (2, 4098, 300)]
+    );
+
+    let updates = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ShopUpdated { .. }))
+        .count();
+    assert_eq!(updates, 3, "open plus one per page");
+}
+
+/// The shop table lives in GC_ZONE (research/XIClient GC_ZONE::gcShop), so
+/// crossing a zoneline takes the vendor and their stock with it.
+#[test]
+fn a_zone_change_closes_the_shop() {
+    let mut login = vec![0u8; 0x100];
+    // GP_SERV_COMMAND_LOGIN is only decoded far enough here to reach the
+    // shop teardown; a zero body still names a zone.
+    login[0..4].copy_from_slice(&1u32.to_le_bytes());
+    let (shop, events) = shop_session_events(&[
+        (ffxi_proto::map::s2c::SHOP_OPEN, shop_open_body(1)),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(0, true, &[(4096, 100)]),
+        ),
+        (ffxi_proto::map::s2c::LOGIN, login),
+    ]);
+
+    assert!(shop.open.is_none(), "the window did not survive the zone");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::ShopClosed)),
+        "close is announced so the viewer drops its window"
+    );
+}
+
+#[test]
+fn shop_pages_accumulate_at_their_offsets_instead_of_replacing() {
+    let page = |offset: u16, last: bool, rows: &[(u16, u32)]| {
+        let mut data = vec![0u8; 4 + 12 * rows.len()];
+        data[0..2].copy_from_slice(&offset.to_le_bytes());
+        data[2] = if last { 0x89 } else { 0x00 };
+        for (i, (item_no, price)) in rows.iter().enumerate() {
+            let off = 4 + i * 12;
+            data[off..off + 4].copy_from_slice(&price.to_le_bytes());
+            data[off + 4..off + 6].copy_from_slice(&item_no.to_le_bytes());
+        }
+        decode_shop_list(&data).expect("decoded")
+    };
+
+    let mut shop = ShopState::default();
+    merge_shop_page(&mut shop, page(0, false, &[(4096, 100), (4097, 200)]));
+    assert!(!shop.complete);
+    merge_shop_page(&mut shop, page(2, true, &[(4098, 300)]));
+
+    assert!(shop.complete, "Flags 0x89 marks the final page");
+    let listed: Vec<(u8, u16)> = shop
+        .items
+        .iter()
+        .map(|i| (i.shop_index, i.item_no))
+        .collect();
+    assert_eq!(listed, vec![(0, 4096), (1, 4097), (2, 4098)]);
+}
+
+#[test]
+fn shop_rows_past_the_client_table_are_dropped() {
+    let over = crate::state::SHOP_TABLE_CAPACITY as u16;
+    let mut data = vec![0u8; 4 + 12];
+    data[0..2].copy_from_slice(&over.to_le_bytes());
+    data[4..8].copy_from_slice(&1u32.to_le_bytes());
+    data[8..10].copy_from_slice(&4096u16.to_le_bytes());
+
+    let mut shop = ShopState::default();
+    merge_shop_page(&mut shop, decode_shop_list(&data).expect("decoded"));
+    assert!(shop.items.is_empty());
+}
+
+#[test]
+fn shop_sell_ignores_a_completed_sale_packet() {
+    let mut body = vec![0u8; 12];
+    body[0..4].copy_from_slice(&250u32.to_le_bytes());
+    body[4] = 9;
+    // research/XiPackets server 0x003D Type 1 = sale, not a price to confirm.
+    body[5] = 1;
+    assert_eq!(decode_shop_sell(&body), None);
+    body[5] = 0;
+    assert_eq!(decode_shop_sell(&body), Some((250, 9, 0)));
+}
+
+#[test]
+fn shop_open_reports_the_expected_row_count() {
+    let mut body = vec![0u8; 4];
+    body[0..2].copy_from_slice(&37u16.to_le_bytes());
+    assert_eq!(decode_shop_open(&body), Some(37));
+    assert_eq!(decode_shop_open(&body[..1]), None);
 }
 
 #[test]
@@ -3627,7 +4004,7 @@ fn equip_set_packet_layout_matches_server_struct() {
 fn item_stack_packet_layout_matches_server_struct() {
     // GP_CLI_COMMAND_ITEM_STACK (vendor/server/src/map/packets/c2s/0x03a_item_stack.h):
     // a single u32 Category (container id) after the 4-byte subpacket header.
-    let buf = build_subpacket_item_stack(0xCAFE, 0);
+    let buf = build_subpacket_item_stack(0xCAFE, 0, false).unwrap();
     assert_eq!(buf.len(), 8, "header (4) + Category u32 (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
     assert_eq!(
@@ -3647,7 +4024,7 @@ fn item_stack_packet_layout_matches_server_struct() {
         "Category = container (LOC_INVENTORY = 0)"
     );
 
-    let buf = build_subpacket_item_stack(0, 1);
+    let buf = build_subpacket_item_stack(0, 1, false).unwrap();
     assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 1);
 }
 
@@ -3915,7 +4292,8 @@ fn chat_std_decoder_maps_each_channel() {
         body[0] = kind;
         body.extend_from_slice(b"Hello there");
         body.push(0);
-        let line = decode_chat_std(&body).expect("decoder accepts well-formed body");
+        let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames)
+            .expect("decoder accepts well-formed body");
         assert_eq!(line.channel, expected, "kind {kind} → {expected:?}");
         assert_eq!(line.text, "Hello there");
     }
@@ -3929,7 +4307,7 @@ fn chat_std_decoder_extracts_sender_and_message() {
 
     body.extend_from_slice(b"hi all");
     body.push(0);
-    let line = decode_chat_std(&body).unwrap();
+    let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames).unwrap();
     assert_eq!(line.sender, "Sylvie");
     assert_eq!(line.text, "hi all");
     assert_eq!(line.channel, ChatChannel::Say);
@@ -3937,9 +4315,9 @@ fn chat_std_decoder_extracts_sender_and_message() {
 
 #[test]
 fn chat_std_decoder_rejects_truncated_body() {
-    assert!(decode_chat_std(&[0u8; 5]).is_none());
-    assert!(decode_chat_std(&[0u8; 18]).is_none());
-    assert!(decode_chat_std(&[0u8; 19]).is_some());
+    assert!(decode_chat_std(&[0u8; 5], &ffxi_proto::autotranslate::FrozenNames).is_none());
+    assert!(decode_chat_std(&[0u8; 18], &ffxi_proto::autotranslate::FrozenNames).is_none());
+    assert!(decode_chat_std(&[0u8; 19], &ffxi_proto::autotranslate::FrozenNames).is_some());
 }
 
 fn chat_std_body(kind: u8, sender: &str, message: &str) -> Vec<u8> {
@@ -3961,13 +4339,18 @@ fn ns_chat_kind_blanks_sender() {
         "Oldman",
         "You can set this.",
     );
-    let line = decode_chat_std(&body).unwrap();
+    let line = decode_chat_std(&body, &ffxi_proto::autotranslate::FrozenNames).unwrap();
     assert_eq!(line.sender, "");
     assert_eq!(line.text, "You can set this.");
     assert_eq!(line.channel, ChatChannel::Say);
     // A plain SAY from the same NPC keeps its attribution.
     let say = chat_std_body(ffxi_proto::map::chat_kind::SAY, "Oldman", "hi");
-    assert_eq!(decode_chat_std(&say).unwrap().sender, "Oldman");
+    assert_eq!(
+        decode_chat_std(&say, &ffxi_proto::autotranslate::FrozenNames)
+            .unwrap()
+            .sender,
+        "Oldman"
+    );
 }
 
 #[test]
@@ -3977,7 +4360,8 @@ fn custom_menu_decodes_title_and_options() {
         CUSTOM_MENU_SENDER,
         r#""Set this as your current home point?""Yes""No""#,
     );
-    let (title, options) = decode_custom_menu(&body).expect("customMenu decodes");
+    let (title, options) = decode_custom_menu(&body, &ffxi_proto::autotranslate::FrozenNames)
+        .expect("customMenu decodes");
     assert_eq!(title, "Set this as your current home point?");
     assert_eq!(options, vec!["Yes".to_string(), "No".to_string()]);
 }
@@ -3986,10 +4370,10 @@ fn custom_menu_decodes_title_and_options() {
 fn custom_menu_gated_on_type_and_sender() {
     // Right sender, wrong type (a plain say) is an ordinary chat line.
     let say = chat_std_body(0, CUSTOM_MENU_SENDER, r#""Title""Yes""#);
-    assert!(decode_custom_menu(&say).is_none());
+    assert!(decode_custom_menu(&say, &ffxi_proto::autotranslate::FrozenNames).is_none());
     // Right type, ordinary sender is not a menu either.
     let other = chat_std_body(MESSAGE_GMPROMPT, "Oldman", r#""Title""Yes""#);
-    assert!(decode_custom_menu(&other).is_none());
+    assert!(decode_custom_menu(&other, &ffxi_proto::autotranslate::FrozenNames).is_none());
 }
 
 // Mirror the server's HandleCustomMenu extraction (luautils.cpp NA path):
@@ -4072,6 +4456,67 @@ pub(super) fn bootstrap_acceptance_contract() {
         });
 }
 
+const FIXTURE_PLAYER: u32 = 17_455_719;
+const FIXTURE_SEED: [u8; 20] = [0; 20];
+const FIXTURE_POSITION: [f32; 3] = [2.15, -2.1, 3.25];
+const BOOTSTRAP_DATAGRAMS: usize = 2;
+const FIXTURE_CASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn fixture_packet(opcode: u16, body: &[u8]) -> Vec<u8> {
+    let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
+    let mut out = build_subpacket_header(opcode, words, 1).to_vec();
+    out.extend(body);
+    out
+}
+
+/// A self 0x00A / 0x00D body: unique_no, send flags, and the three position
+/// floats in wire order (x, height, north).
+fn login_fixture_body(player: u32, position: [f32; 3]) -> Vec<u8> {
+    const LOGIN_BODY_LEN: usize = 48;
+    const SEND_FLAGS: usize = 6;
+    const POSITION_X: usize = 8;
+    const POSITION_HEIGHT: usize = 12;
+    const POSITION_NORTH: usize = 16;
+    let mut body = vec![0; LOGIN_BODY_LEN];
+    body[..4].copy_from_slice(&player.to_le_bytes());
+    body[SEND_FLAGS] = 1;
+    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
+        .into_iter()
+        .zip(position)
+    {
+        body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    body
+}
+
+fn fixture_config() -> Config {
+    Config {
+        server: "127.0.0.1".into(),
+        map_host_override: None,
+        auth_port: 0,
+        data_port: 0,
+        view_port: 0,
+        user: "bootstrap-fixture".into(),
+        password: String::new(),
+        char_selection: CharSelection::Id(FIXTURE_PLAYER),
+        initial_state: None,
+        user_driven_events: true,
+        dat_root: None,
+    }
+}
+
+fn fixture_bootstrap() -> BootstrapArgs<'static> {
+    BootstrapArgs {
+        char_id: FIXTURE_PLAYER,
+        char_name: "Bootstrap",
+        account_name: "bootstrap-fixture",
+        ticket: [0; 16],
+        version: 0,
+        platform: *b"WIN\0",
+        cli_lang: 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BootstrapReply {
     Silent,
@@ -4090,24 +4535,14 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     };
     use std::time::Duration;
 
-    const PLAYER: u32 = 17_455_719;
-    const SEED: [u8; 20] = [0; 20];
-    const LOGIN_BODY_LEN: usize = 48;
-    const SEND_FLAGS: usize = 6;
-    const POSITION_X: usize = 8;
-    const POSITION_HEIGHT: usize = 12;
-    const POSITION_NORTH: usize = 16;
-    const POSITION: [f32; 3] = [2.15, -2.1, 3.25];
-    const EXPECTED_BOOTSTRAPS: usize = 2;
-    const CASE_TIMEOUT: Duration = Duration::from_secs(20);
+    const PLAYER: u32 = FIXTURE_PLAYER;
+    const SEED: [u8; 20] = FIXTURE_SEED;
+    const POSITION: [f32; 3] = FIXTURE_POSITION;
+    const EXPECTED_BOOTSTRAPS: usize = BOOTSTRAP_DATAGRAMS;
+    const CASE_TIMEOUT: Duration = FIXTURE_CASE_TIMEOUT;
     const DELAYED_LOGIN: Duration = Duration::from_millis(900);
 
-    fn packet(opcode: u16, body: &[u8]) -> Vec<u8> {
-        let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
-        let mut out = build_subpacket_header(opcode, words, 1).to_vec();
-        out.extend(body);
-        out
-    }
+    let packet = fixture_packet;
     // The fake server cooperates (sends valid stamped replies) only for the
     // valid self-LOGIN scenarios. The bootstrap no longer gates on the LOGIN, so
     // this drives the server's behavior, not the acceptance assertion.
@@ -4125,15 +4560,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             | BootstrapReply::SelfLogin
             | BootstrapReply::DelayedSelfLogin
     );
-    let mut self_body = vec![0; LOGIN_BODY_LEN];
-    self_body[..4].copy_from_slice(&PLAYER.to_le_bytes());
-    self_body[SEND_FLAGS] = 1;
-    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
-        .into_iter()
-        .zip(POSITION)
-    {
-        self_body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
+    let self_body = login_fixture_body(PLAYER, POSITION);
     let login = packet(s2c::LOGIN, &self_body);
     let self_position = packet(s2c::CHAR_PC, &self_body);
     let initial = match scenario {
@@ -4207,32 +4634,12 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
         .await
         .unwrap();
-    let cfg = Config {
-        server: "127.0.0.1".into(),
-        map_host_override: None,
-        auth_port: 0,
-        data_port: 0,
-        view_port: 0,
-        user: "bootstrap-fixture".into(),
-        password: String::new(),
-        char_selection: CharSelection::Id(PLAYER),
-        initial_state: None,
-        user_driven_events: true,
-        dat_root: None,
-    };
+    let cfg = fixture_config();
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
     };
-    let bootstrap = BootstrapArgs {
-        char_id: PLAYER,
-        char_name: "Bootstrap",
-        account_name: "bootstrap-fixture",
-        ticket: [0; 16],
-        version: 0,
-        platform: *b"WIN\0",
-        cli_lang: 0,
-    };
+    let bootstrap = fixture_bootstrap();
     let (commands, mut command_rx) = mpsc::channel(1);
     commands.send(AgentCommand::Disconnect).await.unwrap();
     let (events, mut event_rx) = broadcast::channel(256);
@@ -4301,6 +4708,137 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     assert!(
         outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS,
         "{scenario:?}: post-bootstrap packets must follow the two bootstraps"
+    );
+}
+
+#[test]
+pub(super) fn bootstrap_enterzone_contract() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(enterzone_in_gameok_reply());
+}
+
+/// LSB answers 0x00C GAMEOK with 0x008 ENTERZONE (vendor/server/src/map/packets/
+/// c2s/0x00c_gameok.cpp GP_CLI_COMMAND_GAMEOK::process), which the bootstrap's
+/// post-send drain consumes before the keepalive loop exists. The loop must
+/// still send exactly one 0x011 ZONE_TRANSITION and then 0x01A SendResRdy,
+/// the request LSB spawns the Mog House Moogle on (SpawnConditionalNPCs).
+async fn enterzone_in_gameok_reply() {
+    use ffxi_proto::map::{c2s, s2c};
+    use std::sync::{Arc, Mutex};
+
+    const ACTION_ID: std::ops::Range<usize> = 6..8;
+    let send_res_rdy = crate::state::ActionKind::SendResRdy.action_id();
+
+    let login = fixture_packet(
+        s2c::LOGIN,
+        &login_fixture_body(FIXTURE_PLAYER, FIXTURE_POSITION),
+    );
+    let enterzone = fixture_packet(s2c::ENTERZONE, &[0; 4]);
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let sent: Arc<Mutex<Vec<(u16, u16)>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed = sent.clone();
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let release = commands.clone();
+    let fake = tokio::spawn(async move {
+        let mut bytes = vec![0; ffxi_proto::map::MAX_DATAGRAM];
+        let mut peer: Option<MapClient> = None;
+        let mut count = 0usize;
+        let mut released = false;
+        loop {
+            let (size, client) = server.recv_from(&mut bytes).await.unwrap();
+            count += 1;
+            if count == 1 {
+                let connected = MapClient::connect(client, FIXTURE_SEED).await.unwrap();
+                connected.send_encrypted(&login, 1, 0).await.unwrap();
+                peer = Some(connected);
+            }
+            if count <= BOOTSTRAP_DATAGRAMS {
+                continue;
+            }
+            let peer = peer.as_ref().unwrap();
+            let datagram = peer
+                .decode_datagram(bytes[..size].to_vec(), client)
+                .unwrap();
+            for sub in framing::walk_sub_packets(&datagram[framing::FFXI_HEADER_SIZE..]).flatten() {
+                let action = if sub.opcode == c2s::ACTION {
+                    u16::from_le_bytes(sub.data[ACTION_ID].try_into().unwrap())
+                } else {
+                    0
+                };
+                observed.lock().unwrap().push((sub.opcode, action));
+            }
+            let stamp = (count - 1) as u16;
+            let reply: &[u8] = if count == BOOTSTRAP_DATAGRAMS + 1 {
+                &enterzone
+            } else {
+                &[]
+            };
+            peer.send_encrypted(reply, stamp, 0).await.unwrap();
+            let done = observed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(opcode, action)| opcode == c2s::ACTION && action == send_res_rdy);
+            if done && !released {
+                released = true;
+                let _ = release.send(AgentCommand::Disconnect).await;
+            }
+        }
+    });
+    let mut map = MapClient::connect(address, FIXTURE_SEED).await.unwrap();
+    let cfg = fixture_config();
+    let auth = crate::auth_client::AuthSession {
+        account_id: 1,
+        session_hash: [0; 16],
+    };
+    let bootstrap = fixture_bootstrap();
+    let (events, _event_rx) = broadcast::channel(256);
+    let outcome = tokio::time::timeout(
+        FIXTURE_CASE_TIMEOUT,
+        run_map_session(
+            &cfg,
+            &auth,
+            &bootstrap,
+            &mut map,
+            None,
+            1,
+            None,
+            &mut command_rx,
+            &events,
+            None,
+        ),
+    )
+    .await
+    .expect("a bootstrap 0x008 must still lead to 0x011 and SendResRdy");
+    fake.abort();
+    assert!(
+        fake.await.unwrap_err().is_cancelled(),
+        "fake map server panicked"
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+    let sent = sent.lock().unwrap().clone();
+    let gameok = sent
+        .iter()
+        .position(|&(opcode, _)| opcode == c2s::GAMEOK)
+        .expect("GAMEOK");
+    let transitions: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, &(opcode, _))| opcode == c2s::ZONE_TRANSITION)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(transitions.len(), 1, "one 0x011 per zone-in: {sent:?}");
+    let res_rdy = sent
+        .iter()
+        .position(|&(opcode, action)| opcode == c2s::ACTION && action == send_res_rdy)
+        .expect("SendResRdy");
+    assert!(
+        gameok < transitions[0] && transitions[0] < res_rdy,
+        "GAMEOK, then ZONE_TRANSITION, then SendResRdy: {sent:?}"
     );
 }
 
@@ -4419,4 +4957,28 @@ fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     };
     super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
     assert_eq!(d.npc_name.as_deref(), Some("???"));
+}
+
+#[test]
+fn chat_packet_resolves_autotranslate_from_the_install() {
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
+    let expected = match root.profile().name() {
+        "horizonxi-2023" => "{Onion Greataxe} {Zeruhn report}",
+        "retail-2026-09" => "{Mandau} {Zeruhn report}",
+        _ => return,
+    };
+    let names = ffxi_dat::autotranslate_names::InstalledNames::open_from_root(&root);
+    // vendor/server/src/map/packets/s2c/0x017_chat_std.h GP_SERV_COMMAND_CHAT_STD::PacketData.
+    const CHAT_TEXT_OFFSET: usize = 19;
+    let mut body = vec![0; CHAT_TEXT_OFFSET];
+    body.extend_from_slice(&[
+        0xFD, 0x07, 0x02, 0x47, 0x5F, 0xFD, b' ', 0xFD, 0x15, 0x02, 0xFF, 0x01, 0xFD, 0,
+    ]);
+    let events = sub_packet_events_with_names(ffxi_proto::map::s2c::CHAT, &body, &names);
+    assert!(
+        matches!(events.as_slice(), [AgentEvent::ChatLine { line }] if line.text == expected),
+        "{events:?}"
+    );
 }

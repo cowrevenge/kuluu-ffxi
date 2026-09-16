@@ -11,9 +11,11 @@ use crate::event_dialog::EventTrigger;
 use crate::lobby_client::LobbyClient;
 use crate::map_client::{self, BootstrapArgs, MapClient};
 use crate::state::{
-    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, Diagnostics, Entity,
-    EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem, ShopState, Stage, Vec3,
+    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, ChatSpan, ChatSpanKind,
+    Diagnostics, Entity, EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem,
+    ShopState, Stage, Vec3,
 };
+use ffxi_dat::sysmes::{self, MesBasicDat};
 
 mod codec;
 mod treasure;
@@ -120,6 +122,41 @@ struct SelfMogState {
     /// 0x055; the c2s 0x064 mark-seen reply must carry the table's full
     /// updated LookItemFlag bitset.
     key_item_tables: [KeyItemTableFlags; decode::ScenarioItem::TABLE_COUNT],
+}
+
+/// The open NPC shop window. The shop has no close packet (research/XiPackets
+/// client 0x0082 GP_CLI_COMMAND_SHOP_REQ is deprecated and GM-only), so the
+/// client owns the window's whole lifetime: it opens on s2c 0x03E, accumulates
+/// s2c 0x03C pages, and closes on a client decision or a zone change.
+#[derive(Debug, Default)]
+struct ShopSession {
+    open: Option<ShopState>,
+
+    /// Entity the last c2s 0x01A Talk went to. LSB's shop scripts run off that
+    /// trigger (vendor/server/scripts/globals/shop.lua `showText` then
+    /// `sendMenu`), so it names the vendor the SHOP_OPEN belongs to.
+    last_talk_target: u32,
+
+    /// `(item_no, quantity)` of the SHOP_SELL_REQ awaiting an appraisal. LSB's
+    /// 0x03D leaves `Count` at 0
+    /// (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp), so the reply's
+    /// quantity comes from here.
+    pending_sell: Option<(u16, u32)>,
+}
+
+impl ShopSession {
+    fn close(&mut self, event_tx: &broadcast::Sender<AgentEvent>) {
+        self.pending_sell = None;
+        if self.open.take().is_some() {
+            let _ = event_tx.send(AgentEvent::ShopClosed);
+        }
+    }
+
+    fn publish(&self, event_tx: &broadcast::Sender<AgentEvent>) {
+        if let Some(shop) = self.open.as_ref() {
+            let _ = event_tx.send(AgentEvent::ShopUpdated { shop: shop.clone() });
+        }
+    }
 }
 
 /// `received` gates c2s 0x064: before this table's 0x055 arrives the local
@@ -387,7 +424,13 @@ async fn run_map_session(
 
     let mut npc_name_resolver = NpcNameResolver::new(cfg.dat_root.clone());
     let mut emote_text_resolver = EmoteTextResolver::new(cfg.dat_root.clone());
+    let autotranslate_names = cfg
+        .dat_root
+        .as_deref()
+        .map(ffxi_dat::autotranslate_names::InstalledNames::open_from_root)
+        .unwrap_or_default();
     let mut sysmes_resolver = treasure::SysMesResolver::new(cfg.dat_root.clone());
+    let mut mes_basic_resolver = MesBasicResolver::new(cfg.dat_root.clone());
     let mut treasure_pool = treasure::TreasurePool::default();
 
     let mut name_miss_dedup: std::collections::HashMap<
@@ -399,6 +442,7 @@ async fn run_map_session(
     let mut self_pos = Position::default();
 
     let mut self_pos_seeded = false;
+    let mut enterzone_seen = false;
 
     // Set by drain_zone_flood when ENTERZONE (s2c 0x008) lands inside a flood;
     // consumed by keepalive_loop to fire the post-GAMEOK handshake.
@@ -407,6 +451,8 @@ async fn run_map_session(
     let mut flood_in_mog_house = false;
 
     let mut mog = SelfMogState::default();
+
+    let mut flood_shop = ShopSession::default();
 
     let mut flood_zone_messages: Vec<(u16, Vec<u8>)> = Vec::new();
     let self_login_received = drain_zone_flood(
@@ -433,10 +479,13 @@ async fn run_map_session(
         &mut self_pos,
         &mut npc_name_resolver,
         &mut emote_text_resolver,
+        &autotranslate_names,
         &mut sysmes_resolver,
+        &mut mes_basic_resolver,
         &mut treasure_pool,
         &mut flood_in_mog_house,
         &mut mog,
+        &mut flood_shop,
         spawn_fallback,
         &mut flood_zone_messages,
     )
@@ -505,10 +554,13 @@ async fn run_map_session(
                 &mut self_pos,
                 &mut npc_name_resolver,
                 &mut emote_text_resolver,
+                &autotranslate_names,
                 &mut sysmes_resolver,
+                &mut mes_basic_resolver,
                 &mut treasure_pool,
                 &mut flood_in_mog_house,
                 &mut mog,
+                &mut flood_shop,
                 spawn_fallback,
                 &mut flood_zone_messages,
             )
@@ -628,7 +680,9 @@ async fn run_map_session(
         enterzone_seen,
         npc_name_resolver,
         emote_text_resolver,
+        autotranslate_names,
         sysmes_resolver,
+        mes_basic_resolver,
         treasure_pool,
         mog,
         flood_zone_messages,
@@ -691,10 +745,13 @@ async fn drain_zone_flood(
     self_pos: &mut Position,
     npc_name_resolver: &mut NpcNameResolver,
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
     sysmes: &mut treasure::SysMesResolver,
+    mes_basic: &mut MesBasicResolver,
     pool: &mut treasure::TreasurePool,
     was_in_mog_house: &mut bool,
     mog: &mut SelfMogState,
+    shop: &mut ShopSession,
     zoneline_spawn_fallback: Option<Vec3>,
     flood_zone_messages: &mut Vec<(u16, Vec<u8>)>,
 ) -> bool {
@@ -748,10 +805,13 @@ async fn drain_zone_flood(
                         self_pos_seeded,
                         npc_name_resolver,
                         emote_text,
+                        autotranslate_names,
                         sysmes,
+                        mes_basic,
                         pool,
                         was_in_mog_house,
                         mog,
+                        shop,
                         zoneline_spawn_fallback,
                     );
                 }
@@ -884,14 +944,19 @@ fn handle_sub_packet(
     npc_name_resolver: &mut NpcNameResolver,
 
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
 
     sysmes: &mut treasure::SysMesResolver,
+
+    mes_basic: &mut MesBasicResolver,
 
     pool: &mut treasure::TreasurePool,
 
     was_in_mog_house: &mut bool,
 
     mog: &mut SelfMogState,
+
+    shop: &mut ShopSession,
 
     zoneline_spawn_fallback: Option<Vec3>,
 ) {
@@ -909,6 +974,12 @@ fn handle_sub_packet(
             if let Ok(login) = decoded {
                 *current_zone_id = login.zone_no;
                 let head = login.pos_head;
+
+                // The retail shop table lives in GC_ZONE
+                // (research/XIClient GC_ZONE::gcShop), so a zone change takes
+                // the vendor and their stock with it.
+                shop.close(event_tx);
+                shop.last_talk_target = 0;
 
                 mog.in_myroom = login.myroom.is_some_and(|m| {
                     m.login_state == decode::ServerLoginMyroom::LOGIN_STATE_MYROOM
@@ -1411,32 +1482,70 @@ fn handle_sub_packet(
             }
         }
         s2c::BATTLE_MESSAGE => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, true) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, true, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, true, event_tx);
         }
         s2c::BATTLE_MESSAGE2 => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, false) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, false, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, false, event_tx);
         }
         s2c::SHOP_LIST => {
-            if let Some(shop) = decode_shop_list(sub.data) {
-                let _ = event_tx.send(AgentEvent::ShopUpdated { shop });
+            if let Some(page) = decode_shop_list(sub.data) {
+                // A list without a preceding SHOP_OPEN still opens the window:
+                // LSB always pairs them (lua_base_entity.cpp sendMenu case 2),
+                // but the list alone is what has the stock.
+                let open = shop.open.get_or_insert_with(|| ShopState {
+                    opened: true,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                merge_shop_page(open, page);
+                shop.publish(event_tx);
             }
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
+                let (item_no, count) = match shop.pending_sell.take() {
+                    Some((item_no, qty)) => (item_no, if count == 0 { qty } else { count }),
+                    None => (0, count),
+                };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
                     count,
+                    item_no,
                 });
+                if let Some(open) = shop.open.as_mut() {
+                    open.pending_sale = Some(crate::state::ShopSale {
+                        item_index,
+                        item_no,
+                        unit_price: price,
+                        count,
+                    });
+                }
+                shop.publish(event_tx);
             }
         }
-        s2c::SHOP_OPEN => {}
+        s2c::SHOP_OPEN => {
+            if let Some(expected_items) = decode_shop_open(sub.data) {
+                shop.open = Some(ShopState {
+                    opened: true,
+                    expected_items,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                shop.pending_sell = None;
+                shop.publish(event_tx);
+            }
+        }
         s2c::BATTLE2 => {
             if combat_log_enabled() {
                 battle2_debug_dump(sub.data);
@@ -1453,7 +1562,7 @@ fn handle_sub_packet(
                     outcome: h.first_outcome,
                 });
             }
-            for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
+            for line in decode_battle2_action(sub.data, name_cache, kind_cache, mes_basic.table()) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -1820,7 +1929,7 @@ fn handle_sub_packet(
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
         s2c::CHAT => {
-            if let Some((title, options)) = decode_custom_menu(sub.data) {
+            if let Some((title, options)) = decode_custom_menu(sub.data, autotranslate_names) {
                 // Retail renders a GMPROMPT/_CUSTOM_MENU as an interactive prompt,
                 // not a chat line (the packet's speaker is the player entity).
                 let dialog = crate::state::DialogState {
@@ -1834,7 +1943,7 @@ fn handle_sub_packet(
                     ..Default::default()
                 };
                 let _ = event_tx.send(AgentEvent::EventDialog { dialog });
-            } else if let Some(line) = decode_chat_std(sub.data) {
+            } else if let Some(line) = decode_chat_std(sub.data, autotranslate_names) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -2010,6 +2119,8 @@ fn handle_sub_packet(
                             price: 0,
                             charges_remaining: None,
                             next_use_vana_ts: None,
+                            use_delay_end_vana_ts: None,
+                            ready: None,
                         },
                     },
                 });
@@ -2048,6 +2159,8 @@ fn handle_sub_packet(
                             price: a.price,
                             charges_remaining: ci.map(|c| c.charges),
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),
+                            use_delay_end_vana_ts: ci.map(|c| c.use_delay_end_vana_ts),
+                            ready: ci.map(|c| c.ready),
                         },
                     },
                 });
@@ -2120,7 +2233,7 @@ fn handle_sub_packet(
 
 const NAME_MISS_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE
 const UPDATE_HP: u8 = 0x04;
 const UPDATE_NAME: u8 = 0x08;
 
@@ -2416,8 +2529,8 @@ struct CastBar {
 
 /// Drives the self cast bar from the server's own BATTLE2 action packets.
 ///
-/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState pushes the MagicStart
-/// action_t from the `CMagicState` constructor, i.e. synchronously inside the
+/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init pushes the MagicStart
+/// action_t as CAIContainer::enterState admits the state, i.e. synchronously inside the
 /// 0x1A action handler (player_controller.cpp CPlayerController::Cast → ai_container.cpp CAIContainer::Internal_Cast),
 /// so this packet is the server's cast-start instant and carries the same cast
 /// pose and "starts casting" line. An interrupt reuses the MagicStart category
@@ -2502,7 +2615,9 @@ async fn keepalive_loop(
     mut enterzone_seen: bool,
     mut npc_name_resolver: NpcNameResolver,
     mut emote_text_resolver: EmoteTextResolver,
+    autotranslate_names: ffxi_dat::autotranslate_names::InstalledNames,
     mut sysmes_resolver: treasure::SysMesResolver,
+    mut mes_basic_resolver: MesBasicResolver,
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
     flood_zone_messages: Vec<(u16, Vec<u8>)>,
@@ -2629,6 +2744,8 @@ async fn keepalive_loop(
     // send; cleared by the timer, by movement (spell interrupt), or on a fresh
     // action. See ActionKind::{cast_bar, action_lock_ms}.
     let mut cast_in_flight: Option<CastInFlight> = None;
+
+    let mut shop_session = ShopSession::default();
 
     // Per-spell recast expiry, tracked entirely client-side: LSB's 0x119 sends
     // ability recasts only (RECAST_ABILITY), never magic, so the client owns
@@ -3043,6 +3160,12 @@ async fn keepalive_loop(
                         target_index,
                         kind,
                     }) => {
+                        // A shop opens off a Talk trigger, so the NPC we are
+                        // about to greet is the vendor any SHOP_OPEN that follows
+                        // belongs to.
+                        if matches!(kind, crate::state::ActionKind::Talk) {
+                            shop_session.last_talk_target = target_id;
+                        }
                         // The MH exit door is client-synthesized (LSB spawns no door
                         // NPC) — never let an action on it reach the wire.
                         if target_id == crate::local_menu::MH_DOOR_ENTITY_ID {
@@ -3111,9 +3234,22 @@ async fn keepalive_loop(
                                 }
                             }
                         }
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            target_id,
+                            target_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("action not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         self_face_target = face_target_for(target_index, self_act_index);
-                        let payload =
-                            build_subpacket_action(sub_seq, target_id, target_index, &kind);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -3177,8 +3313,7 @@ async fn keepalive_loop(
                         // Mirror of the LSB validator (0x05d_motion.cpp
                         // validate + bell note range): a send the server would
                         // drop silently is refused client-side with a reason.
-                        let in_event =
-                            dialog_session.active_end().is_some() || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         if let Some(reason) = emote_send_block_reason(emote_id, mode, param, in_event)
                         {
                             let _ = event_tx.send(AgentEvent::Error {
@@ -3292,8 +3427,21 @@ async fn keepalive_loop(
 
                         let kind = crate::state::ActionKind::HomepointMenu { status_id: 0 };
                         let act_index = self_act_index.unwrap_or(0);
-                        let payload =
-                            build_subpacket_action(sub_seq, self_char_id, act_index, &kind);
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            self_char_id,
+                            act_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("homepoint_return not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -3337,11 +3485,22 @@ async fn keepalive_loop(
                             });
                         }
                     }
+                    Some(AgentCommand::ShopSellCancel) => {
+                        shop_session.pending_sell = None;
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
+                    }
+                    Some(AgentCommand::CloseShop) => {
+                        shop_session.close(&event_tx);
+                    }
                     Some(AgentCommand::ShopSellReq {
                         qty,
                         item_no,
                         item_index,
                     }) => {
+                        shop_session.pending_sell = Some((item_no, qty));
                         let payload =
                             build_subpacket_shop_sell_req(sub_seq, qty, item_no, item_index);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3356,6 +3515,14 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellConfirm) => {
+                        // The server answers a completed sale with MESSAGE +
+                        // ITEM_SAME rather than another 0x03D
+                        // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
+                        // process), so the appraisal is retired here.
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
                         let payload = build_subpacket_shop_sell_set(sub_seq);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
@@ -3683,16 +3850,28 @@ async fn keepalive_loop(
                                 "item_stack throttled (<1.1s) to avoid lightluggage kick"
                             );
                         } else {
-                            let payload = build_subpacket_item_stack(sub_seq, container);
-                            sub_seq = sub_seq.wrapping_add(1);
-                            if let Err(e) = map
-                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
-                                .await
-                            {
-                                tracing::warn!(error = %e, "item_stack send failed");
-                                let _ = event_tx.send(AgentEvent::Error {
-                                    message: format!("item_stack send: {e}"),
-                                });
+                            match build_subpacket_item_stack(
+                                sub_seq,
+                                container,
+                                in_event(&dialog_session, &pending_event_end),
+                            ) {
+                                Err(reason) => {
+                                    let _ = event_tx.send(AgentEvent::Error {
+                                        message: format!("item_stack not sent: {reason}"),
+                                    });
+                                }
+                                Ok(payload) => {
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                    if let Err(e) = map
+                                        .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "item_stack send failed");
+                                        let _ = event_tx.send(AgentEvent::Error {
+                                            message: format!("item_stack send: {e}"),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -3955,8 +4134,7 @@ async fn keepalive_loop(
                         // wrong self id (0x064_scenarioitem.cpp) — skip rather
                         // than burn a seq slot on a silent drop; the unseen state
                         // stays and a later menu close retries.
-                        let in_event = dialog_session.active_end().is_some()
-                            || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         match mog.key_item_tables.get_mut(table_index as usize) {
                             None => {
                                 tracing::warn!(
@@ -4251,16 +4429,19 @@ async fn keepalive_loop(
                 // that spawns city NPCs early-returns when inMogHouse. Outside the
                 // MH the same action pre-warms NPC/MOB/TRUST spawn lists.
                 if zone_transition_sent && self_pos_seeded && !resrdy_sent {
-                    resrdy_sent = true;
-                    resrdy_in_payload = true;
-                    payload.extend(build_subpacket_action(
+                    if let Ok(action) = build_subpacket_action(
                         sub_seq,
                         self_char_id,
                         self_act_index.unwrap_or(0),
                         &crate::state::ActionKind::SendResRdy,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                        in_event(&dialog_session, &pending_event_end),
+                    ) {
+                        resrdy_sent = true;
+                        resrdy_in_payload = true;
+                        payload.extend(action);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                    }
                 }
 
                 if let Some(flush) = flush_pending_event_end(
@@ -4380,19 +4561,21 @@ async fn keepalive_loop(
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),
                     };
                 if include_pos {
-                    payload.extend(build_subpacket_pos(
+                    if let Some(pos) = build_subpacket_pos(
                         sub_seq,
                         self_pos.pos.x,
                         self_pos.pos.y,
                         self_pos.pos.z,
                         self_pos.heading,
                         self_face_target,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    last_keepalive_pos = self_pos.pos;
-                    last_emitted_pos = self_pos.pos;
-                    last_emitted_heading = self_pos.heading;
-                    last_move_emission = Some(std::time::Instant::now());
+                    ) {
+                        payload.extend(pos);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        last_keepalive_pos = self_pos.pos;
+                        last_emitted_pos = self_pos.pos;
+                        last_emitted_heading = self_pos.heading;
+                        last_move_emission = Some(std::time::Instant::now());
+                    }
                 }
 
                 if !payload.is_empty() {
@@ -4781,10 +4964,13 @@ async fn keepalive_loop(
                                 &mut self_pos_seeded,
                                 &mut npc_name_resolver,
                                 &mut emote_text_resolver,
+                                &autotranslate_names,
                                 &mut sysmes_resolver,
+                                &mut mes_basic_resolver,
                                 &mut treasure_pool,
                                 &mut self_in_mog_house,
                                 &mut mog,
+                                &mut shop_session,
                                 None,
                             );
 
@@ -5286,9 +5472,10 @@ fn decode_battle_message(
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
     is_029: bool,
-) -> Option<ChatLine> {
+    mes_basic: Option<&MesBasicDat>,
+) -> Vec<ChatLine> {
     if data.len() < 24 {
-        return None;
+        return Vec::new();
     }
     let cas_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
     let tar_id = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -5307,38 +5494,66 @@ fn decode_battle_message(
 
     let cas_name = name_for_id(cas_id, name_cache);
     let tar_name = name_for_id(tar_id, name_cache);
+    let cas_is_pc = is_pc(cas_id, kind_cache);
+    let tar_is_pc = is_pc(tar_id, kind_cache);
+    let sender = if subject_is_tar(message_num) {
+        tar_name.clone()
+    } else {
+        cas_name.clone()
+    };
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
-        return Some(ChatLine {
+        return vec![ChatLine {
             spans: Vec::new(),
             channel: battle_line_channel(message_num),
             sender: cas_name,
             text,
             server_ts: 0,
-        });
+        }];
     }
-    let raw = template_for_id(message_num)?;
-    let text = substitute_battle_placeholders(
-        raw,
+
+    // Both message packets carry their two data words in the parameter slots the
+    // entry addresses as 0 and 1
+    // (vendor/server/src/map/packets/s2c/0x029_battle_message.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE Data,
+    // vendor/server/src/map/packets/s2c/0x02d_battle_message2.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE2 Data).
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = data1 as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = data2 as i64;
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
         &cas_name,
         &tar_name,
-        is_pc(cas_id, kind_cache),
-        is_pc(tar_id, kind_cache),
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        &sender,
+    ) {
+        return lines;
+    }
+
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
+    let text = substitute_battle_placeholders(
+        &raw,
+        &cas_name,
+        &tar_name,
+        cas_is_pc,
+        tar_is_pc,
         data1,
         data2,
         message_num,
         None,
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
         channel: battle_line_channel(message_num),
-        sender: if subject_is_tar(message_num) {
-            tar_name
-        } else {
-            cas_name
-        },
+        sender,
         text,
         server_ts: 0,
-    })
+    }]
 }
 
 struct BattleBitReader<'a> {
@@ -5516,6 +5731,7 @@ fn decode_battle2_action(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+    mes_basic: Option<&MesBasicDat>,
 ) -> Vec<ChatLine> {
     let mut out: Vec<ChatLine> = Vec::new();
 
@@ -5576,49 +5792,27 @@ fn decode_battle2_action(
                 react_message = br.read(10).unwrap_or(0) as u16;
             }
 
-            if message_num != 0 {
-                if let Some(line) = build_battle2_line(
-                    message_num,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
-            }
+            // One parameter array per result, so an entry reads whichever
+            // block's value it names — the additional-effect and spikes lines
+            // address slots of their own.
+            let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+            numbers[MES_PARAM_ACTION_ID] = cmd_arg as i64;
+            numbers[MES_PARAM_MAIN_VALUE] = value as i64;
+            numbers[MES_PARAM_ADDITIONAL_EFFECT_VALUE] = proc_value as i64;
+            numbers[MES_PARAM_SPIKES_VALUE] = react_value as i64;
 
-            if has_proc && proc_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    proc_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    proc_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
+            for (num, amount) in [
+                (message_num, value),
+                (proc_message, proc_value),
+                (react_message, react_value),
+            ] {
+                if num == 0 {
+                    continue;
                 }
-            }
-
-            if has_react && react_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    react_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    react_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
+                out.extend(build_battle2_line(
+                    mes_basic, num, &cas_name, &tar_name, cas_is_pc, tar_is_pc, amount, cmd_arg,
+                    cmd_no, numbers,
+                ));
             }
         }
     }
@@ -5631,6 +5825,7 @@ fn is_start_category(cmd_no: u8) -> bool {
 }
 
 fn build_battle2_line(
+    mes_basic: Option<&MesBasicDat>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5639,16 +5834,36 @@ fn build_battle2_line(
     amount: u32,
     action_id: u32,
     category: u8,
-) -> Option<ChatLine> {
-    let raw = template_for_id(message_num)?;
+    numbers: [i64; sysmes::PARAM_SLOTS],
+) -> Vec<ChatLine> {
+    let sender = if subject_is_tar(message_num) {
+        tar_name
+    } else {
+        cas_name
+    };
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
+        cas_name,
+        tar_name,
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        sender,
+    ) {
+        return lines;
+    }
 
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
     let resource_id = if is_start_category(category) {
         amount
     } else {
         action_id
     };
     let text = substitute_battle_placeholders(
-        raw,
+        &raw,
         cas_name,
         tar_name,
         cas_is_pc,
@@ -5658,26 +5873,134 @@ fn build_battle2_line(
         message_num,
         Some(resource_id),
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
         channel: battle_line_channel(message_num),
-        sender: if subject_is_tar(message_num) {
-            tar_name.to_string()
-        } else {
-            cas_name.to_string()
-        },
+        sender: sender.to_string(),
         text,
         server_ts: 0,
-    })
+    }]
 }
 
-fn template_for_id(message_num: u16) -> Option<&'static str> {
-    for &(id, template) in TEMPLATE_OVERRIDES {
+/// Message-parameter slots a battle packet fills. The entry addresses them by
+/// index, so which one carries the action id and which the result's value is
+/// what makes `<entity> readies <skill>` (id in the value slot, action id zero)
+/// and `<entity> uses <skill>. ...` (id in the action slot) read from the same
+/// grammar.
+const MES_PARAM_ACTION_ID: usize = 0;
+const MES_PARAM_MAIN_VALUE: usize = 1;
+const MES_PARAM_ADDITIONAL_EFFECT_VALUE: usize = 2;
+const MES_PARAM_SPIKES_VALUE: usize = 3;
+
+/// The install's own wording for a battle message, or `None` when there is no
+/// readable table or the entry needs a control code the composer cannot render.
+fn compose_mes_basic(
+    mes_basic: Option<&MesBasicDat>,
+    message_num: u16,
+    cas_name: &str,
+    tar_name: &str,
+    cas_is_pc: bool,
+    tar_is_pc: bool,
+    numbers: [i64; sysmes::PARAM_SLOTS],
+    sender: &str,
+) -> Option<Vec<ChatLine>> {
+    let table = mes_basic?;
+    let index = message_num as usize;
+    let refs = table.resource_refs(index);
+    let resolved: Vec<String> = refs
+        .iter()
+        .map(|r| mes_basic_resource_name(r.kind, numbers[r.slot] as u32))
+        .collect();
+    let mut params = sysmes::SysMesParams {
+        numbers,
+        caster_name: Some(cas_name),
+        // Retail drops "the" for anything it refers to by name.
+        caster_article: !cas_is_pc,
+        target_name: Some(tar_name),
+        target_article: !tar_is_pc,
+        ..Default::default()
+    };
+    for (r, name) in refs.iter().zip(&resolved) {
+        params.names[r.slot] = Some(name);
+    }
+    let line = table.message(index, &params)?;
+    Some(
+        line.lines
+            .iter()
+            .map(|spans| ChatLine {
+                spans: spans
+                    .iter()
+                    .map(|s| ChatSpan {
+                        text: s.text.clone(),
+                        kind: match s.kind {
+                            sysmes::SpanKind::Text => ChatSpanKind::Text,
+                            sysmes::SpanKind::Item => ChatSpanKind::Item,
+                            sysmes::SpanKind::KeyItem => ChatSpanKind::KeyItem,
+                        },
+                    })
+                    .collect(),
+                channel: ChatChannel::Battle,
+                sender: sender.to_string(),
+                text: spans.iter().map(|s| s.text.as_str()).collect(),
+                server_ts: 0,
+            })
+            .collect(),
+    )
+}
+
+fn mes_basic_resource_name(kind: sysmes::MesBasicResource, id: u32) -> String {
+    match kind {
+        sysmes::MesBasicResource::CombatSkill => ffxi_vocab::skill_names::lookup(id as u8)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::Spell => ffxi_vocab::spell_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("spell #{id}")),
+        sysmes::MesBasicResource::WeaponSkill => ffxi_vocab::tp_move_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::JobAbility => ability_name(id),
+        sysmes::MesBasicResource::StatusEffect => ffxi_vocab::status_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("status #{id}")),
+    }
+}
+
+/// Lazily opens the basic-message table, once, and remembers a miss so an
+/// install without one costs a single attempt rather than one per battle line.
+struct MesBasicResolver {
+    root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
+    table: Option<Option<MesBasicDat>>,
+}
+
+impl MesBasicResolver {
+    fn new(root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) -> Self {
+        Self { root, table: None }
+    }
+
+    fn table(&mut self) -> Option<&MesBasicDat> {
+        let root = self.root.as_ref();
+        self.table
+            .get_or_insert_with(|| {
+                let loaded = root.and_then(|r| MesBasicDat::open(r));
+                if loaded.is_none() {
+                    tracing::info!(
+                        "basic-message DAT (ROM/27/72) unavailable - battle lines fall back to the scraped msg_basic wording"
+                    );
+                }
+                loaded
+            })
+            .as_ref()
+    }
+}
+
+fn fallback_template(message_num: u16) -> Option<std::borrow::Cow<'static, str>> {
+    for &(id, template) in FALLBACK_TEMPLATES {
         if id == message_num {
-            return Some(template);
+            return Some(std::borrow::Cow::Borrowed(template));
         }
     }
-    ffxi_vocab::msg_basic::lookup(message_num)
+    ffxi_vocab::msg_basic::lookup(message_num).map(std::borrow::Cow::Borrowed)
 }
 
 // vendor/server/src/map/enums/msg_std.h MsgStd Examine — "<name> examines you.", sent to
@@ -5797,18 +6120,25 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
     line
 }
 
-// ffxi_vocab::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
-// which fails the client two ways. Id 116 (the generic "uses <ability>" line shared by
-// no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116) has no
-// enumerator at all, so lookup(116) is None and the self-JA battle line goes missing. And
-// wherever LSB's comment writes a bare ".." instead of a named token, the scrape has no way
-// to know which value belongs there — 100/101 are what an ability with message1=0 falls back
-// to (charentity.cpp CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
-// Retail's full mesbasic table (ROM/27/72.DAT) carries the real strings; until that is
-// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
-// The 420-427 Corsair roll family is deliberately absent: those need two numbers and a
-// status effect that data1/data2 alone cannot supply.
-const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
+// Wording of last resort, for a session with no readable install: the client's
+// own basic-message table (ffxi_dat::sysmes::MesBasicDat, ROM/27/72.DAT) is
+// what composes these lines when one is reachable, and it is the only source
+// that is right for both eras - the horizonxi-2023 and retail-2026-09 tables
+// hold 1024 index-stable entries that differ in wording at eleven of them.
+//
+// The scraped fallback under this one, ffxi_vocab::msg_basic, reads the
+// trailing comment on each msg_basic.h enumerator, which fails the client two
+// ways. Id 116 (the generic "uses <ability>" line shared by no-numeric buff JAs
+// like Boost id39 / Warcry id32; abilities.sql message1=116) has no enumerator
+// at all, so lookup(116) is None and the self-JA battle line goes missing. And
+// wherever LSB's comment writes a bare ".." instead of a named token, the
+// scrape has no way to know which value belongs there - 100/101 are what an
+// ability with message1=0 falls back to (charentity.cpp
+// CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
+// vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
+// The 420-427 Corsair roll family is deliberately absent: those need two
+// numbers and a status effect that data1/data2 alone cannot supply.
+const FALLBACK_TEMPLATES: &[(u16, &str)] = &[
     (
         14,
         "The <player>'s attack is countered by the <target>. <number> of <player>'s shadows absorbs the damage and disappears.",
@@ -5852,9 +6182,9 @@ const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
 
 // Ids above that intentionally shadow a scraped msg_basic entry: for all but
 // 565 the LSB enumerator comment elides tokens as a bare "..", so the scrape
-// carries an unusable template (see the WHY atop TEMPLATE_OVERRIDES); 565's
+// carries an unusable template (see the WHY atop FALLBACK_TEMPLATES); 565's
 // reason is on its entry. Guarded by
-// tests::template_overrides_only_shadow_msg_basic_deliberately.
+// tests::fallback_templates_only_shadow_msg_basic_deliberately.
 #[cfg(test)]
 const DELIBERATE_SHADOWS: &[u16] = &[14, 31, 100, 101, 102, 103, 136, 137, 317, 324, 565];
 
@@ -6267,49 +6597,110 @@ fn event_trigger(sub: &framing::SubPacket<'_>) -> Option<EventTrigger> {
     })
 }
 
-fn decode_shop_list(data: &[u8]) -> Option<ShopState> {
+/// GP_SERV_COMMAND_SHOP_OPEN, vendor/server/src/map/packets/s2c/0x03e_shop_open.h:
+/// ShopListNum u16, padding u16. Announces how many rows the SHOP_LIST packets
+/// that follow will carry.
+fn decode_shop_open(data: &[u8]) -> Option<u16> {
+    const BODY_LEN: usize = 2;
+    if data.len() < BODY_LEN {
+        return None;
+    }
+    Some(u16::from_le_bytes(data[0..2].try_into().unwrap()))
+}
+
+/// One s2c 0x03C page: its `ShopItemOffsetIndex`, whether it is the final page,
+/// and the rows it carries.
+struct ShopListPage {
+    offset_index: u16,
+    last: bool,
+    rows: Vec<ShopItem>,
+}
+
+/// GP_SERV_COMMAND_SHOP_LIST Flags bit 0 marks the final page. LSB sends 0x00
+/// while more are coming and 0x89 on the last
+/// (vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp).
+const SHOP_LIST_FLAG_LAST: u8 = 0x01;
+
+fn decode_shop_list(data: &[u8]) -> Option<ShopListPage> {
     const HEADER_LEN: usize = 4;
     const ROW_LEN: usize = 12;
     if data.len() < HEADER_LEN {
         return None;
     }
     let offset_index = u16::from_le_bytes(data[0..2].try_into().unwrap());
+    let flags = data[2];
     let row_bytes = &data[HEADER_LEN..];
     let row_count = row_bytes.len() / ROW_LEN;
-    let mut items = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
     for i in 0..row_count {
         let off = i * ROW_LEN;
         let row = &row_bytes[off..off + ROW_LEN];
         let item_no = u16::from_le_bytes(row[4..6].try_into().unwrap());
 
+        // The packet's ShopIndex is ignored: the retail client derives a row's
+        // index from ShopItemOffsetIndex plus its position in the page
+        // (research/XiPackets server 0x003C, GP_SHOP ShopIndex), and that index
+        // is what c2s 0x083 SHOP_BUY sends back. A zero ItemNo is padding in a
+        // short final page, but it still consumes its slot.
+        let Ok(shop_index) = u8::try_from(offset_index as usize + i) else {
+            break;
+        };
         if item_no == 0 {
             continue;
         }
-        items.push(ShopItem {
+        rows.push(ShopItem {
             price: u32::from_le_bytes(row[0..4].try_into().unwrap()),
             item_no,
-            shop_index: row[6],
+            shop_index,
 
             skill: u16::from_le_bytes(row[8..10].try_into().unwrap()),
             guild_info: u16::from_le_bytes(row[10..12].try_into().unwrap()),
         });
     }
-    Some(ShopState {
+    Some(ShopListPage {
         offset_index,
-        items,
-
-        opened: false,
+        last: flags & SHOP_LIST_FLAG_LAST != 0,
+        rows,
     })
+}
+
+/// Fold one 0x03C page into the open shop, placing its rows at their own
+/// indices so a shop wider than a single packet lists in full. Rows past the
+/// client's fixed table (`SHOP_TABLE_CAPACITY`) are dropped, as the retail
+/// client's fixed-size array would.
+fn merge_shop_page(shop: &mut ShopState, page: ShopListPage) {
+    shop.offset_index = page.offset_index;
+    shop.complete = page.last;
+    for row in page.rows {
+        if row.shop_index as usize >= crate::state::SHOP_TABLE_CAPACITY {
+            continue;
+        }
+        match shop
+            .items
+            .iter_mut()
+            .find(|it| it.shop_index == row.shop_index)
+        {
+            Some(existing) => *existing = row,
+            None => shop.items.push(row),
+        }
+    }
+    shop.items.sort_by_key(|it| it.shop_index);
 }
 
 // GP_SERV_COMMAND_SHOP_SELL, vendor/server/src/map/packets/s2c/0x03d_shop_sell.h:
 // Price u32, PropertyItemIndex u8, Type u8, padding u16, Count u32. LSB only emits it
 // as the SHOP_SELL_REQ appraisal answer (Type = 0, 0x03d_shop_sell.cpp); a completed
 // sale is announced via GP_SERV_COMMAND_MESSAGE + ITEM_SAME instead
-// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count).
+// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count) for an
+// appraisal only; a Type = 1 completed-sale packet is not a price to confirm.
 fn decode_shop_sell(data: &[u8]) -> Option<(u32, u8, u32)> {
     const BODY_LEN: usize = 12;
+    // research/XiPackets server 0x003D Type: 0 = appraisal, 1 = sale.
+    const TYPE_APPRAISAL: u8 = 0;
     if data.len() < BODY_LEN {
+        return None;
+    }
+    if data[5] != TYPE_APPRAISAL {
         return None;
     }
     let price = u32::from_le_bytes(data[0..4].try_into().unwrap());
@@ -6382,21 +6773,25 @@ fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {
     Some((icons, expiries))
 }
 
-// vendor/server/src/map/packets/s2c/0x119_abil_recast.h — recasttimer_t[31]:
-// u16 Timer (remaining seconds), u8 Calc1, u8 TimerId (recast group id), u16 Calc2,
-// u16 padding. Returns (recast_id, absolute Unix expiry) for entries still running.
+// vendor/server/src/map/packets/s2c/0x119_abil_recast.h recasttimer_t: Timer
+// (remaining seconds) and TimerId (recast group id) per entry, at the offsets
+// ffxi_proto::decode::AbilRecast pins to the header. Returns (recast_id,
+// absolute Unix expiry) for entries still running.
 fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
-    const ENTRY_SIZE: usize = 8;
-    const ENTRY_COUNT: usize = 31;
+    use ffxi_proto::decode::AbilRecast;
     let now_unix = kuluu_snapshot::recast_now_unix();
     let mut out = Vec::new();
-    for i in 0..ENTRY_COUNT {
-        let off = i * ENTRY_SIZE;
-        if data.len() < off + ENTRY_SIZE {
+    for i in 0..AbilRecast::ENTRY_COUNT {
+        let off = i * AbilRecast::ENTRY_STRIDE;
+        if data.len() < off + AbilRecast::ENTRY_STRIDE {
             break;
         }
-        let timer = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
-        let timer_id = data[off + 3] as u16;
+        let timer = u16::from_le_bytes(
+            data[off + AbilRecast::TIMER_OFFSET..off + AbilRecast::TIMER_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let timer_id = data[off + AbilRecast::TIMER_ID_OFFSET] as u16;
         if timer == 0 {
             continue;
         }
@@ -6461,8 +6856,8 @@ fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
 /// s2c 0x052 EVENTUCOFF releases the client from an event user-control lock
 /// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h GP_SERV_COMMAND_EVENTUCOFF_MODE). CancelEvent
 /// arrives only after the server already dropped the event (release()/skipEvent
-/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::release,
-/// vendor/server/src/map/entities/charentity.cpp CCharEntity::skipEvent), so no 0x05B goes
+/// call endCurrentEvent — vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::release,
+/// vendor/server/src/map/entities/char_entity.cpp CCharEntity::skipEvent), so no 0x05B goes
 /// back; the local event state is dropped instead. Fishing release = a rejected
 /// cast (no rod / bait / fishing spot) or the end of fishing. EventRecvPending —
 /// the ack after every processed 0x05B (0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) — must NOT clear
@@ -6507,7 +6902,10 @@ fn emit_event_dialog(
     pending_event_end.push((dialog.npc_id, dialog.act_index, dialog.event_para));
 }
 
-fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
+fn decode_chat_std(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<ChatLine> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX {
         return None;
@@ -6522,7 +6920,7 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
     } else {
         trim_nul_string(&data[4..PREFIX])
     };
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     Some(ChatLine {
         spans: Vec::new(),
         channel: ChatChannel::from_chat_kind(kind),
@@ -6546,7 +6944,7 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
+// (vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
 // (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process).
@@ -6560,7 +6958,10 @@ const CUSTOM_MENU_CANCEL: &str = "Canceled.";
 
 /// Decode a customMenu prompt from a chat-std body, returning `(title, options)`.
 /// `None` for any non-customMenu chat so the caller falls back to a plain line.
-fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
+fn decode_custom_menu(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<(String, Vec<String>)> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX || data[0] != MESSAGE_GMPROMPT {
         return None;
@@ -6568,7 +6969,7 @@ fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
     if trim_nul_string(&data[4..PREFIX]) != CUSTOM_MENU_SENDER {
         return None;
     }
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     let mut parts = parse_quoted_concat(&text).into_iter();
     let title = parts.next()?;
     Some((title, parts.collect()))
@@ -6592,9 +6993,9 @@ fn custom_menu_reply(player: &str, title: &str, option: Option<&str>) -> String 
     format!("GMTELL({player}): Question({title}){CUSTOM_MENU_RESULT_MARKER}{result})")
 }
 
-fn decode_chat_text(bytes: &[u8]) -> String {
+fn decode_chat_text(bytes: &[u8], names: &impl ffxi_proto::autotranslate::NameResolver) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    ffxi_proto::autotranslate::decode(&bytes[..end])
+    ffxi_proto::autotranslate::decode_with(&bytes[..end], names)
 }
 
 fn trim_nul_string(bytes: &[u8]) -> String {
@@ -6917,6 +7318,16 @@ fn lerp_toward(cur: Vec3, target: Vec3, max_step: f32) -> (Vec3, bool) {
         },
         false,
     )
+}
+
+/// Client mirror of `PChar->isInEvent()`
+/// (vendor/server/src/map/entities/char_entity.cpp CCharEntity::isInEvent):
+/// an event the VM still drives, or one whose 0x05B EVENT_END has not gone out.
+pub(super) fn in_event(
+    dialog: &crate::event_dialog::DialogSession,
+    pending_event_end: &[(u32, u16, u16)],
+) -> bool {
+    dialog.active_end().is_some() || !pending_event_end.is_empty()
 }
 
 fn should_emit_pos(

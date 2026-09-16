@@ -248,7 +248,7 @@ pub type WeatherTypeId = [u8; 4];
 // WeatherCondition.cpp (`WeatherTable1`), read by XiZone.cpp XiZone::GetWeatherResourceID
 // `GetWeatherResourceID`. Rows are transcribed in DAT byte order; XIClient
 // writes them as reversed multi-char int literals ('enif' == b"fine").
-// The LSB id ordering (vendor/server/src/map/enums/weather.h Weather, None=0 ..
+// The LSB id ordering (vendor/server/data/enums/weather.yaml Weather, None=0 ..
 // Darkness=19) lines up 1:1 with the table index, so row 0 is `fine` — retail
 // has no `None` special case. Do NOT source these from
 // WeatherCondition.cpp's sibling `WeatherKeyframeLibrary.cpp`: that array is a
@@ -284,7 +284,7 @@ const WEATHER_TYPE_IDS: [WeatherTypeId; 20] = [
 
 pub const WEATHER_TYPE_FALLBACK: WeatherTypeId = *b"suny";
 
-// Map an LSB weather id (vendor/server/src/map/enums/weather.h ordering) onto the
+// Map an LSB weather id (vendor/server/data/enums/weather.yaml ordering) onto the
 // `weat/<type>` subdir DatId. wire::Weather shares this discriminant order, so the
 // viewer passes `weather as u16` straight through.
 /// The `weat/<type>` tag for a weather id we may not have received yet.

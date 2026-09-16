@@ -212,6 +212,7 @@ pub fn run(args: ModelViewerArgs) -> Result<()> {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "ffxi model viewer".into(),
+                    name: Some(super::app_icon::APP_ID.into()),
                     resolution: (1280u32, 800u32).into(),
                     ..default()
                 }),
@@ -221,6 +222,7 @@ pub fn run(args: ModelViewerArgs) -> Result<()> {
             .disable::<LogPlugin>(),
     );
 
+    super::app_icon::install(&mut app);
     app.add_plugins(bevy::feathers::FeathersPlugins)
         .insert_resource(bevy::feathers::theme::UiTheme(
             bevy::feathers::dark_theme::create_dark_theme(),

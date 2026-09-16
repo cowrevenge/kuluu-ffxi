@@ -178,10 +178,19 @@ and `pol::CLoginMemberPasswordFrame` screens.
 Both transports are understood, and so is the key agreement. What remains is
 the credential itself:
 
-- Where the sixteen-byte secret at chat slot `+0x39f4` comes from.
-  `0x10045e10` produces it at construction time, and whether it is the POL
-  password, a hash of it, or a stored token is not yet established. This is now
-  the only unsolved step in the chat login.
+- What the sixteen-byte chat secret actually is. Its *plumbing* is now known:
+  the chat client does not derive it. The caller of the constructor hands it in
+  (`0x1000c7b0` forwards its third argument straight through to
+  `0x10013e60`), and if the caller passes the literal placeholder
+  `pQ9CXz56K2J6yDL`, `0x10045e10` substitutes polcore's own stored credential
+  instead. That credential lives obfuscated in a single global at
+  `0x10099288`, sixteen bytes plus a length byte, and `0x10046f80`
+  deobfuscates it with a small reversible transform: rotate each byte by its
+  index, XOR alternate bytes with `0xFF`, and emit in reverse order.
+  `0x10045eb0` is the locked accessor that takes a copy and wipes the source,
+  and `0x10047860` returns it as the last field of an account-profile record.
+  What remains is whether that stored value is the POL password, a hash of it,
+  or a server-issued token, which needs `app.dll` rather than `polcore`.
 - Which of the fifteen profile transactions carries the account name, and what
   the server returns that becomes the profile identity and secret.
 - How the sixty-four byte `authCode` that the FFXI lobby reads at C2S `0x26`

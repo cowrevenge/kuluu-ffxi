@@ -1,7 +1,6 @@
 <p align="center">
-  <img src="kuluu/assets/branding/png/kuluu-512.png" alt="Kuluu: a moss-green curled tail bearing three stars and an amber lantern" width="192" height="192">
+  <img src="kuluu/assets/branding/social/github-preview.png" alt="Kuluu — an open-source FINAL FANTASY XI client. A moss-green curled tail bears three stars and an amber lantern." width="960">
 </p>
-<h1 align="center">Kuluu</h1>
 
 <p align="center">
   <em>A faithful, open-source FINAL FANTASY XI client — rebuilt in Rust + Bevy,
@@ -17,6 +16,13 @@
   <a href="https://github.com/jondwillis/kuluu-ffxi/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/jondwillis/kuluu-ffxi?logo=GitHub"></a>
 </p>
 
+<p align="center">
+  <a href="#setup--first-build">Get started</a> &middot;
+  <a href="https://github.com/jondwillis/kuluu-ffxi/releases">Downloads</a> &middot;
+  <a href="#project-goals">Project goals</a> &middot;
+  <a href="#roadmap">Roadmap</a> &middot;
+  <a href="https://discord.gg/5c8NK46SuD">Community</a>
+</p>
 
 Kuluu is a **fan-community game-preservation project**: a cross-platform, modern, extensible, open-source client for the
 FINAL FANTASY XI network protocol.
@@ -385,7 +391,7 @@ useful one is [XIM](https://xim.pages.dev/), a from-scratch browser FFXI client
 (GPL-3). See [`research/README.md`](research/README.md) for the full list and
 the reference-only policy.
 
-## Project icon
+## Project artwork
 
 The Southern Watcher mark combines a curled green tail, an amber lantern,
 and three stars. It is original AI-generated artwork inspired by FFXI's
@@ -397,6 +403,20 @@ Its generation prompt and provenance are in [`generation.json`](kuluu/assets/bra
 On macOS, regenerate the PNG sizes, Windows ICO, macOS ICNS, and browser
 copies with `bash scripts/export-icons.sh` (requires `sips` and Python 3).
 Generated files are committed so builds do not need image tools.
+
+### Social artwork
+
+| Asset | Size |
+| --- | --- |
+| [GitHub preview](kuluu/assets/branding/social/github-preview.png) | 1280 × 640 |
+| [Discord avatar](kuluu/assets/branding/social/discord-avatar.png) | 512 × 512, transparent |
+| [Discord server banner](kuluu/assets/branding/social/discord-banner.png) | 960 × 540 |
+| [Discord invite splash](kuluu/assets/branding/social/discord-invite-splash.png) | 1920 × 1080 |
+
+The banner and splash share a lantern-lit jungle sanctuary;
+their [generation prompts](kuluu/assets/branding/social/generation.json) are included.
+
+### Application icons
 
 Linux release archives include `install-local.sh`; run it after extracting
 to install the binary and desktop icon under `~/.local` (Python 3 required).

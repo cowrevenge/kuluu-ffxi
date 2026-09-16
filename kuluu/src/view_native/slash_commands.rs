@@ -4,7 +4,8 @@ use kuluu_snapshot::{Entity as WireEntity, Vec3 as WireVec3};
 use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, HealMode, ReqLogoutKind};
 
 use crate::view_native::command_surface::{
-    self, CommandSet, CommandSurface, Surface, EXTENSION_PREFIX, FIRST_PARTY_OWNER,
+    self, CommandSet, CommandSurface, Surface, EXTENSION_HELP_NAMES, EXTENSION_PREFIX,
+    FIRST_PARTY_OWNER,
 };
 
 const MAX_ZONE_ID: u16 = 600;
@@ -69,15 +70,26 @@ fn unknown_command(cmd: &str) -> SlashOutcome {
 const COMMANDS: &[(&str, &[Command])] = &[
     (
         "Help",
-        &[Command {
-            // Two retail commands, one handler for now: /help opens retail's
-            // help window and /? answers about a named command.
-            names: &["help", "?"],
-            set: CommandSet::Retail,
-            usage: "",
-            summary: "show this slash-command reference",
-            handler: |c| SlashOutcome::SystemMessage(render_help(c.surface)),
-        }],
+        &[
+            Command {
+                names: &["help", "?"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "list the retail commands this client answers",
+                handler: |c| {
+                    SlashOutcome::SystemMessage(render_help(c.surface, Surface::Retail))
+                },
+            },
+            Command {
+                names: EXTENSION_HELP_NAMES,
+                set: CommandSet::Core,
+                usage: "",
+                summary: "list Kuluu's own commands",
+                handler: |c| {
+                    SlashOutcome::SystemMessage(render_help(c.surface, Surface::Extension))
+                },
+            },
+        ],
     ),
     (
         "Movement & Navigation",
@@ -630,6 +642,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 summary: "request shutdown (LeaveGame, then close)",
                 handler: |c| parse_reqlogout(c.rest,  true),
             },
+            Command {
+                names: &["exit"],
+                set: CommandSet::Core,
+                usage: "",
+                summary: "request shutdown and close the window now",
+                handler: |_| SlashOutcome::Quit,
+            },
         ],
     ),
     (
@@ -848,13 +867,25 @@ const COMMANDS: &[(&str, &[Command])] = &[
     ),
 ];
 
-fn render_help(surface: &CommandSurface) -> String {
-    let mut out = String::from("=== Slash command reference ===");
+/// The two surfaces list separately: `/?` answers about the client the player
+/// installed, and says where the rest lives.
+fn render_help(surface: &CommandSurface, which: Surface) -> String {
+    let mut out = String::from(match which {
+        Surface::Retail => "=== Retail commands ===",
+        Surface::Extension => "=== Kuluu commands ===",
+    });
     for (category, entries) in COMMANDS {
+        let listed: Vec<&Command> = entries
+            .iter()
+            .filter(|e| listed_on(e, surface, which))
+            .collect();
+        if listed.is_empty() {
+            continue;
+        }
         out.push_str("\n[");
         out.push_str(category);
         out.push(']');
-        for entry in *entries {
+        for entry in listed {
             out.push_str("\n  ");
             for (i, name) in entry.names.iter().enumerate() {
                 if i > 0 {
@@ -862,6 +893,9 @@ fn render_help(surface: &CommandSurface) -> String {
                 }
                 out.push_str(entry.prefix());
                 out.push_str(name);
+                if !entry.set.is_retail() {
+                    continue;
+                }
                 // A retail command's other spellings are the install's answer,
                 // not ours, so they are listed from its table.
                 for alias in surface.alias_group(name).into_iter().filter(|a| a != name) {
@@ -877,7 +911,28 @@ fn render_help(surface: &CommandSurface) -> String {
             out.push_str(entry.summary);
         }
     }
+    if which == Surface::Retail {
+        out.push_str("\nKuluu's own commands are typed with ");
+        out.push_str(EXTENSION_PREFIX);
+        out.push_str(" -- see ");
+        out.push_str(EXTENSION_PREFIX);
+        out.push_str(EXTENSION_HELP_NAMES[0]);
+    }
     out
+}
+
+fn listed_on(entry: &Command, surface: &CommandSurface, which: Surface) -> bool {
+    match which {
+        Surface::Retail => entry.set.is_retail(),
+        Surface::Extension => {
+            !entry.set.is_retail()
+                && (is_extension_help(entry) || surface.enabled.is_enabled(entry.set))
+        }
+    }
+}
+
+fn is_extension_help(entry: &Command) -> bool {
+    !entry.set.is_retail() && entry.names == EXTENSION_HELP_NAMES
 }
 
 #[derive(Debug, Clone)]
@@ -1178,7 +1233,9 @@ fn dispatch_extension(
         return SlashOutcome::SystemMessage(format!("{EXTENSION_PREFIX}{owner}: no such owner"));
     }
     match commands().find(|c| !c.set.is_retail() && c.names.contains(&word)) {
-        Some(command) if surface.enabled.is_enabled(command.set) => (command.handler)(ctx),
+        Some(command) if is_extension_help(command) || surface.enabled.is_enabled(command.set) => {
+            (command.handler)(ctx)
+        }
         Some(command) => SlashOutcome::SystemMessage(format!(
             "{EXTENSION_PREFIX}{word}: the {} command set is off",
             command.set.word()
@@ -4253,22 +4310,11 @@ mod tests {
     }
     #[test]
     fn help_command_returns_multiline_listing() {
-        for slash in ["/help", "/?"] {
+        for slash in ["/help", "/?", "/h"] {
             let out = parse_slash_t(slash, &empty_entities(), origin(), None, None);
             match out {
                 SlashOutcome::SystemMessage(s) => {
-                    assert!(
-                        s.contains("Slash command reference"),
-                        "{slash} missing header"
-                    );
-
-                    for (category, _) in COMMANDS {
-                        assert!(
-                            s.contains(category),
-                            "{slash} output missing category `{category}`"
-                        );
-                    }
-
+                    assert!(s.starts_with("=== Retail commands"), "{slash}: {s}");
                     assert!(s.contains("/follow"), "{slash} missing /follow");
                     assert!(s.contains("/help"), "{slash} missing /help self-reference");
                 }
@@ -4278,15 +4324,111 @@ mod tests {
     }
 
     #[test]
-    fn help_listing_fits_in_local_toast_cap() {
-        let lines = render_help(&test_surface()).split('\n').count();
-        let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
-        assert!(
-            lines <= cap,
-            "/help renders {lines} lines but the chat buffer retains only {cap}; \
-             the top {} lines would be evicted unreadable",
-            lines.saturating_sub(cap),
+    fn between_them_the_two_listings_name_every_category() {
+        let surface = test_surface();
+        let both = format!(
+            "{}\n{}",
+            render_help(&surface, Surface::Retail),
+            render_help(&surface, Surface::Extension)
         );
+        for (category, _) in COMMANDS {
+            assert!(both.contains(category), "no listing names `{category}`");
+        }
+    }
+
+    #[test]
+    fn help_listing_fits_in_local_toast_cap() {
+        let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
+        for (which, typed) in [(Surface::Retail, "/?"), (Surface::Extension, "//?")] {
+            let lines = render_help(&test_surface(), which).split('\n').count();
+            assert!(
+                lines <= cap,
+                "`{typed}` renders {lines} lines but the chat buffer retains only {cap}; \
+                 the top {} lines would be evicted unreadable",
+                lines.saturating_sub(cap),
+            );
+        }
+    }
+
+    #[test]
+    fn retail_help_lists_no_extension_command_and_points_at_the_other_surface() {
+        let text = render_help(&test_surface(), Surface::Retail);
+        assert!(
+            !text.contains(EXTENSION_PREFIX.to_string().as_str()) || text.contains("//?"),
+            "the only // in the retail listing is the hint"
+        );
+        for line in text.split('\n').filter(|l| l.starts_with("  ")) {
+            assert!(
+                !line.trim_start().starts_with(EXTENSION_PREFIX),
+                "retail listing named an extension command: {line}"
+            );
+        }
+        assert!(text.contains("/attack"), "retail listing names its own");
+        assert!(
+            text.ends_with(&format!("{EXTENSION_PREFIX}{}", EXTENSION_HELP_NAMES[0])),
+            "the last line points at the extension help: {text}"
+        );
+    }
+
+    #[test]
+    fn extension_help_lists_no_retail_command() {
+        let text = render_help(&test_surface(), Surface::Extension);
+        for line in text.split('\n').filter(|l| l.starts_with("  ")) {
+            assert!(
+                line.trim_start().starts_with(EXTENSION_PREFIX),
+                "extension listing named a retail command: {line}"
+            );
+        }
+        assert!(text.contains("//exit"));
+        assert!(text.contains("//minimap"));
+    }
+
+    #[test]
+    fn a_disabled_set_drops_out_of_the_listing_but_help_stays() {
+        let mut surface = test_surface();
+        surface.enabled.set_enabled(CommandSet::Dev, false);
+        let text = render_help(&surface, Surface::Extension);
+        assert!(!text.contains("//pathto"), "dev is off: {text}");
+        assert!(text.contains("//?"), "help lists itself whatever is off");
+    }
+
+    #[test]
+    fn extension_help_answers_with_its_own_set_switched_off() {
+        let mut surface = test_surface();
+        surface.enabled.set_enabled(CommandSet::Core, false);
+        let out = parse_slash(
+            "//?",
+            &surface,
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+            None,
+            &[],
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        match out {
+            SlashOutcome::SystemMessage(s) => {
+                assert!(s.starts_with("=== Kuluu commands"), "{s}")
+            }
+            other => panic!("//? did not answer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_is_an_extension_command_and_quits() {
+        assert!(matches!(
+            parse_slash_t("//exit", &empty_entities(), origin(), None, None),
+            SlashOutcome::Quit
+        ));
+        // Retail has no /exit, so the single-slash form is a miss with a hint.
+        match parse_slash_t("/exit", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SystemMessage(s) => assert!(
+                s.contains(&format!("{EXTENSION_PREFIX}exit")),
+                "expected a did-you-mean: {s}"
+            ),
+            other => panic!("/exit answered: {other:?}"),
+        }
     }
 
     #[test]

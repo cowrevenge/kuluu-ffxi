@@ -89,6 +89,12 @@ pub(super) fn apply_slash_outcome(
             target.id = id;
         }
         SlashOutcome::Quit => {
+            // Both ride the one command channel and the session transmits
+            // before it reads again, so the server learns we are leaving
+            // rather than seeing a dropped link.
+            let _ = cmd_tx.try_send(AgentCommand::ReqLogout {
+                kind: kuluu_session::state::ReqLogoutKind::ShutdownOn,
+            });
             let _ = cmd_tx.try_send(AgentCommand::Disconnect);
             exit.write_default();
             crate::view_native::exit_watchdog::arm();

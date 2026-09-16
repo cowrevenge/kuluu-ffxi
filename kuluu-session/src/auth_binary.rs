@@ -19,6 +19,27 @@ pub const RESULT_ALREADY_LOGGED_IN: u8 = 0x0A;
 pub const RESULT_VERSION_MISMATCH: u8 = 0x0B;
 
 pub const DEFAULT_VERSION: [u8; 5] = *b"1.0.0";
+pub const VERSION_FIELD_LEN: usize = 5;
+
+/// The loader version as the fixed-width field at 0x61 carries it: a dotted
+/// triple whose text is exactly [`VERSION_FIELD_LEN`] bytes, so every
+/// component is a single digit.
+pub fn version_field(s: &str) -> Option<[u8; VERSION_FIELD_LEN]> {
+    let trimmed = s.trim();
+    let mut parts = trimmed.split('.');
+    let mut out = [0u8; VERSION_FIELD_LEN];
+    for i in 0..3 {
+        let part = parts.next()?;
+        if part.len() != 1 || !part.as_bytes()[0].is_ascii_digit() {
+            return None;
+        }
+        out[i * 2] = part.as_bytes()[0];
+        if i < 2 {
+            out[i * 2 + 1] = b'.';
+        }
+    }
+    parts.next().is_none().then_some(out)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BinaryAuthError {
@@ -117,9 +138,13 @@ pub struct PayloadBuilder {
 
 impl PayloadBuilder {
     pub fn new() -> Result<Self, BinaryAuthError> {
+        Self::with_version(DEFAULT_VERSION)
+    }
+
+    pub fn with_version(version: [u8; VERSION_FIELD_LEN]) -> Result<Self, BinaryAuthError> {
         Ok(Self {
             mac: local_mac_string()?,
-            version: DEFAULT_VERSION,
+            version,
         })
     }
 
@@ -268,6 +293,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn version_field_is_a_single_digit_triple_of_exactly_five_bytes() {
+        assert_eq!(version_field("1.0.0"), Some(DEFAULT_VERSION));
+        assert_eq!(version_field(" 2.1.0 "), Some(*b"2.1.0"));
+        assert_eq!(version_field("10.0.0"), None);
+        assert_eq!(version_field("1.0"), None);
+        assert_eq!(version_field("1.0.0.1"), None);
+        assert_eq!(version_field("a.b.c"), None);
+    }
+
+    #[test]
+    fn overridden_version_lands_in_the_payload_field() {
+        let b = PayloadBuilder {
+            mac: *b"01:23:45:67:89:AB",
+            version: *b"2.1.0",
+        };
+        let buf = b.build("alice", "secret", Command::Login).unwrap();
+        assert_eq!(&buf[0x61..0x66], b"2.1.0");
     }
 
     #[test]

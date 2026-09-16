@@ -60,6 +60,39 @@ fn resolve_client_version_from(override_: Option<&str>, env: Option<&str>) -> [u
     ffxi_proto::login::SUPPORTED_XILOADER_VERSION
 }
 
+/// The binary flavor's loader field is a fixed-width string with its own
+/// default, so only an explicit override or the env var moves it off
+/// auth_binary::DEFAULT_VERSION; the JSON default never leaks across.
+pub fn resolve_binary_version(override_: Option<&str>) -> [u8; auth_binary::VERSION_FIELD_LEN] {
+    resolve_binary_version_from(
+        override_,
+        std::env::var(XILOADER_VERSION_ENV).ok().as_deref(),
+    )
+}
+
+fn resolve_binary_version_from(
+    override_: Option<&str>,
+    env: Option<&str>,
+) -> [u8; auth_binary::VERSION_FIELD_LEN] {
+    for (label, s) in [
+        ("--xiloader-version", override_),
+        (XILOADER_VERSION_ENV, env),
+    ] {
+        let Some(s) = s else {
+            continue;
+        };
+        if let Some(v) = auth_binary::version_field(s) {
+            return v;
+        }
+        tracing::warn!(
+            "{label}={s:?} does not fit the binary loader's {}-byte single-digit x.y.z field; \
+             ignoring it",
+            auth_binary::VERSION_FIELD_LEN
+        );
+    }
+    auth_binary::DEFAULT_VERSION
+}
+
 fn parse_version_triple(s: &str) -> Option<[u8; 3]> {
     let mut out = [0u8; 3];
     let mut count = 0;
@@ -102,6 +135,7 @@ pub struct AuthClient {
     pub flavor: AuthFlavor,
 
     pub version: [u8; 3],
+    pub binary_version: [u8; auth_binary::VERSION_FIELD_LEN],
 
     binary_builder: std::sync::OnceLock<Result<PayloadBuilder, BinaryAuthError>>,
 }
@@ -130,12 +164,15 @@ impl AuthClient {
             config,
             flavor,
             version: resolve_client_version(version_override),
+            binary_version: resolve_binary_version(version_override),
             binary_builder: std::sync::OnceLock::new(),
         }
     }
 
     fn binary_builder(&self) -> Result<&PayloadBuilder> {
-        let res = self.binary_builder.get_or_init(PayloadBuilder::new);
+        let res = self
+            .binary_builder
+            .get_or_init(|| PayloadBuilder::with_version(self.binary_version));
         match res {
             Ok(b) => Ok(b),
             Err(e) => Err(anyhow!("binary auth builder unavailable: {e}")),
@@ -395,6 +432,34 @@ mod tests {
             ffxi_proto::login::SUPPORTED_XILOADER_VERSION,
             LSB_SUPPORTED_XILOADER_VERSION
         );
+    }
+
+    #[test]
+    fn binary_version_defaults_to_the_loader_field_not_the_json_triple() {
+        assert_eq!(
+            resolve_binary_version_from(None, None),
+            auth_binary::DEFAULT_VERSION
+        );
+        assert_eq!(resolve_binary_version_from(Some("2.1.0"), None), *b"2.1.0");
+        assert_eq!(resolve_binary_version_from(None, Some("3.0.1")), *b"3.0.1");
+        assert_eq!(
+            resolve_binary_version_from(Some("10.0.0"), Some("3.0.1")),
+            *b"3.0.1"
+        );
+        assert_eq!(
+            resolve_binary_version_from(Some("bad"), Some("worse")),
+            auth_binary::DEFAULT_VERSION
+        );
+    }
+
+    #[test]
+    fn binary_client_threads_the_override_into_its_builder() {
+        let c =
+            AuthClient::with_flavor_and_version("127.0.0.1", 1, AuthFlavor::Binary, Some("2.1.0"));
+        assert_eq!(c.binary_version, *b"2.1.0");
+        if let Ok(b) = c.binary_builder() {
+            assert_eq!(b.version, *b"2.1.0");
+        }
     }
 
     #[test]

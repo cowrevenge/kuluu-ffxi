@@ -68,10 +68,14 @@ pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server
         ver_lock_label(VerLock::from_setting(LSB_DEFAULT_VER_LOCK))
     );
 
-    let default_version = auth_client::resolve_client_version(None);
+    let json_default = auth_client::resolve_client_version(None);
+    let binary_default = auth_client::resolve_binary_version(None);
     let version_placeholder = format!(
-        "{}.{}.{}",
-        default_version[0], default_version[1], default_version[2]
+        "JSON {}.{}.{} / Binary {}",
+        json_default[0],
+        json_default[1],
+        json_default[2],
+        String::from_utf8_lossy(&binary_default)
     );
 
     let leaf = if editing {

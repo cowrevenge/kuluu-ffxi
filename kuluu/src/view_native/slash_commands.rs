@@ -20,7 +20,6 @@ struct SlashCtx<'a> {
     zone_id: Option<u16>,
     self_char_id: Option<u32>,
     party: &'a [kuluu_snapshot::PartyMember],
-    myroom: Option<kuluu_snapshot::MyRoom>,
     /// Retail's client-side fishing gate, evaluated by the renderer against the
     /// loaded zone collision (`kuluu_render::fishing_spot`).
     fishing: kuluu_render::fishing_spot::FishingGate,
@@ -151,13 +150,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_zones(c.zone_id),
             },
             Command {
-                names: &["zoneto"],
-                set: CommandSet::Dev,
-                usage: "<name|id>",
-                summary: "pathfind to a zone-line (alias of `//pathto <name>`)",
-                handler: |c| parse_zoneto(c.rest, c.zone_id),
-            },
-            Command {
                 names: &["navmesh"],
                 set: CommandSet::Dev,
                 usage: "[on|off]",
@@ -186,14 +178,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     ))
                 },
             },
-            Command {
-                names: &["return", "homepoint", "hp"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "warp to home point (alive or dead)",
-
-                handler: |_| SlashOutcome::Command(AgentCommand::ReturnToHomePoint),
-            },
         ],
     ),
     (
@@ -216,14 +200,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                     None => SlashOutcome::SystemMessage(format!("/{}: no target", c.cmd)),
                 },
-            },
-            Command {
-                names: &["disengage"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "clear active reactor goal",
-
-                handler: |_| SlashOutcome::Command(AgentCommand::Cancel),
             },
             Command {
                 names: &["attackoff"],
@@ -309,14 +285,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 summary: "cycle nearest NPC/mob/pet",
                 handler: |c| cycle_npc(c, false),
             },
-            // Retail cycles one way only; reversing is Kuluu's.
-            Command {
-                names: &["targetnpc2"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "cycle nearest NPC/mob/pet in reverse",
-                handler: |c| cycle_npc(c, true),
-            },
             Command {
                 names: &["targetbnpc"],
                 set: CommandSet::Retail,
@@ -334,63 +302,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     ) {
                         Some(id) => SlashOutcome::SetTarget(Some(id)),
                         None => SlashOutcome::SystemMessage("/targetenemy: no enemy nearby".into()),
-                    }
-                },
-            },
-            Command {
-                names: &["targetnpcparty"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "cycle owned party NPCs (trusts/fellows/pets)",
-
-                handler: |c| {
-                    let owner = c.self_char_id.unwrap_or(0);
-                    let owned: Vec<&WireEntity> = c
-                        .entities
-                        .iter()
-                        .filter(|e| {
-                            matches!(e.kind, kuluu_snapshot::EntityKind::Pet)
-                                && e.claim_id == owner
-                        })
-                        .collect();
-                    let ids: Vec<u32> = {
-                        let mut sorted = owned.clone();
-                        sorted.sort_by(|a, b| {
-                            let da = sq_dist(a.pos, c.self_pos);
-                            let db = sq_dist(b.pos, c.self_pos);
-                            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        sorted.into_iter().map(|e| e.id).collect()
-                    };
-                    if ids.is_empty() {
-                        SlashOutcome::SystemMessage("/targetnpcparty: no party NPCs".into())
-                    } else {
-                        let next = match c
-                            .current_target
-                            .and_then(|id| ids.iter().position(|x| *x == id))
-                        {
-                            Some(i) => ids[(i + 1) % ids.len()],
-                            None => ids[0],
-                        };
-                        SlashOutcome::SetTarget(Some(next))
-                    }
-                },
-            },
-            Command {
-                names: &["targetparty1", "targetparty2", "targetparty3", "targetparty4", "targetparty5", "targetparty6"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "target party slot 1-6 (slot 1 = self)",
-
-                handler: |c| {
-                    let slot = c
-                        .cmd
-                        .strip_prefix("targetparty")
-                        .and_then(|s| s.parse::<u8>().ok())
-                        .unwrap_or(0);
-                    match resolve_party_slot(slot, c.self_char_id, c.party) {
-                        Some(id) => SlashOutcome::SetTarget(Some(id)),
-                        None => SlashOutcome::SystemMessage(format!("/{}: slot empty", c.cmd)),
                     }
                 },
             },
@@ -460,46 +371,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_use_item(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                names: &["magic"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "open the Magic menu; retail has no command for it, /magic casts",
-
-                handler: |c| {
-                    if c.rest.is_empty() {
-                        SlashOutcome::OpenMenu(MenuKind::Magic)
-                    } else {
-                        unknown_command(c.cmd)
-                    }
-                },
-            },
-            Command {
-                names: &["abilities", "abi"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "open the Abilities menu; retail has no command for it, /jobability uses one",
-                handler: |c| {
-                    if c.rest.is_empty() {
-                        SlashOutcome::OpenMenu(MenuKind::Abilities)
-                    } else {
-                        unknown_command(c.cmd)
-                    }
-                },
-            },
-            Command {
-                names: &["items"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "open the Items menu; retail has no command for it, /item uses one",
-                handler: |c| {
-                    if c.rest.is_empty() {
-                        SlashOutcome::OpenMenu(MenuKind::Items)
-                    } else {
-                        unknown_command(c.cmd)
-                    }
-                },
-            },
-            Command {
                 names: &["equip"],
                 set: CommandSet::Retail,
                 usage: "[slot item]",
@@ -519,14 +390,14 @@ const COMMANDS: &[(&str, &[Command])] = &[
             },
             Command {
                 names: &["cancel"],
-                set: CommandSet::Core,
+                set: CommandSet::Agent,
                 usage: "",
                 summary: "cancel current reactor goal / action",
                 handler: |_| SlashOutcome::Command(AgentCommand::Cancel),
             },
             Command {
                 names: &["raw"],
-                set: CommandSet::Dev,
+                set: CommandSet::Agent,
                 usage: "<attack|attackoff> [name]",
                 summary: "low-level Action packet (bypasses reactor)",
 
@@ -579,13 +450,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
         &[
             Command {
                 names: &["emote"],
-                set: CommandSet::Core,
-                usage: "<name> [motion|text]",
-                summary: "emote by name; every emote is also its own retail command (/wave, /bow, /dance1)",
-                handler: |c| parse_named_emote_args(c.rest, c),
-            },
-            Command {
-                names: &["emote"],
                 set: CommandSet::Retail,
                 usage: "<text>",
                 summary: "free-form custom emote text (zone chat channel 8)",
@@ -628,13 +492,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_sit(c.rest),
             },
             Command {
-                names: &["stand"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "stand (clear any rest stance)",
-                handler: |_| SlashOutcome::SetSitStance(SitToggle::Off),
-            },
-            Command {
                 names: &["heal"],
                 set: CommandSet::Retail,
                 usage: "[on|off]",
@@ -643,36 +500,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_heal(c.rest),
             },
             Command {
-                names: &["raisemenu"],
-                set: CommandSet::Core,
-                usage: "<option>",
-                summary: "respond to raise dialog",
-                handler: |c| parse_raise_menu(c.rest),
-            },
-            Command {
-                names: &["tractormenu"],
-                set: CommandSet::Core,
-                usage: "<option>",
-                summary: "respond to tractor dialog",
-                handler: |c| parse_tractor_menu(c.rest),
-            },
-            Command {
-                names: &["homepointmenu"],
-                set: CommandSet::Core,
-                usage: "<option>",
-                summary: "respond to homepoint dialog",
-                handler: |c| parse_homepoint_menu(c.rest),
-            },
-            Command {
-                names: &["jobchange", "jc"],
-                set: CommandSet::Core,
-                usage: "[<main> [sub]]",
-                summary: "no args: open the Mog Menu; with jobs: change main/sub (names, WAR/MNK codes, or ids)",
-                handler: |c| parse_jobchange(c.rest, c.myroom.is_some()),
-            },
-            Command {
                 names: &["endevent", "endevt", "clearevent", "clearevt"],
-                set: CommandSet::Core,
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "flush pending NPC events (unblock /logout)",
 
@@ -680,38 +509,11 @@ const COMMANDS: &[(&str, &[Command])] = &[
             },
             Command {
                 names: &["endcutscene", "endcs", "skipcutscene", "skipcs"],
-                set: CommandSet::Core,
+                set: CommandSet::Dev,
                 usage: "[csid]",
                 summary: "end a forced cutscene (new-char intro, etc.)",
 
                 handler: |c| parse_endcutscene(c.rest),
-            },
-            Command {
-                names: &["release", "unwedge"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "server-side !release: forcibly end any pinned event (gmlevel>=1)",
-
-                handler: |_| {
-                    SlashOutcome::Command(AgentCommand::Chat {
-                        kind: 0,
-                        text: "!release".into(),
-                    })
-                },
-            },
-            Command {
-                names: &["buy"],
-                set: CommandSet::Core,
-                usage: "<row> [qty]",
-                summary: "buy from open shop by row index",
-                handler: |c| parse_buy(c.rest),
-            },
-            Command {
-                names: &["sell"],
-                set: CommandSet::Core,
-                usage: "<slot> [qty] | confirm",
-                summary: "sell to open shop from inventory slot",
-                handler: |c| parse_sell(c.rest),
             },
             Command {
                 names: &["bank"],
@@ -719,20 +521,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "<subcommand>",
                 summary: "gil-bank operations",
                 handler: |c| parse_bank(c.rest),
-            },
-            Command {
-                names: &["lot"],
-                set: CommandSet::Core,
-                usage: "<pool slot>",
-                summary: "cast lots on a treasure pool item",
-                handler: |c| parse_treasure(c.rest, false),
-            },
-            Command {
-                names: &["pass"],
-                set: CommandSet::Core,
-                usage: "<pool slot>",
-                summary: "pass on a treasure pool item",
-                handler: |c| parse_treasure(c.rest, true),
             },
             Command {
                 names: &["minimap", "mm"],
@@ -773,11 +561,18 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_clock(c.rest),
             },
             Command {
-                names: &["sound", "audio", "mute"],
-                set: CommandSet::Core,
-                usage: "[on|off|toggle|status] [bgm|sfx]",
-                summary: "bare //sound toggles all audio; survives logout",
-                handler: |c| parse_sound(c.rest),
+                names: &["mutebgm"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "mute background music; survives logout",
+                handler: |c| parse_mute(c.rest, SoundOp::SetBgm),
+            },
+            Command {
+                names: &["mutese"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "mute sound effects; survives logout",
+                handler: |c| parse_mute(c.rest, SoundOp::SetSfx),
             },
         ],
     ),
@@ -796,42 +591,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     Some(msg) => SlashOutcome::SystemMessage(msg.to_string()),
                     None => SlashOutcome::Command(AgentCommand::Fish),
                 },
-            },
-            Command {
-                names: &["hook"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "set the hook once a fish bites",
-                handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: kuluu_session::state::FishingInput::Hook,
-                }),
-            },
-            Command {
-                names: &["reelleft", "rl"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "react to a left fishing arrow",
-                handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: kuluu_session::state::FishingInput::Left,
-                }),
-            },
-            Command {
-                names: &["reelright", "rr"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "react to a right fishing arrow",
-                handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: kuluu_session::state::FishingInput::Right,
-                }),
-            },
-            Command {
-                names: &["reelstop", "fishcancel"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "abandon the cast / mini-game",
-                handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: kuluu_session::state::FishingInput::Cancel,
-                }),
             },
         ],
     ),
@@ -852,22 +611,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "[on|off]",
                 summary: "request shutdown (LeaveGame, then close)",
                 handler: |c| parse_reqlogout(c.rest,  true),
-            },
-            Command {
-                names: &["exit"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "polite logout + close window",
-
-                handler: |_| SlashOutcome::QuitWithLogout(ReqLogoutKind::LogoutOn),
-            },
-            Command {
-                names: &["disconnect", "quit"],
-                set: CommandSet::Core,
-                usage: "",
-                summary: "drop the connection immediately",
-
-                handler: |_| SlashOutcome::Quit,
             },
         ],
     ),
@@ -897,17 +640,10 @@ const COMMANDS: &[(&str, &[Command])] = &[
             },
             Command {
                 names: &["zonechange", "rzc"],
-                set: CommandSet::Dev,
+                set: CommandSet::Agent,
                 usage: "<id>",
                 summary: "request zone change (debug)",
                 handler: |c| parse_zone_change(c.rest),
-            },
-            Command {
-                names: &["mhexit"],
-                set: CommandSet::Core,
-                usage: "[home|1f|2f|garden|<region> [slot]]",
-                summary: "leave the current Mog House (sends 0x05E zmrq; the Exit door offers the same Where to? menu)",
-                handler: |c| parse_mhexit(c.rest, c.zone_id),
             },
             Command {
                 names: &["agent"],
@@ -1129,36 +865,12 @@ fn render_help(surface: &CommandSurface) -> String {
 #[derive(Debug, Clone)]
 pub enum SlashOutcome {
     Command(AgentCommand),
-
-    /// A command that still goes out, prefaced by an advisory chat line
-    /// (warn-don't-block, e.g. /jobchange outside a Mog House).
-    CommandWithNotice {
-        cmd: AgentCommand,
-        notice: String,
-    },
-
     Commands(Vec<AgentCommand>),
 
     SetTarget(Option<u32>),
 
     Quit,
-
-    QuitWithLogout(ReqLogoutKind),
-
     SystemMessage(String),
-
-    ShopBuyRow {
-        shop_index: u8,
-        qty: u32,
-    },
-
-    ShopSellSlot {
-        inv_slot: u8,
-        qty: u32,
-    },
-
-    ShopSellConfirm,
-
     PlayBgm {
         track_id: u16,
     },
@@ -1333,10 +1045,6 @@ pub enum OverlayOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoundOp {
-    Status,
-
-    SetBoth(Option<bool>),
-
     SetBgm(Option<bool>),
 
     SetSfx(Option<bool>),
@@ -1378,7 +1086,6 @@ pub fn parse_slash(
     zone_id: Option<u16>,
     self_char_id: Option<u32>,
     party: &[kuluu_snapshot::PartyMember],
-    myroom: Option<kuluu_snapshot::MyRoom>,
     fishing: kuluu_render::fishing_spot::FishingGate,
 ) -> SlashOutcome {
     let Some(typed) = command_surface::classify(buffer) else {
@@ -1403,7 +1110,6 @@ pub fn parse_slash(
         zone_id,
         self_char_id,
         party,
-        myroom,
         fishing,
     };
 
@@ -1519,17 +1225,6 @@ fn canned_emote(surface: &CommandSurface, word: &str, ctx: &SlashCtx) -> Option<
         .find_map(|name| parse_canned_emote(name, ctx.rest, ctx))
 }
 
-fn parse_named_emote_args(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
-    let mut parts = rest.split_whitespace();
-    let Some(name) = parts.next() else {
-        return SlashOutcome::SystemMessage("/emote: usage `/emote <name> [motion|text]`".into());
-    };
-    match parse_canned_emote(name, parts.next().unwrap_or(""), ctx) {
-        Some(outcome) => outcome,
-        None => SlashOutcome::SystemMessage(format!("/emote: unknown emote `{name}`")),
-    }
-}
-
 fn parse_jobemote(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
     use ffxi_proto::map::emote;
     let mut parts = rest.split_whitespace();
@@ -1639,73 +1334,6 @@ fn chat_or_empty(rest: &str, kind: u8, label: &str) -> SlashOutcome {
             text: rest.to_string(),
         })
     }
-}
-
-fn parse_buy(rest: &str) -> SlashOutcome {
-    let mut parts = rest.split_whitespace();
-    let row_str = parts.next().unwrap_or("");
-    if row_str.is_empty() {
-        return SlashOutcome::SystemMessage("/buy: usage `/buy <row> [qty]`".into());
-    }
-    let shop_index: u8 = match row_str.parse() {
-        Ok(n) => n,
-        Err(_) => return SlashOutcome::SystemMessage(format!("/buy: bad row `{row_str}`")),
-    };
-    let qty: u32 = match parts.next() {
-        Some(q) => match q.parse() {
-            Ok(n) if n >= 1 => n,
-            _ => return SlashOutcome::SystemMessage(format!("/buy: bad qty `{q}`")),
-        },
-        None => 1,
-    };
-    SlashOutcome::ShopBuyRow { shop_index, qty }
-}
-
-/// `/lot <slot>` and `/pass <slot>`, where slot is the `TrophyItemIndex` the
-/// pool panel shows. The server ignores a repeat on a slot this character
-/// already acted on, so no client-side gate is needed.
-fn parse_treasure(rest: &str, pass: bool) -> SlashOutcome {
-    let label = if pass { "/pass" } else { "/lot" };
-    let arg = rest.split_whitespace().next().unwrap_or("");
-    let slot: u8 = match arg.parse() {
-        Ok(n) if (n as usize) < ffxi_proto::decode::TREASURE_POOL_SIZE => n,
-        _ => {
-            return SlashOutcome::SystemMessage(format!(
-                "{label}: usage `{label} <slot 0-{}>`",
-                ffxi_proto::decode::TREASURE_POOL_SIZE - 1
-            ))
-        }
-    };
-    SlashOutcome::Command(if pass {
-        AgentCommand::TreasurePass { slot }
-    } else {
-        AgentCommand::TreasureLot { slot }
-    })
-}
-
-fn parse_sell(rest: &str) -> SlashOutcome {
-    let mut parts = rest.split_whitespace();
-    let slot_str = parts.next().unwrap_or("");
-    if slot_str.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/sell: usage `/sell <slot> [qty]` or `/sell confirm`".into(),
-        );
-    }
-    if slot_str.eq_ignore_ascii_case("confirm") {
-        return SlashOutcome::ShopSellConfirm;
-    }
-    let inv_slot: u8 = match slot_str.parse() {
-        Ok(n) => n,
-        Err(_) => return SlashOutcome::SystemMessage(format!("/sell: bad slot `{slot_str}`")),
-    };
-    let qty: u32 = match parts.next() {
-        Some(q) => match q.parse() {
-            Ok(n) if n >= 1 => n,
-            _ => return SlashOutcome::SystemMessage(format!("/sell: bad qty `{q}`")),
-        },
-        None => 1,
-    };
-    SlashOutcome::ShopSellSlot { inv_slot, qty }
 }
 
 fn parse_reqlogout(rest: &str, shutdown: bool) -> SlashOutcome {
@@ -2141,59 +1769,6 @@ fn parse_use_item(
     })
 }
 
-fn parse_raise_menu(rest: &str) -> SlashOutcome {
-    match rest.trim().to_ascii_lowercase().as_str() {
-        "accept" | "yes" | "y" => SlashOutcome::Command(AgentCommand::Action {
-            target_id: 0,
-            target_index: 0,
-            kind: ActionKind::RaiseMenu { accept: true },
-        }),
-        "decline" | "no" | "n" => SlashOutcome::Command(AgentCommand::Action {
-            target_id: 0,
-            target_index: 0,
-            kind: ActionKind::RaiseMenu { accept: false },
-        }),
-        "" => SlashOutcome::SystemMessage("/raisemenu: usage `/raisemenu accept|decline`".into()),
-        other => SlashOutcome::SystemMessage(format!("/raisemenu: bad choice `{other}`")),
-    }
-}
-
-fn parse_tractor_menu(rest: &str) -> SlashOutcome {
-    match rest.trim().to_ascii_lowercase().as_str() {
-        "accept" | "yes" | "y" => SlashOutcome::Command(AgentCommand::Action {
-            target_id: 0,
-            target_index: 0,
-            kind: ActionKind::TractorMenu { accept: true },
-        }),
-        "decline" | "no" | "n" => SlashOutcome::Command(AgentCommand::Action {
-            target_id: 0,
-            target_index: 0,
-            kind: ActionKind::TractorMenu { accept: false },
-        }),
-        "" => {
-            SlashOutcome::SystemMessage("/tractormenu: usage `/tractormenu accept|decline`".into())
-        }
-        other => SlashOutcome::SystemMessage(format!("/tractormenu: bad choice `{other}`")),
-    }
-}
-
-fn parse_homepoint_menu(rest: &str) -> SlashOutcome {
-    let trimmed = rest.trim();
-    if trimmed.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/homepointmenu: usage `/homepointmenu <status_id>` (0=accept,1=cancel,2=retry)".into(),
-        );
-    }
-    match trimmed.parse::<u32>() {
-        Ok(status_id) => SlashOutcome::Command(AgentCommand::Action {
-            target_id: 0,
-            target_index: 0,
-            kind: ActionKind::HomepointMenu { status_id },
-        }),
-        Err(_) => SlashOutcome::SystemMessage(format!("/homepointmenu: bad status_id `{trimmed}`")),
-    }
-}
-
 fn parse_bank(rest: &str) -> SlashOutcome {
     let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
     if parts.len() != 2 {
@@ -2299,120 +1874,6 @@ fn parse_zone_change(rest: &str) -> SlashOutcome {
     }
 }
 
-fn parse_mhexit(rest: &str, zone_id: Option<u16>) -> SlashOutcome {
-    let trimmed = rest.trim().to_ascii_lowercase();
-    let mut parts = trimmed.split_whitespace();
-    let first = parts.next();
-    let slot: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-
-    let kind = match first {
-        None | Some("home") | Some("") => kuluu_session::state::MogHouseExit::Home {
-            exit_bit: zone_id.and_then(home_region_bit_for_zone).unwrap_or(0),
-        },
-        Some("1f") | Some("mog1f") => kuluu_session::state::MogHouseExit::Mog1F,
-        Some("2f") | Some("mog2f") => kuluu_session::state::MogHouseExit::Mog2F,
-        Some("garden") | Some("moggarden") => kuluu_session::state::MogHouseExit::MogGarden,
-        Some("sandoria") | Some("sandy") => kuluu_session::state::MogHouseExit::Sandoria { slot },
-        Some("bastok") => kuluu_session::state::MogHouseExit::Bastok { slot },
-        Some("windurst") | Some("windy") => kuluu_session::state::MogHouseExit::Windurst { slot },
-        Some("jeuno") => kuluu_session::state::MogHouseExit::Jeuno { slot },
-        Some("whitegate") | Some("aht_urhgan") => {
-            kuluu_session::state::MogHouseExit::Whitegate { slot }
-        }
-        Some("adoulin") => kuluu_session::state::MogHouseExit::Adoulin { slot },
-        Some("auto") => match zone_id.and_then(home_region_bit_for_zone) {
-            Some(bit) => kuluu_session::state::MogHouseExit::from_bit_slot(bit, 1),
-            None => {
-                return SlashOutcome::SystemMessage(format!(
-                    "/mhexit auto: zone {} isn't in the home-region table — \
-                         use `/mhexit home` or pass a region name explicitly",
-                    zone_id.map_or("unknown".into(), |z| z.to_string()),
-                ));
-            }
-        },
-        Some(other) => {
-            return SlashOutcome::SystemMessage(format!(
-                "/mhexit: unknown form `{other}` — try home|1f|2f|garden|\
-                 sandoria|bastok|windurst|jeuno|whitegate|adoulin|auto"
-            ));
-        }
-    };
-    SlashOutcome::Command(AgentCommand::MogHouseExit { kind })
-}
-
-// Job tokens accept the LSB-scraped full name ("Warrior"), the canonical
-// three-letter code ("WAR"), or the numeric JOBTYPE id — all case-insensitive.
-fn parse_job_token(token: &str) -> Option<u8> {
-    if let Ok(id) = token.parse::<u16>() {
-        return (id > 0 && ffxi_vocab::job_names::lookup(id).is_some()).then_some(id as u8);
-    }
-    ffxi_vocab::job_names::JOB_ABBREVS
-        .iter()
-        .chain(ffxi_vocab::job_names::JOB_NAMES.iter())
-        .find(|(id, name)| *id > 0 && name.eq_ignore_ascii_case(token))
-        .map(|(id, _)| *id as u8)
-}
-
-fn parse_jobchange(rest: &str, in_mog_house: bool) -> SlashOutcome {
-    let trimmed = rest.trim();
-    if trimmed.is_empty() {
-        return SlashOutcome::Command(AgentCommand::OpenMogMenu);
-    }
-
-    let mut parts = trimmed.split_whitespace();
-    let main_token = parts.next().unwrap_or("");
-    let sub_token = parts.next();
-    if parts.next().is_some() {
-        return SlashOutcome::SystemMessage(
-            "/jobchange: usage `/jobchange [<main> [sub]]` (e.g. `/jc war mnk`)".into(),
-        );
-    }
-
-    let Some(main_job) = parse_job_token(main_token) else {
-        return SlashOutcome::SystemMessage(format!(
-            "/jobchange: unknown job `{main_token}` (use a name or code like WAR, MNK, WHM)"
-        ));
-    };
-    let sub_job = match sub_token {
-        Some(token) => match parse_job_token(token) {
-            Some(job) => Some(job),
-            None => {
-                return SlashOutcome::SystemMessage(format!(
-                    "/jobchange: unknown support job `{token}` (use a name or code like WAR, MNK, WHM)"
-                ));
-            }
-        },
-        None => None,
-    };
-
-    let cmd = AgentCommand::ChangeJob {
-        main_job: Some(main_job),
-        sub_job,
-    };
-    if in_mog_house {
-        SlashOutcome::Command(cmd)
-    } else {
-        SlashOutcome::CommandWithNotice {
-            cmd,
-            notice:
-                "/jobchange: you don't appear to be in a Mog House — the server may reject this"
-                    .into(),
-        }
-    }
-}
-
-fn home_region_bit_for_zone(zone_id: u16) -> Option<u8> {
-    match zone_id {
-        230..=233 => Some(1),
-        234..=237 => Some(2),
-        238..=242 => Some(3),
-        243..=246 => Some(4),
-        48 | 50 => Some(5),
-        256 | 257 => Some(9),
-        _ => None,
-    }
-}
-
 fn resolve_target_args(
     parts: &[&str],
     entities: &[WireEntity],
@@ -2458,44 +1919,6 @@ fn parse_zones(zone_id: Option<u16>) -> SlashOutcome {
         ));
     }
     SlashOutcome::SystemMessage(msg)
-}
-
-fn parse_zoneto(rest: &str, zone_id: Option<u16>) -> SlashOutcome {
-    let needle = rest.trim();
-    if needle.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/zoneto: usage `/zoneto <zone_name|id>`; try `/zones` to list".into(),
-        );
-    }
-    let Some(z) = zone_id else {
-        return SlashOutcome::SystemMessage("/zoneto: not in a zone yet".into());
-    };
-    let lines = kuluu_nav::zone_lines_for(z);
-    if lines.is_empty() {
-        return SlashOutcome::SystemMessage(format!("/zoneto: no zone-lines from zone {z}"));
-    }
-
-    let by_id = needle.parse::<u16>().ok().filter(|n| *n <= MAX_ZONE_ID);
-    let needle_lower = needle.to_ascii_lowercase();
-    let chosen = lines.iter().find(|line| {
-        if Some(line.to_zone) == by_id {
-            return true;
-        }
-        kuluu_nav::zone_name(line.to_zone)
-            .map(|n| n.to_ascii_lowercase().starts_with(&needle_lower))
-            .unwrap_or(false)
-    });
-    match chosen {
-        Some(line) => SlashOutcome::Command(AgentCommand::PathTo {
-            x: line.from_pos[0],
-            y: line.from_pos[1],
-            z: line.from_pos[2],
-            force: false,
-        }),
-        None => SlashOutcome::SystemMessage(format!(
-            "/zoneto: no zone-line matches `{needle}` (try `/zones` to list)"
-        )),
-    }
 }
 
 fn parse_debug(
@@ -2696,47 +2119,18 @@ fn nearby_entities(
     scored
 }
 
-fn parse_sound(rest: &str) -> SlashOutcome {
-    let tokens: Vec<String> = rest
-        .split_whitespace()
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
-    if tokens.is_empty() {
-        return SlashOutcome::SetSound(SoundOp::SetBoth(None));
-    }
-
-    let mut verb: Option<Option<bool>> = None;
-    let mut category: Option<&str> = None;
-    for tok in &tokens {
-        match tok.as_str() {
-            "on" | "unmute" | "true" | "1" => {
-                verb = Some(Some(false));
-            }
-            "off" | "mute" | "false" | "0" => {
-                verb = Some(Some(true));
-            }
-            "toggle" | "flip" => {
-                verb = Some(None);
-            }
-            "bgm" | "music" => category = Some("bgm"),
-            "sfx" | "se" | "fx" | "effects" => category = Some("sfx"),
-            "status" | "?" => return SlashOutcome::SetSound(SoundOp::Status),
-            other => {
-                return SlashOutcome::SystemMessage(format!(
-                    "/sound: bad arg `{other}` \
-                     (use on|off|toggle and/or bgm|sfx)"
-                ));
-            }
+/// `/mutebgm` / `/mutese`. Bare toggles, matching the switch the Config menu
+/// shows; `on` is muted, the state the command is named for.
+fn parse_mute(rest: &str, op: fn(Option<bool>) -> SoundOp) -> SlashOutcome {
+    let muted = match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => None,
+        "on" | "mute" | "1" => Some(true),
+        "off" | "unmute" | "0" => Some(false),
+        other => {
+            return SlashOutcome::SystemMessage(format!("bad arg `{other}` (use on|off)"));
         }
-    }
-
-    let verb = verb.unwrap_or_default();
-    let op = match category {
-        Some("bgm") => SoundOp::SetBgm(verb),
-        Some("sfx") => SoundOp::SetSfx(verb),
-        _ => SoundOp::SetBoth(verb),
     };
-    SlashOutcome::SetSound(op)
+    SlashOutcome::SetSound(op(muted))
 }
 
 fn parse_weather(rest: &str) -> SlashOutcome {
@@ -3463,22 +2857,6 @@ fn cycle_kind_filtered(
     }
 }
 
-fn resolve_party_slot(
-    slot_1based: u8,
-    self_char_id: Option<u32>,
-    party: &[kuluu_snapshot::PartyMember],
-) -> Option<u32> {
-    if slot_1based == 0 {
-        return None;
-    }
-    let idx = (slot_1based as usize).saturating_sub(1);
-    if idx == 0 {
-        self_char_id
-    } else {
-        party.get(idx).map(|p| p.id)
-    }
-}
-
 fn sq_dist(a: WireVec3, b: WireVec3) -> f32 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
@@ -3630,33 +3008,9 @@ mod tests {
             zone_id,
             None,
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         )
     }
-
-    fn party_member(id: u32, name: &str) -> kuluu_snapshot::PartyMember {
-        kuluu_snapshot::PartyMember {
-            id,
-            act_index: id as u16,
-            name: Some(name.into()),
-            hp: 0,
-            mp: 0,
-            tp: 0,
-            hp_pct: 100,
-            mp_pct: 100,
-            zone_no: 0,
-            main_job: 0,
-            main_job_lv: 0,
-            sub_job: 0,
-            sub_job_lv: 0,
-            is_party_leader: false,
-            is_alliance_leader: false,
-            in_mog_house: false,
-            party_no: 0,
-        }
-    }
-
     #[test]
     fn targetnpc_cycles_non_pc_forward() {
         let entities = vec![
@@ -3694,7 +3048,6 @@ mod tests {
             None,
             Some(42),
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         );
         assert!(matches!(
@@ -3706,26 +3059,6 @@ mod tests {
             })
         ));
     }
-
-    #[test]
-    fn targetnpc2_cycles_reverse() {
-        let entities = vec![
-            ent(1, "Goblin A", EntityKind::Mob, 3.0, 0.0),
-            ent(2, "Vendor", EntityKind::Npc, 5.0, 0.0),
-            ent(3, "Goblin B", EntityKind::Mob, 7.0, 0.0),
-        ];
-
-        assert!(matches!(
-            parse_slash_t("//targetnpc2", &entities, origin(), Some(2), None),
-            SlashOutcome::SetTarget(Some(1))
-        ));
-
-        assert!(matches!(
-            parse_slash_t("//targetnpc2", &entities, origin(), Some(1), None),
-            SlashOutcome::SetTarget(Some(3))
-        ));
-    }
-
     #[test]
     fn targetenemy_skips_npcs() {
         let entities = vec![
@@ -3737,64 +3070,6 @@ mod tests {
             SlashOutcome::SetTarget(Some(2))
         ));
     }
-
-    #[test]
-    fn targetparty_resolves_self_and_slots() {
-        let party = vec![
-            party_member(100, "Self"),
-            party_member(200, "Member2"),
-            party_member(300, "Member3"),
-        ];
-
-        assert!(matches!(
-            parse_slash(
-                "//targetparty1",
-                &test_surface(),
-                &[],
-                origin(),
-                None,
-                None,
-                Some(100),
-                &party,
-                None,
-                kuluu_render::fishing_spot::FishingGate::Ready,
-            ),
-            SlashOutcome::SetTarget(Some(100))
-        ));
-
-        assert!(matches!(
-            parse_slash(
-                "//targetparty3",
-                &test_surface(),
-                &[],
-                origin(),
-                None,
-                None,
-                Some(100),
-                &party,
-                None,
-                kuluu_render::fishing_spot::FishingGate::Ready,
-            ),
-            SlashOutcome::SetTarget(Some(300))
-        ));
-
-        assert!(matches!(
-            parse_slash(
-                "//targetparty5",
-                &test_surface(),
-                &[],
-                origin(),
-                None,
-                None,
-                Some(100),
-                &party,
-                None,
-                kuluu_render::fishing_spot::FishingGate::Ready,
-            ),
-            SlashOutcome::SystemMessage(_)
-        ));
-    }
-
     #[test]
     fn sq_dist_is_3d_euclidean() {
         let a = WireVec3 {
@@ -4006,17 +3281,6 @@ mod tests {
         let out = parse_slash_t("/target", &empty_entities(), origin(), Some(7), None);
         assert!(matches!(out, SlashOutcome::SetTarget(None)));
     }
-
-    #[test]
-    fn quit_aliases() {
-        for s in ["//quit", "//disconnect"] {
-            assert!(matches!(
-                parse_slash_t(s, &empty_entities(), origin(), None, None),
-                SlashOutcome::Quit
-            ));
-        }
-    }
-
     #[test]
     fn logout_no_arg_toggles_and_chains_heal_on() {
         match parse_slash_t("/logout", &empty_entities(), origin(), None, None) {
@@ -4105,17 +3369,6 @@ mod tests {
             other => panic!("expected single Command(ReqLogout(ShutdownOff)), got {other:?}"),
         }
     }
-
-    #[test]
-    fn exit_emits_quit_with_logout_on() {
-        match parse_slash_t("//exit", &empty_entities(), origin(), None, None) {
-            SlashOutcome::QuitWithLogout(kind) => {
-                assert_eq!(kind, ReqLogoutKind::LogoutOn);
-            }
-            other => panic!("expected QuitWithLogout(LogoutOn), got {other:?}"),
-        }
-    }
-
     #[test]
     fn logout_rejects_unknown_arg() {
         for s in ["/logout please", "/logout 1", "/shutdown maybe"] {
@@ -4146,24 +3399,6 @@ mod tests {
         ));
         assert_eq!(id, 3);
     }
-
-    #[test]
-    fn sit_on_off_and_stand() {
-        match parse_slash_t("/sit on", &empty_entities(), origin(), None, None) {
-            SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::On),
-            other => panic!("expected SetSitStance(On), got {other:?}"),
-        }
-        match parse_slash_t("/sit off", &empty_entities(), origin(), None, None) {
-            SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::Off),
-            other => panic!("expected SetSitStance(Off), got {other:?}"),
-        }
-
-        match parse_slash_t("//stand", &empty_entities(), origin(), None, None) {
-            SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::Off),
-            other => panic!("expected SetSitStance(Off), got {other:?}"),
-        }
-    }
-
     #[test]
     fn sit_rejects_unknown_arg() {
         match parse_slash_t("/sit bogus", &empty_entities(), origin(), None, None) {
@@ -4680,85 +3915,6 @@ mod tests {
         let out = parse_slash_t("/check", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::SystemMessage(_)));
     }
-
-    #[test]
-    fn buy_with_row_uses_qty_one_by_default() {
-        let out = parse_slash_t("//buy 3", &empty_entities(), origin(), None, None);
-        match out {
-            SlashOutcome::ShopBuyRow { shop_index, qty } => {
-                assert_eq!(shop_index, 3);
-                assert_eq!(qty, 1);
-            }
-            other => panic!("expected ShopBuyRow, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn buy_with_qty_passes_it_through() {
-        let out = parse_slash_t("//buy 0 12", &empty_entities(), origin(), None, None);
-        match out {
-            SlashOutcome::ShopBuyRow { shop_index, qty } => {
-                assert_eq!(shop_index, 0);
-                assert_eq!(qty, 12);
-            }
-            other => panic!("expected ShopBuyRow, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sell_with_slot_uses_qty_one_by_default() {
-        let out = parse_slash_t("//sell 5", &empty_entities(), origin(), None, None);
-        match out {
-            SlashOutcome::ShopSellSlot { inv_slot, qty } => {
-                assert_eq!(inv_slot, 5);
-                assert_eq!(qty, 1);
-            }
-            other => panic!("expected ShopSellSlot, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sell_with_qty_passes_it_through() {
-        let out = parse_slash_t("//sell 2 12", &empty_entities(), origin(), None, None);
-        match out {
-            SlashOutcome::ShopSellSlot { inv_slot, qty } => {
-                assert_eq!(inv_slot, 2);
-                assert_eq!(qty, 12);
-            }
-            other => panic!("expected ShopSellSlot, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sell_confirm_maps_to_confirm_outcome() {
-        let out = parse_slash_t("//sell confirm", &empty_entities(), origin(), None, None);
-        assert!(matches!(out, SlashOutcome::ShopSellConfirm));
-    }
-
-    #[test]
-    fn sell_rejects_zero_qty_and_bad_input() {
-        for bad in ["//sell", "//sell x", "//sell 1 0", "//sell 1 x"] {
-            let out = parse_slash_t(bad, &empty_entities(), origin(), None, None);
-            assert!(
-                matches!(out, SlashOutcome::SystemMessage(_)),
-                "`{bad}` should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn buy_rejects_zero_qty_and_bad_input() {
-        for s in ["//buy", "//buy abc", "//buy 1 0", "//buy 1 xyz"] {
-            assert!(
-                matches!(
-                    parse_slash_t(s, &empty_entities(), origin(), None, None),
-                    SlashOutcome::SystemMessage(_)
-                ),
-                "expected SystemMessage for {s}"
-            );
-        }
-    }
-
     #[test]
     fn engage_dispatches_reactor_goal() {
         let entities = vec![ent(99, "Bee", EntityKind::Mob, 1.0, 0.0)];
@@ -4778,15 +3934,6 @@ mod tests {
             SlashOutcome::Command(AgentCommand::Engage { target_id: 99 })
         ));
     }
-
-    #[test]
-    fn disengage_dispatches_cancel() {
-        assert!(matches!(
-            parse_slash_t("//disengage", &empty_entities(), origin(), None, None),
-            SlashOutcome::Command(AgentCommand::Cancel)
-        ));
-    }
-
     #[test]
     fn raw_attack_preserves_direct_action() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
@@ -4958,20 +4105,6 @@ mod tests {
             other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
-
-    #[test]
-    fn release_aliases_emit_bang_release_chat() {
-        for input in ["//release", "//unwedge"] {
-            match parse_slash_t(input, &empty_entities(), origin(), None, None) {
-                SlashOutcome::Command(AgentCommand::Chat { kind, text }) => {
-                    assert_eq!(kind, 0, "input {input:?}: expected Say (kind=0)");
-                    assert_eq!(text, "!release", "input {input:?}: unexpected text");
-                }
-                other => panic!("input {input:?}: expected Chat(!release), got {other:?}"),
-            }
-        }
-    }
-
     #[test]
     fn endcutscene_aliases_all_work() {
         for input in ["//endcutscene", "//endcs", "//skipcutscene", "//skipcs"] {
@@ -4981,44 +4114,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn raisemenu_accept_and_decline() {
-        for (input, expected) in &[("//raisemenu accept", true), ("//raisemenu decline", false)] {
-            match parse_slash_t(input, &empty_entities(), origin(), None, None) {
-                SlashOutcome::Command(AgentCommand::Action {
-                    kind: ActionKind::RaiseMenu { accept },
-                    ..
-                }) => assert_eq!(accept, *expected, "input: {input}"),
-                other => panic!("expected RaiseMenu, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn tractormenu_accept_and_decline() {
-        for (input, expected) in &[("//tractormenu y", true), ("//tractormenu n", false)] {
-            match parse_slash_t(input, &empty_entities(), origin(), None, None) {
-                SlashOutcome::Command(AgentCommand::Action {
-                    kind: ActionKind::TractorMenu { accept },
-                    ..
-                }) => assert_eq!(accept, *expected, "input: {input}"),
-                other => panic!("expected TractorMenu, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn homepointmenu_parses_status_id() {
-        match parse_slash_t("//homepointmenu 0", &empty_entities(), origin(), None, None) {
-            SlashOutcome::Command(AgentCommand::Action {
-                kind: ActionKind::HomepointMenu { status_id },
-                ..
-            }) => assert_eq!(status_id, 0),
-            other => panic!("expected HomepointMenu, got {other:?}"),
-        }
-    }
-
     #[test]
     fn snapshot_is_direct() {
         assert!(matches!(
@@ -5057,180 +4152,6 @@ mod tests {
             other => panic!("expected RequestZoneChange, got {other:?}"),
         }
     }
-
-    #[test]
-    fn mhexit_defaults_to_home() {
-        match parse_slash_t("//mhexit", &empty_entities(), origin(), None, None) {
-            SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
-                assert!(matches!(
-                    kind,
-                    kuluu_session::state::MogHouseExit::Home { exit_bit: 0 }
-                ));
-                assert_eq!(kind.wire_pair(), (0, 0));
-            }
-            other => panic!("expected MogHouseExit::Home, got {other:?}"),
-        }
-
-        // With a known city zone, Home echoes the zone-derived bit like retail
-        // (research/XiPackets/world/client/0x005E).
-        match parse_slash_t(
-            "//mhexit home",
-            &empty_entities(),
-            origin(),
-            None,
-            Some(235),
-        ) {
-            SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
-                assert_eq!(kind.wire_pair(), (2, 0));
-            }
-            other => panic!("expected MogHouseExit::Home, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mhexit_region_with_slot() {
-        match parse_slash_t("//mhexit bastok 2", &empty_entities(), origin(), None, None) {
-            SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
-                assert!(matches!(
-                    kind,
-                    kuluu_session::state::MogHouseExit::Bastok { slot: 2 }
-                ));
-                assert_eq!(kind.wire_pair(), (2, 2));
-            }
-            other => panic!("expected MogHouseExit::Bastok, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mhexit_special_modes() {
-        for (input, expected_mode) in &[
-            ("//mhexit 1f", 126u8),
-            ("//mhexit 2f", 125),
-            ("//mhexit garden", 127),
-        ] {
-            match parse_slash_t(input, &empty_entities(), origin(), None, None) {
-                SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
-                    let (_, mode) = kind.wire_pair();
-                    assert_eq!(mode, *expected_mode, "input={input}");
-                }
-                other => panic!("expected MogHouseExit, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn mhexit_auto_resolves_known_zone() {
-        match parse_slash_t(
-            "//mhexit auto",
-            &empty_entities(),
-            origin(),
-            None,
-            Some(230),
-        ) {
-            SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
-                assert!(matches!(
-                    kind,
-                    kuluu_session::state::MogHouseExit::Sandoria { slot: 1 }
-                ));
-                assert_eq!(kind.wire_pair(), (1, 1));
-            }
-            other => panic!("expected MogHouseExit::Sandoria, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mhexit_auto_errors_for_unknown_zone() {
-        match parse_slash_t(
-            "//mhexit auto",
-            &empty_entities(),
-            origin(),
-            None,
-            Some(100),
-        ) {
-            SlashOutcome::SystemMessage(msg) => {
-                assert!(msg.contains("auto"), "got: {msg}");
-            }
-            other => panic!("expected error SystemMessage, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn jobchange_no_args_opens_mog_menu() {
-        match parse_slash_t("//jc", &empty_entities(), origin(), None, None) {
-            SlashOutcome::Command(AgentCommand::OpenMogMenu) => {}
-            other => panic!("expected OpenMogMenu, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn jobchange_outside_mog_house_warns_but_sends() {
-        match parse_slash_t(
-            "//jobchange WAR mnk",
-            &empty_entities(),
-            origin(),
-            None,
-            None,
-        ) {
-            SlashOutcome::CommandWithNotice { cmd, notice } => {
-                assert!(matches!(
-                    cmd,
-                    AgentCommand::ChangeJob {
-                        main_job: Some(1),
-                        sub_job: Some(2)
-                    }
-                ));
-                assert!(notice.contains("Mog House"), "got: {notice}");
-            }
-            other => panic!("expected CommandWithNotice, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn jobchange_in_mog_house_sends_without_notice() {
-        let outcome = parse_slash(
-            "//jc warrior",
-            &test_surface(),
-            &empty_entities(),
-            origin(),
-            None,
-            Some(230),
-            None,
-            &[],
-            Some(kuluu_snapshot::MyRoom {
-                model: 257,
-                sub_map: 0,
-            }),
-            kuluu_render::fishing_spot::FishingGate::Ready,
-        );
-        match outcome {
-            SlashOutcome::Command(AgentCommand::ChangeJob {
-                main_job: Some(1),
-                sub_job: None,
-            }) => {}
-            other => panic!("expected ChangeJob, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn jobchange_accepts_names_codes_and_ids_case_insensitively() {
-        assert_eq!(parse_job_token("WAR"), Some(1));
-        assert_eq!(parse_job_token("war"), Some(1));
-        assert_eq!(parse_job_token("Warrior"), Some(1));
-        assert_eq!(parse_job_token("mnk"), Some(2));
-        assert_eq!(parse_job_token("13"), Some(13));
-        assert_eq!(parse_job_token("0"), None, "0 = keep-current, not a job");
-        assert_eq!(parse_job_token("none"), None);
-        assert_eq!(parse_job_token("moogle"), None);
-    }
-
-    #[test]
-    fn jobchange_unknown_job_is_system_message() {
-        match parse_slash_t("//jc moogle", &empty_entities(), origin(), None, None) {
-            SlashOutcome::SystemMessage(msg) => assert!(msg.contains("moogle"), "got: {msg}"),
-            other => panic!("expected SystemMessage, got {other:?}"),
-        }
-    }
-
     #[test]
     fn agent_pause_resume_status_parse() {
         for (input, expected) in &[
@@ -5254,113 +4175,6 @@ mod tests {
             other => panic!("expected SystemMessage, got {other:?}"),
         }
     }
-
-    #[test]
-    fn every_mcp_tool_has_a_slash_twin() {
-        let entities = vec![ent(42, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        let pos = origin();
-        let cur = Some(42);
-
-        let cases: Vec<(&str, fn(&AgentCommand) -> bool)> = vec![
-            ("/follow Mob", |c| {
-                matches!(c, AgentCommand::Follow { target_id: 42, .. })
-            }),
-            ("/attack", |c| {
-                matches!(c, AgentCommand::Engage { target_id: 42 })
-            }),
-            ("//pathto 1 2 3", |c| {
-                matches!(c, AgentCommand::PathTo { .. })
-            }),
-            ("//cancel", |c| matches!(c, AgentCommand::Cancel)),
-            ("/bank 60 12345", |c| {
-                matches!(
-                    c,
-                    AgentCommand::BankWhenFull {
-                        threshold: 60,
-                        mog_house_zoneline: 12345
-                    }
-                )
-            }),
-            ("/say hello", |c| {
-                matches!(c, AgentCommand::Chat { kind: 0, .. })
-            }),
-            ("/party hello", |c| {
-                matches!(c, AgentCommand::Chat { kind: 4, .. })
-            }),
-            ("/tell Bob hi", |c| matches!(c, AgentCommand::Tell { .. })),
-            ("//zonechange 42", |c| {
-                matches!(c, AgentCommand::RequestZoneChange { line_id: 42 })
-            }),
-            ("//snapshot", |c| matches!(c, AgentCommand::Snapshot)),
-            ("/magic 1", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::CastMagic { .. },
-                        ..
-                    }
-                )
-            }),
-            ("/weaponskill 1", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::Weaponskill { .. },
-                        ..
-                    }
-                )
-            }),
-            ("/jobability 1", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::JobAbility { .. },
-                        ..
-                    }
-                )
-            }),
-            ("/item 0 4", |c| matches!(c, AgentCommand::UseItem { .. })),
-            ("//raisemenu accept", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::RaiseMenu { .. },
-                        ..
-                    }
-                )
-            }),
-            ("//tractormenu accept", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::TractorMenu { .. },
-                        ..
-                    }
-                )
-            }),
-            ("//homepointmenu 0", |c| {
-                matches!(
-                    c,
-                    AgentCommand::Action {
-                        kind: ActionKind::HomepointMenu { .. },
-                        ..
-                    }
-                )
-            }),
-        ];
-        for (slash, pred) in &cases {
-            let out = parse_slash_t(slash, &entities, pos, cur, None);
-            match out {
-                SlashOutcome::Command(ref cmd) => assert!(
-                    pred(cmd),
-                    "slash `{slash}` dispatched the wrong variant: {cmd:?}"
-                ),
-                SlashOutcome::Quit => {}
-                other => panic!("slash `{slash}` did not yield Command: {other:?}"),
-            }
-        }
-    }
-
     #[test]
     fn help_command_returns_multiline_listing() {
         for slash in ["/help", "/?"] {
@@ -5545,7 +4359,6 @@ mod tests {
             None,
             None,
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         );
         assert!(
@@ -5562,7 +4375,6 @@ mod tests {
             None,
             None,
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         );
         assert!(
@@ -5584,7 +4396,6 @@ mod tests {
             None,
             None,
             &[],
-            None,
             kuluu_render::fishing_spot::FishingGate::Ready,
         );
         match out {
@@ -5811,6 +4622,98 @@ mod tests {
     /// Unique per surface. The same word may name a retail command and a Kuluu
     /// one -- `/emote` sends free-form text as retail does, `//emote` plays a
     /// named one -- but never two on the same surface.
+
+    #[test]
+    fn every_agent_command_on_the_chat_surface_reaches_its_handler() {
+        let entities = vec![ent(42, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        let pos = origin();
+        let cur = Some(42);
+
+        let cases: Vec<(&str, fn(&AgentCommand) -> bool)> = vec![
+            ("/follow Mob", |c| {
+                matches!(c, AgentCommand::Follow { target_id: 42, .. })
+            }),
+            ("/attack", |c| {
+                matches!(c, AgentCommand::Engage { target_id: 42 })
+            }),
+            ("//pathto 1 2 3", |c| {
+                matches!(c, AgentCommand::PathTo { .. })
+            }),
+            ("//cancel", |c| matches!(c, AgentCommand::Cancel)),
+            ("/bank 60 12345", |c| {
+                matches!(
+                    c,
+                    AgentCommand::BankWhenFull {
+                        threshold: 60,
+                        mog_house_zoneline: 12345
+                    }
+                )
+            }),
+            ("/say hello", |c| {
+                matches!(c, AgentCommand::Chat { kind: 0, .. })
+            }),
+            ("/party hello", |c| {
+                matches!(c, AgentCommand::Chat { kind: 4, .. })
+            }),
+            ("/tell Bob hi", |c| matches!(c, AgentCommand::Tell { .. })),
+            ("//zonechange 42", |c| {
+                matches!(c, AgentCommand::RequestZoneChange { line_id: 42 })
+            }),
+            ("//snapshot", |c| matches!(c, AgentCommand::Snapshot)),
+            ("/magic 1", |c| {
+                matches!(
+                    c,
+                    AgentCommand::Action {
+                        kind: ActionKind::CastMagic { .. },
+                        ..
+                    }
+                )
+            }),
+            ("/weaponskill 1", |c| {
+                matches!(
+                    c,
+                    AgentCommand::Action {
+                        kind: ActionKind::Weaponskill { .. },
+                        ..
+                    }
+                )
+            }),
+            ("/jobability 1", |c| {
+                matches!(
+                    c,
+                    AgentCommand::Action {
+                        kind: ActionKind::JobAbility { .. },
+                        ..
+                    }
+                )
+            }),
+            ("/item 0 4", |c| matches!(c, AgentCommand::UseItem { .. })),
+        ];
+        for (slash, pred) in &cases {
+            let out = parse_slash_t(slash, &entities, pos, cur, None);
+            match out {
+                SlashOutcome::Command(ref cmd) => assert!(
+                    pred(cmd),
+                    "slash `{slash}` dispatched the wrong variant: {cmd:?}"
+                ),
+                SlashOutcome::Quit => {}
+                other => panic!("slash `{slash}` did not yield Command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sit_on_and_off() {
+        match parse_slash_t("/sit on", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::On),
+            other => panic!("expected SetSitStance(On), got {other:?}"),
+        }
+        match parse_slash_t("/sit off", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::Off),
+            other => panic!("expected SetSitStance(Off), got {other:?}"),
+        }
+    }
+
     #[test]
     fn names_are_unique_within_a_surface() {
         let mut seen = std::collections::HashMap::new();

@@ -60,12 +60,6 @@ pub(super) fn apply_slash_outcome(
                 push_system_chat_line(scene_state, format!("command dropped (channel issue): {e}"));
             }
         }
-        SlashOutcome::CommandWithNotice { cmd, notice } => {
-            push_system_chat_line(scene_state, notice);
-            if let Err(e) = cmd_tx.try_send(cmd) {
-                push_system_chat_line(scene_state, format!("command dropped (channel issue): {e}"));
-            }
-        }
         SlashOutcome::Commands(cmds) => {
             for cmd in cmds {
                 if let Some(toast) = reqlogout_ack_text(&cmd) {
@@ -90,22 +84,6 @@ pub(super) fn apply_slash_outcome(
             target.id = id;
         }
         SlashOutcome::Quit => {
-            let _ = cmd_tx.try_send(AgentCommand::Disconnect);
-            exit.write_default();
-            crate::view_native::exit_watchdog::arm();
-        }
-        SlashOutcome::QuitWithLogout(kind) => {
-            let req = AgentCommand::ReqLogout { kind };
-            if let Some(toast) = reqlogout_ack_text(&req) {
-                push_system_chat_line(scene_state, toast.into());
-            }
-            #[cfg(feature = "enhanced-shutdown-counter")]
-            if let Some(shutdown) = reqlogout_starts_countdown(&req) {
-                slash_writers
-                    .logout_requested
-                    .write(kuluu_render::hud::logout_countdown::LogoutRequested { shutdown });
-            }
-            let _ = cmd_tx.try_send(req);
             let _ = cmd_tx.try_send(AgentCommand::Disconnect);
             exit.write_default();
             crate::view_native::exit_watchdog::arm();
@@ -668,27 +646,13 @@ pub(super) fn apply_slash_outcome(
                 *cur = target.unwrap_or(!*cur);
             };
             let chat = match op {
-                SoundOp::Status => format!(
-                    "/sound: bgm={} sfx={}",
-                    if mute.bgm { "off" } else { "on" },
-                    if mute.sfx { "off" } else { "on" },
-                ),
-                SoundOp::SetBoth(target) => {
-                    apply(&mut mute.bgm, target);
-                    apply(&mut mute.sfx, target);
-                    format!(
-                        "/sound: bgm={} sfx={}",
-                        if mute.bgm { "off" } else { "on" },
-                        if mute.sfx { "off" } else { "on" },
-                    )
-                }
                 SoundOp::SetBgm(target) => {
                     apply(&mut mute.bgm, target);
-                    format!("/sound bgm: {}", if mute.bgm { "off" } else { "on" })
+                    format!("/mutebgm: {}", if mute.bgm { "on" } else { "off" })
                 }
                 SoundOp::SetSfx(target) => {
                     apply(&mut mute.sfx, target);
-                    format!("/sound sfx: {}", if mute.sfx { "off" } else { "on" })
+                    format!("/mutese: {}", if mute.sfx { "on" } else { "off" })
                 }
             };
             push_system_chat_line(scene_state, chat);
@@ -748,47 +712,6 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::SubArea { op, self_pos } => {
             apply_sub_area(op, self_pos, scene_state, &mut slash_writers.set_sub_area);
         }
-        SlashOutcome::ShopBuyRow { shop_index, qty } => match scene_state.snapshot.shop.as_ref() {
-            Some(_) => {
-                let _ = cmd_tx.try_send(AgentCommand::ShopBuy {
-                    shop_no: kuluu_render::hud::shop::SHOP_NO,
-                    shop_index,
-                    qty,
-                });
-            }
-            None => push_system_chat_line(scene_state, "/buy: no shop is open".into()),
-        },
-        SlashOutcome::ShopSellSlot { inv_slot, qty } => match scene_state.snapshot.shop.as_ref() {
-            Some(_) => {
-                let item_no = scene_state
-                    .snapshot
-                    .containers
-                    .iter()
-                    .find(|c| c.id == ffxi_proto::map::container::LOC_INVENTORY)
-                    .and_then(|c| c.items.iter().find(|s| s.index == inv_slot))
-                    .map(|s| s.item_no);
-                match item_no {
-                    Some(item_no) => {
-                        let _ = cmd_tx.try_send(AgentCommand::ShopSellReq {
-                            qty,
-                            item_no,
-                            item_index: inv_slot,
-                        });
-                    }
-                    None => push_system_chat_line(
-                        scene_state,
-                        format!("/sell: nothing in inventory slot {inv_slot}"),
-                    ),
-                }
-            }
-            None => push_system_chat_line(scene_state, "/sell: no shop is open".into()),
-        },
-        SlashOutcome::ShopSellConfirm => match scene_state.snapshot.shop.as_ref() {
-            Some(_) => {
-                let _ = cmd_tx.try_send(AgentCommand::ShopSellConfirm);
-            }
-            None => push_system_chat_line(scene_state, "/sell: no shop is open".into()),
-        },
         SlashOutcome::ApplyKeybinds(update) => {
             apply_keybind_update(update, bindings, keybinds_state, scene_state);
         }

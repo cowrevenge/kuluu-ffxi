@@ -869,7 +869,6 @@ fn apply_chat_action(
                     scene_state.snapshot.zone_id,
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
-                    scene_state.snapshot.myroom,
                     fishing_gate,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");

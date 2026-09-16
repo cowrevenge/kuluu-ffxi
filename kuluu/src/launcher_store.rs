@@ -41,7 +41,57 @@ pub struct ServerProfile {
     pub preferred_client: Option<String>,
 }
 
+pub const HORIZONXI_HOST: &str = "play.horizonxi.com";
+/// HorizonXI's launcher ships a 2.0.0 xiloader; the JSON auth flavor is what
+/// its server answers.
+pub const HORIZONXI_XILOADER_VERSION: &str = "2.0.0";
+const HORIZONXI_KNOWN_CLIENT: &str = "horizonxi-2023";
+pub const LOCALHOST: &str = "127.0.0.1";
+
+pub struct ServerTemplate {
+    pub label: &'static str,
+    pub profile: ServerProfile,
+}
+
+pub fn server_templates() -> Vec<ServerTemplate> {
+    let horizonxi_patch = ffxi_dat::client_profile::KNOWN_CLIENTS
+        .iter()
+        .find(|k| k.name == HORIZONXI_KNOWN_CLIENT)
+        .and_then(|k| k.patch_version)
+        .map(str::to_string);
+    vec![
+        ServerTemplate {
+            label: "HorizonXI",
+            profile: ServerProfile {
+                xiloader_version: Some(HORIZONXI_XILOADER_VERSION.to_string()),
+                client_ver: horizonxi_patch,
+                ..ServerProfile::lsb_defaults("HorizonXI", HORIZONXI_HOST)
+            },
+        },
+        ServerTemplate {
+            label: "Local LandSandBoat",
+            profile: ServerProfile::lsb_defaults("local", LOCALHOST),
+        },
+    ]
+}
+
 impl ServerProfile {
+    pub fn lsb_defaults(name: &str, host: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            host: host.to_string(),
+            auth_port: ffxi_proto::login::LSB_LOGIN_AUTH_PORT,
+            data_port: ffxi_proto::login::LSB_LOGIN_DATA_PORT,
+            view_port: ffxi_proto::login::LSB_LOGIN_VIEW_PORT,
+            flavor: AuthFlavorKind::Json,
+            xiloader_version: None,
+            version_check_url: None,
+            client_ver: None,
+            ver_lock: None,
+            preferred_client: None,
+        }
+    }
+
     pub fn expected_client_ver(&self) -> &str {
         self.client_ver
             .as_deref()
@@ -333,19 +383,36 @@ mod tests {
     }
 
     fn profile(name: &str, host: &str) -> ServerProfile {
-        ServerProfile {
-            name: name.into(),
-            host: host.into(),
-            auth_port: 54231,
-            data_port: 54230,
-            view_port: 54001,
-            flavor: AuthFlavorKind::Json,
-            xiloader_version: None,
-            version_check_url: None,
-            client_ver: None,
-            ver_lock: None,
-            preferred_client: None,
-        }
+        ServerProfile::lsb_defaults(name, host)
+    }
+
+    #[test]
+    fn templates_carry_the_horizonxi_client_era_and_lsb_ports() {
+        let templates = server_templates();
+        let hxi = templates
+            .iter()
+            .find(|t| t.label == "HorizonXI")
+            .expect("HorizonXI template");
+        assert_eq!(hxi.profile.host, HORIZONXI_HOST);
+        assert_eq!(
+            hxi.profile.xiloader_version.as_deref(),
+            Some(HORIZONXI_XILOADER_VERSION)
+        );
+        assert_eq!(hxi.profile.client_ver.as_deref(), Some("30230905_0"));
+        assert_eq!(
+            hxi.profile.auth_port,
+            ffxi_proto::login::LSB_LOGIN_AUTH_PORT
+        );
+        let local = templates
+            .iter()
+            .find(|t| t.label == "Local LandSandBoat")
+            .expect("local template");
+        assert_eq!(local.profile.host, LOCALHOST);
+        assert_eq!(local.profile.client_ver, None);
+        assert_eq!(
+            local.profile.expected_client_ver(),
+            ffxi_proto::login::LSB_CLIENT_VER
+        );
     }
 
     #[test]

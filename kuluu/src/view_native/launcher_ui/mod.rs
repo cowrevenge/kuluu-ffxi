@@ -336,6 +336,7 @@ pub(crate) struct ServerEditForm {
     pub client_ver: String,
     pub ver_lock: Option<u8>,
     pub preferred_client: Option<String>,
+    pub show_advanced: bool,
     #[allow(dead_code)]
     pub focus: ServerEditField,
     pub editing_index: Option<usize>,
@@ -343,26 +344,22 @@ pub(crate) struct ServerEditForm {
 
 impl Default for ServerEditForm {
     fn default() -> Self {
-        Self {
-            name: String::new(),
-            host: String::new(),
-            auth_port: String::from("54231"),
-            data_port: String::from("54230"),
-            view_port: String::from("54001"),
-            flavor: crate::launcher_store::AuthFlavorKind::Json,
-            xiloader_version: String::new(),
-            version_check_url: String::new(),
-            client_ver: String::new(),
-            ver_lock: None,
-            preferred_client: None,
-            focus: ServerEditField::default(),
-            editing_index: None,
-        }
+        Self::from_profile(&crate::launcher_store::ServerProfile::lsb_defaults("", ""))
     }
 }
 
 impl ServerEditForm {
     pub fn from_profile(p: &crate::launcher_store::ServerProfile) -> Self {
+        let lsb = crate::launcher_store::ServerProfile::lsb_defaults(&p.name, &p.host);
+        let show_advanced = p.auth_port != lsb.auth_port
+            || p.data_port != lsb.data_port
+            || p.view_port != lsb.view_port
+            || p.flavor != lsb.flavor
+            || p.xiloader_version.is_some()
+            || p.version_check_url.is_some()
+            || p.client_ver.is_some()
+            || p.ver_lock.is_some()
+            || p.preferred_client.is_some();
         Self {
             name: p.name.clone(),
             host: p.host.clone(),
@@ -375,6 +372,7 @@ impl ServerEditForm {
             client_ver: p.client_ver.clone().unwrap_or_default(),
             ver_lock: p.ver_lock,
             preferred_client: p.preferred_client.clone(),
+            show_advanced,
             focus: ServerEditField::default(),
             editing_index: None,
         }
@@ -693,14 +691,17 @@ pub(crate) fn register(
         server_select::keyboard_input_system.run_if(in_state(LauncherState::ServerSelect)),
     );
 
-    app.add_systems(OnEnter(LauncherState::ServerEdit), server_edit::spawn_ui)
+    app.insert_resource(server_edit::ServerEditUiDirty(false))
+        .add_systems(OnEnter(LauncherState::ServerEdit), server_edit::spawn_ui)
         .add_systems(OnExit(LauncherState::ServerEdit), server_edit::despawn_ui)
         .add_systems(
             Update,
             (
                 server_edit::keyboard_input_system,
+                server_edit::rebuild_ui_system,
                 server_edit::redraw_system,
             )
+                .chain()
                 .run_if(in_state(LauncherState::ServerEdit)),
         );
 

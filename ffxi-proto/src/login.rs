@@ -70,6 +70,10 @@ mod tests {
     // pin bump updates both literals alongside the scrape.
     const LSB_PINNED_CLIENT_VER: &str = "30260904_1";
     const LSB_PINNED_VER_LOCK: u8 = 2;
+    // vendor/server/settings/default/network.lua LOGIN_*_PORT
+    const LSB_PINNED_LOGIN_AUTH_PORT: u16 = 54231;
+    const LSB_PINNED_LOGIN_DATA_PORT: u16 = 54230;
+    const LSB_PINNED_LOGIN_VIEW_PORT: u16 = 54001;
 
     /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md example
     /// packet: excode_client 0x0FFF, i.e. every expansion bit LSB names.
@@ -97,6 +101,9 @@ mod tests {
     fn scraped_login_settings_match_the_pinned_lsb_tree() {
         assert_eq!(LSB_CLIENT_VER, LSB_PINNED_CLIENT_VER);
         assert_eq!(LSB_DEFAULT_VER_LOCK, LSB_PINNED_VER_LOCK);
+        assert_eq!(LSB_LOGIN_AUTH_PORT, LSB_PINNED_LOGIN_AUTH_PORT);
+        assert_eq!(LSB_LOGIN_DATA_PORT, LSB_PINNED_LOGIN_DATA_PORT);
+        assert_eq!(LSB_LOGIN_VIEW_PORT, LSB_PINNED_LOGIN_VIEW_PORT);
     }
 
     #[test]

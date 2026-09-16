@@ -179,8 +179,10 @@ pub(super) fn spawn_breadcrumb(
                 },
             );
 
-            let last = crumbs.len().saturating_sub(1);
-            for (idx, crumb) in crumbs.iter().enumerate() {
+            let Some((_current, trail)) = crumbs.split_last() else {
+                return;
+            };
+            for crumb in trail {
                 chip.spawn((
                     Text::new(">"),
                     TextFont {
@@ -191,17 +193,7 @@ pub(super) fn spawn_breadcrumb(
                     ThemedText,
                 ));
                 let label = crumb.label();
-                if idx == last {
-                    chip.spawn((
-                        Text::new(label),
-                        TextFont {
-                            font_size: 14.0.into(),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.85, 0.85, 0.90)),
-                        ThemedText,
-                    ));
-                } else if let Some(target) = crumb.target() {
+                if let Some(target) = crumb.target() {
                     chip.spawn(button_bundle(
                         ButtonBundleProps {
                             variant: ButtonVariant::Normal,

@@ -528,6 +528,7 @@ fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStat
                             };
                             *form = ServerEditForm::from_profile(&store.servers[idx]);
                             form.editing_index = Some(idx);
+                            form.show_advanced = true;
                             next.set(LauncherState::ServerEdit);
                         },
                     );

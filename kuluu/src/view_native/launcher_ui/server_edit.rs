@@ -44,42 +44,40 @@ pub(super) fn ver_lock_label(lock: VerLock) -> &'static str {
     }
 }
 
+#[derive(Resource)]
+pub(super) struct ServerEditUiDirty(pub bool);
+
+const PANEL_WIDTH_PX: f32 = 560.0;
+const FIELD_LABEL_PX: f32 = 150.0;
+
 pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server: Res<ServerInfo>) {
+    build_ui(&mut commands, &form, &server);
+}
+
+pub(super) fn rebuild_ui_system(
+    mut dirty: ResMut<ServerEditUiDirty>,
+    mut commands: Commands,
+    existing: Query<Entity, With<ServerEditRoot>>,
+    form: Res<ServerEditForm>,
+    server: Res<ServerInfo>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    dirty.0 = false;
+    for e in existing.iter() {
+        commands.entity(e).despawn();
+    }
+    build_ui(&mut commands, &form, &server);
+}
+
+fn build_ui(commands: &mut Commands, form: &ServerEditForm, server: &ServerInfo) {
     let editing = form.editing_index.is_some();
-    let snap = (
-        form.name.clone(),
-        form.host.clone(),
-        form.auth_port.clone(),
-        form.data_port.clone(),
-        form.view_port.clone(),
-        form.flavor,
-        form.xiloader_version.clone(),
-        form.version_check_url.clone(),
-        form.client_ver.clone(),
-        form.ver_lock,
-        form.preferred_client.clone(),
-    );
-    let install_names: Vec<String> = ffxi_client::installs()
-        .into_iter()
-        .map(|i| i.name)
-        .collect();
-    let default_lock_label = format!(
-        "Server default ({})",
-        ver_lock_label(VerLock::from_setting(LSB_DEFAULT_VER_LOCK))
-    );
-
-    let json_default = auth_client::resolve_client_version(None);
-    let binary_default = auth_client::resolve_binary_version(None);
-    let version_placeholder = format!(
-        "JSON {}.{}.{} / Binary {}",
-        json_default[0],
-        json_default[1],
-        json_default[2],
-        String::from_utf8_lossy(&binary_default)
-    );
-
+    let name = form.name.clone();
+    let host = form.host.clone();
+    let show_advanced = form.show_advanced;
     let leaf = if editing {
-        Crumb::Other(format!("Edit: {}", snap.0))
+        Crumb::Other(format!("Edit: {name}"))
     } else {
         Crumb::Other("New server".to_string())
     };
@@ -87,106 +85,25 @@ pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server
     commands
         .spawn((ServerEditRoot, screen_root()))
         .with_children(|root| {
-            spawn_breadcrumb(root, &server, &[Crumb::Server, leaf]);
-            root.spawn(panel_node(560.0)).with_children(|panel| {
-                panel.spawn(title(if editing { "Edit server" } else { "New server" }));
-                panel.spawn(hint("Tab cycles fields. Esc cancels."));
+            spawn_breadcrumb(root, server, &[Crumb::Server, leaf]);
+            root.spawn(panel_node(PANEL_WIDTH_PX))
+                .with_children(|panel| {
+                    panel.spawn(title(if editing { "Edit server" } else { "New server" }));
 
-                spawn_field(panel, "Name", &snap.0, "", ServerEditField::Name);
-                spawn_field(panel, "Host", &snap.1, "", ServerEditField::Host);
-                spawn_field(panel, "Auth port", &snap.2, "", ServerEditField::AuthPort);
-                spawn_field(panel, "Data port", &snap.3, "", ServerEditField::DataPort);
-                spawn_field(panel, "View port", &snap.4, "", ServerEditField::ViewPort);
-
-                panel.spawn(row()).with_children(|r| {
-                    r.spawn((
-                        Node {
-                            width: Val::Px(110.0),
-                            ..default()
-                        },
-                        Text::new("Flavor"),
-                        ThemedText,
-                    ));
-                    spawn_flavor_button(r, "JSON", AuthFlavorKind::Json, snap.5);
-                    spawn_flavor_button(r, "Binary", AuthFlavorKind::Binary, snap.5);
-                });
-
-                spawn_field(
-                    panel,
-                    "Xiloader version",
-                    &snap.6,
-                    &version_placeholder,
-                    ServerEditField::XiloaderVersion,
-                );
-
-                spawn_field(
-                    panel,
-                    "Version check URL",
-                    &snap.7,
-                    "https://server/version.json",
-                    ServerEditField::VersionCheckUrl,
-                );
-
-                panel.spawn(hint(
-                    "FINAL FANTASY XI client this server's lobby admits (login.CLIENT_VER / VER_LOCK):",
-                ));
-                spawn_field(
-                    panel,
-                    "Client version",
-                    &snap.8,
-                    LSB_CLIENT_VER,
-                    ServerEditField::ClientVer,
-                );
-                panel.spawn(row()).with_children(|r| {
-                    r.spawn((
-                        Node {
-                            width: Val::Px(140.0),
-                            ..default()
-                        },
-                        Text::new("Version lock"),
-                        ThemedText,
-                    ));
-                    for (value, label) in VER_LOCK_CHOICES {
-                        let label = if value.is_none() {
-                            default_lock_label.as_str()
-                        } else {
-                            label
-                        };
-                        spawn_ver_lock_button(r, label, value, snap.9);
+                    if !editing {
+                        spawn_template_row(panel);
                     }
-                });
-                panel.spawn(row()).with_children(|r| {
-                    r.spawn((
-                        Node {
-                            width: Val::Px(140.0),
-                            ..default()
-                        },
-                        Text::new("Preferred install"),
-                        ThemedText,
-                    ));
-                    spawn_preferred_client_button(r, "Any", None, snap.10.as_deref());
-                    for name in &install_names {
-                        spawn_preferred_client_button(
-                            r,
-                            name,
-                            Some(name.clone()),
-                            snap.10.as_deref(),
-                        );
-                    }
-                    if let Some(saved) = snap.10.as_deref() {
-                        if !install_names.iter().any(|n| n == saved) {
-                            spawn_preferred_client_button(
-                                r,
-                                &format!("{saved} (missing)"),
-                                Some(saved.to_string()),
-                                snap.10.as_deref(),
-                            );
-                        }
-                    }
-                });
 
-                panel.spawn(row()).with_children(|r| {
-                    r.spawn(button_bundle(
+                    spawn_field(panel, "Name", &name, "", ServerEditField::Name);
+                    spawn_field(panel, "Host", &host, "", ServerEditField::Host);
+
+                    spawn_advanced_toggle(panel, show_advanced);
+                    if show_advanced {
+                        spawn_advanced_fields(panel, form);
+                    }
+
+                    panel.spawn(row()).with_children(|r| {
+                        r.spawn(button_bundle(
                         ButtonBundleProps {
                             variant: ButtonVariant::Primary,
                             ..default()
@@ -201,19 +118,157 @@ pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server
                             save_form(&form, &mut next);
                         },
                     );
-                    r.spawn(button_bundle(
-                        ButtonBundleProps::default(),
-                        (),
-                        Spawn((Text::new("Cancel"), ThemedText)),
-                    ))
-                    .observe(
-                        |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
-                            next.set(LauncherState::ServerSelect);
-                        },
-                    );
+                        r.spawn(button_bundle(
+                            ButtonBundleProps::default(),
+                            (),
+                            Spawn((Text::new("Cancel"), ThemedText)),
+                        ))
+                        .observe(
+                            |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
+                                next.set(LauncherState::ServerSelect);
+                            },
+                        );
+                    });
                 });
-            });
         });
+}
+
+fn spawn_template_row(panel: &mut ChildSpawnerCommands) {
+    panel.spawn(hint("Start from:"));
+    panel.spawn(row()).with_children(|r| {
+        for template in launcher_store::server_templates() {
+            let profile = template.profile;
+            r.spawn(button_bundle(
+                ButtonBundleProps::default(),
+                (),
+                Spawn((Text::new(template.label), ThemedText)),
+            ))
+            .observe(
+                move |_ev: On<Activate>,
+                      mut form: ResMut<ServerEditForm>,
+                      mut dirty: ResMut<ServerEditUiDirty>| {
+                    *form = ServerEditForm::from_profile(&profile);
+                    dirty.0 = true;
+                },
+            );
+        }
+    });
+}
+
+fn spawn_advanced_toggle(panel: &mut ChildSpawnerCommands, show_advanced: bool) {
+    let label = if show_advanced {
+        "Hide advanced settings"
+    } else {
+        "Advanced settings..."
+    };
+    panel
+        .spawn(button_bundle(
+            ButtonBundleProps::default(),
+            (),
+            Spawn((Text::new(label), ThemedText)),
+        ))
+        .observe(
+            |_ev: On<Activate>,
+             mut form: ResMut<ServerEditForm>,
+             mut dirty: ResMut<ServerEditUiDirty>| {
+                form.show_advanced = !form.show_advanced;
+                dirty.0 = true;
+            },
+        );
+}
+
+fn spawn_advanced_fields(panel: &mut ChildSpawnerCommands, form: &ServerEditForm) {
+    let install_names: Vec<String> = ffxi_client::installs()
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    let json_default = auth_client::resolve_client_version(None);
+    let binary_default = auth_client::resolve_binary_version(None);
+    let version_placeholder = format!(
+        "JSON {}.{}.{} / Binary {}",
+        json_default[0],
+        json_default[1],
+        json_default[2],
+        String::from_utf8_lossy(&binary_default)
+    );
+    let default_lock = ver_lock_label(VerLock::from_setting(LSB_DEFAULT_VER_LOCK));
+
+    spawn_field(
+        panel,
+        "Auth port",
+        &form.auth_port,
+        "",
+        ServerEditField::AuthPort,
+    );
+    spawn_field(
+        panel,
+        "Data port",
+        &form.data_port,
+        "",
+        ServerEditField::DataPort,
+    );
+    spawn_field(
+        panel,
+        "View port",
+        &form.view_port,
+        "",
+        ServerEditField::ViewPort,
+    );
+
+    panel.spawn(hint("Auth flavor:"));
+    panel.spawn(row()).with_children(|r| {
+        spawn_flavor_button(r, "JSON", AuthFlavorKind::Json, form.flavor);
+        spawn_flavor_button(r, "Binary", AuthFlavorKind::Binary, form.flavor);
+    });
+    spawn_field(
+        panel,
+        "Loader version",
+        &form.xiloader_version,
+        &version_placeholder,
+        ServerEditField::XiloaderVersion,
+    );
+    spawn_field(
+        panel,
+        "Update URL",
+        &form.version_check_url,
+        "https://server/version.json",
+        ServerEditField::VersionCheckUrl,
+    );
+
+    spawn_field(
+        panel,
+        "Client patch",
+        &form.client_ver,
+        LSB_CLIENT_VER,
+        ServerEditField::ClientVer,
+    );
+    panel.spawn(hint(format!(
+        "Version lock (server default: {default_lock}):"
+    )));
+    panel.spawn(row()).with_children(|r| {
+        for (value, label) in VER_LOCK_CHOICES {
+            spawn_ver_lock_button(r, label, value, form.ver_lock);
+        }
+    });
+
+    panel.spawn(hint("Play from install:"));
+    panel.spawn(row()).with_children(|r| {
+        let current = form.preferred_client.as_deref();
+        spawn_preferred_client_button(r, "Any", None, current);
+        for name in &install_names {
+            spawn_preferred_client_button(r, name, Some(name.clone()), current);
+        }
+        if let Some(saved) = current {
+            if !install_names.iter().any(|n| n == saved) {
+                spawn_preferred_client_button(
+                    r,
+                    &format!("{saved} (missing)"),
+                    Some(saved.to_string()),
+                    current,
+                );
+            }
+        }
+    });
 }
 
 fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
@@ -293,7 +348,7 @@ fn spawn_field(
         .with_children(|row| {
             row.spawn((
                 Node {
-                    width: Val::Px(140.0),
+                    width: Val::Px(FIELD_LABEL_PX),
                     ..default()
                 },
                 Text::new(label.to_string()),

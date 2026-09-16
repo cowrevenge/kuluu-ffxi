@@ -560,7 +560,9 @@ pub(crate) fn update_shop_panel_system(
 
     let rows = rows_for(screen.mode, snap);
     let gil = current_gil(snap);
-    let start = screen.page_start.min(ShopScreenState::max_page_start(rows.len()));
+    let start = screen
+        .page_start
+        .min(ShopScreenState::max_page_start(rows.len()));
     let focused = rows.get(screen.cursor).copied();
     let list_active = !matches!(screen.focus, ShopFocus::Menu);
 

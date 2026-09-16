@@ -264,14 +264,28 @@ fn handle_confirm_key(
     cmd_tx: &Sender<AgentCommand>,
 ) {
     if bindings.matches_logical(Action::NavCancel, key) {
-        if matches!(screen.mode, ShopMode::Sell) {
-            let _ = cmd_tx.try_send(AgentCommand::ShopSellCancel);
-        }
-        screen.pending_buy = None;
-        screen.focus = ShopFocus::List;
+        decline(screen, cmd_tx);
         return;
     }
+    // Two rows, so either axis walks them — retail's Log Out prompt answers to
+    // Left, the stacked Yes/No boxes to Up/Down.
+    for action in [
+        Action::NavUp,
+        Action::NavDown,
+        Action::NavLeft,
+        Action::NavRight,
+    ] {
+        if bindings.matches_logical(action, key) {
+            screen.confirm_yes = !screen.confirm_yes;
+            return;
+        }
+    }
     if !bindings.matches_logical(Action::NavConfirm, key) {
+        return;
+    }
+    // Confirming with the cursor on No is the same answer as cancelling.
+    if !screen.confirm_yes {
+        decline(screen, cmd_tx);
         return;
     }
     match screen.mode {
@@ -297,6 +311,16 @@ fn handle_confirm_key(
             screen.focus = ShopFocus::List;
         }
     }
+}
+
+/// Answer the confirm box with No: drop the quote the server parked for a sale
+/// and fall back to the list.
+fn decline(screen: &mut ShopScreenState, cmd_tx: &Sender<AgentCommand>) {
+    if matches!(screen.mode, ShopMode::Sell) {
+        let _ = cmd_tx.try_send(AgentCommand::ShopSellCancel);
+    }
+    screen.pending_buy = None;
+    screen.focus = ShopFocus::List;
 }
 
 fn shop_pending_sale(scene_state: &SceneState) -> Option<&kuluu_snapshot::ShopSale> {
@@ -337,7 +361,7 @@ fn commit_quantity(
         }
         ShopMode::Sell => {
             screen.quantity = None;
-            screen.focus = ShopFocus::Confirm;
+            screen.enter_confirm();
             // Re-price at the chosen count: the quote shown while sizing was
             // for one unit, and the confirm prompt states the whole sale.
             request_appraisal(cmd_tx, row, quantity);

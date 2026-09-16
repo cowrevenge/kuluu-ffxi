@@ -87,7 +87,7 @@ pub struct ShopRow {
 
 /// Cursor + in-flight transaction state. The stock itself lives in the
 /// snapshot; this resource is the part the player is moving around.
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone)]
 pub struct ShopScreenState {
     pub mode: ShopMode,
     pub focus: ShopFocus,
@@ -112,7 +112,34 @@ pub struct ShopScreenState {
     /// reopens it, so the window and its help bar strobe until the round trip
     /// lands. Cleared when the snapshot's shop finally goes away.
     pub dismissed: bool,
+
+    /// Which row the confirm box's Yes/No cursor sits on. Retail's comparable
+    /// transaction confirm - the AH fee dialog - opens on Yes
+    /// (.agents/skills/retail-observe/references/auction-house.md, sell flow).
+    pub confirm_yes: bool,
 }
+
+impl Default for ShopScreenState {
+    fn default() -> Self {
+        Self {
+            mode: ShopMode::default(),
+            focus: ShopFocus::default(),
+            menu_cursor: 0,
+            cursor: 0,
+            page_start: 0,
+            quantity: None,
+            pending_buy: None,
+            dismissed: false,
+            confirm_yes: CONFIRM_DEFAULT_YES,
+        }
+    }
+}
+
+/// The confirm box opens on Yes. Retail's nearest observed equivalent, the
+/// Auction House fee dialog, does the same; the No default this repo uses
+/// elsewhere is for destructive prompts (Drop, Log Out), not for a transaction
+/// the player walked three menus to reach.
+pub const CONFIRM_DEFAULT_YES: bool = true;
 
 /// A purchase the player has sized but not yet confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +226,12 @@ impl ShopScreenState {
         self.pending_buy = None;
     }
 
+    /// Open the priced yes/no step with the cursor on its default row.
+    pub fn enter_confirm(&mut self) {
+        self.focus = ShopFocus::Confirm;
+        self.confirm_yes = CONFIRM_DEFAULT_YES;
+    }
+
     /// Keep the cursor inside a list the server or the player's bag shrank.
     pub fn clamp(&mut self, len: usize) {
         self.cursor = self.cursor.min(len.saturating_sub(1));
@@ -219,7 +252,7 @@ impl ShopScreenState {
         };
         self.quantity = None;
         self.pending_buy = Some(buy);
-        self.focus = ShopFocus::Confirm;
+        self.enter_confirm();
         buy
     }
 }
@@ -280,7 +313,7 @@ pub fn sale_prompt(item_name: &str, quantity: u32, total_gil: u32) -> String {
 }
 
 /// Help-bar title and hint for the current focus.
-pub fn help_bar_content(state: &ShopScreenState, snap: &SceneSnapshot) -> (String, String) {
+pub fn help_bar_content(state: &ShopScreenState, _snap: &SceneSnapshot) -> (String, String) {
     let title = match state.focus {
         ShopFocus::Menu => SHOP_TITLE,
         _ => state.mode.label(),
@@ -295,10 +328,10 @@ pub fn help_bar_content(state: &ShopScreenState, snap: &SceneSnapshot) -> (Strin
             ShopMode::Sell => HELP_SELECT_OWN_ITEM,
         },
         ShopFocus::Quantity => HELP_QUANTITY,
-        ShopFocus::Confirm => match confirm_line(state, snap) {
-            Some(line) => return (title.to_string(), line),
-            None => HELP_SELECT_WARE,
-        },
+        // Retail dims or blanks the help bar while a modal Yes/No dialog has
+        // focus (.agents/skills/retail-observe/references/auction-house.md);
+        // the question itself is on the confirm box, not up here.
+        ShopFocus::Confirm => "",
     };
     (title.to_string(), hint.to_string())
 }
@@ -345,6 +378,7 @@ enum ShopTextRole {
     MenuTitle,
     GilLabel,
     GilValue,
+    ConfirmChoices,
     DetailName,
     DetailBody,
 }
@@ -481,6 +515,12 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                     ));
                     g.spawn((
                         ShopText(ShopTextRole::GilValue),
+                        Text::new(""),
+                        text_font(13.0),
+                        TextColor(theme::TEXT),
+                    ));
+                    g.spawn((
+                        ShopText(ShopTextRole::ConfirmChoices),
                         Text::new(""),
                         text_font(13.0),
                         TextColor(theme::TEXT),
@@ -634,6 +674,13 @@ pub(crate) fn update_shop_panel_system(
                 ),
                 None => (format!("{} G", group_digits(gil)), theme::TEXT),
             },
+            // The yes/no the priced question is asking for. Retail puts this
+            // box lower-left, under the figure
+            // (.agents/skills/retail-observe/references/auction-house.md).
+            ShopTextRole::ConfirmChoices => match screen.focus {
+                ShopFocus::Confirm => (confirm_choices(screen.confirm_yes), theme::CURSOR),
+                _ => (String::new(), theme::TEXT),
+            },
             ShopTextRole::DetailName => match (screen.focus, focused) {
                 (ShopFocus::Confirm, _) => match confirm_line(&screen, snap) {
                     Some(line) => (line, theme::CURSOR),
@@ -726,6 +773,15 @@ fn running_total(
         }
         _ => None,
     }
+}
+
+/// The confirm box's two rows, cursor on the chosen one.
+pub fn confirm_choices(yes: bool) -> String {
+    format!(
+        "{}Yes\n{}No",
+        item_ui::cursor_prefix(yes),
+        item_ui::cursor_prefix(!yes)
+    )
 }
 
 /// What the gil box is showing while a transaction is priced.
@@ -1090,6 +1146,52 @@ mod tests {
         let line = confirm_line(&sell_state, &sell_snap).expect("sell prompt");
         assert!(line.starts_with("Sell 6 "), "{line}");
         assert!(line.ends_with("for 120 gil?"), "{line}");
+    }
+
+    /// The question needs a visible answer. Retail's comparable transaction
+    /// confirm (the AH fee dialog) opens on Yes
+    /// (.agents/skills/retail-observe/references/auction-house.md).
+    #[test]
+    fn the_confirm_box_offers_yes_and_no_with_the_cursor_on_yes() {
+        let mut s = ShopScreenState::opened();
+        let row = ShopRow {
+            index: 0,
+            item_no: 4612,
+            price: 23_400,
+            quantity: 0,
+        };
+        s.stage_buy(&row, 1);
+        assert_eq!(s.focus, ShopFocus::Confirm);
+        assert!(s.confirm_yes);
+        assert_eq!(confirm_choices(s.confirm_yes), "> Yes\n  No");
+
+        s.confirm_yes = false;
+        assert_eq!(confirm_choices(s.confirm_yes), "  Yes\n> No");
+    }
+
+    #[test]
+    fn re_entering_the_confirm_step_re_arms_the_default() {
+        let mut s = ShopScreenState::opened();
+        s.confirm_yes = false;
+        s.enter_confirm();
+        assert!(
+            s.confirm_yes,
+            "a declined prompt does not poison the next one"
+        );
+    }
+
+    /// Retail dims or blanks the help bar while a modal Yes/No owns focus; the
+    /// question belongs on the confirm box, not in two places at once.
+    #[test]
+    fn the_help_bar_hint_clears_behind_the_confirm_box() {
+        let snap = SceneSnapshot::default();
+        let mut s = ShopScreenState::opened();
+        s.enter_list();
+        assert_eq!(help_bar_content(&s, &snap).1, HELP_SELECT_WARE);
+        s.enter_confirm();
+        let (title, hint) = help_bar_content(&s, &snap);
+        assert_eq!(title, "Buy", "the bar still says where you are");
+        assert!(hint.is_empty());
     }
 
     #[test]

@@ -166,17 +166,18 @@ quality still needs validation; the current NR path supplies zero motion vectors
 
 The FFXI client DATs (geometry, textures, audio, animations) are Square Enix
 copyrighted and must come from a **legitimate install** — Kuluu never ships or
-commits them. The client reads them from `vendor/game-files/` by default
-(gitignored), from a named client (see below), or wherever `FFXI_DAT_PATH`
-points; the launcher remembers the install you pick, and
-`kuluu ffxi-client which` tells you which one is in effect and why.
+commits them. Kuluu keeps a registry of named installs in your user data
+directory (`~/Library/Application Support/kuluu/installs/NAME` on macOS,
+`~/.local/share/kuluu/installs/NAME` on Linux and the Steam Deck) with a
+one-line `default` file naming the one that loads. `FFXI_DAT_PATH` overrides
+it for one run. That is the whole model; `kuluu install which` says which
+applied and why.
 
 Get an install one of these ways:
 
-- **Square Enix's official client:** `kuluu ffxi-client setup` (or the
-  launcher's "Get the official client" button, or `cargo xtask ffxi-client
-  setup` for the checkout) downloads, patches and selects it in one shot,
-  asking before each step unless told otherwise. Free to download; a
+- **Square Enix's official client:** `kuluu install get` (or the launcher's
+  "Get the official client" button) downloads, patches and selects it in one
+  shot, asking before each step unless told otherwise. Free to download; a
   registration code / subscription is needed to play on the official service.
 - **HorizonXI launcher (Windows):** install via <https://horizonxi.com>; its
   launcher downloads a full FFXI + Ashita tree.
@@ -185,62 +186,54 @@ Get an install one of these ways:
 - **Copy an existing install:** the PlayOnline tree from any retail/private-server
   install (`.../PlayOnline/SquareEnix/FINAL FANTASY XI/`).
 
-Kuluu expects this layout (the parent of `SquareEnix/`):
+Each registered install is a directory holding the parent of `SquareEnix/`:
 
 ```
-vendor/game-files/
+installs/NAME/
   SquareEnix/
-    FINAL FANTASY XI/      <- FFXI_DAT_PATH points here
+    FINAL FANTASY XI/      <- the DAT root, what FFXI_DAT_PATH would name
       VTABLE.DAT  FTABLE.DAT
       ROM/  ROM2/ … ROM9/
       sound/win/…
 ```
 
-Wire an existing install into the checkout with the cross-platform helper,
-which detects one (HorizonXI / Lutris / Wine / CrossOver / PlayOnline),
-validates it, and symlinks it into `vendor/game-files/`:
+Register an install you already have under a name and make it the default.
+With no path, `link` detects one (HorizonXI / Lutris / Wine / CrossOver /
+PlayOnline), validates it, and symlinks it into the registry:
 
 ```bash
-cargo xtask ffxi-client link                 # auto-detect
-cargo xtask ffxi-client link "/path/to/..."  # or point it at a known install
-cargo xtask ffxi-client link --copy          # copy instead of symlink
+cargo run -p kuluu -- install link hxi                  # auto-detect
+cargo run -p kuluu -- install link hxi "/path/to/..."   # or point it at a known install
+cargo run -p kuluu -- install link hxi PATH --copy      # copy instead of symlink
+cargo run -p kuluu -- install use hxi                   # make it the default
 ```
 
-Don't have an install yet? The same helper downloads Square Enix's **official**
-client installer from the public PlayOnline CDN and unpacks it natively (opt-in
-and confirmation-gated). The `ffxi-install` crate reads the RAR volumes, MSIs
-and cabinets itself, decoding each cabinet while the next volume downloads,
-then patches the 2019 base image to the current version by speaking the
-PlayOnline patch protocol itself: it asks `pc001.pol.com` for the manifest,
-fetches only the files whose checksums differ (whole images or delta chains,
-as the viewer would), verifies each one, and writes the manifest as
-`patch.cfg`. No Wine, no installer GUI, no viewer, no account, on any
-platform:
+Don't have an install yet? `get` downloads Square Enix's **official** client
+installer from the public PlayOnline CDN and unpacks it natively (opt-in and
+confirmation-gated). The `ffxi-install` crate reads the RAR volumes, MSIs and
+cabinets itself, decoding each cabinet while the next volume downloads, then
+patches the 2019 base image to the current version by speaking the PlayOnline
+patch protocol itself: it asks `pc001.pol.com` for the manifest, fetches only
+the files whose checksums differ (whole images or delta chains, as the viewer
+would), verifies each one, and writes the manifest as `patch.cfg`. No Wine,
+no installer GUI, no viewer, no account, on any platform:
 
 ```bash
-cargo xtask ffxi-client setup                           # asks: name (retail), region (us), then downloads, patches, offers to make it the default
-cargo xtask ffxi-client setup --target retail-eu --region eu --yes --default   # the same, unattended
-cargo xtask ffxi-client update --target retail          # re-patch later (--verify re-checks every file)
-cargo xtask ffxi-client default hxi                     # switch what the checkout loads by default (a symlink swap)
+cargo run -p kuluu -- install get                                   # asks: name (retail), region (us), then downloads, patches, makes it the default
+cargo run -p kuluu -- install get --name retail-eu --region eu --yes  # the same, unattended
+cargo run -p kuluu -- install update retail                         # re-patch later (--verify re-checks every file)
 ```
 
-`setup` reuses a target that already carries the name rather than downloading
-over it, and `default` refuses to replace a real directory, so neither can
-destroy an install you already have.
+`get` reuses an install that already carries the name rather than downloading
+over it, and `update` refuses a known non-retail build (a private server's
+pinned client, which retail patches would break). HorizonXI and other flavors
+must be obtained through their own launchers.
 
-`update` never touches the unnamed default install implicitly: that is
-usually a private server's pinned client, which retail patches would break.
-(HorizonXI and other flavors must be obtained through their own launchers.)
-
-Or do it by hand — drop/symlink your install at `vendor/game-files/`, or just
-point the client at an existing copy:
+For one run, point the client anywhere:
 
 ```bash
 export FFXI_DAT_PATH="/path/to/.../SquareEnix/FINAL FANTASY XI"
 ```
-
-`FFXI_DAT_PATH` also overrides at runtime and can be set from the launcher's
-settings UI, so you never have to move a large install to use it.
 
 ### Client versions
 
@@ -254,26 +247,19 @@ item block layout) and logs it. Parsers that differ between generations
 dispatch on those probed layouts, so an unmeasured build still gets the right
 decoder or fails closed instead of reading garbage.
 
-To keep more than one client around, give each a name. Named clients live in
-two places that are searched together: `vendor/game-files/targets/NAME/` in a
-checkout (what `cargo xtask ffxi-client` manages) and the per-user client
-directory the launcher downloads into (`~/Library/Application Support/kuluu/clients/NAME`
-on macOS, `~/.local/share/kuluu/clients/NAME` on Linux). Two pointers pick the
-active one: the checkout default (a symlink into `targets/`, which is what
-tests, examples and a bare `cargo run` load) and the launcher's saved choice
-in `launcher.json` (what `kuluu play` and the launcher load). A shell env var
-still wins over both for one-off runs unless the launcher's choice has its
-Override tick set; `which` says which one applied:
+To keep more than one client around, register each under a name. One pointer
+picks the active one: the `default` file that `kuluu install use NAME` writes,
+which is what the launcher, `kuluu play`, tests and examples all load.
+`FFXI_DAT_PATH` wins over it for that one run, and `which` says which applied:
 
 ```bash
-cargo xtask ffxi-client link --target retail "/path/to/PlayOnline/SquareEnix/FINAL FANTASY XI"
-cargo xtask ffxi-client list                       # the checkout's installs
-cargo xtask ffxi-client default retail             # what cargo run / cargo test load with no override
-cargo run -p kuluu -- ffxi-client list             # every install kuluu can see, with its client profile
-cargo run -p kuluu -- ffxi-client setup            # download, patch and select the official client
-cargo run -p kuluu -- ffxi-client use retail       # persist the choice (launcher.json)
-cargo run -p kuluu -- ffxi-client which            # what will load, and why
-FFXI_CLIENT_TARGET=retail cargo run -p kuluu -- play   # one-off override by name
+cargo run -p kuluu -- install link retail "/path/to/PlayOnline/SquareEnix/FINAL FANTASY XI"
+cargo run -p kuluu -- install list             # every install kuluu can see, with its client profile
+cargo run -p kuluu -- install get              # download, patch and select the official client
+cargo run -p kuluu -- install use retail       # the default
+cargo run -p kuluu -- install which            # what will load, and why
+cargo run -p kuluu -- install path hxi         # the DAT root, for scripts and agents
+FFXI_DAT_PATH="$(cargo run -q -p kuluu -- install path hxi)" cargo run -p kuluu -- play   # one-off
 cargo run -p ffxi-dat --example dat-client-profile -- "/path/to/FINAL FANTASY XI"
 ```
 

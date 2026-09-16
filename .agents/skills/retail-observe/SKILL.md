@@ -261,8 +261,9 @@ here: read the returned captures yourself before citing them for parity.
   explicitly when comparing: `retail-moghouse-menu.png` vs the remake's
   screenshot from `/verify`'s GUI surface.
 - Retail DATs and captures of them are SE-copyrighted — reference material
-  only, never committed (see `.gitignore` on `vendor/game-files/`). Keep
-  captures local; quote paths, not pixels, in reports/beads.
+  only, never committed (installs live outside the repository; find one with
+  `kuluu install path NAME`). Keep captures local; quote paths, not pixels,
+  in reports/beads.
 - For animated behavior, capture a burst: `for i in 1 2 3 4 5; do
   .agents/skills/retail-observe/scripts/hxi.sh capture; sleep 0.5; done`.
 

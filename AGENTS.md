@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository. `CLAUDE.md` is a symli
 
 ## What this is
 
-Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + Bevy. It speaks the FFXI wire protocol to community-run private servers (LandSandBoat / Phoenix), **not** retail. It is **not a server**, and it **ships no game assets** — geometry/textures/audio/animation come from a user-provided retail install read at runtime from `FFXI_DAT_PATH` (default `vendor/game-files/SquareEnix/FINAL FANTASY XI`). Tables derived from LSB/POLUtils are baked in as compile-time constants, never as game content.
+Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + Bevy. It speaks the FFXI wire protocol to community-run private servers (LandSandBoat / Phoenix), **not** retail. It is **not a server**, and it **ships no game assets** — geometry/textures/audio/animation come from a user-provided retail install read at runtime (the registry's `default` install, or `FFXI_DAT_PATH`). Tables derived from LSB/POLUtils are baked in as compile-time constants, never as game content.
 
 ## Build, test, lint
 
@@ -26,7 +26,7 @@ cargo test -p ffxi-proto framing::tests::roundtrip --features native-window
 
 - **Nightly is required.** `rust-toolchain.toml` pins a dated nightly; the dev profile uses the Cranelift codegen backend (gated by `[unstable] codegen-backend` in `.cargo/config.toml`), which makes a *stable* cargo error out. Cranelift is dev-only — `--release` and the Steam Deck cross-build use LLVM.
 - **State contracts cannot self-skip.** `scripts/checks.sh contracts` runs mandatory event and transport-render contracts without game assets or servers and fails if the test is missing. CI's test stage, pre-push (including fast mode), and pre-commit for event/protocol/session/DAT/viewer changes run them. Event VM numeric displays derive from its work slots. Production dialog steps require the transport module's private permit and return a sealed prepared packet; the outcome is exposed only after transmission succeeds. Extend the synthetic raw-packet contract when changing event state, acknowledgements, cancellation, or packet ordering; extend the transport render contract for vehicle motion and coordinate frames. Verify new assertions with a deliberate failing mutation before trusting them.
-- `scripts/checks.sh install` runs the ffxi-dat real-DAT tests and the kuluu-session / kuluu-render install_conformance tests once per client under vendor/game-files/targets/ (plus FFXI_DAT_PATH); it self-skips with a printed reason when no install exists, which is why CI does not run it; pre-push runs it when DAT-layer paths changed.
+- `scripts/checks.sh install` runs the ffxi-dat real-DAT tests and the kuluu-session / kuluu-render install_conformance tests once per registered install (`kuluu install list`, plus FFXI_DAT_PATH); it self-skips with a printed reason when no install exists, which is why CI does not run it; pre-push runs it when DAT-layer paths changed.
 - **Integration tests that need a live LSB server self-skip** when it's unreachable, so the test stage is safe on a network-isolated machine. Fixtures using `mysql_async` stamp out isolated accounts against a real MariaDB and only run when one is reachable.
 - **Enable the hooks once per clone:** `cargo xtask install-hooks` (sets `core.hooksPath=.githooks`). Bypass a push with `git push --no-verify`; `PREPUSH_FAST=1 git push` runs fmt and state contracts.
 - `xtask` is excluded from `default-members`, so plain `cargo build`/`test` skip it; run it via the `cargo xtask` alias.
@@ -37,13 +37,13 @@ Credentials and the DAT path come from env vars (never committed/logged). The la
 
 ```bash
 export FFXI_USER=... FFXI_PASS=... FFXI_CHAR="Exact Name" FFXI_SERVER=127.0.0.1
-export FFXI_DAT_PATH="/path/to/SquareEnix/FINAL FANTASY XI"   # or: cargo xtask ffxi-client link
+export FFXI_DAT_PATH="/path/to/SquareEnix/FINAL FANTASY XI"   # one-off; else the registry's default install loads
 
 cargo run -p kuluu -- play                          # native window (default)
 cargo run -p kuluu --no-default-features -- play --headless  # JSON event-stream agent session, no Bevy
 ```
 
-`cargo xtask ffxi-client setup|link|default|list|update` manages the installs under `vendor/game-files/` (official-client download + PlayOnline patching, wiring an existing install, switching the default symlink); `kuluu ffxi-client setup|which|use|list|update` is the product-side view, which also knows the launcher's saved choice and the per-user client directory.
+`kuluu install list|which|use|path|link|get|update` manages the registry of named installs in the user data dir (`ffxi_dat::install`: `installs/NAME`, a one-line `default` file naming the one that loads, `FFXI_DAT_PATH` as the only override). Agents that need an install's files ask `kuluu install path NAME` rather than assuming a directory; `kuluu install list` shows each install's KNOWN_CLIENTS row. The checkout holds no game files.
 
 ## Issue tracking (beads)
 
@@ -140,7 +140,7 @@ and explicitly requested enhancements do not acquire a retail-parity gate.
 
 ### Build-time vendor scrape (no hand-maintained tables)
 
-`build.rs` in `ffxi-proto`/`ffxi-vocab`/`ffxi-dat`/`kuluu-nav`/`ffxi-audio` (sharing the `lsb-scrape` helper crate) reads LSB SQL/headers/lua and POLUtils XML out of `vendor/` and emits **compile-time Rust constants** (blowfish subkeys, zlib tables, msg/effect/job/spell/item names, zone-DAT id formulas, ROM file mappings). Never hand-copy these values — update the upstream pin and let the build regenerate them (see the `vendor-scrape` skill). The vendor submodules are **build-only**; nothing under `vendor/` (except a user's `game-files/`) is needed at runtime.
+`build.rs` in `ffxi-proto`/`ffxi-vocab`/`ffxi-dat`/`kuluu-nav`/`ffxi-audio` (sharing the `lsb-scrape` helper crate) reads LSB SQL/headers/lua and POLUtils XML out of `vendor/` and emits **compile-time Rust constants** (blowfish subkeys, zlib tables, msg/effect/job/spell/item names, zone-DAT id formulas, ROM file mappings). Never hand-copy these values — update the upstream pin and let the build regenerate them (see the `vendor-scrape` skill). The vendor submodules are **build-only**; nothing under `vendor/` is needed at runtime.
 
 ## Conventions
 

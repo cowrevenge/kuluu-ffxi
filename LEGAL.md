@@ -24,8 +24,8 @@ client, and none has ever entered this repository's git history.
 To run the renderer you must supply your own **legitimately obtained** retail
 install (HorizonXI, a PlayOnline install, etc.). Kuluu reads those DAT files
 from your local disk at runtime; it never bundles, hosts, uploads, or
-redistributes them. The directory they live in (`vendor/game-files/`) is
-git-ignored. See the README's "Getting the game files" section.
+redistributes them. They live in your user data directory (`kuluu/installs/`),
+outside the repository. See the README's "Getting the game files" section.
 
 ### Build-time derived constants are not game content
 

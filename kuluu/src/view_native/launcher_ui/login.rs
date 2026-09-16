@@ -13,14 +13,16 @@ use crate::launcher_store::{self, keyring_account_key, KEYRING_SERVICE};
 use crate::secret_store::SecretStore;
 
 use super::brand::{spawn_brand_mark, BrandMark};
+use super::client_era_check::{ClientEraStatus, EraVerdict};
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_breadcrumb,
     spawn_settings_close_titlebar, Crumb, DefaultFocusTarget, ScrollRegion,
 };
+use super::server_edit::ver_lock_label;
 use super::server_version_check::{ServerVersionStatus, VersionViolation};
 use super::{
-    Credentials, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField, LoginForm, ServerInfo,
-    ServerSelectForm,
+    Credentials, DatSetupReturn, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField,
+    LoginForm, ServerInfo, ServerSelectForm,
 };
 use crate::view_native::widgets::text_field::{text_field, TextField, TextFieldSubmitted};
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
@@ -48,9 +50,18 @@ pub(super) fn spawn_login_ui(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
 ) {
-    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
+    build_login_ui(
+        &mut commands,
+        &server,
+        &form,
+        &server_form,
+        &version,
+        &era,
+        &mark,
+    );
 }
 
 pub(super) fn rebuild_login_ui_system(
@@ -61,6 +72,7 @@ pub(super) fn rebuild_login_ui_system(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
 ) {
     if !dirty.0 {
@@ -70,16 +82,29 @@ pub(super) fn rebuild_login_ui_system(
     for e in existing.iter() {
         commands.entity(e).despawn();
     }
-    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
+    build_login_ui(
+        &mut commands,
+        &server,
+        &form,
+        &server_form,
+        &version,
+        &era,
+        &mark,
+    );
 }
 
 pub(super) fn mark_dirty_on_version_change(
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mut dirty: ResMut<LoginUiDirty>,
 ) {
-    if version.is_changed() {
+    if version.is_changed() || era.is_changed() {
         dirty.0 = true;
     }
+}
+
+fn login_blocked(version: &ServerVersionStatus, era: &ClientEraStatus) -> bool {
+    version.violation == VersionViolation::BelowMinimum || era.blocks_login()
 }
 
 fn build_login_ui(
@@ -88,6 +113,7 @@ fn build_login_ui(
     form: &LoginForm,
     server_form: &ServerSelectForm,
     version: &ServerVersionStatus,
+    era: &ClientEraStatus,
     mark: &BrandMark,
 ) {
     let user_initial = form.user.clone();
@@ -108,6 +134,7 @@ fn build_login_ui(
                 );
 
                 spawn_version_banner(panel, version);
+                spawn_client_era_banner(panel, era);
 
                 spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
 
@@ -134,7 +161,7 @@ fn build_login_ui(
                     },
                 );
 
-                let blocked = version.violation == VersionViolation::BelowMinimum;
+                let blocked = login_blocked(version, era);
 
                 panel.spawn(row()).with_children(|r| {
                     if !blocked {
@@ -335,8 +362,8 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
         VersionViolation::BelowRecommended => {
             let rec = version.recommended.clone().unwrap_or_default();
             (
-                Color::srgb(0.55, 0.45, 0.10),
-                Color::srgb(1.0, 0.85, 0.30),
+                BANNER_WARN_BORDER,
+                BANNER_WARN_TEXT,
                 format!(
                     "This server recommends client {rec}; you are on {}. Some features may not work.",
                     version.current
@@ -346,8 +373,8 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
         VersionViolation::BelowMinimum => {
             let min = version.minimum.clone().unwrap_or_default();
             (
-                Color::srgb(0.55, 0.15, 0.15),
-                Color::srgb(1.0, 0.40, 0.40),
+                BANNER_BLOCK_BORDER,
+                BANNER_BLOCK_TEXT,
                 format!(
                     "This server requires client {min}; you are on {}. Update before logging in.",
                     version.current
@@ -379,6 +406,108 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
                 TextColor(text_color),
                 ThemedText,
             ));
+        });
+}
+
+const BANNER_WARN_BORDER: Color = Color::srgb(0.55, 0.45, 0.10);
+const BANNER_WARN_TEXT: Color = Color::srgb(1.0, 0.85, 0.30);
+const BANNER_BLOCK_BORDER: Color = Color::srgb(0.55, 0.15, 0.15);
+const BANNER_BLOCK_TEXT: Color = Color::srgb(1.0, 0.40, 0.40);
+
+/// Worded around the FINAL FANTASY XI install so it cannot be read as the
+/// Kuluu app-version banner above it.
+fn client_era_message(era: &ClientEraStatus) -> Option<String> {
+    let lock = era.lock.map(ver_lock_label).unwrap_or("not enforced");
+    let mut msg = match era.verdict {
+        EraVerdict::Unchecked | EraVerdict::Ok => return None,
+        EraVerdict::Refused => format!(
+            "This server expects a FINAL FANTASY XI client from era {} ({lock}); your selected \
+             install '{}' is era {}. Its lobby would refuse this install.",
+            era.expected,
+            era.install_name(),
+            era.install_stamp(),
+        ),
+        EraVerdict::Warn if era.install_stamp() == "unknown" => format!(
+            "This server expects a FINAL FANTASY XI client from era {} ({lock}); the patch \
+             stamp of your selected install '{}' could not be read.",
+            era.expected,
+            era.install_name(),
+        ),
+        EraVerdict::Warn if era.preferred_mismatch().is_none() => format!(
+            "This server expects a FINAL FANTASY XI client from era {} ({lock}); your selected \
+             install '{}' is era {}. Zone text and cast timing may come from the wrong era.",
+            era.expected,
+            era.install_name(),
+            era.install_stamp(),
+        ),
+        EraVerdict::Warn => String::new(),
+    };
+    if let Some(preferred) = era.preferred_mismatch() {
+        if !msg.is_empty() {
+            msg.push(' ');
+        }
+        msg.push_str(&format!(
+            "This server entry prefers the '{preferred}' install; '{}' is selected.",
+            era.install_name()
+        ));
+    }
+    Some(msg)
+}
+
+fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStatus) {
+    let Some(msg) = client_era_message(era) else {
+        return;
+    };
+    let (border, text_color) = if era.blocks_login() {
+        (BANNER_BLOCK_BORDER, BANNER_BLOCK_TEXT)
+    } else {
+        (BANNER_WARN_BORDER, BANNER_WARN_TEXT)
+    };
+    panel
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                row_gap: Val::Px(6.0),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BorderColor::all(border),
+        ))
+        .with_children(|bar| {
+            bar.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
+                    min_width: Val::Px(240.0),
+                    ..default()
+                },
+                Text::new(msg),
+                TextFont {
+                    font_size: 13.0.into(),
+                    ..default()
+                },
+                TextColor(text_color),
+                ThemedText,
+            ));
+            bar.spawn(button_bundle(
+                ButtonBundleProps::default(),
+                (),
+                Spawn((Text::new("Choose install..."), ThemedText)),
+            ))
+            .observe(
+                |_ev: On<Activate>,
+                 mut ret: ResMut<DatSetupReturn>,
+                 mut next: ResMut<NextState<LauncherState>>| {
+                    ret.0 = Some(LauncherState::Login);
+                    next.set(LauncherState::DatSetup);
+                },
+            );
         });
 }
 
@@ -437,8 +566,9 @@ fn spawn_field(
                 move |_ev: On<TextFieldSubmitted>,
                       form: Res<LoginForm>,
                       version: Res<ServerVersionStatus>,
+                      era: Res<ClientEraStatus>,
                       mut next: ResMut<NextState<LauncherState>>| {
-                    if version.violation == VersionViolation::BelowMinimum {
+                    if login_blocked(&version, &era) {
                         return;
                     }
                     if !form.user.is_empty() && !form.pass.is_empty() {
@@ -459,6 +589,7 @@ pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
     mut form: ResMut<LoginForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mut next: ResMut<NextState<LauncherState>>,
 ) {
     for ev in events.read() {
@@ -476,7 +607,7 @@ pub(super) fn keyboard_input_system(
             // and stays silent when the other side is still empty - that was
             // the "pressing enter does nothing" dead end.
             Key::Enter
-                if version.violation != VersionViolation::BelowMinimum
+                if !login_blocked(&version, &era)
                     && !form.user.is_empty()
                     && !form.pass.is_empty() =>
             {

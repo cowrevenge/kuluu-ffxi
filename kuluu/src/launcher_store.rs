@@ -25,6 +25,37 @@ pub struct ServerProfile {
 
     #[serde(default)]
     pub version_check_url: Option<String>,
+
+    /// The patch stamp the server's lobby admits (login.CLIENT_VER); unset
+    /// means the vendored LSB pin, ffxi_proto::login::LSB_CLIENT_VER.
+    #[serde(default)]
+    pub client_ver: Option<String>,
+
+    /// login.VER_LOCK as ffxi_proto::login::VerLock::from_setting reads it;
+    /// unset means ffxi_proto::login::LSB_DEFAULT_VER_LOCK.
+    #[serde(default)]
+    pub ver_lock: Option<u8>,
+
+    /// An ffxi_client::Install name this server should be played from.
+    #[serde(default)]
+    pub preferred_client: Option<String>,
+}
+
+impl ServerProfile {
+    pub fn expected_client_ver(&self) -> &str {
+        self.client_ver
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(ffxi_proto::login::LSB_CLIENT_VER)
+    }
+
+    pub fn ver_lock(&self) -> ffxi_proto::login::VerLock {
+        ffxi_proto::login::VerLock::from_setting(
+            self.ver_lock
+                .unwrap_or(ffxi_proto::login::LSB_DEFAULT_VER_LOCK),
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -311,7 +342,36 @@ mod tests {
             flavor: AuthFlavorKind::Json,
             xiloader_version: None,
             version_check_url: None,
+            client_ver: None,
+            ver_lock: None,
+            preferred_client: None,
         }
+    }
+
+    #[test]
+    fn profile_without_era_fields_parses_and_falls_back_to_the_lsb_pin() {
+        let j = r#"{"name":"local","host":"127.0.0.1","auth_port":54231,
+            "data_port":54230,"view_port":54001,"flavor":"json"}"#;
+        let p: ServerProfile = serde_json::from_str(j).unwrap();
+        assert_eq!(p.client_ver, None);
+        assert_eq!(p.ver_lock, None);
+        assert_eq!(p.preferred_client, None);
+        assert_eq!(p.expected_client_ver(), ffxi_proto::login::LSB_CLIENT_VER);
+        assert_eq!(
+            p.ver_lock(),
+            ffxi_proto::login::VerLock::from_setting(ffxi_proto::login::LSB_DEFAULT_VER_LOCK)
+        );
+    }
+
+    #[test]
+    fn blank_client_ver_counts_as_unset() {
+        let mut p = profile("local", "127.0.0.1");
+        p.client_ver = Some("   ".into());
+        assert_eq!(p.expected_client_ver(), ffxi_proto::login::LSB_CLIENT_VER);
+        p.client_ver = Some("30230905_0".into());
+        assert_eq!(p.expected_client_ver(), "30230905_0");
+        p.ver_lock = Some(1);
+        assert_eq!(p.ver_lock(), ffxi_proto::login::VerLock::Exact);
     }
 
     #[test]

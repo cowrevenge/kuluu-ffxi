@@ -6,7 +6,9 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ValueChange};
 
+use crate::ffxi_client;
 use crate::launcher_store::{self, AuthFlavorKind, ServerProfile};
+use ffxi_proto::login::{VerLock, LSB_CLIENT_VER, LSB_DEFAULT_VER_LOCK};
 use kuluu_session::auth_client;
 
 use super::common::{hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb};
@@ -21,6 +23,27 @@ pub(super) struct ServerEditRoot;
 #[derive(Component, Clone, Copy)]
 pub(super) struct FlavorButton(AuthFlavorKind);
 
+#[derive(Component, Clone, Copy)]
+pub(super) struct VerLockButton(Option<u8>);
+
+#[derive(Component, Clone)]
+pub(super) struct PreferredClientButton(Option<String>);
+
+const VER_LOCK_CHOICES: [(Option<u8>, &str); 4] = [
+    (None, "Server default"),
+    (Some(0), "Off"),
+    (Some(1), "Exact"),
+    (Some(2), "At least"),
+];
+
+pub(super) fn ver_lock_label(lock: VerLock) -> &'static str {
+    match lock {
+        VerLock::Off => "not enforced",
+        VerLock::Exact => "exactly",
+        VerLock::AtLeast => "or newer",
+    }
+}
+
 pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server: Res<ServerInfo>) {
     let editing = form.editing_index.is_some();
     let snap = (
@@ -32,6 +55,17 @@ pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server
         form.flavor,
         form.xiloader_version.clone(),
         form.version_check_url.clone(),
+        form.client_ver.clone(),
+        form.ver_lock,
+        form.preferred_client.clone(),
+    );
+    let install_names: Vec<String> = ffxi_client::installs()
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    let default_lock_label = format!(
+        "Server default ({})",
+        ver_lock_label(VerLock::from_setting(LSB_DEFAULT_VER_LOCK))
     );
 
     let default_version = auth_client::resolve_client_version(None);
@@ -88,6 +122,64 @@ pub(super) fn spawn_ui(mut commands: Commands, form: Res<ServerEditForm>, server
                     "https://server/version.json",
                     ServerEditField::VersionCheckUrl,
                 );
+
+                panel.spawn(hint(
+                    "FINAL FANTASY XI client this server's lobby admits (login.CLIENT_VER / VER_LOCK):",
+                ));
+                spawn_field(
+                    panel,
+                    "Client version",
+                    &snap.8,
+                    LSB_CLIENT_VER,
+                    ServerEditField::ClientVer,
+                );
+                panel.spawn(row()).with_children(|r| {
+                    r.spawn((
+                        Node {
+                            width: Val::Px(140.0),
+                            ..default()
+                        },
+                        Text::new("Version lock"),
+                        ThemedText,
+                    ));
+                    for (value, label) in VER_LOCK_CHOICES {
+                        let label = if value.is_none() {
+                            default_lock_label.as_str()
+                        } else {
+                            label
+                        };
+                        spawn_ver_lock_button(r, label, value, snap.9);
+                    }
+                });
+                panel.spawn(row()).with_children(|r| {
+                    r.spawn((
+                        Node {
+                            width: Val::Px(140.0),
+                            ..default()
+                        },
+                        Text::new("Preferred install"),
+                        ThemedText,
+                    ));
+                    spawn_preferred_client_button(r, "Any", None, snap.10.as_deref());
+                    for name in &install_names {
+                        spawn_preferred_client_button(
+                            r,
+                            name,
+                            Some(name.clone()),
+                            snap.10.as_deref(),
+                        );
+                    }
+                    if let Some(saved) = snap.10.as_deref() {
+                        if !install_names.iter().any(|n| n == saved) {
+                            spawn_preferred_client_button(
+                                r,
+                                &format!("{saved} (missing)"),
+                                Some(saved.to_string()),
+                                snap.10.as_deref(),
+                            );
+                        }
+                    }
+                });
 
                 panel.spawn(row()).with_children(|r| {
                     r.spawn(button_bundle(
@@ -146,6 +238,14 @@ fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
             Some(trimmed.to_string())
         }
     };
+    let client_ver = {
+        let trimmed = form.client_ver.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
     let profile = ServerProfile {
         name: form.name.clone(),
         host: form.host.clone(),
@@ -155,6 +255,9 @@ fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
         flavor: form.flavor,
         xiloader_version,
         version_check_url,
+        client_ver,
+        ver_lock: form.ver_lock,
+        preferred_client: form.preferred_client.clone(),
     };
     let mut store = launcher_store::load();
     match form.editing_index {
@@ -237,7 +340,12 @@ fn spawn_field(
                     ServerEditField::VersionCheckUrl => {
                         form.version_check_url = ev.value.clone();
                     }
-                    ServerEditField::Flavor => {}
+                    ServerEditField::ClientVer => {
+                        form.client_ver = ev.value.clone();
+                    }
+                    ServerEditField::Flavor
+                    | ServerEditField::VerLock
+                    | ServerEditField::PreferredClient => {}
                 },
             );
         });
@@ -268,21 +376,77 @@ fn spawn_flavor_button(
         });
 }
 
+fn spawn_ver_lock_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    value: Option<u8>,
+    current: Option<u8>,
+) {
+    parent
+        .spawn((button_bundle(
+            ButtonBundleProps {
+                variant: chip_variant(value == current),
+                ..default()
+            },
+            VerLockButton(value),
+            Spawn((Text::new(label.to_string()), ThemedText)),
+        ),))
+        .observe(move |_ev: On<Activate>, mut form: ResMut<ServerEditForm>| {
+            form.ver_lock = value;
+        });
+}
+
+fn spawn_preferred_client_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    value: Option<String>,
+    current: Option<&str>,
+) {
+    let selected = value.as_deref() == current;
+    parent
+        .spawn((button_bundle(
+            ButtonBundleProps {
+                variant: chip_variant(selected),
+                ..default()
+            },
+            PreferredClientButton(value.clone()),
+            Spawn((Text::new(label.to_string()), ThemedText)),
+        ),))
+        .observe(move |_ev: On<Activate>, mut form: ResMut<ServerEditForm>| {
+            form.preferred_client = value.clone();
+        });
+}
+
+fn chip_variant(selected: bool) -> ButtonVariant {
+    if selected {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Normal
+    }
+}
+
 pub(super) fn redraw_flavor_buttons(
     form: Res<ServerEditForm>,
-    q: Query<(Entity, &FlavorButton)>,
+    flavors: Query<(Entity, &FlavorButton)>,
+    locks: Query<(Entity, &VerLockButton)>,
+    clients: Query<(Entity, &PreferredClientButton)>,
     mut commands: Commands,
 ) {
     if !form.is_changed() {
         return;
     }
-    for (e, fb) in q.iter() {
-        let v = if fb.0 == form.flavor {
-            ButtonVariant::Primary
-        } else {
-            ButtonVariant::Normal
-        };
-        commands.entity(e).insert(v);
+    for (e, fb) in flavors.iter() {
+        commands.entity(e).insert(chip_variant(fb.0 == form.flavor));
+    }
+    for (e, lb) in locks.iter() {
+        commands
+            .entity(e)
+            .insert(chip_variant(lb.0 == form.ver_lock));
+    }
+    for (e, pb) in clients.iter() {
+        commands
+            .entity(e)
+            .insert(chip_variant(pb.0 == form.preferred_client));
     }
 }
 
@@ -309,8 +473,10 @@ pub(super) fn keyboard_input_system(
 
 pub(super) fn redraw_system(
     form: Res<ServerEditForm>,
-    q: Query<(Entity, &FlavorButton)>,
+    flavors: Query<(Entity, &FlavorButton)>,
+    locks: Query<(Entity, &VerLockButton)>,
+    clients: Query<(Entity, &PreferredClientButton)>,
     commands: Commands,
 ) {
-    redraw_flavor_buttons(form, q, commands);
+    redraw_flavor_buttons(form, flavors, locks, clients, commands);
 }

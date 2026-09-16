@@ -6,6 +6,7 @@ mod char_create;
 mod char_create_preview;
 pub(crate) mod char_list;
 mod char_preview;
+mod client_era_check;
 mod client_job;
 mod common;
 mod dat_setup;
@@ -289,6 +290,9 @@ pub(crate) enum ServerEditField {
     Flavor,
     XiloaderVersion,
     VersionCheckUrl,
+    ClientVer,
+    VerLock,
+    PreferredClient,
 }
 
 #[allow(dead_code)]
@@ -302,7 +306,10 @@ impl ServerEditField {
             Self::ViewPort => Self::Flavor,
             Self::Flavor => Self::XiloaderVersion,
             Self::XiloaderVersion => Self::VersionCheckUrl,
-            Self::VersionCheckUrl => Self::Name,
+            Self::VersionCheckUrl => Self::ClientVer,
+            Self::ClientVer => Self::VerLock,
+            Self::VerLock => Self::PreferredClient,
+            Self::PreferredClient => Self::Name,
         }
     }
 }
@@ -326,6 +333,9 @@ pub(crate) struct ServerEditForm {
 
     pub xiloader_version: String,
     pub version_check_url: String,
+    pub client_ver: String,
+    pub ver_lock: Option<u8>,
+    pub preferred_client: Option<String>,
     #[allow(dead_code)]
     pub focus: ServerEditField,
     pub editing_index: Option<usize>,
@@ -342,6 +352,9 @@ impl Default for ServerEditForm {
             flavor: crate::launcher_store::AuthFlavorKind::Json,
             xiloader_version: String::new(),
             version_check_url: String::new(),
+            client_ver: String::new(),
+            ver_lock: None,
+            preferred_client: None,
             focus: ServerEditField::default(),
             editing_index: None,
         }
@@ -359,6 +372,9 @@ impl ServerEditForm {
             flavor: p.flavor,
             xiloader_version: p.xiloader_version.clone().unwrap_or_default(),
             version_check_url: p.version_check_url.clone().unwrap_or_default(),
+            client_ver: p.client_ver.clone().unwrap_or_default(),
+            ver_lock: p.ver_lock,
+            preferred_client: p.preferred_client.clone(),
             focus: ServerEditField::default(),
             editing_index: None,
         }
@@ -894,6 +910,7 @@ pub(crate) fn register(
     footer::register(app);
 
     server_version_check::register(app);
+    client_era_check::register(app);
 
     app.add_systems(OnEnter(LauncherState::CharCreate), char_create::spawn_ui)
         .add_systems(OnExit(LauncherState::CharCreate), char_create::despawn_ui)

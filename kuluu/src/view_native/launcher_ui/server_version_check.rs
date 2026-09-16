@@ -37,14 +37,25 @@ struct VersionCheckSlot {
     result: Arc<Mutex<Option<Option<ServerVersionAdvert>>>>,
 }
 
-fn active_version_check_url(form: &ServerSelectForm, info: &ServerInfo) -> Option<String> {
+/// The saved entry the login screen is signing in to: by selected/applied
+/// name first, else the first entry on the same host.
+pub(super) fn active_server_profile(
+    form: &ServerSelectForm,
+    info: &ServerInfo,
+) -> Option<launcher_store::ServerProfile> {
     let store = launcher_store::load();
     let by_name = form
         .selected
         .as_deref()
         .or(info.profile_name.as_deref())
         .and_then(|name| store.servers.iter().find(|p| p.name == name));
-    let profile = by_name.or_else(|| store.servers.iter().find(|p| p.host == info.server))?;
+    by_name
+        .or_else(|| store.servers.iter().find(|p| p.host == info.server))
+        .cloned()
+}
+
+fn active_version_check_url(form: &ServerSelectForm, info: &ServerInfo) -> Option<String> {
+    let profile = active_server_profile(form, info)?;
     profile
         .version_check_url
         .as_ref()

@@ -18,6 +18,41 @@ pub enum TargetActionId {
     Fish,
 }
 
+impl TargetActionId {
+    /// Whether confirming this entry only addresses, opens or inspects the
+    /// target — it commits no resource and starts no fight, so there is nothing
+    /// for the player to undo if it fires unasked.
+    pub fn is_non_destructive(self) -> bool {
+        match self {
+            TargetActionId::Open
+            | TargetActionId::Check
+            | TargetActionId::Chat
+            | TargetActionId::SwitchTarget => true,
+            TargetActionId::Attack
+            | TargetActionId::Magic
+            | TargetActionId::Abilities
+            | TargetActionId::Trust
+            | TargetActionId::Items
+            | TargetActionId::Trade
+            | TargetActionId::Disengage
+            | TargetActionId::Fish => false,
+        }
+    }
+}
+
+/// The entry a target's Command Menu may confirm on the player's behalf instead
+/// of drawing a one-line box to press Enter in again.
+///
+/// Retail never reaches the menu for a target whose whole vocabulary is one
+/// interaction: a static NPC — doors included — interacts straight off the
+/// confirm key (research/xim UiState.kt `handleDefaultEnter`).
+pub fn sole_auto_confirm_entry(entries: &[ActionEntry]) -> Option<&ActionEntry> {
+    match entries {
+        [only] if only.enabled && only.id.is_non_destructive() => Some(only),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TargetKindLite {
     SelfPc,
@@ -401,6 +436,80 @@ mod tests {
     fn npc_has_no_menu() {
         let entries = build_target_action_entries(&ctx(TargetKindLite::Npc, true), &RETAIL);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn door_menu_is_one_entry_and_confirms_itself() {
+        let entries = build_target_action_entries(&ctx(TargetKindLite::Door, true), &RETAIL);
+        let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![TargetActionId::Open]);
+        assert_eq!(
+            sole_auto_confirm_entry(&entries).map(|e| e.id),
+            Some(TargetActionId::Open),
+            "a door must open off the first confirm, not the second"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_door_still_shows_its_menu() {
+        let entries = build_target_action_entries(&ctx(TargetKindLite::Door, false), &RETAIL);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].enabled);
+        assert!(
+            sole_auto_confirm_entry(&entries).is_none(),
+            "the greyed entry carries the reason, so the player has to see it"
+        );
+    }
+
+    #[test]
+    fn a_door_within_casting_reach_keeps_its_menu() {
+        let fishing = TargetActionContext {
+            can_fish: true,
+            ..ctx(TargetKindLite::Door, true)
+        };
+        let entries = build_target_action_entries(&fishing, &RETAIL);
+        assert_eq!(entries.len(), 2);
+        assert!(sole_auto_confirm_entry(&entries).is_none());
+    }
+
+    #[test]
+    fn multi_entry_menus_are_never_auto_confirmed() {
+        for kind in [
+            TargetKindLite::Mob,
+            TargetKindLite::Pc,
+            TargetKindLite::SelfPc,
+            TargetKindLite::None,
+        ] {
+            let entries = build_target_action_entries(&ctx(kind, true), &RETAIL);
+            assert!(
+                entries.len() > 1,
+                "{kind:?} is expected to offer more than one command"
+            );
+            assert!(sole_auto_confirm_entry(&entries).is_none());
+        }
+    }
+
+    #[test]
+    fn a_lone_committing_entry_is_not_confirmed_for_the_player() {
+        for id in [
+            TargetActionId::Attack,
+            TargetActionId::Trade,
+            TargetActionId::Items,
+            TargetActionId::Fish,
+            TargetActionId::Disengage,
+        ] {
+            let lone = vec![ActionEntry {
+                id,
+                label: String::new(),
+                kind: ActionEntryKind::Plain,
+                enabled: true,
+                hint: None,
+            }];
+            assert!(
+                sole_auto_confirm_entry(&lone).is_none(),
+                "{id:?} commits something and must keep its confirm"
+            );
+        }
     }
 
     #[test]

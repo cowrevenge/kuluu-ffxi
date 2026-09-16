@@ -283,18 +283,25 @@ pub(crate) fn text_input_system(
                     );
                     continue;
                 }
+                let self_char_id = scene_state.snapshot.self_char_id;
+                let usable_items = kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot);
+                let can_fish = slash_writers.fishing_spot.0.is_ready();
                 if let Some(next) = handle_world_key(
                     &ev.logical_key,
                     &bindings,
                     current_target,
                     &entities,
                     self_pos,
-                    scene_state.snapshot.self_char_id,
+                    self_char_id,
                     target_changed,
                     engaged,
-                    kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot),
-                    slash_writers.fishing_spot.0.is_ready(),
+                    usable_items,
+                    can_fish,
                     &cmd_tx.0,
+                    &mut scene_state,
+                    &mut slash_writers.check_target,
+                    &mut slash_writers.trade_state,
+                    &mut slash_writers.select_target,
                 ) {
                     *mode = next;
                 }

@@ -444,6 +444,32 @@ run_comments() {
   return $bad
 }
 
+run_literals() {
+  # A meaningful integer literal (>= 1000, not a power of two or round number)
+  # that some const in the same crate or a dependency already names must be
+  # imported, not re-typed - tests and fixtures included. Scoped like the
+  # comments advisory so the gate judges new lines, not historical debt:
+  #   LITERALS_DIFF=staged   staged hunks (pre-commit)
+  #   LITERALS_DIFF=tree     the whole tree (the debt list)
+  #   default                lines added since the merge-base with origin/main
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: literals - skipped (no python3)"
+    return 0
+  fi
+  case "${LITERALS_DIFF:-}" in
+    staged) python3 scripts/literal-reuse.py --staged ;;
+    tree) python3 scripts/literal-reuse.py ;;
+    *)
+      local base
+      base=${COMMENTS_BASE:-$(git merge-base HEAD origin/main 2>/dev/null || true)}
+      if [ -z "$base" ]; then
+        echo "checks: literals - skipped (no merge-base with origin/main)"
+        return 0
+      fi
+      python3 scripts/literal-reuse.py --base "$base" ;;
+  esac
+}
+
 run_contracts() {
   # Two entry points because the ferry/bootstrap contracts block on their own
   # current-thread runtime and must run outside an active tokio context; both
@@ -679,6 +705,7 @@ for stage in "$@"; do
     clippy) echo "checks: clippy"; run_clippy ;;
     style)  echo "checks: style";  run_style ;;
     comments) echo "checks: comments"; run_comments ;;
+    literals) echo "checks: literals"; run_literals ;;
     harness) echo "checks: harness"; run_harness ;;
     contracts) echo "checks: contracts"; run_contracts ;;
     install) echo "checks: install"; run_install ;;

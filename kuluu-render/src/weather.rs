@@ -128,20 +128,43 @@ impl ZoneWeather {
         self.selected.map(|(_, indoor)| indoor).unwrap_or(false)
     }
 
-    /// The distance fed to `FogFalloff::from_visibility_colors` for the record the player's
-    /// own area is fogged through, i.e. the range past which DAT fog leaves no contrast.
+    /// The far end of the linear fog ramp for the record the player's own area is
+    /// fogged through, i.e. the range past which DAT fog leaves no contrast.
     pub fn fog_visibility_dist(&self) -> Option<f32> {
         let rec = self.area_current.or(self.current)?;
         Some(fog_visibility_dist(&rec))
     }
 }
 
-// FogFalloff::from_visibility_colors divides by the visibility distance and a DAT record may
-// carry 0 (weather.rs harvest default), which would make the extinction non-finite.
+// sun_occlusion.rs scales its lens-flare occlusion reach by this distance, so a record
+// carrying 0 keeps a usable reach instead of collapsing it.
 const MIN_FOG_VISIBILITY_DIST: f32 = 80.0;
 
 pub fn fog_visibility_dist(rec: &WeatherRecord) -> f32 {
     rec.max_fog_dist_landscape.max(MIN_FOG_VISIBILITY_DIST)
+}
+
+// XiArea.cpp XiArea::GetFog bumps an end at or below the start one unit past it.
+const FOG_END_PAST_START: f32 = 1.0;
+
+/// XiArea.cpp XiArea::GetFog: FOGSTART is the terrain block's min fog distance and FOGEND
+/// its max (the registry multiplier is 1.0 by default); ZoneRenderer.cpp
+/// ZoneRenderer::RenderChunk2 and CMoElem.cpp CMoElem::PrepDX draw terrain and elements
+/// through that ramp as D3DFOG_LINEAR, independent of the fog colour.
+pub fn zone_distance_fog(rec: &WeatherRecord) -> DistanceFog {
+    let [r, g, b, _] = rec.fog_landscape;
+    let color = Color::srgb(r, g, b);
+    let start = rec.min_fog_dist_landscape;
+    let mut end = rec.max_fog_dist_landscape;
+    if end <= start {
+        end = start + FOG_END_PAST_START;
+    }
+    DistanceFog {
+        color,
+        directional_light_color: color,
+        directional_light_exponent: 0.0,
+        falloff: FogFalloff::Linear { start, end },
+    }
 }
 
 // wire::Weather shares the LSB weather.h discriminant ordering, so the variant
@@ -496,11 +519,16 @@ pub(crate) fn zone_clear_color(rec: Option<&WeatherRecord>, default: Color) -> C
     }
 }
 
+/// A camera that views zone geometry outside the operator path (the launcher backdrop
+/// flythrough); apply_zone_weather fogs it exactly like the operator camera.
+#[derive(Component)]
+pub struct ZoneViewCamera;
+
 pub fn apply_zone_weather(
     zone_weather: Res<ZoneWeather>,
     active: Res<crate::weather_fx::ActiveWeatherModifier>,
     mut fog_q: Query<(&mut FogVolume, &mut Transform, Option<&mut Visibility>)>,
-    cam_tf_q: Query<&GlobalTransform, With<OperatorCamera>>,
+    cam_tf_q: Query<&GlobalTransform, Or<(With<OperatorCamera>, With<ZoneViewCamera>)>>,
     mut ambient: ResMut<GlobalAmbientLight>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     settings: Res<GraphicsSettings>,
@@ -511,7 +539,7 @@ pub fn apply_zone_weather(
             Option<&mut DistanceFog>,
             Option<&mut bevy::light::VolumetricFog>,
         ),
-        With<OperatorCamera>,
+        Or<(With<OperatorCamera>, With<ZoneViewCamera>)>,
     >,
     mut clear_color: ResMut<ClearColor>,
     default_clear: Res<DefaultClearColor>,
@@ -641,18 +669,7 @@ pub fn apply_zone_weather(
     // row is off (the strip block above already removed both layers).
     if !panels.fog_off {
         if let Ok((cam_entity, dist_slot, vol_slot)) = cam_q.single_mut() {
-            let inscatter = Color::srgb(
-                (fr * 1.08).min(1.0),
-                (fg * 1.06).min(1.0),
-                (fb * 1.02).min(1.0),
-            );
-            let visibility = fog_visibility_dist(&area_rec);
-            let want = DistanceFog {
-                color: fog_color,
-                directional_light_color: inscatter,
-                directional_light_exponent: 60.0,
-                falloff: FogFalloff::from_visibility_colors(visibility, fog_color, inscatter),
-            };
+            let want = zone_distance_fog(&area_rec);
             match dist_slot {
                 Some(mut existing) => *existing = want,
                 None => {
@@ -755,6 +772,36 @@ mod tests {
         area_rec.max_fog_dist_landscape = 0.0;
         zone.area_current = Some(area_rec);
         assert_eq!(zone.fog_visibility_dist(), Some(MIN_FOG_VISIBILITY_DIST));
+    }
+
+    #[test]
+    fn zone_fog_is_a_linear_ramp_from_min_to_max_distance() {
+        let mut rec = rec_with_fog([0.10, 0.11, 0.18, 1.0]);
+        rec.min_fog_dist_landscape = 0.0;
+        rec.max_fog_dist_landscape = 500.0;
+        let fog = zone_distance_fog(&rec);
+        assert_color_close(fog.color, Color::srgb(0.10, 0.11, 0.18));
+        match fog.falloff {
+            FogFalloff::Linear { start, end } => {
+                assert_eq!(start, 0.0);
+                assert_eq!(end, 500.0);
+            }
+            other => panic!("expected a linear ramp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zone_fog_end_is_bumped_past_a_start_that_meets_it() {
+        let mut rec = rec_with_fog([0.5; 4]);
+        rec.min_fog_dist_landscape = 300.0;
+        rec.max_fog_dist_landscape = 300.0;
+        match zone_distance_fog(&rec).falloff {
+            FogFalloff::Linear { start, end } => {
+                assert_eq!(start, 300.0);
+                assert_eq!(end, 300.0 + FOG_END_PAST_START);
+            }
+            other => panic!("expected a linear ramp, got {other:?}"),
+        }
     }
 
     #[test]

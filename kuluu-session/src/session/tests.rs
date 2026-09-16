@@ -2456,6 +2456,7 @@ fn a_job_ability_line_is_composed_from_the_installed_table() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     // Boost is ability 39 (vendor/server/sql/abilities.sql), whose message1 is
     // the elided UsesJobAbility line.
     const BOOST: u32 = 39;
@@ -2500,6 +2501,7 @@ fn a_two_clause_entry_becomes_two_chat_lines() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     const BOOST: u32 = 39;
     const DAMAGE: u32 = 42;
     let mut numbers = [0i64; sysmes::PARAM_SLOTS];
@@ -2535,6 +2537,7 @@ fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     const BOOST: u32 = 39;
     assert!(
         ffxi_vocab::msg_basic::lookup(116).is_none(),
@@ -2557,6 +2560,54 @@ fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
     assert_eq!(lines.len(), 2, "got: {lines:?}");
     assert_eq!(lines[0].text, "Daisy uses Boost.");
     assert_eq!(lines[1].text, "Daisy's attacks are enhanced.");
+}
+
+/// vendor/server/src/map/enums/action/category.h ActionCategory ItemFinish.
+const ITEM_FINISH_CATEGORY: u8 = 5;
+
+/// LSB sends an item's finish line as MsgBasic::ItemUse with the item id in the
+/// target's param, the packet's value slot (vendor/server/src/map/ai/states/item_state.cpp
+/// CItemState::Update); the install's entry reads that slot and names the item
+/// through the item DAT's chat-log spelling. Self-skips without game files.
+#[test]
+fn an_item_use_line_names_the_item_from_the_item_dat() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(tables) = MesBasicTables::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    // vendor/server/sql/item_basic.sql hatchling_shield.
+    const HATCHLING_SHIELD: u32 = 28652;
+    // vendor/server/src/map/enums/msg_basic.h MsgBasic ItemUse.
+    const ITEM_USE: u16 = 28;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = HATCHLING_SHIELD as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = HATCHLING_SHIELD as i64;
+    let lines = super::build_battle2_line(
+        Some(&tables),
+        ITEM_USE,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        HATCHLING_SHIELD,
+        HATCHLING_SHIELD,
+        ITEM_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses a hatchling shield.");
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|s| s.kind == ChatSpanKind::Item && s.text == "hatchling shield"),
+        "the item name is its own span: {:?}",
+        lines[0].spans
+    );
 }
 
 /// vendor/server/src/map/enums/action/category.h ActionCategory AbilityFinish.

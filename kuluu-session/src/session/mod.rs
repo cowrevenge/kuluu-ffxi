@@ -5307,6 +5307,13 @@ fn emit_zone_message_chat(
     use crate::event_dialog::FishingChat;
     match decoded {
         Ok(msg) => {
+            tracing::debug!(
+                zone = zone_id,
+                index = msg.message_index,
+                opcode,
+                nums = ?msg.nums,
+                "zone message"
+            );
             // Fishing lines resolve against the DAT-located fishing block,
             // reconciling server/install client-era skew; anything else takes
             // the direct lookup.
@@ -5509,7 +5516,7 @@ fn decode_battle_message(
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
     is_029: bool,
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
 ) -> Vec<ChatLine> {
     if data.len() < 24 {
         return Vec::new();
@@ -5768,7 +5775,7 @@ fn decode_battle2_action(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
 ) -> Vec<ChatLine> {
     let mut out: Vec<ChatLine> = Vec::new();
 
@@ -5862,7 +5869,7 @@ fn is_start_category(cmd_no: u8) -> bool {
 }
 
 fn build_battle2_line(
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5932,7 +5939,7 @@ const MES_PARAM_SPIKES_VALUE: usize = 3;
 /// The install's own wording for a battle message, or `None` when there is no
 /// readable table or the entry needs a control code the composer cannot render.
 fn compose_mes_basic(
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5941,12 +5948,18 @@ fn compose_mes_basic(
     numbers: [i64; sysmes::PARAM_SLOTS],
     sender: &str,
 ) -> Option<Vec<ChatLine>> {
-    let table = mes_basic?;
+    let tables = mes_basic?;
+    let table = &tables.dat;
     let index = message_num as usize;
     let refs = table.resource_refs(index);
     let resolved: Vec<String> = refs
         .iter()
         .map(|r| mes_basic_resource_name(r.kind, numbers[r.slot] as u32))
+        .collect();
+    let item_slots = table.item_refs(index);
+    let item_names: Vec<String> = item_slots
+        .iter()
+        .map(|&slot| tables.item_log_name(numbers.get(slot).copied().unwrap_or(0) as u16))
         .collect();
     let mut params = sysmes::SysMesParams {
         numbers,
@@ -5959,6 +5972,11 @@ fn compose_mes_basic(
     };
     for (r, name) in refs.iter().zip(&resolved) {
         params.names[r.slot] = Some(name);
+    }
+    for (&slot, name) in item_slots.iter().zip(&item_names) {
+        if let Some(param) = params.items.get_mut(slot) {
+            *param = Some(name);
+        }
     }
     let line = table.message(index, &params)?;
     Some(
@@ -6005,9 +6023,41 @@ fn mes_basic_resource_name(kind: sysmes::MesBasicResource, id: u32) -> String {
 
 /// Lazily opens the basic-message table, once, and remembers a miss so an
 /// install without one costs a single attempt rather than one per battle line.
+/// The install's battle-message table plus the item table its inline item
+/// tags name from. Item names come from the item DAT because retail prints the
+/// chat-log form ("hatchling shield"), not the scraped display name.
+pub(crate) struct MesBasicTables {
+    dat: MesBasicDat,
+    items: Option<ffxi_dat::item_dat::ItemTable>,
+}
+
+impl MesBasicTables {
+    pub(crate) fn open(root: &ffxi_dat::DatRoot) -> Option<Self> {
+        Some(Self {
+            dat: MesBasicDat::open(root)?,
+            items: Some(ffxi_dat::item_dat::ItemTable::open_from_root(root)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_dat(dat: MesBasicDat) -> Self {
+        Self { dat, items: None }
+    }
+
+    fn item_log_name(&self, item_id: u16) -> String {
+        self.items
+            .as_ref()
+            .and_then(|t| t.lookup(item_id))
+            .map(|i| i.log_name)
+            .filter(|n| !n.is_empty())
+            .or_else(|| ffxi_vocab::item_names::lookup(item_id).map(str::to_string))
+            .unwrap_or_else(|| format!("item #{item_id}"))
+    }
+}
+
 struct MesBasicResolver {
     root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
-    table: Option<Option<MesBasicDat>>,
+    table: Option<Option<MesBasicTables>>,
 }
 
 impl MesBasicResolver {
@@ -6015,11 +6065,11 @@ impl MesBasicResolver {
         Self { root, table: None }
     }
 
-    fn table(&mut self) -> Option<&MesBasicDat> {
+    fn table(&mut self) -> Option<&MesBasicTables> {
         let root = self.root.as_ref();
         self.table
             .get_or_insert_with(|| {
-                let loaded = root.and_then(|r| MesBasicDat::open(r));
+                let loaded = root.and_then(|r| MesBasicTables::open(r));
                 if loaded.is_none() {
                     tracing::info!(
                         "basic-message DAT (ROM/27/72) unavailable - battle lines fall back to the scraped msg_basic wording"

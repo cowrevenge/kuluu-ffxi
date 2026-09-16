@@ -1579,6 +1579,66 @@ fn inventory_fold_slot_changed_inserts_then_updates_then_removes() {
 }
 
 #[test]
+fn inventory_fold_item_list_after_item_attr_keeps_charge_state() {
+    let mut s = SessionState::default();
+    let charged = ItemSlot {
+        index: 3,
+        item_no: 28652,
+        quantity: 1,
+        locked: false,
+        price: 0,
+        charges_remaining: Some(1),
+        next_use_vana_ts: Some(1_000),
+        use_delay_end_vana_ts: Some(5_030),
+        ready: Some(false),
+    };
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: 0,
+        update: InventoryUpdate::SlotChanged {
+            slot: charged.clone(),
+        },
+    });
+
+    let bare = ItemSlot {
+        locked: true,
+        charges_remaining: None,
+        next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
+        ..charged.clone()
+    };
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: 0,
+        update: InventoryUpdate::SlotChanged { slot: bare },
+    });
+    let slots = &s.inventory.containers[&0].slots;
+    assert_eq!(slots.len(), 1);
+    assert!(slots[0].locked, "the ITEM_LIST lock flag still applies");
+    assert_eq!(slots[0].charges_remaining, Some(1));
+    assert_eq!(slots[0].use_delay_end_vana_ts, Some(5_030));
+    assert_eq!(slots[0].ready, Some(false));
+
+    let replaced = ItemSlot {
+        item_no: 4112,
+        charges_remaining: None,
+        next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
+        ..charged
+    };
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: 0,
+        update: InventoryUpdate::SlotChanged { slot: replaced },
+    });
+    let slots = &s.inventory.containers[&0].slots;
+    assert_eq!(slots[0].item_no, 4112);
+    assert_eq!(
+        slots[0].charges_remaining, None,
+        "a different item in the slot takes no timers from its predecessor"
+    );
+}
+
+#[test]
 fn inventory_fold_quantity_changed_updates_existing_slot_only() {
     let mut s = SessionState::default();
 

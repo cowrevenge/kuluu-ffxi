@@ -2090,7 +2090,27 @@ impl SessionState {
                         } else if let Some(existing) =
                             entry.slots.iter_mut().find(|s| s.index == slot.index)
                         {
+                            // ITEM_LIST carries no extdata, and LSB's zone-in
+                            // flood sends one for every equipped item right
+                            // after the ITEM_ATTR that stamped its charges and
+                            // equip delay (vendor/server/src/map/utils/charutils.cpp
+                            // SendInventory); a same-id update without charge
+                            // info keeps the timers it cannot restate.
+                            let keep_charges = slot.charges_remaining.is_none()
+                                && existing.item_no == slot.item_no;
+                            let kept = keep_charges.then_some((
+                                existing.charges_remaining,
+                                existing.next_use_vana_ts,
+                                existing.use_delay_end_vana_ts,
+                                existing.ready,
+                            ));
                             *existing = slot.clone();
+                            if let Some((charges, next_use, delay_end, ready)) = kept {
+                                existing.charges_remaining = charges;
+                                existing.next_use_vana_ts = next_use;
+                                existing.use_delay_end_vana_ts = delay_end;
+                                existing.ready = ready;
+                            }
                         } else {
                             entry.slots.push(slot.clone());
                         }

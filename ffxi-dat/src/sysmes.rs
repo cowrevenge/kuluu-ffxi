@@ -256,6 +256,16 @@ impl MesBasicDat {
             .unwrap_or_default()
     }
 
+    /// The message-parameter slots whose item id the entry names inline; the
+    /// caller resolves each id and supplies the name in
+    /// [`SysMesParams::items`] at the same index.
+    pub fn item_refs(&self, index: usize) -> Vec<usize> {
+        self.dat
+            .raw(index)
+            .map(|entry| compose(entry, &SysMesParams::default()).item_slots)
+            .unwrap_or_default()
+    }
+
     /// `None` when the entry is absent, empty, or carries a control code this
     /// composer cannot render — a caller with a second wording source must use
     /// it rather than print a line with a hole in it.
@@ -316,6 +326,8 @@ struct Composed {
     /// composer does not know was skipped, so the text has a hole in it.
     fully_rendered: bool,
     resources: Vec<MesBasicResourceRef>,
+    /// Parameter slots the entry's inline item tags read, in entry order.
+    item_slots: Vec<usize>,
 }
 
 struct Composer {
@@ -325,6 +337,7 @@ struct Composer {
     capitalize: bool,
     fully_rendered: bool,
     resources: Vec<MesBasicResourceRef>,
+    item_slots: Vec<usize>,
 }
 
 impl Composer {
@@ -336,6 +349,7 @@ impl Composer {
             capitalize: false,
             fully_rendered: true,
             resources: Vec::new(),
+            item_slots: Vec::new(),
         }
     }
 
@@ -482,6 +496,7 @@ fn compose(entry: &[u8], params: &SysMesParams) -> Composed {
                 let slot = tag.param as usize;
                 match tag.marker {
                     Some(MARKER_ITEM) => {
+                        c.item_slots.push(slot);
                         let name = params
                             .items
                             .get(slot)
@@ -574,6 +589,7 @@ fn compose(entry: &[u8], params: &SysMesParams) -> Composed {
 
     let fully_rendered = c.fully_rendered;
     let resources = std::mem::take(&mut c.resources);
+    let item_slots = std::mem::take(&mut c.item_slots);
     Composed {
         line: SysMesLine {
             log_mode,
@@ -581,6 +597,7 @@ fn compose(entry: &[u8], params: &SysMesParams) -> Composed {
         },
         fully_rendered,
         resources,
+        item_slots,
     }
 }
 
@@ -710,7 +727,13 @@ mod tests {
         let entry = b"\x1fyYou obtain \x01\x01\x01 \x01\x05'\x82\x80\x80\x80.";
         let mut p = SysMesParams::default();
         p.items[0] = Some("lizard tail");
-        let line = compose(entry, &p).line;
+        let composed = compose(entry, &p);
+        assert_eq!(
+            composed.item_slots,
+            vec![0],
+            "the entry reports which parameter slot its item tag reads"
+        );
+        let line = composed.line;
         assert_eq!(line.lines.len(), 1);
         assert_eq!(
             line.lines[0],

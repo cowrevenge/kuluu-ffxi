@@ -534,7 +534,52 @@ run_wasm() {
 EXAMPLES_KEEP_DAYS=3
 INCREMENTAL_CAP_GB=40
 
+# The prune is the one thing here that mutates target/ outside cargo, so it has
+# to take the same build-dir lock cargo does (scripts/cargo-guard.sh exists
+# because this repo runs concurrent cargo invocations — agent sessions,
+# rust-analyzer, a pre-push hook — against one shared target/). Wiping the
+# incremental cache unlocked pulls session files out from under a live rustc,
+# and the next link reads a truncated object: "no platform load command found in
+# lib<crate>.rlib", which surfaces as an unrelated stage failing to build.
+#
+# Non-blocking: hygiene must never wait on, or delay, somebody's build.
+CARGO_BUILD_LOCK="target/debug/.cargo-build-lock"
+LOCK_BUSY_STATUS=97
+
 run_sweep() {
+  if [ "${CHECKS_SWEEP_LOCKED:-0}" = "1" ]; then
+    sweep_prune
+    return
+  fi
+
+  echo "checks: sweep"
+  [ -d "target/debug" ] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: sweep — skipped (no python3 to hold the cargo build lock)"
+    return 0
+  fi
+
+  local status=0
+  python3 - "$CARGO_BUILD_LOCK" "$LOCK_BUSY_STATUS" \
+    env CHECKS_SWEEP_LOCKED=1 "$PWD/scripts/checks.sh" sweep <<'PY' || status=$?
+import fcntl, subprocess, sys
+
+lock_path, busy_status = sys.argv[1], int(sys.argv[2])
+with open(lock_path, "a") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(busy_status)
+    sys.exit(subprocess.call(sys.argv[3:]))
+PY
+  if [ "$status" -eq "$LOCK_BUSY_STATUS" ]; then
+    echo "checks: sweep — skipped (a cargo build holds $CARGO_BUILD_LOCK)"
+    status=0
+  fi
+  return "$status"
+}
+
+sweep_prune() {
   local examples="target/debug/examples" incremental="target/debug/incremental"
   local pruned inc_gb
 
@@ -593,7 +638,7 @@ for stage in "$@"; do
     build)  echo "checks: build";  run_build ;;
     wasm)   echo "checks: wasm";   run_wasm ;;
     doc)    echo "checks: doc";    run_doc ;;
-    sweep)  echo "checks: sweep";  run_sweep ;;
+    sweep)  run_sweep ;;
     *) echo "checks: unknown stage '$stage'" >&2; exit 2 ;;
   esac
 done

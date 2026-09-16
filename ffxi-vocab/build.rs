@@ -57,6 +57,7 @@ mod floor {
     pub const TP_MOVE: usize = scrape_floor(2652);
     pub const ITEM: usize = scrape_floor(23233);
     pub const ITEM_FLAGS: usize = scrape_floor(23187);
+    pub const ITEM_STACK_SIZE: usize = scrape_floor(4231);
     pub const STATUS_EFFECT_FLAGS: usize = scrape_floor(664);
     pub const EQUIP_INFO: usize = scrape_floor(15378);
     pub const ITEM_USABLE: usize = scrape_floor(3075);
@@ -442,6 +443,20 @@ fn main() -> Result<()> {
         LSB_ITEM_BASIC_SQL,
         item_flag_entries.len(),
         floor::ITEM_FLAGS,
+    )?;
+
+    let item_stack_entries = parse_sql_item_stack_sizes(&item_src)?;
+    write_u16_u8_table(
+        &out_dir.join("item_stack_size_table.rs"),
+        "ITEM_STACK_SIZES",
+        LSB_ITEM_BASIC_SQL,
+        &item_stack_entries,
+    )?;
+    check_scrape_count(
+        "stackable item entries",
+        LSB_ITEM_BASIC_SQL,
+        item_stack_entries.len(),
+        floor::ITEM_STACK_SIZE,
     )?;
 
     let flag_src = fs::read_to_string(LSB_STATUS_EFFECT_FLAG_YAML)
@@ -960,6 +975,47 @@ fn parse_sql_item_flags(src: &str) -> Result<Vec<(u16, u32)>> {
     }
     if out.is_empty() {
         bail!("parsed zero item_basic flag rows — SQL format may have changed");
+    }
+    Ok(out)
+}
+
+/// Scrape `item_basic` rows into (itemid, stackSize). Rows that do not stack
+/// are dropped: the table is sparse and lookup defaults to 1.
+fn parse_sql_item_stack_sizes(src: &str) -> Result<Vec<(u16, u8)>> {
+    const ITEMID_FIELD: usize = 0;
+    const STACK_SIZE_FIELD: usize = 6;
+    let needle = "INSERT INTO `item_basic` VALUES ";
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(needle) else {
+            continue;
+        };
+        let mut cursor = rest;
+        while let Some(open) = cursor.find('(') {
+            cursor = &cursor[open + 1..];
+            let Some((tuple, after)) = split_sql_tuple(cursor) else {
+                break;
+            };
+            cursor = after;
+            let fields = split_sql_fields(tuple);
+            let Some(Ok(id)) = fields.get(ITEMID_FIELD).map(|s| s.trim().parse::<u16>()) else {
+                continue;
+            };
+            let Some(Ok(stack)) = fields.get(STACK_SIZE_FIELD).map(|s| s.trim().parse::<u8>())
+            else {
+                bail!(
+                    "item_basic row {id}: unparseable stackSize {:?}",
+                    fields.get(STACK_SIZE_FIELD)
+                );
+            };
+            if stack > 1 {
+                out.push((id, stack));
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!("parsed zero item_basic stackSize rows — SQL format may have changed");
     }
     Ok(out)
 }

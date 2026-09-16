@@ -397,6 +397,7 @@ pub fn mode_cancels_autorun(mode: &InputMode) -> bool {
             | InputMode::Check
             | InputMode::Bazaar
             | InputMode::Auction
+            | InputMode::Shop
     )
 }
 
@@ -3346,6 +3347,7 @@ mod tests {
             InputMode::Check,
             InputMode::Bazaar,
             InputMode::Auction,
+            InputMode::Shop,
         ] {
             assert!(mode_cancels_autorun(&mode), "{mode:?}");
             assert!(!mode_swallows_keys(&mode), "{mode:?}");

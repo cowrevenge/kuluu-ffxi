@@ -25,6 +25,10 @@ mod delivery;
 pub use delivery::delivery_mode_sync_system;
 use delivery::handle_delivery_key;
 
+mod shop;
+use shop::handle_shop_key;
+pub use shop::shop_mode_sync_system;
+
 mod map_screen;
 
 mod menu;
@@ -120,6 +124,8 @@ pub struct SlashWriters<'w, 's> {
 
     pub auction_inv: Res<'w, kuluu_render::hud::auction::AuctionSellInventory>,
 
+    pub shop_state: ResMut<'w, kuluu_render::hud::shop::ShopScreenState>,
+
     pub select_target: ResMut<'w, SelectTargetMode>,
 
     pub fishing_spot: Res<'w, kuluu_render::fishing_spot::FishingSpot>,
@@ -142,7 +148,7 @@ pub struct SlashWriters<'w, 's> {
 
     pub(crate) dat_root: Res<'w, super::DatRootRes>,
 
-    /// Absent when no config dir resolved, which makes `/overlay` read-only.
+    /// Absent when no config dir resolved, which makes `//overlay` read-only.
     pub overlay_store: Option<Res<'w, crate::overlay_store::OverlayStoreRes>>,
 }
 
@@ -471,6 +477,17 @@ pub(crate) fn text_input_system(
                     &ev.logical_key,
                     &bindings,
                     &mut slash_writers.bazaar_state,
+                    &mut scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+            }
+            InputMode::Shop => {
+                if let Some(next) = handle_shop_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.shop_state,
                     &mut scene_state,
                     &cmd_tx.0,
                 ) {

@@ -95,6 +95,7 @@ fn sub_packet_events_with_names(
         &mut treasure::TreasurePool::default(),
         &mut false,
         &mut SelfMogState::default(),
+        &mut ShopSession::default(),
         None,
     );
     let mut out = Vec::new();
@@ -3312,14 +3313,204 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
     data[20..22].copy_from_slice(&256u16.to_le_bytes());
     data[22] = 1;
 
-    let shop = decode_shop_list(&data).expect("decoded");
-    assert_eq!(shop.offset_index, 5);
-    assert_eq!(shop.items.len(), 2);
-    assert_eq!(shop.items[0].price, 100);
-    assert_eq!(shop.items[0].item_no, 4096);
-    assert_eq!(shop.items[1].item_no, 256);
-    assert_eq!(shop.items[1].price, 99999);
-    assert!(!shop.opened);
+    let page = decode_shop_list(&data).expect("decoded");
+    assert_eq!(page.offset_index, 5);
+    assert!(!page.last, "Flags bit 0 clear means more pages follow");
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.rows[0].price, 100);
+    assert_eq!(page.rows[0].item_no, 4096);
+    // The row's own ShopIndex byte (0 and 1 here) is ignored: the index is
+    // ShopItemOffsetIndex plus the row's position in the page.
+    assert_eq!(page.rows[0].shop_index, 5);
+    assert_eq!(page.rows[1].item_no, 256);
+    assert_eq!(page.rows[1].price, 99999);
+    assert_eq!(page.rows[1].shop_index, 6);
+}
+
+/// Drives the real [`handle_sub_packet`] shop arms over one `ShopSession`, so
+/// a multi-packet stock and the window's lifetime are exercised the way the
+/// wire delivers them rather than through the decoders alone.
+fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
+    let (tx, mut rx) = broadcast::channel(64);
+    let mut shop = ShopSession::default();
+    shop.last_talk_target = 0x0100_0007;
+    for (opcode, body) in packets {
+        handle_sub_packet(
+            &framing::SubPacket {
+                opcode: *opcode,
+                sequence: 0,
+                data: body,
+            },
+            &tx,
+            &mut Vec::new(),
+            &mut crate::event_dialog::CutsceneScope::default(),
+            0,
+            "Tester",
+            &mut None,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut 0,
+            &mut Position::default(),
+            &mut false,
+            &mut NpcNameResolver::new(None),
+            &mut EmoteTextResolver::new(None),
+            &ffxi_dat::autotranslate_names::InstalledNames::default(),
+            &mut treasure::SysMesResolver::new(None),
+            &mut MesBasicResolver::new(None),
+            &mut treasure::TreasurePool::default(),
+            &mut false,
+            &mut SelfMogState::default(),
+            &mut shop,
+            None,
+        );
+    }
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    (shop, out)
+}
+
+fn shop_open_body(expected: u16) -> Vec<u8> {
+    let mut body = vec![0u8; 4];
+    body[0..2].copy_from_slice(&expected.to_le_bytes());
+    body
+}
+
+fn shop_list_body(offset: u16, last: bool, rows: &[(u16, u32)]) -> Vec<u8> {
+    let mut body = vec![0u8; 4 + 12 * rows.len()];
+    body[0..2].copy_from_slice(&offset.to_le_bytes());
+    body[2] = if last { 0x89 } else { 0x00 };
+    for (i, (item_no, price)) in rows.iter().enumerate() {
+        let off = 4 + i * 12;
+        body[off..off + 4].copy_from_slice(&price.to_le_bytes());
+        body[off + 4..off + 6].copy_from_slice(&item_no.to_le_bytes());
+    }
+    body
+}
+
+/// vendor/server/src/map/lua/lua_base_entity.cpp sendMenu case 2 pushes
+/// SHOP_OPEN then SHOP_LIST; vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp
+/// splits stock past 19 rows across pages, the last flagged 0x89.
+#[test]
+fn a_two_page_shop_opens_once_and_lists_every_row() {
+    let (shop, events) = shop_session_events(&[
+        (ffxi_proto::map::s2c::SHOP_OPEN, shop_open_body(3)),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(0, false, &[(4096, 100), (4097, 200)]),
+        ),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(2, true, &[(4098, 300)]),
+        ),
+    ]);
+
+    let open = shop.open.expect("window open");
+    assert!(open.opened);
+    assert!(open.complete);
+    assert_eq!(open.expected_items, 3);
+    assert_eq!(open.vendor_id, 0x0100_0007, "the NPC we talked to");
+    assert_eq!(
+        open.items
+            .iter()
+            .map(|i| (i.shop_index, i.item_no, i.price))
+            .collect::<Vec<_>>(),
+        vec![(0, 4096, 100), (1, 4097, 200), (2, 4098, 300)]
+    );
+
+    let updates = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ShopUpdated { .. }))
+        .count();
+    assert_eq!(updates, 3, "open plus one per page");
+}
+
+/// The shop table lives in GC_ZONE (research/XIClient GC_ZONE::gcShop), so
+/// crossing a zoneline takes the vendor and their stock with it.
+#[test]
+fn a_zone_change_closes_the_shop() {
+    let mut login = vec![0u8; 0x100];
+    // GP_SERV_COMMAND_LOGIN is only decoded far enough here to reach the
+    // shop teardown; a zero body still names a zone.
+    login[0..4].copy_from_slice(&1u32.to_le_bytes());
+    let (shop, events) = shop_session_events(&[
+        (ffxi_proto::map::s2c::SHOP_OPEN, shop_open_body(1)),
+        (
+            ffxi_proto::map::s2c::SHOP_LIST,
+            shop_list_body(0, true, &[(4096, 100)]),
+        ),
+        (ffxi_proto::map::s2c::LOGIN, login),
+    ]);
+
+    assert!(shop.open.is_none(), "the window did not survive the zone");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::ShopClosed)),
+        "close is announced so the viewer drops its window"
+    );
+}
+
+#[test]
+fn shop_pages_accumulate_at_their_offsets_instead_of_replacing() {
+    let page = |offset: u16, last: bool, rows: &[(u16, u32)]| {
+        let mut data = vec![0u8; 4 + 12 * rows.len()];
+        data[0..2].copy_from_slice(&offset.to_le_bytes());
+        data[2] = if last { 0x89 } else { 0x00 };
+        for (i, (item_no, price)) in rows.iter().enumerate() {
+            let off = 4 + i * 12;
+            data[off..off + 4].copy_from_slice(&price.to_le_bytes());
+            data[off + 4..off + 6].copy_from_slice(&item_no.to_le_bytes());
+        }
+        decode_shop_list(&data).expect("decoded")
+    };
+
+    let mut shop = ShopState::default();
+    merge_shop_page(&mut shop, page(0, false, &[(4096, 100), (4097, 200)]));
+    assert!(!shop.complete);
+    merge_shop_page(&mut shop, page(2, true, &[(4098, 300)]));
+
+    assert!(shop.complete, "Flags 0x89 marks the final page");
+    let listed: Vec<(u8, u16)> = shop
+        .items
+        .iter()
+        .map(|i| (i.shop_index, i.item_no))
+        .collect();
+    assert_eq!(listed, vec![(0, 4096), (1, 4097), (2, 4098)]);
+}
+
+#[test]
+fn shop_rows_past_the_client_table_are_dropped() {
+    let over = crate::state::SHOP_TABLE_CAPACITY as u16;
+    let mut data = vec![0u8; 4 + 12];
+    data[0..2].copy_from_slice(&over.to_le_bytes());
+    data[4..8].copy_from_slice(&1u32.to_le_bytes());
+    data[8..10].copy_from_slice(&4096u16.to_le_bytes());
+
+    let mut shop = ShopState::default();
+    merge_shop_page(&mut shop, decode_shop_list(&data).expect("decoded"));
+    assert!(shop.items.is_empty());
+}
+
+#[test]
+fn shop_sell_ignores_a_completed_sale_packet() {
+    let mut body = vec![0u8; 12];
+    body[0..4].copy_from_slice(&250u32.to_le_bytes());
+    body[4] = 9;
+    // research/XiPackets server 0x003D Type 1 = sale, not a price to confirm.
+    body[5] = 1;
+    assert_eq!(decode_shop_sell(&body), None);
+    body[5] = 0;
+    assert_eq!(decode_shop_sell(&body), Some((250, 9, 0)));
+}
+
+#[test]
+fn shop_open_reports_the_expected_row_count() {
+    let mut body = vec![0u8; 4];
+    body[0..2].copy_from_slice(&37u16.to_le_bytes());
+    assert_eq!(decode_shop_open(&body), Some(37));
+    assert_eq!(decode_shop_open(&body[..1]), None);
 }
 
 #[test]

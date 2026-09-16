@@ -262,6 +262,7 @@ pub fn update_menu_help_bar(
     item_focus: Res<ItemMenuFocus>,
     check: Res<crate::hud::check_view::CheckTarget>,
     auction_screen: Res<crate::hud::auction::AuctionScreenState>,
+    shop_screen: Res<crate::hud::shop::ShopScreenState>,
     auction_inv: Res<crate::hud::auction::AuctionSellInventory>,
     mut bar_q: Query<&mut Node, With<MenuHelpBar>>,
     mut title_q: Query<
@@ -346,6 +347,17 @@ pub fn update_menu_help_bar(
             }),
             false,
         ),
+        InputMode::Shop => {
+            let (title, hint) = crate::hud::shop::help_bar_content(&shop_screen, &scene.snapshot);
+            (
+                Some(BarContent {
+                    title,
+                    counter: String::new(),
+                    hint,
+                }),
+                false,
+            )
+        }
         InputMode::Auction => {
             let (title, hint) = crate::hud::auction::help_bar_content(
                 &auction_screen,
@@ -506,7 +518,8 @@ mod tests {
             .init_resource::<ItemMenuFocus>()
             .init_resource::<crate::hud::check_view::CheckTarget>()
             .init_resource::<crate::hud::auction::AuctionScreenState>()
-            .init_resource::<crate::hud::auction::AuctionSellInventory>();
+            .init_resource::<crate::hud::auction::AuctionSellInventory>()
+            .init_resource::<crate::hud::shop::ShopScreenState>();
 
         let scene = SceneState {
             snapshot: SceneSnapshot {

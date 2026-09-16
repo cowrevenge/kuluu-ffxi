@@ -749,9 +749,9 @@ pub(super) fn apply_slash_outcome(
             apply_sub_area(op, self_pos, scene_state, &mut slash_writers.set_sub_area);
         }
         SlashOutcome::ShopBuyRow { shop_index, qty } => match scene_state.snapshot.shop.as_ref() {
-            Some(shop) => {
+            Some(_) => {
                 let _ = cmd_tx.try_send(AgentCommand::ShopBuy {
-                    shop_no: shop.offset_index,
+                    shop_no: kuluu_render::hud::shop::SHOP_NO,
                     shop_index,
                     qty,
                 });

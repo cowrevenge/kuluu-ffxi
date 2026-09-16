@@ -123,6 +123,41 @@ struct SelfMogState {
     key_item_tables: [KeyItemTableFlags; decode::ScenarioItem::TABLE_COUNT],
 }
 
+/// The open NPC shop window. The shop has no close packet (research/XiPackets
+/// client 0x0082 GP_CLI_COMMAND_SHOP_REQ is deprecated and GM-only), so the
+/// client owns the window's whole lifetime: it opens on s2c 0x03E, accumulates
+/// s2c 0x03C pages, and closes on a client decision or a zone change.
+#[derive(Debug, Default)]
+struct ShopSession {
+    open: Option<ShopState>,
+
+    /// Entity the last c2s 0x01A Talk went to. LSB's shop scripts run off that
+    /// trigger (vendor/server/scripts/globals/shop.lua `showText` then
+    /// `sendMenu`), so it names the vendor the SHOP_OPEN belongs to.
+    last_talk_target: u32,
+
+    /// `(item_no, quantity)` of the SHOP_SELL_REQ awaiting an appraisal. LSB's
+    /// 0x03D leaves `Count` at 0
+    /// (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp), so the reply's
+    /// quantity comes from here.
+    pending_sell: Option<(u16, u32)>,
+}
+
+impl ShopSession {
+    fn close(&mut self, event_tx: &broadcast::Sender<AgentEvent>) {
+        self.pending_sell = None;
+        if self.open.take().is_some() {
+            let _ = event_tx.send(AgentEvent::ShopClosed);
+        }
+    }
+
+    fn publish(&self, event_tx: &broadcast::Sender<AgentEvent>) {
+        if let Some(shop) = self.open.as_ref() {
+            let _ = event_tx.send(AgentEvent::ShopUpdated { shop: shop.clone() });
+        }
+    }
+}
+
 /// `received` gates c2s 0x064: before this table's 0x055 arrives the local
 /// flags are default-zeroed, and marking seen against them would tell the
 /// server (and local state) the table is empty.
@@ -410,6 +445,8 @@ async fn run_map_session(
 
     let mut mog = SelfMogState::default();
 
+    let mut flood_shop = ShopSession::default();
+
     let mut flood_zone_messages: Vec<(u16, Vec<u8>)> = Vec::new();
     let self_login_received = drain_zone_flood(
         map,
@@ -440,6 +477,7 @@ async fn run_map_session(
         &mut treasure_pool,
         &mut flood_in_mog_house,
         &mut mog,
+        &mut flood_shop,
         spawn_fallback,
         &mut flood_zone_messages,
     )
@@ -495,6 +533,7 @@ async fn run_map_session(
                 &mut treasure_pool,
                 &mut flood_in_mog_house,
                 &mut mog,
+                &mut flood_shop,
                 spawn_fallback,
                 &mut flood_zone_messages,
             )
@@ -673,6 +712,7 @@ async fn drain_zone_flood(
     pool: &mut treasure::TreasurePool,
     was_in_mog_house: &mut bool,
     mog: &mut SelfMogState,
+    shop: &mut ShopSession,
     zoneline_spawn_fallback: Option<Vec3>,
     flood_zone_messages: &mut Vec<(u16, Vec<u8>)>,
 ) -> bool {
@@ -730,6 +770,7 @@ async fn drain_zone_flood(
                         pool,
                         was_in_mog_house,
                         mog,
+                        shop,
                         zoneline_spawn_fallback,
                     );
                 }
@@ -863,6 +904,8 @@ fn handle_sub_packet(
 
     mog: &mut SelfMogState,
 
+    shop: &mut ShopSession,
+
     zoneline_spawn_fallback: Option<Vec3>,
 ) {
     use ffxi_proto::map::s2c;
@@ -879,6 +922,12 @@ fn handle_sub_packet(
             if let Ok(login) = decoded {
                 *current_zone_id = login.zone_no;
                 let head = login.pos_head;
+
+                // The retail shop table lives in GC_ZONE
+                // (research/XIClient GC_ZONE::gcShop), so a zone change takes
+                // the vendor and their stock with it.
+                shop.close(event_tx);
+                shop.last_talk_target = 0;
 
                 mog.in_myroom = login.myroom.is_some_and(|m| {
                     m.login_state == decode::ServerLoginMyroom::LOGIN_STATE_MYROOM
@@ -1395,20 +1444,54 @@ fn handle_sub_packet(
             emit_battle_message_audio_event(sub.data, false, event_tx);
         }
         s2c::SHOP_LIST => {
-            if let Some(shop) = decode_shop_list(sub.data) {
-                let _ = event_tx.send(AgentEvent::ShopUpdated { shop });
+            if let Some(page) = decode_shop_list(sub.data) {
+                // A list without a preceding SHOP_OPEN still opens the window:
+                // LSB always pairs them (lua_base_entity.cpp sendMenu case 2),
+                // but the list alone is what has the stock.
+                let open = shop.open.get_or_insert_with(|| ShopState {
+                    opened: true,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                merge_shop_page(open, page);
+                shop.publish(event_tx);
             }
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
+                let (item_no, count) = match shop.pending_sell.take() {
+                    Some((item_no, qty)) => (item_no, if count == 0 { qty } else { count }),
+                    None => (0, count),
+                };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
                     count,
+                    item_no,
                 });
+                if let Some(open) = shop.open.as_mut() {
+                    open.pending_sale = Some(crate::state::ShopSale {
+                        item_index,
+                        item_no,
+                        unit_price: price,
+                        count,
+                    });
+                }
+                shop.publish(event_tx);
             }
         }
-        s2c::SHOP_OPEN => {}
+        s2c::SHOP_OPEN => {
+            if let Some(expected_items) = decode_shop_open(sub.data) {
+                shop.open = Some(ShopState {
+                    opened: true,
+                    expected_items,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                shop.pending_sell = None;
+                shop.publish(event_tx);
+            }
+        }
         s2c::BATTLE2 => {
             if let Some(h) = decode_battle2_header(sub.data) {
                 tracing::debug!(target: "combat", header = ?h, "BATTLE2");
@@ -2507,6 +2590,8 @@ async fn keepalive_loop(
     // action. See ActionKind::{cast_bar, action_lock_ms}.
     let mut cast_in_flight: Option<CastInFlight> = None;
 
+    let mut shop_session = ShopSession::default();
+
     // Per-spell recast expiry, tracked entirely client-side: LSB's 0x119 sends
     // ability recasts only (RECAST_ABILITY), never magic, so the client owns
     // spell-recast timing from the scraped base recastTime — as retail's client
@@ -2876,6 +2961,12 @@ async fn keepalive_loop(
                         target_index,
                         kind,
                     }) => {
+                        // A shop opens off a Talk trigger, so the NPC we are
+                        // about to greet is the vendor any SHOP_OPEN that follows
+                        // belongs to.
+                        if matches!(kind, crate::state::ActionKind::Talk) {
+                            shop_session.last_talk_target = target_id;
+                        }
                         // The MH exit door is client-synthesized (LSB spawns no door
                         // NPC) — never let an action on it reach the wire.
                         if target_id == crate::local_menu::MH_DOOR_ENTITY_ID {
@@ -3195,11 +3286,22 @@ async fn keepalive_loop(
                             });
                         }
                     }
+                    Some(AgentCommand::ShopSellCancel) => {
+                        shop_session.pending_sell = None;
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
+                    }
+                    Some(AgentCommand::CloseShop) => {
+                        shop_session.close(&event_tx);
+                    }
                     Some(AgentCommand::ShopSellReq {
                         qty,
                         item_no,
                         item_index,
                     }) => {
+                        shop_session.pending_sell = Some((item_no, qty));
                         let payload =
                             build_subpacket_shop_sell_req(sub_seq, qty, item_no, item_index);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3214,6 +3316,14 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellConfirm) => {
+                        // The server answers a completed sale with MESSAGE +
+                        // ITEM_SAME rather than another 0x03D
+                        // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
+                        // process), so the appraisal is retired here.
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
                         let payload = build_subpacket_shop_sell_set(sub_seq);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
@@ -4522,6 +4632,7 @@ async fn keepalive_loop(
                                 &mut treasure_pool,
                                 &mut self_in_mog_house,
                                 &mut mog,
+                                &mut shop_session,
                                 None,
                             );
 
@@ -6071,49 +6182,110 @@ fn event_trigger(sub: &framing::SubPacket<'_>) -> Option<EventTrigger> {
     })
 }
 
-fn decode_shop_list(data: &[u8]) -> Option<ShopState> {
+/// GP_SERV_COMMAND_SHOP_OPEN, vendor/server/src/map/packets/s2c/0x03e_shop_open.h:
+/// ShopListNum u16, padding u16. Announces how many rows the SHOP_LIST packets
+/// that follow will carry.
+fn decode_shop_open(data: &[u8]) -> Option<u16> {
+    const BODY_LEN: usize = 2;
+    if data.len() < BODY_LEN {
+        return None;
+    }
+    Some(u16::from_le_bytes(data[0..2].try_into().unwrap()))
+}
+
+/// One s2c 0x03C page: its `ShopItemOffsetIndex`, whether it is the final page,
+/// and the rows it carries.
+struct ShopListPage {
+    offset_index: u16,
+    last: bool,
+    rows: Vec<ShopItem>,
+}
+
+/// GP_SERV_COMMAND_SHOP_LIST Flags bit 0 marks the final page. LSB sends 0x00
+/// while more are coming and 0x89 on the last
+/// (vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp).
+const SHOP_LIST_FLAG_LAST: u8 = 0x01;
+
+fn decode_shop_list(data: &[u8]) -> Option<ShopListPage> {
     const HEADER_LEN: usize = 4;
     const ROW_LEN: usize = 12;
     if data.len() < HEADER_LEN {
         return None;
     }
     let offset_index = u16::from_le_bytes(data[0..2].try_into().unwrap());
+    let flags = data[2];
     let row_bytes = &data[HEADER_LEN..];
     let row_count = row_bytes.len() / ROW_LEN;
-    let mut items = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
     for i in 0..row_count {
         let off = i * ROW_LEN;
         let row = &row_bytes[off..off + ROW_LEN];
         let item_no = u16::from_le_bytes(row[4..6].try_into().unwrap());
 
+        // The packet's ShopIndex is ignored: the retail client derives a row's
+        // index from ShopItemOffsetIndex plus its position in the page
+        // (research/XiPackets server 0x003C, GP_SHOP ShopIndex), and that index
+        // is what c2s 0x083 SHOP_BUY sends back. A zero ItemNo is padding in a
+        // short final page, but it still consumes its slot.
+        let Ok(shop_index) = u8::try_from(offset_index as usize + i) else {
+            break;
+        };
         if item_no == 0 {
             continue;
         }
-        items.push(ShopItem {
+        rows.push(ShopItem {
             price: u32::from_le_bytes(row[0..4].try_into().unwrap()),
             item_no,
-            shop_index: row[6],
+            shop_index,
 
             skill: u16::from_le_bytes(row[8..10].try_into().unwrap()),
             guild_info: u16::from_le_bytes(row[10..12].try_into().unwrap()),
         });
     }
-    Some(ShopState {
+    Some(ShopListPage {
         offset_index,
-        items,
-
-        opened: false,
+        last: flags & SHOP_LIST_FLAG_LAST != 0,
+        rows,
     })
+}
+
+/// Fold one 0x03C page into the open shop, placing its rows at their own
+/// indices so a shop wider than a single packet lists in full. Rows past the
+/// client's fixed table (`SHOP_TABLE_CAPACITY`) are dropped, as the retail
+/// client's fixed-size array would.
+fn merge_shop_page(shop: &mut ShopState, page: ShopListPage) {
+    shop.offset_index = page.offset_index;
+    shop.complete = page.last;
+    for row in page.rows {
+        if row.shop_index as usize >= crate::state::SHOP_TABLE_CAPACITY {
+            continue;
+        }
+        match shop
+            .items
+            .iter_mut()
+            .find(|it| it.shop_index == row.shop_index)
+        {
+            Some(existing) => *existing = row,
+            None => shop.items.push(row),
+        }
+    }
+    shop.items.sort_by_key(|it| it.shop_index);
 }
 
 // GP_SERV_COMMAND_SHOP_SELL, vendor/server/src/map/packets/s2c/0x03d_shop_sell.h:
 // Price u32, PropertyItemIndex u8, Type u8, padding u16, Count u32. LSB only emits it
 // as the SHOP_SELL_REQ appraisal answer (Type = 0, 0x03d_shop_sell.cpp); a completed
 // sale is announced via GP_SERV_COMMAND_MESSAGE + ITEM_SAME instead
-// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count).
+// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count) for an
+// appraisal only; a Type = 1 completed-sale packet is not a price to confirm.
 fn decode_shop_sell(data: &[u8]) -> Option<(u32, u8, u32)> {
     const BODY_LEN: usize = 12;
+    // research/XiPackets server 0x003D Type: 0 = appraisal, 1 = sale.
+    const TYPE_APPRAISAL: u8 = 0;
     if data.len() < BODY_LEN {
+        return None;
+    }
+    if data[5] != TYPE_APPRAISAL {
         return None;
     }
     let price = u32::from_le_bytes(data[0..4].try_into().unwrap());

@@ -308,6 +308,15 @@ pub fn shop_to_wire(s: &ShopState) -> wire::ShopState {
         offset_index: s.offset_index,
         items: s.items.iter().map(shop_item_to_wire).collect(),
         opened: s.opened,
+        expected_items: s.expected_items,
+        complete: s.complete,
+        vendor_id: s.vendor_id,
+        pending_sale: s.pending_sale.as_ref().map(|p| wire::ShopSale {
+            item_index: p.item_index,
+            item_no: p.item_no,
+            unit_price: p.unit_price,
+            count: p.count,
+        }),
     }
 }
 

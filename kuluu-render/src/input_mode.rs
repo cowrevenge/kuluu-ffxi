@@ -43,6 +43,11 @@ pub enum InputMode {
     /// lives in `hud::auction::AuctionScreenState`; the native input layer
     /// drives it and emits the Ah* `AgentCommand`s.
     Auction,
+
+    /// An NPC shop window is open and modal. Focus/cursor state lives in
+    /// `hud::shop::ShopScreenState`; the shop itself has no close packet, so
+    /// cancelling out of this mode is what ends it.
+    Shop,
 }
 
 /// The action pending behind a sub-target cursor.

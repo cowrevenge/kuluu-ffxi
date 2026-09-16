@@ -1469,6 +1469,37 @@ pub struct ShopState {
     pub items: Vec<ShopItem>,
 
     pub opened: bool,
+
+    /// How many rows s2c 0x03E SHOP_OPEN said to expect.
+    #[serde(default)]
+    pub expected_items: u16,
+
+    /// The final s2c 0x03C page has landed, so `items` is the whole stock.
+    #[serde(default)]
+    pub complete: bool,
+
+    /// The vendor NPC's entity id, or 0 when it could not be resolved.
+    #[serde(default)]
+    pub vendor_id: u32,
+
+    /// A sale the server has priced, awaiting the player's yes/no.
+    #[serde(default)]
+    pub pending_sale: Option<ShopSale>,
+}
+
+/// A sale appraised by s2c 0x03D and not yet confirmed with c2s 0x085.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShopSale {
+    pub item_index: u8,
+    pub item_no: u16,
+    pub unit_price: u32,
+    pub count: u32,
+}
+
+impl ShopSale {
+    pub fn total_gil(&self) -> u32 {
+        self.unit_price.saturating_mul(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -290,6 +290,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<delivery::DeliveryScreenState>();
         app.init_resource::<delivery::DeliveryInventory>();
 
+        app.init_resource::<shop::ShopScreenState>();
         app.init_resource::<auction::AuctionScreenState>();
         app.init_resource::<auction::AuctionSellInventory>();
         app.init_resource::<auction::AuctionEventCursor>();
@@ -523,7 +524,6 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             quick_action::spawn_quick_action,
             target_panel::spawn_target_panel,
             dialog::spawn_dialog_panel,
-            shop::spawn_shop_panel,
             zone_flash::spawn_zone_flash,
             self_fishing::spawn_fishing_hud,
             party_frame::spawn_party_frames,
@@ -560,6 +560,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             equipment_screen::spawn_equipment_screen,
             delivery::spawn_delivery_screen,
             auction::spawn_auction_screen,
+            shop::spawn_shop_panel,
         ),
     );
     // Depends on `crate::minimap` (wasm-gated).

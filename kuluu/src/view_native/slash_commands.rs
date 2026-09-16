@@ -3,10 +3,15 @@ use kuluu_snapshot::{Entity as WireEntity, Vec3 as WireVec3};
 
 use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, HealMode, ReqLogoutKind};
 
+use crate::view_native::command_surface::{
+    self, CommandSet, CommandSurface, Surface, EXTENSION_PREFIX, FIRST_PARTY_OWNER,
+};
+
 const MAX_ZONE_ID: u16 = 600;
 
 struct SlashCtx<'a> {
     cmd: &'a str,
+    surface: &'a CommandSurface,
 
     rest: &'a str,
     entities: &'a [WireEntity],
@@ -22,10 +27,40 @@ struct SlashCtx<'a> {
 }
 
 struct Command {
-    aliases: &'static [&'static str],
+    /// A [`CommandSet::Retail`] entry names the long form of every retail
+    /// command it answers, and the install's table supplies their aliases.
+    /// Every other set owns its whole list, because nothing else names them.
+    names: &'static [&'static str],
+    set: CommandSet,
     usage: &'static str,
     summary: &'static str,
     handler: fn(&SlashCtx) -> SlashOutcome,
+}
+
+impl Command {
+    fn prefix(&self) -> &'static str {
+        if self.set.is_retail() {
+            "/"
+        } else {
+            EXTENSION_PREFIX
+        }
+    }
+}
+
+fn commands() -> impl Iterator<Item = &'static Command> {
+    COMMANDS.iter().flat_map(|(_, cmds)| cmds.iter())
+}
+
+fn cycle_npc(c: &SlashCtx, reverse: bool) -> SlashOutcome {
+    let kinds = [
+        kuluu_snapshot::EntityKind::Npc,
+        kuluu_snapshot::EntityKind::Mob,
+        kuluu_snapshot::EntityKind::Pet,
+    ];
+    match cycle_kind_filtered(c.entities, c.self_pos, c.current_target, &kinds, reverse) {
+        Some(id) => SlashOutcome::SetTarget(Some(id)),
+        None => SlashOutcome::SystemMessage(format!("/{}: no NPC nearby", c.cmd)),
+    }
 }
 
 fn unknown_command(cmd: &str) -> SlashOutcome {
@@ -36,17 +71,21 @@ const COMMANDS: &[(&str, &[Command])] = &[
     (
         "Help",
         &[Command {
-            aliases: &["help", "?"],
+            // Two retail commands, one handler for now: /help opens retail's
+            // help window and /? answers about a named command.
+            names: &["help", "?"],
+            set: CommandSet::Retail,
             usage: "",
             summary: "show this slash-command reference",
-            handler: |_| SlashOutcome::SystemMessage(render_help()),
+            handler: |c| SlashOutcome::SystemMessage(render_help(c.surface)),
         }],
     ),
     (
         "Movement & Navigation",
         &[
             Command {
-                aliases: &["follow"],
+                names: &["follow"],
+                set: CommandSet::Retail,
                 usage: "[name]",
                 summary: "follow target or current selection",
                 handler: |c| match resolve_target_or_current(
@@ -64,7 +103,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["pathto"],
+                names: &["pathto"],
+                set: CommandSet::Dev,
                 usage: "<x> <y> [z] | <name> | target",
                 summary: "pathfind (navmesh, stays on mesh): coords (z optional), fuzzy zone-line/entity, or current target",
                 handler: |c| {
@@ -79,7 +119,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["pathtoforce", "pathtof"],
+                names: &["pathtoforce", "pathtof"],
+                set: CommandSet::Dev,
                 usage: "<x> <y> [z] | <name> | target",
                 summary: "pathfind ignoring collision (straight-lines through walls when no route — stuck-recovery)",
                 handler: |c| {
@@ -94,7 +135,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["warp"],
+                names: &["warp"],
+                set: CommandSet::Dev,
                 usage: "<x> <y> [z] | <name> | target",
                 summary: "debug teleport (Move): coords (z optional), fuzzy zone-line/entity, or target",
                 handler: |c| {
@@ -102,31 +144,36 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["zones"],
+                names: &["zones"],
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "list zone-line destinations from current zone",
                 handler: |c| parse_zones(c.zone_id),
             },
             Command {
-                aliases: &["zoneto"],
+                names: &["zoneto"],
+                set: CommandSet::Dev,
                 usage: "<name|id>",
-                summary: "pathfind to a zone-line (alias of `/pathto <name>`)",
+                summary: "pathfind to a zone-line (alias of `//pathto <name>`)",
                 handler: |c| parse_zoneto(c.rest, c.zone_id),
             },
             Command {
-                aliases: &["navmesh"],
+                names: &["navmesh"],
+                set: CommandSet::Dev,
                 usage: "[on|off]",
                 summary: "toggle the navmesh debug overlay",
                 handler: |c| parse_navmesh(c.rest),
             },
             Command {
-                aliases: &["navinfo"],
+                names: &["navinfo"],
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "report navmesh snap status at current position",
                 handler: |_| SlashOutcome::NavInfo,
             },
             Command {
-                aliases: &["whereami", "pos"],
+                names: &["whereami", "pos"],
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "print self position and zone id",
                 handler: |c| {
@@ -140,7 +187,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["return", "homepoint", "hp"],
+                names: &["return", "homepoint", "hp"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "warp to home point (alive or dead)",
 
@@ -152,7 +200,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Combat & Targeting",
         &[
             Command {
-                aliases: &["attack", "engage"],
+                names: &["attack"],
+                set: CommandSet::Retail,
                 usage: "[name]",
                 summary: "engage target (reactor goal)",
 
@@ -169,14 +218,16 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["disengage"],
+                names: &["disengage"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "clear active reactor goal",
 
                 handler: |_| SlashOutcome::Command(AgentCommand::Cancel),
             },
             Command {
-                aliases: &["attackoff"],
+                names: &["attackoff"],
+                set: CommandSet::Retail,
                 usage: "",
                 summary: "one-shot attack-off packet on current target",
                 handler: |c| match c.current_target {
@@ -194,7 +245,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["dig"],
+                names: &["dig"],
+                set: CommandSet::Retail,
                 usage: "",
                 summary: "chocobo dig at current position (must be mounted on a chocobo)",
                 handler: |c| {
@@ -213,7 +265,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["assist"],
+                names: &["assist"],
+                set: CommandSet::Retail,
                 usage: "[name]",
                 summary: "assist target (inherit their target)",
                 handler: |c| match resolve_action_target(
@@ -231,7 +284,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["target"],
+                names: &["target"],
+                set: CommandSet::Retail,
                 usage: "[name]",
                 summary: "set or clear current target",
                 handler: |c| {
@@ -249,31 +303,23 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["targetnpc", "targetnpc2"],
+                names: &["targetnpc"],
+                set: CommandSet::Retail,
                 usage: "",
-                summary: "cycle nearest NPC/mob/pet (targetnpc2 cycles in reverse)",
-
-                handler: |c| {
-                    let reverse = c.cmd == "targetnpc2";
-                    let kinds = [
-                        kuluu_snapshot::EntityKind::Npc,
-                        kuluu_snapshot::EntityKind::Mob,
-                        kuluu_snapshot::EntityKind::Pet,
-                    ];
-                    match cycle_kind_filtered(
-                        c.entities,
-                        c.self_pos,
-                        c.current_target,
-                        &kinds,
-                        reverse,
-                    ) {
-                        Some(id) => SlashOutcome::SetTarget(Some(id)),
-                        None => SlashOutcome::SystemMessage(format!("/{}: no NPC nearby", c.cmd)),
-                    }
-                },
+                summary: "cycle nearest NPC/mob/pet",
+                handler: |c| cycle_npc(c, false),
+            },
+            // Retail cycles one way only; reversing is Kuluu's.
+            Command {
+                names: &["targetnpc2"],
+                set: CommandSet::Core,
+                usage: "",
+                summary: "cycle nearest NPC/mob/pet in reverse",
+                handler: |c| cycle_npc(c, true),
             },
             Command {
-                aliases: &["targetenemy"],
+                names: &["targetbnpc"],
+                set: CommandSet::Retail,
                 usage: "",
                 summary: "cycle nearest enemy (mobs only)",
 
@@ -292,7 +338,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["targetnpcparty"],
+                names: &["targetnpcparty"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "cycle owned party NPCs (trusts/fellows/pets)",
 
@@ -330,14 +377,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &[
-                    "targetparty1",
-                    "targetparty2",
-                    "targetparty3",
-                    "targetparty4",
-                    "targetparty5",
-                    "targetparty6",
-                ],
+                names: &["targetparty1", "targetparty2", "targetparty3", "targetparty4", "targetparty5", "targetparty6"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "target party slot 1-6 (slot 1 = self)",
 
@@ -354,13 +395,15 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["debug", "dbg", "nearby", "entities"],
+                names: &["debug", "dbg", "nearby", "entities"],
+                set: CommandSet::Dev,
                 usage: "[name|id|heights]",
                 summary: "dump current target + nearby entities (or one entity in detail)",
                 handler: |c| parse_debug(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["check", "checkname", "checkparam"],
+                names: &["check", "checkname", "checkparam"],
+                set: CommandSet::Retail,
                 usage: "[name]",
                 summary: "check target — strength / name / parameters",
                 handler: |c| match resolve_action_target(
@@ -382,39 +425,45 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["cast"],
+                names: &["magic"],
+                set: CommandSet::Retail,
                 usage: "<spell> [target]",
                 summary: "cast a spell",
                 handler: |c| parse_cast(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["ws", "weaponskill"],
+                names: &["weaponskill"],
+                set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "weapon skill",
                 handler: |c| parse_weaponskill(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["ja", "jobability"],
+                names: &["jobability"],
+                set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "job ability",
                 handler: |c| parse_job_ability(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["ra", "shoot", "rangedattack"],
+                names: &["shoot"],
+                set: CommandSet::Retail,
                 usage: "[target]",
                 summary: "ranged attack",
                 handler: |c| parse_ranged_attack(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["useitem", "use"],
+                names: &["item"],
+                set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "use an item",
                 handler: |c| parse_use_item(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["magic"],
+                names: &["magic"],
+                set: CommandSet::Core,
                 usage: "",
-                summary: "open the Magic menu (no-arg form; with args use /ma)",
+                summary: "open the Magic menu; retail has no command for it, /magic casts",
 
                 handler: |c| {
                     if c.rest.is_empty() {
@@ -425,9 +474,10 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["abilities", "abi"],
+                names: &["abilities", "abi"],
+                set: CommandSet::Core,
                 usage: "",
-                summary: "open the Abilities menu (no-arg form; with args use /ja)",
+                summary: "open the Abilities menu; retail has no command for it, /jobability uses one",
                 handler: |c| {
                     if c.rest.is_empty() {
                         SlashOutcome::OpenMenu(MenuKind::Abilities)
@@ -437,9 +487,10 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["items"],
+                names: &["items"],
+                set: CommandSet::Core,
                 usage: "",
-                summary: "open the Items menu (no-arg form; with args use /useitem)",
+                summary: "open the Items menu; retail has no command for it, /item uses one",
                 handler: |c| {
                     if c.rest.is_empty() {
                         SlashOutcome::OpenMenu(MenuKind::Items)
@@ -449,7 +500,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["equipment", "equip"],
+                names: &["equip"],
+                set: CommandSet::Retail,
                 usage: "[slot item]",
                 summary: "no-arg form opens Equipment menu; <slot> <item> equips directly (Stage 4)",
 
@@ -466,13 +518,15 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["cancel"],
+                names: &["cancel"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "cancel current reactor goal / action",
                 handler: |_| SlashOutcome::Command(AgentCommand::Cancel),
             },
             Command {
-                aliases: &["raw"],
+                names: &["raw"],
+                set: CommandSet::Dev,
                 usage: "<attack|attackoff> [name]",
                 summary: "low-level Action packet (bypasses reactor)",
 
@@ -484,31 +538,36 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Chat",
         &[
             Command {
-                aliases: &["s", "say"],
+                names: &["say"],
+                set: CommandSet::Retail,
                 usage: "<text>",
                 summary: "say (local chat)",
                 handler: |c| chat_or_empty(c.rest, 0, "/s"),
             },
             Command {
-                aliases: &["p", "party"],
+                names: &["party"],
+                set: CommandSet::Retail,
                 usage: "<text>",
                 summary: "party chat",
                 handler: |c| chat_or_empty(c.rest, 4, "/p"),
             },
             Command {
-                aliases: &["sh", "shout"],
+                names: &["shout"],
+                set: CommandSet::Retail,
                 usage: "<text>",
                 summary: "shout chat",
                 handler: |c| chat_or_empty(c.rest, 1, "/sh"),
             },
             Command {
-                aliases: &["l", "ls", "linkshell"],
+                names: &["linkshell"],
+                set: CommandSet::Retail,
                 usage: "<text>",
                 summary: "linkshell chat",
                 handler: |c| chat_or_empty(c.rest, 5, "/l"),
             },
             Command {
-                aliases: &["t", "tell"],
+                names: &["tell"],
+                set: CommandSet::Retail,
                 usage: "<name> <text>",
                 summary: "tell another player",
                 handler: |c| parse_tell(c.rest),
@@ -519,31 +578,36 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Emotes",
         &[
             Command {
-                aliases: &["emote"],
+                names: &["emote"],
+                set: CommandSet::Core,
                 usage: "<name> [motion|text]",
-                summary: "canned emote by name — every table emote also works directly (/wave, /bow, /dance1…)",
+                summary: "emote by name; every emote is also its own retail command (/wave, /bow, /dance1)",
                 handler: |c| parse_named_emote_args(c.rest, c),
             },
             Command {
-                aliases: &["em"],
+                names: &["emote"],
+                set: CommandSet::Retail,
                 usage: "<text>",
-                summary: "free-form custom emote (zone chat channel 8)",
-                handler: |c| chat_or_empty(c.rest, ffxi_proto::map::chat_kind::EMOTION, "/em"),
+                summary: "free-form custom emote text (zone chat channel 8)",
+                handler: |c| chat_or_empty(c.rest, ffxi_proto::map::chat_kind::EMOTION, "/emote"),
             },
             Command {
-                aliases: &["jobemote"],
+                names: &["jobemote"],
+                set: CommandSet::Retail,
                 usage: "[war|mnk|…] [motion|text]",
                 summary: "job gesture (defaults to current main job; needs its JOB_GESTURE key item)",
                 handler: |c| parse_jobemote(c.rest, c),
             },
             Command {
-                aliases: &["bell"],
+                names: &["bell"],
+                set: CommandSet::Retail,
                 usage: "<c4..c6|6..30> [motion|text]",
                 summary: "ring an equipped bell at a note (two octaves from c4)",
                 handler: |c| parse_bell(c.rest, c),
             },
             Command {
-                aliases: &["emotelist"],
+                names: &["emotelist"],
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "request job-emote/chair unlock flags (c2s 0x119)",
                 handler: |_| SlashOutcome::Command(AgentCommand::RequestEmoteList),
@@ -556,65 +620,75 @@ const COMMANDS: &[(&str, &[Command])] = &[
             // "kneel" is deliberately NOT an alias here: retail /kneel is the
             // canned emote (id 3), resolved via the emote fallback.
             Command {
-                aliases: &["sit"],
+                names: &["sit"],
+                set: CommandSet::Retail,
                 usage: "[on|off]",
                 summary: "sit (locks movement; any movement key stands)",
 
                 handler: |c| parse_sit(c.rest),
             },
             Command {
-                aliases: &["stand"],
+                names: &["stand"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "stand (clear any rest stance)",
                 handler: |_| SlashOutcome::SetSitStance(SitToggle::Off),
             },
             Command {
-                aliases: &["heal"],
+                names: &["heal"],
+                set: CommandSet::Retail,
                 usage: "[on|off]",
                 summary: "toggle resting (CAMP)",
 
                 handler: |c| parse_heal(c.rest),
             },
             Command {
-                aliases: &["raisemenu"],
+                names: &["raisemenu"],
+                set: CommandSet::Core,
                 usage: "<option>",
                 summary: "respond to raise dialog",
                 handler: |c| parse_raise_menu(c.rest),
             },
             Command {
-                aliases: &["tractormenu"],
+                names: &["tractormenu"],
+                set: CommandSet::Core,
                 usage: "<option>",
                 summary: "respond to tractor dialog",
                 handler: |c| parse_tractor_menu(c.rest),
             },
             Command {
-                aliases: &["homepointmenu"],
+                names: &["homepointmenu"],
+                set: CommandSet::Core,
                 usage: "<option>",
                 summary: "respond to homepoint dialog",
                 handler: |c| parse_homepoint_menu(c.rest),
             },
             Command {
-                aliases: &["jobchange", "jc"],
+                names: &["jobchange", "jc"],
+                set: CommandSet::Core,
                 usage: "[<main> [sub]]",
                 summary: "no args: open the Mog Menu; with jobs: change main/sub (names, WAR/MNK codes, or ids)",
                 handler: |c| parse_jobchange(c.rest, c.myroom.is_some()),
             },
             Command {
-                aliases: &["endevent", "endevt", "clearevent", "clearevt"],
+                names: &["endevent", "endevt", "clearevent", "clearevt"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "flush pending NPC events (unblock /logout)",
 
                 handler: |_| SlashOutcome::Command(AgentCommand::EndEvent),
             },
             Command {
-                aliases: &["endcutscene", "endcs", "skipcutscene", "skipcs"],
+                names: &["endcutscene", "endcs", "skipcutscene", "skipcs"],
+                set: CommandSet::Core,
                 usage: "[csid]",
                 summary: "end a forced cutscene (new-char intro, etc.)",
 
                 handler: |c| parse_endcutscene(c.rest),
             },
             Command {
-                aliases: &["release", "unwedge"],
+                names: &["release", "unwedge"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "server-side !release: forcibly end any pinned event (gmlevel>=1)",
 
@@ -626,43 +700,50 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["buy"],
+                names: &["buy"],
+                set: CommandSet::Core,
                 usage: "<row> [qty]",
                 summary: "buy from open shop by row index",
                 handler: |c| parse_buy(c.rest),
             },
             Command {
-                aliases: &["sell"],
+                names: &["sell"],
+                set: CommandSet::Core,
                 usage: "<slot> [qty] | confirm",
                 summary: "sell to open shop from inventory slot",
                 handler: |c| parse_sell(c.rest),
             },
             Command {
-                aliases: &["bank"],
+                names: &["bank"],
+                set: CommandSet::Retail,
                 usage: "<subcommand>",
                 summary: "gil-bank operations",
                 handler: |c| parse_bank(c.rest),
             },
             Command {
-                aliases: &["lot"],
+                names: &["lot"],
+                set: CommandSet::Core,
                 usage: "<pool slot>",
                 summary: "cast lots on a treasure pool item",
                 handler: |c| parse_treasure(c.rest, false),
             },
             Command {
-                aliases: &["pass"],
+                names: &["pass"],
+                set: CommandSet::Core,
                 usage: "<pool slot>",
                 summary: "pass on a treasure pool item",
                 handler: |c| parse_treasure(c.rest, true),
             },
             Command {
-                aliases: &["minimap", "mm"],
+                names: &["minimap", "mm"],
+                set: CommandSet::Core,
                 usage: "[show|hide|toggle|mode <top|retail|auto>|cull <N>|zoom ...]",
                 summary: "drive the minimap HUD (visibility, backend, cull, zoom)",
                 handler: |c| parse_minimap(c.rest),
             },
             Command {
-                aliases: &["map", "m"],
+                names: &["map"],
+                set: CommandSet::Retail,
                 usage: "",
                 summary: "open the full-screen Map + Widescan menu",
                 handler: |c| {
@@ -678,23 +759,24 @@ const COMMANDS: &[(&str, &[Command])] = &[
             // retail-faithful path is the Map screen's Wide Scan submenu.
             #[cfg(debug_assertions)]
             Command {
-                // /ws is the weaponskill command; widescan takes /wscan to avoid
-                // shadowing it.
-                aliases: &["widescan", "wscan"],
+                names: &["widescan", "wscan"],
+                set: CommandSet::Dev,
                 usage: "",
                 summary: "(dev) request the server wide-scan tracking list and echo it to chat",
                 handler: |_| SlashOutcome::Widescan,
             },
             Command {
-                aliases: &["clock"],
+                names: &["clock"],
+                set: CommandSet::Retail,
                 usage: "[show|hide|toggle]",
                 summary: "toggle the Vana'diel clock widget (same state as the Current Time menu entry)",
                 handler: |c| parse_clock(c.rest),
             },
             Command {
-                aliases: &["sound", "audio", "mute"],
+                names: &["sound", "audio", "mute"],
+                set: CommandSet::Core,
                 usage: "[on|off|toggle|status] [bgm|sfx]",
-                summary: "bare /sound toggles all audio; survives logout",
+                summary: "bare //sound toggles all audio; survives logout",
                 handler: |c| parse_sound(c.rest),
             },
         ],
@@ -703,7 +785,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Fishing",
         &[
             Command {
-                aliases: &["fish"],
+                names: &["fish"],
+                set: CommandSet::Retail,
                 usage: "",
                 summary: "cast a line (drives the fishing mini-game)",
                 handler: |c| match c.fishing.refusal() {
@@ -715,7 +798,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["hook"],
+                names: &["hook"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "set the hook once a fish bites",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
@@ -723,7 +807,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 }),
             },
             Command {
-                aliases: &["reelleft", "rl"],
+                names: &["reelleft", "rl"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "react to a left fishing arrow",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
@@ -731,7 +816,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 }),
             },
             Command {
-                aliases: &["reelright", "rr"],
+                names: &["reelright", "rr"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "react to a right fishing arrow",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
@@ -739,7 +825,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 }),
             },
             Command {
-                aliases: &["reelstop", "fishcancel"],
+                names: &["reelstop", "fishcancel"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "abandon the cast / mini-game",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
@@ -752,27 +839,31 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Session",
         &[
             Command {
-                aliases: &["logout"],
+                names: &["logout"],
+                set: CommandSet::Retail,
                 usage: "[on|off]",
                 summary: "request logout (30s LeaveGame timer)",
 
                 handler: |c| parse_reqlogout(c.rest,  false),
             },
             Command {
-                aliases: &["shutdown"],
+                names: &["shutdown"],
+                set: CommandSet::Retail,
                 usage: "[on|off]",
                 summary: "request shutdown (LeaveGame, then close)",
                 handler: |c| parse_reqlogout(c.rest,  true),
             },
             Command {
-                aliases: &["exit"],
+                names: &["exit"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "polite logout + close window",
 
                 handler: |_| SlashOutcome::QuitWithLogout(ReqLogoutKind::LogoutOn),
             },
             Command {
-                aliases: &["disconnect", "quit"],
+                names: &["disconnect", "quit"],
+                set: CommandSet::Core,
                 usage: "",
                 summary: "drop the connection immediately",
 
@@ -784,97 +875,113 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Debug & Tooling",
         &[
             Command {
-                aliases: &["overlay"],
+                names: &["overlay"],
+                set: CommandSet::Dev,
                 usage: "[list|add <dir>|remove <n>|clear|reset]",
                 summary: "inspect and override the DAT overlay search path",
                 handler: |c| parse_overlay(c.rest),
             },
             Command {
-                aliases: &["actordiag"],
+                names: &["actordiag"],
+                set: CommandSet::Dev,
                 usage: "[target]",
                 summary: "diagnose missing PC body parts (head/face) against the install",
                 handler: |c| parse_actordiag(c.rest),
             },
             Command {
-                aliases: &["snapshot"],
+                names: &["snapshot"],
+                set: CommandSet::Agent,
                 usage: "",
                 summary: "emit a one-shot scene snapshot",
                 handler: |_| SlashOutcome::Command(AgentCommand::Snapshot),
             },
             Command {
-                aliases: &["zonechange", "rzc"],
+                names: &["zonechange", "rzc"],
+                set: CommandSet::Dev,
                 usage: "<id>",
                 summary: "request zone change (debug)",
                 handler: |c| parse_zone_change(c.rest),
             },
             Command {
-                aliases: &["mhexit"],
+                names: &["mhexit"],
+                set: CommandSet::Core,
                 usage: "[home|1f|2f|garden|<region> [slot]]",
                 summary: "leave the current Mog House (sends 0x05E zmrq; the Exit door offers the same Where to? menu)",
                 handler: |c| parse_mhexit(c.rest, c.zone_id),
             },
             Command {
-                aliases: &["agent"],
+                names: &["agent"],
+                set: CommandSet::Agent,
                 usage: "<pause|resume|status>",
                 summary: "human-in-control flag for agent commands",
                 handler: |c| parse_agent(c.rest),
             },
             Command {
-                aliases: &["keybinds", "keybind", "binds"],
+                names: &["keybinds", "keybind", "binds"],
+                set: CommandSet::Dev,
                 usage: "<preset|list|reset>",
                 summary: "manage keybind presets",
                 handler: |c| parse_keybinds(c.rest),
             },
             Command {
-                aliases: &["load_mmb", "loadmmb"],
+                names: &["load_mmb", "loadmmb"],
+                set: CommandSet::Dev,
                 usage: "<file_id> <chunk_idx>",
                 summary: "spawn MMB model at self_pos (debug overlay)",
                 handler: |c| parse_load_mmb(c.rest, c.self_pos),
             },
             Command {
-                aliases: &["load_mmb_on", "loadmmbon"],
+                names: &["load_mmb_on", "loadmmbon"],
+                set: CommandSet::Dev,
                 usage: "<entity_id> <file_id> <chunk_idx>",
                 summary: "attach MMB model under a tracked entity (debug)",
                 handler: |c| parse_load_mmb_on(c.rest),
             },
             Command {
-                aliases: &["load_mzb", "loadmzb"],
+                names: &["load_mzb", "loadmzb"],
+                set: CommandSet::Dev,
                 usage: "<file_id> [chunk_idx]",
                 summary: "load MZB mesh-library at self_pos (debug overlay)",
                 handler: |c| parse_load_mzb(c.rest, c.self_pos),
             },
             Command {
-                aliases: &["subarea", "subareas"],
+                names: &["subarea", "subareas"],
+                set: CommandSet::Dev,
                 usage: "[<sub_area_id>|here]",
                 summary: "list this zone's building interiors, or load one as an overlay (debug)",
                 handler: |c| parse_sub_area(c.rest, c.self_pos),
             },
             Command {
-                aliases: &["fps"],
+                names: &["fps"],
+                set: CommandSet::Dev,
                 usage: "<max>",
                 summary: "set target frame rate",
                 handler: |c| parse_fps(c.rest),
             },
             Command {
-                aliases: &["capture"],
+                names: &["capture"],
+                set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
                 summary: "screen-capture-friendly mode (disables framepace; avoids QuickTime lockup)",
                 handler: |c| parse_capture(c.rest),
             },
             Command {
-                aliases: &["screenshot", "ss"],
+                names: &["screenshot", "ss"],
+                set: CommandSet::Dev,
                 usage: "[path.png]",
                 summary: "capture primary window to PNG (default: screenshot-N.png in CWD)",
                 handler: |c| parse_screenshot(c.rest),
             },
             Command {
-                aliases: &["drawdistance", "dd"],
+                names: &["drawdistance", "dd"],
+                set: CommandSet::Dev,
                 usage: "[setworld|setmob] [N]",
                 summary: "set draw distance",
                 handler: |c| parse_drawdistance(c.rest),
             },
             Command {
-                aliases: &["copy"],
+                names: &["copy"],
+                set: CommandSet::Dev,
                 usage: "[n]",
                 summary: "copy the last n system-toast lines to the clipboard (default 1)",
 
@@ -893,7 +1000,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["bgm"],
+                names: &["bgm"],
+                set: CommandSet::Dev,
                 usage: "<track_id>",
                 summary: "audition a BGM track id (synthetic 0x05F slot 0)",
                 handler: |c| match c.rest.parse::<u16>() {
@@ -902,7 +1010,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["sfx"],
+                names: &["sfx"],
+                set: CommandSet::Dev,
                 usage: "<se_id>",
                 summary: "fire a one-shot SE by numeric id",
                 handler: |c| match c.rest.parse::<u32>() {
@@ -911,71 +1020,81 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
-                aliases: &["look"],
+                names: &["look"],
+                set: CommandSet::Dev,
                 usage: "[name|act_index]",
                 summary: "print decoded LookData (race/gear) for an entity",
                 handler: |c| parse_look(c.rest, c.entities, c.self_pos, c.current_target),
             },
             Command {
-                aliases: &["zonegeom"],
+                names: &["zonegeom"],
+                set: CommandSet::Dev,
                 usage: "[off|collision|all|toggle]",
                 summary: "MZB overlay visibility (collision-only vs decorative)",
                 handler: |c| parse_zonegeom(c.rest),
             },
             Command {
-                aliases: &["zoneline", "zonelines"],
+                names: &["zoneline", "zonelines"],
+                set: CommandSet::Dev,
                 usage: "[off|pillar|gate|toggle]",
                 summary: "zone-line trigger markers — off (retail-faithful, default), pillar (debug column), or gate (real oriented footprint)",
                 handler: |c| parse_zoneline(c.rest),
             },
             Command {
-                aliases: &["weather"],
+                names: &["weather"],
+                set: CommandSet::Dev,
                 usage: "<id|name>",
                 summary: "client-side weather override (e.g. `rain`, `none`, `12`); lasts until the next server WEATHER packet",
 
                 handler: |c| parse_weather(c.rest),
             },
             Command {
-                aliases: &["debugchat"],
+                names: &["debugchat"],
+                set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
                 summary: "show or hide the debug chat window",
                 handler: |c| parse_debugchat(c.rest),
             },
             Command {
-                aliases: &["devhud"],
+                names: &["devhud"],
+                set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
                 summary: "stage + diagnostics bars (top/bottom telemetry). Per-panel overlays (perf, target cycle, mesh, netstat) live in the in-game Debug menu",
                 handler: |c| parse_devhud(c.rest),
             },
             Command {
-                aliases: &["netstat", "network"],
+                names: &["netstat", "network"],
+                set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
                 summary: "network health indicator (S/R baud, connection %, send/recv arrows)",
                 handler: |c| parse_netstat(c.rest),
             },
             Command {
-                aliases: &["noclip"],
+                names: &["noclip"],
+                set: CommandSet::Dev,
                 usage: "[on|off|toggle]",
                 summary: "debug: bypass client-side wall collision (grounding stays on); same state as the Debug menu NoClip row",
                 handler: |c| parse_noclip(c.rest),
             },
             Command {
-                aliases: &["renderscale", "rscale"],
+                names: &["renderscale", "rscale"],
+                set: CommandSet::Dev,
                 usage: "[25-200 | 0.25-2.0]",
-                summary: "3D render scale: <100% renders the world at lower res and upscales (perf); >100% supersamples. HUD stays native. Bare `/renderscale` reports it.",
+                summary: "3D render scale: <100% renders the world at lower res and upscales (perf); >100% supersamples. HUD stays native. Bare `//renderscale` reports it.",
                 handler: |c| parse_renderscale(c.rest),
             },
             Command {
-                aliases: &["lights", "lanterns"],
+                names: &["lights", "lanterns"],
+                set: CommandSet::Dev,
                 usage: "[on|off | shadowed N | flicker on|off]",
-                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `/lights` lists state",
+                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `//lights` lists state",
                 handler: |c| parse_lights(c.rest),
             },
         ],
     ),
 ];
 
-fn render_help() -> String {
+fn render_help(surface: &CommandSurface) -> String {
     let mut out = String::from("=== Slash command reference ===");
     for (category, entries) in COMMANDS {
         out.push_str("\n[");
@@ -983,12 +1102,18 @@ fn render_help() -> String {
         out.push(']');
         for entry in *entries {
             out.push_str("\n  ");
-            for (i, name) in entry.aliases.iter().enumerate() {
+            for (i, name) in entry.names.iter().enumerate() {
                 if i > 0 {
                     out.push_str(" | ");
                 }
-                out.push('/');
+                out.push_str(entry.prefix());
                 out.push_str(name);
+                // A retail command's other spellings are the install's answer,
+                // not ours, so they are listed from its table.
+                for alias in surface.alias_group(name).into_iter().filter(|a| a != name) {
+                    out.push_str(" | /");
+                    out.push_str(alias);
+                }
             }
             if !entry.usage.is_empty() {
                 out.push(' ');
@@ -1246,6 +1371,7 @@ pub enum KeybindUpdate {
 
 pub fn parse_slash(
     buffer: &str,
+    surface: &CommandSurface,
     entities: &[WireEntity],
     self_pos: WireVec3,
     current_target: Option<u32>,
@@ -1255,20 +1381,22 @@ pub fn parse_slash(
     myroom: Option<kuluu_snapshot::MyRoom>,
     fishing: kuluu_render::fishing_spot::FishingGate,
 ) -> SlashOutcome {
-    let trimmed = buffer.trim_start();
-    let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
-
-    let mut parts = body.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").to_ascii_lowercase();
-    let rest = parts.next().unwrap_or("").trim();
-
-    if cmd.is_empty() {
+    let Some(typed) = command_surface::classify(buffer) else {
         return SlashOutcome::SystemMessage("empty command".into());
-    }
+    };
+
+    // Retail dispatches on the command id, so a handler is reached by the long
+    // form whichever alias was typed. With no table the typed word stands in,
+    // which still reaches every long form.
+    let word = match typed.surface {
+        Surface::Retail => surface.canonical(&typed.word).to_owned(),
+        Surface::Extension => typed.word.clone(),
+    };
 
     let ctx = SlashCtx {
-        cmd: &cmd,
-        rest,
+        cmd: &word,
+        surface,
+        rest: typed.rest,
         entities,
         self_pos,
         current_target,
@@ -1279,19 +1407,57 @@ pub fn parse_slash(
         fishing,
     };
 
-    match COMMANDS
-        .iter()
-        .flat_map(|(_, cmds)| cmds.iter())
-        .find(|c| c.aliases.contains(&cmd.as_str()))
-    {
-        Some(command) => (command.handler)(&ctx),
-        // Every scraped emote name is its own command (/wave, /bow, …); the
-        // table lookup runs after the explicit commands so it can never shadow
-        // one.
-        None => match parse_canned_emote(&cmd, rest, &ctx) {
-            Some(outcome) => outcome,
-            None => unknown_command(&cmd),
-        },
+    match typed.surface {
+        Surface::Retail => dispatch_retail(surface, &word, &ctx),
+        Surface::Extension => dispatch_extension(surface, typed.owner, &word, &ctx),
+    }
+}
+
+fn dispatch_retail(surface: &CommandSurface, word: &str, ctx: &SlashCtx) -> SlashOutcome {
+    if let Some(command) = commands().find(|c| c.set.is_retail() && c.names.contains(&word)) {
+        return (command.handler)(ctx);
+    }
+    // Every emote is a command of its own (/wave, /bow, ...). The scraped names
+    // come from LSB's enum, which spells some of them differently from the
+    // client (Yes for /nod, Goodbye for /farewell), so the whole alias group is
+    // tried rather than just the word.
+    if let Some(outcome) = canned_emote(surface, word, ctx) {
+        return outcome;
+    }
+    retail_miss(surface, word)
+}
+
+/// A `/word` no handler claimed. Saying which of the three reasons it was is
+/// the difference between "this client has no such command", "Kuluu has not
+/// built it yet" and "you wanted the extension surface".
+fn retail_miss(surface: &CommandSurface, word: &str) -> SlashOutcome {
+    if surface.id_for(word).is_some() {
+        return SlashOutcome::SystemMessage(format!("/{word}: not supported yet"));
+    }
+    match commands().find(|c| !c.set.is_retail() && c.names.contains(&word)) {
+        Some(_) => SlashOutcome::SystemMessage(format!(
+            "unknown command: /{word} -- did you mean {EXTENSION_PREFIX}{word}?"
+        )),
+        None => unknown_command(word),
+    }
+}
+
+fn dispatch_extension(
+    surface: &CommandSurface,
+    owner: Option<&str>,
+    word: &str,
+    ctx: &SlashCtx,
+) -> SlashOutcome {
+    if let Some(owner) = owner.filter(|o| !o.eq_ignore_ascii_case(FIRST_PARTY_OWNER)) {
+        return SlashOutcome::SystemMessage(format!("{EXTENSION_PREFIX}{owner}: no such owner"));
+    }
+    match commands().find(|c| !c.set.is_retail() && c.names.contains(&word)) {
+        Some(command) if surface.enabled.is_enabled(command.set) => (command.handler)(ctx),
+        Some(command) => SlashOutcome::SystemMessage(format!(
+            "{EXTENSION_PREFIX}{word}: the {} command set is off",
+            command.set.word()
+        )),
+        None => SlashOutcome::SystemMessage(format!("unknown command: {EXTENSION_PREFIX}{word}")),
     }
 }
 
@@ -1342,6 +1508,15 @@ fn parse_canned_emote(cmd: &str, rest: &str, ctx: &SlashCtx) -> Option<SlashOutc
         return None;
     }
     Some(emote_outcome(ctx, id, rest, 0))
+}
+
+/// The same, reached through the install's alias group so a name LSB spells
+/// differently still lands: `/nod` and `/yes` are both emote 7, but the enum
+/// only calls it `Yes`.
+fn canned_emote(surface: &CommandSurface, word: &str, ctx: &SlashCtx) -> Option<SlashOutcome> {
+    std::iter::once(word)
+        .chain(surface.alias_group(word))
+        .find_map(|name| parse_canned_emote(name, ctx.rest, ctx))
 }
 
 fn parse_named_emote_args(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
@@ -3348,10 +3523,10 @@ mod tests {
     #[test]
     fn debug_chat_command_controls_its_own_visibility() {
         for (command, expected) in [
-            ("/debugchat", None),
-            ("/debugchat toggle", None),
-            ("/debugchat on", Some(true)),
-            ("/debugchat off", Some(false)),
+            ("//debugchat", None),
+            ("//debugchat toggle", None),
+            ("//debugchat on", Some(true)),
+            ("//debugchat off", Some(false)),
         ] {
             assert!(matches!(
                 parse_slash_t(command, &empty_entities(), origin(), None, None),
@@ -3360,7 +3535,7 @@ mod tests {
         }
         assert!(matches!(
             parse_slash_t(
-                "/debugchat invalid",
+                "//debugchat invalid",
                 &empty_entities(),
                 origin(),
                 None,
@@ -3378,6 +3553,67 @@ mod tests {
         }
     }
 
+    /// A table standing in for an install's, carrying only the alias groups
+    /// the tests exercise. Built rather than read so the suite pins alias
+    /// resolution on a machine with no game files.
+    fn test_surface() -> CommandSurface {
+        use ffxi_dat::main_dll::{ClientCommand, CommandTable};
+        let rows: &[(&[&str], u16)] = &[
+            (&["say", "s"], 0x0001),
+            (&["shout", "sh"], 0x0002),
+            (&["tell", "t"], 0x0004),
+            (&["party", "p"], 0x0005),
+            (&["linkshell", "l"], 0x0006),
+            (&["emote", "em"], 0x000b),
+            (&["attack", "a"], 0x001d),
+            (&["attackoff"], 0x001e),
+            (&["target", "ta"], 0x0017),
+            (&["targetnpc"], 0x0019),
+            (&["targetbnpc"], 0x001a),
+            (&["assist", "as"], 0x0020),
+            (&["item"], 0x0022),
+            (&["equip"], 0x0024),
+            (&["magic", "ma"], 0x0025),
+            (&["weaponskill", "ws"], 0x0026),
+            (&["jobability", "ja"], 0x002b),
+            (&["shoot", "range", "ra", "throw"], 0x001c),
+            (&["heal"], 0x0032),
+            (&["sit"], 0x0033),
+            (&["fish"], 0x0036),
+            (&["dig"], 0x0037),
+            (&["help", "h"], 0x0021),
+            (&["check", "c"], 0x0045),
+            (&["checkname", "cn"], 0x0046),
+            (&["checkparam"], 0x0047),
+            (&["logout"], 0x0043),
+            (&["shutdown"], 0x0044),
+            (&["clock"], 0x003f),
+            (&["map"], 0x004f),
+            (&["bank"], 0x006c),
+            (&["follow"], 0x005b),
+            (&["nod", "yes"], 0x00a9),
+            (&["goodbye", "farewell"], 0x00ab),
+            (&["disgusted", "upset"], 0x00bc),
+            (&["wave"], 0x00aa),
+            (&["kneel"], 0x00a5),
+            (&["bell"], 0x00eb),
+            (&["jobemote"], 0x00ec),
+            (&["?"], 0x0103),
+            (&["recast"], 0x002e),
+        ];
+        let entries = rows
+            .iter()
+            .flat_map(|(names, id)| {
+                names.iter().map(move |name| ClientCommand {
+                    name: (*name).to_owned(),
+                    id: *id,
+                    flags: 0,
+                })
+            })
+            .collect();
+        CommandSurface::new(CommandTable::from_entries(entries))
+    }
+
     fn parse_slash_t(
         buffer: &str,
         entities: &[WireEntity],
@@ -3387,6 +3623,7 @@ mod tests {
     ) -> SlashOutcome {
         parse_slash(
             buffer,
+            &test_surface(),
             entities,
             self_pos,
             current_target,
@@ -3450,6 +3687,7 @@ mod tests {
         let entities = vec![me, ent(1, "Goblin", EntityKind::Mob, 3.0, 0.0)];
         let outcome = parse_slash(
             "/dig",
+            &test_surface(),
             &entities,
             origin(),
             Some(1),
@@ -3478,12 +3716,12 @@ mod tests {
         ];
 
         assert!(matches!(
-            parse_slash_t("/targetnpc2", &entities, origin(), Some(2), None),
+            parse_slash_t("//targetnpc2", &entities, origin(), Some(2), None),
             SlashOutcome::SetTarget(Some(1))
         ));
 
         assert!(matches!(
-            parse_slash_t("/targetnpc2", &entities, origin(), Some(1), None),
+            parse_slash_t("//targetnpc2", &entities, origin(), Some(1), None),
             SlashOutcome::SetTarget(Some(3))
         ));
     }
@@ -3495,7 +3733,7 @@ mod tests {
             ent(2, "Goblin", EntityKind::Mob, 8.0, 0.0),
         ];
         assert!(matches!(
-            parse_slash_t("/targetenemy", &entities, origin(), None, None),
+            parse_slash_t("/targetbnpc", &entities, origin(), None, None),
             SlashOutcome::SetTarget(Some(2))
         ));
     }
@@ -3510,7 +3748,8 @@ mod tests {
 
         assert!(matches!(
             parse_slash(
-                "/targetparty1",
+                "//targetparty1",
+                &test_surface(),
                 &[],
                 origin(),
                 None,
@@ -3525,7 +3764,8 @@ mod tests {
 
         assert!(matches!(
             parse_slash(
-                "/targetparty3",
+                "//targetparty3",
+                &test_surface(),
                 &[],
                 origin(),
                 None,
@@ -3540,7 +3780,8 @@ mod tests {
 
         assert!(matches!(
             parse_slash(
-                "/targetparty5",
+                "//targetparty5",
+                &test_surface(),
                 &[],
                 origin(),
                 None,
@@ -3586,7 +3827,7 @@ mod tests {
 
     #[test]
     fn map_and_alias_open_map_menu() {
-        for slash in ["/map", "/m"] {
+        for slash in ["/map", "/map"] {
             assert!(
                 matches!(
                     parse_slash_t(slash, &empty_entities(), origin(), None, None),
@@ -3604,7 +3845,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn widescan_requests_list() {
-        for slash in ["/widescan", "/wscan"] {
+        for slash in ["//widescan", "//wscan"] {
             assert!(
                 matches!(
                     parse_slash_t(slash, &empty_entities(), origin(), None, None),
@@ -3622,7 +3863,13 @@ mod tests {
     fn ws_alias_stays_weaponskill() {
         assert!(
             !matches!(
-                parse_slash_t("/ws Fast Blade", &empty_entities(), origin(), None, None),
+                parse_slash_t(
+                    "/weaponskill Fast Blade",
+                    &empty_entities(),
+                    origin(),
+                    None,
+                    None
+                ),
                 SlashOutcome::Widescan
             ),
             "/ws must remain the weaponskill command, not widescan"
@@ -3631,7 +3878,13 @@ mod tests {
 
     #[test]
     fn party_chat_with_text() {
-        let out = parse_slash_t("/p hello world", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t(
+            "/party hello world",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        );
         match out {
             SlashOutcome::Command(AgentCommand::Chat { kind, text }) => {
                 assert_eq!(kind, 4);
@@ -3643,13 +3896,19 @@ mod tests {
 
     #[test]
     fn party_chat_empty_text_is_system_message() {
-        let out = parse_slash_t("/p", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("/party", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::SystemMessage(_)));
     }
 
     #[test]
     fn tell_requires_name_and_text() {
-        let out = parse_slash_t("/t Bob hi there", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t(
+            "/tell Bob hi there",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        );
         match out {
             SlashOutcome::Command(AgentCommand::Tell { to, text }) => {
                 assert_eq!(to, "Bob");
@@ -3658,7 +3917,7 @@ mod tests {
             other => panic!("expected Tell, got {other:?}"),
         }
 
-        let out = parse_slash_t("/t Bob", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("/tell Bob", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::SystemMessage(_)));
     }
 
@@ -3684,7 +3943,7 @@ mod tests {
             ent(202, "NearMob", EntityKind::Mob, 2.0, 0.0),
             ent(303, "FarNpc", EntityKind::Npc, 50.0, 50.0),
         ];
-        let out = parse_slash_t("/debug", &entities, origin(), Some(202), None);
+        let out = parse_slash_t("//debug", &entities, origin(), Some(202), None);
         match out {
             SlashOutcome::SystemMessage(s) => {
                 assert!(s.contains("target:"), "no target line: {s}");
@@ -3704,7 +3963,7 @@ mod tests {
         let mut e = ent(202, "Goblin", EntityKind::Mob, 3.0, 4.0);
         e.hp_pct = Some(42);
         let entities = vec![e];
-        let out = parse_slash_t("/debug Goblin", &entities, origin(), None, None);
+        let out = parse_slash_t("//debug Goblin", &entities, origin(), None, None);
         match out {
             SlashOutcome::SystemMessage(s) => {
                 assert!(s.contains("Goblin"), "name missing: {s}");
@@ -3719,9 +3978,9 @@ mod tests {
 
     #[test]
     fn debug_heights_subcommand_still_works() {
-        let out = parse_slash_t("/debug heights", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//debug heights", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::DebugHeights));
-        let out = parse_slash_t("/dbg h", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//dbg h", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::DebugHeights));
     }
 
@@ -3750,7 +4009,7 @@ mod tests {
 
     #[test]
     fn quit_aliases() {
-        for s in ["/quit", "/disconnect"] {
+        for s in ["//quit", "//disconnect"] {
             assert!(matches!(
                 parse_slash_t(s, &empty_entities(), origin(), None, None),
                 SlashOutcome::Quit
@@ -3849,7 +4108,7 @@ mod tests {
 
     #[test]
     fn exit_emits_quit_with_logout_on() {
-        match parse_slash_t("/exit", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//exit", &empty_entities(), origin(), None, None) {
             SlashOutcome::QuitWithLogout(kind) => {
                 assert_eq!(kind, ReqLogoutKind::LogoutOn);
             }
@@ -3899,7 +4158,7 @@ mod tests {
             other => panic!("expected SetSitStance(Off), got {other:?}"),
         }
 
-        match parse_slash_t("/stand", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//stand", &empty_entities(), origin(), None, None) {
             SlashOutcome::SetSitStance(t) => assert_eq!(t, SitToggle::Off),
             other => panic!("expected SetSitStance(Off), got {other:?}"),
         }
@@ -3966,7 +4225,7 @@ mod tests {
             y: -7.0,
             z: 3.25,
         };
-        match parse_slash_t("/load_mmb 115 18", &empty_entities(), pos, None, None) {
+        match parse_slash_t("//load_mmb 115 18", &empty_entities(), pos, None, None) {
             SlashOutcome::LoadMmb {
                 file_id,
                 chunk_idx,
@@ -3985,7 +4244,7 @@ mod tests {
     #[test]
     fn load_mmb_on_parses_entity_id() {
         match parse_slash_t(
-            "/load_mmb_on 1234 115 18",
+            "//load_mmb_on 1234 115 18",
             &empty_entities(),
             origin(),
             None,
@@ -4005,17 +4264,23 @@ mod tests {
         }
 
         assert!(matches!(
-            parse_slash_t("/loadmmbon 99 7 0", &empty_entities(), origin(), None, None),
+            parse_slash_t(
+                "//loadmmbon 99 7 0",
+                &empty_entities(),
+                origin(),
+                None,
+                None
+            ),
             SlashOutcome::LoadMmb {
                 entity_id: Some(99),
                 ..
             }
         ));
         for s in [
-            "/load_mmb_on",
-            "/load_mmb_on 1234",
-            "/load_mmb_on 1234 115",
-            "/load_mmb_on foo 115 18",
+            "//load_mmb_on",
+            "//load_mmb_on 1234",
+            "//load_mmb_on 1234 115",
+            "//load_mmb_on foo 115 18",
         ] {
             assert!(
                 matches!(
@@ -4030,7 +4295,7 @@ mod tests {
     #[test]
     fn load_mmb_alias_and_bad_args() {
         assert!(matches!(
-            parse_slash_t("/loadmmb 115 18", &empty_entities(), origin(), None, None),
+            parse_slash_t("//loadmmb 115 18", &empty_entities(), origin(), None, None),
             SlashOutcome::LoadMmb {
                 file_id: 115,
                 chunk_idx: 18,
@@ -4040,10 +4305,10 @@ mod tests {
         ));
 
         for s in [
-            "/load_mmb",
-            "/load_mmb 115",
-            "/load_mmb foo 18",
-            "/load_mmb 115 bar",
+            "//load_mmb",
+            "//load_mmb 115",
+            "//load_mmb foo 18",
+            "//load_mmb 115 bar",
         ] {
             assert!(
                 matches!(
@@ -4063,7 +4328,7 @@ mod tests {
             z: 3.0,
         };
 
-        match parse_slash_t("/load_mzb 7368", &empty_entities(), pos, None, None) {
+        match parse_slash_t("//load_mzb 7368", &empty_entities(), pos, None, None) {
             SlashOutcome::LoadMzb {
                 file_id,
                 chunk_idx,
@@ -4076,7 +4341,7 @@ mod tests {
             other => panic!("expected LoadMzb, got {other:?}"),
         }
 
-        match parse_slash_t("/load_mzb 7368 2", &empty_entities(), pos, None, None) {
+        match parse_slash_t("//load_mzb 7368 2", &empty_entities(), pos, None, None) {
             SlashOutcome::LoadMzb {
                 chunk_idx: Some(2), ..
             } => {}
@@ -4084,14 +4349,14 @@ mod tests {
         }
 
         assert!(matches!(
-            parse_slash_t("/loadmzb 7368", &empty_entities(), pos, None, None),
+            parse_slash_t("//loadmzb 7368", &empty_entities(), pos, None, None),
             SlashOutcome::LoadMzb {
                 chunk_idx: None,
                 ..
             }
         ));
 
-        for s in ["/load_mzb", "/load_mzb foo", "/load_mzb 7368 bar"] {
+        for s in ["//load_mzb", "//load_mzb foo", "//load_mzb 7368 bar"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -4110,7 +4375,7 @@ mod tests {
             z: 3.0,
         };
 
-        match parse_slash_t("/subarea", &empty_entities(), pos, None, None) {
+        match parse_slash_t("//subarea", &empty_entities(), pos, None, None) {
             SlashOutcome::SubArea {
                 op: SubAreaOp::List,
                 self_pos,
@@ -4120,7 +4385,7 @@ mod tests {
 
         // 0x1CE is the Lower Jeuno food-shop interior in
         // research/xi-tools/docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
-        for s in ["/subarea 462", "/subarea 0x1CE", "/subareas 0x1ce"] {
+        for s in ["//subarea 462", "//subarea 0x1CE", "//subareas 0x1ce"] {
             match parse_slash_t(s, &empty_entities(), pos, None, None) {
                 SlashOutcome::SubArea {
                     op: SubAreaOp::Load(id),
@@ -4131,14 +4396,14 @@ mod tests {
         }
 
         assert!(matches!(
-            parse_slash_t("/subarea here", &empty_entities(), pos, None, None),
+            parse_slash_t("//subarea here", &empty_entities(), pos, None, None),
             SlashOutcome::SubArea {
                 op: SubAreaOp::Here,
                 ..
             }
         ));
 
-        for s in ["/subarea foo", "/subarea 0xzz", "/subarea -1"] {
+        for s in ["//subarea foo", "//subarea 0xzz", "//subarea -1"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -4151,7 +4416,7 @@ mod tests {
 
     #[test]
     fn navmesh_no_arg_toggles() {
-        match parse_slash_t("/navmesh", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//navmesh", &empty_entities(), origin(), None, None) {
             SlashOutcome::ToggleNavmesh(None) => {}
             other => panic!("expected ToggleNavmesh(None), got {other:?}"),
         }
@@ -4159,7 +4424,7 @@ mod tests {
 
     #[test]
     fn navmesh_on_and_off_select_explicit_modes() {
-        for (cmd, expected) in [("/navmesh on", Some(true)), ("/navmesh off", Some(false))] {
+        for (cmd, expected) in [("//navmesh on", Some(true)), ("//navmesh off", Some(false))] {
             match parse_slash_t(cmd, &empty_entities(), origin(), None, None) {
                 SlashOutcome::ToggleNavmesh(setting) => assert_eq!(setting, expected),
                 other => panic!("expected ToggleNavmesh({expected:?}), got {other:?}"),
@@ -4169,7 +4434,7 @@ mod tests {
 
     #[test]
     fn navmesh_rejects_unknown_arg() {
-        for s in ["/navmesh maybe", "/navmesh 1", "/navmesh ON!"] {
+        for s in ["//navmesh maybe", "//navmesh 1", "//navmesh ON!"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -4183,7 +4448,7 @@ mod tests {
     #[test]
     fn pathto_numeric_three_args_dispatches() {
         match parse_slash_t(
-            "/pathto 1.5 2 -3.25",
+            "//pathto 1.5 2 -3.25",
             &empty_entities(),
             origin(),
             None,
@@ -4202,7 +4467,7 @@ mod tests {
     fn pathto_target_uses_current_target_pos() {
         let mut entity = ent(42, "Bob", EntityKind::Pc, 7.0, 8.0);
         entity.pos.z = 9.0;
-        match parse_slash_t("/pathto target", &[entity], origin(), Some(42), None) {
+        match parse_slash_t("//pathto target", &[entity], origin(), Some(42), None) {
             SlashOutcome::Command(AgentCommand::PathTo { x, y, z, .. }) => {
                 assert_eq!((x, y, z), (7.0, 8.0, 9.0));
             }
@@ -4213,10 +4478,10 @@ mod tests {
     #[test]
     fn pathto_rejects_bad_input() {
         for s in [
-            "/pathto",
-            "/pathto 1 2 3 4",
-            "/pathto x y z",
-            "/pathto target",
+            "//pathto",
+            "//pathto 1 2 3 4",
+            "//pathto x y z",
+            "//pathto target",
         ] {
             assert!(
                 matches!(
@@ -4232,7 +4497,7 @@ mod tests {
     fn pathto_two_arg_form_uses_self_z() {
         let mut self_pos = origin();
         self_pos.z = 17.5;
-        match parse_slash_t("/pathto 10 20", &empty_entities(), self_pos, None, None) {
+        match parse_slash_t("//pathto 10 20", &empty_entities(), self_pos, None, None) {
             SlashOutcome::Command(AgentCommand::PathTo { x, y, z, .. }) => {
                 assert_eq!((x, y, z), (10.0, 20.0, 17.5));
             }
@@ -4243,7 +4508,7 @@ mod tests {
     #[test]
     fn pathto_fuzzy_name_picks_entity() {
         let entity = ent(42, "Bob", EntityKind::Pc, 7.0, 8.0);
-        match parse_slash_t("/pathto bob", &[entity], origin(), None, None) {
+        match parse_slash_t("//pathto bob", &[entity], origin(), None, None) {
             SlashOutcome::Command(AgentCommand::PathTo { x, y, .. }) => {
                 assert_eq!((x, y), (7.0, 8.0));
             }
@@ -4253,7 +4518,13 @@ mod tests {
 
     #[test]
     fn warp_numeric_three_args_emits_move() {
-        match parse_slash_t("/warp 1.5 2 -3.25", &empty_entities(), origin(), None, None) {
+        match parse_slash_t(
+            "//warp 1.5 2 -3.25",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Move { x, y, z, heading }) => {
                 assert_eq!((x, y, z), (1.5, 2.0, -3.25));
 
@@ -4267,7 +4538,7 @@ mod tests {
     fn warp_two_arg_form_uses_self_z() {
         let mut self_pos = origin();
         self_pos.z = -42.0;
-        match parse_slash_t("/warp 1 2", &empty_entities(), self_pos, None, None) {
+        match parse_slash_t("//warp 1 2", &empty_entities(), self_pos, None, None) {
             SlashOutcome::Command(AgentCommand::Move { x, y, z, .. }) => {
                 assert_eq!((x, y, z), (1.0, 2.0, -42.0));
             }
@@ -4281,7 +4552,7 @@ mod tests {
         let mut me = ent(1, "Me", EntityKind::Pc, self_pos.x, self_pos.y);
         me.pos.z = self_pos.z;
         me.heading = 64;
-        match parse_slash_t("/warp 100 200 5", &[me], self_pos, None, None) {
+        match parse_slash_t("//warp 100 200 5", &[me], self_pos, None, None) {
             SlashOutcome::Command(AgentCommand::Move { heading, .. }) => {
                 assert_eq!(heading, 64);
             }
@@ -4292,7 +4563,7 @@ mod tests {
     #[test]
     fn warp_target_form_emits_move_to_target() {
         let entity = ent(42, "Mob", EntityKind::Mob, 11.0, 22.0);
-        match parse_slash_t("/warp target", &[entity], origin(), Some(42), None) {
+        match parse_slash_t("//warp target", &[entity], origin(), Some(42), None) {
             SlashOutcome::Command(AgentCommand::Move { x, y, .. }) => {
                 assert_eq!((x, y), (11.0, 22.0));
             }
@@ -4303,7 +4574,7 @@ mod tests {
     #[test]
     fn warp_fuzzy_entity_match() {
         let entity = ent(42, "Bob", EntityKind::Pc, 7.0, 8.0);
-        match parse_slash_t("/warp bo", &[entity], origin(), None, None) {
+        match parse_slash_t("//warp bo", &[entity], origin(), None, None) {
             SlashOutcome::Command(AgentCommand::Move { x, y, .. }) => {
                 assert_eq!((x, y), (7.0, 8.0));
             }
@@ -4313,7 +4584,7 @@ mod tests {
 
     #[test]
     fn warp_rejects_empty_and_unmatched() {
-        for s in ["/warp", "/warp nosuchname"] {
+        for s in ["//warp", "//warp nosuchname"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -4327,7 +4598,7 @@ mod tests {
     #[test]
     fn cancel_emits_cancel_command() {
         assert!(matches!(
-            parse_slash_t("/cancel", &empty_entities(), origin(), None, None),
+            parse_slash_t("//cancel", &empty_entities(), origin(), None, None),
             SlashOutcome::Command(AgentCommand::Cancel)
         ));
     }
@@ -4347,7 +4618,7 @@ mod tests {
     #[test]
     fn engage_alias_matches_attack() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/engage", &entities, origin(), Some(7), None) {
+        match parse_slash_t("/attack", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Engage { target_id }) => {
                 assert_eq!(target_id, 7);
             }
@@ -4412,7 +4683,7 @@ mod tests {
 
     #[test]
     fn buy_with_row_uses_qty_one_by_default() {
-        let out = parse_slash_t("/buy 3", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//buy 3", &empty_entities(), origin(), None, None);
         match out {
             SlashOutcome::ShopBuyRow { shop_index, qty } => {
                 assert_eq!(shop_index, 3);
@@ -4424,7 +4695,7 @@ mod tests {
 
     #[test]
     fn buy_with_qty_passes_it_through() {
-        let out = parse_slash_t("/buy 0 12", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//buy 0 12", &empty_entities(), origin(), None, None);
         match out {
             SlashOutcome::ShopBuyRow { shop_index, qty } => {
                 assert_eq!(shop_index, 0);
@@ -4436,7 +4707,7 @@ mod tests {
 
     #[test]
     fn sell_with_slot_uses_qty_one_by_default() {
-        let out = parse_slash_t("/sell 5", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//sell 5", &empty_entities(), origin(), None, None);
         match out {
             SlashOutcome::ShopSellSlot { inv_slot, qty } => {
                 assert_eq!(inv_slot, 5);
@@ -4448,7 +4719,7 @@ mod tests {
 
     #[test]
     fn sell_with_qty_passes_it_through() {
-        let out = parse_slash_t("/sell 2 12", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//sell 2 12", &empty_entities(), origin(), None, None);
         match out {
             SlashOutcome::ShopSellSlot { inv_slot, qty } => {
                 assert_eq!(inv_slot, 2);
@@ -4460,13 +4731,13 @@ mod tests {
 
     #[test]
     fn sell_confirm_maps_to_confirm_outcome() {
-        let out = parse_slash_t("/sell confirm", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t("//sell confirm", &empty_entities(), origin(), None, None);
         assert!(matches!(out, SlashOutcome::ShopSellConfirm));
     }
 
     #[test]
     fn sell_rejects_zero_qty_and_bad_input() {
-        for bad in ["/sell", "/sell x", "/sell 1 0", "/sell 1 x"] {
+        for bad in ["//sell", "//sell x", "//sell 1 0", "//sell 1 x"] {
             let out = parse_slash_t(bad, &empty_entities(), origin(), None, None);
             assert!(
                 matches!(out, SlashOutcome::SystemMessage(_)),
@@ -4477,7 +4748,7 @@ mod tests {
 
     #[test]
     fn buy_rejects_zero_qty_and_bad_input() {
-        for s in ["/buy", "/buy abc", "/buy 1 0", "/buy 1 xyz"] {
+        for s in ["//buy", "//buy abc", "//buy 1 0", "//buy 1 xyz"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -4491,7 +4762,7 @@ mod tests {
     #[test]
     fn engage_dispatches_reactor_goal() {
         let entities = vec![ent(99, "Bee", EntityKind::Mob, 1.0, 0.0)];
-        match parse_slash_t("/engage", &entities, origin(), Some(99), None) {
+        match parse_slash_t("/attack", &entities, origin(), Some(99), None) {
             SlashOutcome::Command(AgentCommand::Engage { target_id }) => {
                 assert_eq!(target_id, 99);
             }
@@ -4511,7 +4782,7 @@ mod tests {
     #[test]
     fn disengage_dispatches_cancel() {
         assert!(matches!(
-            parse_slash_t("/disengage", &empty_entities(), origin(), None, None),
+            parse_slash_t("//disengage", &empty_entities(), origin(), None, None),
             SlashOutcome::Command(AgentCommand::Cancel)
         ));
     }
@@ -4519,7 +4790,7 @@ mod tests {
     #[test]
     fn raw_attack_preserves_direct_action() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/raw attack", &entities, origin(), Some(7), None) {
+        match parse_slash_t("//raw attack", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Action {
                 kind, target_id, ..
             }) => {
@@ -4533,7 +4804,7 @@ mod tests {
     #[test]
     fn raw_attackoff_preserves_direct_action() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/raw attackoff", &entities, origin(), Some(7), None) {
+        match parse_slash_t("//raw attackoff", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Action { kind, .. }) => {
                 assert!(matches!(kind, ActionKind::AttackOff));
             }
@@ -4544,7 +4815,7 @@ mod tests {
     #[test]
     fn cast_with_explicit_target_and_ground_coords() {
         match parse_slash_t(
-            "/cast 257 99 7 1.0 0.0 2.0",
+            "/magic 257 99 7 1.0 0.0 2.0",
             &empty_entities(),
             origin(),
             None,
@@ -4575,7 +4846,7 @@ mod tests {
     #[test]
     fn cast_defaults_target_to_current() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/cast 1", &entities, origin(), Some(7), None) {
+        match parse_slash_t("/magic 1", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Action {
                 target_id,
                 kind: ActionKind::CastMagic { spell_id, .. },
@@ -4591,7 +4862,7 @@ mod tests {
     #[test]
     fn weaponskill_basic() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/ws 16 7", &entities, origin(), Some(7), None) {
+        match parse_slash_t("/weaponskill 16 7", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Action {
                 kind: ActionKind::Weaponskill { skill_id },
                 target_id,
@@ -4606,7 +4877,7 @@ mod tests {
 
     #[test]
     fn job_ability_defaults_to_zero_target() {
-        match parse_slash_t("/ja 88", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("/jobability 88", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::Action {
                 target_id,
                 kind: ActionKind::JobAbility { ability_id },
@@ -4621,7 +4892,7 @@ mod tests {
 
     #[test]
     fn useitem_basic() {
-        match parse_slash_t("/useitem 0 4 4112", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("/item 0 4 4112", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::UseItem {
                 container,
                 slot,
@@ -4638,7 +4909,7 @@ mod tests {
 
     #[test]
     fn endevent_aliases_dispatch_end_event() {
-        for input in ["/endevent", "/endevt", "/clearevent", "/clearevt"] {
+        for input in ["//endevent", "//endevt", "//clearevent", "//clearevt"] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::EndEvent) => {}
                 other => panic!("input {input:?}: expected EndEvent, got {other:?}"),
@@ -4648,7 +4919,13 @@ mod tests {
 
     #[test]
     fn endcutscene_no_arg_returns_none() {
-        match parse_slash_t("/endcutscene", &empty_entities(), origin(), None, Some(231)) {
+        match parse_slash_t(
+            "//endcutscene",
+            &empty_entities(),
+            origin(),
+            None,
+            Some(231),
+        ) {
             SlashOutcome::EndCutscene { event_num } => assert_eq!(event_num, None),
             other => panic!("expected EndCutscene{{ None }}, got {other:?}"),
         }
@@ -4657,7 +4934,7 @@ mod tests {
     #[test]
     fn endcutscene_with_explicit_csid_overrides_zone_lookup() {
         match parse_slash_t(
-            "/endcutscene 7",
+            "//endcutscene 7",
             &empty_entities(),
             origin(),
             None,
@@ -4671,7 +4948,7 @@ mod tests {
     #[test]
     fn endcutscene_bad_csid_errors() {
         match parse_slash_t(
-            "/endcutscene abc",
+            "//endcutscene abc",
             &empty_entities(),
             origin(),
             None,
@@ -4684,7 +4961,7 @@ mod tests {
 
     #[test]
     fn release_aliases_emit_bang_release_chat() {
-        for input in ["/release", "/unwedge"] {
+        for input in ["//release", "//unwedge"] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::Chat { kind, text }) => {
                     assert_eq!(kind, 0, "input {input:?}: expected Say (kind=0)");
@@ -4697,7 +4974,7 @@ mod tests {
 
     #[test]
     fn endcutscene_aliases_all_work() {
-        for input in ["/endcutscene", "/endcs", "/skipcutscene", "/skipcs"] {
+        for input in ["//endcutscene", "//endcs", "//skipcutscene", "//skipcs"] {
             match parse_slash_t(input, &empty_entities(), origin(), None, Some(231)) {
                 SlashOutcome::EndCutscene { event_num } => assert_eq!(event_num, None),
                 other => panic!("input {input:?}: expected EndCutscene, got {other:?}"),
@@ -4707,7 +4984,7 @@ mod tests {
 
     #[test]
     fn raisemenu_accept_and_decline() {
-        for (input, expected) in &[("/raisemenu accept", true), ("/raisemenu decline", false)] {
+        for (input, expected) in &[("//raisemenu accept", true), ("//raisemenu decline", false)] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::Action {
                     kind: ActionKind::RaiseMenu { accept },
@@ -4720,7 +4997,7 @@ mod tests {
 
     #[test]
     fn tractormenu_accept_and_decline() {
-        for (input, expected) in &[("/tractormenu y", true), ("/tractormenu n", false)] {
+        for (input, expected) in &[("//tractormenu y", true), ("//tractormenu n", false)] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::Action {
                     kind: ActionKind::TractorMenu { accept },
@@ -4733,7 +5010,7 @@ mod tests {
 
     #[test]
     fn homepointmenu_parses_status_id() {
-        match parse_slash_t("/homepointmenu 0", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//homepointmenu 0", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::Action {
                 kind: ActionKind::HomepointMenu { status_id },
                 ..
@@ -4745,7 +5022,7 @@ mod tests {
     #[test]
     fn snapshot_is_direct() {
         assert!(matches!(
-            parse_slash_t("/snapshot", &empty_entities(), origin(), None, None),
+            parse_slash_t("//snapshot", &empty_entities(), origin(), None, None),
             SlashOutcome::Command(AgentCommand::Snapshot)
         ));
     }
@@ -4773,7 +5050,7 @@ mod tests {
 
     #[test]
     fn zonechange_parses_line_id() {
-        match parse_slash_t("/zonechange 42", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//zonechange 42", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::RequestZoneChange { line_id }) => {
                 assert_eq!(line_id, 42);
             }
@@ -4783,7 +5060,7 @@ mod tests {
 
     #[test]
     fn mhexit_defaults_to_home() {
-        match parse_slash_t("/mhexit", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//mhexit", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
@@ -4796,7 +5073,13 @@ mod tests {
 
         // With a known city zone, Home echoes the zone-derived bit like retail
         // (research/XiPackets/world/client/0x005E).
-        match parse_slash_t("/mhexit home", &empty_entities(), origin(), None, Some(235)) {
+        match parse_slash_t(
+            "//mhexit home",
+            &empty_entities(),
+            origin(),
+            None,
+            Some(235),
+        ) {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert_eq!(kind.wire_pair(), (2, 0));
             }
@@ -4806,7 +5089,7 @@ mod tests {
 
     #[test]
     fn mhexit_region_with_slot() {
-        match parse_slash_t("/mhexit bastok 2", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//mhexit bastok 2", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
@@ -4821,9 +5104,9 @@ mod tests {
     #[test]
     fn mhexit_special_modes() {
         for (input, expected_mode) in &[
-            ("/mhexit 1f", 126u8),
-            ("/mhexit 2f", 125),
-            ("/mhexit garden", 127),
+            ("//mhexit 1f", 126u8),
+            ("//mhexit 2f", 125),
+            ("//mhexit garden", 127),
         ] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
@@ -4837,7 +5120,13 @@ mod tests {
 
     #[test]
     fn mhexit_auto_resolves_known_zone() {
-        match parse_slash_t("/mhexit auto", &empty_entities(), origin(), None, Some(230)) {
+        match parse_slash_t(
+            "//mhexit auto",
+            &empty_entities(),
+            origin(),
+            None,
+            Some(230),
+        ) {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
@@ -4851,7 +5140,13 @@ mod tests {
 
     #[test]
     fn mhexit_auto_errors_for_unknown_zone() {
-        match parse_slash_t("/mhexit auto", &empty_entities(), origin(), None, Some(100)) {
+        match parse_slash_t(
+            "//mhexit auto",
+            &empty_entities(),
+            origin(),
+            None,
+            Some(100),
+        ) {
             SlashOutcome::SystemMessage(msg) => {
                 assert!(msg.contains("auto"), "got: {msg}");
             }
@@ -4861,7 +5156,7 @@ mod tests {
 
     #[test]
     fn jobchange_no_args_opens_mog_menu() {
-        match parse_slash_t("/jc", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//jc", &empty_entities(), origin(), None, None) {
             SlashOutcome::Command(AgentCommand::OpenMogMenu) => {}
             other => panic!("expected OpenMogMenu, got {other:?}"),
         }
@@ -4870,7 +5165,7 @@ mod tests {
     #[test]
     fn jobchange_outside_mog_house_warns_but_sends() {
         match parse_slash_t(
-            "/jobchange WAR mnk",
+            "//jobchange WAR mnk",
             &empty_entities(),
             origin(),
             None,
@@ -4893,7 +5188,8 @@ mod tests {
     #[test]
     fn jobchange_in_mog_house_sends_without_notice() {
         let outcome = parse_slash(
-            "/jc warrior",
+            "//jc warrior",
+            &test_surface(),
             &empty_entities(),
             origin(),
             None,
@@ -4929,7 +5225,7 @@ mod tests {
 
     #[test]
     fn jobchange_unknown_job_is_system_message() {
-        match parse_slash_t("/jc moogle", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//jc moogle", &empty_entities(), origin(), None, None) {
             SlashOutcome::SystemMessage(msg) => assert!(msg.contains("moogle"), "got: {msg}"),
             other => panic!("expected SystemMessage, got {other:?}"),
         }
@@ -4938,11 +5234,11 @@ mod tests {
     #[test]
     fn agent_pause_resume_status_parse() {
         for (input, expected) in &[
-            ("/agent pause", AgentControlOp::Pause),
-            ("/agent resume", AgentControlOp::Resume),
-            ("/agent unpause", AgentControlOp::Resume),
-            ("/agent status", AgentControlOp::Status),
-            ("/agent", AgentControlOp::Status),
+            ("//agent pause", AgentControlOp::Pause),
+            ("//agent resume", AgentControlOp::Resume),
+            ("//agent unpause", AgentControlOp::Resume),
+            ("//agent status", AgentControlOp::Status),
+            ("//agent", AgentControlOp::Status),
         ] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::AgentControl(op) => assert_eq!(&op, expected, "input: {input}"),
@@ -4953,7 +5249,7 @@ mod tests {
 
     #[test]
     fn agent_unknown_subcommand_is_system_message() {
-        match parse_slash_t("/agent wat", &empty_entities(), origin(), None, None) {
+        match parse_slash_t("//agent wat", &empty_entities(), origin(), None, None) {
             SlashOutcome::SystemMessage(s) => assert!(s.contains("wat")),
             other => panic!("expected SystemMessage, got {other:?}"),
         }
@@ -4969,13 +5265,13 @@ mod tests {
             ("/follow Mob", |c| {
                 matches!(c, AgentCommand::Follow { target_id: 42, .. })
             }),
-            ("/engage", |c| {
+            ("/attack", |c| {
                 matches!(c, AgentCommand::Engage { target_id: 42 })
             }),
-            ("/pathto 1 2 3", |c| {
+            ("//pathto 1 2 3", |c| {
                 matches!(c, AgentCommand::PathTo { .. })
             }),
-            ("/cancel", |c| matches!(c, AgentCommand::Cancel)),
+            ("//cancel", |c| matches!(c, AgentCommand::Cancel)),
             ("/bank 60 12345", |c| {
                 matches!(
                     c,
@@ -4985,18 +5281,18 @@ mod tests {
                     }
                 )
             }),
-            ("/s hello", |c| {
+            ("/say hello", |c| {
                 matches!(c, AgentCommand::Chat { kind: 0, .. })
             }),
-            ("/p hello", |c| {
+            ("/party hello", |c| {
                 matches!(c, AgentCommand::Chat { kind: 4, .. })
             }),
             ("/tell Bob hi", |c| matches!(c, AgentCommand::Tell { .. })),
-            ("/zonechange 42", |c| {
+            ("//zonechange 42", |c| {
                 matches!(c, AgentCommand::RequestZoneChange { line_id: 42 })
             }),
-            ("/snapshot", |c| matches!(c, AgentCommand::Snapshot)),
-            ("/cast 1", |c| {
+            ("//snapshot", |c| matches!(c, AgentCommand::Snapshot)),
+            ("/magic 1", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5005,7 +5301,7 @@ mod tests {
                     }
                 )
             }),
-            ("/ws 1", |c| {
+            ("/weaponskill 1", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5014,7 +5310,7 @@ mod tests {
                     }
                 )
             }),
-            ("/ja 1", |c| {
+            ("/jobability 1", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5023,10 +5319,8 @@ mod tests {
                     }
                 )
             }),
-            ("/useitem 0 4", |c| {
-                matches!(c, AgentCommand::UseItem { .. })
-            }),
-            ("/raisemenu accept", |c| {
+            ("/item 0 4", |c| matches!(c, AgentCommand::UseItem { .. })),
+            ("//raisemenu accept", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5035,7 +5329,7 @@ mod tests {
                     }
                 )
             }),
-            ("/tractormenu accept", |c| {
+            ("//tractormenu accept", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5044,7 +5338,7 @@ mod tests {
                     }
                 )
             }),
-            ("/homepointmenu 0", |c| {
+            ("//homepointmenu 0", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5095,7 +5389,7 @@ mod tests {
 
     #[test]
     fn help_listing_fits_in_local_toast_cap() {
-        let lines = render_help().split('\n').count();
+        let lines = render_help(&test_surface()).split('\n').count();
         let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
         assert!(
             lines <= cap,
@@ -5106,21 +5400,199 @@ mod tests {
     }
 
     #[test]
-    fn every_alias_dispatches() {
+    fn every_registered_name_dispatches_on_its_own_surface() {
         for (_, cmds) in COMMANDS {
             for cmd in *cmds {
-                for alias in cmd.aliases {
-                    let slash = format!("/{alias}");
+                for name in cmd.names {
+                    let slash = format!("{}{name}", cmd.prefix());
                     let out = parse_slash_t(&slash, &empty_entities(), origin(), None, None);
                     if let SlashOutcome::SystemMessage(ref s) = out {
                         assert!(
                             !s.starts_with("unknown command:"),
-                            "registered alias `/{alias}` dispatched to the unknown-command \
-                             fallthrough"
+                            "registered `{slash}` dispatched to the unknown-command fallthrough"
                         );
                     }
                 }
             }
+        }
+    }
+
+    /// The prefix split is the whole point: a Kuluu command must not answer on
+    /// the retail slash, and a retail command must not answer on the doubled
+    /// one.
+    #[test]
+    fn a_name_answers_only_on_its_own_surface() {
+        for (_, cmds) in COMMANDS {
+            for cmd in *cmds {
+                for name in cmd.names {
+                    let wrong = if cmd.set.is_retail() {
+                        format!("{EXTENSION_PREFIX}{name}")
+                    } else {
+                        format!("/{name}")
+                    };
+                    // An emote is a retail command of its own, reached through
+                    // the scraped table rather than through COMMANDS.
+                    if !cmd.set.is_retail()
+                        && ffxi_vocab::emote_names::id_for_command(name).is_some()
+                    {
+                        continue;
+                    }
+                    // A word may name one command on each surface -- /magic
+                    // casts as retail does, //magic opens the menu retail has
+                    // no command for -- and then neither is "wrong".
+                    if commands()
+                        .any(|o| o.set.is_retail() != cmd.set.is_retail() && o.names.contains(name))
+                    {
+                        continue;
+                    }
+                    match parse_slash_t(&wrong, &empty_entities(), origin(), None, None) {
+                        SlashOutcome::SystemMessage(s) => assert!(
+                            s.starts_with("unknown command:"),
+                            "`{wrong}` answered on the wrong surface: {s}"
+                        ),
+                        other => {
+                            panic!("`{wrong}` answered on the wrong surface: {other:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_moved_command_says_where_it_went() {
+        match parse_slash_t("/pathto target", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SystemMessage(s) => {
+                assert!(s.contains("//pathto"), "no forwarding hint: {s}");
+            }
+            other => panic!("expected the moved-command hint, got {other:?}"),
+        }
+    }
+
+    /// A retail command with no handler reads differently from a word that is
+    /// not a command at all, so a player can tell "not built yet" from "no
+    /// such command".
+    #[test]
+    fn a_retail_command_kuluu_lacks_is_not_reported_as_unknown() {
+        match parse_slash_t("/recast Cure", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SystemMessage(s) => {
+                assert!(s.contains("not supported yet"), "{s}");
+                assert!(!s.starts_with("unknown command:"), "{s}");
+            }
+            other => panic!("expected a not-supported message, got {other:?}"),
+        }
+        match parse_slash_t("/blargh", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SystemMessage(s) => assert!(s.starts_with("unknown command:"), "{s}"),
+            other => panic!("expected unknown-command, got {other:?}"),
+        }
+    }
+
+    /// Aliases come from the install's table, so a command answers to every
+    /// spelling the client accepts without Kuluu listing any of them.
+    #[test]
+    fn an_install_alias_reaches_the_canonical_handler() {
+        for (alias, long) in [
+            ("/a", "/attack"),
+            ("/ws 1", "/weaponskill 1"),
+            ("/c", "/check"),
+        ] {
+            let by_alias = parse_slash_t(alias, &empty_entities(), origin(), Some(7), None);
+            let by_long = parse_slash_t(long, &empty_entities(), origin(), Some(7), None);
+            assert_eq!(
+                format!("{by_alias:?}"),
+                format!("{by_long:?}"),
+                "`{alias}` did not reach the same handler as `{long}`"
+            );
+        }
+    }
+
+    /// LSB names emote 7 `Yes` and emote 26 `Disgusted`; the client also
+    /// accepts `/nod` and `/upset`, which only the install's table knows.
+    #[test]
+    fn an_emote_alias_the_scrape_does_not_name_still_resolves() {
+        for (alias, long) in [
+            ("/nod", "/yes"),
+            ("/upset", "/disgusted"),
+            ("/farewell", "/goodbye"),
+        ] {
+            let by_alias = parse_slash_t(alias, &empty_entities(), origin(), None, None);
+            let by_long = parse_slash_t(long, &empty_entities(), origin(), None, None);
+            assert_eq!(
+                format!("{by_alias:?}"),
+                format!("{by_long:?}"),
+                "`{alias}` did not resolve to the same emote as `{long}`"
+            );
+            assert!(
+                matches!(by_alias, SlashOutcome::Command(AgentCommand::Emote { .. })),
+                "`{alias}` did not emote: {by_alias:?}"
+            );
+        }
+    }
+
+    /// With no table, long forms still answer -- the degradation that keeps an
+    /// unrecognised build usable instead of dark.
+    #[test]
+    fn long_forms_answer_without_an_install_table() {
+        let bare = CommandSurface::default();
+        assert!(!bare.table_loaded());
+        let entities = vec![ent(7, "Goblin", EntityKind::Mob, 3.0, 0.0)];
+        let out = parse_slash(
+            "/attack",
+            &bare,
+            &entities,
+            origin(),
+            Some(7),
+            None,
+            None,
+            &[],
+            None,
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        assert!(
+            matches!(out, SlashOutcome::Command(AgentCommand::Engage { .. })),
+            "{out:?}"
+        );
+        // ...and an alias does not, which is the cost of the missing table.
+        let aliased = parse_slash(
+            "/a",
+            &bare,
+            &entities,
+            origin(),
+            Some(7),
+            None,
+            None,
+            &[],
+            None,
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        assert!(
+            matches!(aliased, SlashOutcome::SystemMessage(ref s) if s.starts_with("unknown command:")),
+            "{aliased:?}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_set_says_so_rather_than_unknown() {
+        let mut surface = test_surface();
+        surface.enabled.set_enabled(CommandSet::Dev, false);
+        let out = parse_slash(
+            "//noclip",
+            &surface,
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        match out {
+            SlashOutcome::SystemMessage(s) => {
+                assert!(s.contains("dev"), "{s}");
+                assert!(!s.starts_with("unknown command:"), "{s}");
+            }
+            other => panic!("expected a disabled-set message, got {other:?}"),
         }
     }
 
@@ -5246,8 +5718,8 @@ mod tests {
             for (category, cmds) in COMMANDS {
                 for cmd in *cmds {
                     assert!(
-                        !cmd.aliases.contains(&lower.as_str()),
-                        "alias `/{lower}` in `{category}` shadows emote {id}"
+                        !(cmd.set.is_retail() && cmd.names.contains(&lower.as_str())),
+                        "`/{lower}` in `{category}` shadows emote {id}"
                     );
                 }
             }
@@ -5336,17 +5808,46 @@ mod tests {
         ));
     }
 
+    /// Unique per surface. The same word may name a retail command and a Kuluu
+    /// one -- `/emote` sends free-form text as retail does, `//emote` plays a
+    /// named one -- but never two on the same surface.
     #[test]
-    fn aliases_are_unique() {
+    fn names_are_unique_within_a_surface() {
         let mut seen = std::collections::HashMap::new();
         for (category, cmds) in COMMANDS {
             for cmd in *cmds {
-                for alias in cmd.aliases {
-                    if let Some(prev) = seen.insert(*alias, *category) {
+                for name in cmd.names {
+                    let key = (cmd.set.is_retail(), *name);
+                    if let Some(prev) = seen.insert(key, *category) {
                         panic!(
-                            "alias `/{alias}` is registered twice (in `{prev}` and `{category}`)"
+                            "`{}{name}` is registered twice (in `{prev}` and `{category}`)",
+                            cmd.prefix()
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// A Retail entry must name a command this client actually has, or Kuluu
+    /// has invented a name and called it vanilla.
+    #[test]
+    fn every_retail_name_is_a_canonical_in_the_install_table() {
+        let surface = test_surface();
+        for (category, cmds) in COMMANDS {
+            for cmd in cmds.iter().filter(|c| c.set.is_retail()) {
+                for name in cmd.names {
+                    let Some(id) = surface.id_for(name) else {
+                        // The stand-in table carries only what the suite
+                        // exercises; the install-gated check is in ffxi-dat.
+                        continue;
+                    };
+                    assert_eq!(
+                        surface.canonical(name),
+                        *name,
+                        "`/{name}` in `{category}` is an alias of command {id:#06x}, not its \
+                         long form"
+                    );
                 }
             }
         }

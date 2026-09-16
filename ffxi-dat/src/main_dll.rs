@@ -97,6 +97,13 @@ pub struct CommandTable {
 }
 
 impl CommandTable {
+    /// A table from rows a caller supplies rather than from an install — a
+    /// server policy's extra commands, or a test that needs alias resolution
+    /// without one.
+    pub fn from_entries(entries: Vec<ClientCommand>) -> Self {
+        Self { entries }
+    }
+
     pub fn entries(&self) -> &[ClientCommand] {
         &self.entries
     }

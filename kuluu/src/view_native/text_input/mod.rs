@@ -45,6 +45,7 @@ pub struct CaptureMode {
 
 #[derive(SystemParam)]
 pub struct SlashWriters<'w, 's> {
+    pub command_surface: Res<'w, crate::view_native::command_surface::CommandSurface>,
     pub load_mmb: MessageWriter<'w, LoadMmbRequest>,
     pub load_mzb: MessageWriter<'w, LoadMzbRequest>,
     pub set_sub_area: MessageWriter<'w, kuluu_render::sub_area_activation::SetSubArea>,
@@ -844,6 +845,7 @@ fn apply_chat_action(
             if trimmed.starts_with('/') {
                 let outcome = parse_slash(
                     trimmed,
+                    &slash_writers.command_surface,
                     entities,
                     self_pos,
                     current_target,

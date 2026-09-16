@@ -409,10 +409,67 @@ pub fn describe(root: &Path) -> String {
         );
     }
     let profile = ClientProfile::probe(root);
+    let era = era_summary(profile.patch_version.as_deref());
     match &profile.patch_version {
-        Some(v) => format!("{} patch={v}", profile.name()),
-        None => profile.name().to_string(),
+        Some(v) => format!("{} patch={v}; {era}", profile.name()),
+        None => format!("{}; {era}", profile.name()),
     }
+}
+
+/// How the install's patch era sits against the vendored LSB pin; a saved
+/// server entry's own expectation is what the launcher actually gates on.
+pub fn era_summary(patch_version: Option<&str>) -> String {
+    use ffxi_proto::login::{
+        compare_client_ver_era, lobby_accepts_client_ver, VerLock, LSB_CLIENT_VER,
+        LSB_DEFAULT_VER_LOCK,
+    };
+    let Some(stamp) = patch_version else {
+        return "patch era unknown (no patch.cfg stamp)".to_string();
+    };
+    let relation = match compare_client_ver_era(stamp, LSB_CLIENT_VER) {
+        std::cmp::Ordering::Equal => return format!("era matches LSB {LSB_CLIENT_VER}"),
+        std::cmp::Ordering::Less => "older than",
+        std::cmp::Ordering::Greater => "newer than",
+    };
+    let lock = VerLock::from_setting(LSB_DEFAULT_VER_LOCK);
+    let verdict = if lobby_accepts_client_ver(stamp, LSB_CLIENT_VER, lock) {
+        "admitted"
+    } else {
+        "refused"
+    };
+    format!("era {relation} LSB {LSB_CLIENT_VER} ({verdict} at VER_LOCK {LSB_DEFAULT_VER_LOCK})")
+}
+
+/// One line per saved server that records the era it admits, with the
+/// lobby's verdict on `patch_version`.
+pub fn server_era_lines(
+    servers: &[launcher_store::ServerProfile],
+    patch_version: Option<&str>,
+) -> Vec<String> {
+    use ffxi_proto::login::lobby_accepts_client_ver;
+    servers
+        .iter()
+        .filter(|p| {
+            p.client_ver
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+        })
+        .map(|p| {
+            let expected = p.expected_client_ver();
+            let verdict = match patch_version {
+                Some(stamp) if lobby_accepts_client_ver(stamp, expected, p.ver_lock()) => {
+                    "admits this install"
+                }
+                Some(_) => "would refuse this install",
+                None => "cannot judge an install without a patch stamp",
+            };
+            format!(
+                "{}: expects era {expected} ({:?}); {verdict}",
+                p.name,
+                p.ver_lock()
+            )
+        })
+        .collect()
 }
 
 pub mod cli {
@@ -535,7 +592,8 @@ pub mod cli {
     }
 
     fn which() -> Result<(), String> {
-        match resolve(&launcher_store::load().settings) {
+        let store = launcher_store::load();
+        match resolve(&store.settings) {
             Ok(l) => {
                 println!(
                     "{}\n  source: {}\n  status: {}",
@@ -543,6 +601,10 @@ pub mod cli {
                     l.source,
                     describe(&l.path)
                 );
+                let stamp = ClientProfile::probe(&l.path).patch_version;
+                for line in server_era_lines(&store.servers, stamp.as_deref()) {
+                    println!("  server {line}");
+                }
                 Ok(())
             }
             Err(u) => Err(format!(
@@ -759,5 +821,57 @@ mod tests {
                 assert_eq!(l.source, Source::Config);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod era_tests {
+    use super::*;
+    use crate::launcher_store::{AuthFlavorKind, ServerProfile};
+    use ffxi_proto::login::LSB_CLIENT_VER;
+
+    fn server(name: &str, client_ver: Option<&str>, ver_lock: Option<u8>) -> ServerProfile {
+        ServerProfile {
+            name: name.into(),
+            host: "127.0.0.1".into(),
+            auth_port: 54231,
+            data_port: 54230,
+            view_port: 54001,
+            flavor: AuthFlavorKind::Json,
+            xiloader_version: None,
+            version_check_url: None,
+            client_ver: client_ver.map(str::to_string),
+            ver_lock,
+            preferred_client: None,
+        }
+    }
+
+    #[test]
+    fn era_summary_names_the_relation_and_the_default_lock_verdict() {
+        assert_eq!(
+            era_summary(Some(LSB_CLIENT_VER)),
+            format!("era matches LSB {LSB_CLIENT_VER}")
+        );
+        let older = era_summary(Some("30230905_0"));
+        assert!(older.starts_with("era older than LSB"), "{older}");
+        assert!(older.contains("refused"), "{older}");
+        let newer = era_summary(Some("39990101_0"));
+        assert!(newer.starts_with("era newer than LSB"), "{newer}");
+        assert!(newer.contains("admitted"), "{newer}");
+        assert!(era_summary(None).contains("unknown"));
+    }
+
+    #[test]
+    fn server_era_lines_skip_entries_without_a_recorded_era() {
+        let servers = vec![
+            server("hxi", None, None),
+            server("lsb", Some("30260904_1"), Some(2)),
+            server("old", Some("30230905_0"), Some(1)),
+        ];
+        let lines = server_era_lines(&servers, Some("30230905_0"));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("lsb:") && lines[0].ends_with("would refuse this install"));
+        assert!(lines[1].starts_with("old:") && lines[1].ends_with("admits this install"));
+        assert!(server_era_lines(&servers, None)[0].contains("cannot judge"));
     }
 }

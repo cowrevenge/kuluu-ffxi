@@ -6,6 +6,7 @@ use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::window::SystemCursorIcon;
 
+use super::client_era_check::{self, ClientEraStatus, EraVerdict};
 use super::common::{hint, open_url, PANEL_BG, PANEL_BORDER_COLOR};
 use crate::view_native::AppPhase;
 
@@ -86,6 +87,26 @@ const BRAND_LINKS: [BrandLink; BRAND_LINK_COUNT] = [
 struct LauncherFooter;
 
 #[derive(Component)]
+struct FooterInstallLabel;
+
+fn install_status_text(era: &ClientEraStatus) -> String {
+    let Some(install) = era.install.as_ref() else {
+        return "Install: none selected".to_string();
+    };
+    let mut text = install.label();
+    match (era.verdict, era.server_name.as_deref()) {
+        (EraVerdict::Refused, Some(server)) => {
+            text.push_str(&format!("{VERSION_SEP}era refused by {server}"));
+        }
+        (EraVerdict::Warn, Some(server)) => {
+            text.push_str(&format!("{VERSION_SEP}era check: see {server} sign-in"));
+        }
+        _ => {}
+    }
+    text
+}
+
+#[derive(Component)]
 struct FooterLink {
     idle: Color,
     hover: Color,
@@ -142,8 +163,19 @@ fn upload_brand_icons(images: &mut Assets<Image>) -> BrandIcons {
     }))
 }
 
-fn spawn_footer(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn spawn_footer(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    loaded: Option<Res<crate::view_native::DatRootRes>>,
+) {
     let icons = upload_brand_icons(&mut images);
+    let install = client_era_check::active_install(
+        &crate::launcher_store::load().settings,
+        loaded.as_ref().and_then(|r| r.0.as_deref()),
+    );
+    let install_text = install
+        .map(|i| i.label())
+        .unwrap_or_else(|| "Install: none selected".to_string());
 
     commands
         .spawn((
@@ -166,7 +198,16 @@ fn spawn_footer(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             },
         ))
         .with_children(|root| {
-            root.spawn(hint(footer_version_text()));
+            root.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(FOOTER_LINK_GAP_PX),
+                ..default()
+            })
+            .with_children(|left| {
+                left.spawn(hint(footer_version_text()));
+                left.spawn((FooterInstallLabel, hint(install_text)));
+            });
             root.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
@@ -256,12 +297,25 @@ fn retint_footer_links(
     }
 }
 
+fn refresh_install_label(
+    era: Res<ClientEraStatus>,
+    mut labels: Query<&mut Text, With<FooterInstallLabel>>,
+) {
+    if !era.is_changed() || era.install.is_none() {
+        return;
+    }
+    let text = install_status_text(&era);
+    for mut label in labels.iter_mut() {
+        label.0 = text.clone();
+    }
+}
+
 pub(super) fn register(app: &mut App) {
     app.add_systems(OnEnter(AppPhase::Launcher), spawn_footer)
         .add_systems(OnExit(AppPhase::Launcher), despawn_footer)
         .add_systems(
             Update,
-            retint_footer_links.run_if(in_state(AppPhase::Launcher)),
+            (retint_footer_links, refresh_install_label).run_if(in_state(AppPhase::Launcher)),
         );
 }
 
@@ -280,6 +334,29 @@ mod tests {
             version_line("0.4.0", "debug", "aarch64-apple-darwin"),
             "v0.4.0 | debug | aarch64-apple-darwin",
         );
+    }
+
+    #[test]
+    fn install_status_text_names_the_server_only_when_the_era_check_flags_it() {
+        use super::super::client_era_check::ActiveInstall;
+        let mut era = ClientEraStatus {
+            server_name: Some("lsb".into()),
+            install: Some(ActiveInstall {
+                name: "hxi".into(),
+                client: "horizonxi-2023".into(),
+                patch_version: Some("30230905_0".into()),
+            }),
+            ..Default::default()
+        };
+        era.verdict = EraVerdict::Ok;
+        assert_eq!(
+            install_status_text(&era),
+            "Install: hxi (horizonxi-2023, patch 30230905_0)"
+        );
+        era.verdict = EraVerdict::Refused;
+        assert!(install_status_text(&era).ends_with(" | era refused by lsb"));
+        era.install = None;
+        assert_eq!(install_status_text(&era), "Install: none selected");
     }
 
     #[test]

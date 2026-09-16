@@ -29,7 +29,20 @@ pub(crate) enum EraVerdict {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ActiveInstall {
     pub name: String,
+    /// ffxi_dat::client_profile::KNOWN_CLIENTS row name, or "unknown".
+    pub client: String,
     pub patch_version: Option<String>,
+}
+
+impl ActiveInstall {
+    pub fn label(&self) -> String {
+        format!(
+            "Install: {} ({}, patch {})",
+            self.name,
+            self.client,
+            self.patch_version.as_deref().unwrap_or("unknown")
+        )
+    }
 }
 
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
@@ -113,7 +126,7 @@ pub(crate) fn classify(profile: &ServerProfile, install: Option<ActiveInstall>) 
 /// The install every `DatRoot::from_env_or_default` in this process will
 /// load, named the way the install screen lists it; the loaded root's probe
 /// is reused when it is the same directory, else the tree is probed here.
-fn active_install(
+pub(super) fn active_install(
     settings: &launcher_store::Settings,
     loaded: Option<&ffxi_dat::DatRoot>,
 ) -> Option<ActiveInstall> {
@@ -123,15 +136,18 @@ fn active_install(
         .find(|i| ffxi_client::same_dir(&i.path, &located.path))
         .map(|i| i.name)
         .unwrap_or_else(|| located.path.display().to_string());
-    let patch_version = match loaded {
-        Some(root) if ffxi_client::same_dir(root.root(), &located.path) => {
-            root.profile().patch_version.clone()
+    let probed;
+    let profile = match loaded {
+        Some(root) if ffxi_client::same_dir(root.root(), &located.path) => root.profile(),
+        _ => {
+            probed = ClientProfile::probe(&located.path);
+            &probed
         }
-        _ => ClientProfile::probe(&located.path).patch_version,
     };
     Some(ActiveInstall {
         name,
-        patch_version,
+        client: profile.name().to_string(),
+        patch_version: profile.patch_version.clone(),
     })
 }
 
@@ -198,8 +214,17 @@ mod tests {
     fn install(name: &str, stamp: Option<&str>) -> Option<ActiveInstall> {
         Some(ActiveInstall {
             name: name.into(),
+            client: "horizonxi-2023".into(),
             patch_version: stamp.map(str::to_string),
         })
+    }
+
+    #[test]
+    fn footer_label_carries_name_client_and_stamp() {
+        let i = install("hxi", Some("30230905_0")).unwrap();
+        assert_eq!(i.label(), "Install: hxi (horizonxi-2023, patch 30230905_0)");
+        let i = install("odd", None).unwrap();
+        assert_eq!(i.label(), "Install: odd (horizonxi-2023, patch unknown)");
     }
 
     #[test]

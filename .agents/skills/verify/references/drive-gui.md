@@ -118,6 +118,12 @@ stops growing mid-run.
 | Need | Command | Notes |
 |---|---|---|
 | Session state, chat, GM `!cmds`, actions, zoning | agent socket `AgentCommand` | pure IPC, never touches the window |
+
+**A listener connection that sends nothing receives nothing.** Opening a second
+socket purely to watch the event stream while a third drives returns an empty
+capture, which reads as "the event never fired". Prime the listener with a
+harmless command (`{"cmd":"snapshot"}`) on that same connection, and prefer
+driving and listening down one connection where the sequencing allows.
 | **Talking to an NPC / triggering its event** | `action` + `kind: talk` | see below — no keystrokes needed |
 | **Answering an event's dialog choice** | `end_event_choice` / `end_event` | see below |
 | Movement through the real `input.rs` path | `debug_drive` / MCP `walk` | kuluu-0pof; exercises heading, wall-slide, re-ground |
@@ -251,6 +257,14 @@ cmds = [{"cmd": "action", ...}]
 cmds += [{"cmd": "screenshot", "path": f"artifacts/verify/f{i:02d}.png"} for i in range(14)]
 send(cmds, collect=9.0)   # ~200ms apart in practice
 ```
+
+**Do not burst faster than ~200ms.** A 24-frame burst at 90ms intervals wedged
+the client's Bevy app twice in one session (2026-09-15 shop drive): the render
+loop stopped ticking while the tokio session kept answering the socket, so
+`snapshot` still replied, captures came back solid black, and injected keys
+went nowhere — which reads exactly like "the feature is broken" rather than
+"the driver broke the client". Check the log's `perf:` lines for a recent tick
+before believing a silent client.
 
 Then compare frames numerically rather than by eye — a fade is a luminance
 change, and 13 near-identical means say "nothing happened" far more clearly than

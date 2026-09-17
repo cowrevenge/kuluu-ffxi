@@ -116,22 +116,29 @@ run_harness() {
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
-  local codex_config=".codex/config.toml" bad=0 link target cmd path doc
+  local codex_config=".codex/config.toml" bad=0 link target cmd path doc mode target_rel
   local hook hook_file recipe check_output
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
-  #    .agents/, or settings.json itself. Content never lives here.
+  #    .agents/, or settings.json itself. Content never lives here. The
+  #    invariant lives in the index: a 120000 blob whose target resolves
+  #    inside .agents/. On disk that is a symlink, except on checkouts that
+  #    cannot materialize symlinks (core.symlinks=false, e.g. Windows), where
+  #    git stores the target string as a plain file. Grade the blob, not the
+  #    filesystem representation.
   while IFS= read -r link; do
     [[ "$link" == "$settings" ]] && continue
-    if [[ ! -L "$link" ]]; then
+    mode=$(git ls-files -s "$link" | cut -d' ' -f1)
+    if [[ "$mode" != "120000" ]]; then
       echo "checks: harness — $link is tracked under .claude/ but is not a symlink" >&2
       echo "checks:   content belongs in .agents/; .claude/ holds symlinks + settings.json" >&2
       bad=1
       continue
     fi
-    target=$(cd "$(dirname "$link")" && cd "$(readlink "$(basename "$link")")" 2>/dev/null && pwd) || target=""
+    target_rel=$(git cat-file blob "$(git ls-files -s "$link" | cut -d' ' -f2)")
+    target=$(cd "$(dirname "$link")" && cd "$target_rel" 2>/dev/null && pwd) || target=""
     if [[ -z "$target" ]]; then
-      echo "checks: harness — $link is a broken symlink (-> $(readlink "$link"))" >&2
+      echo "checks: harness — $link is a broken symlink (-> $target_rel)" >&2
       bad=1
     elif [[ "$target" != "$PWD/.agents"* ]]; then
       echo "checks: harness — $link escapes .agents/ (resolves to $target)" >&2
@@ -186,6 +193,19 @@ run_harness() {
   fi
   if command -v bd >/dev/null 2>&1; then
     for recipe in codex claude factory; do
+      # bd setup claude --check reads CLAUDE.md from disk; on a checkout that
+      # cannot materialize symlinks it is a plain file holding the target
+      # string, so bd reports a false "no beads section". Grade the tracked
+      # target instead — it must point at AGENTS.md, whose markers the grep
+      # above already pins.
+      if [[ "$recipe" == "claude" && -f CLAUDE.md && ! -L CLAUDE.md \
+          && "$(git ls-files -s CLAUDE.md | cut -d' ' -f1)" == "120000" ]]; then
+        if [[ "$(git cat-file blob "$(git ls-files -s CLAUDE.md | cut -d' ' -f2)")" != "AGENTS.md" ]]; then
+          echo "checks: harness — CLAUDE.md is tracked as a symlink but its target is not AGENTS.md" >&2
+          bad=1
+        fi
+        continue
+      fi
       if ! check_output=$(bd setup "$recipe" --check 2>&1); then
         echo "checks: harness — stale Beads $recipe integration:" >&2
         echo "$check_output" >&2

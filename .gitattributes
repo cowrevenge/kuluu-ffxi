@@ -1,0 +1,4 @@
+# bd regenerates these adapters with LF line endings; a CRLF checkout makes
+# `bd setup --check` report them stale although the content is identical.
+.agents/skills/beads/SKILL.md text eol=lf
+.agents/skills/beads/agents/openai.yaml text eol=lf

@@ -204,8 +204,9 @@ pub(super) fn handle_delivery_key(
         delivery::focus_right(screen, &ctx);
         return;
     }
-    // Esc unwinds one level: item list -> the slot it was entered from, action
-    // buttons -> the grid, and only the panel itself closes the box
+    // Esc unwinds one level: the item list to the slot it was entered from,
+    // Take/Return to the grid, an armed dispatch to unarmed. From the panel
+    // itself it closes the box, which lands back on Receive/Send
     // (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md
     // "How the menu opens", "Send flow" step 7).
     if bindings.matches_logical(Action::NavCancel, key) {

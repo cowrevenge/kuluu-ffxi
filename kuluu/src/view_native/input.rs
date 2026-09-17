@@ -112,6 +112,16 @@ const RETAIL_AUTORUN_STEER_DEG_PER_TICK: f32 = 2.0;
 pub const ROTATE_KEY_RATE_RAD_PER_SEC: f32 =
     RETAIL_AUTORUN_STEER_DEG_PER_TICK * (std::f32::consts::PI / 180.0) * RETAIL_MOVE_TICKS_PER_SEC;
 
+// The same retail key also orbits the eye around its target, 1.6 degrees per
+// tick (research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp,
+// CameraManager::UpdatePlayerFollowingCamera scales the CameraControlX analog
+// value by 0.027924445 rad). Steering a retail autorun moves both, so the run
+// leads the eye only by the 0.4 deg/tick difference; Q/E is that pair with the
+// two halves named separately and drives the same orbit.
+const RETAIL_TURN_KEY_ORBIT_DEG_PER_TICK: f32 = 1.6;
+pub const ROTATE_KEY_ORBIT_RAD_PER_SEC: f32 =
+    RETAIL_TURN_KEY_ORBIT_DEG_PER_TICK * (std::f32::consts::PI / 180.0) * RETAIL_MOVE_TICKS_PER_SEC;
+
 const CAMERA_YAW_RATE: f32 = HEADING_TURN_RATE * 4.0;
 
 const PITCH_STEP_HELD: f32 = 0.015;
@@ -1300,9 +1310,14 @@ pub fn dispatch_movement_system(
 
     // First person: the view IS the facing, so rotation (Q/E and A/D alike)
     // moves the camera rigidly and forward motion follows the view (mouse-look
-    // included). In chase mode the camera instead trails via auto-recenter.
+    // included). In chase mode the eye orbits at the retail turn-key rate while
+    // the body turns at the faster steer rate, and camera_polish_system's follow
+    // closes the difference.
     if player_rotate_u8 != 0 && first_person {
         chase.yaw -= heading_delta_units * std::f32::consts::TAU / 256.0;
+    }
+    if !first_person && resolved.rotate_dir != 0 {
+        chase.yaw -= resolved.rotate_dir as f32 * ROTATE_KEY_ORBIT_RAD_PER_SEC * time.delta_secs();
     }
 
     // Stair-capture drive camera axes: remote pan at the key yaw rate, plus a
@@ -2008,16 +2023,30 @@ pub struct CameraAutoRecenter {
     pub forward_held_since: Option<Instant>,
 
     pub manual_override: bool,
+
+    /// The follow lags whatever turned the body (a Q/E rotate, an A/D carve,
+    /// an autorun steer), so the key comes up with the camera still off to the
+    /// side. It keeps closing that gap after the key lifts, until it sits
+    /// behind the character or the player takes the camera back.
+    pub settling: bool,
 }
 
 // Retail's camera swings behind a carving character at ~0.55 rad/s (HorizonXI
 // video 2026-07-20: ~150-180° over a ~5s held D). This lazy follow is what
 // makes a held A/D trace a wide circle — the camera-relative run direction
-// only rotates as fast as the camera catches up. When no lateral steer is
-// held (plain W/S), the camera snaps behind faster (play-testing feedback).
+// only rotates as fast as the camera catches up. Everything else follows at
+// the retail chase rate below.
 const CARVE_FOLLOW_RATE: f32 = 0.55;
 
-const AUTO_RECENTER_RATE: f32 = 2.5;
+// Retail's chase camera (the Chase Cam config mode, FS_CONFIG_145) pulls the
+// eye toward the point directly behind the actor's facing by 2.5 percent of the
+// remaining offset per tick, and it runs off the actor's own rotation, not off a
+// held key - so it keeps closing after the turn key comes up
+// (research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp,
+// CameraManager::UpdatePlayerFollowingCamera). Per-tick fraction times the tick
+// rate is the continuous rate to first order.
+const RETAIL_CHASE_RECENTER_PER_TICK: f32 = 0.025;
+const AUTO_RECENTER_RATE: f32 = RETAIL_CHASE_RECENTER_PER_TICK * RETAIL_MOVE_TICKS_PER_SEC;
 
 /// Retail plants the chase camera when the character deliberately runs toward
 /// it (unlocked S / about-face): the follow must not swing around to the
@@ -2027,6 +2056,27 @@ const RECENTER_HOLD_RAD: f32 = 2.0;
 
 pub fn recenter_follow_allowed(yaw_diff: f32) -> bool {
     yaw_diff.abs() < RECENTER_HOLD_RAD
+}
+
+// Retail stops the pull once the eye is within this dot product of the
+// behind-the-actor direction (UpdatePlayerFollowingCamera again, the
+// `> 0.5 && < 0.99` engagement window), about eight degrees. An exponential
+// follow only asymptotes, so we spend that dead band closing the remainder in
+// one step instead of resting at an arbitrary point inside it.
+const RETAIL_CHASE_RECENTER_SETTLED_DOT: f32 = 0.99;
+
+/// Returns the camera yaw after one follow step and whether it still has
+/// ground to cover.
+pub fn recenter_yaw_step(yaw: f32, target_yaw: f32, rate: f32, dt: f32) -> (f32, bool) {
+    let diff = wrap_signed_pi(target_yaw - yaw);
+    if !recenter_follow_allowed(diff) {
+        return (yaw, false);
+    }
+    if diff.cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT {
+        return (target_yaw, false);
+    }
+    let alpha = 1.0 - (-rate * dt).exp();
+    (yaw + diff * alpha, true)
 }
 
 const FP_LOCK_PITCH_RATE: f32 = 3.0;
@@ -2060,6 +2110,7 @@ pub fn camera_polish_system(
     let drag_active = pointer.left || pointer.right;
     if yaw_input || drag_active {
         recenter.manual_override = true;
+        recenter.settling = false;
     }
     let movement_input = bindings.pressed(Action::MoveForward, &keys)
         || bindings.pressed(Action::MoveBackward, &keys)
@@ -2072,11 +2123,13 @@ pub fn camera_polish_system(
         || pad.movement != Vec2::ZERO;
     if movement_input {
         recenter.manual_override = false;
+        recenter.settling = true;
     }
 
-    // Recenter only tracks the character while it is actually moving; idle,
-    // the camera holds wherever the player left it (retail behavior).
-    if movement_input
+    // Recenter tracks the character while it is moving and for the tail it
+    // takes to finish swinging behind; idle and settled, the camera holds
+    // wherever the player left it (retail behavior).
+    if (movement_input || recenter.settling)
         && !yaw_input
         && !drag_active
         && !recenter.manual_override
@@ -2094,15 +2147,9 @@ pub fn camera_polish_system(
             AUTO_RECENTER_RATE
         };
         let target_yaw = yaw_for_heading(state.snapshot.self_pos.heading);
-        let tau = std::f32::consts::TAU;
-        let mut diff = (target_yaw - chase.yaw).rem_euclid(tau);
-        if diff > std::f32::consts::PI {
-            diff -= tau;
-        }
-        let alpha = 1.0 - (-rate * time.delta_secs()).exp();
-        if recenter_follow_allowed(diff) {
-            chase.yaw += diff * alpha;
-        }
+        let (yaw, settling) = recenter_yaw_step(chase.yaw, target_yaw, rate, time.delta_secs());
+        chase.yaw = yaw;
+        recenter.settling = settling;
     }
 
     if !matches!(*camera_mode, CameraMode::FirstPerson) {
@@ -3551,6 +3598,10 @@ mod tests {
             self.app.world().resource::<AutoRun>().phantom_forward
         }
 
+        fn camera_yaw(&self) -> f32 {
+            self.app.world().resource::<ChaseCamera>().yaw
+        }
+
         fn tick(&mut self) -> (u8, Vec2) {
             self.app
                 .world_mut()
@@ -3583,6 +3634,10 @@ mod tests {
     /// Half a second of held rotate: ~40 heading units at the Q/E key rate,
     /// far past the couple of units of lerp round-trip noise.
     const ROTATE_TICKS: usize = 30;
+    /// Four seconds of movement ticks: an exponential close of the widest
+    /// followable gap finishes well inside this, so overrunning it means the
+    /// follow has stalled rather than merely being slow.
+    const SETTLE_TICK_BUDGET: u32 = 4 * RETAIL_MOVE_TICKS_PER_SEC as u32;
 
     fn turned_units(from: u8, to: u8) -> i32 {
         let raw = i32::from(to) - i32::from(from);
@@ -3701,6 +3756,30 @@ mod tests {
         );
     }
 
+    /// The two retail rates are within a fifth of each other, so a ratio that
+    /// missed by this much would have to be a different pairing entirely.
+    const ORBIT_RATIO_TOLERANCE: f32 = 0.05;
+
+    #[test]
+    fn a_held_rotate_key_orbits_the_camera_with_the_body() {
+        let mut drive = MoveDrive::new();
+        drive.press(KeyCode::KeyW);
+        drive.run(SETTLE_TICKS);
+        let (start, _) = drive.tick();
+        let yaw_start = drive.camera_yaw();
+        drive.press(KeyCode::KeyQ);
+        let (end, _) = *drive.run(ROTATE_TICKS).last().expect("ticks");
+
+        let body = turned_units(start, end) as f32 * std::f32::consts::TAU / 256.0;
+        let orbit = -(drive.camera_yaw() - yaw_start);
+        let ratio = orbit / body;
+        let want = ROTATE_KEY_ORBIT_RAD_PER_SEC / ROTATE_KEY_RATE_RAD_PER_SEC;
+        assert!(
+            (ratio - want).abs() < ORBIT_RATIO_TOLERANCE,
+            "the eye orbited {ratio} of the body turn, retail pairs them at {want}"
+        );
+    }
+
     #[test]
     fn rotate_aims_an_autorun_instead_of_cancelling_it() {
         let mut drive = MoveDrive::new();
@@ -3780,6 +3859,42 @@ mod tests {
         assert!(recenter_follow_allowed(0.0));
         assert!(recenter_follow_allowed(std::f32::consts::FRAC_PI_2));
         assert!(recenter_follow_allowed(-std::f32::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn recenter_finishes_squarely_behind_after_the_turn_key_lifts() {
+        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
+        let target = std::f32::consts::FRAC_PI_2;
+        // The gap a held Q/E leaves at the moment of release: the body outruns
+        // its own camera orbit, and the follow closes that difference.
+        let mut yaw = target
+            - (ROTATE_KEY_RATE_RAD_PER_SEC - ROTATE_KEY_ORBIT_RAD_PER_SEC) / AUTO_RECENTER_RATE;
+        let mut ticks = 0u32;
+        let settled = loop {
+            let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
+            assert!(
+                (next - target).abs() < (yaw - target).abs(),
+                "the follow stalled at {yaw} short of {target}"
+            );
+            yaw = next;
+            ticks += 1;
+            if !settling {
+                break true;
+            }
+            if ticks > SETTLE_TICK_BUDGET {
+                break false;
+            }
+        };
+        assert!(settled, "the follow never finished: {yaw} vs {target}");
+        assert_eq!(yaw, target, "the camera must come to rest exactly behind");
+    }
+
+    #[test]
+    fn recenter_step_leaves_the_planted_about_face_camera_alone() {
+        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
+        let (yaw, settling) = recenter_yaw_step(0.0, std::f32::consts::PI, AUTO_RECENTER_RATE, dt);
+        assert_eq!(yaw, 0.0);
+        assert!(!settling, "a planted camera has nothing left to settle");
     }
 
     #[test]

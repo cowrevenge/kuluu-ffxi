@@ -133,7 +133,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["pathtoforce", "pathtof"],
                 set: CommandSet::Dev,
                 usage: "<x> <y> [z] | <name> | target",
-                summary: "pathfind ignoring collision (straight-lines through walls when no route — stuck-recovery)",
+                summary: "pathfind ignoring collision (straight-lines through walls when no route -- stuck-recovery)",
                 handler: |c| {
                     parse_pathto(
                         c.rest,
@@ -346,7 +346,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["check", "checkname", "checkparam"],
                 set: CommandSet::Retail,
                 usage: "[name]",
-                summary: "check target — strength / name / parameters",
+                summary: "check target -- strength / name / parameters",
                 handler: |c| match resolve_action_target(
                     c.rest,
                     c.entities,
@@ -488,7 +488,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
             Command {
                 names: &["jobemote"],
                 set: CommandSet::Retail,
-                usage: "[war|mnk|…] [motion|text]",
+                usage: "[war|mnk|...] [motion|text]",
                 summary: "job gesture (defaults to current main job; needs its JOB_GESTURE key item)",
                 handler: |c| parse_jobemote(c.rest, c),
             },
@@ -572,9 +572,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
-            // Not a retail command — a dev/diagnostic convenience (echoes the raw
-            // 0x0F4 tracking list to chat for copying). Debug builds only; the
-            // retail-faithful path is the Map screen's Wide Scan submenu.
             #[cfg(debug_assertions)]
             Command {
                 names: &["widescan", "wscan"],
@@ -810,7 +807,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["zoneline", "zonelines"],
                 set: CommandSet::Dev,
                 usage: "[off|pillar|gate|toggle]",
-                summary: "zone-line trigger markers — off (retail-faithful, default), pillar (debug column), or gate (real oriented footprint)",
+                summary: "zone-line trigger markers -- off (retail-faithful, default), pillar (debug column), or gate (real oriented footprint)",
                 handler: |c| parse_zoneline(c.rest),
             },
             Command {
@@ -1006,7 +1003,7 @@ pub enum SlashOutcome {
 
     SetVanaClock(Option<bool>),
 
-    /// `Some(scale)` sets the 3D render scale (0.25–2.0); `None` reports it.
+    /// `Some(scale)` sets the 3D render scale (0.25-2.0); `None` reports it.
     SetRenderScale(Option<f32>),
 
     SetZoneLines(ZoneLineOp),
@@ -1111,7 +1108,7 @@ pub enum OverlayOp {
     Add(std::path::PathBuf),
     /// Drop the 1-based entry `n` from the active list and persist.
     Remove(usize),
-    /// Persist an empty list — the way to run a private-server install with the
+    /// Persist an empty list -- the way to run a private-server install with the
     /// server's overlays off, which is distinct from `Reset`.
     Clear,
     /// Forget the override and go back to what discovery finds.
@@ -1252,8 +1249,8 @@ fn emote_target(ctx: &SlashCtx) -> (Option<u32>, Option<u16>) {
     (ent.map(|e| e.id), ent.map(|e| e.act_index))
 }
 
-/// `[motion|text]` trailing argument → EmoteMode (default All; XiPackets
-/// client 0x005D: 'motion' → 2, 'text' → 1).
+/// `[motion|text]` trailing argument -> EmoteMode (default All; XiPackets
+/// client 0x005D: 'motion' -> 2, 'text' -> 1).
 fn parse_emote_mode(arg: &str) -> Option<u8> {
     use ffxi_proto::map::emote::mode;
     match arg {
@@ -1317,7 +1314,7 @@ fn parse_jobemote(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
     };
     if job_id == 0 {
         return SlashOutcome::SystemMessage(format!(
-            "/jobemote: unknown job `{job_arg}` (use WAR/MNK/… or omit for main job)"
+            "/jobemote: unknown job `{job_arg}` (use WAR/MNK/... or omit for main job)"
         ));
     }
     emote_outcome(
@@ -1619,8 +1616,8 @@ fn resolve_position_needle(
                     z: line.from_pos[2],
                 };
                 let label = kuluu_nav::zone_name(line.to_zone)
-                    .map(|n| format!("zone-line → {n} ({})", line.to_zone))
-                    .unwrap_or_else(|| format!("zone-line → zone {}", line.to_zone));
+                    .map(|n| format!("zone-line -> {n} ({})", line.to_zone))
+                    .unwrap_or_else(|| format!("zone-line -> zone {}", line.to_zone));
                 return Some((pos, label));
             }
         }
@@ -1767,7 +1764,7 @@ fn parse_weaponskill(
     })
 }
 
-/// `/ra [target]` — ranged attack (c2s action 0x10). Takes no id, only a target
+/// `/ra [target]` -- ranged attack (c2s action 0x10). Takes no id, only a target
 /// (defaults to the current target).
 fn parse_ranged_attack(
     rest: &str,
@@ -1935,7 +1932,7 @@ fn parse_overlay(rest: &str) -> SlashOutcome {
         "reset" | "auto" => OverlayOp::Reset,
         other => {
             return SlashOutcome::SystemMessage(format!(
-                "/overlay: unknown `{other}` — try list|add <dir>|remove <n>|clear|reset"
+                "/overlay: unknown `{other}` -- try list|add <dir>|remove <n>|clear|reset"
             ))
         }
     };
@@ -2153,7 +2150,7 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
     s.push_str(&format!("  look_tag={}", look_tag(e.look.as_ref())));
     use kuluu_snapshot::EntityLook;
     match &e.look {
-        None => s.push_str(" (none decoded — no look-bearing tick yet)"),
+        None => s.push_str(" (none decoded -- no look-bearing tick yet)"),
         Some(EntityLook::Standard { modelid }) => {
             s.push_str(&format!(" modelid={modelid} (0x{modelid:04X})"));
         }
@@ -2227,7 +2224,7 @@ fn parse_weather(rest: &str) -> SlashOutcome {
     let arg = rest.trim();
     if arg.is_empty() {
         return SlashOutcome::SystemMessage(
-            "/weather: usage `/weather <id|name>` — 0..=19, or names like \
+            "/weather: usage `/weather <id|name>` -- 0..=19, or names like \
              none, sunshine, clouds, fog, rain, snow, thunderstorms, sand_storm, \
              auroras, gloom, darkness (see vendor/server/data/enums/weather.yaml)"
                 .into(),
@@ -2446,7 +2443,7 @@ fn parse_renderscale(rest: &str) -> SlashOutcome {
                 SlashOutcome::SetRenderScale(Some(v))
             } else {
                 SlashOutcome::SystemMessage(format!(
-                    "/renderscale: {:.0}% out of range (25–200%)",
+                    "/renderscale: {:.0}% out of range (25-200%)",
                     v * 100.0
                 ))
             }
@@ -2789,7 +2786,7 @@ fn parse_sub_area(rest: &str, self_pos: WireVec3) -> SlashOutcome {
             Some(id) => SubAreaOp::Load(id),
             None => {
                 return SlashOutcome::SystemMessage(format!(
-                    "/subarea: bad sub-area id `{arg}` — usage `/subarea [<sub_area_id>|here]`"
+                    "/subarea: bad sub-area id `{arg}` -- usage `/subarea [<sub_area_id>|here]`"
                 ))
             }
         },
@@ -2830,13 +2827,13 @@ fn parse_keybinds(rest: &str) -> SlashOutcome {
         "preset" => match Preset::from_slug(arg) {
             Some(preset) => SlashOutcome::ApplyKeybinds(KeybindUpdate::Preset(preset)),
             None => SlashOutcome::SystemMessage(format!(
-                "/keybinds: unknown preset `{arg}` — try compact1, compact2, or standard"
+                "/keybinds: unknown preset `{arg}` -- try compact1, compact2, or standard"
             )),
         },
         "list" => SlashOutcome::ApplyKeybinds(KeybindUpdate::List),
         "reset" => SlashOutcome::ApplyKeybinds(KeybindUpdate::Reset),
         other => SlashOutcome::SystemMessage(format!(
-            "/keybinds: unknown verb `{other}` — try preset, list, or reset"
+            "/keybinds: unknown verb `{other}` -- try preset, list, or reset"
         )),
     }
 }
@@ -3478,7 +3475,6 @@ mod tests {
             other => panic!("expected SetSitStance(Toggle), got {other:?}"),
         }
 
-        // /kneel is the canned emote (id 3) — no longer a /sit alias.
         let (id, ..) = expect_emote(parse_slash_t(
             "/kneel",
             &empty_entities(),
@@ -3708,7 +3704,7 @@ mod tests {
         }
 
         // 0x1CE is the Lower Jeuno food-shop interior in
-        // research/xi-tools/docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
+        // research/xi-tools/docs/zone/subareas.md "Worked example -- Lower Jeuno (`ROM/1/41`, zone 245)".
         for s in ["//subarea 462", "//subarea 0x1CE", "//subareas 0x1ce"] {
             match parse_slash_t(s, &empty_entities(), pos, None, None) {
                 SlashOutcome::SubArea {
@@ -4660,7 +4656,7 @@ mod tests {
             None,
         ));
         assert_eq!(mode, mode::MOTION);
-        assert_eq!(tid, None, "no selection → untargeted");
+        assert_eq!(tid, None, "no selection -> untargeted");
 
         assert!(matches!(
             parse_slash_t("/wave sideways", &[], WireVec3::default(), None, None),
@@ -4693,7 +4689,7 @@ mod tests {
             None,
         ));
         assert_eq!(id, emote::JOB);
-        assert_eq!(param, emote::JOB_PARAM_BASE, "WAR(1) → 0x1F");
+        assert_eq!(param, emote::JOB_PARAM_BASE, "WAR(1) -> 0x1F");
         let (_, _, param, ..) = expect_emote(parse_slash_t(
             "/jobemote RUN",
             &[],
@@ -4701,7 +4697,7 @@ mod tests {
             None,
             None,
         ));
-        assert_eq!(param, emote::JOB_PARAM_BASE + 21, "RUN(22) → 0x34");
+        assert_eq!(param, emote::JOB_PARAM_BASE + 21, "RUN(22) -> 0x34");
         assert!(matches!(
             parse_slash_t("/jobemote xyz", &[], WireVec3::default(), None, None),
             SlashOutcome::SystemMessage(_)
@@ -4734,7 +4730,7 @@ mod tests {
     }
 
     /// The emote fallback runs after the COMMANDS lookup, so an alias equal to
-    /// a scraped emote name would silently shadow the emote — forbid it
+    /// a scraped emote name would silently shadow the emote -- forbid it
     /// (Bell/Job keep dedicated commands with required args).
     #[test]
     fn no_alias_shadows_a_scraped_emote_name() {

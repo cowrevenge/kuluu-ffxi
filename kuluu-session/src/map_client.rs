@@ -65,6 +65,28 @@ impl MapClient {
             .await
             .with_context(|| format!("UDP bind {local}"))?;
         tracing::info!(local_addr = %socket.local_addr()?, "UDP socket bound");
+        Self::finish(server, seed, socket)
+    }
+
+    /// Sync variant of [`Self::connect_with_local`] for offline test fixtures:
+    /// binds the same ephemeral UDP socket without a runtime. No datagram is
+    /// sent until one is explicitly requested.
+    pub fn connect_with_local_sync(
+        server: SocketAddr,
+        seed: [u8; 20],
+        local: &str,
+    ) -> Result<Self> {
+        let std_socket =
+            std::net::UdpSocket::bind(local).with_context(|| format!("UDP bind {local}"))?;
+        // tokio's `from_std` debug-asserts on Unix that the fd is already
+        // non-blocking; the std bind above is blocking, so flip it first.
+        std_socket
+            .set_nonblocking(true)
+            .with_context(|| "set UDP socket non-blocking")?;
+        Self::finish(server, seed, UdpSocket::from_std(std_socket)?)
+    }
+
+    fn finish(server: SocketAddr, seed: [u8; 20], socket: UdpSocket) -> Result<Self> {
         let blowfish = derive_blowfish(&seed);
         let decompress_table =
             zlib::DecompressTable::new().map_err(|e| anyhow!("decompress table init: {e}"))?;
@@ -151,7 +173,13 @@ impl MapClient {
         buf.truncate(n);
         self.bytes_recv
             .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        self.decode_datagram(buf, src)
+    }
 
+    /// Decrypt, verify and inflate one datagram; both directions share the
+    /// framing, so a fixture holding the same seed can read client datagrams.
+    pub(crate) fn decode_datagram(&self, mut buf: Vec<u8>, src: SocketAddr) -> Result<Vec<u8>> {
+        let n = buf.len();
         if n < framing::MIN_FRAME_SIZE {
             bail!("undersized response datagram: {n} bytes");
         }
@@ -338,7 +366,11 @@ mod tests {
         let server_b: SocketAddr = "127.0.0.2:2".parse().unwrap();
         let seed_a = [1u8; 20];
         let seed_b = [2u8; 20];
-        let mut client = MapClient::connect(server_a, seed_a).await.unwrap();
+        // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2
+        // DNAT pin), or parallel test tasks collide on the pinned port.
+        let mut client = MapClient::connect_with_local(server_a, seed_a, "0.0.0.0:0")
+            .await
+            .unwrap();
         let local_before = client.socket.local_addr().unwrap();
         client.retarget(server_b, seed_b);
         let local_after = client.socket.local_addr().unwrap();

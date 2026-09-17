@@ -98,6 +98,8 @@ fn load_transport_models(
         {
             for &chunk_idx in &asset.meshes {
                 models.write(LoadMmbRequest {
+                    light_bindings: Default::default(),
+                    area_id: 0,
                     file_id: pending.file_id,
                     chunk_idx,
                     world_pos: Vec3::ZERO,
@@ -294,23 +296,21 @@ fn voyage_progress(zone: u16, now: f64, timing: Option<kuluu_snapshot::Voyage>) 
             timing.route,
         );
     }
-    // vendor/server/src/map/transport.cpp CTransportHandler::TransportTimer; LSB LOGIN leaves voyage timing empty.
-    const EARTH_SECONDS_PER_VANA_MINUTE: f64 =
-        crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64 / 60.0;
+    // vendor/server/src/map/transports/ship_handler.cpp ShipHandler::tick; LSB LOGIN leaves
+    // ShipStart/ShipEnd empty, so the crossing is timed from the ship's own cycle: the
+    // backdrop holds at the berth from the moment boarding closes until the ship is hidden,
+    // then runs until riders are put ashore.
     let Some(s) = ffxi_vocab::transport::voyage(zone) else {
         return (0.0, false, 0);
     };
-    let interval = f64::from(s.interval);
-    let departure = f64::from(s.arrival + s.waiting + s.departure);
-    let phase = (now / EARTH_SECONDS_PER_VANA_MINUTE - f64::from(s.offset)).rem_euclid(interval);
-    let departure_event = f64::from(s.arrival + s.waiting);
-    if phase >= departure_event && phase < departure {
+    let every = f64::from(s.every);
+    let into = (now - f64::from(s.offset)).rem_euclid(every);
+    let held = (f64::from(s.departs) - f64::from(s.boarding_ends)).rem_euclid(every);
+    if (into - f64::from(s.boarding_ends)).rem_euclid(every) < held {
         return (0.0, false, 0);
     }
-    let elapsed = (phase - departure).rem_euclid(interval);
-    let duration = interval + f64::from(s.arrival)
-        - f64::from(ffxi_vocab::transport::EVICTION_LEAD_VANA_MINUTES)
-        - departure;
+    let elapsed = (into - f64::from(s.departs)).rem_euclid(every);
+    let duration = (f64::from(s.disembark) - f64::from(s.departs)).rem_euclid(every);
     ((elapsed / duration).clamp(0.0, 1.0) as f32, false, 0)
 }
 
@@ -441,14 +441,23 @@ mod tests {
         assert_eq!(voyage_progress(228, 1450.0, Some(timing)), (0.5, true, 2));
         assert_eq!(voyage_progress(228, 999.0, Some(timing)).0, 0.0);
         assert_eq!(voyage_progress(228, 2000.0, Some(timing)).0, 1.0);
-        let seconds = |minute: f64| minute * 2.4;
-        assert_eq!(voyage_progress(228, seconds(0.0), None).0, 0.0);
-        assert_eq!(voyage_progress(228, seconds(16.0), None).0, 0.0);
-        assert_eq!(voyage_progress(228, seconds(17.0), None).0, 0.0);
-        assert_eq!(voyage_progress(228, seconds(390.0), None).0, 1.0);
-        let halfway = voyage_progress(228, seconds(203.5), None).0;
+        // data/zones/mhaura/zone.yaml mhaura_selbina_boat: every 1152, offset 920,
+        // docked ends at 233, departing hides the ship at 272, riders ashore at 26.
+        let s = ffxi_vocab::transport::voyage(228).unwrap();
+        assert_eq!(
+            (s.every, s.offset, s.boarding_ends, s.departs, s.disembark),
+            (1152, 920, 233, 272, 26)
+        );
+        let cycle = |into: f64| f64::from(s.offset) + into;
+        assert_eq!(voyage_progress(228, cycle(233.0), None).0, 0.0);
+        assert_eq!(voyage_progress(228, cycle(271.0), None).0, 0.0);
+        assert_eq!(voyage_progress(228, cycle(272.0), None).0, 0.0);
+        assert_eq!(voyage_progress(228, cycle(1152.0 + 26.0), None).0, 1.0);
+        let halfway = voyage_progress(228, cycle(272.0 + 453.0), None).0;
         assert!((halfway - 0.5).abs() < 0.0001);
-        assert!((voyage_progress(228, seconds(683.5), None).0 - halfway).abs() < 0.0001);
+        assert!(
+            (voyage_progress(228, cycle(1152.0 + 272.0 + 453.0), None).0 - halfway).abs() < 0.0001
+        );
     }
 
     fn voyage_frame_contract() {

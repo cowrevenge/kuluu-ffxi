@@ -25,6 +25,16 @@ mod delivery;
 pub use delivery::delivery_mode_sync_system;
 use delivery::handle_delivery_key;
 
+mod event_map;
+pub use event_map::event_map_sync_system;
+
+mod auto_enter;
+pub use auto_enter::auto_enter_cs_system;
+
+mod shop;
+use shop::handle_shop_key;
+pub use shop::shop_mode_sync_system;
+
 mod map_screen;
 
 mod menu;
@@ -45,6 +55,7 @@ pub struct CaptureMode {
 
 #[derive(SystemParam)]
 pub struct SlashWriters<'w, 's> {
+    pub command_surface: Res<'w, crate::view_native::command_surface::CommandSurface>,
     pub load_mmb: MessageWriter<'w, LoadMmbRequest>,
     pub load_mzb: MessageWriter<'w, LoadMzbRequest>,
     pub set_sub_area: MessageWriter<'w, kuluu_render::sub_area_activation::SetSubArea>,
@@ -93,6 +104,13 @@ pub struct SlashWriters<'w, 's> {
 
     pub rest_stance: ResMut<'w, kuluu_render::combat_stance::RestStance>,
 
+    /// Disengage releases the camera lock the same as the H toggle; the slash
+    /// and menu paths both funnel through here, so the writer rides the bundle
+    /// (text_input_system is at the 16-param cap on unix).
+    pub lock_on: ResMut<'w, kuluu_render::LockOn>,
+
+    pub auto_attack: ResMut<'w, crate::view_native::auto_target::AutoAttack>,
+
     pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
 
     pub sort_options: ResMut<'w, kuluu_render::hud::item_detail::SortOptions>,
@@ -119,11 +137,13 @@ pub struct SlashWriters<'w, 's> {
 
     pub auction_inv: Res<'w, kuluu_render::hud::auction::AuctionSellInventory>,
 
-    pub select_target: ResMut<'w, SelectTargetMode>,
+    pub shop_state: ResMut<'w, kuluu_render::hud::shop::ShopScreenState>,
 
     pub fishing_spot: Res<'w, kuluu_render::fishing_spot::FishingSpot>,
 
     pub active_chat_tab: ResMut<'w, ActiveChatTab>,
+    pub battle_scroll: ResMut<'w, kuluu_render::hud::chat_panel::BattleScroll>,
+    pub debug_scroll: ResMut<'w, kuluu_render::hud::chat_panel::DebugScroll>,
 
     pub chat_history: ResMut<'w, ChatHistory>,
 
@@ -139,7 +159,7 @@ pub struct SlashWriters<'w, 's> {
 
     pub(crate) dat_root: Res<'w, super::DatRootRes>,
 
-    /// Absent when no config dir resolved, which makes `/overlay` read-only.
+    /// Absent when no config dir resolved, which makes `//overlay` read-only.
     pub overlay_store: Option<Res<'w, crate::overlay_store::OverlayStoreRes>>,
 }
 
@@ -150,6 +170,26 @@ pub struct SlashWriters<'w, 's> {
 pub struct KeyEventStreams<'w, 's> {
     pub keyboard: MessageReader<'w, 's, KeyboardInput>,
     pub pad: MessageReader<'w, 's, super::gamepad_input::PadKeyEvent>,
+}
+
+/// The navmesh overlay's visibility latch and cached mesh as one parameter:
+/// bevy_ecs's `impl_system_function` tops out at 16 parameters and
+/// `text_input_system` sits at that cap on unix (its `AgentPaused` parameter
+/// is unix-only), so the two overlay resources ride in together.
+#[derive(SystemParam)]
+pub struct NavmeshOverlay<'w> {
+    pub visible: ResMut<'w, super::navmesh_overlay::NavmeshOverlayVisible>,
+    pub state: Res<'w, super::navmesh_overlay::NavmeshState>,
+}
+
+/// The two optional session-gate resources ride in together: bevy_ecs's
+/// `impl_system_function` tops out at 16 parameters and `text_input_system`
+/// sits at that cap on unix, so the pair cannot both take a slot.
+#[derive(SystemParam)]
+pub(crate) struct SessionGates<'w> {
+    #[cfg(unix)]
+    pub agent_paused: Option<Res<'w, super::AgentPaused>>,
+    pub session_event_tx: Option<Res<'w, super::SessionEventTx>>,
 }
 
 #[derive(SystemParam)]
@@ -166,7 +206,7 @@ pub struct MenuConfirmWriters<'w> {
 use tokio::sync::mpsc::Sender;
 
 use crate::keybinds_store::KeybindsStateRes;
-use crate::view_native::input::{CommandTx, SelectTargetMode};
+use crate::view_native::input::CommandTx;
 use crate::view_native::slash_commands::{
     parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
 };
@@ -183,11 +223,9 @@ pub(crate) fn text_input_system(
     mut target: ResMut<Target>,
     mut scene_state: ResMut<SceneState>,
     mut exit: MessageWriter<AppExit>,
-    mut navmesh_visible: ResMut<super::navmesh_overlay::NavmeshOverlayVisible>,
-    navmesh_state: Res<super::navmesh_overlay::NavmeshState>,
+    mut navmesh: NavmeshOverlay,
 
-    #[cfg(unix)] agent_paused: Option<Res<super::AgentPaused>>,
-    session_event_tx: Option<Res<super::SessionEventTx>>,
+    session_gates: SessionGates,
 
     mut slash_writers: SlashWriters,
 
@@ -196,6 +234,8 @@ pub(crate) fn text_input_system(
     mut chat_scroll: ResMut<ChatScroll>,
 
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
+
+    cutscene_mode: Res<kuluu_render::cutscene::CutsceneMode>,
 ) {
     let entities = scene_state.snapshot.entities.clone();
     let self_pos = scene_state.snapshot.self_pos.pos;
@@ -207,9 +247,72 @@ pub(crate) fn text_input_system(
 
     let target_changed = target.is_changed();
 
+    // A Switch Target confirm holds the picker up until the server's 0x058
+    // commits the candidate into the main target (apply_server_retarget_system
+    // runs before this one); the frame tracks the candidate meanwhile, so the
+    // swap lands on the server's word. The lapse covers the server answering
+    // with a rejection line instead (its not-engaged fall-through). If the main
+    // target dies while the picker is up (auto_clear dropped it, which runs
+    // before this system), the switch is moot: close the picker; the weapon
+    // sheathes on its own since the pose pass gates the weapon on an active
+    // target.
+    if let InputMode::SubTarget(st) = &mut *mode {
+        // A switch already in flight keeps waiting for its 0x058 even if the
+        // old target dies first (the commit lands the new one); only a picker
+        // with no pending switch closes on the main target going away.
+        let main_target_gone = matches!(
+            st.action,
+            kuluu_render::input_mode::SubTargetAction::PickSub
+        ) && st.pending_switch.is_none()
+            && target.id.is_none();
+        let close = main_target_gone
+            || st.pending_switch.is_some_and(|sent| {
+                target.id == Some(sent)
+                    || st
+                        .pending_since
+                        .is_some_and(|since| since.elapsed() >= SWITCH_ANSWER_TIMEOUT)
+            });
+        if close {
+            st.pending_switch = None;
+            st.pending_since = None;
+            *mode = InputMode::World;
+        }
+    }
+
     let pad_synth: Vec<KeyboardInput> = events.pad.read().map(|e| e.0.clone()).collect();
     for ev in events.keyboard.read().chain(pad_synth.iter()) {
         if ev.state != ButtonState::Pressed {
+            continue;
+        }
+        // CS input lock: while a VM-driven event frame is up, retail's DEFCAMERA has taken the
+        // camera and disabled menu drawing (research/XiEvents/OpCodes/0x0046.md), so every key
+        // routes through the dialog handler — Enter advances the event even with the map open in
+        // Menu(Map) mode, and ESC respects cancel_armed instead of closing whatever window is up.
+        if cutscene_mode.active && scene_state.snapshot.dialog.is_some() {
+            let next = match &mut *mode {
+                InputMode::Dialog(cursor) => handle_dialog_key(
+                    &ev.logical_key,
+                    &bindings,
+                    cursor,
+                    &mut scene_state,
+                    &cmd_tx.0,
+                    &mut slash_writers.item_screen_container,
+                ),
+                _ => {
+                    let mut cursor = DialogCursor::default();
+                    handle_dialog_key(
+                        &ev.logical_key,
+                        &bindings,
+                        &mut cursor,
+                        &mut scene_state,
+                        &cmd_tx.0,
+                        &mut slash_writers.item_screen_container,
+                    )
+                }
+            };
+            if let Some(next) = next {
+                *mode = next;
+            }
             continue;
         }
         match &mut *mode {
@@ -254,39 +357,37 @@ pub(crate) fn text_input_system(
                         continue;
                     }
                 }
-                if slash_writers.select_target.active {
-                    if bindings.matches_logical(Action::ConfirmAction, &ev.logical_key) {
-                        if let Some(id) = current_target {
-                            let _ = cmd_tx.0.try_send(AgentCommand::Engage { target_id: id });
-                        }
-                        slash_writers.select_target.active = false;
-                        slash_writers.select_target.prev = None;
-                        continue;
-                    }
-                    if bindings.matches_logical(Action::ClearTarget, &ev.logical_key) {
-                        target.id = slash_writers.select_target.prev.take();
-                        slash_writers.select_target.active = false;
-                        continue;
-                    }
-                }
                 if bindings.matches_logical(Action::SelectActiveWindow, &ev.logical_key) {
+                    if slash_writers.graphics.chat_layout
+                        != kuluu_render::graphics_settings::ChatLayout::Tabbed
+                    {
+                        slash_writers.active_chat_tab.0 =
+                            kuluu_render::hud::chat_panel::ChatKind::Social;
+                    }
                     *mode = InputMode::PassiveCursor(
                         kuluu_render::input_mode::PassiveCursorState::fresh_chat(),
                     );
                     continue;
                 }
+                let self_char_id = scene_state.snapshot.self_char_id;
+                let usable_items = kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot);
+                let can_fish = slash_writers.fishing_spot.0.is_ready();
                 if let Some(next) = handle_world_key(
                     &ev.logical_key,
                     &bindings,
                     current_target,
                     &entities,
                     self_pos,
-                    scene_state.snapshot.self_char_id,
+                    self_char_id,
                     target_changed,
                     engaged,
-                    kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot),
-                    slash_writers.fishing_spot.0.is_ready(),
+                    usable_items,
+                    can_fish,
                     &cmd_tx.0,
+                    &mut scene_state,
+                    &mut slash_writers.check_target,
+                    &mut slash_writers.trade_state,
+                    &mut slash_writers.lock_on,
                 ) {
                     *mode = next;
                 }
@@ -309,13 +410,13 @@ pub(crate) fn text_input_system(
                     &cmd_tx.0,
                     &mut scene_state,
                     &mut exit,
-                    &mut navmesh_visible,
-                    &navmesh_state,
+                    &mut navmesh.visible,
+                    &navmesh.state,
                     &mut bindings,
                     &mut keybinds_state,
                     #[cfg(unix)]
-                    agent_paused.as_deref(),
-                    session_event_tx.as_deref(),
+                    session_gates.agent_paused.as_deref(),
+                    session_gates.session_event_tx.as_deref(),
                     fishing_gate,
                     &mut slash_writers,
                     &mut draw_distance,
@@ -379,12 +480,20 @@ pub(crate) fn text_input_system(
                 }
             }
             InputMode::PassiveCursor(state) => {
+                use kuluu_render::hud::chat_panel::ChatKind;
+                let scroll_rows = match slash_writers.active_chat_tab.0 {
+                    ChatKind::Social => &mut chat_scroll.rows,
+                    ChatKind::Battle => &mut slash_writers.battle_scroll.rows,
+                    ChatKind::Debug => &mut slash_writers.debug_scroll.rows,
+                };
                 if let Some(next) = handle_passive_cursor_key(
                     &ev.logical_key,
                     &bindings,
                     state,
-                    &mut chat_scroll,
+                    scroll_rows,
                     &mut slash_writers.active_chat_tab,
+                    slash_writers.graphics.chat_layout,
+                    slash_writers.graphics.debug_chat,
                     &scene_state,
                     &cmd_tx.0,
                 ) {
@@ -403,7 +512,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.check_target,
                     &mut slash_writers.trade_state,
                     &mut slash_writers.trade_intent,
-                    &mut slash_writers.select_target,
+                    &mut slash_writers.lock_on,
                 ) {
                     *mode = next;
                 }
@@ -447,6 +556,17 @@ pub(crate) fn text_input_system(
                     &ev.logical_key,
                     &bindings,
                     &mut slash_writers.bazaar_state,
+                    &mut scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+            }
+            InputMode::Shop => {
+                if let Some(next) = handle_shop_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.shop_state,
                     &mut scene_state,
                     &cmd_tx.0,
                 ) {
@@ -821,13 +941,13 @@ fn apply_chat_action(
             if trimmed.starts_with('/') {
                 let outcome = parse_slash(
                     trimmed,
+                    &slash_writers.command_surface,
                     entities,
                     self_pos,
                     current_target,
                     scene_state.snapshot.zone_id,
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
-                    scene_state.snapshot.myroom,
                     fishing_gate,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");
@@ -1020,6 +1140,9 @@ fn dynamic_action_for(
             index,
             item_no,
         },
+        // PickSub never fires an action — handle_sub_target_key stores the
+        // candidate in the sub slot before this is ever called.
+        S::PickSub => unreachable!("PickSub is resolved before dispatch"),
     }
 }
 
@@ -1031,7 +1154,18 @@ fn gather_sub_target_entities(
     use kuluu_snapshot::EntityKind;
     let snap = &scene_state.snapshot;
     let self_id = snap.self_char_id;
+    let self_pet = snap.self_pet_targid;
     let self_pos = snap.self_pos.pos;
+    // A pet joins the enemy set only when its allegiance differs from ours:
+    // the server's TARGET_ENEMY check is the allegiance inequality
+    // (vendor/server/src/map/entities/battle_entity.cpp
+    // CBattleEntity::ValidTarget) and a pet inherits its master's allegiance
+    // (vendor/server/src/map/utils/petutils.cpp). The 0x00A self sync can OR
+    // in a display belligerence bit (vendor/server/src/map/packets/
+    // char_status.cpp), so compare the low three bits.
+    let self_allegiance = self_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .map(|e| e.char_flags.allegiance & 0x07);
     snap.entities
         .iter()
         .map(|e| {
@@ -1048,8 +1182,11 @@ fn gather_sub_target_entities(
                 // yet; party covers the common case (kuluu: revisit when
                 // alliance lists land).
                 is_alliance: is_party,
-                is_enemy: matches!(e.kind, EntityKind::Mob),
+                is_enemy: matches!(e.kind, EntityKind::Mob)
+                    || (matches!(e.kind, EntityKind::Pet)
+                        && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 0x07 != a)),
                 is_npc: matches!(e.kind, EntityKind::Npc),
+                is_own_pet: self_pet.is_some_and(|t| e.act_index == t),
                 is_dead: e.hp_pct == Some(0),
                 dist_sq: dx * dx + dy * dy + dz * dz,
             }
@@ -1086,10 +1223,32 @@ fn open_sub_target(
     scene_state: &mut SceneState,
     return_to: InputMode,
 ) -> Option<InputMode> {
+    use kuluu_render::input_mode::SubTargetAction;
     use kuluu_render::sub_target;
     let flags = sub_target::action_flags(action);
     let ents = gather_sub_target_entities(scene_state);
-    let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
+    // "Switch Target" picks a *different* mob: parking the cursor on the
+    // main target would make the first confirm a no-op, so the picker starts
+    // on the nearest valid candidate other than it.
+    let parked = if matches!(action, SubTargetAction::PickSub) {
+        None
+    } else {
+        current_target
+    };
+    let candidate = if matches!(action, SubTargetAction::PickSub) {
+        sub_target::initial_candidate(flags, None, &ents)
+            .filter(|id| Some(*id) != current_target)
+            .or_else(|| {
+                ents.iter()
+                    .filter(|e| e.id != current_target.unwrap_or(0))
+                    .filter(|e| sub_target::entity_valid(flags, e))
+                    .min_by(|a, b| a.dist_sq.total_cmp(&b.dist_sq))
+                    .map(|e| e.id)
+            })
+    } else {
+        sub_target::initial_candidate(flags, parked, &ents)
+    };
+    let Some(candidate) = candidate else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
         return None;
     };
@@ -1097,6 +1256,11 @@ fn open_sub_target(
     st.candidate = Some(candidate);
     Some(InputMode::SubTarget(st))
 }
+
+/// How long a Switch Target confirm waits for the server's 0x058 before the
+/// picker closes on its own; the answer lands within one AI tick, so this
+/// only covers the server refusing with a rejection line instead.
+const SWITCH_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Retail sub-target cursor keys: Tab/arrows cycle valid candidates in
 /// distance order, Enter fires the pending action at the candidate, Esc
@@ -1110,6 +1274,7 @@ fn handle_sub_target_key(
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
     use ffxi_vocab::valid_target::TargetFlags;
+    use kuluu_render::input_mode::SubTargetAction;
     use kuluu_render::sub_target;
 
     let flags = TargetFlags(state.flags);
@@ -1132,6 +1297,10 @@ fn handle_sub_target_key(
     let reverse = bindings.matches_logical(Action::NavUp, key)
         || bindings.matches_logical(Action::NavLeft, key);
     if forward || reverse {
+        // Re-picking cancels the in-flight switch: the sent 0x058 may still
+        // land the main target, but the picker stays up for the new choice.
+        state.pending_switch = None;
+        state.pending_since = None;
         state.candidate = sub_target::cycle_candidate(flags, state.candidate, &ents, reverse);
         return None;
     }
@@ -1143,6 +1312,46 @@ fn handle_sub_target_key(
             push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
             return None;
         };
+        if matches!(state.action, SubTargetAction::PickSub) {
+            // "Switch Target" asks the server to move the battle target: c2s
+            // 0x01A ChangeTarget, whose engaged branch is a bare
+            // setBattleTarget with no entry validation and no swing-delay
+            // gate (vendor/server/src/map/ai/ai_container.cpp
+            // CAIContainer::Internal_ChangeTarget). The server's 0x058 echo —
+            // one AI tick later — lands it in the main target slot
+            // (apply_server_retarget_system), so the picker holds until then.
+            let Some(ent) = entities.iter().find(|e| e.id == id) else {
+                push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
+                return None;
+            };
+            // The local engage pre-checks are the only range/claim gate on
+            // this path: a candidate the server would refuse at the next
+            // swing (36/12 + disengage) never leaves the client, the server
+            // keeps swinging the current target, and the cursor stays up.
+            if let Some(line) = crate::view_native::engage::rejection_line(
+                ent,
+                scene_state.snapshot.self_pos.pos,
+                scene_state.snapshot.self_char_id,
+                &scene_state.snapshot.party,
+            ) {
+                push_system_chat_line(scene_state, line);
+                return None;
+            }
+            if let Err(err) = cmd_tx.try_send(AgentCommand::Action {
+                target_id: id,
+                target_index: ent.act_index,
+                kind: ActionKind::ChangeTarget,
+            }) {
+                push_system_chat_line(
+                    scene_state,
+                    format!("[menu] Switch Target dispatch dropped: {err}"),
+                );
+                return None;
+            }
+            state.pending_switch = Some(id);
+            state.pending_since = Some(std::time::Instant::now());
+            return None;
+        }
         let self_pos = scene_state.snapshot.self_pos.pos;
         dispatch_dynamic_menu_action(
             dynamic_action_for(state.action),
@@ -1439,6 +1648,10 @@ fn confirm_dialog_choice(
 ) -> Option<u8> {
     let mut open_storage = None;
     if let Some(d) = scene_state.snapshot.dialog.as_ref() {
+        // The player answered the frame manually: the auto-enter clock holds
+        // its fire while this timestamp is inside its guard window, so the
+        // session's round-trip can't double-advance (auto_enter.rs).
+        scene_state.last_manual_dialog_advance = Some(std::time::Instant::now());
         // A server customMenu answers with a `_CUSTOM_MENU` tell, not an
         // EndEventChoice — the server owns the context, not an event.
         if d.custom_menu {
@@ -1545,7 +1758,7 @@ pub fn mouse_nav_dispatch_system(
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
     mut check_target: ResMut<kuluu_render::hud::check_view::CheckTarget>,
     mut trade_state: ResMut<kuluu_render::hud::trade::TradeState>,
-    mut select_target: ResMut<SelectTargetMode>,
+    mut lock_on: ResMut<kuluu_render::LockOn>,
 ) {
     let entities = scene_state.snapshot.entities.clone();
     let current_target = target.id;
@@ -1631,7 +1844,7 @@ pub fn mouse_nav_dispatch_system(
                 &cmd_tx.0,
                 &mut check_target,
                 &mut trade_state,
-                &mut select_target,
+                &mut lock_on,
             ) {
                 *mode = next;
             }
@@ -1773,6 +1986,17 @@ fn handle_dialog_key(
                 title: d.prompt.clone().unwrap_or_default(),
                 option: None,
             });
+            return None;
+        }
+        // Retail's 0x42 disarms ESC-cancel in the prologue of cutscenes that lock
+        // you in (event 503 runs it as its second opcode); while disarmed, ESC is
+        // a no-op — no EVENT_END goes out and the event keeps running.
+        if scene_state
+            .snapshot
+            .dialog
+            .as_ref()
+            .is_some_and(|d| !d.cancel_armed)
+        {
             return None;
         }
         // Reconcile via the session snapshot; clearing here flickers multi-frame events.
@@ -1967,8 +2191,10 @@ fn handle_passive_cursor_key(
     key: &Key,
     bindings: &Bindings,
     state: &mut kuluu_render::input_mode::PassiveCursorState,
-    chat_scroll: &mut ChatScroll,
+    scroll_rows: &mut usize,
     active_chat_tab: &mut ActiveChatTab,
+    layout: kuluu_render::graphics_settings::ChatLayout,
+    debug_chat: bool,
     scene_state: &SceneState,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
@@ -1976,9 +2202,17 @@ fn handle_passive_cursor_key(
 
     let icons = &scene_state.snapshot.status_icons;
 
-    // F advances focus across windows: Chat -> StatusIcons (when buffs exist)
-    // -> World (unfocused), matching retail's window-change cycle.
     if bindings.matches_logical(Action::SelectActiveWindow, key) {
+        if state.focus == PassiveCursorFocus::Chat
+            && kuluu_render::hud::chat_panel::advance_split_focus(
+                &mut active_chat_tab.0,
+                layout,
+                debug_chat,
+            )
+        {
+            state.chat_expanded = false;
+            return None;
+        }
         return Some(match state.focus {
             PassiveCursorFocus::Chat if !icons.is_empty() => {
                 InputMode::PassiveCursor(PassiveCursorState::fresh_status())
@@ -1989,33 +2223,43 @@ fn handle_passive_cursor_key(
 
     match state.focus {
         PassiveCursorFocus::Chat => {
-            let max_back = kuluu_render::snapshot::rendered_chat(scene_state).len();
+            let max_back = kuluu_render::snapshot::rendered_chat(scene_state)
+                .iter()
+                .filter(|line| {
+                    active_chat_tab.0.accepts_in_layout(line.channel, layout)
+                        && kuluu_render::snapshot::chat_line_visible(line.channel, debug_chat)
+                })
+                .count();
             if bindings.matches_logical(Action::NavUp, key) {
-                if chat_scroll.rows + 1 < max_back {
-                    chat_scroll.rows += 1;
+                if *scroll_rows + 1 < max_back {
+                    *scroll_rows += 1;
                 }
                 return None;
             }
             if bindings.matches_logical(Action::NavDown, key) {
-                chat_scroll.rows = chat_scroll.rows.saturating_sub(1);
+                *scroll_rows = scroll_rows.saturating_sub(1);
                 return None;
             }
             if bindings.matches_logical(Action::PageUp, key) {
-                let next = chat_scroll.rows.saturating_add(CHAT_SCROLL_PAGE_ROWS);
-                chat_scroll.rows = next.min(max_back.saturating_sub(1));
+                let next = scroll_rows.saturating_add(CHAT_SCROLL_PAGE_ROWS);
+                *scroll_rows = next.min(max_back.saturating_sub(1));
                 return None;
             }
             if bindings.matches_logical(Action::PageDown, key) {
-                chat_scroll.rows = chat_scroll.rows.saturating_sub(CHAT_SCROLL_PAGE_ROWS);
+                *scroll_rows = scroll_rows.saturating_sub(CHAT_SCROLL_PAGE_ROWS);
                 return None;
             }
             // Left/Right cycle which chat tab the focused log shows.
-            if bindings.matches_logical(Action::NavLeft, key) {
-                active_chat_tab.0 = active_chat_tab.0.cycle_prev();
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavLeft, key)
+            {
+                active_chat_tab.0 = active_chat_tab.0.step(false, debug_chat);
                 return None;
             }
-            if bindings.matches_logical(Action::NavRight, key) {
-                active_chat_tab.0 = active_chat_tab.0.cycle_next();
+            if layout != kuluu_render::graphics_settings::ChatLayout::Unified
+                && bindings.matches_logical(Action::NavRight, key)
+            {
+                active_chat_tab.0 = active_chat_tab.0.step(true, debug_chat);
                 return None;
             }
             // Confirm expands the log to full-screen; cancel contracts it,
@@ -2069,6 +2313,138 @@ fn handle_passive_cursor_key(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_window_tests {
+    use super::*;
+    use kuluu_render::graphics_settings::ChatLayout;
+    use kuluu_render::hud::chat_panel::ChatKind;
+    use kuluu_render::input_mode::PassiveCursorState;
+
+    #[test]
+    fn unified_chat_keeps_focus_on_the_single_log() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Social);
+        let scene = SceneState::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        for key in [Key::ArrowLeft, Key::ArrowRight] {
+            handle_passive_cursor_key(
+                &key,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            );
+            assert_eq!(active.0, ChatKind::Social);
+        }
+        assert!(matches!(
+            handle_passive_cursor_key(
+                &Key::Character("f".into()),
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::Unified,
+                true,
+                &scene,
+                &tx,
+            ),
+            Some(InputMode::World)
+        ));
+    }
+
+    #[test]
+    fn compact_f_selects_second_split_log_before_releasing_focus() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Social);
+        let scene = SceneState::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        let key = Key::Character("f".into());
+        for layout in [ChatLayout::Vertical, ChatLayout::SideBySide] {
+            active.0 = ChatKind::Social;
+            assert!(handle_passive_cursor_key(
+                &key,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                layout,
+                false,
+                &scene,
+                &tx
+            )
+            .is_none());
+            assert_eq!(active.0, ChatKind::Battle);
+            assert!(matches!(
+                handle_passive_cursor_key(
+                    &key,
+                    &bindings,
+                    &mut state,
+                    &mut rows,
+                    &mut active,
+                    layout,
+                    false,
+                    &scene,
+                    &tx
+                ),
+                Some(InputMode::World)
+            ));
+        }
+    }
+
+    #[test]
+    fn backscroll_is_bounded_by_the_selected_log() {
+        let bindings = kuluu_render::keybinds::presets::compact1();
+        let mut state = PassiveCursorState::fresh_chat();
+        let mut active = ActiveChatTab(ChatKind::Battle);
+        let mut scene = SceneState::default();
+        for channel in [
+            kuluu_snapshot::ChatChannel::Say,
+            kuluu_snapshot::ChatChannel::System,
+            kuluu_snapshot::ChatChannel::Battle,
+        ] {
+            let mut line = kuluu_render::snapshot::system_chat_line("message".into());
+            line.channel = channel;
+            scene.snapshot.chat.push(line);
+        }
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut rows = 0;
+        for _ in 0..3 {
+            handle_passive_cursor_key(
+                &Key::ArrowUp,
+                &bindings,
+                &mut state,
+                &mut rows,
+                &mut active,
+                ChatLayout::SideBySide,
+                false,
+                &scene,
+                &tx,
+            );
+        }
+        assert_eq!(rows, 1);
+        handle_passive_cursor_key(
+            &Key::ArrowDown,
+            &bindings,
+            &mut state,
+            &mut rows,
+            &mut active,
+            ChatLayout::SideBySide,
+            false,
+            &scene,
+            &tx,
+        );
+        assert_eq!(rows, 0);
     }
 }
 
@@ -2286,5 +2662,829 @@ mod chat_history_tests {
 
         handle_chat_key(&Key::ArrowUp, &bindings, &mut buffer, &history);
         assert_eq!(buffer.text, "/heal");
+    }
+}
+
+#[cfg(test)]
+mod dialog_esc_gate_tests {
+    use super::*;
+    use kuluu_snapshot::DialogState;
+
+    /// Drains a tokio mpsc receiver without a runtime (try_recv only).
+    pub(super) fn drain(
+        cmd_rx: &mut tokio::sync::mpsc::Receiver<AgentCommand>,
+    ) -> Vec<AgentCommand> {
+        let mut sent = Vec::new();
+        while let Ok(msg) = cmd_rx.try_recv() {
+            sent.push(msg);
+        }
+        sent
+    }
+
+    /// Event 503's master block runs 0x42 as its second opcode: while the VM
+    /// reports cancel_armed=false, ESC must not send any command (retail locks
+    /// you in; no EVENT_END goes out at all).
+    #[test]
+    fn esc_is_a_noop_while_the_vm_has_disarmed_cancel() {
+        let bindings = Bindings::default();
+        let mut cursor = DialogCursor::default();
+        let mut scene_state = SceneState::default();
+        let dialog = DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        };
+        scene_state.snapshot.dialog = Some(dialog);
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        assert!(handle_dialog_key(
+            &Key::Escape,
+            &bindings,
+            &mut cursor,
+            &mut scene_state,
+            &cmd_tx,
+            &mut item_bag
+        )
+        .is_none());
+
+        let sent = drain(&mut cmd_rx);
+        assert!(
+            sent.is_empty(),
+            "ESC must not send any command while cancel is disarmed, got {sent:?}"
+        );
+    }
+
+    /// A plain conversation (cancel_armed=true) still cancels with EndEvent.
+    #[test]
+    fn esc_sends_end_event_while_cancel_is_armed() {
+        let bindings = Bindings::default();
+        let mut cursor = DialogCursor::default();
+        let mut scene_state = SceneState::default();
+        let dialog = DialogState {
+            cancel_armed: true,
+            ..Default::default()
+        };
+        scene_state.snapshot.dialog = Some(dialog);
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        assert!(handle_dialog_key(
+            &Key::Escape,
+            &bindings,
+            &mut cursor,
+            &mut scene_state,
+            &cmd_tx,
+            &mut item_bag
+        )
+        .is_none());
+
+        let sent = drain(&mut cmd_rx);
+        assert_eq!(sent, vec![AgentCommand::EndEvent]);
+    }
+}
+
+/// The CS input lock at the system level: while a VM-driven event frame is up, keys route
+/// through the dialog handler even when InputMode says otherwise — Enter advances the event
+/// with the map open in Menu(Map) mode (event 503's beat), and ESC respects cancel_armed
+/// instead of closing whatever window is up.
+#[cfg(test)]
+mod cs_input_lock_tests {
+    use super::*;
+    use bevy::input::keyboard::KeyCode;
+    use kuluu_snapshot::DialogState;
+
+    /// The full resource set text_input_system's parameters fetch, so the gate can be driven
+    /// on a bare app exactly like cutscene.rs's tests do.
+    pub(super) fn gate_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
+        let mut app = App::new();
+        // Message storage for every reader/writer the system carries.
+        app.add_message::<KeyboardInput>()
+            .add_message::<crate::view_native::gamepad_input::PadKeyEvent>()
+            .add_message::<AppExit>()
+            .add_message::<LoadMmbRequest>()
+            .add_message::<LoadMzbRequest>()
+            .add_message::<kuluu_render::sub_area_activation::SetSubArea>()
+            .add_message::<DebugHeightsRequest>()
+            .add_message::<kuluu_render::audio::SfxEvent>()
+            .add_message::<crate::view_native::screenshot::ScreenshotRequest>()
+            .add_message::<kuluu_render::hud::trade::TradeIntent>();
+        // The shutdown-counter feature adds a slash writer for this message;
+        // the bare app must register it or the gate's fetch panics.
+        #[cfg(feature = "enhanced-shutdown-counter")]
+        app.add_message::<kuluu_render::hud::logout_countdown::LogoutRequested>();
+        // The rest of the parameters.
+        app.insert_resource(CommandTx(cmd_tx));
+        app.insert_resource(Bindings::default());
+        app.insert_resource(KeybindsStateRes {
+            store: crate::keybinds_store::KeybindsStore::new(
+                std::env::temp_dir().join("kuluu-cs-gate-tests-unused.json"),
+            ),
+            persisted: Default::default(),
+        });
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        app.insert_resource(InputMode::Menu(stack));
+        app.insert_resource(Target::default());
+        app.insert_resource(kuluu_render::LockOn::default());
+        app.insert_resource(crate::view_native::auto_target::AutoAttack::default());
+        app.insert_resource(SceneState::default());
+        // The plugin initializes this in production; the gate reads it unconditionally.
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::default());
+        app.insert_resource(crate::view_native::navmesh_overlay::NavmeshOverlayVisible::default());
+        app.insert_resource(crate::view_native::navmesh_overlay::NavmeshState::default());
+        app.insert_resource(bevy_framepace::FramepaceSettings::default());
+        app.insert_resource(CaptureMode::default());
+        app.insert_resource(kuluu_render::EventLog::default());
+        app.insert_resource(kuluu_render::GraphicsSettings::default());
+        app.insert_resource(kuluu_render::hud::HudVerbosity::default());
+        app.insert_resource(kuluu_render::hud::HudPanels::default());
+        app.insert_resource(kuluu_render::hud::network_status::NetStatusVisible::default());
+        app.insert_resource(kuluu_render::vana_time::VanaClock::default());
+        app.insert_resource(kuluu_render::hud::vana_clock::VanaClockVisible::default());
+        app.insert_resource(kuluu_render::minimap::MinimapMode::default());
+        app.insert_resource(kuluu_render::minimap::MinimapVisible::default());
+        app.insert_resource(kuluu_render::minimap::topdown::TopdownCullPolicy::default());
+        app.insert_resource(kuluu_render::audio::AudioMuteState::default());
+        app.insert_resource(kuluu_render::minimap::MinimapZoom::default());
+        app.insert_resource(kuluu_render::minimap::MinimapView::default());
+        app.insert_resource(kuluu_render::minimap::MinimapState::default());
+        app.insert_resource(kuluu_render::combat_stance::RestStance::default());
+        app.insert_resource(kuluu_render::hud::status_panel::StatusProfileOpen::default());
+        app.insert_resource(kuluu_render::hud::item_detail::SortOptions::default());
+        app.insert_resource(kuluu_render::hud::item_detail::ItemMenuFocus::default());
+        app.insert_resource(kuluu_render::hud::item_screen::ItemScreenContainer::default());
+        app.insert_resource(kuluu_render::hud::item_screen::ItemListViewport::default());
+        app.insert_resource(kuluu_render::hud::check_view::CheckTarget::default());
+        app.insert_resource(kuluu_render::hud::bazaar_view::BazaarScreenState::default());
+        app.insert_resource(kuluu_render::hud::trade::TradeState::default());
+        app.insert_resource(kuluu_render::hud::shop::ShopScreenState::default());
+        app.insert_resource(kuluu_render::hud::delivery::DeliveryScreenState::default());
+        app.insert_resource(kuluu_render::hud::delivery::DeliveryInventory::default());
+        app.insert_resource(kuluu_render::hud::auction::AuctionScreenState::default());
+        app.insert_resource(kuluu_render::hud::auction::AuctionSellInventory::default());
+        app.insert_resource(crate::view_native::command_surface::CommandSurface::default());
+        app.insert_resource(kuluu_render::fishing_spot::FishingSpot::default());
+        app.insert_resource(ActiveChatTab::default());
+        app.insert_resource(ChatHistory::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapScreenState::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapMarkers::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapView::default());
+        app.insert_resource(kuluu_render::hud::map_screen::ChangeMapCatalog::default());
+        app.insert_resource(kuluu_render::hud::death_prompt::DeathPromptSelection::default());
+        app.insert_resource(crate::view_native::DatRootRes(None));
+        app.insert_resource(kuluu_render::dat_mzb::DrawDistance::default());
+        app.insert_resource(ChatScroll::default());
+        app.insert_resource(kuluu_render::hud::chat_panel::BattleScroll::default());
+        app.insert_resource(kuluu_render::hud::chat_panel::DebugScroll::default());
+        app.insert_resource(kuluu_render::hud::menu::DynamicMenu::default());
+        app.add_systems(Update, text_input_system);
+        app
+    }
+
+    fn press(app: &mut App, key: Key) {
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::Enter,
+                logical_key: key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+    }
+
+    /// Event 503's map beat: the coupon line is up with the map open in Menu(Map) mode and the
+    /// VM disarmed ESC-cancel. Enter must advance the event (EndEventChoice), not fall through
+    /// to the menu handler — without the gate a human playthrough hangs here.
+    #[test]
+    fn enter_advances_the_event_with_the_map_open() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
+
+        press(&mut app, Key::Enter);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEventChoice {
+                event_id: 0,
+                act_index: 0,
+                event_num: 0,
+                choice: 0
+            }],
+            "Enter must advance the event, got {sent:?}"
+        );
+    }
+
+    /// Same state, ESC instead: with cancel disarmed (event 503's second opcode) no command may
+    /// go out at all — the map cannot be closed by hand while the frame is up.
+    #[test]
+    fn esc_cannot_close_the_map_while_disarmed() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
+
+        press(&mut app, Key::Escape);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert!(
+            sent.is_empty(),
+            "ESC must be a no-op while disarmed, got {sent:?}"
+        );
+    }
+
+    /// The gate must not overreach: with no cutscene session active the same Menu(Map) + frame
+    /// state routes to the menu handler as before — its map-beat branch cancels the event
+    /// unconditionally (no cancel_armed check), which is exactly what the gated path refuses.
+    #[test]
+    fn without_a_cutscene_session_the_menu_handler_keeps_the_keys() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
+        // CutsceneMode defaults to inactive — no session brackets this frame.
+
+        press(&mut app, Key::Escape);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEvent],
+            "the map handler's own cancel must run when no CS session is active, got {sent:?}"
+        );
+    }
+}
+
+/// Auto-Enter CS at the system level: with the Debug row on, eligible
+/// message frames advance themselves after their read time (the same
+/// `EndEventChoice` Enter would send), and the frames the player must answer
+/// stay manual.
+#[cfg(test)]
+mod auto_enter_tests {
+    use super::*;
+    use kuluu_snapshot::DialogState;
+
+    /// A headless app carrying only auto_enter_cs_system's parameters;
+    /// MinimalPlugins supplies the Time resource and its per-update advance.
+    fn auto_enter_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CommandTx(cmd_tx));
+        app.insert_resource(kuluu_render::hud::HudPanels::default());
+        app.insert_resource(SceneState::default());
+        app.add_systems(Update, auto_enter_cs_system);
+        app
+    }
+
+    fn eligible_frame() -> DialogState {
+        DialogState {
+            npc_id: 0x010E6001,
+            act_index: 7,
+            event_para: 230,
+            prompt: Some("A line of narration.".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn off_sends_nothing() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    #[test]
+    fn choice_frames_are_never_advanced() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        let mut d = eligible_frame();
+        d.choices.push("Yes".into());
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(d);
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    #[test]
+    fn blacklisted_speakers_are_never_advanced() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        let mut d = eligible_frame();
+        d.npc_name = Some("Paintbrush of Souls".into());
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(d);
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    /// The read-time floor is 1.5 s of wall clock, so this test runs real
+    /// time; the deadline bounds a wedged clock.
+    #[test]
+    fn eligible_frame_advances_exactly_once_after_its_read_time() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let mut sent = Vec::new();
+        while sent.is_empty() && std::time::Instant::now() < deadline {
+            app.update();
+            sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        }
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEventChoice {
+                event_id: 0x010E6001,
+                act_index: 7,
+                event_num: 230,
+                choice: 0
+            }],
+            "the eligible frame must advance exactly once, got {sent:?}"
+        );
+    }
+
+    /// A manual Enter landing just before the clock's fire must hold it: the
+    /// snapshot is still on the pre-advance frame, and sending would make the
+    /// session dismiss the frame the manual advance just opened. Runs real
+    /// time up to the 1.5 s read-time floor plus guard margin.
+    #[test]
+    fn a_recent_manual_advance_holds_the_fire() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1300) {
+            app.update();
+        }
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .last_manual_dialog_advance = Some(std::time::Instant::now());
+        while start.elapsed() < std::time::Duration::from_millis(1900) {
+            app.update();
+        }
+        assert!(
+            dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty(),
+            "the manual-advance guard must hold the fire"
+        );
+    }
+}
+
+/// "Switch Target" (PickSub) parks the sub-target cursor off the main target
+/// and confirms into the main target: parking on the main target would make
+/// the first Enter a no-op, and confirming re-engages on the chosen mob.
+#[cfg(test)]
+mod sub_target_pick_tests {
+    use super::*;
+    use kuluu_render::input_mode::SubTargetAction;
+    use kuluu_snapshot::{Entity, EntityKind, PartyMember, Vec3};
+
+    fn ent(id: u32, kind: EntityKind, x: f32) -> Entity {
+        Entity {
+            id,
+            act_index: 0,
+            kind,
+            name: Some(format!("e{id}")),
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            name_vis: None,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: Default::default(),
+            monstrosity: false,
+        }
+    }
+
+    fn party_member(id: u32) -> PartyMember {
+        PartyMember {
+            id,
+            act_index: 0,
+            name: Some(format!("p{id}")),
+            hp: 100,
+            mp: 100,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        }
+    }
+
+    const SELF_ID: u32 = 0x0100_0001;
+    const MOB_ID: u32 = 0x0200_0001;
+    const MOB2_ID: u32 = 0x0200_0002;
+    const PARTY_ID: u32 = 0x0100_0002;
+    const ENEMY_PET_ID: u32 = 0x0300_0001;
+    const OWNED_PET_ID: u32 = 0x0300_0002;
+    const PARTY_PET_ID: u32 = 0x0300_0003;
+
+    fn with_allegiance(mut e: Entity, allegiance: u8) -> Entity {
+        e.char_flags.allegiance = allegiance;
+        e
+    }
+
+    // xi::Allegiance values (vendor/server/data/enums/allegiance.yaml): the
+    // nation band, so the scene exercises the PVP pet inequality.
+    const SELF_NATION: u8 = 2;
+    const ENEMY_NATION: u8 = 3;
+
+    /// Self at the origin on the San d'Oria allegiance, the engaged mob 5
+    /// yalms out, a second mob 8 yalms out, a party member 3 yalms out, an
+    /// enemy pet 6 yalms out, and the owned/party pets 4 yalms out. Pets
+    /// carry no claim: the server never sets one on a pet
+    /// (vendor/server/src/map/utils/battleutils.cpp ClaimMob).
+    fn battle_scene() -> SceneState {
+        let mut s = SceneState::default();
+        s.snapshot.self_char_id = Some(SELF_ID);
+        s.snapshot.entities = vec![
+            with_allegiance(ent(SELF_ID, EntityKind::Pc, 0.0), SELF_NATION),
+            ent(MOB_ID, EntityKind::Mob, 5.0),
+            ent(MOB2_ID, EntityKind::Mob, 8.0),
+            ent(PARTY_ID, EntityKind::Pc, 3.0),
+            with_allegiance(ent(ENEMY_PET_ID, EntityKind::Pet, 6.0), ENEMY_NATION),
+            with_allegiance(ent(OWNED_PET_ID, EntityKind::Pet, 4.0), SELF_NATION),
+            with_allegiance(ent(PARTY_PET_ID, EntityKind::Pet, 4.0), SELF_NATION),
+        ];
+        s.snapshot.party = vec![party_member(PARTY_ID)];
+        s
+    }
+
+    #[test]
+    fn pick_sub_does_not_park_on_the_main_target() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .expect("the picker must open with candidates in range");
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker, got {mode:?}");
+        };
+        assert_ne!(
+            st.candidate,
+            Some(MOB_ID),
+            "Switch Target must not park on the main target: the first Enter would be a no-op"
+        );
+    }
+
+    #[test]
+    fn pick_sub_confirm_sends_a_change_target_and_holds_the_picker() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        let next = handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert!(
+            next.is_none(),
+            "confirm must hold the picker up for the server's 0x058: {next:?}"
+        );
+        let sent = cmd_rx
+            .try_recv()
+            .expect("confirm must send the ChangeTarget");
+        assert!(
+            matches!(
+                sent,
+                AgentCommand::Action {
+                    target_id,
+                    kind: ActionKind::ChangeTarget,
+                    ..
+                } if target_id == st.candidate.unwrap()
+            ),
+            "confirm must ask the server to move the battle target to the chosen candidate: {sent:?}"
+        );
+        assert_eq!(
+            st.pending_switch, st.candidate,
+            "the sent candidate must arm the answer wait"
+        );
+        assert!(st.pending_since.is_some());
+    }
+
+    #[test]
+    fn pick_sub_confirm_refuses_a_mob_beyond_the_engage_range() {
+        let far_id: u32 = 0x0200_0003;
+        let mut scene = battle_scene();
+        // Inside the sub-target range, beyond the engage range.
+        scene
+            .snapshot
+            .entities
+            .push(ent(far_id, EntityKind::Mob, 40.0));
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        st.candidate = Some(far_id);
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        let next = handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert!(
+            next.is_none(),
+            "a locally refused switch must keep the cursor up for the next candidate: {next:?}"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no command may leave the client for a doomed switch"
+        );
+        assert_eq!(
+            st.pending_switch, None,
+            "a refused candidate must not arm the wait"
+        );
+    }
+
+    #[test]
+    fn switch_target_includes_enemy_pets_not_friendly_pets() {
+        let scene = battle_scene();
+        let flags = kuluu_render::sub_target::action_flags(SubTargetAction::PickSub);
+        let ents = gather_sub_target_entities(&scene);
+        let by_id = |id: u32| ents.iter().find(|e| e.id == id).expect("scene entity");
+        assert!(kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(ENEMY_PET_ID)
+        ));
+        assert!(!kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(OWNED_PET_ID)
+        ));
+        assert!(!kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(PARTY_PET_ID)
+        ));
+        // The picker itself must park on the enemy pet, not a friendly one.
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .expect("the picker must open with candidates in range");
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker, got {mode:?}");
+        };
+        assert_eq!(st.candidate, Some(ENEMY_PET_ID));
+    }
+
+    #[test]
+    fn spell_prompt_still_parks_on_the_current_target() {
+        // The retail "confirm on the current target" rule stays for actions:
+        // Cure on a valid party target parks on it, not on self.
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::Spell(1),
+            Some(PARTY_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker");
+        };
+        assert_eq!(st.candidate, Some(PARTY_ID));
+    }
+
+    #[test]
+    fn own_pet_is_marked_from_the_pet_sync_targid() {
+        let mut scene = battle_scene();
+        // Distinct wire targids per entity.
+        for (i, e) in scene.snapshot.entities.iter_mut().enumerate() {
+            e.act_index = i as u16 + 1;
+        }
+        let owned_idx = scene
+            .snapshot
+            .entities
+            .iter()
+            .position(|e| e.id == OWNED_PET_ID)
+            .expect("owned pet in scene");
+        scene.snapshot.self_pet_targid = Some(scene.snapshot.entities[owned_idx].act_index);
+        let ents = gather_sub_target_entities(&scene);
+        let by_id = |id: u32| ents.iter().find(|e| e.id == id).expect("scene entity");
+        assert!(by_id(OWNED_PET_ID).is_own_pet);
+        assert!(!by_id(PARTY_PET_ID).is_own_pet);
+        assert!(!by_id(ENEMY_PET_ID).is_own_pet);
+        // A PET-flagged ability (Sic, 72) accepts the own pet; the
+        // ENEMY-only Switch Target does not.
+        let flags = kuluu_render::sub_target::action_flags(SubTargetAction::Ability(72));
+        assert!(kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(OWNED_PET_ID)
+        ));
+        let pick = kuluu_render::sub_target::action_flags(SubTargetAction::PickSub);
+        assert!(!kuluu_render::sub_target::entity_valid(
+            pick,
+            by_id(OWNED_PET_ID)
+        ));
+    }
+
+    #[test]
+    fn pick_sub_cycling_cancels_the_answer_wait() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert!(
+            st.pending_switch.is_some(),
+            "confirm must arm the answer wait"
+        );
+        handle_sub_target_key(
+            &Key::Tab,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert_eq!(
+            st.pending_switch, None,
+            "cycling to another candidate must cancel the in-flight switch wait"
+        );
+        assert!(st.pending_since.is_none());
+    }
+
+    /// The picker holds while the 0x058 is in flight and closes the moment the
+    /// main target lands on the sent candidate — the swap the frame shows is
+    /// the server's commit, not our send.
+    #[test]
+    fn pick_sub_picker_closes_when_the_server_commits_the_candidate() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let mut st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        st.candidate = Some(MOB2_ID);
+        st.pending_switch = Some(MOB2_ID);
+        st.pending_since = Some(std::time::Instant::now());
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<InputMode>(),
+                InputMode::SubTarget(_)
+            ),
+            "the picker must hold while the server's 0x058 is in flight"
+        );
+        app.world_mut().resource_mut::<Target>().id = Some(MOB2_ID);
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "the committed 0x058 must close the picker"
+        );
+    }
+
+    /// No 0x058, no rejection the client can see: the wait lapses and the
+    /// picker closes on its own, leaving the main target where it was.
+    #[test]
+    fn pick_sub_picker_lapses_when_no_answer_lands() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let mut st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        st.candidate = Some(MOB2_ID);
+        st.pending_switch = Some(MOB2_ID);
+        // Armed past the answer window: the 0x058 never came.
+        st.pending_since = Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "a lapsed answer wait must close the picker on its own"
+        );
+        assert_eq!(
+            app.world().resource::<Target>().id,
+            None,
+            "the main target must stay where it was"
+        );
+    }
+
+    /// The main target dying while the switch-target picker is up makes the
+    /// switch moot: the picker closes (the weapon sheathes on its own via the
+    /// pose pass's active-target gate).
+    #[test]
+    fn pick_sub_picker_closes_when_the_main_target_dies() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        // The main target is live while the picker is up.
+        app.world_mut().resource_mut::<Target>().id = Some(MOB_ID);
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<InputMode>(),
+                InputMode::SubTarget(_)
+            ),
+            "the picker must stay up while the main target is alive"
+        );
+        // The main target dies: auto_clear drops it, the picker must close.
+        app.world_mut().resource_mut::<Target>().id = None;
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "a dead main target must close the switch-target picker"
+        );
     }
 }

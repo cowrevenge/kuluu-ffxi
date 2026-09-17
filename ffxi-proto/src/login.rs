@@ -64,7 +64,7 @@ mod tests {
 
     // vendor/server/settings/default/login.lua CLIENT_VER / VER_LOCK; a vendor
     // pin bump updates both literals alongside the scrape.
-    const LSB_PINNED_CLIENT_VER: &str = "30260203_0";
+    const LSB_PINNED_CLIENT_VER: &str = "30260904_1";
     const LSB_PINNED_VER_LOCK: u8 = 2;
 
     #[test]
@@ -152,18 +152,23 @@ mod tests {
             LSB_CLIENT_VER,
             VerLock::Exact
         ));
-        assert!(lobby_accepts_client_ver(
+        assert!(!lobby_accepts_client_ver(
             "30260203_0",
             LSB_CLIENT_VER,
             VerLock::Exact
         ));
         assert!(lobby_accepts_client_ver(
-            "30260228_3",
+            "30260904_1",
+            LSB_CLIENT_VER,
+            VerLock::Exact
+        ));
+        assert!(lobby_accepts_client_ver(
+            "30260928_2",
             LSB_CLIENT_VER,
             VerLock::Exact
         ));
         assert!(!lobby_accepts_client_ver(
-            "30260904_1",
+            "30261001_0",
             LSB_CLIENT_VER,
             VerLock::Exact
         ));
@@ -181,13 +186,18 @@ mod tests {
             LSB_CLIENT_VER,
             VerLock::AtLeast
         ));
-        assert!(lobby_accepts_client_ver(
+        assert!(!lobby_accepts_client_ver(
             "30260203_0",
             LSB_CLIENT_VER,
             VerLock::AtLeast
         ));
         assert!(lobby_accepts_client_ver(
             "30260904_1",
+            LSB_CLIENT_VER,
+            VerLock::AtLeast
+        ));
+        assert!(lobby_accepts_client_ver(
+            "30261001_0",
             LSB_CLIENT_VER,
             VerLock::AtLeast
         ));

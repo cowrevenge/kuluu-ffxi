@@ -195,6 +195,7 @@ pub struct MzbCollisionBlock {
     /// belongs to, `NO_SUB_AREA_LINK` for ordinary zone surface. Empty means
     /// "no shells here", matching the `tri_normals` fallback convention.
     pub tri_sub_area: Vec<u32>,
+    pub tri_lighting: Vec<Option<GroundLighting>>,
 
     /// Which shell [`Self::for_each_hit_in_column`] walks past. Retail suppresses
     /// at query time rather than by rebuilding the block —
@@ -626,6 +627,30 @@ impl MzbCollisionGeometry {
         mzb::TerrainType::from_nibble(*self.block(slot).tri_terrain.get(tri_id)?)
     }
 
+    // research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp CollisionQuery.
+    pub fn lighting_at(&self, feet: Vec3) -> Option<GroundLighting> {
+        let mut best: Option<(u8, f32, usize)> = None;
+        self.for_each_hit_in_column(feet.xz(), |slot, tri, height, normal| {
+            if normal.y < FLOOR_NORMAL_MIN
+                || height > feet.y + MAX_GROUND_STEP_UP + STEP_UP_REACH_EPSILON
+            {
+                return;
+            }
+            if best.is_none_or(|(old_slot, old_height, _)| {
+                step_candidate_beats(
+                    (slot, height),
+                    (old_slot, old_height),
+                    feet.y,
+                    MAX_GROUND_STEP_UP,
+                )
+            }) {
+                best = Some((slot, height, tri));
+            }
+        });
+        let (slot, _, tri) = best?;
+        self.block(slot).tri_lighting.get(tri).copied().flatten()
+    }
+
     /// Whether any up-facing floor in this column, from `from_y` down to
     /// `from_y - max_drop`, is water.
     ///
@@ -684,6 +709,7 @@ pub fn build_collision_geometry(
     let mut camera_skip: Vec<bool> = Vec::new();
     let mut tri_terrain: Vec<u8> = Vec::new();
     let mut tri_sub_area: Vec<u32> = Vec::new();
+    let mut tri_lighting = Vec::new();
     let mut missing = 0usize;
 
     for inst in instances {
@@ -718,6 +744,7 @@ pub fn build_collision_geometry(
             ));
             tri_terrain.push(sub.tri_terrain.get(t).copied().unwrap_or_default());
             tri_sub_area.push(inst.sub_area_link);
+            tri_lighting.push(inst.lighting);
         }
     }
 
@@ -739,6 +766,7 @@ pub fn build_collision_geometry(
         camera_skip,
         tri_terrain,
         tri_sub_area,
+        tri_lighting,
         suppressed: None,
         source_file_id: file_id,
     }
@@ -967,11 +995,18 @@ pub struct MzbSubMesh {
     pub flags: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroundLighting {
+    pub area: u32,
+    pub lights: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+}
+
 pub struct MzbInstance {
     pub submesh_idx: usize,
     pub bevy_transform: Transform,
 
     pub water_height_bevy: Option<f32>,
+    pub lighting: Option<GroundLighting>,
 
     /// `ffxi_dat::mzb::MzbPlacement::sub_area_link` — the interior whose shell
     /// this is, `NO_SUB_AREA_LINK` for ordinary zone surface.
@@ -994,6 +1029,7 @@ pub fn load_mzb_placed(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    let bindings = mzb::parse_light_bindings(&plain, &header);
     let placements =
         mzb::parse_placements(&plain, &header).map_err(|e| format!("MZB parse_placements: {e}"))?;
 
@@ -1029,6 +1065,7 @@ pub fn load_mzb_placed(
                 submesh_idx: idx,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             });
         }
@@ -1095,6 +1132,10 @@ pub fn load_mzb_placed(
             submesh_idx: idx,
             bevy_transform: Transform::from_matrix(m_bevy),
             water_height_bevy,
+            lighting: p.lighting.map(|lighting| GroundLighting {
+                area: lighting.area,
+                lights: mzb::resolve_actor_lights(&lighting.light_references, &bindings),
+            }),
             sub_area_link: p.sub_area_link,
         });
     }
@@ -1171,6 +1212,8 @@ fn load_decrypted(
 
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneMmbSpawn {
+    pub light_bindings: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+    pub area_id: u32,
     pub voyage_backdrop: bool,
     pub chunk_idx: usize,
     pub bevy_transform: Mat4,
@@ -1276,14 +1319,6 @@ pub struct ZoneMmbBuild {
 
 /// Which [`AreaResourceId`] each point of the zone belongs to.
 ///
-/// Retail asks the collision map for the FourCC of the block under the actor and
-/// draws that actor's fog and ambient from the matching `XiArea`
-/// (CollidableActor.cpp CollidableActor::UpdateGroundNormal, SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting). Our MZB
-/// collision section carries no area id — only the render placements do
-/// (ZoneBlockFormat.h PositionedMeshBlockData) — so the block is found by its own bounds instead.
-/// The areas that differ from the zone environment are building interiors and
-/// the blocks that floor them, so [`ZoneAreaBox::holds`] answers the same
-/// question the ground query does.
 #[derive(Resource, Default)]
 pub struct ZoneAreaMap {
     slots: [ZoneAreaSlot; ZONE_BLOCK_SLOTS],
@@ -1441,6 +1476,56 @@ pub fn placement_bevy_transform(scale: Vec3, rot: Vec3, trans: Vec3) -> Mat4 {
             Quat::from_euler(EulerRot::XYZEx, rot.x, rot.y, rot.z),
             trans,
         )
+}
+
+pub(crate) fn water_generator_model(
+    body: &[u8],
+) -> Option<(
+    ffxi_dat::generator::ModelSpawnDef,
+    ffxi_dat::particle_gen::ParticleGeneratorDef,
+)> {
+    let def = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(body).ok()??;
+    if def.camera_relative || def.max_life_frames != 0.0 {
+        return None;
+    }
+    let model = ffxi_dat::generator::Generator::parse_model_spawn(body).ok()??;
+    (model.uv_scroll != [0.0, 0.0]).then_some((model, def))
+}
+
+pub(crate) fn water_generator_offsets(bytes: &[u8]) -> std::collections::HashSet<usize> {
+    let chunks: Vec<_> = walk(bytes).flatten().collect();
+    let mut ids = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for c in &chunks {
+        if c.kind != ChunkKind::Mmb as u8 {
+            continue;
+        }
+        ids.insert(
+            String::from_utf8_lossy(&c.name)
+                .trim_end_matches('\0')
+                .trim_end()
+                .to_owned(),
+        );
+        if let Some(name) = mmb::decrypt(c.data)
+            .ok()
+            .and_then(|d| MmbHeader::parse(&d).ok().map(|h| h.zone_mesh_name()))
+        {
+            names.push(name);
+        }
+    }
+    let prefix = mzb::infer_zone_prefix(&names);
+    chunks
+        .iter()
+        .filter_map(|c| {
+            if c.kind != ChunkKind::Generator as u8 {
+                return None;
+            }
+            let (model, _) = water_generator_model(c.data)?;
+            let name = model.model_name_str().trim_end();
+            (ids.contains(name) || mzb::resolve_mmb_index(name, &prefix, &names).is_some())
+                .then_some(c.offset)
+        })
+        .collect()
 }
 
 pub fn build_zone_mmb_spawns(
@@ -1712,6 +1797,8 @@ pub fn build_zone_mmb_spawns(
             .map(|slot| crate::zone_doors::ZoneDoorLeaf::new(*slot, p));
         for local in variants {
             out.push(ZoneMmbSpawn {
+                light_bindings: chunk_lights,
+                area_id,
                 chunk_idx: mmb_indices[local],
                 bevy_transform,
                 water: None,
@@ -1750,41 +1837,9 @@ pub fn build_zone_mmb_spawns(
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt updateAssociatedPosition:
-        // the weat/<type>/ sky generators (cloud canopies cld1/cld2 and per-weather
-        // variants like ~4cl) set the follow_camera config bit (0x0004) — they are
-        // camera-relative sky registered through EffectManager, NOT world geometry.
-        // They share the water signature below (singleton + uv_scroll), so a
-        // name-based skip missed variants and spawned the cloud dome as a static
-        // sheet draped over the zone (kuluu-nfrp). Reject any camera-follow
-        // generator; real water (sea1/sea2, izu*) is world-anchored (follow=false).
-        let follows_camera = ffxi_dat::generator::Generator::parse_cloud_generator(c.name, c.data)
-            .ok()
-            .flatten()
-            .is_some_and(|d| d.follow_camera);
-        if follows_camera {
-            continue;
-        }
-        let Ok(Some(ms)) = ffxi_dat::generator::Generator::parse_model_spawn(c.data) else {
+        let Some((ms, gen_def)) = water_generator_model(c.data) else {
             continue;
         };
-        // Scrolling sheets are the water surfaces (sea1/sea2 scroll their UVs);
-        // static model-spawns (ships, floors, collision hulls) have zero scroll
-        // and are left to the normal geometry path — spawning them here would
-        // give them the translucent water material.
-        if ms.uv_scroll == [0.0, 0.0] {
-            continue;
-        }
-        // Singletons (max_life_frames == 0) are static sheets. life > 0 generators
-        // (e.g. Port Windurst "rivs", Bastok "tki*") emit particles over time and
-        // belong to the particle path; taking them here would double-render them.
-        let is_singleton = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data)
-            .ok()
-            .flatten()
-            .is_none_or(|d| d.max_life_frames == 0.0);
-        if !is_singleton {
-            continue;
-        }
         let name = ms.model_name_str().trim_end();
         // Resolve by the MMB DatId first (the generator's own linkage), then fall
         // back to the header zone_mesh_name path. Only names that resolve to an MMB
@@ -1825,6 +1880,8 @@ pub fn build_zone_mmb_spawns(
             .unwrap_or(([0.0; 3], [0.0; 3]));
         let (world_min, world_max) = world_bounds_from_local(bevy_transform, local_min, local_max);
         out.push(ZoneMmbSpawn {
+            light_bindings: [None; mzb::LIGHT_REFERENCE_COUNT],
+            area_id: 0,
             chunk_idx,
             bevy_transform,
             water: Some(crate::dat_mmb::GenWater {
@@ -1832,6 +1889,7 @@ pub fn build_zone_mmb_spawns(
                 uv_scroll: Vec2::new(ms.uv_scroll[0], ms.uv_scroll[1]),
                 world_min,
                 world_max,
+                sort_bias: crate::element_sort::transparent_sort_bias(&gen_def, c.offset),
             }),
             // Generator sheets carry no placement record, so no LOD triple, no
             // `_`/`@` group membership and no sub-area shell role.
@@ -2943,6 +3001,8 @@ fn spawn_mzb_overlay(
                     entity_id: None,
                     world_transform: Some(offset * s.bevy_transform),
                     water: s.water,
+                    light_bindings: s.light_bindings,
+                    area_id: s.area_id,
                     lod: s.lod,
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                     slot: req.slot,
@@ -3221,7 +3281,15 @@ pub fn cull_entities_by_distance(
     draw: Res<DrawDistance>,
     table: Res<EntityTable>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
-    mut ent_q: Query<(&WorldEntity, &GlobalTransform, &mut Visibility), Without<IsSelf>>,
+    mut ent_q: Query<
+        (
+            &WorldEntity,
+            &GlobalTransform,
+            Option<&crate::scheduler_runtime::CutsceneHidden>,
+            &mut Visibility,
+        ),
+        Without<IsSelf>,
+    >,
 ) {
     let Ok(self_t) = self_q.single() else {
         return;
@@ -3229,7 +3297,15 @@ pub fn cull_entities_by_distance(
     let self_pos = self_t.translation();
     let cull_sq = draw.mob * draw.mob;
 
-    for (ent, ent_t, mut vis) in ent_q.iter_mut() {
+    for (ent, ent_t, cutscene_hidden, mut vis) in ent_q.iter_mut() {
+        // Cutscene-hidden models are owned by the running event's choreography; keep them hidden
+        // while the marker is present so an in-range cull pass does not re-show them mid-scene.
+        if cutscene_hidden.is_some() {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
+        }
         // Server-invisible models are owned by sync_entities_system; resetting them to
         // Inherited would re-show the model every frame. Kind-agnostic on purpose.
         if table.get(ent.id).is_some_and(|r| r.is_invisible()) {
@@ -3316,10 +3392,37 @@ pub(crate) mod ground_tests {
             camera_skip: Vec::new(),
             tri_terrain: Vec::new(),
             tri_sub_area: Vec::new(),
+            tri_lighting: Vec::new(),
             suppressed: None,
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
+    }
+
+    #[test]
+    fn floor_lighting_ignores_overhead_surfaces_and_suppressed_shells() {
+        const INDOOR: u32 = u32::from_le_bytes(*b"ev01");
+        const OUTDOOR: u32 = 0;
+        const CEILING_HEIGHT: f32 = 4.0;
+        const LIGHT: u32 = u32::from_le_bytes(*b"c14 ");
+        let indoor = GroundLighting {
+            area: INDOOR,
+            lights: [Some(LIGHT), None, None, None],
+        };
+        let outdoor = GroundLighting {
+            area: OUTDOOR,
+            ..default()
+        };
+        let mut block = slab_block(&[(0.0, Vec3::Y), (CEILING_HEIGHT, Vec3::Y)]);
+        block.tri_lighting = vec![Some(indoor), Some(indoor), Some(outdoor), Some(outdoor)];
+        let mut geom = MzbCollisionGeometry::from_block(block);
+        assert_eq!(geom.lighting_at(Vec3::ZERO), Some(indoor));
+        assert_eq!(geom.lighting_at(Vec3::Y * CEILING_HEIGHT), Some(outdoor));
+        geom.slots[0].tri_sub_area = vec![INDOOR; 4];
+        geom.set_suppressed(Some(INDOOR));
+        assert_eq!(geom.lighting_at(Vec3::ZERO), None);
+        geom.clear_block(ZONE_SLOT_MAIN);
+        assert_eq!(geom.lighting_at(Vec3::ZERO), None);
     }
 
     fn slabs(slabs: &[(f32, Vec3)]) -> MzbCollisionGeometry {
@@ -3419,12 +3522,14 @@ pub(crate) mod ground_tests {
                 submesh_idx: 0,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: SHELL,
             },
             MzbInstance {
                 submesh_idx: 0,
                 bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
         ];
@@ -3478,18 +3583,21 @@ pub(crate) mod ground_tests {
                 submesh_idx: 0,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 0,
                 bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 1,
                 bevy_transform: Transform::from_xyz(100.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
         ];
@@ -4528,6 +4636,62 @@ mod cull_tests {
             *app.world().get::<Visibility>(vis_out_of_range).unwrap(),
             Visibility::Hidden,
             "out-of-range visible entity is hidden by distance-culling (control)"
+        );
+    }
+
+    /// A model hidden by a running cutscene's EVENT_HIDE cue carries the CutsceneHidden marker;
+    /// an in-range cull pass must not reset its Visibility back to Inherited, or event 503's
+    /// knights re-appear mid-scene. Unmarked entities keep normal cull behavior.
+    #[test]
+    fn cull_respects_cutscene_hidden_entities() {
+        let mut app = App::new();
+        app.init_resource::<DrawDistance>()
+            .init_resource::<EntityTable>()
+            .add_systems(Update, cull_entities_by_distance);
+
+        // Self at origin; cull needs exactly one IsSelf.
+        app.world_mut().spawn((
+            IsSelf,
+            GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),
+        ));
+
+        let cs_hidden_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 1,
+                    act_index: 0,
+                    kind: EntityKind::Pc,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                crate::scheduler_runtime::CutsceneHidden,
+                Visibility::Inherited,
+            ))
+            .id();
+        let vis_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 2,
+                    act_index: 0,
+                    kind: EntityKind::Pc,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(cs_hidden_in_range).unwrap(),
+            Visibility::Hidden,
+            "cutscene-hidden entity must stay hidden; cull must not reset it to Inherited"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_in_range).unwrap(),
+            Visibility::Inherited,
+            "unmarked in-range entity keeps normal cull behavior (control)"
         );
     }
 }

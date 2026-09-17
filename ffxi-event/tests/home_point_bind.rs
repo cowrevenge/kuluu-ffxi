@@ -23,16 +23,20 @@ const MAX_STEPS: usize = 40;
 
 fn load() -> Option<(EventDat, StringDat)> {
     let root = DatRoot::from_env_or_default().ok()?;
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(BASTOK_MARKETS)?;
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(BASTOK_MARKETS))
+        .ok()?;
     let dat = EventDat::parse(&std::fs::read(loc.path_under(&root)).ok()?).ok()?;
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(BASTOK_MARKETS)?;
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(BASTOK_MARKETS);
     let sloc = root.resolve(file_id).ok()?;
     let strings = StringDat::parse(&std::fs::read(sloc.path_under(&root)).ok()?).ok()?;
     Some((dat, strings))
 }
 
 /// Drives the event choosing `first` on the "What will you do?" menu and `later` on
-/// every menu after it, returning the cues in order.
+/// every menu after it, returning the cues in order. The event's own 0x43
+/// send-tag and WAIT parks are answered the way a live host would, so they do
+/// not stop the drive.
 fn drive(
     dat: &EventDat,
     strings: &StringDat,
@@ -49,7 +53,7 @@ fn drive(
     let mut menus = Vec::new();
     let mut choice = None;
     for _ in 0..MAX_STEPS {
-        let step = runner.advance(choice.take(), strings);
+        let step = advance_past_parks(&mut runner, choice.take(), strings);
         cues.extend(runner.take_cues());
         match step {
             DialogStep::Frame(f) if !f.choices.is_empty() => {
@@ -61,6 +65,27 @@ fn drive(
         }
     }
     (cues, menus)
+}
+
+/// Runs to the next dialog frame, answering the parks the event's own
+/// choreography sets: the 0x43 send-tag is acked the way the server would
+/// (a unit test has no c2s/s2c round-trip) and a timed wait is run to
+/// expiry, the pattern the runner's own tests use.
+fn advance_past_parks(
+    runner: &mut DialogRunner,
+    choice: Option<u32>,
+    strings: &StringDat,
+) -> DialogStep {
+    const WAIT_SKIP_SECS: f32 = 3600.0;
+    let mut step = runner.advance(choice, strings);
+    while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+        step = if matches!(step, DialogStep::Waiting) {
+            runner.tick(WAIT_SKIP_SECS, strings)
+        } else {
+            runner.ack_server(strings)
+        };
+    }
+    step
 }
 
 fn bind_on_event_entity(cues: &[EventCue]) -> bool {

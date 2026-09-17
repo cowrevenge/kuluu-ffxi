@@ -505,6 +505,34 @@ pub fn find_shortcut(root: &vdf::Value) -> Option<&vdf::Value> {
         .find(|e| is_kuluu_entry(e))
 }
 
+fn install_default_icon(root: &mut vdf::Value, shortcuts_file: &Path) -> Result<()> {
+    let entry = shortcuts_list(root)
+        .iter_mut()
+        .find(|(_, entry)| is_kuluu_entry(entry))
+        .map(|(_, entry)| entry)
+        .ok_or_else(|| anyhow!("Kuluu shortcut is missing"))?;
+    let directory = shortcuts_file
+        .parent()
+        .ok_or_else(|| anyhow!("Steam shortcuts path has no parent"))?
+        .join("kuluu-artwork");
+    let icon_path = directory.join("icon.png");
+    let icon_name = icon_path.to_string_lossy().into_owned();
+    if entry
+        .get("icon")
+        .and_then(vdf::Value::as_str)
+        .is_some_and(|value| !value.is_empty() && value != icon_name)
+    {
+        return Ok(());
+    }
+    fs::create_dir_all(directory)?;
+    fs::write(
+        &icon_path,
+        include_bytes!("../assets/branding/png/kuluu-256.png"),
+    )?;
+    entry.set("icon", vdf::Value::Str(icon_name));
+    Ok(())
+}
+
 pub fn load_shortcuts(path: &Path) -> Result<vdf::Value> {
     match fs::read(path) {
         Ok(bytes) if bytes.is_empty() => Ok(vdf::Value::map()),
@@ -690,6 +718,7 @@ pub mod cli {
         let file = paths.shortcuts_file();
         let mut root = load_shortcuts(&file)?;
         let updated = upsert_shortcut(&mut root, &spec);
+        install_default_icon(&mut root, &file)?;
         save_shortcuts(&file, &root)?;
         println!(
             "{} {SHORTCUT_NAME} in {}\n  exe     {}\n  options {LAUNCH_OPTIONS}\n  appid   {}",
@@ -797,6 +826,41 @@ mod tests {
         let exe = PathBuf::from(exe);
         let start_dir = exe.parent().unwrap().to_path_buf();
         ShortcutSpec { exe, start_dir }
+    }
+
+    #[test]
+    fn default_icon_survives_reinstall_and_preserves_custom_artwork() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("shortcuts.vdf");
+        let mut root = Value::map();
+        let spec = spec("/games/kuluu");
+        upsert_shortcut(&mut root, &spec);
+        install_default_icon(&mut root, &file).unwrap();
+        let icon = find_shortcut(&root)
+            .unwrap()
+            .get("icon")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            fs::read(&icon).unwrap(),
+            include_bytes!("../assets/branding/png/kuluu-256.png")
+        );
+        upsert_shortcut(&mut root, &spec);
+        install_default_icon(&mut root, &file).unwrap();
+        assert_eq!(
+            find_shortcut(&root).unwrap().get("icon").unwrap().as_str(),
+            Some(icon.as_str())
+        );
+        shortcuts_list(&mut root)[0]
+            .1
+            .set("icon", Value::Str("/custom/art.png".into()));
+        install_default_icon(&mut root, &file).unwrap();
+        assert_eq!(
+            find_shortcut(&root).unwrap().get("icon").unwrap().as_str(),
+            Some("/custom/art.png")
+        );
     }
 
     #[test]
@@ -998,11 +1062,16 @@ mod tests {
     fn find_steam_root_requires_a_userdata_dir() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        assert_eq!(find_steam_root(home), None);
-        let candidate = steam_root_candidates(home)
+        // Windows candidates are machine-level Program Files paths, and a
+        // real Steam install on the dev box would shadow the fixture, so
+        // the end-to-end pin only runs where candidates are home-relative.
+        let Some(candidate) = steam_root_candidates(home)
             .into_iter()
             .find(|c| c.starts_with(home))
-            .unwrap();
+        else {
+            return;
+        };
+        assert_eq!(find_steam_root(home), None);
         fs::create_dir_all(candidate.join("userdata")).unwrap();
         assert_eq!(find_steam_root(home), Some(candidate));
     }

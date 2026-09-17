@@ -1,4 +1,6 @@
 use super::*;
+use crate::map_client::MapClient;
+use crate::state::ActionKind;
 use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 use ffxi_proto::{decode::PosMode, framing, map};
 
@@ -140,10 +142,19 @@ struct Host {
     position: Position,
     events: broadcast::Sender<AgentEvent>,
     receiver: broadcast::Receiver<AgentEvent>,
+    map: MapClient,
 }
 impl Host {
-    fn new(dat: EventDat, gil: i32) -> Self {
+    async fn new(dat: EventDat, gil: i32) -> Self {
         let (events, receiver) = broadcast::channel(64);
+        // Offline fixture socket: an ephemeral UDP bind with no server behind
+        // it; a tag send from Begin::AwaitServerAck just drops.
+        let map = MapClient::connect_with_local_sync(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            [0u8; 20],
+            "0.0.0.0:0",
+        )
+        .unwrap();
         let mut host = Self {
             dialog: crate::event_dialog::tests::contract_session(dat, ZONE, TEXT_ZONE),
             pending: vec![],
@@ -151,22 +162,30 @@ impl Host {
             position: INITIAL,
             events,
             receiver,
+            map,
         };
-        host.begin(gil);
+        host.begin(gil).await;
         host
     }
-    fn begin(&mut self, gil: i32) {
+    async fn begin(&mut self, gil: i32) {
         self.dialog
             .set_player_position(event_position(self.position));
         let mut automatic = vec![];
         super::super::begin_server_event(
+            &mut self.map,
+            &mut self.sequence,
+            0,
+            ZONE,
             &mut self.dialog,
             trigger(gil),
             &self.events,
             &mut crate::event_dialog::CutsceneScope::default(),
             &mut self.pending,
             &mut automatic,
-        );
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .await;
         assert!(
             automatic.is_empty(),
             "contract fixture must be driven, not auto-released"
@@ -253,9 +272,9 @@ fn float(body: &[u8], offset: usize) -> f32 {
     f32::from_le_bytes(body[offset..offset + 4].try_into().unwrap())
 }
 
-fn numeric_contract() {
+async fn numeric_contract() {
     for gil in [0, FARE - 1, FARE, 1_300_000, i32::MAX] {
-        let mut host = Host::new(affordability_dat(), gil);
+        let mut host = Host::new(affordability_dat(), gil).await;
         let initial = std::iter::from_fn(|| host.receiver.try_recv().ok())
             .find_map(|event| {
                 if let AgentEvent::EventDialog { dialog } = event {
@@ -289,11 +308,11 @@ fn numeric_contract() {
             .contains(&format!("fare {expected_fare}")));
     }
 }
-fn acknowledgement_contract() {
+async fn acknowledgement_contract() {
     for child in [false, true] {
         for position_first in [false, true] {
             for mode in [PosMode::Event, PosMode::Clear] {
-                let mut host = Host::new(position_dat(child), 1_300_000);
+                let mut host = Host::new(position_dat(child), 1_300_000).await;
                 host.request();
                 host.position_ack(PLAYER + 1, PosMode::Event);
                 host.waiting();
@@ -368,13 +387,13 @@ fn acknowledgement_contract() {
         }
     }
 }
-fn abort_contract() {
-    let mut replaced = Host::new(position_dat(false), FARE);
-    replaced.begin(FARE);
+async fn abort_contract() {
+    let mut replaced = Host::new(position_dat(false), FARE).await;
+    replaced.begin(FARE).await;
     replaced.request();
 
     for queued_ack in [false, true] {
-        let mut host = Host::new(position_dat(true), FARE);
+        let mut host = Host::new(position_dat(true), FARE).await;
         if queued_ack {
             host.request();
             host.position_ack(PLAYER, PosMode::Event);
@@ -388,7 +407,7 @@ fn abort_contract() {
         assert_eq!(host.position, INITIAL);
         assert!(host.dialog.drain_scene_actions(&DrivePermit(())).is_empty());
     }
-    let mut host = Host::new(position_dat(false), FARE);
+    let mut host = Host::new(position_dat(false), FARE).await;
     host.request();
     host.position_ack(PLAYER, PosMode::Event);
     host.packet(
@@ -397,16 +416,178 @@ fn abort_contract() {
     );
     assert!(host.dialog.active_end().is_none());
     assert!(host.dialog.drain_scene_actions(&DrivePermit(())).is_empty());
-    host.begin(FARE);
+    host.begin(FARE).await;
     host.request();
     assert_eq!(host.position, INITIAL);
 }
 
+/// Every [`ActionKind`] paired with the answer
+/// vendor/server/src/map/packets/c2s/0x01a_action.cpp
+/// GP_CLI_COMMAND_ACTION::validate gives it under BlockedState::InEvent.
+fn action_kinds() -> Vec<(ActionKind, bool)> {
+    vec![
+        (ActionKind::Attack, true),
+        (
+            ActionKind::CastMagic {
+                spell_id: 1,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                pos_z: 0.0,
+            },
+            true,
+        ),
+        (ActionKind::JobAbility { ability_id: 1 }, true),
+        (ActionKind::Shoot, true),
+        (ActionKind::Weaponskill { skill_id: 1 }, true),
+        (ActionKind::MonsterSkill { skill_id: 1 }, true),
+        (ActionKind::Fish, true),
+        (ActionKind::Mount { mount_id: 0 }, true),
+        (ActionKind::Talk, false),
+        (ActionKind::AttackOff, false),
+        (ActionKind::Help, false),
+        (ActionKind::HomepointMenu { status_id: 0 }, false),
+        (ActionKind::Assist, false),
+        (ActionKind::RaiseMenu { accept: true }, false),
+        (ActionKind::ChangeTarget, false),
+        (ActionKind::ChocoboDig, false),
+        (ActionKind::Dismount, false),
+        (ActionKind::TractorMenu { accept: true }, false),
+        (ActionKind::SendResRdy, false),
+        (ActionKind::Quarry, false),
+        (ActionKind::Sprint, false),
+        (ActionKind::Scout, false),
+        (ActionKind::Blockaid { status_id: 0 }, false),
+    ]
+}
+
+/// Drive a fixture event to its end, asserting it emits 0x05B EVENT_END and
+/// releases the in-event state.
+fn end_event(host: &mut Host) {
+    let step = host.step(Drive::Cancel);
+    assert!(matches!(step.advance, Advance::Ended { .. }));
+    assert_eq!(
+        packets(&step).iter().map(|p| p.opcode).collect::<Vec<_>>(),
+        [map::c2s::EVENT_END]
+    );
+    assert!(
+        !super::super::in_event(&host.dialog, &host.pending),
+        "EVENT_END released the event"
+    );
+}
+
+/// vendor/server/src/map/packets/c2s/0x01a_action.cpp
+/// GP_CLI_COMMAND_ACTION::validate refuses Attack, CastMagic, JobAbility,
+/// Shoot, Weaponskill, MonsterSkill, Fish and Mount while the character is
+/// InEvent, so the client must not spend a 0x01A on one until its 0x05B
+/// EVENT_END has gone out.
+async fn action_event_gate_contract() {
+    const ACTION_ID: std::ops::Range<usize> = 10..12;
+
+    let mut host = Host::new(position_dat(true), FARE).await;
+    let open = super::super::in_event(&host.dialog, &host.pending);
+    assert!(open, "the fixture event is open before its EVENT_END");
+    for (kind, blocked) in action_kinds() {
+        let encoded = super::super::build_subpacket_action(0, NPC, INDEX, &kind, open);
+        assert_eq!(encoded.is_err(), blocked, "{kind:?} while InEvent");
+        if let Ok(packet) = encoded {
+            assert_eq!(
+                u16::from_le_bytes(packet[ACTION_ID].try_into().unwrap()),
+                kind.action_id()
+            );
+        }
+    }
+
+    end_event(&mut host);
+    let released = super::super::in_event(&host.dialog, &host.pending);
+    for (kind, _) in action_kinds() {
+        let packet = super::super::build_subpacket_action(0, NPC, INDEX, &kind, released)
+            .unwrap_or_else(|reason| panic!("{kind:?} after EVENT_END: {reason}"));
+        assert_eq!(
+            framing::walk_sub_packets(&packet)
+                .next()
+                .unwrap()
+                .unwrap()
+                .opcode,
+            map::c2s::ACTION
+        );
+    }
+}
+
+/// vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp
+/// GP_CLI_COMMAND_ITEM_STACK::validate refuses the sort while InEvent and
+/// accepts only a container id PacketValidator::isValidContainer admits.
+async fn item_stack_gate_contract() {
+    use ffxi_proto::map::container;
+    const CATEGORY: std::ops::Range<usize> = 4..8;
+
+    let mut host = Host::new(position_dat(true), FARE).await;
+    let open = super::super::in_event(&host.dialog, &host.pending);
+    assert!(open, "the fixture event is open before its EVENT_END");
+    for container in 0..=container::MAX_CONTAINER_ID {
+        assert!(
+            super::super::build_subpacket_item_stack(0, container, open).is_err(),
+            "container {container} while InEvent"
+        );
+    }
+
+    end_event(&mut host);
+    let released = super::super::in_event(&host.dialog, &host.pending);
+    for container in 0..container::MAX_CONTAINER_ID {
+        let packet = super::super::build_subpacket_item_stack(0, container, released)
+            .unwrap_or_else(|reason| panic!("container {container}: {reason}"));
+        assert_eq!(
+            u32::from_le_bytes(packet[CATEGORY].try_into().unwrap()),
+            u32::from(container)
+        );
+    }
+    for container in [container::MAX_CONTAINER_ID, u8::MAX] {
+        assert!(
+            super::super::build_subpacket_item_stack(0, container, released).is_err(),
+            "container {container} is not a storage the server owns"
+        );
+    }
+}
+
+/// vendor/server/src/map/packets/c2s/0x015_pos.cpp GP_CLI_COMMAND_POS::process
+/// discards the update when x, y or z is not finite.
+fn pos_finite_contract() {
+    const HEADING: u8 = 192;
+    const FINITE: [f32; 3] = [33.762, -31.432, -2.558];
+
+    let packet = build_subpacket_pos(0, FINITE[0], FINITE[1], FINITE[2], HEADING, 0)
+        .expect("a finite position is sendable");
+    assert_eq!(
+        [float(&packet, 4), float(&packet, 12), float(&packet, 8)],
+        FINITE
+    );
+
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for axis in 0..FINITE.len() {
+            let mut coords = FINITE;
+            coords[axis] = poison;
+            assert!(
+                build_subpacket_pos(0, coords[0], coords[1], coords[2], HEADING, 0).is_none(),
+                "{poison} on axis {axis} must not reach the wire"
+            );
+        }
+    }
+}
+
 #[test]
-fn event_state_contract() {
+fn ferry_and_bootstrap_contracts_hold() {
+    // bootstrap_acceptance_contract blocks on its own current-thread runtime,
+    // so it must run outside an active tokio context.
     super::super::tests::ferry_packet_state_contract();
     super::super::tests::bootstrap_acceptance_contract();
-    numeric_contract();
-    acknowledgement_contract();
-    abort_contract();
+    super::super::tests::bootstrap_enterzone_contract();
+}
+
+#[tokio::test]
+async fn event_state_contract() {
+    numeric_contract().await;
+    acknowledgement_contract().await;
+    abort_contract().await;
+    action_event_gate_contract().await;
+    item_stack_gate_contract().await;
+    pos_finite_contract();
 }

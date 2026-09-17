@@ -2,7 +2,7 @@
 //! and whether this character has lotted or passed.
 //!
 //! Fed by s2c 0x0D2/0x0D3 (see `kuluu/src/session/treasure.rs`). Acting on
-//! a slot goes out as `/lot <slot>` or `/pass <slot>`; the row shows the slot
+//! a slot goes out as `//lot <slot>` or `//pass <slot>`; the row shows the slot
 //! index so the command has something to name.
 
 use bevy::prelude::*;
@@ -84,7 +84,7 @@ pub fn spawn_treasure_pool(mut commands: Commands) {
         });
 }
 
-/// `"3. Lizard Tail"` — the leading number is the slot `/lot` and `/pass` take.
+/// `"3. Lizard Tail"` — the leading number is the slot `//lot` and `//pass` take.
 pub fn row_label(s: &TreasurePoolSlot) -> String {
     if s.count > 1 {
         format!("{}. {} x{}", s.slot, s.item_name, s.count)

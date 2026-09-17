@@ -1,4 +1,6 @@
-<h1 align="center">Kuluu</h1>
+<p align="center">
+  <img src="kuluu/assets/branding/social/github-preview.png" alt="Kuluu — an open-source FINAL FANTASY XI client. A moss-green curled tail bears three stars and an amber lantern." width="960">
+</p>
 
 <p align="center">
   <em>A faithful, open-source FINAL FANTASY XI client — rebuilt in Rust + Bevy,
@@ -14,6 +16,13 @@
   <a href="https://github.com/jondwillis/kuluu-ffxi/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/jondwillis/kuluu-ffxi?logo=GitHub"></a>
 </p>
 
+<p align="center">
+  <a href="#setup--first-build">Get started</a> &middot;
+  <a href="https://github.com/jondwillis/kuluu-ffxi/releases">Downloads</a> &middot;
+  <a href="#project-goals">Project goals</a> &middot;
+  <a href="#roadmap">Roadmap</a> &middot;
+  <a href="https://discord.gg/5c8NK46SuD">Community</a>
+</p>
 
 Kuluu is a **fan-community game-preservation project**: a cross-platform, modern, extensible, open-source client for the
 FINAL FANTASY XI network protocol.
@@ -272,16 +281,22 @@ When you measure a new build, add its row to `KNOWN_CLIENTS` and cite that
 row's name (not a date) next to any offset or constant verified on it.
 
 The build-time vendor pins have generations too, and they are not the
-client's. `vendor/server` (LandSandBoat, pinned 2026-04-26) declares
-`CLIENT_VER = '30260203_0'` in `settings/default/login.lua` with
+client's. `vendor/server` (LandSandBoat, pinned 2026-09-11) declares
+`CLIENT_VER = '30260904_1'` in `settings/default/login.lua` with
 `VER_LOCK = 2`, so a stock server at that pin admits `retail-2026-09`
-(`30260904_1`) and refuses `horizonxi-2023` (`30230905_0`) unless the lock is
-off; upstream has since moved to `30260904_1`, and a pin bump moves it again.
+(`30260904_1`) exactly and refuses `horizonxi-2023` (`30230905_0`) unless the
+lock is off; a pin bump moves it again. The same pin's zone text ids
+(`scripts/zones/*/IDs.lua`) are synced to that client, so `retail-2026-09`
+reads them as identity DAT indexes and `horizonxi-2023` through the landmark
+reconciliation in `kuluu-session`.
 `vendor/POLUtils`' `ROMFileMappings.xml` (pinned 2020-07-19; last edited
 2018-08-18 for the Unity dialog tables, before that the 2015-11 Reisenjima
-update) keys on absolute file ids up to 86528; every one still resolves on
-both installs and retail's table now runs to 109480, so Square Enix appends
-and the 2018 mapping stays valid. `vendor/AltanaListener`'s `track_names.json`
+update) keys on absolute file ids up to 86528. Those ids still resolve on
+both installs, but the old zone associations and map counts can be wrong.
+Dialog DAT ids now follow the client's zone formula through VTABLE/FTABLE;
+map selection uses the installed DLL's zone-map records. Item and key-item
+autotranslate names come from the installed DATs, with the LSB dictionary
+as a fallback when a name is unavailable. `vendor/AltanaListener`'s `track_names.json`
 (v1.0.4, 2026-03-11) is a hand-curated 223-track name list, not a
 client-derived table, so it has no build to match; the repository is archived
 and the pin stays frozen.
@@ -375,6 +390,46 @@ behavior and re-express it in our own code; don't copy source in. The most
 useful one is [XIM](https://xim.pages.dev/), a from-scratch browser FFXI client
 (GPL-3). See [`research/README.md`](research/README.md) for the full list and
 the reference-only policy.
+
+## Project artwork
+
+The Southern Watcher mark combines a curled green tail, an amber lantern,
+and three stars. It is original AI-generated artwork inspired by FFXI's
+Tonberry lantern and constellation lore, not an official Kuluu crest or an
+extracted game asset. The star arrangement is an interpretation.
+
+The transparent source is [`kuluu-master.png`](kuluu/assets/branding/kuluu-master.png).
+Its generation prompt and provenance are in [`generation.json`](kuluu/assets/branding/generation.json).
+On macOS, regenerate the PNG sizes, Windows ICO, macOS ICNS, and browser
+copies with `bash scripts/export-icons.sh` (requires `sips` and Python 3).
+Generated files are committed so builds do not need image tools.
+
+### Social artwork
+
+| Asset | Size |
+| --- | --- |
+| [GitHub preview](kuluu/assets/branding/social/github-preview.png) | 1280 × 640 |
+| [Discord avatar](kuluu/assets/branding/social/discord-avatar.png) | 512 × 512, transparent |
+| [Discord server banner](kuluu/assets/branding/social/discord-banner.png) | 960 × 540 |
+| [Discord invite splash](kuluu/assets/branding/social/discord-invite-splash.png) | 1920 × 1080 |
+
+The banner and splash share a lantern-lit jungle sanctuary;
+their [generation prompts](kuluu/assets/branding/social/generation.json) are included.
+
+### Application icons
+
+Linux release archives include `install-local.sh`; run it after extracting
+to install the binary and desktop icon under `~/.local` (Python 3 required).
+macOS archives include `Kuluu.app`, which can be moved to Applications, plus
+the standalone command-line binary. Windows executables embed the icon.
+Native builds open the launcher when started without arguments.
+`kuluu steam-shortcut install` installs the default Steam shortcut icon
+while preserving a custom icon; close Steam before running it.
+
+The browser viewer uses the same mark for its favicon and web manifest.
+Android and iOS native packages do not exist yet; their adaptive/layered
+icons should derive from this master with platform-specific backgrounds
+and safe-area padding.
 
 ## License & legal
 

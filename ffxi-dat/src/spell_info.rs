@@ -5,14 +5,18 @@ use crate::archive::DatRoot;
 use crate::chunk;
 
 // research/xim SpellListSection.kt + DatResource.kt: the retail client reads its own
-// spell table from ROM/118/114.DAT, a DAT container whose spell list lives in a
-// section of type 0x49 (S49_SpellList). Each spell is a 0x64-byte block obfuscated
-// with the per-block rotate scheme in research/xim BlockDecoder.kt.
-pub const SPELL_DAT_ROM_PATH: &str = "ROM/118/114.DAT";
+// spell table from a DAT container whose spell list lives in a section of type
+// 0x49 (S49_SpellList). Each spell is a 0x64-byte block obfuscated with the
+// per-block rotate scheme in research/xim BlockDecoder.kt.
 
-/// VTABLE/FTABLE file id of [`SPELL_DAT_ROM_PATH`]; the only id mapping there on
-/// both horizonxi-2023 and retail-2026-09.
+/// VTABLE/FTABLE file id of the spell table.
 pub const SPELL_LIST_FILE_ID: u32 = 81;
+
+/// Where [`SPELL_LIST_FILE_ID`] resolved on the horizonxi-2023 and
+/// retail-2026-09 [`crate::client_profile::KNOWN_CLIENTS`] rows; the fallback
+/// for a root whose VTABLE/FTABLE cannot place the id, pinned against every
+/// install by `ffxi-dat/tests/fixed_dat_ids.rs`.
+const SPELL_DAT_ERA_ROM_PATH: &str = "ROM/118/114.DAT";
 
 pub const SPELL_LIST_SECTION_KIND: u8 = 0x49;
 
@@ -173,13 +177,13 @@ pub struct SpellTable {
 
 impl SpellTable {
     /// Overlay-aware: resolves [`SPELL_LIST_FILE_ID`] through the install's
-    /// VTABLE/FTABLE, falling back to the fixed ROM path only when the tables
+    /// VTABLE/FTABLE, falling back to the era ROM path only when the tables
     /// cannot place it.
     pub fn open_from_root(root: &DatRoot) -> SpellTable {
         let path = match root.resolve(SPELL_LIST_FILE_ID) {
             Ok(loc) => loc.path_under(root),
             Err(e) => {
-                let fallback = root.root().join(SPELL_DAT_ROM_PATH);
+                let fallback = root.root().join(SPELL_DAT_ERA_ROM_PATH);
                 eprintln!(
                     "spell table: file id {SPELL_LIST_FILE_ID} unresolved under {} ({e}); using {}",
                     root.root().display(),
@@ -191,8 +195,14 @@ impl SpellTable {
         Self::open_path(&path)
     }
 
+    /// For a caller holding only a path: the install's own tables place the id,
+    /// and a directory carrying none (a synthetic fixture) falls back to the
+    /// era ROM path.
     pub fn open(root_dir: &Path) -> SpellTable {
-        Self::open_path(&root_dir.join(SPELL_DAT_ROM_PATH))
+        match DatRoot::open(root_dir) {
+            Ok(root) => Self::open_from_root(&root),
+            Err(_) => Self::open_path(&root_dir.join(SPELL_DAT_ERA_ROM_PATH)),
+        }
     }
 
     fn open_path(path: &Path) -> SpellTable {
@@ -396,7 +406,7 @@ mod tests {
     fn malformed_file_yields_an_empty_table() {
         let dir = tempfile::tempdir().unwrap();
         assert!(SpellTable::open(dir.path()).is_empty());
-        let path = dir.path().join(SPELL_DAT_ROM_PATH);
+        let path = dir.path().join(SPELL_DAT_ERA_ROM_PATH);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut blocks = well_formed_blocks();
         blocks[1] = encode_spell(9, 1, 8, 20);

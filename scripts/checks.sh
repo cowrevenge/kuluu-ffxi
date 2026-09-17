@@ -116,22 +116,29 @@ run_harness() {
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
-  local codex_config=".codex/config.toml" bad=0 link target cmd path doc
+  local codex_config=".codex/config.toml" bad=0 link target cmd path doc mode target_rel
   local hook hook_file recipe check_output
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
-  #    .agents/, or settings.json itself. Content never lives here.
+  #    .agents/, or settings.json itself. Content never lives here. The
+  #    invariant lives in the index: a 120000 blob whose target resolves
+  #    inside .agents/. On disk that is a symlink, except on checkouts that
+  #    cannot materialize symlinks (core.symlinks=false, e.g. Windows), where
+  #    git stores the target string as a plain file. Grade the blob, not the
+  #    filesystem representation.
   while IFS= read -r link; do
     [[ "$link" == "$settings" ]] && continue
-    if [[ ! -L "$link" ]]; then
+    mode=$(git ls-files -s "$link" | cut -d' ' -f1)
+    if [[ "$mode" != "120000" ]]; then
       echo "checks: harness — $link is tracked under .claude/ but is not a symlink" >&2
       echo "checks:   content belongs in .agents/; .claude/ holds symlinks + settings.json" >&2
       bad=1
       continue
     fi
-    target=$(cd "$(dirname "$link")" && cd "$(readlink "$(basename "$link")")" 2>/dev/null && pwd) || target=""
+    target_rel=$(git cat-file blob "$(git ls-files -s "$link" | cut -d' ' -f2)")
+    target=$(cd "$(dirname "$link")" && cd "$target_rel" 2>/dev/null && pwd) || target=""
     if [[ -z "$target" ]]; then
-      echo "checks: harness — $link is a broken symlink (-> $(readlink "$link"))" >&2
+      echo "checks: harness — $link is a broken symlink (-> $target_rel)" >&2
       bad=1
     elif [[ "$target" != "$PWD/.agents"* ]]; then
       echo "checks: harness — $link escapes .agents/ (resolves to $target)" >&2
@@ -186,6 +193,19 @@ run_harness() {
   fi
   if command -v bd >/dev/null 2>&1; then
     for recipe in codex claude factory; do
+      # bd setup claude --check reads CLAUDE.md from disk; on a checkout that
+      # cannot materialize symlinks it is a plain file holding the target
+      # string, so bd reports a false "no beads section". Grade the tracked
+      # target instead — it must point at AGENTS.md, whose markers the grep
+      # above already pins.
+      if [[ "$recipe" == "claude" && -f CLAUDE.md && ! -L CLAUDE.md \
+          && "$(git ls-files -s CLAUDE.md | cut -d' ' -f1)" == "120000" ]]; then
+        if [[ "$(git cat-file blob "$(git ls-files -s CLAUDE.md | cut -d' ' -f2)")" != "AGENTS.md" ]]; then
+          echo "checks: harness — CLAUDE.md is tracked as a symlink but its target is not AGENTS.md" >&2
+          bad=1
+        fi
+        continue
+      fi
       if ! check_output=$(bd setup "$recipe" --check 2>&1); then
         echo "checks: harness — stale Beads $recipe integration:" >&2
         echo "$check_output" >&2
@@ -281,6 +301,24 @@ run_comments() {
   # shellcheck source=../.agents/hooks/comment-rot.lib.sh
   . .agents/hooks/comment-rot.lib.sh
   local bad=0 lines text
+  # Self-test: the dangling-citation detectors must fire on a known offender
+  # and stay silent on a published citation, judged by the very expression the
+  # gate below uses. A green tree is meaningless if the detector cannot fire,
+  # so this runs before the scan and fails the stage when it cannot.
+  local cr_selftest_bad='// Dynamic obstacles (plan §2.5): RID door boxes
+//! Piece 3: the slide direction sweep
+// Step 2: rasterize'
+  local cr_selftest_good='// Ericson §5.1.3: the GJK distance iteration
+/// "Real-Time Collision Detection" §1.3.6
+// a zone step 42 marker'
+  if ! printf '%s\n' "$cr_selftest_bad" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector did not fire on a known offender" >&2
+    return 1
+  fi
+  if printf '%s\n' "$cr_selftest_good" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector fired on a published citation" >&2
+    return 1
+  fi
   if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
     lines=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
       git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #" || true
@@ -312,6 +350,13 @@ run_comments() {
   hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL" || true)
   if [ -n "$hits" ]; then
     echo "checks: comments - citation to a session artifact nobody can open: a private plan section or a bare ordinal step label. Restate the WHY inline, cite an in-tree symbol, or delete the comment:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
+  hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_COW_DOC" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation to a local-only Cow_doc path nobody else has. Restate the fact against a public anchor (research/, the code, a regression test) or delete the citation:" >&2
     printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
     bad=1
   fi
@@ -534,7 +579,52 @@ run_wasm() {
 EXAMPLES_KEEP_DAYS=3
 INCREMENTAL_CAP_GB=40
 
+# The prune is the one thing here that mutates target/ outside cargo, so it has
+# to take the same build-dir lock cargo does (scripts/cargo-guard.sh exists
+# because this repo runs concurrent cargo invocations — agent sessions,
+# rust-analyzer, a pre-push hook — against one shared target/). Wiping the
+# incremental cache unlocked pulls session files out from under a live rustc,
+# and the next link reads a truncated object: "no platform load command found in
+# lib<crate>.rlib", which surfaces as an unrelated stage failing to build.
+#
+# Non-blocking: hygiene must never wait on, or delay, somebody's build.
+CARGO_BUILD_LOCK="target/debug/.cargo-build-lock"
+LOCK_BUSY_STATUS=97
+
 run_sweep() {
+  if [ "${CHECKS_SWEEP_LOCKED:-0}" = "1" ]; then
+    sweep_prune
+    return
+  fi
+
+  echo "checks: sweep"
+  [ -d "target/debug" ] || return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: sweep — skipped (no python3 to hold the cargo build lock)"
+    return 0
+  fi
+
+  local status=0
+  python3 - "$CARGO_BUILD_LOCK" "$LOCK_BUSY_STATUS" \
+    env CHECKS_SWEEP_LOCKED=1 "$PWD/scripts/checks.sh" sweep <<'PY' || status=$?
+import fcntl, subprocess, sys
+
+lock_path, busy_status = sys.argv[1], int(sys.argv[2])
+with open(lock_path, "a") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit(busy_status)
+    sys.exit(subprocess.call(sys.argv[3:]))
+PY
+  if [ "$status" -eq "$LOCK_BUSY_STATUS" ]; then
+    echo "checks: sweep — skipped (a cargo build holds $CARGO_BUILD_LOCK)"
+    status=0
+  fi
+  return "$status"
+}
+
+sweep_prune() {
   local examples="target/debug/examples" incremental="target/debug/incremental"
   local pruned inc_gb
 
@@ -593,7 +683,7 @@ for stage in "$@"; do
     build)  echo "checks: build";  run_build ;;
     wasm)   echo "checks: wasm";   run_wasm ;;
     doc)    echo "checks: doc";    run_doc ;;
-    sweep)  echo "checks: sweep";  run_sweep ;;
+    sweep)  run_sweep ;;
     *) echo "checks: unknown stage '$stage'" >&2; exit 2 ;;
   esac
 done

@@ -347,14 +347,14 @@ fn diffuse_to_light(rgb: [f32; 3]) -> (Vec3, f32) {
 /// The terrain(landscape) half of [`crate::weather::ZoneDirectionalLighting`]: retail's two
 /// weather diffuse lights plus the ambient a block is drawn with.
 #[derive(Clone, Copy)]
-struct LandscapeLighting {
-    sun_dir: Vec3,
-    sun_color: Vec3,
-    sun_k: f32,
-    moon_dir: Vec3,
-    moon_color: Vec3,
-    moon_k: f32,
-    ambient: Vec3,
+pub(crate) struct LandscapeLighting {
+    pub(crate) sun_dir: Vec3,
+    pub(crate) sun_color: Vec3,
+    pub(crate) sun_k: f32,
+    pub(crate) moon_dir: Vec3,
+    pub(crate) moon_color: Vec3,
+    pub(crate) moon_k: f32,
+    pub(crate) ambient: Vec3,
 }
 
 // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 draws each block through `positionedBlock->Area`:
@@ -364,7 +364,7 @@ struct LandscapeLighting {
 // not the zone's. Its OWN indoor flag decides how the moon slot is read: indoors the arc
 // is replaced by one static diffuse and the moon bytes are a signed direction rather than
 // a color (research/xim EnvironmentSection.kt getLightingParams).
-fn landscape_lighting(
+pub(crate) fn landscape_lighting(
     rec: &ffxi_dat::weather::WeatherRecord,
     sun_dir: Vec3,
     moon_dir: Vec3,
@@ -414,7 +414,7 @@ fn landscape_lighting(
 // research/xim EnvironmentSection.kt modelLightMix: models swap moon->sun
 // at 06:00 (minute 360) and sun->moon at 18:00 (minute 1080), with a short blend
 // window on either side; t=1 means pure sun, t=0 means pure moon.
-fn model_light_mix(time_minutes: u32) -> f32 {
+pub(crate) fn model_light_mix(time_minutes: u32) -> f32 {
     let m = (time_minutes % 1440) as f32;
     if m < 355.0 {
         0.0
@@ -427,6 +427,32 @@ fn model_light_mix(time_minutes: u32) -> f32 {
     } else {
         0.0
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn actor_area_lighting(
+    record: &ffxi_dat::weather::WeatherRecord,
+    minutes: u32,
+    model_direction: Vec3,
+) -> (Vec4, Vec4, Vec4) {
+    let ambient = Vec3::from_slice(&record.ambient_entity[..3]).extend(1.0);
+    let sun = Vec3::from_slice(&record.sunlight_diffuse_entity[..3]);
+    let moon = Vec3::from_slice(&record.moonlight_diffuse_entity[..3]);
+    let direction = if record.indoors {
+        ffxi_dir_to_bevy(record.indoor_light_dir_entity)
+    } else {
+        model_direction
+    };
+    let rgb = if record.indoors {
+        sun
+    } else {
+        moon.lerp(sun, model_light_mix(minutes))
+    };
+    (
+        ambient,
+        (-direction).normalize_or_zero().extend(0.0),
+        rgb.extend(if direction == Vec3::ZERO { 0.0 } else { 1.0 }),
+    )
 }
 
 pub fn moon_color_for_phase(illumination: f32, moon_altitude: f32) -> (Color, f32) {
@@ -754,21 +780,10 @@ pub fn sun_moon_system(
     // blend (research/xim EnvironmentSection.kt modelLightMix); landscape feeds both
     // sun(dir0) and moon(dir1) slots from the terrain block.
     //
-    // The terrain half reads the record of the AREA the player stands in, the way
-    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 lights each block from `positionedBlock->Area`; one
-    // global light set here means the player's area stands in for the blocks around
-    // them, the same approximation the distance fog already makes. The entity half
-    // stays zone-wide: retail resolves it per actor from that actor's own area
-    // (CMoElem.cpp CMoElem::PrepDX `FindAreaByFourCCAndGetWeatherDiffuseLights`), which one shared
-    // model light cannot express.
     let sun_up = sky.sun_altitude > 0.0;
     let moon_up = sky.moon_altitude > 0.0;
     let zone_land = dat.map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up));
-    let land = render_cfg
-        .zone_weather
-        .area_current
-        .map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up))
-        .or(zone_land);
+    let land = zone_land;
     let zone_sun_k = zone_land.map_or(0.0, |z| z.sun_k);
 
     if let Some((rec, land)) = dat.zip(land).filter(|(r, _)| r.indoors) {
@@ -1206,13 +1221,8 @@ mod tests {
         assert!(lit.moon_k > 0.0);
     }
 
-    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 resolves the block's lights through
-    // `positionedBlock->Area`, so the published terrain lighting has to move when the
-    // player's area does while the entity(model) half stays on the zone record
-    // (CMoElem.cpp CMoElem::PrepDX resolves that one per actor, which one shared light cannot
-    // express). This pins the wiring, not just `landscape_lighting`.
     #[test]
-    fn published_terrain_lighting_follows_the_players_area() {
+    fn shared_terrain_lighting_is_independent_of_the_players_area() {
         const ZONE_SUN: [f32; 4] = [0.9, 0.88, 0.8, 1.0];
         const AREA_SUN: [f32; 4] = [0.25, 0.1, 0.05, 1.0];
         const ZONE_AMBIENT: [f32; 4] = [0.7, 0.7, 0.68, 1.0];
@@ -1266,23 +1276,9 @@ mod tests {
         let area_lit = *app
             .world()
             .resource::<crate::weather::ZoneDirectionalLighting>();
-        assert!(
-            area_lit.ambient_landscape.distance(Vec3::new(
-                AREA_AMBIENT[0],
-                AREA_AMBIENT[1],
-                AREA_AMBIENT[2]
-            )) < 1e-6,
-            "terrain ambient stayed on the zone record: {}",
-            area_lit.ambient_landscape
-        );
-        assert!(
-            (area_lit.sun_color * area_lit.sun_k).distance(Vec3::new(
-                AREA_SUN[0],
-                AREA_SUN[1],
-                AREA_SUN[2]
-            )) < 1e-6,
-            "terrain sun diffuse stayed on the zone record"
-        );
+        assert_eq!(area_lit.ambient_landscape, zone_lit.ambient_landscape);
+        assert_eq!(area_lit.sun_color, zone_lit.sun_color);
+        assert_eq!(area_lit.sun_k, zone_lit.sun_k);
         assert_eq!(
             area_lit.ambient_entity, zone_lit.ambient_entity,
             "the entity half is resolved per actor in retail and must stay zone-wide here"
@@ -1295,12 +1291,6 @@ mod tests {
         );
     }
 
-    // `lamp_lit_factor` treats a black daytime sun diffuse as "covered zone, lamps
-    // burn all day" and switches EVERY Generator light in the zone together, so it
-    // reads `zone_sun_k` rather than the area-resolved `sun_k`; standing in a
-    // sunless interior area must not light the lamps three streets away
-    // (zone_point_lights::tests::lamps_stay_out_when_only_the_players_area_is_sunless
-    // pins the consumer).
     #[test]
     fn zone_sun_k_stays_on_the_zone_record_inside_a_sunless_area() {
         const ZONE_SUN: [f32; 4] = [0.9, 0.88, 0.8, 1.0];
@@ -1338,7 +1328,7 @@ mod tests {
         let lit = *app
             .world()
             .resource::<crate::weather::ZoneDirectionalLighting>();
-        assert_eq!(lit.sun_k, 0.0, "terrain sun follows the sunless area");
+        assert_eq!(lit.sun_k, lit.zone_sun_k);
         assert!(
             (lit.zone_sun_k - ZONE_SUN[0]).abs() < 1e-6,
             "the whole-zone lamp gate must still see the zone's daylight sun: {}",

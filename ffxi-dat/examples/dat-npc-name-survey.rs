@@ -4,14 +4,14 @@ use std::process::ExitCode;
 
 use ffxi_dat::npc_names::{split_id, NpcNameTable};
 use ffxi_dat::DatRoot;
+use lsb_scrape::{parse_yaml_npcs, zone_files};
 
-const LSB_NPC_LIST_SQL: &str = "vendor/server/sql/npc_list.sql";
-
-const NPC_LIST_INSERT_PREFIX: &str = "INSERT INTO `npc_list` VALUES (";
+const LSB_ZONES_DATA_DIR: &str = "vendor/server/data/zones";
 
 const SAMPLE_ROWS: usize = 12;
 
-// Score both NPC-name addressing schemes against LSB's npc_list.sql: the record index the low
+// Score both NPC-name addressing schemes against LSB's NPC display names
+// (data/zones/<zone>/npcs.yaml): the record index the low
 // 12 bits of an entity id used to be read as, versus the id each record embeds at 0x1C. Every
 // disagreement is then classified so era skew (kuluu-j0nd: the vendored LSB pin is newer than
 // this install's client) can be told apart from a real lookup bug.
@@ -70,26 +70,25 @@ impl FlipClass {
     }
 }
 
-fn next_sql_string(chars: &mut std::str::Chars<'_>) -> Option<String> {
-    chars.by_ref().find(|&c| c == '\'')?;
-    let mut out = String::new();
-    loop {
-        match chars.next()? {
-            '\\' => out.push(chars.next()?),
-            '\'' => return Some(out),
-            c => out.push(c),
+fn lsb_display_names() -> Result<Vec<(u32, String)>, String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate has a workspace parent")
+        .join(LSB_ZONES_DATA_DIR);
+    let mut out = Vec::new();
+    for (_, path) in zone_files(&dir, "npcs.yaml").map_err(|e| format!("{e:#}"))? {
+        let src =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        for (id, npc) in parse_yaml_npcs(&src).map_err(|e| format!("{}: {e:#}", path.display()))? {
+            let name: Option<String> = npc
+                .field("display_name")
+                .map_err(|e| format!("{}: npc {id}: {e:#}", path.display()))?;
+            if let Some(name) = name {
+                out.push((id, name));
+            }
         }
     }
-}
-
-fn parse_npc_list_row(line: &str) -> Option<(u32, String)> {
-    let rest = line.strip_prefix(NPC_LIST_INSERT_PREFIX)?;
-    let (id, rest) = rest.split_once(',')?;
-    let id: u32 = id.trim().parse().ok()?;
-    let mut chars = rest.chars();
-    next_sql_string(&mut chars)?;
-    let display_name = next_sql_string(&mut chars)?;
-    Some((id, display_name))
+    Ok(out)
 }
 
 fn old_lookup(table: &NpcNameTable, npc_id: u32) -> Option<&str> {
@@ -175,20 +174,16 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let sql_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate has a workspace parent")
-        .join(LSB_NPC_LIST_SQL);
-    let sql = match std::fs::read_to_string(&sql_path) {
-        Ok(sql) => sql,
+    let names = match lsb_display_names() {
+        Ok(names) => names,
         Err(e) => {
-            eprintln!("could not read {}: {e}", sql_path.display());
+            eprintln!("{e}");
             return ExitCode::from(1);
         }
     };
 
     let mut by_zone: HashMap<u16, Vec<(u32, String)>> = HashMap::new();
-    for (id, name) in sql.lines().filter_map(parse_npc_list_row) {
+    for (id, name) in names {
         let Some((zone, _)) = split_id(id) else {
             continue;
         };
@@ -284,7 +279,7 @@ fn main() -> ExitCode {
     }
 
     println!("zones with an npc-name table : {zones_with_table}");
-    println!("npc_list.sql rows checked    : {}", t.rows);
+    println!("lsb npc rows checked         : {}", t.rows);
     println!(
         "  embedded-id addressing     : ok {} / wrong {} / none {}",
         t.new_ok, t.new_wrong, t.new_none

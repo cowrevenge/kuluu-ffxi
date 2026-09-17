@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::{grap_list, login};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy)]
@@ -17,6 +18,11 @@ pub struct PosHead {
 
     pub y: f32,
 
+    /// POS block word 0x18. Bits 17..31 carry the head-look target (see `facetarget`); the low
+    /// 13 bits are LSB's moving step counter: entity_update.cpp CEntityUpdatePacket::updateWith
+    /// writes `ref<uint16>(0x18) = PEntity->loc.p.moving`, and pathfind.cpp CPathFind::StepTo
+    /// advances it by 0x35 per step (0x28 on a speed change), mod 0x2000. Retail phases walk/run
+    /// cycles off the delta between two POS updates.
     pub flags0: u32,
 
     pub speed: u8,
@@ -43,6 +49,10 @@ impl PosHead {
 
     pub(crate) const SIZE_WITH_BT_TARGET: usize = 44;
 
+    /// Our `flags0..flags3` are the header's `flags1..flags4`: the names are
+    /// off by one, the offsets are not.
+    const FLAGS0_OFFSET: usize = 20;
+
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -60,7 +70,11 @@ impl PosHead {
             x: f32::from_le_bytes(body[8..12].try_into().unwrap()),
             z: f32::from_le_bytes(body[12..16].try_into().unwrap()),
             y: f32::from_le_bytes(body[16..20].try_into().unwrap()),
-            flags0: u32::from_le_bytes(body[20..24].try_into().unwrap()),
+            flags0: u32::from_le_bytes(
+                body[Self::FLAGS0_OFFSET..Self::FLAGS0_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            ),
             speed: body[24],
             speed_base: body[25],
             hpp: body[Self::HPP_OFFSET],
@@ -87,7 +101,7 @@ impl PosHead {
     // `ref<uint16>(0x18) = PEntity->loc.p.moving` (vendor/server/src/map/packets/
     // entity_update.cpp CEntityUpdatePacket::updateWith), and the pathfinder advances that
     // counter by a fixed amount per step (a different one on a speed change), wrapping at
-    // the 13-bit width (vendor/server/src/map/ai/helpers/pathfind.cpp StepTo). So the delta
+    // the 13-bit width (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepTo). So the delta
     // between two POS updates counts server steps since the last one. XiPackets
     // world/server/0x000E UpdateMoveTime reads the same 13 bits; retail
     // phases walk/run cycles off it so foot timing matches, instead of re-deriving a phase
@@ -186,7 +200,7 @@ impl PosHead {
     const NAME_LEN: usize = 16;
 
     /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
-    /// (vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME).
+    /// (vendor/server/src/map/entities/base_entity.h UPDATETYPE UPDATE_NAME).
     const SEND_NAME: u8 = 0x08;
     /// `sendflags_t.Name2` (entity_update.cpp). Set on every equipped-model
     /// spawn, which is why it alone does not imply a name is present.
@@ -279,6 +293,18 @@ pub struct CharFlags {
     pub gm_level: u8,
     pub bazaar: bool,
 
+    /// `Flags1.GraphSize` (bits 9-10): LSB writes `PEntity->modelSize` here for
+    /// NPC/MOB and `PChar->look.size` for PCs
+    /// (vendor/server/src/map/packets/entity_update.cpp
+    /// `CEntityUpdatePacket::updateWith`, char_update.cpp
+    /// `CCharUpdatePacket::updateWith`), clamped to 0..=3 by
+    /// `lua_baseentity.cpp CLuaBaseEntity::setModelSize`. It is not a
+    /// multiplier: retail indexes the model's four authored CIB scales with it
+    /// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp
+    /// `SkeletalMeshActor::GetCibScaleIndex`), so the same value means
+    /// different sizes on different models.
+    pub graph_size: u8,
+
     /// `Flags2.r/g/b`: the equipped linkshell's pearl colour, already expanded
     /// from the 4-bit Exdata channel by the server as `(c << 4) + 15`
     /// (`CCharUpdatePacket::updateWith`). Meaningless unless `linkshell` is set.
@@ -318,7 +344,7 @@ pub struct CharFlags {
     /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit. For
     /// NPC/MOB/PET/TRUST that word carries `m_flags` — LSB writes it at
     /// `ref<uint32>(0x21)` under UPDATE_HP, so ENTITYFLAGS
-    /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/src/map/entities/baseentity.h)
+    /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/data/enums/entity_flags.yaml)
     /// lands exactly on this bit; for CHAR_PC it is char_update's explicit
     /// "Untargetable player" field. vendor/server/src/map/packets/
     /// entity_update.cpp `flags1_t`, char_update.cpp CCharUpdatePacket::updateWith.
@@ -341,6 +367,7 @@ impl CharFlags {
             linkshell: bit(f1, flags1::LINKSHELL),
             linkdead: bit(f1, flags1::LINKDEAD),
             gm_level: field(f1, flags1::GM_LEVEL, flags1::GM_LEVEL_BITS) as u8,
+            graph_size: field(f1, flags1::GRAPH_SIZE, flags1::GRAPH_SIZE_BITS) as u8,
             bazaar: bit(f1, flags1::BAZAAR),
             linkshell_color: [
                 field(f2, flags2::LS_R, flags2::CHANNEL_BITS) as u8,
@@ -383,6 +410,8 @@ mod flags1 {
     pub const LINKDEAD: u32 = 18;
     pub const GM_LEVEL: u32 = 24;
     pub const GM_LEVEL_BITS: u32 = 3;
+    pub const GRAPH_SIZE: u32 = 9;
+    pub const GRAPH_SIZE_BITS: u32 = 2;
     pub const BAZAAR: u32 = 31;
     /// `TargetOffFlag` — bit 19 in both char_update.cpp and entity_update.cpp
     /// `flags1_t`. For NPC/MOB this is where `m_flags & FLAG_UNTARGETABLE`
@@ -400,6 +429,10 @@ mod flags1 {
 mod flags2 {
     pub const LS_R: u32 = 0;
     pub const LS_G: u32 = 8;
+    /// On 0x0E CHAR_NPC General updates LSB overwrites this channel's high
+    /// nibble with the confrontation gate id
+    /// (vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
+    /// `Fenced content ID`); only 0x0D CHAR_PC carries a full linkshell colour.
     pub const LS_B: u32 = 16;
     pub const CHANNEL_BITS: u32 = 8;
     pub const CHARM: u32 = 27;
@@ -579,6 +612,33 @@ impl LookData {
         }
     }
 
+    /// The retail entity Type byte (ent+0xEE) this 0x0E payload's SubKind
+    /// dispatch writes — the input the 0x5B/0x66 motion resource readers'
+    /// load gate reads. The vendored XiClient's RecvCharNpc switch mirrors
+    /// the SubKind dispatch (research/XiClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp).
+    /// CHAR_PC sets Type 0.
+    pub fn retail_type(opcode: u16, body: &[u8]) -> Option<u8> {
+        use crate::map::s2c;
+        if opcode == s2c::CHAR_PC {
+            return Some(0);
+        }
+        if opcode != s2c::CHAR_NPC {
+            return None;
+        }
+        let off = Self::LOOK_BODY_OFFSET;
+        let size = u16::from_le_bytes(body.get(off..off + 2)?.try_into().ok()?);
+        Some(match size & 7 {
+            0 => 2,
+            1 => 1,
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            5 => 6,
+            6 => 7,
+            _ => 8,
+        })
+    }
+
     pub const CHAR_PC_GRAP_OFFSET: usize = 0x44;
 
     /// `GP_SERV_COMMAND_GRAP_LIST::PacketData` opens with `GrapIDTbl`
@@ -712,6 +772,42 @@ const _: () = {
     assert!(NpcState::ANIMATIONSUB_OFFSET < LookData::LOOK_BODY_OFFSET);
     assert!(LookData::LOOK_BODY_OFFSET < LookData::DOOR_ID_BODY_OFFSET);
 };
+
+pin_s2c_offset!(
+    PosHead::HPP_OFFSET,
+    login::POS_HEAD_HP_MAX,
+    "GP_SERV_POS_HEAD.HpMax"
+);
+pin_s2c_offset!(
+    PosHead::FLAGS0_OFFSET,
+    login::POS_HEAD_FLAGS1,
+    "GP_SERV_POS_HEAD.flags1"
+);
+pin_s2c_offset!(
+    PosHead::SIZE,
+    login::POS_HEAD_BT_TARGET_ID,
+    "GP_SERV_POS_HEAD.BtTargetID"
+);
+pin_s2c_offset!(
+    PosHead::SIZE_WITH_BT_TARGET,
+    login::ZONE_NO,
+    "GP_SERV_POS_HEAD size"
+);
+pin_s2c_offset!(
+    LookData::GRAP_LIST_TBL_OFFSET,
+    grap_list::GRAP_ID_TBL,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl"
+);
+pin_s2c_offset!(
+    LookData::GRAP_ID_TBL_SLOTS,
+    grap_list::GRAP_ID_TBL_COUNT,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl length"
+);
+pin_s2c_offset!(
+    LookData::GRAP_ID_TBL_LEN,
+    grap_list::GRAP_ID_TBL_LEN,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl length"
+);
 
 #[cfg(test)]
 mod despawn_tests {
@@ -931,7 +1027,28 @@ mod char_flags_tests {
                 .count();
             assert_eq!(others, 0, "flags1 bit {shift} bled into another field");
             assert_eq!(flags.gm_level, 0, "flags1 bit {shift} bled into GmLevel");
+            assert_eq!(
+                flags.graph_size, 0,
+                "flags1 bit {shift} bled into GraphSize"
+            );
         }
+    }
+
+    /// `GraphSize` sits at bits 9-10, immediately under `LfgFlag` and above
+    /// `CliPosInitFlag`, so a maxed size class must not light either neighbour
+    /// (vendor/server/src/map/packets/entity_update.cpp `flags1_t`).
+    #[test]
+    fn graph_size_is_a_two_bit_field_under_lfg() {
+        for size in 0..=3u8 {
+            let flags = CharFlags::from_pos_head(
+                &head_with(u32::from(size) << flags1::GRAPH_SIZE, 0, 0),
+                None,
+            );
+            assert_eq!(flags.graph_size, size);
+            assert!(!flags.lfg, "GraphSize {size} bled into LfgFlag");
+        }
+        let flags = CharFlags::from_pos_head(&head_with(1 << flags1::LFG, 0, 0), None);
+        assert_eq!(flags.graph_size, 0, "LfgFlag bled into GraphSize");
     }
 
     /// Pins the byte mapping against LSB's write site: for NPC/MOB the
@@ -1009,7 +1126,7 @@ mod char_flags_tests {
 
     #[test]
     fn allegiance_is_the_ballista_team_byte() {
-        // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h)
+        // ALLEGIANCE_TYPE::WINDURST (vendor/server/data/enums/allegiance.yaml)
         const WINDURST: u8 = 4;
         let flags = CharFlags::from_pos_head(
             &head_with(0, 0, u32::from(WINDURST) << flags3::BALLISTA_TEAM),
@@ -1517,7 +1634,7 @@ mod pos_head_tests {
         // a value at the top of the counter's range must decode without bleeding into
         // facetarget.
         const FACETARGET_SAMPLE: u32 = 0x01A2;
-        // vendor/server/src/map/ai/helpers/pathfind.cpp StepTo: the per-step MovTime increment.
+        // vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepTo: the per-step MovTime increment.
         const PATHFIND_STEP_MOV_TIME: u32 = 0x35;
         let mut buf = vec![0u8; PosHead::SIZE];
         let flags0 = (FACETARGET_SAMPLE << PosHead::FACETARGET_SHIFT) | PosHead::MOV_TIME_MASK;

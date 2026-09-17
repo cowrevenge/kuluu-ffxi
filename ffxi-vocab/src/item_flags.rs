@@ -5,12 +5,15 @@
 //! far get named constants; the raw word is available via [`lookup`].
 
 include!(concat!(env!("OUT_DIR"), "/item_flags_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/item_stack_size_table.rs"));
 
 /// @FLAG_CAN_SEND_ACCT — deliverable to a character on the same account even
 /// when @FLAG_NODELIVERY is set (server enforces the account match).
 pub const CAN_SEND_ACCT: u32 = 0x00010;
 /// @FLAG_NOAUCTION — cannot be listed on the Auction House.
 pub const NOAUCTION: u32 = 0x00040;
+/// @FLAG_NOSALE — cannot be sold to an NPC shop.
+pub const NOSALE: u32 = 0x01000;
 /// @FLAG_NODELIVERY — cannot be staged into the delivery box.
 pub const NODELIVERY: u32 = 0x02000;
 /// @FLAG_EX — cannot be traded.
@@ -50,6 +53,26 @@ pub fn auctionable(id: u16) -> bool {
     lookup(id) & NOAUCTION == 0
 }
 
+/// Whether the NPC-shop sell picker should offer this item. Mirrors the
+/// `!PItem->hasFlag(ItemFlag::NoSale)` guard in
+/// vendor/server/src/map/packets/c2s/0x084_shop_sell_req.cpp process, which
+/// silently drops the appraisal for a NoSale item.
+pub fn sellable(id: u16) -> bool {
+    lookup(id) & NOSALE == 0
+}
+
+/// How many of `id` fit in one inventory slot (`item_basic.stackSize`). Items
+/// absent from the sparse table do not stack. This is the cap a shop purchase
+/// is sized against; LSB clamps anything larger
+/// (vendor/server/src/map/packets/c2s/0x083_shop_buy.cpp process).
+pub fn stack_size(id: u16) -> u8 {
+    ITEM_STACK_SIZES
+        .binary_search_by_key(&id, |&(k, _)| k)
+        .ok()
+        .map(|i| ITEM_STACK_SIZES[i].1)
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,8 +103,27 @@ mod tests {
     }
 
     #[test]
+    fn nosale_furnishing_is_kept_out_of_the_shop_sell_picker() {
+        // item 7 (gold_bed): @FLAG_INSCRIBABLE | @FLAG_NOAUCTION | @FLAG_NOSALE |
+        // @FLAG_NODELIVERY | @FLAG_EX (item_basic.sql).
+        assert_eq!(lookup(7) & NOSALE, NOSALE);
+        assert!(!sellable(7));
+        // item 2 (simple_bed) carries neither flag.
+        assert!(sellable(2));
+    }
+
+    #[test]
+    fn stack_size_comes_from_item_basic() {
+        // item 4096 (fire crystal) stacks to 12; item 7 (gold_bed) does not stack.
+        assert_eq!(stack_size(4096), 12);
+        assert_eq!(stack_size(7), 1);
+        assert_eq!(stack_size(u16::MAX), 1, "unknown ids do not stack");
+    }
+
+    #[test]
     fn unknown_item_has_no_flags() {
         assert_eq!(lookup(u16::MAX), 0);
         assert!(deliverable(u16::MAX));
+        assert!(sellable(u16::MAX));
     }
 }

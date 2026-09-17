@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jondwillis.kuluu</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Kuluu</name>
+  <summary>An open-source FINAL FANTASY XI client</summary>
+  <description>
+    <p>Kuluu is a community-built FINAL FANTASY XI client for private servers. It requires a user-provided game installation and ships no game assets.</p>
+  </description>
+  <launchable type="desktop-id">io.github.jondwillis.kuluu.desktop</launchable>
+  <url type="homepage">https://github.com/jondwillis/kuluu-ffxi</url>
+  <url type="bugtracker">https://github.com/jondwillis/kuluu-ffxi/issues</url>
+  <provides><binary>kuluu</binary></provides>
+  <categories><category>Game</category><category>RolePlaying</category></categories>
+</component>

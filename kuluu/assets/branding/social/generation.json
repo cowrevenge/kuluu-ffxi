@@ -1,0 +1,38 @@
+{
+  "generator": "Built-in image_gen",
+  "reference": "../kuluu-master.png",
+  "github": {
+    "file": "github-preview.png",
+    "width": 1280,
+    "height": 640,
+    "prompt": "Design a polished GitHub repository social preview card, wide 2:1 composition, 1280x640 desired. Use the supplied Southern Watcher icon as the EXACT brand identity reference: moss-green curled tail carrying three ivory stars and a bronze amber lantern. Preserve its recognizable silhouette and orientation. Place the entire emblem on the LEFT occupying about 33% of card width, fully inside 70px safe margins. RIGHT: very large elegant ivory serif wordmark text exactly 'Kuluu'. Beneath it a smaller highly legible warm-gray sans-serif line exactly 'An open-source' and next line exactly 'FINAL FANTASY XI client'. No other text. Dark deep forest-green matte background with barely visible atmospheric mist and subtle warm amber glow behind the lantern, quiet and sophisticated, warm old-world fantasy meets clear modern editorial design. Sparse tiny subdued stars only at far edges. No border, no UI mockup, no extra logos, no watermark. Excellent legibility when the entire image shrinks to 640x320. Avoid ornate scrollwork, muddy text, overbright magical effects, bright green neon or chrome. This banner has an opaque background, unlike the transparent source icon.",
+    "generatedSize": [
+      1774,
+      887
+    ],
+    "export": "sips -z 640 1280"
+  },
+  "discord": {
+    "banner": "discord-banner.png",
+    "bannerSize": [
+      960,
+      540
+    ],
+    "inviteSplash": "discord-invite-splash.png",
+    "inviteSplashSize": [
+      1920,
+      1080
+    ],
+    "prompt": "Create a sophisticated original fantasy landscape background for a Discord server banner and invitation splash, 16:9 wide, desired 1920x1080. Use the reference ONLY for its moss olive green, deep forest green, aged bronze, warm amber lantern and ivory star palette and softly painted material treatment. No logo, no text, no character, no watermark. An ancient jungle sanctuary at night: weathered moss-covered stone steps and low carved ruins framing the bottom edges, enormous curling roots subtly recalling a spiral, atmospheric deep green mist in the middle distance. A small beautiful bronze lantern closely inspired by the reference lantern sits on a stone plinth at the lower RIGHT, around 82% horizontal and  seventy percent vertical, casting warm amber light across moss. Three small distant ivory stars in the upper right sky subtly echo the brand. Center half of the image is quiet dark atmospheric negative space for a Discord invite overlay; top 12% is very dark low-contrast empty mist for the server name overlay. Main evocative scene elements concentrated at outer edges and lower third. Restrained painterly old-world Japanese fantasy MMORPG concept art feeling, tranquil, mysterious, inviting, elegant, fine detail but no visual clutter. No neon, no bright moon, no giant focal element in the center. Opaque background, full bleed artwork.",
+    "export": "sips resize to delivery dimensions"
+  },
+  "avatar": {
+    "file": "discord-avatar.png",
+    "size": [
+      512,
+      512
+    ],
+    "source": "../png/kuluu-512.png",
+    "transparent": true
+  }
+}

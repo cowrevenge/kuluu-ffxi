@@ -93,14 +93,14 @@ mod tests {
     use super::*;
 
     /// Pins the two scrapes against each other and against LSB's own comments:
-    /// Port San d'Oria's base is 7264 and `_NOROD` sits at +1, so the "you can't
-    /// fish without a rod" line is 7265 there.
+    /// Port San d'Oria's base is 7268 and `_NOROD` sits at +1, so the "you can't
+    /// fish without a rod" line is 7269 there.
     #[test]
     fn port_san_doria_base_and_offsets_compose() {
         const PORT_SAN_DORIA: u16 = 232;
-        assert_eq!(zone_offset(PORT_SAN_DORIA), Some(7264));
+        assert_eq!(zone_offset(PORT_SAN_DORIA), Some(7268));
         assert_eq!(kind::NOROD, 0x01);
-        assert_eq!(classify(PORT_SAN_DORIA, 7265), Some(kind::NOROD));
+        assert_eq!(classify(PORT_SAN_DORIA, 7269), Some(kind::NOROD));
     }
 
     /// The two "something caught the hook" lines retail sizes the mini-game bar

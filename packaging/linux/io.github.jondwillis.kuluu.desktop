@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kuluu
+Comment=Explore Vana'diel with an open-source FINAL FANTASY XI client
+Exec=kuluu play
+Icon=io.github.jondwillis.kuluu
+Terminal=false
+Categories=Game;RolePlaying;
+StartupWMClass=io.github.jondwillis.kuluu

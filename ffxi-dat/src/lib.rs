@@ -1,7 +1,9 @@
 pub mod action;
 pub mod anim;
 pub mod archive;
+pub mod autotranslate_names;
 pub mod bone;
+pub mod camera;
 pub mod chunk;
 pub mod cib;
 pub mod client_profile;
@@ -13,8 +15,15 @@ pub mod event_locate;
 pub mod footstep;
 pub mod ftable;
 pub mod generator;
+// Sourced directly from ffxi-install rather than a crate dependency: an
+// ffxi-install crate dependency would drag its unconditional native deps
+// (unrar in particular, a C++ build via cc-rs) into every ffxi-dat consumer,
+// including the wasm32 target (kuluu-viewer-wasm -> kuluu-render ->
+// ffxi-actor/ffxi-dat), which has no C++ stdlib to link against.
+#[path = "../../ffxi-install/src/install_detect.rs"]
 pub mod install_detect;
 pub mod item_dat;
+pub mod key_item;
 pub mod kind;
 pub mod main_dll;
 pub mod map_image;
@@ -22,6 +31,7 @@ pub mod mmb;
 pub mod mzb;
 pub mod npc_names;
 pub mod particle_gen;
+pub mod pol1;
 pub mod resource_dir;
 pub mod scheduler;
 pub mod sep;
@@ -41,9 +51,11 @@ pub mod zone_dat;
 pub mod zone_interaction;
 
 pub use archive::{discover_overlays, DatLocation, DatRoot};
+pub use camera::CameraResource;
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use client_profile::{ClientProfile, ItemBlockLayout};
 pub use item_dat::ItemStatic;
+pub use key_item::KeyItemTable;
 pub use kind::ChunkKind;
 pub use npc_names::{compose_id, split_id, NpcNameTable, NPC_LIST_FILE_ID_BASE};
 

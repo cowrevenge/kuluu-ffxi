@@ -18,22 +18,17 @@ pub struct ZoneParticles {
     entities: Vec<Entity>,
 }
 
-// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp InitWeather — on zone load the only
-// generators the zone unlinks are those under 'taew' (weat/), which WeatherTransition.cpp
-// ActivateWeatherGenerators re-activates per weather (weather_particles.rs here); every other
-// generator in the container stays linked and runs on its own flags.
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator — a linked
-// generator emits on its own when `flags & 0x1000` is set, the bit parsed as `auto_run`; no
-// name, placement or mesh test sits anywhere on that path. The life split is ours: a life of 0
-// marks a persistent singleton (the sea sheets dat_mzb.rs draws, the canopies zone_clouds.rs
-// draws) rather than a timed emitter, and that set stays with those modules (kuluu-zi3t).
+// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp InitWeather;
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator.
 pub(crate) fn is_zone_static(def: &ParticleGeneratorDef) -> bool {
-    def.auto_run && def.max_life_frames > 0.0
+    def.auto_run
 }
 
 pub(crate) struct ZoneStaticDef {
     pub name: [u8; 4],
     pub def: ParticleGeneratorDef,
+    // The chunk's byte offset in the zone DAT: the element_sort.rs tie-break.
+    pub dat_offset: usize,
 }
 
 // The same emitter is sometimes authored twice (West Ronfaure's effe/fir1 campfire subtree
@@ -44,6 +39,7 @@ pub(crate) struct ZoneStaticDef {
 fn zone_static_defs(bytes: &[u8]) -> Vec<ZoneStaticDef> {
     fn walk(
         node: &ffxi_dat::chunk::ChunkNode<'_>,
+        water: &HashSet<usize>,
         seen: &mut HashSet<([u8; 4], [u8; 4], [u32; 3])>,
         out: &mut Vec<ZoneStaticDef>,
     ) {
@@ -51,7 +47,7 @@ fn zone_static_defs(bytes: &[u8]) -> Vec<ZoneStaticDef> {
             let c = &child.chunk;
             if !child.children.is_empty() || c.kind == ChunkKind::Rmp as u8 {
                 if c.name != crate::weather_particles::WEAT_DIR {
-                    walk(child, seen, out);
+                    walk(child, water, seen, out);
                 }
                 continue;
             }
@@ -61,17 +57,22 @@ fn zone_static_defs(bytes: &[u8]) -> Vec<ZoneStaticDef> {
             let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
                 continue;
             };
-            if !is_zone_static(&def) {
+            if !is_zone_static(&def) || water.contains(&c.offset) {
                 continue;
             }
             if seen.insert((c.name, def.mesh_id, def.base_position.map(f32::to_bits))) {
-                out.push(ZoneStaticDef { name: c.name, def });
+                out.push(ZoneStaticDef {
+                    name: c.name,
+                    def,
+                    dat_offset: c.offset,
+                });
             }
         }
     }
     let mut out = Vec::new();
     walk(
         &ffxi_dat::chunk::walk_tree(bytes),
+        &crate::dat_mzb::water_generator_offsets(bytes),
         &mut HashSet::new(),
         &mut out,
     );
@@ -119,11 +120,16 @@ fn sync_zone_particles(
         return;
     };
 
-    let (_schedulers, assets) = parse_action_bytes(&bytes);
+    let (_schedulers, assets, _cameras) = parse_action_bytes(&bytes);
     let global = global.as_ref().map(|g| &g.assets);
     let mut spawned = 0usize;
     let mut unresolved: Vec<String> = Vec::new();
-    for ZoneStaticDef { name, def } in zone_static_defs(&bytes) {
+    for ZoneStaticDef {
+        name,
+        def,
+        dat_offset,
+    } in zone_static_defs(&bytes)
+    {
         let bp = def.base_position;
         let origin = if def.camera_relative {
             // Placeholder: track_zone_particles rewrites it from the camera before the first
@@ -138,6 +144,7 @@ fn sync_zone_particles(
         };
         let opts = ZoneGeneratorOptions {
             camera_relative: def.camera_relative,
+            dat_offset,
             ..Default::default()
         };
         let entity = spawn_zone_particle_generator(
@@ -223,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn zone_static_is_every_timed_auto_run_generator() {
+    fn zone_static_is_every_auto_run_generator() {
         let base = ParticleGeneratorDef {
             auto_run: true,
             max_life_frames: 60.0,
@@ -241,11 +248,11 @@ mod tests {
             "manual-run generator excluded"
         );
         assert!(
-            !is_zone_static(&ParticleGeneratorDef {
+            is_zone_static(&ParticleGeneratorDef {
                 max_life_frames: 0.0,
                 ..base
             }),
-            "life==0 persistent singleton excluded (dat_mzb / zone_clouds scope)"
+            "persistent singleton runs unless another renderer owns it"
         );
     }
 
@@ -269,21 +276,40 @@ mod tests {
         }
     }
 
-    // Selbina's lantern glow (effe/ligh/lt*, lfr*), flame (effe/ligh/fir*) and chimney smoke
-    // (effe/smok/sk*) are all timed auto-run generators under their own names. The sea sheets
-    // (effe/sea/sea1, life 0) and the fishing splash (effe/sea/se01, manual-run) stay out.
     #[test]
     fn real_dat_selbina_lanterns_and_chimneys_are_zone_statics() {
         let Some(bytes) = zone_dat(SELBINA_ZONE_DAT) else {
             return;
         };
         let names = names(&zone_static_defs(&bytes));
-        for n in ["lt01", "lfr1", "fir1", "sk00"] {
+        for n in [
+            "lt01", "lfr1", "fir1", "sk00", "wi01", "lt15", "lt16", "lt17",
+        ] {
             assert!(names.iter().any(|x| x == n), "{n} missing: {names:?}");
         }
-        for n in ["sea1", "wi01", "se01"] {
+        for n in ["sea1", "sea2", "scol", "se01"] {
             assert!(!names.iter().any(|x| x == n), "{n} claimed here");
         }
+    }
+
+    #[test]
+    fn real_dat_lower_jeuno_monument_persistent_effects_are_owned() {
+        const LOWER_JEUNO_DAT: u32 = 345;
+        let Some(bytes) = zone_dat(LOWER_JEUNO_DAT) else {
+            return;
+        };
+        let defs = zone_static_defs(&bytes);
+        let (_, assets, _) = parse_action_bytes(&bytes);
+        for name in [*b"myl7", *b"SPLT"] {
+            let d = defs
+                .iter()
+                .find(|d| d.name == name)
+                .expect("monument effect");
+            assert_eq!(d.def.max_life_frames, 0.0);
+            assert_eq!(d.def.mesh_id, *b"ligh");
+        }
+        assert!(assets.sprite_sheets.contains_key(b"ligh"));
+        assert!(assets.mmbs.contains_key(b"ligh"));
     }
 
     // The campfire flame sheet hi12 ships only in the global effect dir (syst/effe/hi12): the
@@ -302,8 +328,8 @@ mod tests {
             .find(|d| &d.name == b"fir1")
             .expect("fir1");
         assert_eq!(&fir1.def.mesh_id, b"hi12");
-        let (_s, local) = parse_action_bytes(&bytes);
-        let (_s, global) = parse_action_bytes(&global);
+        let (_s, local, _) = parse_action_bytes(&bytes);
+        let (_s, global, _) = parse_action_bytes(&global);
         assert!(
             !local.sprite_sheets.contains_key(b"hi12") && !local.d3ms.contains_key(b"hi12"),
             "hi12 is not zone-local"

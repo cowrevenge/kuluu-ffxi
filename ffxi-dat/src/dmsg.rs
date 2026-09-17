@@ -21,6 +21,14 @@ const OFFSET_XOR: u32 = 0x8080_8080;
 const MAGIC_BASE: u32 = 0x1000_0000;
 
 // DialogTable control codes (POLUtils Things/DialogTableEntry.cs).
+/// Text X position for the message-box renderer: two position bytes
+/// (`p1 << 8 | p0`), no visible text. The zone-230 event-503 narration lines
+/// open with `set_x(80)` so their subtitles anchor off the dialog frame —
+/// consuming the pair keeps its parameter bytes from leaking as "PT".
+/// (research/cexi-docs/dialog/format.md, set_x row.)
+const CC_SET_X: u8 = 0x02;
+/// Text Y position — see [`CC_SET_X`]; the narration lines' `set_y(340)`.
+const CC_SET_Y: u8 = 0x03;
 pub(crate) const CC_NEWLINE: u8 = 0x07;
 const CC_PLAYER_NAME: u8 = 0x08;
 const CC_SPEAKER_NAME: u8 = 0x09;
@@ -76,6 +84,10 @@ pub(crate) const INLINE_KIND_ITEM_ANY: u8 = 0x28;
 pub(crate) const INLINE_KIND_ITEM_COUNTED: u8 = 0x29;
 pub(crate) const INLINE_KIND_ITEM_COUNTED_PLURAL: u8 = 0x2a;
 pub(crate) const INLINE_KIND_KEY_ITEM: u8 = 0x33;
+/// Status-effect name. Observed in the basic-message table's effect lines,
+/// whose LSB counterpart names the slot `<status>`
+/// (vendor/server/src/map/enums/msg_basic.h MsgBasic UsesSkillGainsEffect).
+pub(crate) const INLINE_KIND_STATUS: u8 = 0x13;
 /// Zone name (system-message table entry 318 lists linkshell-concierge zones).
 pub(crate) const INLINE_KIND_ZONE: u8 = 0x37;
 
@@ -251,24 +263,20 @@ pub fn emote_line_index(mes_num: u16, targeted: bool) -> usize {
 /// 2*97 entries (ROM/27/70.DAT has 198 on horizonxi-2023 and retail-2026-09).
 pub const EMOTE_TABLE_MIN_ENTRIES: usize = 2 * 97;
 
-/// The canned-emote chat-text DialogTable. Located at ROM/27/70.DAT in the NA
-/// install (empirical — found by scan, not by a documented file id; other
-/// regions may relocate it, hence the parse-shape validation on open).
+/// The canned-emote chat-text DialogTable of the NA install (empirical — found
+/// by scan, not by a documented file id; another region may hold a different
+/// table at this id, hence the parse-shape validation on open).
 pub struct EmoteTextDat {
     dat: StringDat,
 }
 
-/// `<install root>/ROM/27/70.DAT` (FTABLE sub_path dir 27, file 70).
-pub const EMOTE_TEXT_SUB_PATH: (u16, u8) = (27, 70);
+/// The emote table's file id; `ROM/27/70.DAT` on the horizonxi-2023 and
+/// retail-2026-09 [`crate::client_profile::KNOWN_CLIENTS`] rows.
+pub const EMOTE_TEXT_FILE_ID: u32 = 7025;
 
 impl EmoteTextDat {
     pub fn open(root: &crate::DatRoot) -> Option<Self> {
-        let (dir, file) = EMOTE_TEXT_SUB_PATH;
-        let path = root
-            .root()
-            .join("ROM")
-            .join(dir.to_string())
-            .join(format!("{file}.DAT"));
+        let path = root.resolve(EMOTE_TEXT_FILE_ID).ok()?.path_under(root);
         let bytes = std::fs::read(path).ok()?;
         let dat = StringDat::parse(&bytes).ok()?;
         (dat.len() >= EMOTE_TABLE_MIN_ENTRIES).then_some(Self { dat })
@@ -415,6 +423,8 @@ fn decode_dialog_text(bytes: &[u8]) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         match b {
+            // Layout directives: consume both position bytes, emit nothing.
+            CC_SET_X | CC_SET_Y => i += 2,
             CC_NEWLINE => out.push('\n'),
             CC_PLAYER_NAME => push_plain(&mut out, MARKER_PLAYER_NAME),
             CC_SPEAKER_NAME => push_plain(&mut out, MARKER_SPEAKER_NAME),
@@ -460,6 +470,9 @@ pub(crate) struct InlineTag {
     /// Marker name to emit, `None` for a recognized-but-unrenderable kind
     /// (the tag is still consumed whole so its data bytes never leak as text).
     pub(crate) marker: Option<&'static str>,
+    /// The raw kind byte, kept because several kinds share one marker (or
+    /// none) in the rendered text and a composer may need to tell them apart.
+    pub(crate) kind: u8,
     /// Message-parameter index from the tag's last `82 <0x80|n>` reference —
     /// for item kinds that also carry a count/plural reference, the id ref
     /// comes last (observed: `01 09 29 82 81 80 80 82 80` = count param 1,
@@ -499,7 +512,12 @@ pub(crate) fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
         .find(|w| w[0] == INLINE_TAG_PARAM_REF)
         .map(|w| w[1] & !INLINE_TAG_PARAM_BASE)
         .unwrap_or(0);
-    Some(InlineTag { marker, param, len })
+    Some(InlineTag {
+        marker,
+        kind: bytes[at + 2],
+        param,
+        len,
+    })
 }
 
 /// Emit `{name}` for a control code with no parameter.
@@ -559,6 +577,57 @@ mod tests {
         let entry = [b'H', b'i', b' ', 0x08, b',', b' ', 0x0a, 5];
         let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
         assert_eq!(dat.text(0).as_deref(), Some("Hi {PlayerName}, {Num:5}"));
+    }
+
+    /// The event-503 narration lines open with `set_x(80)` + NUL + `set_y(340)`:
+    /// the position bytes must not leak as "PT" before the text, and the NUL
+    /// between them does not stop decoding (the text lives in the second
+    /// NUL-separated sub-string).
+    #[test]
+    fn narration_position_prefix_decodes_clean() {
+        let entry = [
+            CC_SET_X, 0x50, 0x00, CC_SET_Y, 0x54, 0x01, b'T', b'h', b'e', CC_NEWLINE, b'n', b'o',
+            b'r', b't', b'h', CC_AUTO, 0x34, 9, CC_AUTO, 0x31, 0x00, CC_NEWLINE,
+        ];
+        let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
+        assert_eq!(
+            dat.text(0).as_deref(),
+            Some("The\nnorth{Auto:52}{Auto:49}\n")
+        );
+    }
+
+    /// Decodes the real zone-230 event-503 narration line to clean text — no
+    /// "PT" position-byte leak. Self-skips without game files; located by
+    /// content in a window around the observed index, which drifts with client
+    /// patch level.
+    #[test]
+    fn real_zone230_event503_narration_line_decodes_clean() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const NARRATION_LINE_PIN: usize = 7668;
+        let file_id = crate::zone_dat::string_dat_file_id(ZONE230_ID);
+        let loc = root.resolve(file_id).expect("string DAT resolves");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
+        let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
+        let pin = NARRATION_LINE_PIN;
+        let lo = pin.saturating_sub(256);
+        let hi = pin + 512;
+        let text = (lo..hi.min(dat.len()))
+            .filter_map(|i| dat.text(i))
+            .find(|t| t.contains("fortress city of San d'Oria"));
+        let Some(text) = text else {
+            panic!(
+                "no 'fortress city of San d'Oria' entry in {lo}..{hi} of a {}-entry table; \n                 install patch skew beyond the window (pin {pin} holds {:?})",
+                dat.len(),
+                dat.text(pin)
+            );
+        };
+        assert!(
+            text.starts_with("The fortress city"),
+            "position bytes leaked into the narration line: {text:?}"
+        );
     }
 
     #[test]
@@ -841,14 +910,17 @@ mod tests {
         assert_eq!(dat.text(0).as_deref(), Some("#hi"), "kind byte re-renders");
     }
 
+    /// Message index Southern San d'Oria event 503's epilogue SAY references —
+    /// the "give coupon" line that inlines the Adventurer's Coupon name
+    /// (vendor/server/sql/item_basic.sql item 536) through an item inline tag.
+    const ZONE230_EVENT503_COUPON_LINE: usize = 7747;
     const ZONE230_ID: u16 = 230;
     const KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
     /// Southern San d'Oria (zone 230) KEYITEM_OBTAINED per KNOWN_CLIENTS row.
     /// LSB text ids are identity DAT entry indexes for the client era LSB was
     /// synced to: the vendored vendor/server/scripts/zones/Southern_San_dOria/IDs.lua
-    /// (CLIENT_VER 30260203_0) pins 6438; horizonxi-2023 sits 1 below it and
-    /// retail-2026-09 4 above (LSB's 30260904_1 sync matches retail-2026-09
-    /// exactly). The index moves between rows because SE inserts dialog
+    /// (CLIENT_VER 30260904_1) pins 6442, which retail-2026-09 matches
+    /// exactly; horizonxi-2023 sits 5 below it. The index moves between rows because SE inserts dialog
     /// entries over time — client-build skew, not an index-base convention.
     const HORIZONXI_2023_KEYITEM_OBTAINED: usize = 6437;
     const RETAIL_2026_09_KEYITEM_OBTAINED: usize = 6442;
@@ -891,8 +963,7 @@ mod tests {
             eprintln!("skipping: no FFXI install");
             return;
         };
-        let file_id = crate::zone_dat::zone_id_to_string_file_id(ZONE230_ID)
-            .expect("zone 230 has a string DAT mapping");
+        let file_id = crate::zone_dat::string_dat_file_id(ZONE230_ID);
         let loc = root.resolve(file_id).expect("string DAT resolves");
         let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
         let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
@@ -922,6 +993,44 @@ mod tests {
                  zone-230 KEYITEM_OBTAINED index (located at {index})"
             ),
         }
+    }
+
+    /// Decodes the real zone-230 event-503 coupon line to an `{Item:0}` marker
+    /// (the tag's `82 80` word is a message-parameter reference to slot 0; the
+    /// byte after the tag drops as an unknown control code). Self-skips without
+    /// game files; located by content in a window around the observed index,
+    /// which drifts with client patch level.
+    #[test]
+    fn real_zone230_event503_coupon_line_decodes_item_marker() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let file_id = crate::zone_dat::string_dat_file_id(ZONE230_ID);
+        let loc = root.resolve(file_id).expect("string DAT resolves");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
+        let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
+        let pin = ZONE230_EVENT503_COUPON_LINE;
+        let lo = pin.saturating_sub(256);
+        let hi = pin + 512;
+        let text = (lo..hi.min(dat.len()))
+            .filter_map(|i| dat.text(i))
+            .find(|t| t.contains("Give it to Ailevia"));
+        let Some(text) = text else {
+            panic!(
+                "no 'Give it to Ailevia' entry in {lo}..{hi} of a {}-entry table; \n                 install patch skew beyond the window (pin {pin} holds {:?})",
+                dat.len(),
+                dat.text(pin)
+            );
+        };
+        assert!(
+            text.contains(&format!("{{{MARKER_ITEM}:0}}")),
+            "expected an {{Item:0}} marker, got {text:?}"
+        );
+        assert!(
+            !text.contains(char::REPLACEMENT_CHARACTER),
+            "tag bytes leaked as unmapped text: {text:?}"
+        );
     }
 
     /// Loads a real DialogTable from the retail install when present; self-skips

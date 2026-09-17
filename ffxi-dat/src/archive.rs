@@ -333,14 +333,17 @@ impl DatRoot {
         }
 
         let overlays = RwLock::new(discover_overlays(&root));
-        let profile = ClientProfile::probe(&root);
-        Ok(Self {
+        // The profile's item-layout probe resolves a file id, so it needs the
+        // assembled tables and overlay search path: build the root, then fill it in.
+        let mut root = Self {
             root,
-            profile,
+            profile: ClientProfile::default(),
             apps,
             skipped,
             overlays,
-        })
+        };
+        root.profile = ClientProfile::probe_in(&root);
+        Ok(root)
     }
 
     /// Replace the overlay search path. Every constructor already seeds it from
@@ -352,12 +355,16 @@ impl DatRoot {
 
     /// Swap the overlay search path on a live root, so a settings change takes
     /// effect without a restart. Callers holding DAT-derived caches must drop
-    /// them — this only changes which file a later resolve reads.
+    /// them — this only changes which file a later resolve reads. The
+    /// scheduler's zone-scene memo ([`crate::scheduler::clear_zone_scene_cache`])
+    /// is cleared here automatically; every other DAT-derived cache is the
+    /// holder's to drop.
     pub fn set_overlays(&self, overlays: Vec<PathBuf>) {
         *self
             .overlays
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = overlays;
+        crate::scheduler::clear_zone_scene_cache();
     }
 
     pub fn overlays(&self) -> Vec<PathBuf> {

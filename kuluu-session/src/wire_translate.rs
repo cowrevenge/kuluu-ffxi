@@ -28,6 +28,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         producer_monotonic_ms: process_monotonic_ms(),
 
         self_char_id: s.char_id,
+        self_pet_targid: s.self_pet_targid,
 
         dialog: s.dialog.as_ref().map(dialog_to_wire),
 
@@ -252,6 +253,8 @@ fn project_containers(s: &SessionState) -> Vec<wire::ContainerView> {
                     locked: slot.locked,
                     charges_remaining: slot.charges_remaining,
                     next_use_vana_ts: slot.next_use_vana_ts,
+                    use_delay_end_vana_ts: slot.use_delay_end_vana_ts,
+                    ready: slot.ready,
                 })
                 .collect(),
         })
@@ -306,6 +309,15 @@ pub fn shop_to_wire(s: &ShopState) -> wire::ShopState {
         offset_index: s.offset_index,
         items: s.items.iter().map(shop_item_to_wire).collect(),
         opened: s.opened,
+        expected_items: s.expected_items,
+        complete: s.complete,
+        vendor_id: s.vendor_id,
+        pending_sale: s.pending_sale.as_ref().map(|p| wire::ShopSale {
+            item_index: p.item_index,
+            item_no: p.item_no,
+            unit_price: p.unit_price,
+            count: p.count,
+        }),
     }
 }
 
@@ -337,6 +349,9 @@ pub fn dialog_to_wire(d: &DialogState) -> wire::DialogState {
         text_entry: d.text_entry,
         grid: d.grid.as_ref().map(grid_to_wire),
         custom_menu: d.custom_menu,
+        cancel_armed: d.cancel_armed,
+        speaker_index: d.speaker_index,
+        contains_item: d.contains_item,
     }
 }
 
@@ -430,7 +445,9 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             action_id,
             action_kind,
             target_id,
-            result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
+            // The swing pair stays raw: the snapshot's `result` is basic-attack-only, and the
+            // typed resolution rides in `outcome`.
+            result: result.map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
             animation,
             outcome: outcome.map(ffxi_proto::melee::ResultOutcome::to_wire),
         }),
@@ -484,6 +501,21 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             cue: cutscene_cue_to_wire(cue),
         }),
         AgentEvent::CutsceneEnded => Some(wire::ViewerEvent::CutsceneEnded),
+        AgentEvent::MapOpen { map_id, tutorial } => {
+            Some(wire::ViewerEvent::MapOpen { map_id, tutorial })
+        }
+        AgentEvent::MapMarkerPlaced {
+            map_id,
+            x_milli,
+            y_milli,
+            label,
+        } => Some(wire::ViewerEvent::MapMarkerPlaced {
+            map_id,
+            x_milli,
+            y_milli,
+            label,
+        }),
+        AgentEvent::MapClosed => Some(wire::ViewerEvent::MapClosed),
 
         _ => None,
     }
@@ -528,6 +560,8 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             hide,
         },
         Cue::CameraLock { lock } => wire::CutsceneCue::CameraLock { lock },
+        Cue::HudHide { hide } => wire::CutsceneCue::HudHide { hide },
+        Cue::ClockHold { stop, hour } => wire::CutsceneCue::ClockHold { stop, hour },
         Cue::Mount {
             target,
             status_event,
@@ -536,6 +570,72 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             target: cutscene_actor_to_wire(target),
             status_event,
             mount_id,
+        },
+        Cue::ExtScheduler {
+            motion,
+            actor,
+            partner,
+            key,
+        } => wire::CutsceneCue::ExtScheduler {
+            motion,
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
+            key,
+        },
+        Cue::ZoneScheduler {
+            key,
+            actor,
+            partner,
+            zone_id,
+        } => wire::CutsceneCue::ZoneScheduler {
+            key,
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
+            zone_id,
+        },
+        Cue::ActorMove {
+            actor,
+            x,
+            y,
+            z,
+            heading,
+            speed,
+        } => wire::CutsceneCue::ActorMove {
+            actor: cutscene_actor_to_wire(actor),
+            x,
+            y,
+            z,
+            heading,
+            speed,
+        },
+        Cue::ActorPlace {
+            actor,
+            x,
+            y,
+            z,
+            heading,
+        } => wire::CutsceneCue::ActorPlace {
+            actor: cutscene_actor_to_wire(actor),
+            x,
+            y,
+            z,
+            heading,
+        },
+        Cue::ActorFace { actor, heading } => wire::CutsceneCue::ActorFace {
+            actor: cutscene_actor_to_wire(actor),
+            heading,
+        },
+        Cue::ActorLookAt { actor, target } => wire::CutsceneCue::ActorLookAt {
+            actor: cutscene_actor_to_wire(actor),
+            target: cutscene_actor_to_wire(target),
+        },
+        Cue::ActorStopAction { actor, key } => wire::CutsceneCue::ActorStopAction {
+            actor: cutscene_actor_to_wire(actor),
+            key,
+        },
+        Cue::EntityName { actor, name } => wire::CutsceneCue::EntityName {
+            actor: cutscene_actor_to_wire(actor),
+            name,
         },
     }
 }
@@ -612,10 +712,10 @@ pub fn vec3_to_wire(v: Vec3) -> wire::Vec3 {
     }
 }
 
-// MOUNTTYPE, vendor/server/src/map/entities/baseentity.h. Noble Chocobo
+// MOUNTTYPE, vendor/server/src/map/entities/base_entity.h. Noble Chocobo
 // is a chocobo despite sitting at the far end of the enum — the server routes it
 // through ANIMATION_CHOCOBO like the plain one
-// (charentity.cpp, CCharEntity::tryStartNextEvent).
+// (char_entity.cpp, CCharEntity::tryStartNextEvent).
 const MOUNT_CHOCOBO: u8 = 0;
 const MOUNT_NOBLE_CHOCOBO: u8 = 34;
 
@@ -679,6 +779,7 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         linkdead: f.linkdead,
         gm_level: f.gm_level,
         bazaar: f.bazaar,
+        graph_size: f.graph_size,
         linkshell_color: f.linkshell_color,
         charm: f.charm,
         gm_icon: f.gm_icon,
@@ -976,6 +1077,9 @@ mod tests {
         let hit_right = ffxi_proto::melee::MeleeResult {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
             animation: ffxi_proto::melee::AttackAnimation::RightAttack,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
         };
         let crit = ffxi_proto::melee::ResultOutcome::from_wire(2, 3, 2);
         for result in [None, Some(hit_right)] {
@@ -994,7 +1098,8 @@ mod tests {
                     result: r,
                     outcome: Some((2, 3, 2)),
                     ..
-                }) if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
+                }) if r
+                    == result.map(|m| (m.resolution.to_wire(), m.animation.to_wire()))
             ));
         }
     }
@@ -1015,6 +1120,8 @@ mod tests {
                     price: 0,
                     charges_remaining: None,
                     next_use_vana_ts: None,
+                    use_delay_end_vana_ts: (id == 0 && i == 0).then_some(12_345),
+                    ready: (id == 0 && i == 0).then_some(false),
                 })
                 .collect();
             s.inventory
@@ -1038,6 +1145,8 @@ mod tests {
         );
         assert_eq!(out[1].capacity, 60);
         assert_eq!(out[0].items.len(), 2);
+        assert_eq!(out[0].items[0].use_delay_end_vana_ts, Some(12_345));
+        assert_eq!(out[0].items[0].ready, Some(false));
         assert_eq!(out[2].items[0].container, 4, "items tag their source bag");
     }
 
@@ -1427,6 +1536,8 @@ mod tests {
             price: 0,
             charges_remaining: None,
             next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
         });
         s.inventory.containers.insert(0, inv0);
 
@@ -1533,7 +1644,7 @@ mod tests {
         let mut scope = CutsceneScope::default();
         scope.start(crate::event_dialog::agent_event_id(NPC_ID, EVENT_ID), &tx);
         for cue in runner.take_cues() {
-            scope.push(resolve_cue(cue, NPC_ID), &tx);
+            scope.push(resolve_cue(cue, NPC_ID, 0), &tx);
         }
         scope.end(EventSessionExit::ScriptEnded, &tx);
 

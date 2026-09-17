@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use kuluu_snapshot::{ChatChannel, ChatLine, ChatSpanKind};
 
+use crate::graphics_settings::{ChatLayout, GraphicsSettings};
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, PassiveCursorFocus};
 use crate::mouse::MousePointer;
@@ -75,6 +76,21 @@ pub struct ActiveChatTab(pub ChatKind);
 #[derive(Component)]
 pub struct ChatTabBar;
 
+#[derive(Component)]
+pub struct ChatPanelGroup;
+
+#[derive(Component, Default)]
+pub struct ChatArea {
+    pub horizontal: bool,
+    pub panel_height: f32,
+}
+
+const CHAT_SPLIT_MIN_WIDTH_PX: f32 = 960.0;
+const CHAT_WINDOW_GAP_PX: f32 = 4.0;
+const CHAT_TAB_HEIGHT_PX: f32 = 20.0;
+// Leave breathing room above the log controls at large text scales.
+const CHAT_TOP_CLEARANCE_PX: f32 = 16.0;
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ChatTabButton {
     pub kind: ChatKind,
@@ -83,14 +99,8 @@ pub struct ChatTabButton {
 #[derive(Component)]
 pub struct ChatTabButtonLabel;
 
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ChatAutoSwitch(pub bool);
-
-impl Default for ChatAutoSwitch {
-    fn default() -> Self {
-        Self(true)
-    }
-}
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ChatUnread {
@@ -123,6 +133,28 @@ pub struct ChatActivityTracker {
     pub debug: usize,
 }
 
+pub fn reset_chat_session(
+    mut active: ResMut<ActiveChatTab>,
+    mut unread: ResMut<ChatUnread>,
+    mut tracker: ResMut<ChatActivityTracker>,
+    mut social: ResMut<ChatScroll>,
+    mut battle: ResMut<BattleScroll>,
+    mut debug: ResMut<DebugScroll>,
+    mut social_accum: ResMut<ChatScrollAccum>,
+    mut battle_accum: ResMut<BattleScrollAccum>,
+    mut debug_accum: ResMut<DebugScrollAccum>,
+) {
+    *active = default();
+    *unread = default();
+    *tracker = default();
+    *social = default();
+    *battle = default();
+    *debug = default();
+    *social_accum = default();
+    *battle_accum = default();
+    *debug_accum = default();
+}
+
 #[derive(Component)]
 pub struct ChatAutoSwitchToggle;
 
@@ -130,10 +162,6 @@ pub struct ChatAutoSwitchToggle;
 pub struct ChatAutoSwitchLabel;
 
 impl ChatKind {
-    /// The display order of the tab bar (`spawn_chat_tab_bar_as_child`): Chat,
-    /// Battle, System. Retail's "Select active window" key (`SelectActiveWindow`)
-    /// steps focus along this order and wraps, the field-state analog of the
-    /// item window's `select_active_window` pane stepping.
     pub const TAB_ORDER: [ChatKind; 3] = [ChatKind::Social, ChatKind::Battle, ChatKind::Debug];
 
     pub fn cycle_next(self) -> ChatKind {
@@ -150,27 +178,74 @@ impl ChatKind {
     pub fn tab_label(self) -> &'static str {
         match self {
             ChatKind::Social => "Chat",
-            ChatKind::Battle => "Battle",
-            ChatKind::Debug => "System",
+            ChatKind::Battle => "Log",
+            ChatKind::Debug => "Debug",
         }
     }
 
     pub fn accepts(self, c: ChatChannel) -> bool {
         match self {
-            ChatKind::Battle => matches!(c, ChatChannel::Battle),
-            ChatKind::Debug => matches!(c, ChatChannel::System | ChatChannel::Debug),
-            // Retail's main Log window shows system messages (home-point-set
-            // confirmations, "obtained" lines, announcements) alongside social
-            // chat — only battle spam and our internal Debug channel are siloed.
-            // System still also appears in its own tab (the Debug arm above).
-            ChatKind::Social => !matches!(c, ChatChannel::Battle | ChatChannel::Debug),
+            ChatKind::Battle => matches!(c, ChatChannel::Battle | ChatChannel::System),
+            ChatKind::Debug => matches!(c, ChatChannel::Debug),
+            ChatKind::Social => !matches!(
+                c,
+                ChatChannel::Battle | ChatChannel::System | ChatChannel::Debug
+            ),
         }
+    }
+
+    pub fn accepts_in_layout(self, channel: ChatChannel, layout: ChatLayout) -> bool {
+        if layout == ChatLayout::Unified {
+            self == Self::Social
+        } else {
+            self.accepts(channel)
+        }
+    }
+
+    pub fn available_in_layout(layout: ChatLayout, debug_chat: bool) -> &'static [Self] {
+        if layout == ChatLayout::Unified {
+            &[Self::Social]
+        } else {
+            Self::available(debug_chat)
+        }
+    }
+
+    pub fn available(debug_chat: bool) -> &'static [Self] {
+        if debug_chat {
+            &Self::TAB_ORDER
+        } else {
+            &Self::TAB_ORDER[..2]
+        }
+    }
+
+    pub fn step(self, forward: bool, debug_chat: bool) -> Self {
+        let kinds = Self::available(debug_chat);
+        let pos = kinds.iter().position(|&kind| kind == self).unwrap_or(0);
+        let offset = if forward { 1 } else { kinds.len() - 1 };
+        kinds[(pos + offset) % kinds.len()]
     }
 }
 
 #[derive(Component)]
 pub struct ChatPanel {
     pub kind: ChatKind,
+}
+
+pub fn advance_split_focus(active: &mut ChatKind, layout: ChatLayout, debug_chat: bool) -> bool {
+    if matches!(layout, ChatLayout::Unified | ChatLayout::Tabbed) {
+        return false;
+    }
+    let kinds = ChatKind::available(debug_chat);
+    if let Some(next) = kinds
+        .iter()
+        .position(|kind| kind == active)
+        .and_then(|pos| kinds.get(pos + 1))
+    {
+        *active = *next;
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Component)]
@@ -184,21 +259,38 @@ pub struct ChatRowBody;
 #[derive(Component)]
 pub struct ChatRowSpan;
 
-const SPANS_PER_ROW: usize = 16;
-
-const AUTOTRANSLATE_COLOR: Color = Color::srgb(0.50, 0.78, 1.00);
+// .agents/skills/retail-observe/references/2026-09-14-chat-windows.md Observed
+const AUTOTRANSLATE_OPEN_COLOR: Color = Color::srgb(0.35, 0.90, 0.35);
+const AUTOTRANSLATE_CLOSE_COLOR: Color = Color::srgb(1.00, 0.35, 0.35);
+const LOG_TEXT_COLOR: Color = Color::srgb(0.95, 0.95, 0.55);
+const ACTION_TEXT_COLOR: Color = Color::srgb(1.00, 1.00, 0.20);
+const YELL_TEXT_COLOR: Color = Color::srgb(1.00, 0.50, 0.50);
 
 pub fn spawn_chat_panels_as_children(p: &mut ChildSpawnerCommands) {
-    spawn_panel(p, ChatKind::Social, Display::Flex);
-    spawn_panel(p, ChatKind::Battle, Display::None);
-    spawn_panel(p, ChatKind::Debug, Display::None);
+    p.spawn((
+        ChatPanelGroup,
+        ChatArea::default(),
+        Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
+            column_gap: Val::Px(CHAT_WINDOW_GAP_PX),
+            row_gap: Val::Px(CHAT_WINDOW_GAP_PX),
+            ..default()
+        },
+    ))
+    .with_children(|p| {
+        spawn_panel(p, ChatKind::Social, Display::Flex);
+        spawn_panel(p, ChatKind::Battle, Display::None);
+        spawn_panel(p, ChatKind::Debug, Display::None);
+    });
 }
 
 pub fn spawn_chat_tab_bar_as_child(p: &mut ChildSpawnerCommands) {
     p.spawn((
         ChatTabBar,
         Node {
-            height: Val::Px(20.0),
+            height: Val::Px(CHAT_TAB_HEIGHT_PX),
             flex_shrink: 0.0,
             flex_direction: FlexDirection::Row,
             column_gap: Val::Px(2.0),
@@ -230,7 +322,7 @@ fn spawn_auto_switch_toggle(p: &mut ChildSpawnerCommands) {
     .with_children(|btn| {
         btn.spawn((
             ChatAutoSwitchLabel,
-            Text::new("auto \u{2713}"),
+            Text::new("Auto: off"),
             style::text_font(12.0),
             TextColor(theme::CURSOR),
         ));
@@ -272,6 +364,11 @@ fn spawn_panel(parent: &mut ChildSpawnerCommands, kind: ChatKind, initial_displa
             RelativeCursorPosition::default(),
             Node {
                 width: Val::Percent(100.0),
+                min_width: Val::Px(0.0),
+                min_height: Val::Px(0.0),
+                flex_basis: Val::Auto,
+                flex_grow: 0.0,
+                flex_shrink: 1.0,
                 height: Val::Px(PANEL_MIN_HEIGHT_PX),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 border: UiRect::all(Val::Px(1.0)),
@@ -292,7 +389,7 @@ fn spawn_panel(parent: &mut ChildSpawnerCommands, kind: ChatKind, initial_displa
                     ChatRow { slot },
                     Node {
                         flex_direction: FlexDirection::Row,
-
+                        flex_shrink: 0.0,
                         width: Val::Percent(100.0),
                         min_width: Val::Px(0.0),
                         ..default()
@@ -312,26 +409,18 @@ fn spawn_panel(parent: &mut ChildSpawnerCommands, kind: ChatKind, initial_displa
                         },
                         style::text_font(13.0),
                         TextColor(theme::TEXT),
-                    ))
-                    .with_children(|body| {
-                        for _ in 0..SPANS_PER_ROW {
-                            body.spawn((
-                                ChatRowSpan,
-                                TextSpan::new(""),
-                                style::text_font(13.0),
-                                TextColor(theme::TEXT),
-                            ));
-                        }
-                    });
+                    ));
                 });
             }
         });
 }
 
 pub fn update_chat_panel(
+    mut commands: Commands,
     time: Res<Time>,
     state: Res<SceneState>,
     mode: Res<InputMode>,
+    active: Res<ActiveChatTab>,
     scroll: Res<ChatScroll>,
     battle_scroll: Res<BattleScroll>,
     debug_scroll: Res<DebugScroll>,
@@ -344,23 +433,23 @@ pub fn update_chat_panel(
         &Children,
     )>,
     rows: Query<(&ChatRow, &Children), Without<ChatPanel>>,
-    body_q: Query<&Children, With<ChatRowBody>>,
+    body_q: Query<Option<&Children>, With<ChatRowBody>>,
     mut span_q: Query<(&mut TextSpan, &mut TextColor), With<ChatRowSpan>>,
-    verbosity: Res<super::HudVerbosity>,
+    graphics: Res<GraphicsSettings>,
+    area: Query<&ChatArea>,
 ) {
     let now = time.elapsed_secs();
+    let height_limit = area
+        .single()
+        .map(|area| area.panel_height)
+        .unwrap_or(PANEL_MAX_HEIGHT_PX);
 
-    // Row text derives entirely from chat content + scroll/mode/verbosity, so
-    // the per-row format/segment pass only runs when one of those changed
-    // (SceneState ticks only on real content changes since ingest_system clears
-    // `dirty` via bypass). Border + height decay stay per-frame: hover and
-    // idle-fade are per-frame inputs.
     let refill = state.is_changed()
         || mode.is_changed()
         || scroll.is_changed()
         || battle_scroll.is_changed()
         || debug_scroll.is_changed()
-        || verbosity.is_changed();
+        || graphics.is_changed();
 
     let all = if refill {
         rendered_chat(&state)
@@ -373,8 +462,10 @@ pub fn update_chat_panel(
             all.iter()
                 .copied()
                 .filter(|l| {
-                    panel.kind.accepts(l.channel)
-                        && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                    panel
+                        .kind
+                        .accepts_in_layout(l.channel, graphics.chat_layout)
+                        && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
                 })
                 .collect()
         });
@@ -385,20 +476,18 @@ pub fn update_chat_panel(
             ChatKind::Debug => debug_scroll.rows,
         };
 
-        // The whole tabbed log is one retail "Log Window": when the active-
-        // window cursor focuses Chat, the shown panel gets the focus border and
-        // Confirm expands it. (Battle/Debug panels are Display::None off-tab, so
-        // treating them as focused too is harmless.)
-        let chat_focused = matches!(
-            &*mode,
-            InputMode::PassiveCursor(s) if matches!(s.focus, PassiveCursorFocus::Chat)
-        );
-        let chat_expanded = matches!(
-            &*mode,
-            InputMode::PassiveCursor(s) if s.chat_expanded && matches!(s.focus, PassiveCursorFocus::Chat)
-        );
+        let chat_focused = panel.kind == active.0
+            && matches!(
+                &*mode,
+                InputMode::PassiveCursor(s) if matches!(s.focus, PassiveCursorFocus::Chat)
+            );
+        let chat_expanded = panel.kind == active.0
+            && matches!(
+                &*mode,
+                InputMode::PassiveCursor(s) if s.chat_expanded && matches!(s.focus, PassiveCursorFocus::Chat)
+            );
         let focused = scroll_offset != 0 || chat_focused;
-        let want_border = if focused {
+        let want_border = if chat_focused {
             theme::CURSOR
         } else {
             theme::FRAME_EDGE
@@ -425,7 +514,7 @@ pub fn update_chat_panel(
             let t = ((idle - FULL_HOLD_SECS) / FADE_SECS).clamp(0.0, 1.0);
             PANEL_MAX_HEIGHT_PX + (PANEL_MIN_HEIGHT_PX - PANEL_MAX_HEIGHT_PX) * t
         };
-        let want_h = Val::Px(target_h);
+        let want_h = Val::Px(target_h.min(height_limit));
         if node.height != want_h {
             node.height = want_h;
         }
@@ -470,7 +559,11 @@ pub fn update_chat_panel(
                     Some(l) => segment_line(l),
                     None => Vec::new(),
                 };
-                for (i, span_child) in span_children.iter().enumerate() {
+                for (i, span_child) in span_children
+                    .into_iter()
+                    .flat_map(|children| children.iter())
+                    .enumerate()
+                {
                     let Ok((mut span_text, mut span_color)) = span_q.get_mut(span_child) else {
                         continue;
                     };
@@ -484,6 +577,19 @@ pub fn update_chat_panel(
                     if span_color.0 != want_color {
                         span_color.0 = want_color;
                     }
+                }
+                let existing = span_children.map_or(0, |children| children.len());
+                if segments.len() > existing {
+                    commands.entity(body_child).with_children(|body| {
+                        for (text, color) in segments.iter().skip(existing) {
+                            body.spawn((
+                                ChatRowSpan,
+                                TextSpan::new(text.clone()),
+                                style::text_font(13.0),
+                                TextColor(*color),
+                            ));
+                        }
+                    });
                 }
             }
         }
@@ -558,11 +664,8 @@ pub fn segment_line(l: &ChatLine) -> Vec<(String, Color)> {
         .collect()
 }
 
-/// Retail's item-name green, sampled from the 2026-08-03 drop screenshots
-/// (`.agents/skills/retail-observe/references/treasure-pool-chat.md`). Retail
-/// makes this configurable under Config → Font Colors; the exact default RGB is
-/// still unpinned, so this is the closest theme-consistent match.
-const ITEM_NAME_COLOR: Color = Color::srgb(0.55, 0.88, 0.36);
+// .agents/skills/retail-observe/references/2026-09-14-chat-windows.md Observed
+const ITEM_NAME_COLOR: Color = Color::srgb(0.65, 1.00, 0.15);
 
 pub fn span_color(kind: ChatSpanKind, base: Color) -> Color {
     match kind {
@@ -572,30 +675,26 @@ pub fn span_color(kind: ChatSpanKind, base: Color) -> Color {
 }
 
 pub fn segment_chat_line(line: &str, base: Color) -> Vec<(String, Color)> {
-    let mut out: Vec<(String, Color)> = Vec::new();
-    let mut buf = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            if !buf.is_empty() {
-                out.push((std::mem::take(&mut buf), base));
+    use ffxi_proto::autotranslate::{PHRASE_CLOSE, PHRASE_OPEN};
+    let mut out: Vec<(String, Color)> = ffxi_proto::autotranslate::split_phrases(line)
+        .into_iter()
+        .flat_map(|span| {
+            if !span.is_phrase {
+                return vec![(span.text, base)];
             }
-
-            let mut at = String::from('{');
-            for ic in chars.by_ref() {
-                at.push(ic);
-                if ic == '}' {
-                    break;
-                }
+            let body = span.text.strip_prefix(PHRASE_OPEN).unwrap_or(&span.text);
+            let closed = body.ends_with(PHRASE_CLOSE);
+            let body = body.strip_suffix(PHRASE_CLOSE).unwrap_or(body);
+            let mut segments = vec![
+                (PHRASE_OPEN.to_string(), AUTOTRANSLATE_OPEN_COLOR),
+                (body.to_string(), base),
+            ];
+            if closed {
+                segments.push((PHRASE_CLOSE.to_string(), AUTOTRANSLATE_CLOSE_COLOR));
             }
-            out.push((at, AUTOTRANSLATE_COLOR));
-        } else {
-            buf.push(c);
-        }
-    }
-    if !buf.is_empty() {
-        out.push((buf, base));
-    }
+            segments
+        })
+        .collect();
     if out.is_empty() {
         out.push((String::new(), base));
     }
@@ -609,11 +708,11 @@ pub fn channel_color(c: ChatChannel) -> Color {
         ChatChannel::Tell => Color::srgb(0.95, 0.40, 0.95),
         ChatChannel::Party => Color::srgb(0.50, 0.65, 1.00),
         ChatChannel::Linkshell => Color::srgb(0.40, 0.95, 0.50),
-        ChatChannel::Yell => Color::srgb(1.00, 0.85, 0.20),
-        ChatChannel::System => theme::MUTED,
+        ChatChannel::Yell => YELL_TEXT_COLOR,
+        ChatChannel::System => LOG_TEXT_COLOR,
         ChatChannel::Other => theme::FAINT,
 
-        ChatChannel::Battle => Color::srgb(1.00, 0.55, 0.10),
+        ChatChannel::Battle => ACTION_TEXT_COLOR,
 
         ChatChannel::Debug => Color::srgb(0.55, 0.75, 0.80),
 
@@ -649,7 +748,7 @@ pub fn apply_wheel_delta(
 
 pub fn chat_wheel_scroll_system(
     mut wheel: MessageReader<MouseWheel>,
-    panel_q: Query<(&ChatPanel, &RelativeCursorPosition)>,
+    panel_q: Query<(&ChatPanel, &Node, &RelativeCursorPosition)>,
     state: Res<SceneState>,
     mut scroll: ResMut<ChatScroll>,
     mut battle_scroll: ResMut<BattleScroll>,
@@ -658,7 +757,7 @@ pub fn chat_wheel_scroll_system(
     mut battle_accum: ResMut<BattleScrollAccum>,
     mut debug_accum: ResMut<DebugScrollAccum>,
     mut pointer: ResMut<MousePointer>,
-    verbosity: Res<super::HudVerbosity>,
+    graphics: Res<GraphicsSettings>,
 ) {
     let mut delta: f32 = 0.0;
     for ev in wheel.read() {
@@ -669,8 +768,8 @@ pub fn chat_wheel_scroll_system(
     }
 
     let mut hovered: Option<ChatKind> = None;
-    for (panel, rel) in &panel_q {
-        if rel.cursor_over() {
+    for (panel, node, rel) in &panel_q {
+        if node.display != Display::None && rel.cursor_over() {
             hovered = Some(panel.kind);
             break;
         }
@@ -683,8 +782,8 @@ pub fn chat_wheel_scroll_system(
     let buffer_len = all
         .iter()
         .filter(|l| {
-            kind.accepts(l.channel)
-                && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+            kind.accepts_in_layout(l.channel, graphics.chat_layout)
+                && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
         })
         .count();
     match kind {
@@ -721,6 +820,158 @@ pub fn chat_tab_click_system(
     }
 }
 
+pub fn apply_chat_layout(
+    graphics: Res<GraphicsSettings>,
+    ui_scale: Res<UiScale>,
+    mode: Res<InputMode>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    obstacles: Query<
+        (
+            &Node,
+            &ComputedNode,
+            &UiGlobalTransform,
+            Option<&InheritedVisibility>,
+        ),
+        Or<(
+            With<super::panel_column::ColumnPanel>,
+            With<super::menu::MainMenu>,
+        )>,
+    >,
+    tools: Query<&ComputedNode, With<super::ChatTools>>,
+    mut nodes: Query<
+        (&mut Node, Option<&mut ChatArea>, Has<ChatTabBar>),
+        (
+            Or<(
+                With<super::BottomLeftStack>,
+                With<ChatPanelGroup>,
+                With<ChatTabBar>,
+            )>,
+            Without<super::panel_column::ColumnPanel>,
+            Without<super::menu::MainMenu>,
+        ),
+    >,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let viewport = Vec2::new(window.width(), window.height()) / ui_scale.0;
+    let obstacles: Vec<Rect> = obstacles
+        .iter()
+        .filter_map(|(node, computed, transform, visibility)| {
+            if node.display == Display::None
+                || visibility.is_some_and(|v| !v.get())
+                || computed.size().min_element() <= 0.0
+            {
+                return None;
+            }
+            let scale = computed.inverse_scale_factor();
+            Some(Rect::from_center_size(
+                transform.translation * scale,
+                computed.size() * scale,
+            ))
+        })
+        .collect();
+    let tools_height = tools
+        .iter()
+        .map(|node| node.size().y * node.inverse_scale_factor())
+        .fold(0.0_f32, f32::max);
+    let tabbed = graphics.chat_layout == ChatLayout::Tabbed;
+    let window_count =
+        ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat).len();
+    let expanded = matches!(&*mode, InputMode::PassiveCursor(state) if state.chat_expanded);
+    let preferred_height = if expanded {
+        PANEL_EXPANDED_HEIGHT_PX
+    } else {
+        PANEL_MAX_HEIGHT_PX
+    };
+    let mut horizontal = horizontal_chat_layout(graphics.chat_layout, viewport.x);
+    let layout_region = |horizontal: bool| {
+        let rows = if tabbed || horizontal {
+            1
+        } else {
+            window_count
+        };
+        let reserved = tools_height
+            + if tabbed {
+                CHAT_TAB_HEIGHT_PX + CHAT_WINDOW_GAP_PX
+            } else {
+                0.0
+            }
+            + CHAT_WINDOW_GAP_PX * rows as f32;
+        let wanted = preferred_height * rows as f32 + reserved;
+        let region = available_chat_region(viewport, wanted, reserved, &obstacles);
+        (
+            region,
+            ((region.height() - reserved) / rows as f32).max(0.0),
+        )
+    };
+    let (mut region, mut panel_height) = layout_region(horizontal);
+    if horizontal && !horizontal_chat_layout(graphics.chat_layout, region.width()) {
+        horizontal = false;
+        (region, panel_height) = layout_region(horizontal);
+    }
+    for (mut node, area, tab_bar) in &mut nodes {
+        if let Some(mut area) = area {
+            area.horizontal = horizontal;
+            area.panel_height = panel_height;
+            node.flex_direction = if horizontal {
+                FlexDirection::Row
+            } else {
+                FlexDirection::Column
+            };
+        } else if tab_bar {
+            node.display = if tabbed { Display::Flex } else { Display::None };
+        } else {
+            node.width = Val::Px(region.width());
+            node.max_width = Val::Auto;
+        }
+    }
+}
+
+fn available_chat_region(
+    viewport: Vec2,
+    wanted_height: f32,
+    reserved: f32,
+    obstacles: &[Rect],
+) -> Rect {
+    let bottom = (viewport.y - super::BOTTOM_LEFT_INSET_PX).max(0.0);
+    let top = (bottom - wanted_height)
+        .max(CHAT_TOP_CLEARANCE_PX)
+        .min(bottom);
+    let widths = std::iter::once(viewport.x).chain(
+        obstacles
+            .iter()
+            .map(|rect| (rect.min.x - CHAT_WINDOW_GAP_PX).clamp(0.0, viewport.x)),
+    );
+    widths
+        .map(|width| {
+            let mut candidate_top = top;
+            for obstacle in obstacles {
+                if obstacle.min.x < width
+                    && obstacle.max.x > 0.0
+                    && obstacle.min.y < bottom
+                    && obstacle.max.y > candidate_top
+                {
+                    candidate_top = candidate_top
+                        .max(obstacle.max.y + CHAT_WINDOW_GAP_PX)
+                        .min(bottom);
+                }
+            }
+            Rect::from_corners(Vec2::new(0.0, candidate_top), Vec2::new(width, bottom))
+        })
+        .max_by(|a, b| {
+            let usable = |rect: &Rect| rect.width() * (rect.height() - reserved).max(0.0);
+            usable(a)
+                .total_cmp(&usable(b))
+                .then_with(|| a.width().total_cmp(&b.width()))
+        })
+        .unwrap_or_default()
+}
+
+fn horizontal_chat_layout(layout: ChatLayout, width: f32) -> bool {
+    layout == ChatLayout::SideBySide && width >= CHAT_SPLIT_MIN_WIDTH_PX
+}
+
 pub fn chat_auto_switch_click_system(
     interactions: Query<&Interaction, (Changed<Interaction>, With<ChatAutoSwitchToggle>)>,
     mut auto: ResMut<ChatAutoSwitch>,
@@ -738,14 +989,19 @@ pub fn chat_auto_switch_and_unread_system(
     mut active: ResMut<ActiveChatTab>,
     mut unread: ResMut<ChatUnread>,
     mut tracker: ResMut<ChatActivityTracker>,
-    verbosity: Res<super::HudVerbosity>,
+    graphics: Res<GraphicsSettings>,
+    mode: Res<InputMode>,
 ) {
+    if !ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat).contains(&active.0)
+    {
+        active.0 = ChatKind::Social;
+    }
     let all = rendered_chat(&state);
     let count = |kind: ChatKind| {
         all.iter()
             .filter(|l| {
                 kind.accepts(l.channel)
-                    && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                    && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
             })
             .count()
     };
@@ -756,7 +1012,11 @@ pub fn chat_auto_switch_and_unread_system(
     ];
     let mut to_switch: Option<ChatKind> = None;
     for (kind, now_count, prev_count) in kinds {
-        if now_count > prev_count && kind != active.0 {
+        if now_count > prev_count
+            && kind != active.0
+            && ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+                .contains(&kind)
+        {
             if !unread.get(kind) {
                 unread.set(kind, true);
             }
@@ -766,7 +1026,7 @@ pub fn chat_auto_switch_and_unread_system(
     tracker.social = kinds[0].1;
     tracker.battle = kinds[1].1;
     tracker.debug = kinds[2].1;
-    if auto.0 {
+    if auto.0 && graphics.chat_layout == ChatLayout::Tabbed && matches!(*mode, InputMode::World) {
         if let Some(kind) = to_switch {
             if active.0 != kind {
                 active.0 = kind;
@@ -774,8 +1034,10 @@ pub fn chat_auto_switch_and_unread_system(
         }
     }
 
-    if unread.get(active.0) {
-        unread.set(active.0, false);
+    for &kind in ChatKind::available(graphics.debug_chat) {
+        if (graphics.chat_layout != ChatLayout::Tabbed || kind == active.0) && unread.get(kind) {
+            unread.set(kind, false);
+        }
     }
 }
 
@@ -783,9 +1045,10 @@ pub fn update_chat_tab_visuals_system(
     active: Res<ActiveChatTab>,
     unread: Res<ChatUnread>,
     auto: Res<ChatAutoSwitch>,
+    graphics: Res<GraphicsSettings>,
     mut panel_q: Query<(&ChatPanel, &mut Node), Without<ChatTabButton>>,
     mut tab_q: Query<
-        (&ChatTabButton, &mut BorderColor, &Children),
+        (&ChatTabButton, &mut BorderColor, &mut Node, &Children),
         (
             Without<ChatPanel>,
             Without<ChatTabButtonLabel>,
@@ -810,7 +1073,10 @@ pub fn update_chat_tab_visuals_system(
     >,
 ) {
     for (panel, mut node) in &mut panel_q {
-        let want = if panel.kind == active.0 {
+        let want = if ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+            .contains(&panel.kind)
+            && (graphics.chat_layout != ChatLayout::Tabbed || panel.kind == active.0)
+        {
             Display::Flex
         } else {
             Display::None
@@ -820,14 +1086,20 @@ pub fn update_chat_tab_visuals_system(
         }
     }
 
-    let unread_color = Color::srgb(1.00, 0.85, 0.20);
-    for (button, mut border, children) in &mut tab_q {
+    for (button, mut border, mut node, children) in &mut tab_q {
+        node.display = if ChatKind::available_in_layout(graphics.chat_layout, graphics.debug_chat)
+            .contains(&button.kind)
+        {
+            Display::Flex
+        } else {
+            Display::None
+        };
         let is_active = button.kind == active.0;
         let is_unread = !is_active && unread.get(button.kind);
         let (border_c, label_c) = if is_active {
             (theme::CURSOR, theme::CURSOR)
         } else if is_unread {
-            (unread_color, unread_color)
+            (theme::FRAME_EDGE, theme::TEXT)
         } else {
             (theme::FRAME_EDGE, theme::MUTED)
         };
@@ -844,9 +1116,9 @@ pub fn update_chat_tab_visuals_system(
     }
 
     let (want_text, want_color, want_border) = if auto.0 {
-        ("auto \u{2713}", theme::CURSOR, theme::CURSOR)
+        ("Auto: on", theme::CURSOR, theme::CURSOR)
     } else {
-        ("auto \u{2717}", theme::MUTED, theme::FRAME_EDGE)
+        ("Auto: off", theme::MUTED, theme::FRAME_EDGE)
     };
     for (mut border, children) in &mut toggle_q {
         if border.left != want_border {
@@ -870,6 +1142,91 @@ mod tests {
     use super::*;
 
     use kuluu_snapshot::ChatSpan;
+
+    #[test]
+    fn unified_log_clears_hidden_selection_and_reads_combined_history() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<ChatAutoSwitch>()
+            .init_resource::<ChatUnread>()
+            .init_resource::<ChatActivityTracker>()
+            .init_resource::<GraphicsSettings>()
+            .init_resource::<InputMode>()
+            .insert_resource(ActiveChatTab(ChatKind::Battle))
+            .add_systems(Update, chat_auto_switch_and_unread_system);
+        app.world_mut().resource_mut::<ChatUnread>().battle = true;
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .chat
+            .push(drop_line());
+        app.update();
+        assert_eq!(app.world().resource::<ActiveChatTab>().0, ChatKind::Social);
+        assert!(!app.world().resource::<ChatUnread>().battle);
+        app.world_mut()
+            .resource_mut::<GraphicsSettings>()
+            .chat_layout = ChatLayout::Tabbed;
+        app.update();
+        assert!(!app.world().resource::<ChatUnread>().battle);
+    }
+
+    #[test]
+    fn unified_log_combines_channels_without_hidden_window_focus() {
+        let layout = ChatLayout::default();
+        assert_eq!(layout, ChatLayout::Unified);
+        for debug_chat in [false, true] {
+            assert_eq!(
+                ChatKind::available_in_layout(layout, debug_chat),
+                &[ChatKind::Social]
+            );
+            let mut active = ChatKind::Social;
+            assert!(!advance_split_focus(&mut active, layout, debug_chat));
+            assert_eq!(active, ChatKind::Social);
+        }
+        for channel in [
+            ChatChannel::Say,
+            ChatChannel::Battle,
+            ChatChannel::System,
+            ChatChannel::Debug,
+        ] {
+            assert!(ChatKind::Social.accepts_in_layout(channel, layout));
+            assert!(!ChatKind::Battle.accepts_in_layout(channel, layout));
+            assert!(!ChatKind::Debug.accepts_in_layout(channel, layout));
+        }
+    }
+
+    #[test]
+    fn chat_fills_the_viewport_until_a_visible_hud_obstructs_it() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let clear = available_chat_region(viewport, 220.0, 0.0, &[]);
+        assert_eq!(clear.width(), viewport.x);
+        let party = Rect::from_corners(Vec2::new(1600.0, 800.0), Vec2::new(1912.0, 1072.0));
+        let region = available_chat_region(viewport, 220.0, 0.0, &[party]);
+        assert!(region.max.x < party.min.x);
+        assert_eq!(region.height(), clear.height());
+        assert_eq!(region.min.x, 0.0);
+    }
+
+    #[test]
+    fn menus_only_reserve_space_when_they_reach_the_chat_stack() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let menu = Rect::from_corners(Vec2::new(1200.0, 48.0), Vec2::new(1912.0, 700.0));
+        let compact = available_chat_region(viewport, 220.0, 0.0, &[menu]);
+        assert_eq!(compact.width(), viewport.x);
+        let expanded = available_chat_region(viewport, 700.0, 100.0, &[menu]);
+        assert!(expanded.max.x <= menu.min.x || expanded.min.y >= menu.max.y);
+        assert!(expanded.height() > 100.0);
+    }
+
+    #[test]
+    fn toolbar_space_is_preserved_when_choosing_between_free_regions() {
+        let viewport = Vec2::new(800.0, 450.0);
+        let menu = Rect::from_corners(Vec2::new(500.0, 48.0), Vec2::new(792.0, 350.0));
+        let region = available_chat_region(viewport, 400.0, 180.0, &[menu]);
+        assert!(region.max.x < menu.min.x);
+        assert!(region.height() > 180.0);
+        assert!(region.min.y >= CHAT_TOP_CLEARANCE_PX);
+    }
 
     fn drop_line() -> ChatLine {
         // What kuluu's treasure handler emits for s2c 0x0D2, composed
@@ -920,11 +1277,6 @@ mod tests {
     }
 
     #[test]
-    fn a_spanned_line_stays_under_the_span_pool() {
-        assert!(segment_line(&drop_line()).len() <= SPANS_PER_ROW);
-    }
-
-    #[test]
     fn autotranslate_still_splits_inside_a_span() {
         let mut l = drop_line();
         l.spans[2].text = " on the {Rock Lizard}.".into();
@@ -932,7 +1284,7 @@ mod tests {
         let segs = segment_line(&l);
         assert!(
             segs.iter()
-                .any(|(t, c)| t == "{Rock Lizard}" && *c == AUTOTRANSLATE_COLOR),
+                .any(|(t, c)| t == "Rock Lizard" && *c == channel_color(l.channel)),
             "{segs:?}"
         );
     }
@@ -978,28 +1330,24 @@ mod tests {
     }
 
     #[test]
-    fn segment_splits_braces_and_colors_them() {
-        let segs = segment_chat_line(
-            "[Skaine] : {Looking for Party} {Experience points} : THF 59",
-            theme::TEXT,
-        );
-        let texts: Vec<&str> = segs.iter().map(|(t, _)| t.as_str()).collect();
+    fn auto_translate_colors_only_the_markers_and_preserves_text() {
+        let line = "hello {Looking for Party} {Experience points}";
+        let segments = segment_chat_line(line, theme::TEXT);
         assert_eq!(
-            texts,
-            vec![
-                "[Skaine] : ",
-                "{Looking for Party}",
-                " ",
-                "{Experience points}",
-                " : THF 59",
-            ]
+            segments
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            line
         );
-
-        assert_eq!(segs[1].1, AUTOTRANSLATE_COLOR);
-        assert_eq!(segs[3].1, AUTOTRANSLATE_COLOR);
-        assert_eq!(segs[0].1, theme::TEXT);
-        assert_eq!(segs[2].1, theme::TEXT);
-        assert_eq!(segs[4].1, theme::TEXT);
+        for (text, color) in segments {
+            let expected = match text.as_str() {
+                "{" => AUTOTRANSLATE_OPEN_COLOR,
+                "}" => AUTOTRANSLATE_CLOSE_COLOR,
+                _ => theme::TEXT,
+            };
+            assert_eq!(color, expected);
+        }
     }
 
     #[test]
@@ -1018,14 +1366,15 @@ mod tests {
     }
 
     #[test]
-    fn segment_count_stays_under_pool_for_worst_case_shout() {
-        let line = "{a}{b}{c}{d}{e}{f}{g}";
-        let segs = segment_chat_line(line, theme::TEXT);
-        assert!(
-            segs.len() <= SPANS_PER_ROW,
-            "{} segments overflows pool of {}",
-            segs.len(),
-            SPANS_PER_ROW
+    fn heavily_formatted_shout_keeps_every_phrase_and_tail() {
+        let line = "{a}{b}{c}{d}{e}{f}{g} tail";
+        let segments = segment_chat_line(line, theme::TEXT);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            line
         );
     }
 
@@ -1099,14 +1448,37 @@ mod tests {
     }
 
     #[test]
-    fn social_tab_shows_system_messages() {
-        // Home-point-set confirmations and other system lines (kind 6/7/29)
-        // must appear in the main Chat log, like retail — not only the System tab.
-        assert!(ChatKind::Social.accepts(ChatChannel::System));
-        assert!(ChatKind::Debug.accepts(ChatChannel::System));
-        // Battle spam and the internal Debug channel stay out of the main log.
-        assert!(!ChatKind::Social.accepts(ChatChannel::Battle));
-        assert!(!ChatKind::Social.accepts(ChatChannel::Debug));
+    fn log_groups_system_and_actions_separately_from_social() {
+        for channel in [ChatChannel::System, ChatChannel::Battle] {
+            assert!(ChatKind::Battle.accepts(channel));
+            assert!(!ChatKind::Social.accepts(channel));
+            assert!(!ChatKind::Debug.accepts(channel));
+        }
+        for channel in [
+            ChatChannel::Say,
+            ChatChannel::Yell,
+            ChatChannel::Tell,
+            ChatChannel::Party,
+        ] {
+            assert!(ChatKind::Social.accepts(channel));
+            assert!(!ChatKind::Battle.accepts(channel));
+        }
+    }
+
+    #[test]
+    fn split_focus_visits_visible_windows_before_releasing() {
+        for layout in [ChatLayout::Vertical, ChatLayout::SideBySide] {
+            let mut active = ChatKind::Social;
+            assert!(advance_split_focus(&mut active, layout, false));
+            assert_eq!(active, ChatKind::Battle);
+            assert!(!advance_split_focus(&mut active, layout, false));
+            assert!(advance_split_focus(&mut active, layout, true));
+            assert_eq!(active, ChatKind::Debug);
+            assert!(!advance_split_focus(&mut active, layout, true));
+        }
+        let mut active = ChatKind::Social;
+        assert!(!advance_split_focus(&mut active, ChatLayout::Tabbed, false));
+        assert_eq!(ChatKind::Battle.step(true, false), ChatKind::Social);
     }
 
     #[test]

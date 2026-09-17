@@ -2,16 +2,28 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::components::{IsSelf, WorldEntity};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cutscene_camera::CutsceneCameraTasks;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::scene::BakedActor;
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
+#[cfg(not(target_arch = "wasm32"))]
+use ffxi_event::vm::scene::{EVENT_COORD_UNITS, EVENT_HEADING_UNITS};
+#[cfg(not(target_arch = "wasm32"))]
+use kuluu_snapshot::{CutsceneCue, ExtSchedulerMotion};
 
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
 // EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
-// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
+// skeletal animations are only updated every other frame", see SKELETON_FRAME_DIVISOR. DAT stage
+// durations count whole frames of this clock; DAT transition fields (CompletionMotion's HalfFrames)
+// count half-frames, so a stored V plays as V/2 whole frames at ROUTINE_FPS.
 pub const ROUTINE_FPS: f32 = 60.0;
 
 // research/xim poc/ActorManager.kt updateAll — `elapsedFrames / 2f` into updateAnimation.
@@ -127,6 +139,17 @@ pub struct ActiveScheduler {
     pub cursor: usize,
 
     pub name: [u8; 4],
+
+    // The cutscene motion actor this routine was started for, as the wire
+    // value the cue named (the session matches the report against the same
+    // value it resolved the cue with): 0x2C SCHEDULOR and the file-routine
+    // motions (0x45 non-fade, 0x5B/0x66, 0x2D). `None` for routines no
+    // WAIT* hold waits on, so they do not report.
+    pub cutscene_motion_actor: Option<kuluu_snapshot::CutsceneActor>,
+
+    // Set once the finish report went out: the routine lingers past its last
+    // stage for the post-finish TTL, so the report must fire exactly once.
+    pub done_reported: bool,
 }
 
 impl ActiveScheduler {
@@ -138,6 +161,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: s.name,
+            cutscene_motion_actor: None,
+            done_reported: false,
         }
     }
 
@@ -180,6 +205,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: first,
+            cutscene_motion_actor: None,
+            done_reported: false,
         })
     }
 
@@ -194,6 +221,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: *name,
+            cutscene_motion_actor: None,
+            done_reported: false,
         })
     }
 
@@ -223,11 +252,17 @@ impl ActiveScheduler {
     /// The routine timeline ends when its last stage ends, not when it starts: a trailing
     /// AnimationLock must keep the routine alive for its whole `duration_frames`.
     pub fn last_frame(&self) -> u32 {
-        self.stages
-            .iter()
-            .map(|t| t.frame + t.stage.duration_frames as u32)
-            .max()
-            .unwrap_or(0)
+        self.end_frame()
+    }
+
+    /// The frame at which this routine's effects end: the max over all stages of
+    /// `stage.frame + stage.duration_frames`, a half-open bound like `locks_at`'s. A plain
+    /// stage ends on its own fire frame; an AnimationLock keeps holding until
+    /// `frame + duration_frames`, so retiring on the last stage's fire time would drop a long
+    /// lock early (the post-finish TTL then counts from the wrong start). Measured over this
+    /// entry's flattened stages, so inlined sub-routine calls count toward it.
+    pub fn end_frame(&self) -> u32 {
+        Scheduler::end_frame_for(&self.stages)
     }
 }
 
@@ -274,6 +309,12 @@ impl ActiveSchedulers {
         self.routines.retain(|r| r.name != *name);
     }
 
+    /// 0x5E/0x6B stop action with no tag: clear the whole queue so the actor's pose
+    /// falls back to its idle path (research/XiEvents/OpCodes/0x005E.md).
+    pub fn stop_all(&mut self) {
+        self.routines.clear();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.routines.is_empty()
     }
@@ -309,10 +350,22 @@ pub struct SchedulerStageEvent {
     pub scheduler: [u8; 4],
 }
 
+/// A cutscene motion routine the cue `(actor, key)` named has finished - or
+/// could not be started at all: the host releases the event VM's pending hold
+/// on the pair so the WAIT* past it advances. The actor is the wire value the
+/// cue named, the same one the session resolved it against.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CutsceneMotionDone {
+    pub actor: kuluu_snapshot::CutsceneActor,
+
+    pub key: [u8; 4],
+}
+
 pub fn tick_active_schedulers(
     time: Res<Time>,
     mut q: Query<(Entity, &mut ActiveSchedulers)>,
     mut writer: MessageWriter<SchedulerStageEvent>,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -336,15 +389,28 @@ pub fn tick_active_schedulers(
                 });
                 sched.cursor += 1;
             }
+            // A cutscene motion routine reports its finish the frame its last
+            // stage fires; unmarked routines (emotes, hit reactions, ...) never do.
+            if !sched.done_reported && sched.finished() {
+                if let Some(actor) = sched.cutscene_motion_actor {
+                    motion_done.write(CutsceneMotionDone {
+                        actor,
+                        key: scheduler_name,
+                    });
+                    sched.done_reported = true;
+                }
+            }
         }
 
-        // Retire entries that finished more than the TTL ago (their last stages may still be in
-        // flight on consumers); strip the component and its assets once none remain.
+        // Retire entries whose effects ended more than the TTL ago (their last stages may still
+        // be in flight on consumers); strip the component and its assets once none remain.
+        // `end_frame` includes each stage's duration, so a trailing AnimationLock holds until
+        // its own end frame instead of lapsing at fire time + TTL.
         scheds.routines.retain(|sched| {
             if !sched.finished() {
                 return true;
             }
-            let finish_secs = sched.last_frame() as f32 / ROUTINE_FPS;
+            let finish_secs = sched.end_frame() as f32 / ROUTINE_FPS;
             sched.elapsed < finish_secs + POST_FINISH_TTL_SECS
         });
         if scheds.routines.is_empty() {
@@ -355,11 +421,11 @@ pub fn tick_active_schedulers(
     }
 }
 
-// StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way
-//. xim stops every sequence named by the stage on the same actor; here that is a plain
-// removal from the vec. The stopped routine's remaining stages simply never fire - including any
-// StopParticle, which retail does not run for a stopped sequence either
-// (EffectRoutineInstance.kt stop).
+// 0x5F StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way.
+// xim stops every sequence named by the stage on the same actor; here that is a plain removal
+// from the vec. The stopped routine's remaining stages simply never fire - including any 0x2D
+// StopParticle, which retail does not run for a stopped sequence either (research/xim
+// EffectRoutineInstance.kt EffectSequence.stop).
 pub fn dispatch_stop_routine_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     mut q: Query<&mut ActiveSchedulers>,
@@ -495,8 +561,7 @@ const MAX_SUBROUTINE_DEPTH: usize = 6;
 // The global effect dir's `dada` is the swing impact carrier: every melee swing calls it at its
 // impact frame, and it holds the DamageCallback that hands off to the victim reaction.
 // When flattening cannot inline it (the global dir degraded to empty), the CALL survives as a
-// marker stage so `dispatch_damage_callback_stages` still fires on that frame instead of never
-//.
+// marker stage so `dispatch_damage_callback_stages` still fires on that frame instead of never.
 const DADA_IMPACT_MARKER: [u8; 4] = *b"dada";
 
 // Knuth's MMIX LCG. Every DAT-driven choice the format leaves unauthored (random routine
@@ -638,14 +703,23 @@ fn walk_with_dirs(
     rec(node, ffxi_dat::scheduler::NO_LOCAL_DIR, visit);
 }
 
-pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
-    let (schedulers, assets, _) = parse_action_bytes_reporting(bytes);
-    (schedulers, assets)
+/// The kind 0x06 camera routes of one action DAT, keyed by four-char name; a scheduler's
+/// CameraRoute stage names one of these (research/XIClient Game/Scheduler/Tags/0x04.cpp).
+pub type ActionDatCameras = HashMap<[u8; 4], ffxi_dat::camera::CameraResource>;
+
+pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets, ActionDatCameras) {
+    let (schedulers, assets, _report, cameras) = parse_action_bytes_reporting(bytes);
+    (schedulers, assets, cameras)
 }
 
 pub fn parse_action_bytes_reporting(
     bytes: &[u8],
-) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport) {
+) -> (
+    Vec<Scheduler>,
+    ActionAssets,
+    EffectCoverageReport,
+    ActionDatCameras,
+) {
     parse_action_tree_reporting(&ffxi_dat::chunk::walk_tree(bytes))
 }
 
@@ -683,17 +757,25 @@ impl EffectCoverageReport {
 // (zone 123 carries `clod` and `hm01..hm15` under both weat/rain and weat/squl), so a consumer
 // that owns one subtree must build its assets from that subtree alone or it binds the wrong
 // mesh/texture/keyframe.
-pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Scheduler>, ActionAssets) {
-    let (schedulers, assets, _) = parse_action_tree_reporting(node);
-    (schedulers, assets)
+pub fn parse_action_tree(
+    node: &ffxi_dat::chunk::ChunkNode<'_>,
+) -> (Vec<Scheduler>, ActionAssets, ActionDatCameras) {
+    let (schedulers, assets, _report, cameras) = parse_action_tree_reporting(node);
+    (schedulers, assets, cameras)
 }
 
 pub fn parse_action_tree_reporting(
     node: &ffxi_dat::chunk::ChunkNode<'_>,
-) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport) {
+) -> (
+    Vec<Scheduler>,
+    ActionAssets,
+    EffectCoverageReport,
+    ActionDatCameras,
+) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
     let mut report = EffectCoverageReport::default();
+    let mut cameras = ActionDatCameras::new();
     walk_with_dirs(node, &mut |dir, c| {
         let Some(kind) = ChunkKind::from_u8(c.kind) else {
             return;
@@ -771,6 +853,13 @@ pub fn parse_action_tree_reporting(
                     assets.seps.insert(c.name, s);
                 }
             }
+            // research/XIClient include/World/Camera/CameraFormat.h - the camera route a
+            // scheduler's 0x04 stage drives; keyed by name like every other chunk here.
+            ChunkKind::Camera => {
+                if let Ok(cam) = ffxi_dat::camera::CameraResource::parse(c.name, c.data) {
+                    cameras.insert(c.name, cam);
+                }
+            }
             ChunkKind::AnimMo2 => {
                 let id = ffxi_dat::datid::DatId::from_name(&c.name);
                 assets
@@ -793,7 +882,7 @@ pub fn parse_action_tree_reporting(
             _ => {}
         }
     });
-    (schedulers, assets, report)
+    (schedulers, assets, report, cameras)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -871,7 +960,9 @@ pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionA
 pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
     let root = root.0.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        let (schedulers, assets, report) =
+        // The global effect dir is spell effects, not cutscene camera routes; the parse's
+        // camera value does not land here.
+        let (schedulers, assets, report, _cameras) =
             parse_action_bytes_reporting(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID));
         report_effect_coverage(GLOBAL_EFFECT_DIR_FILE_ID, &report);
         (schedulers, assets)
@@ -897,6 +988,10 @@ pub(crate) fn poll_global_effect_dir(
 pub struct ParsedActionDat {
     pub schedulers: Vec<Scheduler>,
     pub assets: ActionAssets,
+
+    /// The kind 0x06 camera routes of the file, keyed by four-char name; a scheduler's
+    /// CameraRoute stage names one of these (research/XIClient Game/Scheduler/Tags/0x04.cpp).
+    pub cameras: ActionDatCameras,
 }
 
 // Populated Jeuno fires several casts/WS per second and each re-visits a handful of files, so a
@@ -940,10 +1035,33 @@ enum PendingActionDispatch {
         actor_id: u32,
         target_id: Option<u32>,
     },
-    Emote {
+    // A named routine out of a file, on an actor, with a partner. Emotes and cutscene
+    // motions (0x45 non-fade schedulers, 0x5B/0x66 event motion resources, 0x2D zone
+    // routines) both dispatch through this; the name describes the operation, not one
+    // caller.
+    Routine {
         actor_id: u32,
         target_id: u32,
         routine: [u8; 4],
+        /// The 0x45 duration operand (ffxi_event::SCHEDULER_DURATION_FROM_DAT when the cue
+        /// carries none): it scales a CameraRoute stage's authored length against the
+        /// routine's end frame, the way kuluu-session arms its WAIT* holds.
+        duration: u16,
+        /// The cue's wire actor when this dispatch is a motion the session's pending
+        /// hold waits on; the miss paths report it done. `None` for emotes.
+        cutscene_actor: Option<kuluu_snapshot::CutsceneActor>,
+    },
+    // A 0x66 Tpc routine: the routine's schedulers live in container A (the pending vec's
+    // file id); container B's clips join A's assets so the routine's Motion stages can
+    // resolve the waist clip. `b` is None when the actor's CIB waist byte loads A only.
+    TpcRoutine {
+        actor_id: u32,
+        target_id: u32,
+        b: Option<u32>,
+        routine: [u8; 4],
+        duration: u16,
+        /// The cue's wire actor; the miss paths report it done.
+        cutscene_actor: Option<kuluu_snapshot::CutsceneActor>,
     },
 }
 
@@ -980,6 +1098,9 @@ impl ActionDatCache {
 
     fn defer(&mut self, file_id: u32, dispatch: PendingActionDispatch) {
         self.request(file_id);
+        if let PendingActionDispatch::TpcRoutine { b: Some(b), .. } = &dispatch {
+            self.request(*b);
+        }
         self.pending.push((file_id, dispatch));
     }
 }
@@ -988,9 +1109,14 @@ impl ActionDatCache {
 // pre-existing "no effect" behaviour instead of re-spawning a load per cast.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> ParsedActionDat {
-    let (schedulers, assets, report) = parse_action_bytes_reporting(&read_dat_bytes(root, file_id));
+    let (schedulers, assets, report, cameras) =
+        parse_action_bytes_reporting(&read_dat_bytes(root, file_id));
     report_effect_coverage(file_id, &report);
-    ParsedActionDat { schedulers, assets }
+    ParsedActionDat {
+        schedulers,
+        assets,
+        cameras,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1065,24 +1191,72 @@ fn apply_action_dispatch(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn apply_emote_dispatch(
+fn apply_routine_dispatch(
     parsed: &ParsedActionDat,
     routine: &[u8; 4],
     actor_entity: Entity,
     target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) -> bool {
     let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
         return false;
     };
-    // Same insert-or-push as apply_action_dispatch: an emote mid-cast (or a cast mid-emote)
-    // runs alongside the other instead of replacing it.
-    enqueue_routine(commands, actor_entity, active);
-    commands
-        .entity(actor_entity)
-        .try_insert_if_new(parsed.assets.clone())
-        .try_insert_if_new(ActionTarget(target_entity));
+    queue_routine_on_actor(
+        parsed,
+        active,
+        actor_entity,
+        target_entity,
+        q_scheds,
+        pending_inserts,
+        commands,
+    );
     true
+}
+
+// Same insert-or-push as apply_action_dispatch: a second routine (an emote or cutscene motion)
+// mid-cast runs alongside the other instead of replacing it.
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_routine_on_actor(
+    parsed: &ParsedActionDat,
+    active: ActiveScheduler,
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+    commands: &mut Commands,
+) {
+    queue_routine_on_actor_assets(
+        &parsed.assets,
+        active,
+        actor_entity,
+        target_entity,
+        q_scheds,
+        pending_inserts,
+        commands,
+    );
+}
+
+// The 0x66 Tpc form of the above: the assets are the two containers' merged set, not one
+// file's.
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_routine_on_actor_assets(
+    assets: &ActionAssets,
+    active: ActiveScheduler,
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+    commands: &mut Commands,
+) {
+    let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
+    if fresh {
+        commands
+            .entity(actor_entity)
+            .insert_if_new(assets.clone())
+            .insert_if_new(ActionTarget(target_entity));
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1099,6 +1273,173 @@ fn actor_routines_via_mut<'a>(
         .map(|actor| actor.routines())
 }
 
+// A CameraRoute stage drives the operator camera instead of the skeleton (research/XIClient
+// Game/Scheduler/Tags/0x04.cpp HandleTag0x04): one task per such stage, each scaled by the 0x45
+// duration operand against the routine's authored end frame - the same ratio kuluu-session
+// applies when it arms the WAIT* hold for this cue. The endpoints a route substitutes come from
+// the operator camera's live state (START_AT_CURRENT_POS) and the player's default chase state
+// (END_AT_CURRENT_POS), both captured at start time.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_cutscene_camera_tasks(
+    parsed: &ParsedActionDat,
+    active: &ActiveScheduler,
+    duration_override: u16,
+    q_cam: &Query<(&Transform, &Projection), With<crate::camera::OperatorCamera>>,
+    q_self: &Query<
+        (&Transform, Option<&BakedActor>),
+        (With<IsSelf>, Without<crate::camera::OperatorCamera>),
+    >,
+    mode: &crate::camera::CameraMode,
+    tasks: &mut ResMut<CutsceneCameraTasks>,
+    actor_entity: Entity,
+    q_attach: &Query<
+        (&Transform, Option<&BakedActor>),
+        (
+            With<crate::components::WorldEntity>,
+            Without<crate::camera::OperatorCamera>,
+        ),
+    >,
+    q_children: &Query<&Children>,
+    q_render: &Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+) {
+    let Some(named) = parsed.schedulers.iter().find(|s| s.name == active.name()) else {
+        return;
+    };
+    let ratio = crate::cutscene::scheduler_speed_ratio(duration_override, named.end_frame());
+
+    // No operator camera yet (or an orthographic one) means no substitution source; the stages
+    // are dropped with a log rather than guessed.
+    let Some((cam_t, cam_proj)) = q_cam.single().ok() else {
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            "no operator camera to start the cutscene route from; its stages are dropped"
+        );
+        return;
+    };
+    let Some(current) = crate::cutscene_camera::capture_current_camera(cam_t, cam_proj) else {
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            "the operator camera is not a perspective projection; the route stages are dropped"
+        );
+        return;
+    };
+    let default_chase = q_self.single().ok().map(|(self_t, baked)| {
+        crate::cutscene_camera::default_chase_endpoint(
+            self_t,
+            baked,
+            matches!(*mode, crate::camera::CameraMode::FirstPerson),
+        )
+    });
+
+    for stage in active
+        .stages
+        .iter()
+        .filter(|t| t.stage.kind == StageKind::CameraRoute)
+    {
+        let Some(cam) = parsed.cameras.get(&stage.stage.id) else {
+            tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                "camera route stage names no kind 0x06 chunk in the file; the stage is dropped"
+            );
+            continue;
+        };
+        let Some(default_chase) = default_chase else {
+            tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                "no player entity for the route's end point; the stage is dropped"
+            );
+            continue;
+        };
+        let total_frames = stage.stage.duration_frames as f32 * ratio;
+        // Modes 1 and 3 ride the cue's caster: Attachment.cpp MakeAttachMatrix places the
+        // origin on the caster's EID locator, and xim's SourceToTargetBasis (mode 3) puts the
+        // source-to-target origin on the source's joint 0, the same actor. Mode 0 plays in
+        // world space (the decompilation's identity default arm); the unported modes (2-13
+        // and 16-27 error out in retail, 14/15 anchor to zone positions) play in world space
+        // here.
+        let attach_actor = match cam.attach_mode() {
+            ffxi_dat::camera::ATTACH_MODE_CASTER
+            | ffxi_dat::camera::ATTACH_MODE_SOURCE_TO_TARGET => Some(actor_entity),
+            _ => None,
+        };
+        if cam.attachment_info != 0 && attach_actor.is_none() {
+            tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                attachment_info = cam.attachment_info,
+                "camera route attach mode is not ported; the route plays in world space"
+            );
+        }
+        let mut attach = None;
+        if let Some(actor) = attach_actor {
+            match q_attach.get(actor) {
+                Ok((xform, baked)) => {
+                    let render = q_children.get(actor).ok().and_then(|children| {
+                        children.iter().find_map(|child| q_render.get(child).ok())
+                    });
+                    let locator = cam.attach_locator_index();
+                    match crate::cutscene_camera::eid_model_point(locator, baked, render) {
+                        Some(point) => {
+                            attach = Some(crate::cutscene_camera::AttachStart {
+                                actor,
+                                locator,
+                                interp: cam.interp_factor as f32
+                                    / ffxi_dat::camera::INTERP_FACTOR_SCALE,
+                                initial_matrix: crate::cutscene_camera::attach_matrix(xform, point),
+                            });
+                        }
+                        // The special EID locators need a collision or nearest-actor query
+                        // this tree does not run; the stage is dropped rather than misread in
+                        // world space.
+                        None => {
+                            tracing::debug!(
+                                target: "kuluu_render::scheduler_runtime",
+                                routine = %fourcc(active.name()),
+                                camera = %String::from_utf8_lossy(&stage.stage.id),
+                                attachment_info = cam.attachment_info,
+                                "camera route attach locator does not resolve; the stage is dropped"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                // The caster is gone: retail's mode 1 with a null caster takes the identity
+                // matrix, so the route plays in world space.
+                Err(_) => tracing::debug!(
+                    target: "kuluu_render::scheduler_runtime",
+                    routine = %fourcc(active.name()),
+                    camera = %String::from_utf8_lossy(&stage.stage.id),
+                    attachment_info = cam.attachment_info,
+                    "camera route attach actor is gone; the route plays in world space"
+                ),
+            }
+        }
+        let task = crate::cutscene_camera::CutsceneCameraTask::start(
+            cam,
+            total_frames,
+            current,
+            default_chase,
+            attach,
+        );
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            camera = %String::from_utf8_lossy(&stage.stage.id),
+            total_frames,
+            attached = attach.is_some(),
+            "cutscene camera route started"
+        );
+        tasks.start(task);
+    }
+}
+
 // Applies dispatches whose action-DAT parse has landed. A cache miss therefore delays the
 // completion effect by the load's frames-in-flight instead of stalling the frame it arrived on;
 // the routine's internal timeline (motion + particles + SE) shifts as one unit.
@@ -1109,7 +1450,24 @@ pub fn poll_action_dat_tasks(
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    mut tasks: ResMut<CutsceneCameraTasks>,
+    q_cam: Query<(&Transform, &Projection), With<crate::camera::OperatorCamera>>,
+    q_self: Query<
+        (&Transform, Option<&BakedActor>),
+        (With<IsSelf>, Without<crate::camera::OperatorCamera>),
+    >,
+    q_attach: Query<
+        (&Transform, Option<&BakedActor>),
+        (
+            With<crate::components::WorldEntity>,
+            Without<crate::camera::OperatorCamera>,
+        ),
+    >,
+    mode: Res<crate::camera::CameraMode>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
 ) {
     use bevy::tasks::futures_lite::future;
     if cache.tasks.is_empty() && cache.pending.is_empty() {
@@ -1133,11 +1491,25 @@ pub fn poll_action_dat_tasks(
     }
     let pending = std::mem::take(&mut cache.pending);
     for (file_id, dispatch) in pending {
+        // A Tpc dispatch names two files: container A (its routine's schedulers) and, when
+        // the CIB waist byte selects one, container B (the waist clips that merge into A's
+        // assets). Both must be in the LRU before it can run.
+        let b_file = match &dispatch {
+            PendingActionDispatch::TpcRoutine { b: Some(b), .. } => Some(*b),
+            _ => None,
+        };
         let Some(parsed) = cache.lru.get_and_promote(file_id) else {
             // Still in flight — or evicted before this entry drained, in which case re-request.
             cache.defer(file_id, dispatch);
             continue;
         };
+        let parsed_b = b_file.and_then(|b| cache.lru.get_and_promote(b));
+        if b_file.is_some() && parsed_b.is_none() {
+            // B is still in flight (A landed first): re-request both and drain on a later
+            // frame.
+            cache.defer(file_id, dispatch);
+            continue;
+        }
         match dispatch {
             PendingActionDispatch::Action {
                 actor_id,
@@ -1157,27 +1529,171 @@ pub fn poll_action_dat_tasks(
                     &mut commands,
                 );
             }
-            PendingActionDispatch::Emote {
+            PendingActionDispatch::Routine {
                 actor_id,
                 target_id,
                 routine,
+                duration,
+                cutscene_actor,
             } => {
                 let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    // A motion the session's pending hold waits on must report even
+                    // when its actor is not tracked: the hold would otherwise sit out
+                    // its whole DAT-length deadline.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    }
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                if !apply_emote_dispatch(
-                    &parsed,
-                    &routine,
-                    actor_entity,
-                    target_entity,
-                    &mut commands,
-                ) {
-                    play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
+                else {
+                    // A cutscene motion's key is not an emote name: report the miss so
+                    // the session's hold releases, instead of playing a local clip.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    } else {
+                        play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    }
+                    continue;
+                };
+                // A CameraRoute stage plays on the operator camera instead of the skeleton:
+                // start its task here and keep only what still plays on the actor.
+                if active
+                    .stages
+                    .iter()
+                    .any(|t| t.stage.kind == StageKind::CameraRoute)
+                {
+                    start_cutscene_camera_tasks(
+                        &parsed,
+                        &active,
+                        duration,
+                        &q_cam,
+                        &q_self,
+                        &mode,
+                        &mut tasks,
+                        actor_entity,
+                        &q_attach,
+                        &q_children,
+                        &q_actors,
+                    );
+                    active
+                        .stages
+                        .retain(|t| t.stage.kind != StageKind::CameraRoute);
+                }
+                active.cutscene_motion_actor = cutscene_actor;
+                if !active.stages.is_empty() {
+                    queue_routine_on_actor(
+                        &parsed,
+                        active,
+                        actor_entity,
+                        target_entity,
+                        &mut q_scheds,
+                        &mut pending_inserts,
+                        &mut commands,
+                    );
+                }
+            }
+            PendingActionDispatch::TpcRoutine {
+                actor_id,
+                target_id,
+                routine,
+                duration,
+                cutscene_actor,
+                ..
+            } => {
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    // A motion the session's pending hold waits on must report even
+                    // when its actor is not tracked: the hold would otherwise sit out
+                    // its whole DAT-length deadline.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    }
+                    continue;
+                };
+                let target_entity = tracked.by_id.get(&target_id).copied();
+                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
+                else {
+                    // A cutscene motion's key is not an emote name: report the miss so
+                    // the session's hold releases, instead of playing a local clip.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    } else {
+                        play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    }
+                    continue;
+                };
+                // B's clips join A's assets before the routine queues: the entity's
+                // ActionAssets is first-writer-wins, so a second DAT can never attach
+                // separately - A's clips keep any name B also ships.
+                let assets = if let Some(parsed_b) = &parsed_b {
+                    let mut merged = parsed.assets.clone();
+                    let mut a_ids: std::collections::HashSet<ffxi_dat::datid::DatId> =
+                        merged.animations.iter().map(|an| an.id).collect();
+                    merged.animations.extend(
+                        parsed_b
+                            .assets
+                            .animations
+                            .iter()
+                            .filter(|an| a_ids.insert(an.id))
+                            .cloned(),
+                    );
+                    merged
+                } else {
+                    parsed.assets.clone()
+                };
+                // A CameraRoute stage plays on the operator camera instead of the skeleton:
+                // start its task here and keep only what still plays on the actor.
+                if active
+                    .stages
+                    .iter()
+                    .any(|t| t.stage.kind == StageKind::CameraRoute)
+                {
+                    start_cutscene_camera_tasks(
+                        &parsed,
+                        &active,
+                        duration,
+                        &q_cam,
+                        &q_self,
+                        &mode,
+                        &mut tasks,
+                        actor_entity,
+                        &q_attach,
+                        &q_children,
+                        &q_actors,
+                    );
+                    active
+                        .stages
+                        .retain(|t| t.stage.kind != StageKind::CameraRoute);
+                }
+                active.cutscene_motion_actor = cutscene_actor;
+                if !active.stages.is_empty() {
+                    queue_routine_on_actor_assets(
+                        &assets,
+                        active,
+                        actor_entity,
+                        target_entity,
+                        &mut q_scheds,
+                        &mut pending_inserts,
+                        &mut commands,
+                    );
                 }
             }
         }
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1277,8 +1793,12 @@ pub fn dispatch_motion_stages(
                         local_clips,
                         duration_frames: stage.duration_frames as f32,
                         max_loops: stage.max_loops,
-                        transition_in: stage.transition_in,
-                        transition_out: stage.transition_out,
+                        transition_in: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_in,
+                        ),
+                        transition_out: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_out,
+                        ),
                     },
                 );
             }
@@ -1345,8 +1865,12 @@ pub fn dispatch_flinch_stages(
                     local_clips: &[],
                     duration_frames: anim_dur,
                     max_loops: 1,
-                    transition_in: anim_dur as u16,
-                    transition_out: anim_dur as u16,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
+                    transition_out: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
                 },
             );
         }
@@ -1366,14 +1890,20 @@ pub fn action_dat_file_id(
     // start categories drive the caster's cast-loop motion instead (see
     // ffxi_actor_render::action_routine). vendor/server enums/action/category.h:
     // 3 = weaponskill finish, 4 = magic finish, 6 = job-ability finish.
+    use ffxi_proto::melee::{
+        CATEGORY_ABILITY_FINISH, CATEGORY_MAGIC_FINISH, CATEGORY_MOB_SKILL_FINISH,
+        CATEGORY_PET_SKILL_FINISH, CATEGORY_SKILL_FINISH,
+    };
     match action_kind {
-        3 => weapon_skill_file_id(animation?, race?, main_dll?),
-        4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
-        6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
+        CATEGORY_SKILL_FINISH => weapon_skill_file_id(animation?, race?, main_dll?),
+        CATEGORY_MAGIC_FINISH => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
+        CATEGORY_ABILITY_FINISH => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
         // research/xim MobAbilityTable.kt getFileTableOffset - mob skills (category 11) and pet
         // skills (category 13) key the effect DAT by the result's animation index with a range-
         // dependent base; that DAT's `main` plays the caster's own sp?? clip.
-        11 | 13 => Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?)),
+        CATEGORY_MOB_SKILL_FINISH | CATEGORY_PET_SKILL_FINISH => {
+            Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?))
+        }
         _ => None,
     }
 }
@@ -1516,6 +2046,8 @@ pub fn dispatch_action_started(
     global: Option<Res<GlobalEffectDir>>,
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1573,69 +2105,7 @@ pub fn dispatch_action_started(
             ),
         }
     }
-}
-
-// research/XiEvents/OpCodes/0x002C.md SCHEDULOR — the event script plays action `key` out of
-// the target's own model. The Home Point's set-home-point branch runs `bind` (the activation
-// flash and its se016023 cue) on the crystal this way, so the routine comes from the actor's
-// DAT rather than an action DAT, and the partner becomes the routine's target.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn dispatch_cutscene_actor_motion(
-    events: Res<crate::snapshot::EventLog>,
-    scene: Res<crate::snapshot::SceneState>,
-    tracked: Res<crate::scene::TrackedEntities>,
-    q_children: Query<&Children>,
-    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
-    mut commands: Commands,
-    mut last_seen: Local<u64>,
-) {
-    let new_count =
-        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
-    *last_seen = events.pushed_total;
-    if new_count == 0 {
-        return;
-    }
-    for ev in events.recent.iter().rev().take(new_count).rev() {
-        let kuluu_snapshot::ViewerEvent::Cutscene {
-            cue:
-                kuluu_snapshot::CutsceneCue::ActorMotion {
-                    actor,
-                    partner,
-                    key,
-                },
-        } = ev
-        else {
-            continue;
-        };
-        let self_id = scene.snapshot.self_char_id;
-        let Some(actor_entity) = cutscene_actor_entity(actor, self_id, &tracked) else {
-            continue;
-        };
-        let Some(routines) = actor_render_routines(actor_entity, &q_children, &q_render) else {
-            continue;
-        };
-        let lookup = RoutineLookup::new().with_actor(routines);
-        let Some(active) = ActiveScheduler::from_routine(&lookup, key) else {
-            continue;
-        };
-        let target = cutscene_actor_entity(partner, self_id, &tracked);
-        enqueue_routine(&mut commands, actor_entity, active);
-        commands
-            .entity(actor_entity)
-            .try_insert_if_new(ActionTarget(target));
-    }
-}
-
-fn cutscene_actor_entity(
-    actor: &kuluu_snapshot::CutsceneActor,
-    self_id: Option<u32>,
-    tracked: &crate::scene::TrackedEntities,
-) -> Option<Entity> {
-    let id = match actor {
-        kuluu_snapshot::CutsceneActor::LocalPlayer => self_id?,
-        kuluu_snapshot::CutsceneActor::Entity { server_id } => *server_id,
-    };
-    tracked.by_id.get(&id).copied()
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1650,6 +2120,620 @@ fn actor_render_routines<'a>(
         .iter()
         .find_map(|child| q_render.get(child).ok())
         .map(|actor| actor.routines())
+}
+
+// The server id a cutscene cue's actor operand names: the local player resolves
+// against the entity table's self id (None until it is known), everything else
+// is already a literal.
+#[cfg(not(target_arch = "wasm32"))]
+fn cutscene_actor_server_id(
+    self_id: Option<u32>,
+    actor: kuluu_snapshot::CutsceneActor,
+) -> Option<u32> {
+    match actor {
+        kuluu_snapshot::CutsceneActor::LocalPlayer => self_id,
+        kuluu_snapshot::CutsceneActor::Entity { server_id } => Some(server_id),
+    }
+}
+
+// The CIB waist byte of the actor's render component (0 when the actor has no
+// render child or no CIB): which of a 0x66 Tpc package's two tag-2 containers
+// the renderer loads.
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_waist_byte(
+    entity: Entity,
+    q_children: &Query<&Children>,
+    q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+) -> u8 {
+    q_children
+        .get(entity)
+        .ok()
+        .and_then(|children| children.iter().find_map(|child| q_render.get(child).ok()))
+        .map(|actor| actor.body_armour_waist())
+        .unwrap_or(0)
+}
+
+// Cutscene motion cues (research/XiEvents/OpCodes/0x002C.md, 0x0045.md, 0x005B.md):
+// the event script's actor choreography. 0x2C names a routine in the actor's own model DAT,
+// so it plays straight off the render component; 0x45 (non-fade) and 0x5B/0x66 name a
+// routine out of an event motion resource file, which loads through the action cache like
+// an emote. The session parks the VM's WAIT* on a pending hold this system's finish
+// report releases (the DAT-authored length is the hold's deadline), so every path that
+// cannot start a motion reports done; fades stay in cutscene.rs.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_cutscene_motion(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    table: Res<crate::entity_table::EntityTable>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
+    mut commands: Commands,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    let self_id = table.self_id();
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Cutscene { cue } = *ev else {
+            continue;
+        };
+        let resolve = |a: kuluu_snapshot::CutsceneActor| -> Option<u32> {
+            cutscene_actor_server_id(self_id, a)
+        };
+        match cue {
+            // 0x2C: the routine is in the actor's own model DAT. Every path that
+            // cannot start it reports done immediately: the session's pending
+            // hold must not wait for a finish that never comes.
+            CutsceneCue::ActorMotion {
+                actor,
+                partner,
+                key,
+            } => {
+                let (Some(actor_id), Some(partner_id)) = (resolve(actor), resolve(partner)) else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
+                let Some(routines) = actor_render_routines(actor_entity, &q_children, &q_render)
+                else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
+                let lookup = RoutineLookup::new().with_actor(routines);
+                let Some(mut active) = ActiveScheduler::from_routine(&lookup, &key) else {
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        key = %fourcc(key),
+                        "cutscene actor motion has no routine on the actor"
+                    );
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
+                active.cutscene_motion_actor = Some(actor);
+                let target_entity = tracked.by_id.get(&partner_id).copied();
+                if queue_active_scheduler(actor_entity, active, &mut q_scheds, &mut pending_inserts)
+                {
+                    commands
+                        .entity(actor_entity)
+                        .insert_if_new(ActionTarget(target_entity));
+                }
+            }
+            // 0x45 with a non-fade DAT: a named routine out of a file, on an actor, with a
+            // partner. Same dispatch shape the emote path uses; the duration operand scales any
+            // CameraRoute stage it carries.
+            CutsceneCue::Scheduler {
+                dat_id,
+                actor,
+                partner,
+                tag,
+                duration,
+            } if dat_id != ffxi_event::SCHEDULER_FADE_DAT_ID => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                cache.defer(
+                    dat_id,
+                    PendingActionDispatch::Routine {
+                        actor_id,
+                        target_id,
+                        routine: tag,
+                        duration,
+                        cutscene_actor: Some(actor),
+                    },
+                );
+            }
+            // 0x5B bank and 0x66 package: same dispatch. Prefer a routine the actor already
+            // owns under that key (research/cexi-docs/cutscene_authoring.md, Dialogue +
+            // gestures: an actor's own routine outranks a same-named bank gesture, and bank
+            // motion binds by joint index, which distorts fixed-model rigs); otherwise load
+            // the file and dispatch the named routine.
+            CutsceneCue::ExtScheduler {
+                motion,
+                actor,
+                partner,
+                key,
+            } => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let owned = actor_render_routines(actor_entity, &q_children, &q_render).and_then(
+                    |routines| {
+                        ActiveScheduler::from_routine(
+                            &RoutineLookup::new().with_actor(routines),
+                            &key,
+                        )
+                    },
+                );
+                match (owned, motion) {
+                    (Some(mut active), _) => {
+                        let target_entity = tracked.by_id.get(&target_id).copied();
+                        active.cutscene_motion_actor = Some(actor);
+                        if queue_active_scheduler(
+                            actor_entity,
+                            active,
+                            &mut q_scheds,
+                            &mut pending_inserts,
+                        ) {
+                            commands
+                                .entity(actor_entity)
+                                .insert_if_new(ActionTarget(target_entity));
+                        }
+                    }
+                    (None, None) => {
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            key = %fourcc(key),
+                            "0x66 out-of-range package: no container and no owned routine; nothing to play"
+                        );
+                    }
+                    (None, Some(ExtSchedulerMotion::Event(file_id))) => {
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            file_id,
+                            key = %fourcc(key),
+                            "cutscene motion from event motion resource"
+                        );
+                        cache.defer(
+                            file_id,
+                            PendingActionDispatch::Routine {
+                                actor_id,
+                                target_id,
+                                routine: key,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: Some(actor),
+                            },
+                        );
+                    }
+                    (None, Some(ExtSchedulerMotion::Tpc { a, b_set, b_clear })) => {
+                        let b = ffxi_event::tpc_b_for_waist(
+                            b_set,
+                            b_clear,
+                            actor_waist_byte(actor_entity, &q_children, &q_render),
+                        );
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            a,
+                            b,
+                            key = %fourcc(key),
+                            "cutscene motion from Tpc package"
+                        );
+                        cache.defer(
+                            a,
+                            PendingActionDispatch::TpcRoutine {
+                                actor_id,
+                                target_id,
+                                b,
+                                routine: key,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: Some(actor),
+                            },
+                        );
+                    }
+                }
+            }
+            // 0x2D: the zone-level routine out of the CURRENT zone's own model DAT
+            // (the cue carries the zone id); on a miss, the entrance/instance partner
+            // zone's model DAT, then the non-model scene carriers. Defer the file the
+            // key resolved in; its camera stages drive the operator camera like any
+            // other routine's.
+            CutsceneCue::ZoneScheduler {
+                key,
+                actor,
+                partner,
+                zone_id,
+            } => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                let Some(file_id) = cache
+                    .root
+                    .as_ref()
+                    .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone_id, key))
+                else {
+                    // No install, or the key is in no candidate file: report done so the
+                    // session's pending hold releases instead of sitting out its deadline.
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
+                cache.defer(
+                    file_id,
+                    PendingActionDispatch::Routine {
+                        actor_id,
+                        target_id,
+                        routine: key,
+                        duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                        cutscene_actor: Some(actor),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
+}
+
+/// Client-side actor state owned by a running cutscene: pending walks plus every server id
+/// this session moved. CutsceneEnded releases each touched entity back to its last
+/// server-authored position (the way the fade and camera lock are released), and prediction
+/// and grounding skip touched ids while they stay here so the authored choreography owns the
+/// transform.
+#[derive(Resource, Debug, Default)]
+pub struct CutsceneActorState {
+    /// Server id -> (goal in world units, speed in world units per second).
+    walks: HashMap<u32, (Vec3, f32)>,
+    touched: std::collections::HashSet<u32>,
+    /// Server ids hidden by a running cutscene's EVENT_HIDE cue; cleared at CutsceneEnded.
+    hidden: std::collections::HashSet<u32>,
+}
+
+/// A model root hidden by a running cutscene's EVENT_HIDE (0x4E) cue. Distance-culling and the
+/// entity sync respect it the way they already respect server-invisible entities, so an in-range
+/// hide is not re-shown on the next cull pass; release_cutscene_actors removes it at CutsceneEnded.
+#[derive(Component, Debug, Default)]
+pub struct CutsceneHidden;
+
+impl CutsceneActorState {
+    pub fn is_touched(&self, id: u32) -> bool {
+        self.touched.contains(&id)
+    }
+
+    pub fn touch(&mut self, id: u32) {
+        self.touched.insert(id);
+    }
+
+    pub fn begin_walk(&mut self, id: u32, goal: Vec3, speed: f32) {
+        self.touch(id);
+        self.walks.insert(id, (goal, speed));
+    }
+
+    pub fn hide(&mut self, id: u32) {
+        self.hidden.insert(id);
+    }
+
+    pub fn unhide(&mut self, id: u32) {
+        self.hidden.remove(&id);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.touched.is_empty() && self.walks.is_empty() && self.hidden.is_empty()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Event-coordinate position to Bevy world units: event y is height and x/z are the ground
+/// plane (research/XiEvents/OpCodes/0x001F.md MOVE integrates [0]/[2] and snaps [1]), so the
+/// vertical lands on Bevy's up axis, negated like every other placed asset.
+fn event_to_world(x: i32, y: i32, z: i32) -> Vec3 {
+    Vec3::new(
+        x as f32 / EVENT_COORD_UNITS,
+        -(y as f32 / EVENT_COORD_UNITS),
+        -(z as f32 / EVENT_COORD_UNITS),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Event-coordinate heading (4096 steps per full circle) to a Bevy yaw: the inverse of
+/// scene.rs's wire-heading convention (heading_to_quat over the 1/256-step wire byte).
+fn event_heading_to_quat(heading: i32) -> Quat {
+    Quat::from_rotation_y(-std::f32::consts::TAU * heading as f32 / EVENT_HEADING_UNITS)
+}
+
+// The five client-side actor cues (research/XiEvents/OpCodes/0x001F.md, 0x0037.md, 0x0039.md,
+// 0x004A.md, 0x005E.md): the event script's NPC choreography. Every write is client-side
+// transform state scoped to the running cutscene; release_cutscene_actors puts each touched
+// entity back on its last server-authored position at CutsceneEnded.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_cutscene_actor_cues(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    table: Res<crate::entity_table::EntityTable>,
+    mut state: ResMut<CutsceneActorState>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+    mut q_vis: Query<&mut Visibility, With<WorldEntity>>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut commands: Commands,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    let self_id = table.self_id();
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Cutscene { cue } = *ev else {
+            continue;
+        };
+        // The local player's movement is the session's own scene lerp, not a cue: driving it
+        // here would fight first-person input and prediction. Look-at targets may still be
+        // the player (an NPC turning to face you).
+        let moved = |a: kuluu_snapshot::CutsceneActor| -> Option<u32> {
+            cutscene_actor_server_id(self_id, a).filter(|id| Some(*id) != self_id)
+        };
+        match cue {
+            // The authored arrival heading is not applied: the walk faces its travel
+            // direction, and the scene's next facing opcode owns what comes after.
+            CutsceneCue::ActorMove {
+                actor,
+                x,
+                y,
+                z,
+                speed,
+                ..
+            } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                state.begin_walk(id, event_to_world(x, y, z), speed);
+                tracing::debug!(
+                    target: "kuluu_render::scheduler_runtime",
+                    id,
+                    speed,
+                    "cutscene actor walk"
+                );
+            }
+            CutsceneCue::ActorPlace {
+                actor,
+                x,
+                y,
+                z,
+                heading,
+            } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.translation = event_to_world(x, y, z);
+                    t.rotation = event_heading_to_quat(heading);
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        heading,
+                        "cutscene actor place"
+                    );
+                }
+            }
+            CutsceneCue::ActorFace { actor, heading } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.rotation = event_heading_to_quat(heading);
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        heading,
+                        "cutscene actor face"
+                    );
+                }
+            }
+            CutsceneCue::ActorLookAt { actor, target } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(target_id) = cutscene_actor_server_id(self_id, target) else {
+                    continue;
+                };
+                let (Some(&entity), Some(&target_entity)) =
+                    (tracked.by_id.get(&id), tracked.by_id.get(&target_id))
+                else {
+                    continue;
+                };
+                // The look-at yaw inverts scene.rs's travel-heading formula, and this system keeps
+                // one exclusive Transform query (a second shared one trips B0001), so both
+                // positions are read via .get() before the write.
+                let (Ok(from), Ok(to)) = (q_xform.get(entity), q_xform.get(target_entity)) else {
+                    continue;
+                };
+                let dx = to.translation.x - from.translation.x;
+                let dz = to.translation.z - from.translation.z;
+                if dx.abs() <= f32::EPSILON && dz.abs() <= f32::EPSILON {
+                    continue;
+                }
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.rotation = Quat::from_rotation_y(dz.atan2(dx));
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        target_id,
+                        "cutscene actor look-at"
+                    );
+                }
+            }
+            CutsceneCue::ActorStopAction { actor, key } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut scheds) = q_scheds.get_mut(entity) {
+                    match key {
+                        Some(name) => scheds.remove_routine_named(&name),
+                        None => scheds.stop_all(),
+                    }
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        key = %key.map(fourcc).unwrap_or_default(),
+                        "cutscene actor stop action"
+                    );
+                }
+            }
+            CutsceneCue::ActorHide { target, hide } => {
+                // Hiding the local player model is a valid ask (EVENT_HIDE_SELF routes here too),
+                // so resolve without excluding self.
+                let Some(id) = cutscene_actor_server_id(self_id, target) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if hide {
+                    commands.entity(entity).insert(CutsceneHidden);
+                    state.hide(id);
+                    if let Ok(mut v) = q_vis.get_mut(entity) {
+                        *v = Visibility::Hidden;
+                    }
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        "cutscene actor hide"
+                    );
+                } else {
+                    commands.entity(entity).remove::<CutsceneHidden>();
+                    state.unhide(id);
+                    // Leave Visibility to culling/sync: next frame it is Inherited when in range
+                    // and not server-invisible, so we never force-show an out-of-range or buried actor.
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        "cutscene actor show"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// Per-frame progression of the walks apply_cutscene_actor_cues queued: each entity steps
+// toward its goal at the authored speed (world units per second, the same clock the session
+// used to arm the MOVE hold) and faces its travel direction; arrival snaps and drops the walk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn advance_cutscene_walks(
+    time: Res<Time>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    mut state: ResMut<CutsceneActorState>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+) {
+    if state.walks.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs();
+    let mut arrived = Vec::new();
+    for (&id, &(goal, speed)) in state.walks.iter() {
+        let Some(&entity) = tracked.by_id.get(&id) else {
+            arrived.push(id);
+            continue;
+        };
+        let Ok(mut t) = q_xform.get_mut(entity) else {
+            continue;
+        };
+        let dx = goal.x - t.translation.x;
+        let dz = goal.z - t.translation.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist <= f32::EPSILON {
+            arrived.push(id);
+            continue;
+        }
+        let travel = (speed * dt).min(dist);
+        t.translation.x += dx / dist * travel;
+        t.translation.z += dz / dist * travel;
+        t.translation.y = goal.y;
+        t.rotation = Quat::from_rotation_y(dz.atan2(dx));
+        if travel >= dist {
+            arrived.push(id);
+        }
+    }
+    for id in arrived {
+        state.walks.remove(&id);
+    }
+}
+
+// CutsceneEnded (and the zone/disconnect belt-and-braces, mirroring drain_cutscene_events):
+// release every entity this cutscene moved back to its last server-authored position and
+// drop the pending walks.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn release_cutscene_actors(
+    events: Res<crate::snapshot::EventLog>,
+    scene_state: Res<crate::snapshot::SceneState>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    mut state: ResMut<CutsceneActorState>,
+    mut cursor: Local<u64>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+    q_hidden: Query<Entity, With<CutsceneHidden>>,
+    mut commands: Commands,
+) {
+    let total = events.pushed_total;
+    let first_global = total.saturating_sub(events.recent.len() as u64);
+    let mut ended = false;
+    for g in (*cursor).max(first_global)..total {
+        match &events.recent[(g - first_global) as usize] {
+            kuluu_snapshot::ViewerEvent::CutsceneEnded
+            | kuluu_snapshot::ViewerEvent::ZoneChanged { .. }
+            | kuluu_snapshot::ViewerEvent::Disconnected { .. } => ended = true,
+            _ => {}
+        }
+    }
+    *cursor = total;
+    if !ended || state.is_empty() {
+        return;
+    }
+    for wire in &scene_state.snapshot.entities {
+        if !state.is_touched(wire.id) {
+            continue;
+        }
+        let Some(&entity) = tracked.by_id.get(&wire.id) else {
+            continue;
+        };
+        if let Ok(mut t) = q_xform.get_mut(entity) {
+            t.translation = crate::scene::ffxi_to_bevy(wire.pos);
+            t.rotation = crate::scene::heading_to_quat(wire.heading);
+        }
+    }
+    // Release every cutscene-hidden model so it reappears on its last server-authored visibility
+    // (culling/sync own Visibility from the next frame once the marker is gone).
+    for e in q_hidden.iter() {
+        commands.entity(e).remove::<CutsceneHidden>();
+    }
+    state.walks.clear();
+    state.touched.clear();
+    state.hidden.clear();
 }
 
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
@@ -1678,6 +2762,8 @@ pub fn dispatch_cast_routine_started(
     q_cast: Query<&CastRoutine>,
     mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
     mut spell_suffix: ResMut<crate::ffxi_actor_render::SpellSuffixCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1751,6 +2837,7 @@ pub fn dispatch_cast_routine_started(
                 target_id.and_then(|id| tracked.by_id.get(&id).copied()),
             ));
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
@@ -1769,9 +2856,10 @@ pub struct PendingHitReaction {
     pub armed_by: [u8; 4],
 }
 
-// A Defeated result starts the victim's death path on this frame instead of waiting for the
-// next 0x0E to report hp_pct 0. Latched on the render-actor child (the pose pass reads it
-// there) and cleared once the snapshot reports the entity alive again.
+// When the result's info bit carries Defeated, retail flips StatusServer on the same frame as the
+// HP packet (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"): the victim's death path starts immediately instead of waiting for the next
+// 0x0E to report hp_pct 0. Latched on the render-actor child (the pose pass reads it there); it
+// dies with the model on despawn/zone change, which is when a fresh `init` would run anyway.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeadFromAction {
     /// Set once the snapshot has caught up (hp_pct 0); the latch is released when the snapshot
@@ -1823,7 +2911,7 @@ pub fn hit_reaction_routine(
     use ffxi_proto::melee::ActionResolution;
     let out = match resolution {
         // The crit rides the VICTIM's result block as `info & CriticalHit`
-        // (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack). LSB's
+        // (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack). LSB's
         // hitDistortion is the damage share of max HP (action.cpp action_result_t::recordDamage),
         // so it cannot stand in for the flag. None/Light/Medium/Heavy non-crits all play `damg`
         // per retail's dam0 branch table - never sdam, which flinches nothing on its own.
@@ -1846,11 +2934,11 @@ pub fn hit_reaction_routine(
     routines
 }
 
-// research/xim Actor.kt displayAutoAttack — the swing routine is chosen by which limb struck.
+// research/xim Actor.kt displayAutoAttack: the swing routine is chosen by which limb struck.
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time. No attacker-side crit swing exists on purpose: LSB
 // flags the crit only in the VICTIM's result block (CBattleEntity::OnAttack sets info CriticalHit
-// + hitDistortion Heavy from one bool; vendor/server/src/map/entities/battleentity.cpp) and this
+// + hitDistortion Heavy from one bool; vendor/server/src/map/entities/battle_entity.cpp) and this
 // `animation` field is limb-selected, never
 // crit-selected - do not re-add a crit variant here.
 pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {
@@ -1866,8 +2954,21 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
 
 // vendor/server/src/map/enums/four_cc.h — BasicAttack's FourCC is "atk0", the self-targeted
 // voice routine research/xim Actor.kt displayAutoAttack enqueues alongside the swing.
+#[cfg(not(target_arch = "wasm32"))]
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
+// KULUU_COMBAT_LOG=1 - live trace of which BATTLE2 results reach the
+// render, what gets armed on the attacker, whether the DamageCallback fires and where the
+// victim's reaction routine resolves. Read-only; no state, no behaviour change (same pattern
+// as KULUU_MOTION_LOG).
+#[cfg(not(target_arch = "wasm32"))]
+fn combat_log_enabled() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::env_flags::env_flag(&ONCE, "KULUU_COMBAT_LOG")
+}
+
+/// Printable form of a FourCC for COMBAT_ log lines.
+#[cfg(not(target_arch = "wasm32"))]
 fn fourcc(name: [u8; 4]) -> String {
     ffxi_dat::datid::DatId::from_name(&name).as_str()
 }
@@ -1988,11 +3089,14 @@ pub fn dispatch_melee_action_started(
                 fourcc(swing),
                 fourcc(armed_by));
         }
-        // Retail flips StatusServer on the same frame as the HP packet, so start the victim's
-        // death path now instead of waiting for the next 0x0E.
+        // Info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP packet
+        // (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"),
+        // so start the victim's death path now instead of waiting for the next 0x0E.
         if outcome.defeated() {
-            tracing::debug!(target: "combat", "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
-                    actor_id, victim, outcome.info);
+            if combat_log_enabled() {
+                tracing::debug!(target: "combat", "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
+                        actor_id, victim, outcome.info);
+            }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);
             // XIM's onDisplayDeath enqueues the model's `dead` routine with
             // displayDead=true on the Defeated frame: ded? fall-over at its first Motion stage,
@@ -2014,7 +3118,7 @@ pub fn dispatch_melee_action_started(
             }
         }
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // Latch the victim's death path on its render-actor child (see DeadFromAction). No-op when the
@@ -2125,7 +3229,7 @@ pub fn dispatch_damage_callback_stages(
             );
         }
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_active, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
 
 // research/xim EffectRoutineParser.kt parseSection2 + EffectRoutineInstance.kt createChild newSequences — a 0x09 link
@@ -2176,7 +3280,7 @@ pub fn dispatch_target_routine_stages(
             &mut commands,
         );
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_active, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2220,11 +3324,6 @@ fn run_routine_on(
         .try_insert(ActionTarget(flipped_target));
 }
 
-// Apply the inserts buffered by `run_routine_on`'s Err branch (see there for why): re-check for
-// an ActiveSchedulers that appeared since the call and merge into it, otherwise insert every
-// queued routine at once so none is lost to a deferred-command overwrite. Commands apply per
-// system, so within one batch only our own buffered inserts can change the answer between the
-// call and this flush.
 #[cfg(not(target_arch = "wasm32"))]
 /// Queue a routine on an entity through commands so two routines landing on a not-yet-scheduled
 /// entity in one system both survive: a deferred `insert(ActiveSchedulers::one)` would let the
@@ -2237,7 +3336,38 @@ pub fn enqueue_routine(commands: &mut Commands, entity: Entity, active: ActiveSc
         .and_modify(move |mut scheds| scheds.push(active));
 }
 
-fn flush_pending_routine_inserts(
+/// Insert-or-push an ActiveScheduler onto `entity`. Push when the component already exists;
+/// otherwise buffer into `pending_inserts` instead of issuing a deferred insert: two routines
+/// queued on the same fresh entity in one batch would overwrite each other (last insert wins),
+/// which would drop a queued knockback hit's damage reaction to the sway insert. The caller
+/// must run [`flush_active_scheduler_inserts`] after all of its queueing.
+///
+/// Returns true when `entity` had no ActiveSchedulers yet (the insert was buffered), so sites
+/// that attach entity-level side components can keep first-writer-wins for them.
+pub fn queue_active_scheduler(
+    entity: Entity,
+    active: ActiveScheduler,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+) -> bool {
+    match q_scheds.get_mut(entity) {
+        Ok(mut scheds) => {
+            scheds.push(active);
+            false
+        }
+        Err(_) => {
+            pending_inserts.entry(entity).or_default().push(active);
+            true
+        }
+    }
+}
+
+// Apply the inserts buffered by `queue_active_scheduler` (see there for why): re-check for an
+// ActiveSchedulers that appeared since the call and merge into it, otherwise insert every
+// queued routine at once so none is lost to a deferred-command overwrite. Commands apply per
+// system, so within one batch only our own buffered inserts can change the answer between the
+// call and this flush.
+pub fn flush_active_scheduler_inserts(
     pending: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     q_active: &mut Query<&mut ActiveSchedulers>,
     commands: &mut Commands,
@@ -2362,6 +3492,8 @@ pub fn dispatch_entity_emoted(
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -2409,11 +3541,13 @@ pub fn dispatch_entity_emoted(
                 let file_id = base as u32 + file_offset;
                 match cache.lru.get_and_promote(file_id) {
                     Some(parsed) => {
-                        if apply_emote_dispatch(
+                        if apply_routine_dispatch(
                             &parsed,
                             &routine,
                             actor_entity,
                             tracked.by_id.get(&target_id).copied(),
+                            &mut q_scheds,
+                            &mut pending_inserts,
                             &mut commands,
                         ) {
                             continue;
@@ -2423,10 +3557,12 @@ pub fn dispatch_entity_emoted(
                     None => {
                         cache.defer(
                             file_id,
-                            PendingActionDispatch::Emote {
+                            PendingActionDispatch::Routine {
                                 actor_id,
                                 target_id,
                                 routine,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: None,
                             },
                         );
                         continue;
@@ -2437,6 +3573,7 @@ pub fn dispatch_entity_emoted(
 
         play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
@@ -2461,8 +3598,8 @@ fn play_local_emote_clip(
                     local_clips: &[],
                     duration_frames: 0.0,
                     max_loops: 1,
-                    transition_in: 0,
-                    transition_out: 0,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::ZERO,
+                    transition_out: crate::ffxi_actor_render::HalfFrames::ZERO,
                 },
             );
         }
@@ -2474,6 +3611,10 @@ pub struct SchedulerRuntimePlugin;
 impl Plugin for SchedulerRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SchedulerStageEvent>();
+        app.add_message::<CutsceneMotionDone>();
+        // Prediction and grounding read this on every target; only the native cutscene systems
+        // write it.
+        app.init_resource::<CutsceneActorState>();
 
         #[cfg(target_arch = "wasm32")]
         app.add_systems(
@@ -2485,6 +3626,9 @@ impl Plugin for SchedulerRuntimePlugin {
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
             app.init_resource::<ActionDatCache>();
+            // The running cutscene camera route; the advance system lives in kuluu's view
+            // native module, after resolve_camera.
+            app.init_resource::<CutsceneCameraTasks>();
             app.init_resource::<ActionDatRoot>();
             app.add_systems(Startup, load_global_effect_dir);
             // Ordered ahead of the poll so a root change landing on the same frame as an
@@ -2504,12 +3648,28 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_action_started,
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
-                    (dispatch_entity_emoted, dispatch_cutscene_actor_motion).chain(),
+                    dispatch_entity_emoted,
+                    dispatch_cutscene_motion,
                     poll_action_dat_tasks,
-                    // Chained between the routine inserters and the stage consumers so a
-                    // routine's frame-0 stages fire on the frame it is inserted, and every
-                    // stage is consumed the same frame it is written. StopRoutine removal runs
-                    // right after the tick that emits its StopRoutine stage.
+                )
+                    .chain()
+                    // The overlay and this chain both drain EventLog with private cursors; the
+                    // overlay's "no routine for this action" branch clears the looping action, so
+                    // it must run before a completion routine's Motion stage begins here.
+                    .after(crate::ffxi_actor_render::dispatch_action_overlay)
+                    // Bevy chains tuples of at most 20 systems (bevy_ecs schedule/config.rs,
+                    // IntoScheduleConfigs tuple impls), so the inserters and the stage
+                    // consumers are two chained halves pinned together: every inserter runs
+                    // before tick_active_schedulers, which keeps a routine's frame-0 stages
+                    // firing on the frame it is inserted.
+                    .before(tick_active_schedulers),
+            );
+            app.add_systems(
+                Update,
+                (
+                    // Chained after the inserter half so every stage is consumed the same
+                    // frame it is written. StopRoutine removal runs right after the tick that
+                    // emits its 0x5F stage.
                     tick_active_schedulers,
                     dispatch_stop_routine_stages,
                     crate::particle_sim::spawn_actor_auto_run_particles,
@@ -2524,11 +3684,21 @@ impl Plugin for SchedulerRuntimePlugin {
                     (dispatch_damage_callback_stages, settle_dead_from_action).chain(),
                     dispatch_target_routine_stages,
                 )
+                    .chain(),
+            );
+            // The cutscene's NPC choreography owns its entities' transforms for as long as they
+            // are touched, so it runs after prediction and grounding (which skip them) and wins
+            // any same-frame write.
+            app.add_systems(
+                Update,
+                (
+                    apply_cutscene_actor_cues,
+                    advance_cutscene_walks,
+                    release_cutscene_actors,
+                )
                     .chain()
-                    // The overlay and this chain both drain EventLog with private cursors; the
-                    // overlay's "no routine for this action" branch clears the looping action, so
-                    // it must run before a completion routine's Motion stage begins here.
-                    .after(crate::ffxi_actor_render::dispatch_action_overlay),
+                    .after(crate::combat_stance::predict_entities_system)
+                    .after(crate::combat_stance::ground_remote_movers_system),
             );
             app.add_systems(
                 Update,
@@ -2544,8 +3714,46 @@ mod tests {
     use super::*;
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
 
-    // Foot Kick (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file id
-    // is the range-dependent base plus that index (research/xim MobAbilityTable.kt getFileTableOffset).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn event_coordinates_and_heading_convert_to_bevy_space() {
+        // Event y is height; Bevy's up axis is -native-y like every other placed asset.
+        assert_eq!(event_to_world(2000, -500, 400), Vec3::new(2.0, 0.5, -0.4));
+        // A quarter circle of event heading steps is a quarter Bevy yaw, signed the way
+        // scene.rs's wire-heading convention (heading_to_quat) signs it.
+        let q = event_heading_to_quat(1024);
+        // -TAU * 1024 / 4096 rounds to exactly -FRAC_PI_2 in f32, so the yaw is a
+        // quarter turn; compare against that exact quaternion rather than through
+        // angle_between, whose dot product of two identical quaternions rounds just
+        // under 1.0 and reports about 7e-4 radians for zero rotation.
+        assert_eq!(q, Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cutscene_actor_server_id_resolves_local_player_and_entities() {
+        assert_eq!(
+            cutscene_actor_server_id(None, kuluu_snapshot::CutsceneActor::LocalPlayer),
+            None
+        );
+        assert_eq!(
+            cutscene_actor_server_id(Some(7), kuluu_snapshot::CutsceneActor::LocalPlayer),
+            Some(7)
+        );
+        assert_eq!(
+            cutscene_actor_server_id(
+                None,
+                kuluu_snapshot::CutsceneActor::Entity {
+                    server_id: 0x010E_6001
+                }
+            ),
+            Some(0x010E_6001)
+        );
+    }
+
+    // whirl_claws (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file
+    // id is the range-dependent base plus that index (research/xim resource/table/MobAbilityTable.kt
+    // getFileTableOffset).
     #[test]
     fn mob_skill_categories_key_the_effect_dat_by_animation() {
         assert_eq!(
@@ -2798,6 +4006,7 @@ mod tests {
     fn tick_active_schedulers_strips_action_components_after_ttl() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .add_systems(Update, tick_active_schedulers);
 
@@ -2840,13 +4049,16 @@ mod tests {
     }
 
     // The whole point of the vec: a hit reaction that lands mid-swing runs on the same entity
-    // without touching the swing's cursor or frame (retail's ActionTimer1 counted 2 and 3).
-    // Each entry keeps its own clock; entries retire on their OWN finish+TTL, so a short
+    // without touching the swing's cursor or frame (retail's ActionTimer1 counted 2 and 3;
+    // .agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"
+    // and "Target-side reactions"). Each entry keeps its own clock; entries retire on their OWN
+    // finish+TTL, so a short
     // reaction can lapse while the swing still runs.
     #[test]
     fn concurrent_routines_keep_separate_cursors_and_strip_together() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .init_resource::<CapturedStages>()
             .add_systems(Update, (tick_active_schedulers, capture_stages).chain());
@@ -2912,12 +4124,121 @@ mod tests {
         assert!(!app.world().entity(actor).contains::<ActiveSchedulers>());
     }
 
-    // StopRoutine drops the named entry and only that one (xim EffectRoutineInstance.kt:
+    #[derive(Resource, Default)]
+    struct CapturedMotionDone(Vec<CutsceneMotionDone>);
+
+    fn capture_motion_done(
+        mut reader: MessageReader<CutsceneMotionDone>,
+        mut out: ResMut<CapturedMotionDone>,
+    ) {
+        out.0.extend(reader.read().copied());
+    }
+
+    // The 0x53 past a 0x2C parks on this report: it must fire the frame the
+    // routine's last stage lands, exactly once, carrying the wire actor and
+    // key the cue named.
+    #[test]
+    fn a_marked_routine_reports_done_exactly_once_on_finish() {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
+            .init_resource::<Time>()
+            .init_resource::<CapturedMotionDone>()
+            .add_systems(
+                Update,
+                (tick_active_schedulers, capture_motion_done).chain(),
+            );
+
+        let actor = kuluu_snapshot::CutsceneActor::Entity {
+            server_id: 0x010E_6032,
+        };
+        let mut sched = ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"kue0",
+            vec![stage(30, StageKind::SoundOnCaster, 0x53, *b"snd1")],
+        ));
+        sched.cutscene_motion_actor = Some(actor);
+        let entity = app.world_mut().spawn(ActiveSchedulers::one(sched)).id();
+
+        // t=0.1 s (frame 6): the frame-30 stage has not fired yet.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "an unfinished routine does not report"
+        );
+
+        // t=0.6 s (frame 36): the routine finished on this frame.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        let done = std::mem::take(&mut app.world_mut().resource_mut::<CapturedMotionDone>().0);
+        assert_eq!(
+            done,
+            vec![CutsceneMotionDone {
+                actor,
+                key: *b"kue0"
+            }]
+        );
+
+        // The entry lingers past its last stage for the post-finish TTL: the
+        // report must not fire again while it does.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        assert!(app.world().entity(entity).contains::<ActiveSchedulers>());
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "the report fires exactly once"
+        );
+    }
+
+    #[test]
+    fn unmarked_routines_never_report_done() {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
+            .init_resource::<Time>()
+            .init_resource::<CapturedMotionDone>()
+            .add_systems(
+                Update,
+                (tick_active_schedulers, capture_motion_done).chain(),
+            );
+
+        // An emote-style routine: finished long ago, no 0x53 waiting on it.
+        let actor = app
+            .world_mut()
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(
+                &make_scheduler(
+                    *b"em01",
+                    vec![stage(5, StageKind::SoundOnCaster, 0x53, *b"snd1")],
+                ),
+            )))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        assert!(
+            app.world().entity(actor).contains::<ActiveSchedulers>(),
+            "the routine is finished but still within its TTL"
+        );
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "only a 0x2C-marked routine reports"
+        );
+    }
+
+    // 0x5F StopRoutine drops the named entry and only that one (xim EffectRoutineInstance.kt:
     // 910-915 stops each matching sequence on the same actor).
     #[test]
     fn stop_routine_stage_removes_only_the_named_entry() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .add_systems(
                 Update,
@@ -3026,7 +4347,7 @@ mod tests {
         );
     }
 
-    // the fall-over window: pending from insertion until the first Motion
+    // The fall-over window: pending from insertion until the first Motion
     // stage fires, never reported for routines without one (instant-corpse fallback models)
     // or under any other name.
     #[test]
@@ -3102,8 +4423,7 @@ mod tests {
         );
         // None/Light/Medium all route to damg per retail's dam0 branch table - never sdam, even
         // when the model ships it: ROM/0/0.DAT's damh/damg both carry the 0x21 flinch stage,
-        // while sdam is sound-only (kuluu-df9t: the old sdam preference made normal hits on
-        // sdam-shipping models invisible).
+        // while sdam is sound-only and would leave normal hits on sdam-shipping models invisible.
         assert_eq!(
             hit_reaction_routine(R::Hit, o(0, 0, 0), has(vec![*b"sdam"])),
             vec![*b"damg"]
@@ -3242,7 +4562,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
         let tgt0 = schedulers
             .iter()
             .find(|s| &s.name == b"tgt0")
@@ -3290,7 +4610,63 @@ mod tests {
         let sched = make_scheduler(*b"main", vec![]);
         let a = ActiveScheduler::from_scheduler(&sched);
         assert!(a.finished());
-        assert_eq!(a.last_frame(), 0);
+        assert_eq!(a.end_frame(), 0);
+    }
+
+    // A trailing AnimationLock holds until its own end frame: `end_frame` is the max over all
+    // stages of fire time + duration_frames, so this routine locks [0, 130) and retirement
+    // (which counts down from that end frame plus the post-finish TTL) cannot release it early.
+    #[test]
+    fn trailing_lock_holds_until_its_end_frame_not_the_ttl() {
+        let mut lk = stage(0, StageKind::AnimationLock, 0x07, *b"lk01");
+        lk.stage.duration_frames = 130;
+        let sched = make_scheduler(*b"lock", vec![lk]);
+
+        // Exact integer bounds: locked through frame 129, released at 130.
+        let a = ActiveScheduler::from_scheduler(&sched);
+        assert_eq!(a.end_frame(), 130);
+        assert!(a.locks_at(129), "frame 129 is inside [0, 130)");
+        assert!(!a.locks_at(130), "the lock ends at frame 130");
+
+        // The entry must still be alive when the clock reaches that window: retirement counts
+        // down from end_frame plus the post-finish TTL, so at tick 125 both the entry and its
+        // lock are visible to is_locked_now.
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
+            .init_resource::<Time>()
+            .add_systems(Update, tick_active_schedulers);
+        let actor = app
+            .world_mut()
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(
+                &sched,
+            )))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(125.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry must survive to tick 125, inside its lock window");
+        assert!(scheds.is_locked_now(), "tick 125 is locked");
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(15.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry retires only after end_frame + TTL, not at the lock's end");
+        assert!(
+            !scheds.is_locked_now(),
+            "tick 140 is past the [0, 130) window"
+        );
     }
 
     /// End-to-end against the installed retail DATs (skips without them):
@@ -3309,7 +4685,7 @@ mod tests {
         let (offset, routine) = emote_routine(1, 0).expect("bow is mapped");
         let loc = root.resolve(base + offset).expect("emote file resolves");
         let bytes = std::fs::read(loc.path_under(&root)).expect("emote DAT readable");
-        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
         let active = ActiveScheduler::from_main(&schedulers, &routine).expect("em00 exists");
         let motion = active
             .stages
@@ -3397,7 +4773,7 @@ mod tests {
 
     #[test]
     fn parse_action_bytes_handles_empty_input() {
-        let (scheds, assets) = parse_action_bytes(&[]);
+        let (scheds, assets, _cameras) = parse_action_bytes(&[]);
         assert!(scheds.is_empty());
         assert!(assets.generators.is_empty());
         assert!(assets.seps.is_empty());
@@ -3428,7 +4804,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (_scheds, assets) = parse_action_bytes(&bytes);
+        let (_scheds, assets, _cameras) = parse_action_bytes(&bytes);
 
         assert!(
             !assets.sprite_sheets.is_empty(),
@@ -3459,7 +4835,7 @@ mod tests {
         let Ok(cure_bytes) = std::fs::read(cure_loc.path_under(&root)) else {
             return;
         };
-        let (_s, cure_assets) = parse_action_bytes(&cure_bytes);
+        let (_s, cure_assets, _) = parse_action_bytes(&cure_bytes);
         assert!(
             cure_assets
                 .particle_defs
@@ -3487,7 +4863,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (_scheds, assets) = parse_action_bytes(&bytes);
+        let (_scheds, assets, _cameras) = parse_action_bytes(&bytes);
 
         let sheet = assets
             .sprite_sheets
@@ -3576,7 +4952,7 @@ mod tests {
         let Some(bytes) = read_dat(HOME_POINT_MODEL_DAT) else {
             return;
         };
-        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
         let active = ActiveScheduler::from_main(&schedulers, b"bind").expect("bind routine");
 
         let particles: Vec<[u8; 4]> = active
@@ -3629,7 +5005,7 @@ mod tests {
         let Some(bytes) = read_dat(GLOBAL_EFFECT_DIR_FILE_ID) else {
             return;
         };
-        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
 
         let ner1 = schedulers
             .iter()
@@ -3689,8 +5065,8 @@ mod tests {
         ) else {
             return;
         };
-        let (actor_scheds, _) = parse_action_bytes(&actor_bytes);
-        let (global_scheds, _) = parse_action_bytes(&global_bytes);
+        let (actor_scheds, _, _) = parse_action_bytes(&actor_bytes);
+        let (global_scheds, _, _) = parse_action_bytes(&global_bytes);
         let lookup = RoutineLookup::new()
             .with_dat(&actor_scheds)
             .with_dat(&global_scheds);
@@ -4057,7 +5433,8 @@ mod tests {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
         let bytes = std::fs::read(loc.path_under(&root)).ok()?;
-        Some(parse_action_bytes(&bytes))
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
+        Some((schedulers, assets))
     }
 
     // Retail-DAT guard (self-skips without an install) for the whole hit-spark chain. `chit`
@@ -4167,7 +5544,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
 
         let damg = schedulers
             .iter()
@@ -4295,7 +5672,7 @@ mod tests {
             eprintln!("skipping: no {}", path.display());
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
 
         for (name, lock_dur, stops) in [
             (*b"ini1", WORM_DIG_LOCK_TICKS, *b"init"),
@@ -4339,6 +5716,7 @@ mod tests {
         Arc::new(ParsedActionDat {
             schedulers: Vec::new(),
             assets: ActionAssets::default(),
+            cameras: ActionDatCameras::new(),
         })
     }
 
@@ -4686,5 +6064,136 @@ mod tests {
             Some("fireefc"),
             "an unscoped caller still falls back to the flat map"
         );
+    }
+
+    // --- ActorHide cue (EVENT_HIDE 0x4E, EVENT_HIDE_SELF): event 503's B4/C6/E1 reveals ---
+
+    fn actor_cue_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::EventLog>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<CutsceneActorState>()
+            .add_systems(Update, apply_cutscene_actor_cues);
+        app
+    }
+
+    fn spawn_tracked_actor(app: &mut App, id: u32) -> Entity {
+        let e = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id,
+                    act_index: 0,
+                    kind: kuluu_snapshot::EntityKind::Pc,
+                },
+                Transform::from_xyz(1.0, 0.0, 2.0),
+                Visibility::Inherited,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::scene::TrackedEntities>()
+            .by_id
+            .insert(id, e);
+        e
+    }
+
+    fn push_hide(app: &mut App, target: kuluu_snapshot::CutsceneActor, hide: bool) {
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::Cutscene {
+                cue: CutsceneCue::ActorHide { target, hide },
+            });
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn actor_hide_cue_hides_the_entity_and_unhide_releases_it() {
+        const NPC: u32 = 0x010E_60D5; // Curilla, event 503's party lead
+        let mut app = actor_cue_app();
+        let npc = spawn_tracked_actor(&mut app, NPC);
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            true,
+        );
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_some(),
+            "hide must insert the marker so culling keeps it hidden in range"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(npc).unwrap(),
+            Visibility::Hidden
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(
+            state.hidden.contains(&NPC),
+            "hide must record the id for release"
+        );
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            false,
+        );
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_none(),
+            "unhide must remove the marker; culling/sync own Visibility from here"
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(state.hidden.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn actor_hide_cue_resolves_the_local_player() {
+        // EVENT_HIDE_SELF routes here: the motion cues' `moved` closure excludes self, but a
+        // hide must not — event 503's A1 hides the player model for the whole opening.
+        const SELF: u32 = 7;
+        let mut app = actor_cue_app();
+        let player = spawn_tracked_actor(&mut app, SELF);
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF));
+
+        push_hide(&mut app, kuluu_snapshot::CutsceneActor::LocalPlayer, true);
+        app.update();
+        assert!(app.world().get::<CutsceneHidden>(player).is_some());
+        assert_eq!(
+            *app.world().get::<Visibility>(player).unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cutscene_ended_releases_cutscene_hidden_models() {
+        const NPC: u32 = 0x010E_60D5;
+        let mut app = actor_cue_app();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .add_systems(Update, release_cutscene_actors);
+        let npc = spawn_tracked_actor(&mut app, NPC);
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            true,
+        );
+        app.update();
+        assert!(app.world().get::<CutsceneHidden>(npc).is_some());
+
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::CutsceneEnded);
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_none(),
+            "ended must release the marker so the model reappears on its server visibility"
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(state.is_empty());
     }
 }

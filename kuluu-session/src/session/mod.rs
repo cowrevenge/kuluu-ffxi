@@ -2,6 +2,7 @@
 
 pub(crate) mod event_transport;
 use anyhow::{anyhow, Context, Result};
+use ffxi_event::PendingTag;
 use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
 
@@ -10,9 +11,11 @@ use crate::event_dialog::EventTrigger;
 use crate::lobby_client::LobbyClient;
 use crate::map_client::{self, BootstrapArgs, MapClient};
 use crate::state::{
-    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, Diagnostics, Entity,
-    EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem, ShopState, Stage, Vec3,
+    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, ChatSpan, ChatSpanKind,
+    Diagnostics, Entity, EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem,
+    ShopState, Stage, Vec3,
 };
+use ffxi_dat::sysmes::{self, MesBasicDat};
 
 mod codec;
 mod treasure;
@@ -119,6 +122,41 @@ struct SelfMogState {
     /// 0x055; the c2s 0x064 mark-seen reply must carry the table's full
     /// updated LookItemFlag bitset.
     key_item_tables: [KeyItemTableFlags; decode::ScenarioItem::TABLE_COUNT],
+}
+
+/// The open NPC shop window. The shop has no close packet (research/XiPackets
+/// client 0x0082 GP_CLI_COMMAND_SHOP_REQ is deprecated and GM-only), so the
+/// client owns the window's whole lifetime: it opens on s2c 0x03E, accumulates
+/// s2c 0x03C pages, and closes on a client decision or a zone change.
+#[derive(Debug, Default)]
+struct ShopSession {
+    open: Option<ShopState>,
+
+    /// Entity the last c2s 0x01A Talk went to. LSB's shop scripts run off that
+    /// trigger (vendor/server/scripts/globals/shop.lua `showText` then
+    /// `sendMenu`), so it names the vendor the SHOP_OPEN belongs to.
+    last_talk_target: u32,
+
+    /// `(item_no, quantity)` of the SHOP_SELL_REQ awaiting an appraisal. LSB's
+    /// 0x03D leaves `Count` at 0
+    /// (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp), so the reply's
+    /// quantity comes from here.
+    pending_sell: Option<(u16, u32)>,
+}
+
+impl ShopSession {
+    fn close(&mut self, event_tx: &broadcast::Sender<AgentEvent>) {
+        self.pending_sell = None;
+        if self.open.take().is_some() {
+            let _ = event_tx.send(AgentEvent::ShopClosed);
+        }
+    }
+
+    fn publish(&self, event_tx: &broadcast::Sender<AgentEvent>) {
+        if let Some(shop) = self.open.as_ref() {
+            let _ = event_tx.send(AgentEvent::ShopUpdated { shop: shop.clone() });
+        }
+    }
 }
 
 /// `received` gates c2s 0x064: before this table's 0x055 arrives the local
@@ -377,6 +415,8 @@ async fn run_map_session(
     let mut self_act_index: Option<u16> = None;
     let mut name_cache: std::collections::HashMap<u32, String> = Default::default();
 
+    let mut target_cache: std::collections::HashMap<u16, u32> = Default::default();
+
     let mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind> =
         Default::default();
 
@@ -384,7 +424,13 @@ async fn run_map_session(
 
     let mut npc_name_resolver = NpcNameResolver::new(cfg.dat_root.clone());
     let mut emote_text_resolver = EmoteTextResolver::new(cfg.dat_root.clone());
+    let autotranslate_names = cfg
+        .dat_root
+        .as_deref()
+        .map(ffxi_dat::autotranslate_names::InstalledNames::open_from_root)
+        .unwrap_or_default();
     let mut sysmes_resolver = treasure::SysMesResolver::new(cfg.dat_root.clone());
+    let mut mes_basic_resolver = MesBasicResolver::new(cfg.dat_root.clone());
     let mut treasure_pool = treasure::TreasurePool::default();
 
     let mut name_miss_dedup: std::collections::HashMap<
@@ -397,9 +443,15 @@ async fn run_map_session(
 
     let mut self_pos_seeded = false;
 
+    // Set by drain_zone_flood when ENTERZONE (s2c 0x008) lands inside a flood;
+    // consumed by keepalive_loop to fire the post-GAMEOK handshake.
+    let mut enterzone_seen = false;
+
     let mut flood_in_mog_house = false;
 
     let mut mog = SelfMogState::default();
+
+    let mut flood_shop = ShopSession::default();
 
     let mut flood_zone_messages: Vec<(u16, Vec<u8>)> = Vec::new();
     let self_login_received = drain_zone_flood(
@@ -410,6 +462,7 @@ async fn run_map_session(
         &mut server_last_seq,
         &mut total_subs,
         &mut self_pos_seeded,
+        &mut enterzone_seen,
         event_tx,
         &mut pending_event_end,
         &mut cutscene,
@@ -417,6 +470,7 @@ async fn run_map_session(
         bootstrap.char_name,
         &mut self_act_index,
         &mut name_cache,
+        &mut target_cache,
         &mut kind_cache,
         &mut claim_cache,
         &mut name_miss_dedup,
@@ -424,10 +478,13 @@ async fn run_map_session(
         &mut self_pos,
         &mut npc_name_resolver,
         &mut emote_text_resolver,
+        &autotranslate_names,
         &mut sysmes_resolver,
+        &mut mes_basic_resolver,
         &mut treasure_pool,
         &mut flood_in_mog_house,
         &mut mog,
+        &mut flood_shop,
         spawn_fallback,
         &mut flood_zone_messages,
     )
@@ -439,11 +496,29 @@ async fn run_map_session(
         self_pos_seeded,
         "zone-in flood drained"
     );
-    // vendor/server/src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process.
-    anyhow::ensure!(
-        self_login_received && self_pos_seeded,
-        "map bootstrap failed: required self LOGIN/position missing (login={self_login_received}, position={self_pos_seeded}, received_subpackets={total_subs}, server_sync={server_last_seq})"
-    );
+    // The self-position seed (CHAR_PC) is the only hard bootstrap requirement:
+    // without it we cannot seed outbound POS. The s2c 0x00A LOGIN (vendor/server/
+    // src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process) carries
+    // the voyage timing but rides a second datagram behind the zone-in burst, so
+    // it is not a hard gate — if it did not land in the pre-GAMEOK drain it is
+    // still processed opportunistically by the keepalive loop (handle_sub_packet).
+    if !self_pos_seeded {
+        tracing::warn!(
+            iteration,
+            current_zone_id,
+            "zone-in flood ended without a self-position seed (no CHAR_PC for self \
+             before deadline) — outbound POS suppressed until a CHAR_PC for self lands"
+        );
+    }
+    if !self_login_received {
+        tracing::info!(
+            iteration,
+            total_subs,
+            server_sync = server_last_seq,
+            "self 0x00A LOGIN not in the pre-GAMEOK drain (voyage timing deferred \
+             to the keepalive loop)"
+        );
+    }
 
     let mut sub_seq: u16 = map_client::BOOTSTRAP_SUB_SYNC.wrapping_add(1);
 
@@ -462,6 +537,7 @@ async fn run_map_session(
                 &mut server_last_seq,
                 &mut total_subs,
                 &mut self_pos_seeded,
+                &mut enterzone_seen,
                 event_tx,
                 &mut pending_event_end,
                 &mut cutscene,
@@ -469,6 +545,7 @@ async fn run_map_session(
                 bootstrap.char_name,
                 &mut self_act_index,
                 &mut name_cache,
+                &mut target_cache,
                 &mut kind_cache,
                 &mut claim_cache,
                 &mut name_miss_dedup,
@@ -476,10 +553,13 @@ async fn run_map_session(
                 &mut self_pos,
                 &mut npc_name_resolver,
                 &mut emote_text_resolver,
+                &autotranslate_names,
                 &mut sysmes_resolver,
+                &mut mes_basic_resolver,
                 &mut treasure_pool,
                 &mut flood_in_mog_house,
                 &mut mog,
+                &mut flood_shop,
                 spawn_fallback,
                 &mut flood_zone_messages,
             )
@@ -552,18 +632,28 @@ async fn run_map_session(
             "sent 0x061 CLISTATUS (zone-in self status request)"
         );
     }
-    emit_stage(event_tx, Stage::InZone);
-    let _ = event_tx.send(AgentEvent::Diagnostics {
-        diagnostics: Diagnostics {
-            stage: Some(Stage::InZone),
-            blowfish_status: Some(BlowfishStatus::Accepted),
-            sync_in: Some(server_last_seq),
-            sync_out: Some(datagram_header_id(sub_seq)),
-            last_server_packet_age_ms: Some(0),
-            cert_sha256,
-            map_server_addr: Some(map.server_addr().to_string()),
-        },
-    });
+    // Claim InZone / blowfish-Accepted only once the self position seed has
+    // landed: without it the session cannot spawn the player, so it must not
+    // present itself as connected. The seed is the sole hard bootstrap
+    // requirement (the s2c 0x00A LOGIN is tracked but not gated), so a server
+    // that never sends a self CHAR_PC leaves the session in Zoning rather than
+    // a false InZone.
+    if self_pos_seeded {
+        emit_stage(event_tx, Stage::InZone);
+        let _ = event_tx.send(AgentEvent::Diagnostics {
+            diagnostics: Diagnostics {
+                stage: Some(Stage::InZone),
+                blowfish_status: Some(BlowfishStatus::Accepted),
+                sync_in: Some(server_last_seq),
+                sync_out: Some(datagram_header_id(sub_seq)),
+                last_server_packet_age_ms: Some(0),
+                cert_sha256,
+                map_server_addr: Some(map.server_addr().to_string()),
+            },
+        });
+    } else {
+        tracing::warn!("bootstrap completed without a self position seed — staying in Zoning");
+    }
 
     keepalive_loop(
         map,
@@ -580,14 +670,18 @@ async fn run_map_session(
         event_tx.clone(),
         cfg.user_driven_events,
         name_cache,
+        target_cache,
         kind_cache,
         claim_cache,
         name_miss_dedup,
         self_pos,
         self_pos_seeded,
+        enterzone_seen,
         npc_name_resolver,
         emote_text_resolver,
+        autotranslate_names,
         sysmes_resolver,
+        mes_basic_resolver,
         treasure_pool,
         mog,
         flood_zone_messages,
@@ -605,17 +699,17 @@ async fn run_map_session(
 /// vendor/server/scripts/zones/Attohwa_Chasm/Zone.lua).
 const FLOOD_ZONE_MESSAGE_MAX: usize = 32;
 
-fn should_break_flood(
-    break_on_idle: bool,
-    self_pos_seeded: bool,
-    self_login_received: bool,
-) -> bool {
-    break_on_idle || (self_pos_seeded && self_login_received)
+fn should_break_flood(break_on_idle: bool, self_pos_seeded: bool) -> bool {
+    break_on_idle || self_pos_seeded
 }
 
 /// Drains and processes zone-in traffic until `deadline`, or earlier once the
 /// socket has been idle for one recv window: unconditionally when
-/// `break_on_idle`, otherwise only after self LOGIN and its position have landed.
+/// `break_on_idle`, otherwise only after the self position seed (CHAR_PC) has
+/// landed. The s2c 0x00A LOGIN is tracked (returned) for voyage timing but is
+/// not a break condition — it rides a second datagram behind the zone-in burst,
+/// so gating the break on it stalls the whole bootstrap when that datagram is
+/// late or lost.
 /// When `ack_at_send` is Some (post-send quiescence), also breaks as soon as a
 /// datagram stamped differently from that ack arrives — the server's id only
 /// advances when it accepts one of our c2s, so any post-acceptance stamp is
@@ -631,6 +725,7 @@ async fn drain_zone_flood(
     server_last_seq: &mut u16,
     total_subs: &mut usize,
     self_pos_seeded: &mut bool,
+    enterzone_seen: &mut bool,
     event_tx: &broadcast::Sender<AgentEvent>,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     cutscene: &mut crate::event_dialog::CutsceneScope,
@@ -638,6 +733,7 @@ async fn drain_zone_flood(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+    target_cache: &mut std::collections::HashMap<u16, u32>,
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
     claim_cache: &mut std::collections::HashMap<u32, u32>,
     name_miss_dedup: &mut std::collections::HashMap<
@@ -648,10 +744,13 @@ async fn drain_zone_flood(
     self_pos: &mut Position,
     npc_name_resolver: &mut NpcNameResolver,
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
     sysmes: &mut treasure::SysMesResolver,
+    mes_basic: &mut MesBasicResolver,
     pool: &mut treasure::TreasurePool,
     was_in_mog_house: &mut bool,
     mog: &mut SelfMogState,
+    shop: &mut ShopSession,
     zoneline_spawn_fallback: Option<Vec3>,
     flood_zone_messages: &mut Vec<(u16, Vec<u8>)>,
 ) -> bool {
@@ -680,6 +779,13 @@ async fn drain_zone_flood(
                         self_login_received |= decode::ServerLogin::decode(sub.data)
                             .is_ok_and(|login| login.unique_no == self_char_id);
                     }
+                    // GP_CLI_COMMAND_GAMEOK::process answers c2s 0x00C with ENTERZONE
+                    // first (vendor/server/src/map/packets/c2s/0x00c_gameok.cpp), so on a
+                    // fast link it lands inside this post-GAMEOK drain instead of the
+                    // keepalive loop. Record it here; the in-loop check still covers slow links.
+                    if sub.opcode == ffxi_proto::map::s2c::ENTERZONE {
+                        *enterzone_seen = true;
+                    }
                     handle_sub_packet(
                         &sub,
                         event_tx,
@@ -689,6 +795,7 @@ async fn drain_zone_flood(
                         self_char_name,
                         self_act_index,
                         name_cache,
+                        target_cache,
                         kind_cache,
                         claim_cache,
                         name_miss_dedup,
@@ -697,10 +804,13 @@ async fn drain_zone_flood(
                         self_pos_seeded,
                         npc_name_resolver,
                         emote_text,
+                        autotranslate_names,
                         sysmes,
+                        mes_basic,
                         pool,
                         was_in_mog_house,
                         mog,
+                        shop,
                         zoneline_spawn_fallback,
                     );
                 }
@@ -718,7 +828,7 @@ async fn drain_zone_flood(
             Ok(Err(_)) => break,
 
             Err(_) => {
-                if should_break_flood(break_on_idle, *self_pos_seeded, self_login_received) {
+                if should_break_flood(break_on_idle, *self_pos_seeded) {
                     break;
                 }
             }
@@ -789,6 +899,15 @@ fn first_decode_err(opcode: u16) -> bool {
         .unwrap_or(true)
 }
 
+// Read-once env switch for the gated diagnostics in this module (same pattern as
+// kuluu-render's env_flags::env_flag): any value enables, unset disables.
+fn env_flag(cell: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+/// Special-pose wire diagnostics on target "special" (RUST_LOG=special=debug): raw
+/// status/sub observations for every CHAR_NPC update that could drive a special-pose
+/// transition.
 fn special_wire_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
 }
@@ -803,6 +922,8 @@ fn handle_sub_packet(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+
+    target_cache: &mut std::collections::HashMap<u16, u32>,
 
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
 
@@ -822,14 +943,19 @@ fn handle_sub_packet(
     npc_name_resolver: &mut NpcNameResolver,
 
     emote_text: &mut EmoteTextResolver,
+    autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
 
     sysmes: &mut treasure::SysMesResolver,
+
+    mes_basic: &mut MesBasicResolver,
 
     pool: &mut treasure::TreasurePool,
 
     was_in_mog_house: &mut bool,
 
     mog: &mut SelfMogState,
+
+    shop: &mut ShopSession,
 
     zoneline_spawn_fallback: Option<Vec3>,
 ) {
@@ -847,6 +973,12 @@ fn handle_sub_packet(
             if let Ok(login) = decoded {
                 *current_zone_id = login.zone_no;
                 let head = login.pos_head;
+
+                // The retail shop table lives in GC_ZONE
+                // (research/XIClient GC_ZONE::gcShop), so a zone change takes
+                // the vendor and their stock with it.
+                shop.close(event_tx);
+                shop.last_talk_target = 0;
 
                 mog.in_myroom = login.myroom.is_some_and(|m| {
                     m.login_state == decode::ServerLoginMyroom::LOGIN_STATE_MYROOM
@@ -1139,6 +1271,8 @@ fn handle_sub_packet(
                     wire_name
                 };
 
+                target_cache.insert(head.act_index, head.unique_no);
+
                 let name = name.map(|n| n.replace('_', " "));
                 if let Some(n) = name.as_ref() {
                     if !n.is_empty() {
@@ -1334,6 +1468,9 @@ fn handle_sub_packet(
             if let Ok(pet) =
                 decode::PetSync::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
+                let _ = event_tx.send(AgentEvent::OwnPetSynced {
+                    targid: (pet.pet_targid != 0).then_some(pet.pet_targid),
+                });
                 if pet.pet_targid != 0 {
                     let _ = event_tx.send(AgentEvent::EntityPatched {
                         id: None,
@@ -1347,33 +1484,74 @@ fn handle_sub_packet(
             }
         }
         s2c::BATTLE_MESSAGE => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, true) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, true, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, true, event_tx);
         }
         s2c::BATTLE_MESSAGE2 => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, false) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, false, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, false, event_tx);
         }
         s2c::SHOP_LIST => {
-            if let Some(shop) = decode_shop_list(sub.data) {
-                let _ = event_tx.send(AgentEvent::ShopUpdated { shop });
+            if let Some(page) = decode_shop_list(sub.data) {
+                // A list without a preceding SHOP_OPEN still opens the window:
+                // LSB always pairs them (lua_base_entity.cpp sendMenu case 2),
+                // but the list alone is what has the stock.
+                let open = shop.open.get_or_insert_with(|| ShopState {
+                    opened: true,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                merge_shop_page(open, page);
+                shop.publish(event_tx);
             }
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
+                let (item_no, count) = match shop.pending_sell.take() {
+                    Some((item_no, qty)) => (item_no, if count == 0 { qty } else { count }),
+                    None => (0, count),
+                };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
                     count,
+                    item_no,
                 });
+                if let Some(open) = shop.open.as_mut() {
+                    open.pending_sale = Some(crate::state::ShopSale {
+                        item_index,
+                        item_no,
+                        unit_price: price,
+                        count,
+                    });
+                }
+                shop.publish(event_tx);
             }
         }
-        s2c::SHOP_OPEN => {}
+        s2c::SHOP_OPEN => {
+            if let Some(expected_items) = decode_shop_open(sub.data) {
+                shop.open = Some(ShopState {
+                    opened: true,
+                    expected_items,
+                    vendor_id: shop.last_talk_target,
+                    ..Default::default()
+                });
+                shop.pending_sell = None;
+                shop.publish(event_tx);
+            }
+        }
         s2c::BATTLE2 => {
+            if combat_log_enabled() {
+                battle2_debug_dump(sub.data);
+            }
             if let Some(h) = decode_battle2_header(sub.data) {
                 tracing::debug!(target: "combat", header = ?h, "BATTLE2");
                 let _ = event_tx.send(AgentEvent::ActionStarted {
@@ -1386,7 +1564,7 @@ fn handle_sub_packet(
                     outcome: h.first_outcome,
                 });
             }
-            for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
+            for line in decode_battle2_action(sub.data, name_cache, kind_cache, mes_basic.table()) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -1753,7 +1931,7 @@ fn handle_sub_packet(
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
         s2c::CHAT => {
-            if let Some((title, options)) = decode_custom_menu(sub.data) {
+            if let Some((title, options)) = decode_custom_menu(sub.data, autotranslate_names) {
                 // Retail renders a GMPROMPT/_CUSTOM_MENU as an interactive prompt,
                 // not a chat line (the packet's speaker is the player entity).
                 let dialog = crate::state::DialogState {
@@ -1763,10 +1941,11 @@ fn handle_sub_packet(
                     prompt: Some(title),
                     choices: options,
                     custom_menu: true,
+                    cancel_armed: true, // ESC answers "Canceled." via the customMenu branch
                     ..Default::default()
                 };
                 let _ = event_tx.send(AgentEvent::EventDialog { dialog });
-            } else if let Some(line) = decode_chat_std(sub.data) {
+            } else if let Some(line) = decode_chat_std(sub.data, autotranslate_names) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -1942,6 +2121,8 @@ fn handle_sub_packet(
                             price: 0,
                             charges_remaining: None,
                             next_use_vana_ts: None,
+                            use_delay_end_vana_ts: None,
+                            ready: None,
                         },
                     },
                 });
@@ -1980,6 +2161,8 @@ fn handle_sub_packet(
                             price: a.price,
                             charges_remaining: ci.map(|c| c.charges),
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),
+                            use_delay_end_vana_ts: ci.map(|c| c.use_delay_end_vana_ts),
+                            ready: ci.map(|c| c.ready),
                         },
                     },
                 });
@@ -2052,7 +2235,7 @@ fn handle_sub_packet(
 
 const NAME_MISS_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE
 const UPDATE_HP: u8 = 0x04;
 const UPDATE_NAME: u8 = 0x08;
 
@@ -2145,17 +2328,77 @@ fn is_fresh_bundle(last_applied: Option<u16>, incoming: u16) -> bool {
     }
 }
 
+/// Send the c2s half of a pending tag round-trip: an EVENT_END subpacket with
+/// Mode=UpdatePending for a plain tag, or the position-tag packet (the only
+/// mode its validator accepts). Both process() functions push s2c EVENTUCOFF
+/// EventRecvPending back; the keepalive intercept on that ack calls
+/// [`crate::event_dialog::DialogSession::ack_server`] to release the VM's hold
+/// and run on (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp,
+/// 0x05c_eventendxzy.cpp GP_CLI_COMMAND_EVENTEND*::process).
+async fn send_pending_tag(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
+    unique_no: u32,
+    act_index: u16,
+    event_id: u16,
+    tag: &PendingTag,
+) {
+    let payload = match tag {
+        PendingTag::SendTag { end_para } => build_subpacket_event_end(
+            *sub_seq,
+            unique_no,
+            act_index,
+            current_zone_id,
+            event_id,
+            *end_para,
+            ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+        ),
+        PendingTag::SendXzy {
+            x,
+            y,
+            z,
+            dir,
+            end_para,
+        } => build_subpacket_event_end_xzy(
+            *sub_seq,
+            unique_no,
+            *x,
+            *y,
+            *z,
+            *dir,
+            *end_para,
+            act_index,
+            current_zone_id,
+            event_id,
+        ),
+    };
+    let header = datagram_header_id(*sub_seq);
+    *sub_seq = sub_seq.wrapping_add(1);
+    if let Err(e) = map.send_encrypted(&payload, header, server_last_seq).await {
+        tracing::warn!(error = %e, "pending-tag c2s send failed");
+    }
+}
+
 /// Route a server-initiated event into the event VM: display it when the VM
 /// can drive it (EVENT_END goes out when the script ends), auto-release it
 /// otherwise so the char never sticks server-side InEvent (which rejects
 /// zonelines, logout, and ~100 other c2s until 0x05B lands).
-fn begin_server_event(
+#[allow(clippy::too_many_arguments)]
+async fn begin_server_event(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
     dialog_session: &mut crate::event_dialog::DialogSession,
     trigger: EventTrigger,
     event_tx: &broadcast::Sender<AgentEvent>,
     cutscene: &mut crate::event_dialog::CutsceneScope,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     auto_event_end: &mut Vec<(u32, u16, u16, u32)>,
+    name_cache: &std::collections::HashMap<u32, String>,
+    target_cache: &std::collections::HashMap<u16, u32>,
 ) {
     let (zone_id, unique_no, act_index, event_id) = (
         trigger.event_zone,
@@ -2165,6 +2408,10 @@ fn begin_server_event(
     );
     let outcome = dialog_session.begin(trigger);
     let cues = dialog_session.take_cues();
+    // Syncs the up→down edge detector for this event's first frame.
+    if dialog_session.take_message_closed() {
+        let _ = event_tx.send(AgentEvent::DialogDismissed);
+    }
     // A choreography-only script runs to completion inside `begin`, so its
     // cues have to open and close a session of their own or nothing downstream
     // would ever see them.
@@ -2178,11 +2425,12 @@ fn begin_server_event(
         }
     }
     match outcome {
-        crate::event_dialog::Begin::Frame(dialog) => {
+        crate::event_dialog::Begin::Frame(mut dialog) => {
             cutscene.start(dialog.event_id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart {
                 event_id: dialog.event_id,
             });
+            attribute_event_speaker(&mut dialog, target_cache, name_cache);
             emit_event_speech_to_chat(event_tx, &dialog);
             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
             pending_event_end.push((unique_no, act_index, event_id));
@@ -2196,6 +2444,26 @@ fn begin_server_event(
             cutscene.start(id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
             pending_event_end.push((unique_no, act_index, event_id));
+        }
+        crate::event_dialog::Begin::AwaitServerAck(tag) => {
+            // The script opened on a pending tag (0x43/0x47 case 0): the event
+            // is live server-side and owes its first frame to the s2c ack, so
+            // it tracks like Waiting until then.
+            let id = crate::event_dialog::agent_event_id(unique_no, event_id);
+            cutscene.start(id, event_tx);
+            let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
+            pending_event_end.push((unique_no, act_index, event_id));
+            send_pending_tag(
+                map,
+                sub_seq,
+                server_last_seq,
+                current_zone_id,
+                unique_no,
+                act_index,
+                event_id,
+                &tag,
+            )
+            .await;
         }
         crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
             tracing::warn!(
@@ -2263,8 +2531,8 @@ struct CastBar {
 
 /// Drives the self cast bar from the server's own BATTLE2 action packets.
 ///
-/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState pushes the MagicStart
-/// action_t from the `CMagicState` constructor, i.e. synchronously inside the
+/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init pushes the MagicStart
+/// action_t as CAIContainer::enterState admits the state, i.e. synchronously inside the
 /// 0x1A action handler (player_controller.cpp CPlayerController::Cast → ai_container.cpp CAIContainer::Internal_Cast),
 /// so this packet is the server's cast-start instant and carries the same cast
 /// pose and "starts casting" line. An interrupt reuses the MagicStart category
@@ -2334,6 +2602,9 @@ async fn keepalive_loop(
     event_tx: broadcast::Sender<AgentEvent>,
     user_driven_events: bool,
     mut name_cache: std::collections::HashMap<u32, String>,
+    // Target index -> unique_no for live entities; resolves a VM frame's
+    // speaker_index to the entity that speaks it.
+    mut target_cache: std::collections::HashMap<u16, u32>,
     mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind>,
     mut claim_cache: std::collections::HashMap<u32, u32>,
     mut name_miss_dedup: std::collections::HashMap<
@@ -2343,9 +2614,12 @@ async fn keepalive_loop(
     mut self_pos: Position,
 
     mut self_pos_seeded: bool,
+    mut enterzone_seen: bool,
     mut npc_name_resolver: NpcNameResolver,
     mut emote_text_resolver: EmoteTextResolver,
+    autotranslate_names: ffxi_dat::autotranslate_names::InstalledNames,
     mut sysmes_resolver: treasure::SysMesResolver,
+    mut mes_basic_resolver: MesBasicResolver,
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
     flood_zone_messages: Vec<(u16, Vec<u8>)>,
@@ -2367,8 +2641,10 @@ async fn keepalive_loop(
     let mut last_net_emit = std::time::Instant::now();
     let mut keepalive_send_failing = false;
 
-    let mut enterzone_seen = false;
     let mut zone_transition_sent = false;
+
+    // One warn per pinned event when the player moves while it is held.
+    let mut walk_warning_sent = false;
 
     let mut resrdy_sent = false;
 
@@ -2380,6 +2656,12 @@ async fn keepalive_loop(
 
     let mut reconnect_via_zoneline: Option<u32> = None;
     let mut terminal_disconnect = false;
+    // The kind of the last 0x0E7 REQLOGOUT the client sent: retail's /shutdown
+    // must return to the login/server-select screen while /logout returns to the
+    // character list, so the terminal 0x00B LOGOUT reason carries which one was
+    // requested (issue #156). A server-initiated logout (no client request) keeps
+    // the logout flavor.
+    let mut last_reqlogout_shutdown = false;
 
     let mut pending_maprect: Option<(std::time::Instant, u32)> = None;
 
@@ -2465,6 +2747,8 @@ async fn keepalive_loop(
     // action. See ActionKind::{cast_bar, action_lock_ms}.
     let mut cast_in_flight: Option<CastInFlight> = None;
 
+    let mut shop_session = ShopSession::default();
+
     // Per-spell recast expiry, tracked entirely client-side: LSB's 0x119 sends
     // ability recasts only (RECAST_ABILITY), never magic, so the client owns
     // spell-recast timing from the scraped base recastTime — as retail's client
@@ -2532,8 +2816,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -2545,11 +2833,26 @@ async fn keepalive_loop(
                                 // next message wait; if none follows, the scene
                                 // just plays out (kuluu-bxts: cancel latch).
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    if let Some((u, a, n)) = dialog_session.active_end() {
+                                        send_pending_tag(
+                                            map,
+                                            &mut sub_seq,
+                                            server_last_seq,
+                                            current_zone_id,
+                                            u,
+                                            a,
+                                            n,
+                                            &tag,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         } else if !pending_event_end.is_empty() {
                             let mut payload = Vec::new();
                             for (unique_no, act_index, event_num) in pending_event_end.drain(..) {
-                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0));
+                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0, ffxi_proto::map::c2s::event_end_mode::END));
                                 sub_seq = sub_seq.wrapping_add(1);
                             }
                             if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
@@ -2699,8 +3002,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -2709,6 +3016,21 @@ async fn keepalive_loop(
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    if let Some((u, a, n)) = dialog_session.active_end() {
+                                        send_pending_tag(
+                                            map,
+                                            &mut sub_seq,
+                                            server_last_seq,
+                                            current_zone_id,
+                                            u,
+                                            a,
+                                            n,
+                                            &tag,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         } else {
                             let payload = build_subpacket_event_end(
@@ -2718,6 +3040,7 @@ async fn keepalive_loop(
                                 current_zone_id,
                                 event_num,
                                 choice,
+                                ffxi_proto::map::c2s::event_end_mode::END,
                             );
                             sub_seq = sub_seq.wrapping_add(1);
                             if let Err(e) = map
@@ -2737,7 +3060,12 @@ async fn keepalive_loop(
                         break;
                     }
                     Some(AgentCommand::ReqLogout { kind }) => {
-
+                        last_reqlogout_shutdown = matches!(
+                            kind,
+                            crate::state::ReqLogoutKind::ShutdownToggle
+                                | crate::state::ReqLogoutKind::ShutdownOn
+                                | crate::state::ReqLogoutKind::ShutdownOff
+                        );
                         let (mode, kind_wire) = kind.wire_pair();
                         let payload = build_subpacket_reqlogout(sub_seq, mode, kind_wire);
                         tracing::info!(
@@ -2834,6 +3162,12 @@ async fn keepalive_loop(
                         target_index,
                         kind,
                     }) => {
+                        // A shop opens off a Talk trigger, so the NPC we are
+                        // about to greet is the vendor any SHOP_OPEN that follows
+                        // belongs to.
+                        if matches!(kind, crate::state::ActionKind::Talk) {
+                            shop_session.last_talk_target = target_id;
+                        }
                         // The MH exit door is client-synthesized (LSB spawns no door
                         // NPC) — never let an action on it reach the wire.
                         if target_id == crate::local_menu::MH_DOOR_ENTITY_ID {
@@ -2902,9 +3236,22 @@ async fn keepalive_loop(
                                 }
                             }
                         }
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            target_id,
+                            target_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("action not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         self_face_target = face_target_for(target_index, self_act_index);
-                        let payload =
-                            build_subpacket_action(sub_seq, target_id, target_index, &kind);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -2968,8 +3315,7 @@ async fn keepalive_loop(
                         // Mirror of the LSB validator (0x05d_motion.cpp
                         // validate + bell note range): a send the server would
                         // drop silently is refused client-side with a reason.
-                        let in_event =
-                            dialog_session.active_end().is_some() || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         if let Some(reason) = emote_send_block_reason(emote_id, mode, param, in_event)
                         {
                             let _ = event_tx.send(AgentEvent::Error {
@@ -3083,8 +3429,21 @@ async fn keepalive_loop(
 
                         let kind = crate::state::ActionKind::HomepointMenu { status_id: 0 };
                         let act_index = self_act_index.unwrap_or(0);
-                        let payload =
-                            build_subpacket_action(sub_seq, self_char_id, act_index, &kind);
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            self_char_id,
+                            act_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("homepoint_return not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -3128,11 +3487,22 @@ async fn keepalive_loop(
                             });
                         }
                     }
+                    Some(AgentCommand::ShopSellCancel) => {
+                        shop_session.pending_sell = None;
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
+                    }
+                    Some(AgentCommand::CloseShop) => {
+                        shop_session.close(&event_tx);
+                    }
                     Some(AgentCommand::ShopSellReq {
                         qty,
                         item_no,
                         item_index,
                     }) => {
+                        shop_session.pending_sell = Some((item_no, qty));
                         let payload =
                             build_subpacket_shop_sell_req(sub_seq, qty, item_no, item_index);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3147,6 +3517,14 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellConfirm) => {
+                        // The server answers a completed sale with MESSAGE +
+                        // ITEM_SAME rather than another 0x03D
+                        // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
+                        // process), so the appraisal is retired here.
+                        if let Some(open) = shop_session.open.as_mut() {
+                            open.pending_sale = None;
+                        }
+                        shop_session.publish(&event_tx);
                         let payload = build_subpacket_shop_sell_set(sub_seq);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
@@ -3474,16 +3852,28 @@ async fn keepalive_loop(
                                 "item_stack throttled (<1.1s) to avoid lightluggage kick"
                             );
                         } else {
-                            let payload = build_subpacket_item_stack(sub_seq, container);
-                            sub_seq = sub_seq.wrapping_add(1);
-                            if let Err(e) = map
-                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
-                                .await
-                            {
-                                tracing::warn!(error = %e, "item_stack send failed");
-                                let _ = event_tx.send(AgentEvent::Error {
-                                    message: format!("item_stack send: {e}"),
-                                });
+                            match build_subpacket_item_stack(
+                                sub_seq,
+                                container,
+                                in_event(&dialog_session, &pending_event_end),
+                            ) {
+                                Err(reason) => {
+                                    let _ = event_tx.send(AgentEvent::Error {
+                                        message: format!("item_stack not sent: {reason}"),
+                                    });
+                                }
+                                Ok(payload) => {
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                    if let Err(e) = map
+                                        .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "item_stack send failed");
+                                        let _ = event_tx.send(AgentEvent::Error {
+                                            message: format!("item_stack send: {e}"),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -3507,6 +3897,12 @@ async fn keepalive_loop(
                         {
                             tracing::warn!(error = %e, "submapchange send failed");
                         }
+                    }
+                    // The renderer's finish report for a 0x2C SCHEDULOR routine:
+                    // releases the event VM's pending hold on it so the 0x53
+                    // past it advances on the next tick. No server traffic.
+                    Some(AgentCommand::CutsceneMotionDone { actor, key }) => {
+                        dialog_session.motion_done(actor, key);
                     }
                     Some(AgentCommand::TreasureLot { slot }) => {
                         let payload = build_subpacket_trophy_lot(sub_seq, slot);
@@ -3740,8 +4136,7 @@ async fn keepalive_loop(
                         // wrong self id (0x064_scenarioitem.cpp) — skip rather
                         // than burn a seq slot on a silent drop; the unseen state
                         // stays and a later menu close retries.
-                        let in_event = dialog_session.active_end().is_some()
-                            || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         match mog.key_item_tables.get_mut(table_index as usize) {
                             None => {
                                 tracing::warn!(
@@ -3854,8 +4249,12 @@ async fn keepalive_loop(
                     for cue in cues {
                         cutscene.push(cue, &event_tx);
                     }
+                    if dialog_session.take_message_closed() {
+                        let _ = event_tx.send(AgentEvent::DialogDismissed);
+                    }
                     match advance {
-                        crate::event_dialog::Advance::Frame(dialog) => {
+                        crate::event_dialog::Advance::Frame(mut dialog) => {
+                            attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                             emit_event_speech_to_chat(&event_tx, &dialog);
                             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                         }
@@ -3864,6 +4263,21 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                         crate::event_dialog::Advance::Waiting => {}
+                        crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                            if let Some((u, a, n)) = dialog_session.active_end() {
+                                send_pending_tag(
+                                    map,
+                                    &mut sub_seq,
+                                    server_last_seq,
+                                    current_zone_id,
+                                    u,
+                                    a,
+                                    n,
+                                    &tag,
+                                )
+                                .await;
+                            }
+                        }
                     }
                 }
 
@@ -3932,6 +4346,7 @@ async fn keepalive_loop(
                     (false, false) => {
                         pending_event_end_since = Some(std::time::Instant::now());
                         pending_event_end_anchor = Some(self_pos.pos);
+                        walk_warning_sent = false;
                     }
                     (true, true) => {
                         pending_event_end_since = None;
@@ -3950,6 +4365,11 @@ async fn keepalive_loop(
                 });
                 let walked_away = !dialog_session.controls_player_position()
                     && should_release_on_walkaway(user_driven_events, walk_dist);
+                // Auto/headless mode never releases on drift (user_driven is false), so a
+                // pinned event can sit while the player moves: warn once per episode.
+                let moved_during_event = !walked_away
+                    && !dialog_session.controls_player_position()
+                    && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS);
 
                 let mut payload = Vec::new();
                 let mut resrdy_in_payload = false;
@@ -3968,6 +4388,10 @@ async fn keepalive_loop(
                     if let Some(ev) = mog.zone_in_event.take() {
                         dialog_session.set_player_position(event_transport::event_position(self_pos));
                         begin_server_event(
+                            map,
+                            &mut sub_seq,
+                            server_last_seq,
+                            current_zone_id,
                             &mut dialog_session,
                             EventTrigger {
                                 event_zone: ev.event_num,
@@ -3982,7 +4406,10 @@ async fn keepalive_loop(
                             &mut cutscene,
                             &mut pending_event_end,
                             &mut auto_event_end,
-                        );
+                            &name_cache,
+                            &target_cache,
+                        )
+                        .await;
                     }
                 }
                 for (unique_no, act_index, event_num, end_para) in auto_event_end.drain(..) {
@@ -3993,6 +4420,7 @@ async fn keepalive_loop(
                         current_zone_id,
                         event_num,
                         end_para,
+                        ffxi_proto::map::c2s::event_end_mode::END,
                     ));
                     sub_seq = sub_seq.wrapping_add(1);
                 }
@@ -4003,16 +4431,19 @@ async fn keepalive_loop(
                 // that spawns city NPCs early-returns when inMogHouse. Outside the
                 // MH the same action pre-warms NPC/MOB/TRUST spawn lists.
                 if zone_transition_sent && self_pos_seeded && !resrdy_sent {
-                    resrdy_sent = true;
-                    resrdy_in_payload = true;
-                    payload.extend(build_subpacket_action(
+                    if let Ok(action) = build_subpacket_action(
                         sub_seq,
                         self_char_id,
                         self_act_index.unwrap_or(0),
                         &crate::state::ActionKind::SendResRdy,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                        in_event(&dialog_session, &pending_event_end),
+                    ) {
+                        resrdy_sent = true;
+                        resrdy_in_payload = true;
+                        payload.extend(action);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                    }
                 }
 
                 if let Some(flush) = flush_pending_event_end(
@@ -4020,6 +4451,7 @@ async fn keepalive_loop(
                         user_driven: user_driven_events,
                         watchdog_fires,
                         walked_away,
+                        tag_in_flight: dialog_session.has_pending_tag(),
                     },
                     &mut pending_event_end,
                     dialog_session.active_end(),
@@ -4065,6 +4497,24 @@ async fn keepalive_loop(
                     }
                     pending_event_end_since = None;
                     pending_event_end_anchor = None;
+                }
+
+                if moved_during_event && !walk_warning_sent && !pending_event_end.is_empty() {
+                    walk_warning_sent = true;
+                    tracing::warn!(
+                        moved_yalms = walk_dist.unwrap_or(0.0),
+                        "player moving while a server event is pinned"
+                    );
+                    let _ = event_tx.send(AgentEvent::ChatLine {
+                        line: ChatLine {
+                            spans: Vec::new(),
+                            channel: ChatChannel::System,
+                            sender: "<client>".into(),
+                            text: "You moved while a server event is pending; hold position for the cutscene."
+                                .into(),
+                            server_ts: 0,
+                        },
+                    });
                 }
 
                 // Deferred 0x076 GROUP_LIST_REQ (skipped at zone-in while InEvent —
@@ -4113,19 +4563,21 @@ async fn keepalive_loop(
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),
                     };
                 if include_pos {
-                    payload.extend(build_subpacket_pos(
+                    if let Some(pos) = build_subpacket_pos(
                         sub_seq,
                         self_pos.pos.x,
                         self_pos.pos.y,
                         self_pos.pos.z,
                         self_pos.heading,
                         self_face_target,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    last_keepalive_pos = self_pos.pos;
-                    last_emitted_pos = self_pos.pos;
-                    last_emitted_heading = self_pos.heading;
-                    last_move_emission = Some(std::time::Instant::now());
+                    ) {
+                        payload.extend(pos);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        last_keepalive_pos = self_pos.pos;
+                        last_emitted_pos = self_pos.pos;
+                        last_emitted_heading = self_pos.heading;
+                        last_move_emission = Some(std::time::Instant::now());
+                    }
                 }
 
                 if !payload.is_empty() {
@@ -4191,11 +4643,13 @@ async fn keepalive_loop(
                                     reconnect_via_zoneline =
                                         pending_maprect.map(|(_, line_id)| line_id);
                                 } else {
+                                    let flavor = if last_reqlogout_shutdown {
+                                        "server shutdown"
+                                    } else {
+                                        "server logout"
+                                    };
                                     let _ = event_tx.send(AgentEvent::Disconnected {
-                                        reason: format!(
-                                            "server logout state={}",
-                                            logout.logout_state
-                                        ),
+                                        reason: format!("{flavor} state={}", logout.logout_state),
                                     });
                                     terminal_disconnect = true;
                                 }
@@ -4361,18 +4815,96 @@ async fn keepalive_loop(
                                         });
                                     dialog_session.set_player_position(event_transport::event_position(self_pos));
                                     begin_server_event(
+                                        map,
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        current_zone_id,
                                         &mut dialog_session,
                                         trigger,
                                         &event_tx,
                                         &mut cutscene,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
-                                    );
+                                        &name_cache,
+                                        &target_cache,
+                                    )
+                                    .await;
                                     continue;
                                 }
                             }
 
+                            // s2c PENDINGNUM writes the event VM's Work_Zone loop
+                            // conditions from index 2; it must land before the next
+                            // step even while a tag is held (research/XiPackets/
+                            // world/server/0x005C GP_SERV_PENDINGNUM).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGNUM {
+                                match decode::PendingNum::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_num(&p.num),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
+                            // s2c PENDINGSTR copies four 16-byte strings into
+                            // PTR_EventStrings, the table the event VM's 0xB4
+                            // case 1 reads; it must land before the next step even
+                            // while a tag is held, like PENDINGNUM above
+                            // (research/XiPackets/world/server/0x005D).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGSTR {
+                                match decode::PendingStr::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_str(&p.strings),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
                             event_transport::receive(&mut dialog_session, &sub, self_char_id, self_pos);
+
+                            // The ack both c2s event-end process() functions push after
+                            // handling a pending tag: release the VM's hold and run on to
+                            // the next frame. Gated on has_pending_tag so an EventRecvPending
+                            // with no held tag is only the scene-module acknowledgement in
+                            // event_transport::receive.
+                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
+                                && eventucoff_mode_of(sub.data)
+                                    == Some(ffxi_proto::map::eventucoff_mode::EVENT_RECV_PENDING)
+                                && dialog_session.has_pending_tag()
+                            {
+                                let Some((u, a, n)) = dialog_session.active_end() else {
+                                    continue;
+                                };
+                                let advance = dialog_session.ack_server();
+                                for cue in dialog_session.take_cues() {
+                                    cutscene.push(cue, &event_tx);
+                                }
+                                if dialog_session.take_message_closed() {
+                                    let _ = event_tx.send(AgentEvent::DialogDismissed);
+                                }
+                                match advance {
+                                    crate::event_dialog::Advance::Frame(mut dialog) => {
+                                        attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
+                                        emit_event_speech_to_chat(&event_tx, &dialog);
+                                        let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                                    }
+                                    crate::event_dialog::Advance::Ended { end_para, .. } => {
+                                        if take_pending_event_end(&mut pending_event_end, u, n) {
+                                            let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
+                                            sub_seq = sub_seq.wrapping_add(1);
+                                            if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                                tracing::warn!(error = %e, "EVENT_END (vm ack) send failed");
+                                            }
+                                        }
+                                        cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                                        let _ = event_tx.send(AgentEvent::EventEnded);
+                                    }
+                                    // Chained tag: the next hold in the same script. Send it
+                                    // now; its own EventRecvPending drives the next ack.
+                                    crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                        send_pending_tag(map, &mut sub_seq, server_last_seq, current_zone_id, u, a, n, &tag).await;
+                                    }
+                                    crate::event_dialog::Advance::Waiting => {}
+                                }
+                            }
 
                             // Keep the LOC_INVENTORY mirror for the delivery-box
                             // item picker current (category 0; index 0 is Gil).
@@ -4425,6 +4957,7 @@ async fn keepalive_loop(
                                 &character_name,
                                 &mut self_act_index,
                                 &mut name_cache,
+                                &mut target_cache,
                                 &mut kind_cache,
                                 &mut claim_cache,
                                 &mut name_miss_dedup,
@@ -4433,10 +4966,13 @@ async fn keepalive_loop(
                                 &mut self_pos_seeded,
                                 &mut npc_name_resolver,
                                 &mut emote_text_resolver,
+                                &autotranslate_names,
                                 &mut sysmes_resolver,
+                                &mut mes_basic_resolver,
                                 &mut treasure_pool,
                                 &mut self_in_mog_house,
                                 &mut mog,
+                                &mut shop_session,
                                 None,
                             );
 
@@ -4914,14 +5450,34 @@ fn emit_battle_message_audio_event(
     }
 }
 
+// vendor/server/src/map/enums/msg_basic.h MsgBasic — the ids whose client text reports a
+// refused action (the engage refusals "Unable to see <target>." / "<target> is out of
+// range.", plus the spell/item/pet refusal family). The Battle tab is display-hidden by
+// default, so a refused action whose only feedback parks there reads as nothing happened;
+// these route to the main log instead.
+const BATTLE_REJECTION_IDS: &[u16] = &[
+    4, 5, 12, 16, 18, 22, 34, 35, 36, 39, 40, 47, 49, 56, 62, 71, 76, 78, 87, 88, 89, 92, 94, 155,
+    190, 191, 192, 199, 210, 215, 216, 217, 218, 235, 307, 313, 315, 316, 328, 337, 339, 347, 356,
+    428, 429, 445, 446, 512, 574, 575, 660, 661, 662, 665, 666, 700, 717, 742, 745, 773,
+];
+
+fn battle_line_channel(message_num: u16) -> ChatChannel {
+    if BATTLE_REJECTION_IDS.contains(&message_num) {
+        ChatChannel::System
+    } else {
+        ChatChannel::Battle
+    }
+}
+
 fn decode_battle_message(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
     is_029: bool,
-) -> Option<ChatLine> {
+    mes_basic: Option<&MesBasicDat>,
+) -> Vec<ChatLine> {
     if data.len() < 24 {
-        return None;
+        return Vec::new();
     }
     let cas_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
     let tar_id = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -4940,39 +5496,66 @@ fn decode_battle_message(
 
     let cas_name = name_for_id(cas_id, name_cache);
     let tar_name = name_for_id(tar_id, name_cache);
+    let cas_is_pc = is_pc(cas_id, kind_cache);
+    let tar_is_pc = is_pc(tar_id, kind_cache);
+    let sender = if subject_is_tar(message_num) {
+        tar_name.clone()
+    } else {
+        cas_name.clone()
+    };
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
-        return Some(ChatLine {
+        return vec![ChatLine {
             spans: Vec::new(),
-            channel: ChatChannel::Battle,
+            channel: battle_line_channel(message_num),
             sender: cas_name,
             text,
             server_ts: 0,
-        });
+        }];
     }
-    let raw = template_for_id(message_num)?;
-    let text = substitute_battle_placeholders(
-        raw,
+
+    // Both message packets carry their two data words in the parameter slots the
+    // entry addresses as 0 and 1
+    // (vendor/server/src/map/packets/s2c/0x029_battle_message.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE Data,
+    // vendor/server/src/map/packets/s2c/0x02d_battle_message2.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE2 Data).
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = data1 as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = data2 as i64;
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
         &cas_name,
         &tar_name,
-        is_pc(cas_id, kind_cache),
-        is_pc(tar_id, kind_cache),
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        &sender,
+    ) {
+        return lines;
+    }
+
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
+    let text = substitute_battle_placeholders(
+        &raw,
+        &cas_name,
+        &tar_name,
+        cas_is_pc,
+        tar_is_pc,
         data1,
         data2,
         message_num,
         None,
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
-
-        sender: if subject_is_tar(message_num) {
-            tar_name
-        } else {
-            cas_name
-        },
+        channel: battle_line_channel(message_num),
+        sender,
         text,
         server_ts: 0,
-    })
+    }]
 }
 
 struct BattleBitReader<'a> {
@@ -5052,6 +5635,49 @@ pub struct Battle2Header {
     pub first_outcome: Option<ffxi_proto::melee::ResultOutcome>,
 }
 
+// KULUU_COMBAT_LOG=1 - ground-truth trace of BATTLE2 packets: re-reads the header bits
+// independently (same order as vendor/server/src/map/packets/s2c/0x028_battle2.cpp) so "the
+// packet carries no result block" is distinguishable from
+// "our parser dropped it". Read-only; no behaviour change.
+fn combat_log_enabled() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    env_flag(&ONCE, "KULUU_COMBAT_LOG")
+}
+
+fn battle2_debug_dump(data: &[u8]) {
+    let mut br = BattleBitReader::new(data, 8);
+    let actor_id = br.read(32).map(|v| v as u32);
+    let trg_sum = br.read(6);
+    let _res_sum = br.read(4);
+    let kind = br.read(4);
+    let action_id = br.read(32).map(|v| v as u32);
+    let _info = br.read(32);
+    let target = br.read(32).map(|v| v as u32);
+    let nres = br.read(4);
+    let first = matches!(nres, Some(n) if n > 0).then(|| {
+        (
+            br.read(3),  // resolution
+            br.read(2),  // kind
+            br.read(12), // animation
+            br.read(5),  // info
+            br.read(2),  // hitDistortion
+            br.read(3),  // knockback
+        )
+    });
+    tracing::debug!(
+        target: "combat",
+        "COMBAT_B2 len={} actor={:?} trg_sum={:?} kind={:?} actid={:?} target={:?} nres={:?} first=(res,kind,anim,info,dist,kb)={:?}",
+        data.len(),
+        actor_id,
+        trg_sum,
+        kind,
+        action_id,
+        target,
+        nres,
+        first
+    );
+}
+
 pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let mut br = BattleBitReader::new(data, 8);
     let actor_id = br.read(32)? as u32;
@@ -5083,8 +5709,14 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
         });
     let first_result = first
         .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
-        .and_then(|(resolution, animation, _)| {
-            ffxi_proto::melee::MeleeResult::from_wire(resolution, animation)
+        .and_then(|(resolution, animation, outcome)| {
+            ffxi_proto::melee::MeleeResult::from_wire(
+                resolution,
+                animation,
+                outcome.info,
+                outcome.hit_distortion,
+                outcome.knockback,
+            )
         });
     Some(Battle2Header {
         actor_id,
@@ -5101,6 +5733,7 @@ fn decode_battle2_action(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+    mes_basic: Option<&MesBasicDat>,
 ) -> Vec<ChatLine> {
     let mut out: Vec<ChatLine> = Vec::new();
 
@@ -5161,49 +5794,27 @@ fn decode_battle2_action(
                 react_message = br.read(10).unwrap_or(0) as u16;
             }
 
-            if message_num != 0 {
-                if let Some(line) = build_battle2_line(
-                    message_num,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
-            }
+            // One parameter array per result, so an entry reads whichever
+            // block's value it names — the additional-effect and spikes lines
+            // address slots of their own.
+            let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+            numbers[MES_PARAM_ACTION_ID] = cmd_arg as i64;
+            numbers[MES_PARAM_MAIN_VALUE] = value as i64;
+            numbers[MES_PARAM_ADDITIONAL_EFFECT_VALUE] = proc_value as i64;
+            numbers[MES_PARAM_SPIKES_VALUE] = react_value as i64;
 
-            if has_proc && proc_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    proc_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    proc_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
+            for (num, amount) in [
+                (message_num, value),
+                (proc_message, proc_value),
+                (react_message, react_value),
+            ] {
+                if num == 0 {
+                    continue;
                 }
-            }
-
-            if has_react && react_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    react_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    react_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
+                out.extend(build_battle2_line(
+                    mes_basic, num, &cas_name, &tar_name, cas_is_pc, tar_is_pc, amount, cmd_arg,
+                    cmd_no, numbers,
+                ));
             }
         }
     }
@@ -5216,6 +5827,7 @@ fn is_start_category(cmd_no: u8) -> bool {
 }
 
 fn build_battle2_line(
+    mes_basic: Option<&MesBasicDat>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5224,16 +5836,36 @@ fn build_battle2_line(
     amount: u32,
     action_id: u32,
     category: u8,
-) -> Option<ChatLine> {
-    let raw = template_for_id(message_num)?;
+    numbers: [i64; sysmes::PARAM_SLOTS],
+) -> Vec<ChatLine> {
+    let sender = if subject_is_tar(message_num) {
+        tar_name
+    } else {
+        cas_name
+    };
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
+        cas_name,
+        tar_name,
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        sender,
+    ) {
+        return lines;
+    }
 
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
     let resource_id = if is_start_category(category) {
         amount
     } else {
         action_id
     };
     let text = substitute_battle_placeholders(
-        raw,
+        &raw,
         cas_name,
         tar_name,
         cas_is_pc,
@@ -5243,26 +5875,134 @@ fn build_battle2_line(
         message_num,
         Some(resource_id),
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
-        sender: if subject_is_tar(message_num) {
-            tar_name.to_string()
-        } else {
-            cas_name.to_string()
-        },
+        channel: battle_line_channel(message_num),
+        sender: sender.to_string(),
         text,
         server_ts: 0,
-    })
+    }]
 }
 
-fn template_for_id(message_num: u16) -> Option<&'static str> {
-    for &(id, template) in TEMPLATE_OVERRIDES {
+/// Message-parameter slots a battle packet fills. The entry addresses them by
+/// index, so which one carries the action id and which the result's value is
+/// what makes `<entity> readies <skill>` (id in the value slot, action id zero)
+/// and `<entity> uses <skill>. ...` (id in the action slot) read from the same
+/// grammar.
+const MES_PARAM_ACTION_ID: usize = 0;
+const MES_PARAM_MAIN_VALUE: usize = 1;
+const MES_PARAM_ADDITIONAL_EFFECT_VALUE: usize = 2;
+const MES_PARAM_SPIKES_VALUE: usize = 3;
+
+/// The install's own wording for a battle message, or `None` when there is no
+/// readable table or the entry needs a control code the composer cannot render.
+fn compose_mes_basic(
+    mes_basic: Option<&MesBasicDat>,
+    message_num: u16,
+    cas_name: &str,
+    tar_name: &str,
+    cas_is_pc: bool,
+    tar_is_pc: bool,
+    numbers: [i64; sysmes::PARAM_SLOTS],
+    sender: &str,
+) -> Option<Vec<ChatLine>> {
+    let table = mes_basic?;
+    let index = message_num as usize;
+    let refs = table.resource_refs(index);
+    let resolved: Vec<String> = refs
+        .iter()
+        .map(|r| mes_basic_resource_name(r.kind, numbers[r.slot] as u32))
+        .collect();
+    let mut params = sysmes::SysMesParams {
+        numbers,
+        caster_name: Some(cas_name),
+        // Retail drops "the" for anything it refers to by name.
+        caster_article: !cas_is_pc,
+        target_name: Some(tar_name),
+        target_article: !tar_is_pc,
+        ..Default::default()
+    };
+    for (r, name) in refs.iter().zip(&resolved) {
+        params.names[r.slot] = Some(name);
+    }
+    let line = table.message(index, &params)?;
+    Some(
+        line.lines
+            .iter()
+            .map(|spans| ChatLine {
+                spans: spans
+                    .iter()
+                    .map(|s| ChatSpan {
+                        text: s.text.clone(),
+                        kind: match s.kind {
+                            sysmes::SpanKind::Text => ChatSpanKind::Text,
+                            sysmes::SpanKind::Item => ChatSpanKind::Item,
+                            sysmes::SpanKind::KeyItem => ChatSpanKind::KeyItem,
+                        },
+                    })
+                    .collect(),
+                channel: ChatChannel::Battle,
+                sender: sender.to_string(),
+                text: spans.iter().map(|s| s.text.as_str()).collect(),
+                server_ts: 0,
+            })
+            .collect(),
+    )
+}
+
+fn mes_basic_resource_name(kind: sysmes::MesBasicResource, id: u32) -> String {
+    match kind {
+        sysmes::MesBasicResource::CombatSkill => ffxi_vocab::skill_names::lookup(id as u8)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::Spell => ffxi_vocab::spell_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("spell #{id}")),
+        sysmes::MesBasicResource::WeaponSkill => ffxi_vocab::tp_move_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::JobAbility => ability_name(id),
+        sysmes::MesBasicResource::StatusEffect => ffxi_vocab::status_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("status #{id}")),
+    }
+}
+
+/// Lazily opens the basic-message table, once, and remembers a miss so an
+/// install without one costs a single attempt rather than one per battle line.
+struct MesBasicResolver {
+    root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
+    table: Option<Option<MesBasicDat>>,
+}
+
+impl MesBasicResolver {
+    fn new(root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) -> Self {
+        Self { root, table: None }
+    }
+
+    fn table(&mut self) -> Option<&MesBasicDat> {
+        let root = self.root.as_ref();
+        self.table
+            .get_or_insert_with(|| {
+                let loaded = root.and_then(|r| MesBasicDat::open(r));
+                if loaded.is_none() {
+                    tracing::info!(
+                        "basic-message DAT (ROM/27/72) unavailable - battle lines fall back to the scraped msg_basic wording"
+                    );
+                }
+                loaded
+            })
+            .as_ref()
+    }
+}
+
+fn fallback_template(message_num: u16) -> Option<std::borrow::Cow<'static, str>> {
+    for &(id, template) in FALLBACK_TEMPLATES {
         if id == message_num {
-            return Some(template);
+            return Some(std::borrow::Cow::Borrowed(template));
         }
     }
-    ffxi_vocab::msg_basic::lookup(message_num)
+    ffxi_vocab::msg_basic::lookup(message_num).map(std::borrow::Cow::Borrowed)
 }
 
 // vendor/server/src/map/enums/msg_std.h MsgStd Examine — "<name> examines you.", sent to
@@ -5382,18 +6122,25 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
     line
 }
 
-// ffxi_vocab::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
-// which fails the client two ways. Id 116 (the generic "uses <ability>" line shared by
-// no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116) has no
-// enumerator at all, so lookup(116) is None and the self-JA battle line goes missing. And
-// wherever LSB's comment writes a bare ".." instead of a named token, the scrape has no way
-// to know which value belongs there — 100/101 are what an ability with message1=0 falls back
-// to (charentity.cpp CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
-// Retail's full mesbasic table (ROM/27/72.DAT) carries the real strings; until that is
-// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
-// The 420-427 Corsair roll family is deliberately absent: those need two numbers and a
-// status effect that data1/data2 alone cannot supply.
-const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
+// Wording of last resort, for a session with no readable install: the client's
+// own basic-message table (ffxi_dat::sysmes::MesBasicDat, ROM/27/72.DAT) is
+// what composes these lines when one is reachable, and it is the only source
+// that is right for both eras - the horizonxi-2023 and retail-2026-09 tables
+// hold 1024 index-stable entries that differ in wording at eleven of them.
+//
+// The scraped fallback under this one, ffxi_vocab::msg_basic, reads the
+// trailing comment on each msg_basic.h enumerator, which fails the client two
+// ways. Id 116 (the generic "uses <ability>" line shared by no-numeric buff JAs
+// like Boost id39 / Warcry id32; abilities.sql message1=116) has no enumerator
+// at all, so lookup(116) is None and the self-JA battle line goes missing. And
+// wherever LSB's comment writes a bare ".." instead of a named token, the
+// scrape has no way to know which value belongs there - 100/101 are what an
+// ability with message1=0 falls back to (charentity.cpp
+// CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
+// vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
+// The 420-427 Corsair roll family is deliberately absent: those need two
+// numbers and a status effect that data1/data2 alone cannot supply.
+const FALLBACK_TEMPLATES: &[(u16, &str)] = &[
     (
         14,
         "The <player>'s attack is countered by the <target>. <number> of <player>'s shadows absorbs the damage and disappears.",
@@ -5437,9 +6184,9 @@ const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
 
 // Ids above that intentionally shadow a scraped msg_basic entry: for all but
 // 565 the LSB enumerator comment elides tokens as a bare "..", so the scrape
-// carries an unusable template (see the WHY atop TEMPLATE_OVERRIDES); 565's
+// carries an unusable template (see the WHY atop FALLBACK_TEMPLATES); 565's
 // reason is on its entry. Guarded by
-// tests::template_overrides_only_shadow_msg_basic_deliberately.
+// tests::fallback_templates_only_shadow_msg_basic_deliberately.
 #[cfg(test)]
 const DELIBERATE_SHADOWS: &[u16] = &[14, 31, 100, 101, 102, 103, 136, 137, 317, 324, 565];
 
@@ -5720,6 +6467,9 @@ fn decode_event_0x032(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -5768,6 +6518,9 @@ fn decode_event_0x033(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -5805,6 +6558,9 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -5843,49 +6599,110 @@ fn event_trigger(sub: &framing::SubPacket<'_>) -> Option<EventTrigger> {
     })
 }
 
-fn decode_shop_list(data: &[u8]) -> Option<ShopState> {
+/// GP_SERV_COMMAND_SHOP_OPEN, vendor/server/src/map/packets/s2c/0x03e_shop_open.h:
+/// ShopListNum u16, padding u16. Announces how many rows the SHOP_LIST packets
+/// that follow will carry.
+fn decode_shop_open(data: &[u8]) -> Option<u16> {
+    const BODY_LEN: usize = 2;
+    if data.len() < BODY_LEN {
+        return None;
+    }
+    Some(u16::from_le_bytes(data[0..2].try_into().unwrap()))
+}
+
+/// One s2c 0x03C page: its `ShopItemOffsetIndex`, whether it is the final page,
+/// and the rows it carries.
+struct ShopListPage {
+    offset_index: u16,
+    last: bool,
+    rows: Vec<ShopItem>,
+}
+
+/// GP_SERV_COMMAND_SHOP_LIST Flags bit 0 marks the final page. LSB sends 0x00
+/// while more are coming and 0x89 on the last
+/// (vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp).
+const SHOP_LIST_FLAG_LAST: u8 = 0x01;
+
+fn decode_shop_list(data: &[u8]) -> Option<ShopListPage> {
     const HEADER_LEN: usize = 4;
     const ROW_LEN: usize = 12;
     if data.len() < HEADER_LEN {
         return None;
     }
     let offset_index = u16::from_le_bytes(data[0..2].try_into().unwrap());
+    let flags = data[2];
     let row_bytes = &data[HEADER_LEN..];
     let row_count = row_bytes.len() / ROW_LEN;
-    let mut items = Vec::with_capacity(row_count);
+    let mut rows = Vec::with_capacity(row_count);
     for i in 0..row_count {
         let off = i * ROW_LEN;
         let row = &row_bytes[off..off + ROW_LEN];
         let item_no = u16::from_le_bytes(row[4..6].try_into().unwrap());
 
+        // The packet's ShopIndex is ignored: the retail client derives a row's
+        // index from ShopItemOffsetIndex plus its position in the page
+        // (research/XiPackets server 0x003C, GP_SHOP ShopIndex), and that index
+        // is what c2s 0x083 SHOP_BUY sends back. A zero ItemNo is padding in a
+        // short final page, but it still consumes its slot.
+        let Ok(shop_index) = u8::try_from(offset_index as usize + i) else {
+            break;
+        };
         if item_no == 0 {
             continue;
         }
-        items.push(ShopItem {
+        rows.push(ShopItem {
             price: u32::from_le_bytes(row[0..4].try_into().unwrap()),
             item_no,
-            shop_index: row[6],
+            shop_index,
 
             skill: u16::from_le_bytes(row[8..10].try_into().unwrap()),
             guild_info: u16::from_le_bytes(row[10..12].try_into().unwrap()),
         });
     }
-    Some(ShopState {
+    Some(ShopListPage {
         offset_index,
-        items,
-
-        opened: false,
+        last: flags & SHOP_LIST_FLAG_LAST != 0,
+        rows,
     })
+}
+
+/// Fold one 0x03C page into the open shop, placing its rows at their own
+/// indices so a shop wider than a single packet lists in full. Rows past the
+/// client's fixed table (`SHOP_TABLE_CAPACITY`) are dropped, as the retail
+/// client's fixed-size array would.
+fn merge_shop_page(shop: &mut ShopState, page: ShopListPage) {
+    shop.offset_index = page.offset_index;
+    shop.complete = page.last;
+    for row in page.rows {
+        if row.shop_index as usize >= crate::state::SHOP_TABLE_CAPACITY {
+            continue;
+        }
+        match shop
+            .items
+            .iter_mut()
+            .find(|it| it.shop_index == row.shop_index)
+        {
+            Some(existing) => *existing = row,
+            None => shop.items.push(row),
+        }
+    }
+    shop.items.sort_by_key(|it| it.shop_index);
 }
 
 // GP_SERV_COMMAND_SHOP_SELL, vendor/server/src/map/packets/s2c/0x03d_shop_sell.h:
 // Price u32, PropertyItemIndex u8, Type u8, padding u16, Count u32. LSB only emits it
 // as the SHOP_SELL_REQ appraisal answer (Type = 0, 0x03d_shop_sell.cpp); a completed
 // sale is announced via GP_SERV_COMMAND_MESSAGE + ITEM_SAME instead
-// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count).
+// (0x085_shop_sell_set.cpp process). Returns (price, item_index, count) for an
+// appraisal only; a Type = 1 completed-sale packet is not a price to confirm.
 fn decode_shop_sell(data: &[u8]) -> Option<(u32, u8, u32)> {
     const BODY_LEN: usize = 12;
+    // research/XiPackets server 0x003D Type: 0 = appraisal, 1 = sale.
+    const TYPE_APPRAISAL: u8 = 0;
     if data.len() < BODY_LEN {
+        return None;
+    }
+    if data[5] != TYPE_APPRAISAL {
         return None;
     }
     let price = u32::from_le_bytes(data[0..4].try_into().unwrap());
@@ -5958,27 +6775,52 @@ fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {
     Some((icons, expiries))
 }
 
-// vendor/server/src/map/packets/s2c/0x119_abil_recast.h — recasttimer_t[31]:
-// u16 Timer (remaining seconds), u8 Calc1, u8 TimerId (recast group id), u16 Calc2,
-// u16 padding. Returns (recast_id, absolute Unix expiry) for entries still running.
+// vendor/server/src/map/packets/s2c/0x119_abil_recast.h recasttimer_t: Timer
+// (remaining seconds) and TimerId (recast group id) per entry, at the offsets
+// ffxi_proto::decode::AbilRecast pins to the header. Returns (recast_id,
+// absolute Unix expiry) for entries still running.
 fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
-    const ENTRY_SIZE: usize = 8;
-    const ENTRY_COUNT: usize = 31;
+    use ffxi_proto::decode::AbilRecast;
     let now_unix = kuluu_snapshot::recast_now_unix();
     let mut out = Vec::new();
-    for i in 0..ENTRY_COUNT {
-        let off = i * ENTRY_SIZE;
-        if data.len() < off + ENTRY_SIZE {
+    for i in 0..AbilRecast::ENTRY_COUNT {
+        let off = i * AbilRecast::ENTRY_STRIDE;
+        if data.len() < off + AbilRecast::ENTRY_STRIDE {
             break;
         }
-        let timer = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
-        let timer_id = data[off + 3] as u16;
+        let timer = u16::from_le_bytes(
+            data[off + AbilRecast::TIMER_OFFSET..off + AbilRecast::TIMER_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let timer_id = data[off + AbilRecast::TIMER_ID_OFFSET] as u16;
         if timer == 0 {
             continue;
         }
         out.push((timer_id, now_unix.saturating_add(timer as u32)));
     }
     out
+}
+
+/// Attribute a VM frame to its speaker for the dialog header and chat:
+/// resolve the frame's target index to an entity name. A speakerless frame
+/// (retail's no-speaker lines) stays blank; an unresolvable index prints
+/// "???", retail's missing-entity speaker (research/XiEvents/OpCodes/0x001D.md).
+fn attribute_event_speaker(
+    dialog: &mut crate::state::DialogState,
+    target_cache: &std::collections::HashMap<u16, u32>,
+    name_cache: &std::collections::HashMap<u32, String>,
+) {
+    let resolved = dialog
+        .speaker_index
+        .and_then(|idx| target_cache.get(&idx).and_then(|id| name_cache.get(id)));
+    dialog.npc_name = match resolved {
+        Some(name) => Some(name.clone()),
+        None => Some(match dialog.speaker_index {
+            Some(_) => "???".to_string(),
+            None => String::new(),
+        }),
+    };
 }
 
 /// Copy an NPC's event *speech* (a VM message frame — `prompt` set, no `choices`)
@@ -6016,8 +6858,8 @@ fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
 /// s2c 0x052 EVENTUCOFF releases the client from an event user-control lock
 /// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h GP_SERV_COMMAND_EVENTUCOFF_MODE). CancelEvent
 /// arrives only after the server already dropped the event (release()/skipEvent
-/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::release,
-/// vendor/server/src/map/entities/charentity.cpp CCharEntity::skipEvent), so no 0x05B goes
+/// call endCurrentEvent — vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::release,
+/// vendor/server/src/map/entities/char_entity.cpp CCharEntity::skipEvent), so no 0x05B goes
 /// back; the local event state is dropped instead. Fishing release = a rejected
 /// cast (no rod / bait / fishing spot) or the end of fishing. EventRecvPending —
 /// the ack after every processed 0x05B (0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) — must NOT clear
@@ -6062,7 +6904,10 @@ fn emit_event_dialog(
     pending_event_end.push((dialog.npc_id, dialog.act_index, dialog.event_para));
 }
 
-fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
+fn decode_chat_std(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<ChatLine> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX {
         return None;
@@ -6077,7 +6922,7 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
     } else {
         trim_nul_string(&data[4..PREFIX])
     };
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     Some(ChatLine {
         spans: Vec::new(),
         channel: ChatChannel::from_chat_kind(kind),
@@ -6101,7 +6946,7 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
+// (vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
 // (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process).
@@ -6115,7 +6960,10 @@ const CUSTOM_MENU_CANCEL: &str = "Canceled.";
 
 /// Decode a customMenu prompt from a chat-std body, returning `(title, options)`.
 /// `None` for any non-customMenu chat so the caller falls back to a plain line.
-fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
+fn decode_custom_menu(
+    data: &[u8],
+    names: &impl ffxi_proto::autotranslate::NameResolver,
+) -> Option<(String, Vec<String>)> {
     const PREFIX: usize = 4 + 15;
     if data.len() < PREFIX || data[0] != MESSAGE_GMPROMPT {
         return None;
@@ -6123,7 +6971,7 @@ fn decode_custom_menu(data: &[u8]) -> Option<(String, Vec<String>)> {
     if trim_nul_string(&data[4..PREFIX]) != CUSTOM_MENU_SENDER {
         return None;
     }
-    let text = decode_chat_text(&data[PREFIX..]);
+    let text = decode_chat_text(&data[PREFIX..], names);
     let mut parts = parse_quoted_concat(&text).into_iter();
     let title = parts.next()?;
     Some((title, parts.collect()))
@@ -6147,9 +6995,9 @@ fn custom_menu_reply(player: &str, title: &str, option: Option<&str>) -> String 
     format!("GMTELL({player}): Question({title}){CUSTOM_MENU_RESULT_MARKER}{result})")
 }
 
-fn decode_chat_text(bytes: &[u8]) -> String {
+fn decode_chat_text(bytes: &[u8], names: &impl ffxi_proto::autotranslate::NameResolver) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    ffxi_proto::autotranslate::decode(&bytes[..end])
+    ffxi_proto::autotranslate::decode_with(&bytes[..end], names)
 }
 
 fn trim_nul_string(bytes: &[u8]) -> String {
@@ -6474,6 +7322,16 @@ fn lerp_toward(cur: Vec3, target: Vec3, max_step: f32) -> (Vec3, bool) {
     )
 }
 
+/// Client mirror of `PChar->isInEvent()`
+/// (vendor/server/src/map/entities/char_entity.cpp CCharEntity::isInEvent):
+/// an event the VM still drives, or one whose 0x05B EVENT_END has not gone out.
+pub(super) fn in_event(
+    dialog: &crate::event_dialog::DialogSession,
+    pending_event_end: &[(u32, u16, u16)],
+) -> bool {
+    dialog.active_end().is_some() || !pending_event_end.is_empty()
+}
+
 fn should_emit_pos(
     elapsed: std::time::Duration,
     pos_delta_yalms: f32,
@@ -6492,6 +7350,9 @@ struct EventEndFlushInputs {
     user_driven: bool,
     watchdog_fires: bool,
     walked_away: bool,
+    /// A VM pending tag is in flight: its event must stay open server-side for
+    /// OnEventUpdate, so no Mode-0 END may drain it this tick.
+    tag_in_flight: bool,
 }
 
 /// What the tick owes the rest of the loop once the pinned events are drained.
@@ -6521,8 +7382,11 @@ fn flush_pending_event_end(
     sub_seq: u16,
 ) -> Option<EventEndFlush> {
     let dialog_open = active_dialog.is_some();
-    let flush =
-        inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open);
+    // A pending tag in flight owns the server-side event until its s2c ack: a
+    // Mode-0 END here would kill it mid-transaction and OnEventUpdate would
+    // find no currentEvent (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+    let flush = !inputs.tag_in_flight
+        && (inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open));
     if !flush || pending_event_end.is_empty() {
         return None;
     }
@@ -6541,6 +7405,7 @@ fn flush_pending_event_end(
             event_zone,
             event_id,
             0,
+            ffxi_proto::map::c2s::event_end_mode::END,
         ));
         out.next_sub_seq = out.next_sub_seq.wrapping_add(1);
         out.released += 1;

@@ -2,6 +2,27 @@
 
 use serde::{Deserialize, Serialize};
 
+// v35: InventoryItem.use_delay_end_vana_ts + ready (enchanted-item equip delay).
+// v34: CharFlags.graph_size - Flags1.GraphSize, the server's per-entity size class.
+// It indexes the model's four authored CIB scales, so without it every entity
+// renders at the model's index-0 size and mob size variation is lost.
+// v31: CutsceneCue::ExtScheduler.motion - the 0x66 Tpc package now carries its two
+// container file ids (A + the CIB-waist-selected B) instead of one flat id; None is the
+// out-of-range package, which loads nothing.
+// v30: CutsceneCue::ZoneScheduler - the 0x2D/0x54 zone scene routine out of the global
+// scene DAT (ROM/0/23.DAT), whose camera routes drive the operator camera.
+// v29: CutsceneCue::ExtScheduler (the 0x5B/0x66 motion-resource cue) and the
+// actor cues ActorMove / ActorPlace / ActorFace / ActorLookAt / ActorStopAction
+// that a REQSET-spawned NPC script emits.
+// v28: ViewerEvent::ActionStarted.outcome - the first result block as one typed
+// Option<ResultOutcome> (resolution + info bits + hitDistortion + knockback, ffxi-proto enums
+// from the pinned vendor/server headers) instead of four parallel u8 fields that spelled "no
+// result block" as zero. None means no result block was read; resolution 0 is Hit, so absence
+// must not be a value.
+// v27: ViewerEvent::ActionStarted.{info, hit_distortion, knockback, kind} - the first
+// result's per-result outcome bits packed by BATTLE2 (s2c 0x028): Defeated/CriticalHit
+// flags, the hit-distortion level and the knockback level that drive the victim's reaction
+// routine.
 // v26: ViewerEvent::ActionStarted.outcome - the first result's (info, hitDistortion,
 // knockback) bits (GP_SERV_COMMAND_BATTLE2::pack) that drive the victim's reaction routine.
 // v25: ViewerEvent::TargetChanged - the server-pushed retarget (s2c 0x058 ASSIST).
@@ -54,7 +75,13 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 26;
+// v33: CutsceneCue::ZoneScheduler.zone_id - the 0x2D zone scene now carries the
+// current zone so the host resolves its key out of the zone's own model DAT (with
+// the entrance/instance partner and non-model carriers as fallbacks) instead of the
+// global title-screen scene DAT.
+// v32: CutsceneCue::EntityName (0xB5 case 0 display-name change, fed by the
+// s2c 0x005D PENDINGSTR table via 0xB4 case 1).
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -62,7 +89,7 @@ pub const PROTOCOL_VERSION: u32 = 26;
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
 
-/// vendor/server/src/map/entities/baseentity.h NAMEVIS VIS_HIDE_NAME
+/// vendor/server/data/enums/name_vis.yaml NAMEVIS VIS_HIDE_NAME
 pub const NAMEVIS_HIDE_NAME: u8 = 0x08;
 
 /// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
@@ -128,7 +155,7 @@ pub enum BlowfishStatus {
     PendingZone,
 }
 
-// vendor/server/src/map/enums/weather.h Weather (None=0..Darkness=19)
+// vendor/server/data/enums/weather.yaml Weather (None=0..Darkness=19)
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Weather {
@@ -158,7 +185,7 @@ pub enum Weather {
 impl Weather {
     pub fn from_lsb(n: u16) -> Self {
         use Weather::*;
-        // vendor/server/src/map/enums/weather.h Weather
+        // vendor/server/data/enums/weather.yaml Weather
         const TABLE: [Weather; 20] = [
             None,
             Sunshine,
@@ -293,6 +320,7 @@ pub struct CharFlags {
     pub linkdead: bool,
     pub gm_level: u8,
     pub bazaar: bool,
+    pub graph_size: u8,
     pub linkshell_color: [u8; 3],
     pub charm: bool,
     pub gm_icon: bool,
@@ -415,15 +443,15 @@ pub struct Entity {
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith.
     /// `None` until the first General-block update carries it; treated as visible,
-    /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
-    /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
+    /// matching the server's VIS_NONE default (base_entity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
+    /// (vendor/server/data/enums/name_vis.yaml): 0x01 icon, 0x08 hide-name,
     /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
     /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
     #[serde(default)]
     pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// LSB STATUS_TYPE. vendor/server/data/enums/status.yaml.
 // Public so the renderer can hide models on INVISIBLE without re-declaring
 // the byte (single source of truth).
 pub mod status_type {
@@ -460,7 +488,7 @@ pub mod speed {
     pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
 
     /// The speed LSB sends an unmounted PC, which every "step per tick" budget in the reactor is
-    /// calibrated against (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed).
+    /// calibrated against (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed).
     pub const BASE_PACKET_SPEED: u8 = 50;
 
     /// The movement rate a walk/run clip is authored at: the base packet speed decoded to yalms per
@@ -519,7 +547,7 @@ impl Entity {
     }
 
     /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
-    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp CBaseEntity::IsNameHidden
+    /// cutscene actors. vendor/server/src/map/entities/base_entity.cpp CBaseEntity::IsNameHidden
     /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
@@ -578,7 +606,7 @@ impl Entity {
     /// The server-side precondition for a door Talk to fire its onTrigger:
     /// LSB's general trigger path (`GP_CLI_COMMAND_ACTION::process`,
     /// vendor/server/src/map/packets/c2s/0x01a_action.cpp) requires
-    /// `status == STATUS_TYPE::NORMAL` (vendor/server/src/map/entities/baseentity.h).
+    /// `status == STATUS_TYPE::NORMAL` (vendor/server/data/enums/status.yaml).
     /// Otherwise nothing triggers and the handler falls through to the
     /// `GP_SERV_COMMAND_EVENTUCOFF` release it answers every unlocked Talk with.
     /// Doors do ship with other statuses (DISAPPEAR, STATUS_4, CUTSCENE_ONLY in
@@ -818,6 +846,11 @@ pub struct SceneSnapshot {
 
     #[serde(default)]
     pub self_char_id: Option<u32>,
+
+    /// Targid of the player's own up pet, from 0x068 PetSync (sent to the
+    /// owner only); `None` while the pet is down.
+    #[serde(default)]
+    pub self_pet_targid: Option<u16>,
 
     #[serde(default)]
     pub dialog: Option<DialogState>,
@@ -1307,6 +1340,12 @@ pub struct InventoryItem {
     /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    /// Equip-delay end in the same timestamp frame as `next_use_vana_ts`.
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    /// `GP_SERV_COMMAND_ITEM_ATTR` ready flag; `None` for non-charged items.
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1368,6 +1407,24 @@ pub struct DialogState {
     /// with `AgentCommand::CustomMenuRespond` instead of an `EndEventChoice`.
     #[serde(default)]
     pub custom_menu: bool,
+    /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
+    /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
+    /// true so frames from an unknown producer stay cancellable.
+    #[serde(default = "cancel_armed_default")]
+    pub cancel_armed: bool,
+    /// The speaking entity's target index for this frame; `None` is a line the
+    /// bytecode prints with no speaker (retail renders those headerless).
+    #[serde(default)]
+    pub speaker_index: Option<u16>,
+    /// The line carried an item / key-item marker (`{Item:N}` / `{KeyItem:N}`)
+    /// before substitution: enternity-style auto-advance leaves such lines
+    /// manual (the addon's "sentences that contain items will not be skipped").
+    #[serde(default)]
+    pub contains_item: bool,
+}
+
+fn cancel_armed_default() -> bool {
+    true
 }
 
 /// Row-major grid overlay for a choice frame (`cells.len() == rows * cols`).
@@ -1458,6 +1515,37 @@ pub struct ShopState {
     pub items: Vec<ShopItem>,
 
     pub opened: bool,
+
+    /// How many rows s2c 0x03E SHOP_OPEN said to expect.
+    #[serde(default)]
+    pub expected_items: u16,
+
+    /// The final s2c 0x03C page has landed, so `items` is the whole stock.
+    #[serde(default)]
+    pub complete: bool,
+
+    /// The vendor NPC's entity id, or 0 when it could not be resolved.
+    #[serde(default)]
+    pub vendor_id: u32,
+
+    /// A sale the server has priced, awaiting the player's yes/no.
+    #[serde(default)]
+    pub pending_sale: Option<ShopSale>,
+}
+
+/// A sale appraised by s2c 0x03D and not yet confirmed with c2s 0x085.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShopSale {
+    pub item_index: u8,
+    pub item_no: u16,
+    pub unit_price: u32,
+    pub count: u32,
+}
+
+impl ShopSale {
+    pub fn total_gil(&self) -> u32 {
+        self.unit_price.saturating_mul(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1504,18 +1592,30 @@ pub type FourCc = [u8; 4];
 /// Which entity a [`CutsceneCue`] names. The event VM's own operand is an
 /// unresolved `ActorLookup`; the producer resolves it against the running
 /// event's entity before it crosses this boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutsceneActor {
     LocalPlayer,
     Entity { server_id: u32 },
 }
 
+/// The motion resource a LOADEXTSCHEDULER cue loads before playing its key
+/// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExtSchedulerMotion {
+    /// 0x5B: the event motion resource a single DAT file id names.
+    Event(u32),
+    /// 0x66 in range: container A (resource tag 1) and the two B candidates
+    /// (resource tag 2); the renderer picks between them from the actor's CIB
+    /// waist byte.
+    Tpc { a: u32, b_set: u32, b_clear: u32 },
+}
+
 /// One staging effect the running event script asked for, in execution order.
 /// Scoped to the event session: every one of these is undone at
 /// [`ViewerEvent::CutsceneEnded`], because the bytecode routinely never undoes
-/// it itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// it itself. Not `Eq`: [`CutsceneCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CutsceneCue {
     /// Play action `key` on `actor`, with `partner` as the action's partner.
     ActorMotion {
@@ -1538,6 +1638,13 @@ pub enum CutsceneCue {
     ActorHide { target: CutsceneActor, hide: bool },
     /// Take camera control away from the player, or give it back.
     CameraLock { lock: bool },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide { hide: bool },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold { stop: bool, hour: Option<u32> },
     /// Put the target on or off a mount. `status_event` is the `GameStatus`
     /// value the script writes; `mount_id` is carried only by the non-chocobo
     /// mount cases.
@@ -1545,6 +1652,67 @@ pub enum CutsceneCue {
         target: CutsceneActor,
         status_event: u8,
         mount_id: Option<u16>,
+    },
+    /// Load the motion resource into `actor`, then play action `key` on it
+    /// with `partner`. `motion` is `None` for the 0x66 out-of-range package,
+    /// where retail logs and loads nothing and the renderer plays `key` on the
+    /// actor's own resources.
+    ExtScheduler {
+        motion: Option<ExtSchedulerMotion>,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: FourCc,
+    },
+    /// Start zone-level scheduler routine `key` over the two actors (the
+    /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
+    /// `key` out of the current zone's own model DAT (`zone_id`, with the
+    /// entrance/instance partner and non-model carriers as fallbacks) and its
+    /// camera routes drive the operator camera.
+    ZoneScheduler {
+        key: FourCc,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        zone_id: u16,
+    },
+    /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`. The
+    /// coordinates are the VM's event-coordinate integers; the renderer scales
+    /// them with EVENT_COORD_UNITS / EVENT_HEADING_UNITS.
+    ActorMove {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+        speed: f32,
+    },
+    /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
+    /// integers.
+    ActorPlace {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+    },
+    /// Face `actor` toward `heading`, in the VM's 4096-step full-circle units.
+    ActorFace { actor: CutsceneActor, heading: i32 },
+    /// Turn `actor` to face `target`.
+    ActorLookAt {
+        actor: CutsceneActor,
+        target: CutsceneActor,
+    },
+    /// Stop the named routine on `actor`, or every routine when `key` is
+    /// None, and return it to idle.
+    ActorStopAction {
+        actor: CutsceneActor,
+        key: Option<FourCc>,
+    },
+    /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
+    /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
+    /// table); released like every other cue at [`ViewerEvent::CutsceneEnded`].
+    EntityName {
+        actor: CutsceneActor,
+        name: [u8; 16],
     },
 }
 
@@ -1592,6 +1760,24 @@ pub enum ViewerEvent {
         volume: u8,
     },
 
+    /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    MapOpen {
+        map_id: u16,
+        tutorial: bool,
+    },
+
+    /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
+    /// coordinates on zone `map_id`'s map.
+    MapMarkerPlaced {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+
+    /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    MapClosed,
+
     LevelUp {
         player_id: u32,
     },
@@ -1610,7 +1796,7 @@ pub enum ViewerEvent {
         /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
         /// carries them, absent otherwise.
         result: Option<(u8, u16)>,
-        /// First result's raw `animation` index, for every category — the file-table key of
+        /// First result's raw `animation` index, for every category: the file-table key of
         /// the caster's effect DAT. Absent on a result-less or truncated body.
         animation: Option<u16>,
         /// First result's `(info, hit_distortion, knockback)` bits
@@ -1956,6 +2142,7 @@ mod tests {
             }),
             producer_monotonic_ms: 1_500,
             self_char_id: Some(0xCAFE_F00D),
+            self_pet_targid: Some(0x010E),
             dialog: None,
             shop: None,
             delivery_box: None,
@@ -2195,8 +2382,8 @@ mod tests {
     }
 
     #[test]
-    fn ferry_protocol_26_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 26;
+    fn current_protocol_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 35;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2279,6 +2466,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.zone_generation = 128;
         snapshot.entities[0].char_flags.untargetable = true;
+        snapshot.entities[0].char_flags.graph_size = 3;
         snapshot.entities[0].name_vis = Some(0x08);
         snapshot.death_menu_offer = Some(DeathMenuOffer::Tractor);
         let bytes = postcard::to_allocvec(&Frame::Snapshot(Box::new(snapshot))).unwrap();
@@ -2287,6 +2475,7 @@ mod tests {
         };
         assert_eq!(decoded.zone_generation, 128);
         assert!(decoded.entities[0].char_flags.untargetable);
+        assert_eq!(decoded.entities[0].char_flags.graph_size, 3);
         assert_eq!(decoded.entities[0].name_vis, Some(0x08));
         assert_eq!(decoded.chat[0].text, "hi");
         assert_eq!(decoded.death_menu_offer, Some(DeathMenuOffer::Tractor));
@@ -2456,6 +2645,12 @@ mod tests {
                 partner: CutsceneActor::LocalPlayer,
                 key: *b"kue0",
             },
+            CutsceneCue::EntityName {
+                actor: CutsceneActor::Entity {
+                    server_id: 0x010E_602F,
+                },
+                name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
+            },
         ];
         for cue in cues {
             let bytes =
@@ -2494,6 +2689,7 @@ mod tests {
             "last_reconnect",
             "producer_monotonic_ms",
             "self_char_id",
+            "self_pet_targid",
             "dialog",
             "shop",
             "delivery_box",
@@ -2535,7 +2731,7 @@ mod tests {
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

@@ -1,4 +1,4 @@
-use crate::{DatError, Result};
+use crate::{DatError, DatRoot, Result};
 
 // The effect list of a routine whose control-flow section (section 1) is empty. Kept as the
 // fallback for chunks whose section table reads implausibly — see `effect_section_start`.
@@ -253,38 +253,49 @@ pub enum StageKind {
 
     DamageCallback,
 
-    /// AnimationLock for `duration_frames` ticks (SE: `BondageActor` /
+    FollowPoints,
+
+    /// 0x07 / 0x59 - AnimationLock for `duration_frames` frames of the routine clock
+    /// (SE: `BondageActor` /
     /// `LockCasterMagic`; xim treats both as AnimationLockEffect). Retail's ActionTimer1
     /// lock; refcounted across overlapping routines, and a routine without a lock stage does
     /// not lock.
     AnimationLock,
 
-    /// Stop the running routine named by `id` (xim EffectRoutineParser.kt
-    /// parseSection2). The worm's `ini1` stops `init` and `init` stops `ini1` this way.
+    /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
+    /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
+    /// and `init` stops `ini1` this way.
     StopRoutine,
 
-    /// Flinch on the caster / the target; SE `GetDamageDirId` picks the dfi/dbi/dfm/dbm
+    /// 0x21 (caster) / 0x25 (target) - flinch; SE `GetDamageDirId` picks the dfi/dbi/dfm/dbm
     /// front/back clip by hit direction.
     FlinchOnCaster,
     FlinchOnTarget,
 
-    /// Knockback (xim EffectRoutineParser.kt parseSection2, SE tag table).
+    /// 0x5E / 0xBF - knockback (research/xim EffectRoutineParser.kt parseSection2
+    /// KnockBackRoutine).
     Knockback,
 
-    /// DisplayDeadRoutine (xim EffectRoutineParser.kt parseSection2): the actor is
-    /// dead from this stage on.
+    /// 0x78 - DisplayDeadRoutine (research/xim EffectRoutineParser.kt parseSection2
+    /// DisplayDeadRoutine): the actor is dead from this stage on.
     DisplayDead,
 
-    /// TransitionToIdle (xim EffectRoutineParser.kt parseSection2);
-    /// `idle_transition_time` holds the payload's f32 transition time when present.
+    /// 0x28 - TransitionToIdle (research/xim EffectRoutineParser.kt parseSection2
+    /// TransitionToIdleEffect); `idle_transition_time` holds the payload's f32 transition time
+    /// when present.
     TransitionToIdle,
 
-    /// ActorFade on the caster / the target to `actor_fade` over `duration_frames`
-    /// (SE `ActorColorDriveTask`; xim EffectRoutineParser.kt parseSection2).
+    /// 0x29 (caster) / 0x2A (target) - ActorFade to `actor_fade` over `duration_frames`
+    /// (SE `ActorColorDriveTask`; research/xim EffectRoutineParser.kt parseSection2
+    /// ActorFadeRoutine). 0x80808080 is the neutral tint the worm's `init` uses.
     ActorFadeOnCaster,
     ActorFadeOnTarget,
 
-    FollowPoints,
+    /// 0x04 - drive the camera along the kind 0x06 route named by `id` for the stage's scaled
+    /// duration (research/XIClient Game/Scheduler/Tags/0x04.cpp HandleTag0x04 looks the
+    /// resource up by the tag's four-char name and calls CameraResource::CreateCameraTask).
+    CameraRoute,
+
     Unknown,
 }
 
@@ -329,6 +340,9 @@ impl StageKind {
             // 0x0B/0x53 play sound on target/caster.
             0x02 => Self::Particle,
             0x03 => Self::SubRoutine,
+            // research/XIClient Game/Scheduler/Tags/0x04.cpp HandleTag0x04 - the camera route
+            // stage; `id` is the kind 0x06 chunk name in the same file.
+            0x04 => Self::CameraRoute,
             0x05 => Self::Motion,
             // research/xim EffectRoutineParser.kt parseSection2.
             0x09 => Self::SubRoutineOnTarget,
@@ -598,6 +612,23 @@ impl Scheduler {
         Ok(Self { name, stages })
     }
 
+    /// The frame at which this routine's effects end: the max over all stages of
+    /// `stage.frame + stage.duration_frames`, a half-open bound. A plain stage ends on its own
+    /// fire frame; an AnimationLock keeps holding until `frame + duration_frames`.
+    pub fn end_frame(&self) -> u32 {
+        Self::end_frame_for(&self.stages)
+    }
+
+    /// The same bound over an arbitrary stage list, for hosts that flatten sub-routine calls
+    /// into one timeline before measuring it (kuluu-render's ActiveScheduler).
+    pub fn end_frame_for(stages: &[TimedStage]) -> u32 {
+        stages
+            .iter()
+            .map(|t| t.frame + t.stage.duration_frames as u32)
+            .max()
+            .unwrap_or(0)
+    }
+
     // A routine built out of these is a switch (`daml` picks one hit reaction, `dam0` one
     // additional effect), so inlining it whole would run every branch at once. We do not
     // evaluate the conditions; callers pick the branch.
@@ -629,6 +660,167 @@ pub struct SoundEvent {
     pub frame: u32,
     pub id: [u8; 4],
     pub on_caster: bool,
+}
+
+/// The entrance/instance zone pairs whose 0x2D MAPSCHEDULOR keys resolve in the
+/// partner zone's model DAT rather than their own (fixToDo/Fix9.md corpus scan:
+/// 27 "another zone's model DAT" pairs, the clean instance/entrance pairs below).
+/// Hand-built table from that single corpus scan: retail's loader rule for the
+/// partner fallback is unknown, and these five pairs are the observed clean cases.
+const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [
+    (242, 170), // Heavens' Tower -> Full Moon Fountain
+    (194, 192), // Outer Horutoto Ruins -> Inner Horutoto Ruins
+    (31, 34),   // Monarch's Linn -> Grand Palace of Hu'Xzoi
+    (32, 11),   // Sealion's Den -> Oldton Movalpolos
+    (32, 8),    // Sealion's Den -> Boneyard Gully
+];
+
+/// The handful of non-model files that carry 0x2D scene keys no per-zone slot owns
+/// (fixToDo/Fix9.md: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu scene
+/// families, `sc11..sc41` / `kc51..kc54` / `kci1..kci4`). Hand-built list from the
+/// same corpus scan; retail's loader rule for these is unknown.
+const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [
+    641,   // ROM/3/48.DAT
+    30705, // ROM/123/85.DAT
+    57075, // ROM/213/92.DAT
+    57082, // ROM/216/12.DAT
+    57204, // ROM/241/3.DAT
+];
+
+/// Resolve the 0x2D MAPSCHEDULOR key to the DAT file that carries its routine,
+/// following retail's per-zone rule: the routine lives in the CURRENT zone's own
+/// model DAT (already loaded for rendering via
+/// [`zone_dat::zone_id_to_mzb_file_id`]); on a miss, the entrance/instance partner
+/// zone's model DAT; on a further miss, the non-model scene carriers. Returns the
+/// file id, or `None` when no candidate file carries the key. The host arms the
+/// 0x54 WAITMAPSCHEDULOR hold from the file the key resolved in; the renderer plays
+/// it from the same file.
+///
+/// Memoized per process: the result is a pure function of the install's DATs,
+/// while deriving it costs up to eight full DAT reads plus parses per call (the
+/// zone's model DAT is a large MZB file) on every 0x2D cue. One install per
+/// process (the renderer and the session are separate processes, each with its
+/// own memo), so the memo keys on (zone, key) alone. An overlay swap changes
+/// which file a resolve reads, so [`DatRoot::set_overlays`] clears it.
+pub fn zone_scene_file_id(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
+    let cache = ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&hit) = cache.get(&(zone, key)) {
+        return hit;
+    }
+    drop(cache);
+    let resolved = zone_scene_file_id_uncached(root, zone, key);
+    #[cfg(test)]
+    {
+        *ZONE_SCENE_RESOLVE_COUNTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry((zone, key))
+            .or_insert(0) += 1;
+    }
+    ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((zone, key), resolved);
+    resolved
+}
+
+/// Process-local memo for [`zone_scene_file_id`]; see its doc for the keying
+/// and invalidation rules.
+type ZoneSceneMemo = std::collections::HashMap<(u16, [u8; 4]), Option<u32>>;
+static ZONE_SCENE_CACHE: std::sync::LazyLock<std::sync::Mutex<ZoneSceneMemo>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ZoneSceneMemo::new()));
+
+/// Drop the [`zone_scene_file_id`] memo: called from `DatRoot::set_overlays`,
+/// because the swap changes which file a later resolve reads. A lookup racing
+/// the swap may re-memoize a pre-swap result until the next swap; the memo
+/// holds only 0x2D answers, so the exposure is one stale zone-scene file id.
+pub(crate) fn clear_zone_scene_cache() {
+    ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// Per-(zone, key) count of full resolves, test-only: a monotonic observation
+/// point the memoization test reads, immune to parallel memo clears.
+#[cfg(test)]
+type ZoneSceneResolveCounts = std::collections::HashMap<(u16, [u8; 4]), u64>;
+#[cfg(test)]
+static ZONE_SCENE_RESOLVE_COUNTS: std::sync::LazyLock<std::sync::Mutex<ZoneSceneResolveCounts>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ZoneSceneResolveCounts::new()));
+
+#[cfg(test)]
+fn zone_scene_resolve_count(zone: u16, key: [u8; 4]) -> u64 {
+    ZONE_SCENE_RESOLVE_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(zone, key))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn zone_scene_file_id_uncached(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
+    if let Some(file) = crate::zone_dat::zone_id_to_mzb_file_id(zone) {
+        if scheduler_key_in_file(root, file, key) {
+            return Some(file);
+        }
+    }
+    for &(scene_zone, partner) in &ZONE_SCENE_PARTNERS {
+        if scene_zone != zone {
+            continue;
+        }
+        if let Some(file) = crate::zone_dat::zone_id_to_mzb_file_id(partner) {
+            if scheduler_key_in_file(root, file, key) {
+                return Some(file);
+            }
+        }
+    }
+    NON_MODEL_SCENE_CARRIERS
+        .iter()
+        .copied()
+        .find(|&file| scheduler_key_in_file(root, file, key))
+}
+
+/// True when `key` names a cleanly-parsed scheduler chunk in DAT file `file_id` —
+/// the same set the renderer's action cache can play (a broken chunk resolves to
+/// nothing, so a miss here is a miss there too).
+fn scheduler_key_in_file(root: &DatRoot, file_id: u32, key: [u8; 4]) -> bool {
+    let loc = match root.resolve(file_id) {
+        Ok(loc) => loc,
+        Err(_) => return false,
+    };
+    let bytes = match std::fs::read(loc.path_under(root)) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    crate::resource_dir::ResourceDir::from_bytes(bytes)
+        .collect_schedulers()
+        .iter()
+        .any(|s| s.name == key)
+}
+
+// The camera route names in the title-screen scene DAT (ROM/0/23.DAT, magic `titl`)
+// run two lowercase hex digits plus a two-digit decimal index
+// (research/cexi-docs/dats/ROM_0_23.md node naming conventions).
+const ROUTE_NAME_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+/// Two hex digits of the zone id fit this bound.
+const ROUTE_NAME_ZONE_MAX: u16 = 0xFF;
+/// A two-digit decimal index fits this bound.
+const ROUTE_NAME_INDEX_MAX: u8 = 99;
+
+/// The zone-coded camera route name in the title-screen scene DAT (ROM/0/23.DAT):
+/// `zone_id` as two lowercase hex digits followed by a two-digit decimal `index`
+/// (research/cexi-docs/dats/ROM_0_23.md).
+pub fn zone_camera_route_name(zone_id: u16, index: u8) -> [u8; 4] {
+    debug_assert!(zone_id <= ROUTE_NAME_ZONE_MAX && index <= ROUTE_NAME_INDEX_MAX);
+    let mut name = [0u8; 4];
+    name[0] = ROUTE_NAME_HEX_DIGITS[(zone_id >> 4 & 0xF) as usize];
+    name[1] = ROUTE_NAME_HEX_DIGITS[(zone_id & 0xF) as usize];
+    name[2] = b'0' + index / 10;
+    name[3] = b'0' + index % 10;
+    name
 }
 
 #[cfg(test)]
@@ -1855,5 +2047,101 @@ mod vehicle_contract_tests {
         assert_eq!(scheduler.stages.len(), 1);
         assert_eq!(scheduler.stages[0].stage.kind, StageKind::Unknown);
         assert_eq!(scheduler.stages[0].stage.follow_points, None);
+    }
+
+    #[test]
+    fn zone_camera_route_name_spells_the_hex_zone_prefix_and_decimal_index() {
+        // Anchors from the global scene file's census: ex1a plays 1c* routes
+        // (zone 28 = 0x1C), ex1b plays 2c* (44 = 0x2C), mov2 plays c1* to c4*
+        // (zones 193 to 196).
+        assert_eq!(zone_camera_route_name(0x1C, 1), *b"1c01");
+        assert_eq!(zone_camera_route_name(0x2C, 14), *b"2c14");
+        assert_eq!(zone_camera_route_name(0xC1, 7), *b"c107");
+        assert_eq!(zone_camera_route_name(0xC4, 99), *b"c499");
+        assert_eq!(zone_camera_route_name(0, 0), *b"0000");
+    }
+
+    // Retail-byte guard (skips without an install). The 0x2D keys of the Chamber of
+    // Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT): the corpus
+    // scan's dominant rule (fixToDo/Fix9.md).
+    #[test]
+    fn zone_scene_resolves_in_the_zones_own_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let file =
+            crate::zone_dat::zone_id_to_mzb_file_id(168).expect("zone 168 maps to a model DAT");
+        for key in [b"215s", b"220a"] {
+            assert_eq!(
+                zone_scene_file_id(&root, 168, *key),
+                Some(file),
+                "{key:?} resolves in zone 168's own model DAT"
+            );
+        }
+    }
+
+    // Retail-byte guard (skips without an install). Sealion's Den (32) event 100
+    // runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
+    #[test]
+    fn zone_scene_resolves_sealions_den_lwon_in_its_own_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let file =
+            crate::zone_dat::zone_id_to_mzb_file_id(32).expect("zone 32 maps to a model DAT");
+        assert_eq!(zone_scene_file_id(&root, 32, *b"lwon"), Some(file));
+    }
+
+    // Retail-byte guard (skips without an install). A repeated 0x2D lookup for the
+    // same (zone, key) is served from the memo instead of re-reading the zone's
+    // model DAT; an overlay-swap clear forces one re-resolve. The probe key is
+    // unique to this test so parallel tests resolving real keys cannot move the
+    // per-key counter.
+    #[test]
+    fn zone_scene_lookups_are_memoized_and_cleared() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let key = *b"zz99";
+        let before = zone_scene_resolve_count(168, key);
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 1,
+            "the first lookup resolves"
+        );
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 1,
+            "the repeat lookup is served from the memo"
+        );
+        clear_zone_scene_cache();
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 2,
+            "the clear forces a re-resolve"
+        );
+    }
+
+    // Retail-byte guard (skips without an install). Heavens' Tower (242) carries no
+    // `hshi` in its own model DAT; the key resolves in the partner zone Full Moon
+    // Fountain (170)'s model DAT (fixToDo/Fix9.md instance/entrance pair).
+    #[test]
+    fn zone_scene_falls_back_to_the_partner_zone_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let own =
+            crate::zone_dat::zone_id_to_mzb_file_id(242).expect("zone 242 maps to a model DAT");
+        let partner =
+            crate::zone_dat::zone_id_to_mzb_file_id(170).expect("zone 170 maps to a model DAT");
+        assert_ne!(own, partner, "242 and 170 are distinct zones");
+        assert_eq!(
+            zone_scene_file_id(&root, 242, *b"hshi"),
+            Some(partner),
+            "242's hshi resolves in partner zone 170's model DAT"
+        );
     }
 }

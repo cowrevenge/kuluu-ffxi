@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::group_list as lsb;
 
 /// `GAttr.PartyNo` sentinel for "not in a party of the alliance".
 /// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
@@ -145,6 +146,27 @@ pub struct PartyListExtra {
 }
 
 impl PartyAttrs {
+    // vendor/server/src/map/packets/s2c/0x0dd_group_list.h GP_SERV_COMMAND_GROUP_LIST
+    const LIST_UNIQUE_NO_OFFSET: usize = 0;
+    const LIST_HP_OFFSET: usize = 4;
+    const LIST_MP_OFFSET: usize = 8;
+    const LIST_TP_OFFSET: usize = 12;
+    const LIST_GATTR_OFFSET: usize = 16;
+    const LIST_ACT_INDEX_OFFSET: usize = 20;
+    const LIST_MEMBER_NUMBER_OFFSET: usize = 22;
+    const LIST_MOGHOUSE_FLG_OFFSET: usize = 23;
+    const LIST_KIND_OFFSET: usize = 24;
+    const LIST_HPP_OFFSET: usize = 25;
+    const LIST_MPP_OFFSET: usize = 26;
+    const LIST_ZONE_NO_OFFSET: usize = 28;
+    const LIST_MJOB_NO_OFFSET: usize = 30;
+    const LIST_MJOB_LV_OFFSET: usize = 31;
+    const LIST_SJOB_NO_OFFSET: usize = 32;
+    const LIST_SJOB_LV_OFFSET: usize = 33;
+    const LIST_NAME_OFFSET: usize = 36;
+    const LIST_NAME_LEN: usize = 16;
+    const GROUP_LIST_SIZE: usize = 52;
+
     pub fn decode_group_attr(body: &[u8]) -> Result<Self, DecodeError> {
         const NEEDED: usize = 32;
         if body.len() < NEEDED {
@@ -169,33 +191,37 @@ impl PartyAttrs {
     }
 
     pub fn decode_group_list(body: &[u8]) -> Result<(Self, PartyListExtra), DecodeError> {
-        const NEEDED: usize = 52;
-        if body.len() < NEEDED {
-            return Err(DecodeError::Truncated(NEEDED, body.len()));
+        if body.len() < Self::GROUP_LIST_SIZE {
+            return Err(DecodeError::Truncated(Self::GROUP_LIST_SIZE, body.len()));
         }
+        let rd32 = |o: usize| u32::from_le_bytes(body[o..o + 4].try_into().unwrap());
+        let rd16 = |o: usize| u16::from_le_bytes(body[o..o + 2].try_into().unwrap());
         let attrs = Self {
-            unique_no: u32::from_le_bytes(body[0..4].try_into().unwrap()),
-            hp: u32::from_le_bytes(body[4..8].try_into().unwrap()),
-            mp: u32::from_le_bytes(body[8..12].try_into().unwrap()),
-            tp: u32::from_le_bytes(body[12..16].try_into().unwrap()),
-            act_index: u16::from_le_bytes(body[20..22].try_into().unwrap()),
-            kind: body[24],
-            hpp: body[25],
-            mpp: body[26],
-            moghouse_flg: body[23],
-            zone_no: u16::from_le_bytes(body[28..30].try_into().unwrap()),
-            mjob_no: body[30],
-            mjob_lv: body[31],
-            sjob_no: body[32],
-            sjob_lv: body[33],
+            unique_no: rd32(Self::LIST_UNIQUE_NO_OFFSET),
+            hp: rd32(Self::LIST_HP_OFFSET),
+            mp: rd32(Self::LIST_MP_OFFSET),
+            tp: rd32(Self::LIST_TP_OFFSET),
+            act_index: rd16(Self::LIST_ACT_INDEX_OFFSET),
+            kind: body[Self::LIST_KIND_OFFSET],
+            hpp: body[Self::LIST_HPP_OFFSET],
+            mpp: body[Self::LIST_MPP_OFFSET],
+            moghouse_flg: body[Self::LIST_MOGHOUSE_FLG_OFFSET],
+            zone_no: rd16(Self::LIST_ZONE_NO_OFFSET),
+            mjob_no: body[Self::LIST_MJOB_NO_OFFSET],
+            mjob_lv: body[Self::LIST_MJOB_LV_OFFSET],
+            sjob_no: body[Self::LIST_SJOB_NO_OFFSET],
+            sjob_lv: body[Self::LIST_SJOB_LV_OFFSET],
         };
-        let gattr = u32::from_le_bytes(body[16..20].try_into().unwrap());
+        let gattr = rd32(Self::LIST_GATTR_OFFSET);
 
-        const PARTY_NO_MASK: u32 = 0x03;
-        let party_no = (gattr & PARTY_NO_MASK) as u8;
-        let is_party_leader = (gattr >> 2) & 1 == 1;
-        let is_alliance_leader = (gattr >> 3) & 1 == 1;
-        let name_bytes = &body[36..52];
+        let party_no = ((gattr >> lsb::G_ATTR_PARTY_NO_SHIFT) & lsb::G_ATTR_PARTY_NO_MASK) as u8;
+        let is_party_leader =
+            (gattr >> lsb::G_ATTR_PARTY_LEADER_FLG_SHIFT) & lsb::G_ATTR_PARTY_LEADER_FLG_MASK == 1;
+        let is_alliance_leader = (gattr >> lsb::G_ATTR_ALLIANCE_LEADER_FLG_SHIFT)
+            & lsb::G_ATTR_ALLIANCE_LEADER_FLG_MASK
+            == 1;
+        let name_bytes =
+            &body[Self::LIST_NAME_OFFSET..Self::LIST_NAME_OFFSET + Self::LIST_NAME_LEN];
         let n = name_bytes
             .iter()
             .position(|&b| b == 0)
@@ -206,7 +232,7 @@ impl PartyAttrs {
             None
         };
         let extra = PartyListExtra {
-            member_number: body[22],
+            member_number: body[Self::LIST_MEMBER_NUMBER_OFFSET],
             is_party_leader,
             is_alliance_leader,
             party_no,
@@ -215,6 +241,102 @@ impl PartyAttrs {
         Ok((attrs, extra))
     }
 }
+
+pin_s2c_offset!(
+    PartyAttrs::LIST_UNIQUE_NO_OFFSET,
+    lsb::UNIQUE_NO,
+    "GP_SERV_COMMAND_GROUP_LIST.UniqueNo"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_HP_OFFSET,
+    lsb::HP,
+    "GP_SERV_COMMAND_GROUP_LIST.Hp"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MP_OFFSET,
+    lsb::MP,
+    "GP_SERV_COMMAND_GROUP_LIST.Mp"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_TP_OFFSET,
+    lsb::TP,
+    "GP_SERV_COMMAND_GROUP_LIST.Tp"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_GATTR_OFFSET,
+    lsb::G_ATTR,
+    "GP_SERV_COMMAND_GROUP_LIST.GAttr"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_ACT_INDEX_OFFSET,
+    lsb::ACT_INDEX,
+    "GP_SERV_COMMAND_GROUP_LIST.ActIndex"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MEMBER_NUMBER_OFFSET,
+    lsb::MEMBER_NUMBER,
+    "GP_SERV_COMMAND_GROUP_LIST.MemberNumber"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MOGHOUSE_FLG_OFFSET,
+    lsb::MOGHOUSE_FLG,
+    "GP_SERV_COMMAND_GROUP_LIST.MoghouseFlg"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_KIND_OFFSET,
+    lsb::KIND,
+    "GP_SERV_COMMAND_GROUP_LIST.Kind"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_HPP_OFFSET,
+    lsb::HPP,
+    "GP_SERV_COMMAND_GROUP_LIST.Hpp"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MPP_OFFSET,
+    lsb::MPP,
+    "GP_SERV_COMMAND_GROUP_LIST.Mpp"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_ZONE_NO_OFFSET,
+    lsb::ZONE_NO,
+    "GP_SERV_COMMAND_GROUP_LIST.ZoneNo"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MJOB_NO_OFFSET,
+    lsb::MJOB_NO,
+    "GP_SERV_COMMAND_GROUP_LIST.mjob_no"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_MJOB_LV_OFFSET,
+    lsb::MJOB_LV,
+    "GP_SERV_COMMAND_GROUP_LIST.mjob_lv"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_SJOB_NO_OFFSET,
+    lsb::SJOB_NO,
+    "GP_SERV_COMMAND_GROUP_LIST.sjob_no"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_SJOB_LV_OFFSET,
+    lsb::SJOB_LV,
+    "GP_SERV_COMMAND_GROUP_LIST.sjob_lv"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_NAME_OFFSET,
+    lsb::NAME,
+    "GP_SERV_COMMAND_GROUP_LIST.Name"
+);
+pin_s2c_offset!(
+    PartyAttrs::LIST_NAME_LEN,
+    lsb::NAME_LEN,
+    "GP_SERV_COMMAND_GROUP_LIST.Name length"
+);
+pin_s2c_offset!(
+    PartyAttrs::GROUP_LIST_SIZE,
+    lsb::SIZE,
+    "GP_SERV_COMMAND_GROUP_LIST.PacketData size"
+);
 
 #[cfg(test)]
 mod party_attrs_tests {

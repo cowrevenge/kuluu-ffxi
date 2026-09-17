@@ -438,6 +438,7 @@ pub struct SessionState {
     pub stage: Stage,
     pub account_id: Option<u32>,
     pub char_id: Option<u32>,
+    pub self_pet_targid: Option<u16>,
     pub character: Option<String>,
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
@@ -564,9 +565,11 @@ pub struct SessionState {
     #[serde(default)]
     pub self_fishing: Option<SelfFishing>,
 
-    /// The server's animation byte for self, from 0x037 CHAR_STATUS. Self never
-    /// appears in the CHAR_PC stream that carries `Entity::animation` for other
-    /// players, so this is the only authority for our own rest state.
+    /// The server's animation byte for self. 0x037 CHAR_STATUS carries it
+    /// directly; the engage edge arrives as the 0x058 battle-target push, because
+    /// the server never sends its own 0x0E update (zone_entities.cpp
+    /// UpdateEntityPacket skips the entity's own player). Authority for our own
+    /// combat stance and rest state.
     #[serde(default)]
     pub self_server_status: u8,
 
@@ -971,6 +974,24 @@ pub struct DialogState {
     /// (`AgentCommand::CustomMenuRespond`), not an `EndEventChoice`.
     #[serde(default)]
     pub custom_menu: bool,
+    /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
+    /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
+    /// true so frames from an unknown producer stay cancellable.
+    #[serde(default = "cancel_armed_default")]
+    pub cancel_armed: bool,
+    /// The speaking entity's target index for this frame; `None` is a line the
+    /// bytecode prints with no speaker (retail renders those headerless).
+    #[serde(default)]
+    pub speaker_index: Option<u16>,
+    /// The line carried an item / key-item marker (`{Item:N}` / `{KeyItem:N}`)
+    /// before substitution: enternity-style auto-advance leaves such lines
+    /// manual (the addon's "sentences that contain items will not be skipped").
+    #[serde(default)]
+    pub contains_item: bool,
+}
+
+fn cancel_armed_default() -> bool {
+    true
 }
 
 /// Row-major grid overlay for a choice frame (`cells.len() == rows * cols`).
@@ -998,7 +1019,7 @@ pub struct DialogGridCell {
 /// Which entity a [`CutsceneCue`] names, resolved from the event VM's
 /// [`ffxi_event::ActorLookup`] against the running event's own entity (the VM
 /// deliberately leaves that to its host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutsceneActor {
     LocalPlayer,
@@ -1007,8 +1028,9 @@ pub enum CutsceneActor {
 
 /// One staging effect the running event script asked for — the renderer-facing
 /// half of [`ffxi_event::EventCue`]. `MusicVolume` is absent because 0x5D rides
-/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream. Not `Eq`:
+/// [`CutsceneCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CutsceneCue {
     ActorMotion {
         actor: CutsceneActor,
@@ -1029,24 +1051,140 @@ pub enum CutsceneCue {
     CameraLock {
         lock: bool,
     },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide {
+        hide: bool,
+    },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+    },
     Mount {
         target: CutsceneActor,
         status_event: u8,
         mount_id: Option<u16>,
     },
+    ExtScheduler {
+        motion: Option<kuluu_snapshot::ExtSchedulerMotion>,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: ffxi_event::FourCc,
+    },
+    /// Start zone-level scheduler routine `key` over the two actors (the
+    /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
+    /// `key` out of the current zone's own model DAT (`zone_id`).
+    ZoneScheduler {
+        key: ffxi_event::FourCc,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        zone_id: u16,
+    },
+    /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`; the
+    /// coordinates are the VM's event-coordinate integers.
+    ActorMove {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+        speed: f32,
+    },
+    /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
+    /// integers.
+    ActorPlace {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+    },
+    /// Face `actor` toward `heading`, in the VM's 4096-step full-circle units.
+    ActorFace {
+        actor: CutsceneActor,
+        heading: i32,
+    },
+    /// Turn `actor` to face `target`.
+    ActorLookAt {
+        actor: CutsceneActor,
+        target: CutsceneActor,
+    },
+    /// Stop the named routine on `actor`, or every routine when `key` is
+    /// None, and return it to idle.
+    ActorStopAction {
+        actor: CutsceneActor,
+        key: Option<ffxi_event::FourCc>,
+    },
+    /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
+    /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
+    /// table). The nameplate re-rasters from it until the event ends.
+    EntityName {
+        actor: CutsceneActor,
+        name: [u8; 16],
+    },
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name
-/// (vendor/server/src/map/enums/music_slot.h `MusicSlot`, ZoneDay..Fishing).
+/// (vendor/server/data/enums/music_slot.yaml `MusicSlot`, ZoneDay..Fishing).
 /// The 0x5D event opcode sets retail's single master music volume, so it is
 /// carried as the same volume on every slot.
 pub const MUSIC_SLOT_COUNT: u8 = 8;
 
+/// Wares an NPC shop can hold. The retail client's shop table is a fixed
+/// 80-entry array (research/XIClient GC_SHOP_SYS `Entries`), and the server
+/// fills it 19 rows at a time.
+pub const SHOP_TABLE_CAPACITY: usize = 80;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShopState {
+    /// `ShopItemOffsetIndex` of the most recent s2c 0x03C. Rows accumulate at
+    /// that offset rather than replacing the table, so a shop wider than one
+    /// packet lists in full.
     pub offset_index: u16,
     pub items: Vec<ShopItem>,
+    /// s2c 0x03E SHOP_OPEN arrived: the window is up even before any row does.
     pub opened: bool,
+
+    /// `ShopListNum` from s2c 0x03E — how many rows the server intends to send.
+    #[serde(default)]
+    pub expected_items: u16,
+
+    /// The final s2c 0x03C (Flags bit 0) has landed, so `items` is the whole
+    /// stock.
+    #[serde(default)]
+    pub complete: bool,
+
+    /// The NPC this shop belongs to — the entity the client last sent an
+    /// `ActionKind::Talk` at. 0 when nothing was resolved (a shop opened from a
+    /// server-driven menu rather than a trigger). The window closes when this
+    /// entity leaves range or the zone.
+    #[serde(default)]
+    pub vendor_id: u32,
+
+    /// The appraisal a SHOP_SELL_REQ came back with (s2c 0x03D), awaiting the
+    /// player's yes/no before the SHOP_SELL_SET that completes the sale.
+    #[serde(default)]
+    pub pending_sale: Option<ShopSale>,
+}
+
+/// A sale the server has priced but the player has not yet confirmed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShopSale {
+    /// LOC_INVENTORY slot being sold (`PropertyItemIndex`).
+    pub item_index: u8,
+    pub item_no: u16,
+    /// Per-unit price the server appraised the item at.
+    pub unit_price: u32,
+    pub count: u32,
+}
+
+impl ShopSale {
+    pub fn total_gil(&self) -> u32 {
+        self.unit_price.saturating_mul(self.count)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1220,10 @@ pub struct ItemSlot {
     pub charges_remaining: Option<u8>,
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub use_delay_end_vana_ts: Option<u32>,
+    #[serde(default)]
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1646,6 +1788,11 @@ impl SessionState {
                 }
                 self.entities.len() != before
             }
+            AgentEvent::OwnPetSynced { targid } => {
+                let changed = self.self_pet_targid != *targid;
+                self.self_pet_targid = *targid;
+                changed
+            }
             AgentEvent::NameExtractionMiss { miss } => {
                 self.name_misses.push_back(miss.clone());
                 while self.name_misses.len() > NAME_MISSES_CAP {
@@ -1891,10 +2038,24 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::TargetChanged { target_id } => {
+                // The server's engage truth for self: it never sends its own 0x0E
+                // update (zone_entities.cpp UpdateEntityPacket skips the entity's
+                // own player), so the 0x058 battle-target push is what flips this
+                // byte to ATTACK on an accepted engage and back to NONE on a
+                // disengage. A "wait longer" rejection sends no 0x058, so the byte
+                // stays NONE and the weapon never draws.
+                let status = match target_id {
+                    Some(_) => ffxi_proto::decode::animation::ATTACK,
+                    None => ffxi_proto::decode::animation::NONE,
+                };
+                let changed = self.self_server_status != status;
+                self.self_server_status = status;
+                changed
+            }
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }
-            | AgentEvent::TargetChanged { .. }
             | AgentEvent::TellReceived { .. }
             | AgentEvent::SceneSummary { .. }
             | AgentEvent::ActionStarted { .. }
@@ -2214,10 +2375,18 @@ impl SessionState {
             | AgentEvent::KeyRotated { .. }
             | AgentEvent::CutsceneStarted { .. }
             | AgentEvent::CutsceneCue { .. }
-            | AgentEvent::CutsceneEnded => false,
+            | AgentEvent::CutsceneEnded
+            | AgentEvent::MapOpen { .. }
+            | AgentEvent::MapMarkerPlaced { .. }
+            | AgentEvent::MapClosed => false,
             AgentEvent::EventDialog { dialog } => {
                 let changed = self.dialog.as_ref() != Some(dialog);
                 self.dialog = Some(dialog.clone());
+                changed
+            }
+            AgentEvent::DialogDismissed => {
+                let changed = self.dialog.is_some();
+                self.dialog = None;
                 changed
             }
             AgentEvent::ShopUpdated { shop } => {
@@ -2225,18 +2394,25 @@ impl SessionState {
                 self.shop = Some(shop.clone());
                 changed
             }
+            AgentEvent::ShopClosed => {
+                let changed = self.shop.is_some();
+                self.shop = None;
+                changed
+            }
+            // The appraisal that reaches `shop.pending_sale` rides the
+            // `ShopUpdated` that follows this event; this arm only echoes it.
             AgentEvent::ShopSellAppraisal {
                 price,
                 item_index,
                 count,
+                item_no: _,
             } => {
                 self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<shop>".into(),
                     text: format!(
-                        "Appraisal: slot {item_index} x{count} sells for {price} gil each \
-                         — `/sell confirm` to accept"
+                        "Appraisal: slot {item_index} x{count} sells for {price} gil each"
                     ),
                     server_ts: 0,
                 });
@@ -2303,10 +2479,12 @@ impl SessionState {
                 changed
             }
             AgentEvent::EventEnded => {
-                let changed = self.dialog.is_some() || self.shop.is_some();
+                // The shop is deliberately untouched: it is not event-scoped
+                // (a vendor runs `showText` + `sendMenu`, not `startEvent` —
+                // vendor/server/scripts/globals/shop.lua), and the server even
+                // refuses SHOP_BUY while InEvent. `ShopClosed` owns its close.
+                let changed = self.dialog.is_some();
                 self.dialog = None;
-
-                self.shop = None;
                 changed
             }
             AgentEvent::SelfServerStatus { status, mount_id } => {
@@ -2539,6 +2717,16 @@ pub enum AgentEvent {
         id: u32,
     },
 
+    /// 0x068 PetSync is sent to the pet's owner only, so every one we receive
+    /// describes our own pet: `Some` is the up variant carrying the pet's
+    /// targid, `None` the despawn shape. The server redirects PET-flagged
+    /// actions at this pet (vendor/server/src/map/ai/helpers/targetfind.cpp
+    /// CTargetFind::getValidTarget TARGET_PET).
+    OwnPetSynced {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        targid: Option<u16>,
+    },
+
     NameExtractionMiss {
         miss: NameExtractionMiss,
     },
@@ -2570,6 +2758,14 @@ pub enum AgentEvent {
         dialog: DialogState,
     },
 
+    /// The running event's displayed frame is down again without the session
+    /// ending: dismissal parked on a timed hold, or a pending tag awaits its
+    /// ack. Retail clears CliEventMessOpenFlag when the player answers, so the
+    /// box hides until the next [`AgentEvent::EventDialog`] reopens it —
+    /// otherwise the dismissed line (and its advance hint) lingers over camera
+    /// moves and holds.
+    DialogDismissed,
+
     /// An event session opened. Distinct from [`AgentEvent::EventStart`],
     /// which also fires for client-local menus that run no script.
     CutsceneStarted {
@@ -2591,11 +2787,23 @@ pub enum AgentEvent {
         shop: ShopState,
     },
 
+    /// The shop window went away. There is no close-shop packet — c2s 0x082
+    /// SHOP_REQ is deprecated and GM-only (research/XiPackets client 0x0082) —
+    /// so every close is a client decision: cancel, walking out of the vendor's
+    /// range, or a zone change.
+    ShopClosed,
+
     /// Server appraisal answer to a SHOP_SELL_REQ (s2c 0x03D): `price` is per unit.
+    /// `count` is the quantity the request asked for — LSB leaves the packet's
+    /// `Count` at 0 (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp sets
+    /// only Price/PropertyItemIndex/Type), so the session substitutes the
+    /// quantity it sent.
     ShopSellAppraisal {
         price: u32,
         item_index: u8,
         count: u32,
+        #[serde(default)]
+        item_no: u16,
     },
 
     StatusIconsUpdated {
@@ -2842,6 +3050,24 @@ pub enum AgentEvent {
         volume: u8,
     },
 
+    /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    MapOpen {
+        map_id: u16,
+        tutorial: bool,
+    },
+
+    /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
+    /// coordinates on zone `map_id`'s map.
+    MapMarkerPlaced {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+
+    /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    MapClosed,
+
     LevelUp {
         player_id: u32,
     },
@@ -2876,7 +3102,7 @@ pub enum AgentEvent {
     },
 
     /// The whole 0x037 animation byte for self (`ANIMATION_*` in
-    /// vendor/server/src/map/entities/baseentity.h). The server owns this — it
+    /// vendor/server/data/enums/animation.yaml). The server owns this — it
     /// starts and ends resting on its own (damage, status effects) — so the
     /// renderer reconciles its optimistic local stance against it.
     SelfServerStatus {
@@ -3180,6 +3406,15 @@ pub enum AgentCommand {
         sub_area: u16,
     },
 
+    /// The renderer finished (or could not start) the 0x2C SCHEDULOR routine
+    /// this `(actor, key)` named: releases the event VM's pending hold on it.
+    /// Carries the wire actor the cue named, so the session matches the same
+    /// value it resolved the cue with.
+    CutsceneMotionDone {
+        actor: CutsceneActor,
+        key: ffxi_event::FourCc,
+    },
+
     EndEvent,
 
     EndEventChoice {
@@ -3378,6 +3613,18 @@ pub enum AgentCommand {
 
     /// Confirm the pending sell appraisal (0x085 SHOP_SELL_SET).
     ShopSellConfirm,
+
+    /// Walk back from an appraised sale without completing it. Sends nothing:
+    /// the server parks the item in its shop container on SHOP_SELL_REQ and
+    /// only moves it on SHOP_SELL_SET
+    /// (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp process), so
+    /// declining is just the client dropping the quote.
+    ShopSellCancel,
+
+    /// Drop the open shop window. Sends nothing — the shop has no close packet
+    /// (research/XiPackets client 0x0082 is deprecated and GM-only), so this is
+    /// purely the client forgetting the stock it was shown.
+    CloseShop,
 
     CheckTarget {
         target_id: u32,
@@ -3851,6 +4098,37 @@ impl ActionKind {
             ActionKind::Blockaid { .. } => 0x18,
             ActionKind::MonsterSkill { .. } => 0x19,
             ActionKind::Mount { .. } => 0x1A,
+        }
+    }
+
+    /// The action ids vendor/server/src/map/packets/c2s/0x01a_action.cpp
+    /// GP_CLI_COMMAND_ACTION::validate refuses with BlockedState::InEvent.
+    /// Exhaustive on purpose: a new action must state its answer.
+    pub fn blocked_in_event(&self) -> bool {
+        match self {
+            ActionKind::Attack
+            | ActionKind::CastMagic { .. }
+            | ActionKind::JobAbility { .. }
+            | ActionKind::Shoot
+            | ActionKind::Weaponskill { .. }
+            | ActionKind::MonsterSkill { .. }
+            | ActionKind::Fish
+            | ActionKind::Mount { .. } => true,
+            ActionKind::Talk
+            | ActionKind::AttackOff
+            | ActionKind::Help
+            | ActionKind::HomepointMenu { .. }
+            | ActionKind::Assist
+            | ActionKind::RaiseMenu { .. }
+            | ActionKind::ChangeTarget
+            | ActionKind::ChocoboDig
+            | ActionKind::Dismount
+            | ActionKind::TractorMenu { .. }
+            | ActionKind::SendResRdy
+            | ActionKind::Quarry
+            | ActionKind::Sprint
+            | ActionKind::Scout
+            | ActionKind::Blockaid { .. } => false,
         }
     }
 

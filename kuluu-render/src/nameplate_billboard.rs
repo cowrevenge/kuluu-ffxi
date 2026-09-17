@@ -92,6 +92,19 @@ const HP_BAR_TOP_GAP_PX: u32 = 8;
 
 const HP_BAR_WIDTH_FRACTION: f32 = 1.0;
 
+// The frustum test centers on the head anchor, not the plate's own quad
+// extent, and only gates how often the raster key is rechecked (never
+// whether the plate draws) — this radius errs generously above the plate's
+// own half-extent so a plate that is genuinely visible is never judged
+// off-screen.
+const ON_SCREEN_MARGIN_YALMS: f32 = 5.0;
+
+// Bounds worst-case raster-key staleness for a plate outside the view
+// frustum to about half a second; irrelevant to what the player can see
+// since the frustum test itself is recomputed every frame regardless of this
+// throttle, so a plate that turns on-screen is rechecked that same frame.
+const OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES: u32 = RETAIL_FPS as u32 / 2;
+
 #[derive(Resource)]
 pub struct BillboardFont(pub Arc<FontArc>);
 
@@ -137,6 +150,10 @@ pub struct NameplateBillboard {
     pub rastered: Option<RasterKey>,
 
     pub last_alpha: f32,
+
+    /// `pulse_frame` at or after which an off-screen plate's raster key is
+    /// next allowed to be rechecked; see `OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES`.
+    pub next_key_check_frame: u32,
 }
 
 /// Per-frame billboard visibility breakdown for the Debug menu "Nameplate
@@ -179,22 +196,11 @@ pub fn spawn_nameplate_billboard(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    font: &FontArc,
     entity_id: u32,
     kind: EntityKind,
     name: &str,
-    color: Color,
 ) -> Entity {
-    let rgba = color_to_rgba8(color);
-
-    let raster = rasterize_plate(font, name, NAME_PX, rgba, None, &[], rgba, None);
-    let aspect = (
-        raster.image.width(),
-        raster.image.height(),
-        raster.text_center_y_px,
-    );
-    let image_handle = images.add(raster.image);
+    let image_handle = bevy::image::TRANSPARENT_IMAGE_HANDLE;
 
     let mesh_handle = meshes.add(Rectangle::new(1.0, 1.0));
 
@@ -225,11 +231,12 @@ pub fn spawn_nameplate_billboard(
                 base_name: name.to_string(),
                 rastered: None,
                 last_alpha: 1.0,
+                next_key_check_frame: 0,
             },
             BillboardAspect {
-                width: aspect.0,
-                height: aspect.1,
-                text_center_y_px: aspect.2,
+                width: 1,
+                height: 1,
+                text_center_y_px: 0.0,
             },
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
@@ -248,6 +255,8 @@ pub struct RasterInputs<'w> {
     pub font: Res<'w, BillboardFont>,
     pub name_colors: Res<'w, crate::nameplate_color::NameColorTable>,
     pub icons: Res<'w, crate::nameplate_icons::NameplateIcons>,
+    /// A running event's 0xB5 renames; win over the record's name while set.
+    pub name_overrides: Res<'w, crate::cutscene::EventNameOverrides>,
 }
 
 pub fn is_self_billboard(entity_id: u32, self_char_id: Option<u32>) -> bool {
@@ -268,7 +277,10 @@ pub fn update_nameplate_billboards_system(
     camera_mode: Res<CameraMode>,
     time: Res<Time>,
     target: Res<Target>,
-    cam_q: Query<(&Transform, &Projection), (With<OperatorCamera>, Without<NameplateBillboard>)>,
+    cam_q: Query<
+        (&Transform, &Projection, &bevy::camera::primitives::Frustum),
+        (With<OperatorCamera>, Without<NameplateBillboard>),
+    >,
     world_q: Query<
         (
             &Transform,
@@ -295,7 +307,7 @@ pub fn update_nameplate_billboards_system(
     table: Res<crate::entity_table::EntityTable>,
     mut missing_record_warned: Local<std::collections::HashSet<u32>>,
 ) {
-    let Ok((cam_t, projection)) = cam_q.single() else {
+    let Ok((cam_t, projection, frustum)) = cam_q.single() else {
         return;
     };
     let Projection::Perspective(perspective) = projection else {
@@ -334,29 +346,30 @@ pub fn update_nameplate_billboards_system(
             if have.contains(&id) || !pos_by_id.get(&id).is_some_and(Option::is_some) {
                 continue;
             }
-            let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
+            // A running event's 0xB5 rename (EventNameOverrides) wins over the
+            // record's name; with neither there is no plate yet — this pass
+            // re-runs every frame, so a name that arrives later still gets one.
+            let name = raster
+                .name_overrides
+                .get(id)
+                .map(|n| n.to_string())
+                .or_else(|| {
+                    rec.entity
+                        .name
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                });
+            let Some(name) = name else {
                 continue;
             };
-            // The record's kind/status are known right now, so the first bake
-            // already carries its type colour (mob yellow / npc green / pc
-            // white) — no white placeholder waiting on a DAT read. A later
-            // table load or status change re-rasters via the key comparison.
-            let ctx = crate::nameplate_color::SelfContext {
-                self_id: self_char_id,
-                party: &state.snapshot.party,
-            };
-            let color = crate::nameplate_color::name_color_choice(&rec.entity, ctx)
-                .resolve(&raster.name_colors);
             spawn_nameplate_billboard(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
-                &mut images,
-                &raster.font.0,
                 id,
                 rec.entity.kind,
-                name,
-                color,
+                &name,
             );
             have.insert(id);
         }
@@ -428,7 +441,9 @@ pub fn update_nameplate_billboards_system(
         // fact about the actor, not about where the camera points; keeping it
         // view-independent means a plate is already correct the frame it
         // first becomes visible.
-        match legibility_scale_for_view_depth(view_depth) {
+        let legible = legibility_scale_for_view_depth(view_depth);
+        let mut on_screen = false;
+        match legible {
             None => {
                 hidden_depth += 1;
                 *vis = Visibility::Hidden;
@@ -456,6 +471,14 @@ pub fn update_nameplate_billboards_system(
                 *vis = Visibility::Visible;
                 visible_n += 1;
 
+                on_screen = frustum.intersects_sphere(
+                    &bevy::camera::primitives::Sphere {
+                        center: head_pos.into(),
+                        radius: ON_SCREEN_MARGIN_YALMS,
+                    },
+                    true,
+                );
+
                 // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
                 // last_alpha guard bounds writes to 30/s) and runs every frame;
                 // the live-key re-raster below does too -- neither waits on a
@@ -478,11 +501,30 @@ pub fn update_nameplate_billboards_system(
             }
         }
 
-        // The key is recomputed from LIVE table facts every frame — an hp
-        // tick, a claim flip or the colour-table load all re-raster on the
-        // next frame without waiting for a dirty rebuild. The name lives
-        // on the component, not the record: a later update can drop it and
-        // the plate must keep the name it spawned with.
+        if np.rastered.is_none() && !on_screen {
+            continue;
+        }
+
+        // A plate outside the view frustum (but in front of the camera, past
+        // the view-depth gate above) only rechecks its raster key once every
+        // OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES: the raster is the hot path
+        // in a crowd, and nothing off-screen can show a stale bake. A plate
+        // behind the view-depth gate (hidden_depth) stays unthrottled per the
+        // comment above it.
+        let due_for_check =
+            legible.is_none() || on_screen || np.next_key_check_frame <= pulse_frame;
+        if !due_for_check {
+            continue;
+        }
+        if legible.is_some() && !on_screen {
+            np.next_key_check_frame = pulse_frame + OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES;
+        }
+
+        // The key is recomputed from LIVE table facts every checked frame —
+        // an hp tick, a claim flip or the colour-table load all re-raster on
+        // the next checked frame without waiting for a dirty rebuild. The
+        // name lives on the component, not the record: a later update can
+        // drop it and the plate must keep the name it spawned with.
         // Plates are spawned from this same table (the ensure pass above), so
         // a live plate with no record is anomalous — surface it instead of
         // silently holding the last raster. Deduped per id: a despawn race can
@@ -502,6 +544,25 @@ pub fn update_nameplate_billboards_system(
             party: &state.snapshot.party,
         };
         let key = raster_key_for(&rec.entity, ctx, &raster.name_colors, settings.mob_hp_under);
+        // A 0xB5 rename overrides the record's name for the event's duration;
+        // when the override clears at session end the record's name returns,
+        // and with neither present the plate keeps the name it spawned with
+        // (the "name lives on the component" contract below). A move of
+        // `base_name` breaks `matches` and re-rasters on this frame.
+        let effective_name = raster
+            .name_overrides
+            .get(np.entity_id)
+            .map(|n| n.to_string())
+            .or_else(|| {
+                rec.entity
+                    .name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+        if let Some(name) = effective_name {
+            np.base_name = name;
+        }
         if np
             .rastered
             .as_ref()
@@ -531,6 +592,13 @@ pub fn update_nameplate_billboards_system(
                 );
             }
         }
+        tracing::debug!(target: "nameplate_raster", id = np.entity_id,
+            first = np.rastered.is_none(),
+            color = np.rastered.as_ref().is_some_and(|done| done.color != want.color),
+            hp = np.rastered.as_ref().is_some_and(|done| done.hp != want.hp),
+            markers = np.rastered.as_ref().is_some_and(|done| done.markers != want.markers),
+            tint = np.rastered.as_ref().is_some_and(|done| done.linkshell_tint != want.linkshell_tint),
+            "nameplate raster inputs changed");
         let Some(mut mat_data) = materials.get_mut(&mat.0) else {
             continue;
         };
@@ -561,7 +629,10 @@ pub fn update_nameplate_billboards_system(
         // PrepareBindGroups, so no stale-plate beat. The displaced texture is
         // unreferenced after this swap and bevy GCs it.
         mat_data.base_color_texture = Some(images.add(new_img.image));
-        np.rastered = Some(want.clone());
+        if np.rastered.is_none() {
+            *vis = Visibility::Hidden;
+        }
+        np.rastered = Some(want);
     }
 
     dbg_out.total = total;
@@ -600,12 +671,18 @@ fn raster_key_for(
         let _ = show_mob_hp;
         None
     };
+    let markers = crate::nameplate_marker::nameplate_markers(ent);
+    let linkshell_tint = if markers.contains(&crate::nameplate_marker::glyph::LINKSHELL) {
+        color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags))
+    } else {
+        [0; 4]
+    };
     RasterKey {
         text: String::new(),
         color: color_to_rgba8(color),
         hp,
-        markers: crate::nameplate_marker::nameplate_markers(ent),
-        linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
+        markers,
+        linkshell_tint,
     }
 }
 
@@ -1439,6 +1516,33 @@ mod tests {
     }
 
     #[test]
+    fn walking_and_unused_pearl_tint_do_not_change_raster_pixels() {
+        let colors = crate::nameplate_color::NameColorTable::default();
+        let key = |entity: &kuluu_snapshot::Entity| {
+            raster_key_for(
+                entity,
+                crate::nameplate_color::SelfContext {
+                    self_id: None,
+                    party: &[],
+                },
+                &colors,
+                false,
+            )
+        };
+        let mut entity = keyed_entity(0, Some(100));
+        entity.kind = EntityKind::Pc;
+        let initial = key(&entity);
+        entity.pos.x += 1.0;
+        entity.heading = 10;
+        entity.char_flags.linkshell_color = [10, 20, 30];
+        assert_eq!(initial, key(&entity));
+        entity.char_flags.linkshell = true;
+        let pearl = key(&entity);
+        entity.char_flags.linkshell_color = [30, 20, 10];
+        assert_ne!(pearl, key(&entity));
+    }
+
+    #[test]
     fn raster_key_ignores_status_flips_but_tracks_death() {
         let colors = crate::nameplate_color::NameColorTable::default();
         let key = |e: &kuluu_snapshot::Entity| {
@@ -1477,11 +1581,13 @@ mod tests {
             .init_resource::<crate::nameplate_icons::NameplateIcons>()
             .init_resource::<NameplateBillboardDebug>()
             .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::cutscene::EventNameOverrides>()
             .add_systems(Update, update_nameplate_billboards_system);
         app.world_mut().spawn((
             OperatorCamera,
             Transform::default(),
             Projection::Perspective(PerspectiveProjection::default()),
+            test_frustum(Transform::default()),
         ));
         let actor = app
             .world_mut()
@@ -1503,6 +1609,7 @@ mod tests {
                     base_name: "Damselfly".into(),
                     rastered: None,
                     last_alpha: 1.0,
+                    next_key_check_frame: 0,
                 },
                 BillboardAspect {
                     width: 130,
@@ -1553,6 +1660,208 @@ mod tests {
         app.world_mut().despawn(actor);
         app.update();
         assert!(app.world().get_entity(plate).is_err());
+    }
+
+    fn test_frustum(transform: Transform) -> bevy::camera::primitives::Frustum {
+        use bevy::camera::{CameraProjection, PerspectiveProjection};
+        PerspectiveProjection::default().compute_frustum(&GlobalTransform::from(transform))
+    }
+
+    /// A minimal app wired the same way as
+    /// [`nameplate_system_hides_during_loading_and_restores_without_a_snapshot`],
+    /// plus a real `EntityTable` record and a real `StandardMaterial` asset so
+    /// re-raster is observable as a texture-handle change.
+    fn throttle_test_app(actor_pos: Vec3, initial_hp_pct: Option<u8>) -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<crate::graphics::settings::GraphicsSettings>()
+            .init_resource::<CameraMode>()
+            .init_resource::<Time>()
+            .init_resource::<Target>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<BillboardFont>()
+            .init_resource::<crate::nameplate_color::NameColorTable>()
+            .init_resource::<crate::nameplate_icons::NameplateIcons>()
+            .init_resource::<NameplateBillboardDebug>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::cutscene::EventNameOverrides>()
+            .add_systems(Update, update_nameplate_billboards_system);
+        app.world_mut().spawn((
+            OperatorCamera,
+            Transform::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+            test_frustum(Transform::default()),
+        ));
+        app.world_mut().spawn((
+            Transform::from_translation(actor_pos),
+            WorldEntity {
+                id: 1,
+                act_index: 1,
+                kind: EntityKind::Mob,
+            },
+            NameplateLocator {
+                offset: Some(Vec3::ZERO),
+                root_attached: false,
+                model_scale: 1.0,
+            },
+        ));
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let plate = app
+            .world_mut()
+            .spawn((
+                NameplateBillboard {
+                    entity_id: 1,
+                    kind: EntityKind::Mob,
+                    base_name: "Damselfly".into(),
+                    rastered: None,
+                    last_alpha: 1.0,
+                    next_key_check_frame: 0,
+                },
+                BillboardAspect {
+                    width: 130,
+                    height: 130,
+                    text_center_y_px: 53.0,
+                },
+                Transform::default(),
+                Visibility::Visible,
+                MeshMaterial3d(material),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, initial_hp_pct));
+        (app, plate)
+    }
+
+    fn move_test_actor(app: &mut App, position: Vec3) {
+        let world = app.world_mut();
+        let mut actors = world.query_filtered::<&mut Transform, With<WorldEntity>>();
+        actors.single_mut(world).unwrap().translation = position;
+    }
+
+    #[test]
+    fn first_raster_waits_for_visibility_and_uses_latest_facts() {
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, 10.0), Some(100));
+        app.update();
+        assert!(base_color_texture_of(&app, plate).is_none());
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, Some(0)));
+        move_test_actor(&mut app, Vec3::new(0.0, 0.0, -10.0));
+        advance_one_frame(&mut app);
+        let first = base_color_texture_of(&app, plate);
+        assert!(first.is_some());
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        advance_one_frame(&mut app);
+        assert_eq!(base_color_texture_of(&app, plate), first);
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+    }
+
+    fn base_color_texture_of(app: &App, plate: Entity) -> Option<Handle<Image>> {
+        let mat_handle = app.world().get::<MeshMaterial3d<StandardMaterial>>(plate)?;
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&mat_handle.0)?
+            .base_color_texture
+            .clone()
+    }
+
+    fn advance_one_frame(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / RETAIL_FPS));
+        app.update();
+    }
+
+    /// An actor well outside the camera's view frustum (but still in front of
+    /// it, past the view-depth gate) holds its last raster across a key change
+    /// until `OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES` elapses, then catches up.
+    #[test]
+    fn offscreen_key_check_is_throttled_then_catches_up() {
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, -10.0), Some(100));
+        app.update();
+        move_test_actor(&mut app, Vec3::new(20.0, 0.0, -10.0));
+        app.update();
+        let baseline = base_color_texture_of(&app, plate);
+        assert!(baseline.is_some(), "the plate was rastered while visible");
+
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, Some(0)));
+        for _ in 0..(OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES - 1) {
+            advance_one_frame(&mut app);
+        }
+        assert_eq!(
+            base_color_texture_of(&app, plate),
+            baseline,
+            "an off-screen plate must hold its bake until the throttle window elapses"
+        );
+
+        advance_one_frame(&mut app);
+        assert_ne!(
+            base_color_texture_of(&app, plate),
+            baseline,
+            "an off-screen plate must still catch up once the throttle window elapses"
+        );
+    }
+
+    /// An actor directly in the camera's view is never throttled: a key change
+    /// re-rasters on the very next frame regardless of `next_key_check_frame`.
+    #[test]
+    fn onscreen_plate_reraster_is_never_throttled() {
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, -10.0), Some(100));
+        app.update();
+        let baseline = base_color_texture_of(&app, plate);
+        assert!(baseline.is_some());
+
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, Some(0)));
+        advance_one_frame(&mut app);
+        assert_ne!(
+            base_color_texture_of(&app, plate),
+            baseline,
+            "an on-screen plate must re-raster the very next frame"
+        );
+    }
+
+    /// An actor behind the camera's view-depth gate (`hidden_depth`) keeps
+    /// rechecking its raster key every frame, per the pre-existing
+    /// view-independent invariant — the throttle applies only to the
+    /// in-front-but-off-screen case.
+    #[test]
+    fn hidden_depth_plate_still_checks_every_frame() {
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, -10.0), Some(100));
+        app.update();
+        move_test_actor(&mut app, Vec3::new(0.0, 0.0, 10.0));
+        app.update();
+        let baseline = base_color_texture_of(&app, plate);
+        assert!(baseline.is_some());
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, Some(0)));
+        advance_one_frame(&mut app);
+        assert_ne!(
+            base_color_texture_of(&app, plate),
+            baseline,
+            "a hidden_depth plate must re-raster the very next frame"
+        );
     }
 
     #[test]

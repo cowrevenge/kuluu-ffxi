@@ -12,6 +12,7 @@ use bevy::ui_widgets::{Activate, ValueChange};
 use crate::launcher_store::{self, keyring_account_key, KEYRING_SERVICE};
 use crate::secret_store::SecretStore;
 
+use super::brand::{spawn_brand_mark, BrandMark};
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_breadcrumb,
     spawn_settings_close_titlebar, Crumb, DefaultFocusTarget, ScrollRegion,
@@ -47,8 +48,9 @@ pub(super) fn spawn_login_ui(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    mark: Res<BrandMark>,
 ) {
-    build_login_ui(&mut commands, &server, &form, &server_form, &version);
+    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
 }
 
 pub(super) fn rebuild_login_ui_system(
@@ -59,6 +61,7 @@ pub(super) fn rebuild_login_ui_system(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    mark: Res<BrandMark>,
 ) {
     if !dirty.0 {
         return;
@@ -67,7 +70,7 @@ pub(super) fn rebuild_login_ui_system(
     for e in existing.iter() {
         commands.entity(e).despawn();
     }
-    build_login_ui(&mut commands, &server, &form, &server_form, &version);
+    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
 }
 
 pub(super) fn mark_dirty_on_version_change(
@@ -85,6 +88,7 @@ fn build_login_ui(
     form: &LoginForm,
     server_form: &ServerSelectForm,
     version: &ServerVersionStatus,
+    mark: &BrandMark,
 ) {
     let user_initial = form.user.clone();
     let pass_initial = form.pass.clone();
@@ -95,6 +99,7 @@ fn build_login_ui(
     commands
         .spawn((LoginUiRoot, screen_root()))
         .with_children(|root| {
+            spawn_brand_mark(root, mark);
             spawn_breadcrumb(root, server, &[Crumb::Sign(None)]);
             root.spawn(panel_node(560.0)).with_children(|panel| {
                 spawn_settings_close_titlebar(

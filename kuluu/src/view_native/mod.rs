@@ -1,7 +1,12 @@
+mod app_icon;
+pub mod auto_target;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
+pub mod command_surface;
+pub mod cutscene_motion_done;
 pub mod debug_heights;
+pub mod engage;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
 mod gamepad_input;
@@ -254,12 +259,20 @@ pub(crate) fn insert_dat_roots(
     sink.put(kuluu_render::scheduler_runtime::ActionDatRoot(
         dat_root.clone(),
     ));
+    sink.put(kuluu_render::ffxi_actor_render::ActorDatRoot(
+        dat_root.clone(),
+    ));
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
     // Same latch on the map DLL: without this the map calibration and the
     // Change Map catalog keep answering from the previous install (kuluu-u8p1).
     sink.put(kuluu_render::minimap::retail::MapCalibration::default());
+    // Which slash commands exist is the new install's answer, not the previous
+    // one's: a server shipping a patched client renames or drops them.
+    sink.put(command_surface::CommandSurface::from_dat_root(
+        dat_root.as_deref(),
+    ));
     sink.put(DatRootRes(dat_root));
 }
 
@@ -363,6 +376,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("kuluu — {server}"),
+            name: Some(app_icon::APP_ID.into()),
             resolution: resolution.into(),
             mode: window_mode,
             // Lets gamescope surface the Steam Deck's on-screen keyboard when a
@@ -392,6 +406,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+    app_icon::install(&mut app);
     app.add_plugins(walker::WalkerPlugin);
     app.add_systems(
         Update,
@@ -629,7 +644,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         OnExit(AppPhase::InGame),
         (
             despawn_ingame_entities,
+            kuluu_render::hud::chat_panel::reset_chat_session,
             drain_entity_prediction,
+            drain_motion_probe,
             drain_entity_table,
             input::reset_local_movement,
             kuluu_render::camera::reset_camera_follow,
@@ -696,8 +713,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
 
     app.init_resource::<input::TabCycleStack>();
-    app.init_resource::<input::SelectTargetMode>();
     app.init_resource::<key_items::KeyItemsViewed>();
+    app.init_resource::<auto_target::AutoAttack>();
 
     app.insert_resource(crate::padbinds_store::load_or_default());
     app.init_resource::<gamepad_input::PrimaryGamepad>();
@@ -731,14 +748,19 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::delivery_mode_sync_system,
             text_input::bazaar_mode_sync_system,
             text_input::auction_mode_sync_system,
+            text_input::event_map_sync_system,
+            text_input::shop_mode_sync_system,
             input::handle_input_system,
             text_input::text_input_system,
+            text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,
             input::dispatch_target_change_system,
+            input::engage_locks_target_system,
             input::sync_target_lock_system,
             input::tab_cycle_invalidate_system,
             key_items::key_items_mark_seen_system,
             sub_area_report::report_sub_area_system,
+            cutscene_motion_done::report_cutscene_motion_done_system,
         )
             .chain()
             .after(kuluu_render::chase_camera_system)
@@ -774,6 +796,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         input::reset_interaction_flags_on_zone_change.run_if(in_state(AppPhase::InGame)),
     );
 
+    // After the input chain: on the frame auto_clear drops a dead target,
+    // dispatch_target_change_system has already queued the deselect 0x01A(0);
+    // the auto-retarget must queue behind it, or the deselect lands second
+    // and undoes the switch.
+    app.add_systems(
+        Update,
+        auto_target::auto_attack_retarget_system
+            .after(cutscene_motion_done::report_cutscene_motion_done_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
     app.add_systems(Update, crate::graphics_store::persist_graphics_on_change);
     app.add_systems(Update, crate::audio_store::persist_audio_on_change);
     app.add_systems(Update, crate::marker_store::sync_markers);
@@ -801,6 +834,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         Update,
         camera_collision::resolve_camera
             .before(kuluu_render::nameplate_billboard::update_nameplate_billboards_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
+    // The cutscene's camera route owns the operator camera while it runs: after resolve_camera,
+    // so its transform and focal writes win any same-frame collision push.
+    app.add_systems(
+        Update,
+        kuluu_render::cutscene_camera::advance_cutscene_camera_task
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 
@@ -868,8 +910,16 @@ fn arm_exit_watchdog_on_appexit(mut exits: MessageReader<AppExit>) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisconnectKind {
+    /// A clean `/logout`: the account session is retained, so the launcher
+    /// resumes the character list.
     Clean,
 
+    /// A clean `/shutdown`: the client closes rather than returning to the
+    /// launcher front (issue #156 differentiated the destinations; Kuluu's
+    /// launcher front is a login screen, so shutdown exits the app instead).
+    Shutdown,
+
+    /// A forced / unexpected disconnect: the launcher front with an error toast.
     Forced,
 }
 
@@ -881,6 +931,8 @@ pub(crate) struct ResumeCharListAfterLogout;
 fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
     if reason.starts_with("server logout state=") {
         DisconnectKind::Clean
+    } else if reason.starts_with("server shutdown state=") {
+        DisconnectKind::Shutdown
     } else {
         DisconnectKind::Forced
     }
@@ -901,6 +953,8 @@ fn despawn_ingame_entities(
         ResMut<kuluu_render::zone_point_lights::ZonePointLights>,
         ResMut<kuluu_render::zone_point_lights::ActiveSceneLights>,
         ResMut<kuluu_render::zone_doors::ZoneDoors>,
+        ResMut<kuluu_render::ffxi_actor_render::ActorLoadInFlight>,
+        ResMut<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>,
     ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
@@ -933,6 +987,8 @@ fn despawn_ingame_entities(
     *zone_geom.4 = kuluu_render::zone_point_lights::ZonePointLights::default();
     *zone_geom.5 = kuluu_render::zone_point_lights::ActiveSceneLights::default();
     *zone_geom.6 = kuluu_render::zone_doors::ZoneDoors::default();
+    *zone_geom.7 = kuluu_render::ffxi_actor_render::ActorLoadInFlight::default();
+    *zone_geom.8 = kuluu_render::ffxi_zone_material::ZoneGlobalLighting::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -984,6 +1040,10 @@ fn drain_entity_prediction(mut prediction: ResMut<kuluu_render::combat_stance::E
     prediction.by_id.clear();
 }
 
+fn drain_motion_probe(mut probe: ResMut<kuluu_render::combat_stance::MotionProbe>) {
+    probe.drain();
+}
+
 fn drain_mzb_load_state(
     mut mzb_in_flight: ResMut<kuluu_render::dat_mzb::LoadMzbInFlight>,
     mut zone_geom_cache: ResMut<kuluu_render::dat_mzb::ZoneGeomCache>,
@@ -1027,7 +1087,11 @@ fn drain_mmb_load_state(
 // Particle generators hold mesh-entity handles in a resource Vec; the entities are despawned by
 // despawn_ingame_entities (they carry InGameEntity), but the Vec itself must be cleared so it
 // doesn't leak stale generators across a zone change.
-fn drain_particle_simulator(mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>) {
+fn drain_particle_simulator(
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut zone_particles: ResMut<kuluu_render::zone_particles::ZoneParticles>,
+) {
+    *zone_particles = default();
     let dropped = sim.drain_entities().len();
     if dropped > 0 {
         tracing::info!(dropped, "OnExit(InGame): drained live particle generators");
@@ -1050,6 +1114,7 @@ fn return_to_launcher_on_disconnect(
     events: Option<Res<EventLog>>,
     mut err: ResMut<LoginErrorMsg>,
     mut next_phase: ResMut<NextState<AppPhase>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     let Some(scene) = scene else { return };
     if scene.snapshot.stage != WireStage::Disconnected {
@@ -1069,8 +1134,17 @@ fn return_to_launcher_on_disconnect(
     if matches!(kind, DisconnectKind::Forced) && err.0.is_empty() {
         err.0 = "Disconnected from server. Press Esc to return to login.".into();
     }
-    if matches!(kind, DisconnectKind::Clean) {
-        commands.insert_resource(ResumeCharListAfterLogout);
+    match kind {
+        DisconnectKind::Clean => {
+            commands.insert_resource(ResumeCharListAfterLogout);
+        }
+        // /shutdown closes the client: the state transition still runs so the
+        // OnExit(InGame) teardown fires, then the AppExit the winit loop
+        // observes after this frame ends the process.
+        DisconnectKind::Shutdown => {
+            exit.write_default();
+        }
+        DisconnectKind::Forced => {}
     }
     tracing::info!(?kind, "disconnect-watcher: returning AppPhase to Launcher");
     next_phase.set(AppPhase::Launcher);
@@ -1125,6 +1199,35 @@ mod dat_root_wiring_tests {
             "every consumer reads one install"
         );
     }
+
+    #[test]
+    fn insert_dat_roots_hands_the_actor_loader_the_shared_root() {
+        let mut app = App::new();
+        insert_dat_roots(&mut app, None);
+        assert!(
+            app.world()
+                .get_resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+                .is_some(),
+            "ActorDatRoot must be wired even when there is no install"
+        );
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let root = Arc::new(root);
+        insert_dat_roots(&mut app, Some(root.clone()));
+
+        let actor_root = app
+            .world()
+            .resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+            .0
+            .clone()
+            .expect("the wired root reaches the actor loader");
+        assert!(
+            Arc::ptr_eq(&actor_root, &root),
+            "load_pc/load_npc must share the launcher's root, not open their own"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1144,6 +1247,21 @@ mod disconnect_tests {
     }
 
     #[test]
+    fn server_shutdown_classified_shutdown() {
+        // The /shutdown flavor must classify as Shutdown, distinct from Clean:
+        // the watcher closes the client on Shutdown and resumes the character
+        // list only on Clean.
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=1"),
+            DisconnectKind::Shutdown
+        );
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=2"),
+            DisconnectKind::Shutdown
+        );
+    }
+
+    #[test]
     fn timeout_kick_agent_classified_forced() {
         assert_eq!(
             classify_disconnect_reason("no server packets for 60s"),
@@ -1154,6 +1272,93 @@ mod disconnect_tests {
             DisconnectKind::Forced
         );
         assert_eq!(classify_disconnect_reason(""), DisconnectKind::Forced);
+    }
+
+    #[cfg(test)]
+    mod watcher {
+        use super::super::{
+            return_to_launcher_on_disconnect, AppPhase, LoginErrorMsg, ResumeCharListAfterLogout,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        use kuluu_render::{EventLog, SceneState};
+        use kuluu_snapshot::{Stage, ViewerEvent};
+
+        fn watcher_app(reason: &str) -> App {
+            let mut app = App::new();
+            let mut scene = SceneState::default();
+            scene.snapshot.stage = Stage::Disconnected;
+            app.insert_resource(scene);
+            let mut log = EventLog::default();
+            log.recent.push_back(ViewerEvent::Disconnected {
+                reason: reason.into(),
+            });
+            app.insert_resource(log);
+            app.init_resource::<LoginErrorMsg>();
+            app.insert_resource(NextState::<AppPhase>::default());
+            app
+        }
+
+        #[test]
+        fn shutdown_disconnect_closes_the_client() {
+            let mut app = watcher_app("server shutdown state=1");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                1,
+                "/shutdown must close the client"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_none(),
+                "/shutdown must not resume the character list"
+            );
+        }
+
+        #[test]
+        fn logout_disconnect_resumes_the_character_list() {
+            let mut app = watcher_app("server logout state=1");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                0,
+                "/logout must keep the app open"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_some(),
+                "/logout must resume the character list"
+            );
+        }
+
+        #[test]
+        fn forced_disconnect_stays_on_the_launcher_front() {
+            let mut app = watcher_app("no server packets for 60s");
+            app.world_mut()
+                .run_system_once(return_to_launcher_on_disconnect)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<Messages<AppExit>>().len(),
+                0,
+                "a forced disconnect must not close the client"
+            );
+            assert!(
+                app.world()
+                    .get_resource::<ResumeCharListAfterLogout>()
+                    .is_none(),
+                "a forced disconnect must not resume the character list"
+            );
+            assert!(
+                !app.world().resource::<LoginErrorMsg>().0.is_empty(),
+                "a forced disconnect must keep its error toast"
+            );
+        }
     }
 }
 
@@ -1197,6 +1402,8 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::zone_point_lights::ZonePointLights>();
         world.init_resource::<kuluu_render::zone_point_lights::ActiveSceneLights>();
         world.init_resource::<kuluu_render::zone_doors::ZoneDoors>();
+        world.init_resource::<kuluu_render::ffxi_actor_render::ActorLoadInFlight>();
+        world.init_resource::<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>();
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();
@@ -1215,6 +1422,8 @@ mod zone_teardown_tests {
         use kuluu_render::zone_point_lights::{ActiveSceneLights, ZonePointLight, ZonePointLights};
         let mut world = world_with_teardown_resources();
         let light = ZonePointLight {
+            theta_track: None,
+            theta_multiplier: 1.0,
             light_id: u32::from_le_bytes(*b"l_01"),
             world_pos: Vec3::ZERO,
             color: Vec3::ONE,
@@ -1224,7 +1433,7 @@ mod zone_teardown_tests {
         world.insert_resource(ZonePointLights {
             file_id: Some(348),
             sub_area_file_id: Some(585),
-            lights: vec![light],
+            lights: vec![light.clone()],
         });
         world.insert_resource(ActiveSceneLights {
             lights: vec![light],

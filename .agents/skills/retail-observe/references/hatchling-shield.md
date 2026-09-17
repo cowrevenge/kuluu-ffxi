@@ -39,6 +39,21 @@ Lv.1 All Jobs
   `Oldman uses a bird egg.` — food buffs apply silently (no "gains the effect"
   line), unlike spell buffs.
 
+## Equip-delay behavior (retail)
+
+User-supplied HorizonXI capture from 2026-09-15 (local-only source:
+`Screen Recording 2026-09-15 at 3.24.01 PM.mov`) records a zone-in with the
+Hatchling Shield equipped:
+
+- The selected Items-list row is grey while the equip delay is active.
+- The tooltip's existing live timer counts the equip delay down, including
+  `<1/1 0:18/[24:00:00, 0:30]>` and `<1/1 0:07/[24:00:00, 0:30]>`.
+- At `0:00`, the row label changes from grey to white.
+- Enter then starts item activation and closes the list to the bare `Items`
+  bar. Enter during the countdown has no visible effect.
+- Two green circular Rare and Ex icons appear at the tooltip's upper-right;
+  they are icons rather than an inline `Rare Ex` text row.
+
 ## Local client verification (task #2 outcome)
 
 Verified in-session against the local client: dispense charge consumed and egg

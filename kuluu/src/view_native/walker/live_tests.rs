@@ -12,7 +12,7 @@ use kuluu_render::dat_mzb::{MzbCollisionBlock, MzbCollisionGeometry};
 use super::consts::{FallModel, STEP_MAX};
 use super::obstacles::{DoorObstacle, MobObstacle, ObstacleSet};
 use super::step::step;
-use super::{VerticalDecision, Walker};
+use super::{HorizontalOutcome, VerticalDecision, Walker};
 
 // ---------------------------------------------------------------------------
 // Geometry builders (ported from dat_mzb's wall_collision_tests)
@@ -1644,4 +1644,270 @@ fn strafe_along_tread_edge() {
         "strafed up the flight: x={x:.2} h={:.2}",
         -z
     );
+}
+
+// ---------------------------------------------------------------------------
+// Horizontal outcomes: the panel's "why am I stopped"
+// ---------------------------------------------------------------------------
+
+fn flat_floor() -> MzbCollisionGeometry {
+    let mut b = MzbCollisionBlock::default();
+    quad(
+        &mut b,
+        [
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
+        ],
+        Vec3::Y,
+        NO_SUB_AREA_LINK,
+    );
+    MzbCollisionGeometry::from_block(b)
+}
+
+/// Two quads meeting in an inside corner at the origin: the interior is
+/// x < 0, z < 0 (bevy), so the faces point +x / +z into it.
+fn inside_corner() -> MzbCollisionGeometry {
+    let mut b = MzbCollisionBlock::default();
+    quad(
+        &mut b,
+        [
+            Vec3::new(0.0, 0.0, -10.0),
+            Vec3::new(0.0, 0.0, 10.0),
+            Vec3::new(0.0, 3.0, 10.0),
+            Vec3::new(0.0, 3.0, -10.0),
+        ],
+        Vec3::new(1.0, 0.0, 0.0),
+        NO_SUB_AREA_LINK,
+    );
+    quad(
+        &mut b,
+        [
+            Vec3::new(-10.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 3.0, 0.0),
+            Vec3::new(-10.0, 3.0, 0.0),
+        ],
+        Vec3::new(0.0, 0.0, 1.0),
+        NO_SUB_AREA_LINK,
+    );
+    MzbCollisionGeometry::from_block(b)
+}
+
+/// One fixed tick of [`step`], wire boundary like dispatch.
+fn tick(
+    geom: &MzbCollisionGeometry,
+    obstacles: &ObstacleSet,
+    state: &mut Walker,
+    x: f32,
+    y: f32,
+    z: f32,
+    dx: f32,
+    dy: f32,
+    noclip: bool,
+) -> super::StepResult {
+    let dt = 1.0 / 60.0;
+    step(
+        geom, obstacles, state, x, y, z, dx, dy, RUN, dt, noclip, true,
+    )
+}
+
+#[test]
+fn horizontal_outcome_moved_no_input_noclip() {
+    let g = flat_floor();
+    let obstacles = ObstacleSet::default();
+    let mut state = Walker::default();
+    let dt = 1.0 / 60.0;
+    let mut x = 0.0f32;
+    // Open ground: every tick honors the full input.
+    for _ in 0..30 {
+        let res = tick(
+            &g,
+            &obstacles,
+            &mut state,
+            x,
+            0.0,
+            0.0,
+            RUN * dt,
+            0.0,
+            false,
+        );
+        assert!(
+            matches!(res.outcome, HorizontalOutcome::Moved),
+            "open ground must be Moved, got {:?}",
+            res.outcome
+        );
+        x += res.dx;
+    }
+    // Idle tick: no input.
+    let res = tick(&g, &obstacles, &mut state, x, 0.0, 0.0, 0.0, 0.0, false);
+    assert!(
+        matches!(res.outcome, HorizontalOutcome::NoInput),
+        "idle tick must be NoInput, got {:?}",
+        res.outcome
+    );
+    // Noclip bypasses the sweep and the contact check.
+    let res = tick(&g, &obstacles, &mut state, x, 0.0, 0.0, RUN * dt, 0.0, true);
+    assert!(
+        matches!(res.outcome, HorizontalOutcome::Noclip),
+        "noclip must be Noclip, got {:?}",
+        res.outcome
+    );
+}
+
+#[test]
+fn horizontal_outcome_wall_hold_at_flat_wall() {
+    let g = flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK);
+    let obstacles = ObstacleSet::default();
+    let mut state = Walker::default();
+    let dt = 1.0 / 60.0;
+    let mut x = -2.0f32;
+    // Approach the wall, then keep pushing head-on at standoff.
+    for _ in 0..60 {
+        let res = tick(
+            &g,
+            &obstacles,
+            &mut state,
+            x,
+            0.0,
+            0.0,
+            RUN * dt,
+            0.0,
+            false,
+        );
+        x += res.dx;
+    }
+    let res = tick(
+        &g,
+        &obstacles,
+        &mut state,
+        x,
+        0.0,
+        0.0,
+        RUN * dt,
+        0.0,
+        false,
+    );
+    match res.outcome {
+        HorizontalOutcome::WallHold { contact } => {
+            assert!(contact.is_some(), "wall hold must carry the contact");
+            // The bisection leaves the body a hair off the face, so the tick
+            // creeps by a sliver; it must not be a real advance.
+            assert!(
+                res.dx.abs() < RUN * dt / 100.0,
+                "held: dx={:.6} (input {:.4})",
+                res.dx,
+                RUN * dt
+            );
+        }
+        other => panic!("head-on standoff must be WallHold, got {other:?}"),
+    }
+}
+
+#[test]
+fn horizontal_outcome_wall_hold_at_inside_corner() {
+    let g = inside_corner();
+    let obstacles = ObstacleSet::default();
+    let mut state = Walker::default();
+    let dt = 1.0 / 60.0;
+    let m = RUN * dt / 2.0f32.sqrt(); // diagonal at run speed
+                                      // Walk diagonally into the corner's point from the open quadrant: the
+                                      // slide along the first wall dead-ends on the second, so the body stops
+                                      // at the corner's standoff. The tick displacement must never exceed the
+                                      // input.
+    let mut x = 2.0f32;
+    let mut y = -2.0f32;
+    for _ in 0..60 {
+        let res = tick(&g, &obstacles, &mut state, x, y, 0.0, -m, m, false);
+        x += res.dx;
+        y += res.dy;
+        assert!(
+            res.dx.abs() <= m + 1e-6 && res.dy.abs() <= m + 1e-6,
+            "overshot the tick's input: ({:.4}, {:.4})",
+            res.dx,
+            res.dy
+        );
+    }
+    // Stopped at the corner's standoff, well short of the start: the body
+    // advanced toward the point and then held.
+    assert!(
+        (0.2..0.8).contains(&x) && (-0.8..-0.2).contains(&y),
+        "corner: body at wire ({x:.3}, {y:.3})"
+    );
+    let res = tick(&g, &obstacles, &mut state, x, y, 0.0, -m, m, false);
+    match res.outcome {
+        HorizontalOutcome::WallHold { contact } => {
+            assert!(contact.is_some(), "corner hold must carry the contact");
+        }
+        other => panic!("inside corner must be WallHold, got {other:?}"),
+    }
+}
+
+#[test]
+fn horizontal_outcome_slid_along_oblique_wall() {
+    // The 30 degree wall from `oblique_wall_slide_keeps_full_speed`.
+    let mut b = MzbCollisionBlock::default();
+    quad(
+        &mut b,
+        [
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
+        ],
+        Vec3::Y,
+        NO_SUB_AREA_LINK,
+    );
+    let a = Vec3::new(4.0, 0.0, -6.0);
+    let c = Vec3::new(4.0 + 12.0 / 30_f32.to_radians().tan(), 0.0, 6.0);
+    quad(
+        &mut b,
+        [a, c, c + Vec3::Y * 3.0, a + Vec3::Y * 3.0],
+        (c - a).cross(Vec3::Y).normalize(),
+        NO_SUB_AREA_LINK,
+    );
+    let g = MzbCollisionGeometry::from_block(b);
+    let obstacles = ObstacleSet::default();
+    let mut state = Walker::default();
+    let dt = 1.0 / 60.0;
+    let mut x = -4.0f32;
+    let mut y = 0.0f32;
+    let mut slid: Option<f32> = None;
+    for _ in 0..300 {
+        let res = tick(&g, &obstacles, &mut state, x, y, 0.0, RUN * dt, 0.0, false);
+        x += res.dx;
+        y += res.dy;
+        if let HorizontalOutcome::Slid { ratio } = res.outcome {
+            slid = Some(ratio);
+        }
+    }
+    // Sliding along a wall 30 degrees off the input keeps cos(30) ~ 0.87 of
+    // it; the ratio must sit in the slide band, not read as a full move or a
+    // stop.
+    let ratio = slid.expect("never slid along the oblique wall");
+    assert!(
+        (0.7..0.95).contains(&ratio),
+        "slide ratio {ratio:.3} is not the 30 degree projection"
+    );
+}
+
+#[test]
+fn horizontal_outcome_actor_contact_carries_the_mob() {
+    let g = flat_with_wall(30.0, 3.0, NO_SUB_AREA_LINK);
+    // The projected body (one tick ahead) must sit inside the circle: the
+    // standoff gap must stay under the 0.9 combined radii or nothing blocks.
+    let mobs = mob_circle(7, 0.8, 0.0, 0.5);
+    let mut state = Walker::default();
+    let dt = 1.0 / 60.0;
+    // One tick into the mob's circle: the move is withheld, not deflected.
+    let res = tick(&g, &mobs, &mut state, 0.0, 0.0, 0.0, RUN * dt, 0.0, false);
+    match res.outcome {
+        HorizontalOutcome::ActorContact { mob, contact } => {
+            assert_eq!(mob, 7, "must name the blocking actor");
+            assert!(contact.is_some(), "actor contact must carry the point");
+            assert!(res.dx.abs() < 1e-6, "withheld: dx={:.6}", res.dx);
+        }
+        other => panic!("mob overlap must be ActorContact, got {other:?}"),
+    }
 }

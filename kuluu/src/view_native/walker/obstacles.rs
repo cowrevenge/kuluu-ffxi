@@ -1,5 +1,20 @@
-//! RID door boxes follow server animation independently of visible leaves.
-//! research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::InitUnderscoreRid.
+//! Dynamic obstacles: RID door boxes, closed door leaves as
+//! world-baked triangles, mobs as horizontal circles. Rebuilt every fixed tick
+//! into [`ObstacleSet`] before dispatch — the slot the avian collider syncs
+//! used; `step` is pure over it. Bevy space throughout: xz horizontal, y up.
+//!
+//! Doors: RID collision rects follow server animation independently of visible
+//! leaves (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp
+//! RidManager::InitUnderscoreRid). Door groups with no RID entry fall back to
+//! the leaf mesh — baked through its AUTHORED pose, which is the closed one —
+//! as the solid geometry: walls for the sweep AND floors for the column probe
+//! (a closed drawbridge). Any swing displacement means open or mid-swing and
+//! the leaf drops out of the set.
+//!
+//! Mobs: horizontal circles in xz from the model AABB's wider ground-plane
+//! half-extent, with the old body-block rules: dead entities (wire 0x0E hp 0)
+//! never block, `EntityKind::Other` never blocks, undrawn actors never block,
+//! self is never in the set.
 
 use bevy::prelude::*;
 use ffxi_dat::zone_interaction::ZoneInteraction;
@@ -9,6 +24,7 @@ use kuluu_render::{
     zone_doors::{DoorPose, ZoneDoorLeaf, ZoneDoors},
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityLook};
+use std::collections::HashSet;
 
 // FFXiMain.dll DoorOpen horizonxi-2023 RVA 0xAC5E0 / retail-2026-09 RVA 0xAD1E0 and DoorClose
 // horizonxi-2023 RVA 0xAC670 / retail-2026-09 RVA 0xAD270 toggle RID collision through the RID
@@ -192,6 +208,7 @@ pub fn rebuild_obstacles_system(
     >,
     children_q: Query<&Children>,
     mesh_vis: Query<&InheritedVisibility, With<Mesh3d>>,
+    mut dead_ids: Local<HashSet<u32>>,
     mut set: ResMut<ObstacleSet>,
 ) {
     // Doors: bake the closed leaves' triangles through the authored pose. The
@@ -266,15 +283,28 @@ pub fn rebuild_obstacles_system(
         doors.push(DoorObstacle { tris, min, max });
     }
 
-    // Mobs: the old body-block rules (old `mob_body_blocks`), in order.
+    // Mobs: body-block rules, in order. Dead entities drop out on the tick
+    // they die, no grace period: the wire 0x0E hp_pct is the server's HP truth
+    // (Entity::is_dead == Some(0)), so a corpse never enters the set and the
+    // contact budget cannot latch onto it.
     let mut mobs = Vec::new();
+    dead_ids.clear();
+    for e in &scene.snapshot.entities {
+        if e.is_dead() {
+            dead_ids.insert(e.id);
+        }
+    }
     for (_ent, we, kids, t, r) in mob_q.iter() {
-        // 1. EntityKind::Other — the HUD's "[obj]": door objects, "???" points,
+        // 1. Dead (wire hp_pct == 0): no body-block, whatever kind or mesh.
+        if dead_ids.contains(&we.id) {
+            continue;
+        }
+        // 2. EntityKind::Other, the HUD's "[obj]": door objects, "???" points,
         //    event triggers. These NEVER body-block, whatever mesh they carry.
         if matches!(we.kind, kuluu_snapshot::EntityKind::Other) {
             continue;
         }
-        // 2. Character kinds block only when their texture is actually drawn:
+        // 3. Character kinds block only when their texture is actually drawn:
         //    undrawn actor = invisible entity = walk through.
         let Some(kids) = kids else {
             continue;
@@ -297,6 +327,7 @@ pub fn rebuild_obstacles_system(
 mod tests {
     use super::*;
     use kuluu_render::{dat_mzb::MzbCollisionGeometry, snapshot::SceneState};
+    use kuluu_snapshot::{Entity, EntityKind};
 
     const GATE: [u8; 4] = *b"_6ww";
     const DOCK_POSITION: [f32; 3] = [18.000645, -2.385981, -59.55436];
@@ -337,6 +368,62 @@ mod tests {
         dat[4..8].copy_from_slice(&((units << 7) | ffxi_dat::ChunkKind::Rid as u32).to_le_bytes());
         dat.extend(body);
         dat
+    }
+
+    fn snap_entity(id: u32, hp_pct: Option<u8>) -> Entity {
+        Entity {
+            id,
+            act_index: 0,
+            kind: EntityKind::Mob,
+            name: None,
+            pos: Default::default(),
+            heading: 0,
+            hp_pct,
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        }
+    }
+
+    /// A drawn mob root (WorldEntity + block radius) with one visible mesh
+    /// child, so it passes the body-block rules up to the dead check.
+    fn spawn_drawn_mob(world: &mut World, id: u32, xz: Vec2) {
+        world
+            .spawn((
+                WorldEntity {
+                    id,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                Transform::from_xyz(xz.x, 0.0, xz.y),
+                MobBlockRadius { radius: 0.5 },
+            ))
+            .with_children(|p| {
+                p.spawn((Mesh3d(Handle::default()), InheritedVisibility::VISIBLE));
+            });
+    }
+
+    fn app_with_mobs(entities: Vec<Entity>) -> App {
+        let mut scene = SceneState::default();
+        scene.snapshot.entities = entities;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(ZoneDoors::default())
+            .init_resource::<ObstacleSet>()
+            .init_resource::<Assets<Mesh>>()
+            .insert_resource(scene)
+            .add_systems(Update, rebuild_obstacles_system);
+        app
     }
 
     fn gate_entity(state: u8) -> WireEntity {
@@ -395,6 +482,33 @@ mod tests {
             pos += Vec2::new(result.dx, result.dy);
         }
         (pos - center).dot(outward)
+    }
+
+    #[test]
+    fn dead_mob_stops_body_blocking_live_one_keeps_it() {
+        let mut app = app_with_mobs(vec![snap_entity(7, Some(0)), snap_entity(8, Some(50))]);
+        spawn_drawn_mob(app.world_mut(), 7, Vec2::new(1.0, 0.0));
+        spawn_drawn_mob(app.world_mut(), 8, Vec2::new(4.0, 0.0));
+
+        app.update();
+
+        let set = app.world().resource::<ObstacleSet>();
+        assert_eq!(set.mobs.len(), 1, "only the live mob blocks");
+        assert_eq!(set.mobs[0].id, 8);
+    }
+
+    #[test]
+    fn unknown_hp_still_blocks() {
+        // No hp read yet (None) is not dead: the conservative default keeps
+        // blocking until the wire says otherwise.
+        let mut app = app_with_mobs(vec![snap_entity(9, None)]);
+        spawn_drawn_mob(app.world_mut(), 9, Vec2::new(1.0, 0.0));
+
+        app.update();
+
+        let set = app.world().resource::<ObstacleSet>();
+        assert_eq!(set.mobs.len(), 1);
+        assert_eq!(set.mobs[0].id, 9);
     }
 
     #[test]

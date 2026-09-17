@@ -54,6 +54,10 @@ pub struct LookComp(pub EntityLook);
 pub struct EntityModel {
     pub look: EntityLook,
     pub mounted: bool,
+    /// Part of the signature because it selects which of the model's authored
+    /// CIB scales the prepared mesh is built at, so a server-side size change
+    /// has to re-dispatch the load the way a look change does.
+    pub graph_size: u8,
 }
 
 /// The mount whose model is currently loaded onto a mount actor entity. Memoises
@@ -62,16 +66,11 @@ pub struct EntityModel {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MountModel(pub kuluu_snapshot::Mount);
 
-/// Model-load transition: grows the actor in while a transient orb stretches
-/// into a light-column and dissolves. The column's lifetime belongs to this
-/// component — see `ffxi_actor_render::despawn_morph_column`.
 #[derive(Component, Debug, Clone)]
 pub struct MorphIn {
+    pub enhanced: bool,
     pub elapsed: f32,
     pub actor_root: Entity,
-    pub orb: Option<Entity>,
-    pub orb_mat: Option<Handle<StandardMaterial>>,
-    pub orb_emissive: LinearRgba,
 }
 
 #[derive(Component, Debug, Clone, Copy)]

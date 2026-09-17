@@ -43,6 +43,11 @@ pub enum InputMode {
     /// lives in `hud::auction::AuctionScreenState`; the native input layer
     /// drives it and emits the Ah* `AgentCommand`s.
     Auction,
+
+    /// An NPC shop window is open and modal. Focus/cursor state lives in
+    /// `hud::shop::ShopScreenState`; the shop itself has no close packet, so
+    /// cancelling out of this mode is what ends it.
+    Shop,
 }
 
 /// The action pending behind a sub-target cursor.
@@ -58,6 +63,9 @@ pub enum SubTargetAction {
         index: u8,
         item_no: u16,
     },
+    /// "Switch Target": pick a different mob; confirm asks the server to move
+    /// the battle target and it becomes the main target when the 0x058 lands.
+    PickSub,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +81,15 @@ pub struct SubTargetState {
 
     /// Mode to restore on Esc (retail: back to the menu, cursor preserved).
     pub return_to: Box<InputMode>,
+
+    /// "Switch Target" confirm sent a c2s ChangeTarget for this candidate: the
+    /// picker holds until the server's 0x058 commits it into the main target
+    /// (or the wait lapses), so the target frame only swaps on the server's
+    /// word. Cycling to another candidate cancels the wait.
+    pub pending_switch: Option<u32>,
+
+    /// When `pending_switch` was armed; the wait lapses if no 0x058 lands.
+    pub pending_since: Option<std::time::Instant>,
 }
 
 impl SubTargetState {
@@ -82,6 +99,8 @@ impl SubTargetState {
             flags,
             candidate: None,
             return_to: Box::new(return_to),
+            pending_switch: None,
+            pending_since: None,
         }
     }
 }
@@ -209,9 +228,9 @@ pub enum MenuKind {
 
     Graphics,
 
-    /// DLSS Config submenu pushed from the Graphics list's "DLSS Config" row
-    /// (hud::menu::GRAPHICS_DLSS_CONFIG_SLOT): the quality tier plus the inert
-    /// RenoDX-parity placeholder rows.
+    /// DLSS Config submenu pushed from the Graphics list's "DLSS Config" row:
+    /// the quality tier plus the Neural Uplift block
+    /// (graphics_settings::DLSS_CONFIG_SECTIONS).
     GraphicsDlss,
 
     Magic,

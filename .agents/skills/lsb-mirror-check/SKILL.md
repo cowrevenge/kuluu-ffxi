@@ -20,7 +20,7 @@ this codebase:
 |---|---|---|
 | Wire packet decoder | `PosHead::decode`, `ServerLogout::decode` | `vendor/server/src/map/packets/s2c/0x*.{h,cpp}` |
 | Wire packet builder | `build_subpacket_*`, `build_bootstrap_packet` | `vendor/server/src/map/packets/c2s/0x*.{h,cpp}` |
-| Coord transform | `ffxi_to_detour`, `ffxi_to_bevy`, the build.rs y/z swap | `vendor/server/src/map/navmesh.cpp` (`ToDetourPos`/`ToFFXIPos`), `vendor/server/src/common/mmofile.h` (position_t layout) |
+| Coord transform | `ffxi_to_detour`, `ffxi_to_bevy`, the build.rs y/z swap | `vendor/server/src/map/navmesh/detour_navmesh.cpp` (`DetourNavMesh::toDetour`/`DetourNavMesh::fromDetour`), `vendor/server/src/common/types/position.h` (position_t layout) |
 | Session-state transition | reconnect path, key rotation, status machine | `vendor/server/src/map/map_networking.cpp`, `vendor/server/src/map/map_session.cpp` |
 | Numeric constant | message IDs, opcodes, status enums | `vendor/server/src/map/enums/*.h`, `vendor/server/sql/*.sql` |
 | Lifecycle assumption | when sessions are created/destroyed, IPC ordering | `vendor/server/src/map/map_session_container.cpp`, `vendor/server/src/map/ipc_*.cpp` |
@@ -135,7 +135,7 @@ be arbitrary? If the former, it's a boundary symbol — proceed.
 Cite LSB findings in code comments at the point of the boundary:
 
 ```rust
-// LSB's `CNavMesh::ToDetourPos` (vendor/server/src/map/navmesh.cpp:141)
+// LSB's `DetourNavMesh::toDetour` (vendor/server/src/map/navmesh/detour_navmesh.cpp)
 // negates both height (FFXI y) and north (FFXI z); we mirror.
 ```
 

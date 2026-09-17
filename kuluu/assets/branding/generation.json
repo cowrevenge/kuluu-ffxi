@@ -1,0 +1,12 @@
+{
+  "name": "Southern Watcher",
+  "generator": "Built-in image_gen",
+  "generated": "2026-09-15",
+  "width": 1254,
+  "height": 1254,
+  "alpha": true,
+  "sha256": "d328d10d810e2feba2a919d445e267ba62cb20f07e2b30919618b3decf964424",
+  "lore_inspiration": "https://finalfantasy.fandom.com/wiki/Tonberry_(Final_Fantasy_XI)",
+  "canonical_game_symbol": false,
+  "prompt": "Refine this exact Southern Watcher concept into a production-quality app icon. Preserve the identity: clockwise moss-green curled lizard tail on right and top, warm amber bronze lantern suspended on left, exactly three ivory constellation stars along upper arc. Keep the same orientation and approximately round overall silhouette. Major simplification: REMOVE ALL moss speckles, stone cracks, fine surface texture, engraving, fine chains. Use smooth matte painted surfaces with just broad gentle shading and a thin ochre highlight. Make lantern 25 percent larger relative to tail and simplify into three broad amber panes and stout dark bronze frame with simple cap. Attach with ONE thick loop, no chain. Tail is a single thick gracefully curved shape with one clearly open inner curl and olive/forest green broad shading. Three clean simple four-point stars inset into top curve, no decorative borders. Compact, coherent, balanced app emblem that reads at 32px; elegant FFXI earthy palette, not neon, shiny gem or cartoon mascot. GENUINELY TRANSPARENT alpha background, including interior gaps, no black backdrop, no shadow outside silhouette, no checkerboard, no text, no scene. Square high-resolution 2048x2048 desired with 12 percent safe margins all sides. Single icon only."
+}

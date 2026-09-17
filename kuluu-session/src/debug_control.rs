@@ -3,7 +3,7 @@
 //! path (`view_native::input::dispatch_movement_system`) where WASD movement and
 //! re-grounding live. This shared handle is written by the socket command
 //! decoder ([`crate::agent_codec`]) and read by the GUI each frame, so a remote
-//! driver can inject movement input and trigger `/debug heights` without OS
+//! driver can inject movement input and trigger `//debug heights` without OS
 //! keystrokes.
 
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ impl DebugControl {
     /// window focus nor Screen Recording permission — unlike `screencapture`,
     /// which reads the window-server backing store and hands back a stale frame
     /// for an occluded window. `None` leaves the default naming to the GUI side,
-    /// which owns the counter the `/screenshot` command already uses.
+    /// which owns the counter the `//screenshot` command already uses.
     pub fn request_screenshot(&mut self, path: Option<PathBuf>) {
         self.screenshot = path;
         self.screenshot_seq = self.screenshot_seq.wrapping_add(1);

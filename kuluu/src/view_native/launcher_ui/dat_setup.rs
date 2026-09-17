@@ -13,17 +13,19 @@ use crate::ffxi_client::{self, Install, SetupOptions};
 use crate::launcher_store::{self, EnvOverride};
 use ffxi_dat::install_detect;
 
-use super::client_job::{self, ClientJob, JobBarFill, JobDetailText, JobKind, JobPhaseText};
+use ffxi_install::Lane;
+
+use super::client_job::{self, ClientJob, JobKind, JobLaneBar, JobStageLabel, JobText};
 use super::common::{hint, panel_node, screen_root, title, PANEL_BORDER_COLOR};
 use super::{DatGateDone, DatSetupReturn, LauncherState};
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
 
-const OK_COLOR: Color = Color::srgb(0.35, 0.85, 0.40);
+pub(super) const OK_COLOR: Color = Color::srgb(0.35, 0.85, 0.40);
 const ERR_COLOR: Color = Color::srgb(0.95, 0.35, 0.30);
 const LABEL_COLOR: Color = Color::srgb(0.92, 0.92, 0.95);
-const MUTED_COLOR: Color = Color::srgb(0.60, 0.60, 0.65);
-const ACCENT_COLOR: Color = Color::srgb(0.55, 0.85, 0.90);
+pub(super) const MUTED_COLOR: Color = Color::srgb(0.60, 0.60, 0.65);
+pub(super) const ACCENT_COLOR: Color = Color::srgb(0.55, 0.85, 0.90);
 const SECTION_COLOR: Color = Color::srgb(0.72, 0.72, 0.78);
 const CARD_BG: Color = Color::srgba(1.0, 1.0, 1.0, 0.035);
 const CARD_SELECTED_BORDER: Color = Color::srgb(0.30, 0.55, 0.85);
@@ -140,6 +142,18 @@ fn text(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
 /// clip lives on a wrapper because a node only clips its children, never its
 /// own glyphs.
 fn clipped_text(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    clipped_text_tagged(text, size, color, ())
+}
+
+/// As [`clipped_text`], with `tag` on the inner entity. A marker on the
+/// wrapper would never be seen by a `Text` query: the wrapper carries the
+/// clip, the child carries the glyphs.
+fn clipped_text_tagged(
+    text: impl Into<String>,
+    size: f32,
+    color: Color,
+    tag: impl Bundle,
+) -> impl Bundle {
     (
         Node {
             width: Val::Percent(100.0),
@@ -159,6 +173,7 @@ fn clipped_text(text: impl Into<String>, size: f32, color: Color) -> impl Bundle
                 ..default()
             },
             ThemedText,
+            tag,
         )],
     )
 }
@@ -290,40 +305,130 @@ fn build_ui(
         });
 }
 
+const STAGE_SEPARATOR: &str = ">";
+const LANE_BAR_HEIGHT: f32 = 8.0;
+const LANE_GAP: f32 = 4.0;
+const LANE_BLOCK_GAP: f32 = 14.0;
+
 fn build_job_panel(panel: &mut ChildSpawnerCommands, job: &ClientJob) {
     panel.spawn(title(job.title.clone()));
-    panel.spawn((text(job.phase.clone(), 15.0, LABEL_COLOR), JobPhaseText));
+    panel.spawn(h_row(8.0)).with_children(|strip| {
+        for (i, lane) in Lane::ALL.iter().enumerate() {
+            if i > 0 {
+                strip.spawn(text(STAGE_SEPARATOR, BODY_SIZE, MUTED_COLOR));
+            }
+            strip.spawn((
+                text(
+                    lane.label(),
+                    BODY_SIZE,
+                    client_job::stage_color(job.lane(*lane).status),
+                ),
+                JobStageLabel(*lane),
+            ));
+        }
+    });
     panel
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(8.0),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                overflow: Overflow::clip(),
-                ..default()
-            },
-            BackgroundColor(BAR_TRACK),
-        ))
-        .with_children(|track| {
-            track.spawn((
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(LANE_BLOCK_GAP),
+            width: Val::Percent(100.0),
+            ..default()
+        })
+        .with_children(|lanes| {
+            for lane in Lane::ALL {
+                build_lane_row(lanes, job, lane);
+            }
+        });
+    panel
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            width: Val::Percent(100.0),
+            ..default()
+        })
+        .with_children(|log| {
+            for index in 0..client_job::LOG_LINES {
+                log.spawn(clipped_text_tagged(
+                    job.log.get(index).cloned().unwrap_or_default(),
+                    FINE_SIZE,
+                    MUTED_COLOR,
+                    JobText::Log(index),
+                ));
+            }
+        });
+    panel.spawn(hint(format!(
+        "The installer is {}, and the patch up to {} more, so this takes a while. Stopping \
+         keeps whatever finished downloading; starting again resumes from it.",
+        ffxi_client::INSTALLER_SIZE_NOTE,
+        ffxi_client::PATCH_SIZE_NOTE,
+    )));
+    panel.spawn(actions_row()).with_children(|r| {
+        r.spawn(button_slot(BUTTON_WIDTH)).with_children(|s| {
+            s.spawn(button_bundle(
+                ButtonBundleProps::default(),
+                (),
+                Spawn((
+                    Text::new(client_job::CANCEL_LABEL),
+                    ThemedText,
+                    JobText::CancelButton,
+                )),
+            ))
+            .observe(|_ev: On<Activate>, job: Option<ResMut<ClientJob>>| {
+                if let Some(mut job) = job {
+                    job.cancel.cancel();
+                    job.cancelling = true;
+                }
+            });
+        });
+    });
+}
+
+fn build_lane_row(lanes: &mut ChildSpawnerCommands, job: &ClientJob, lane: Lane) {
+    let state = job.lane(lane);
+    lanes
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(LANE_GAP),
+            width: Val::Percent(100.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(h_row(8.0)).with_children(|line| {
+                line.spawn(text(lane.label(), FINE_SIZE, MUTED_COLOR));
+                line.spawn(clipped_text_tagged(
+                    state.headline.clone(),
+                    BODY_SIZE,
+                    LABEL_COLOR,
+                    JobText::Headline(lane),
+                ));
+            });
+            row.spawn((
                 Node {
-                    width: Val::Percent(job.fraction.unwrap_or(0.0) * 100.0),
-                    height: Val::Percent(100.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Px(LANE_BAR_HEIGHT),
+                    border_radius: BorderRadius::all(Val::Px(LANE_BAR_HEIGHT / 2.0)),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
-                BackgroundColor(BAR_FILL),
-                JobBarFill,
+                BackgroundColor(BAR_TRACK),
+            ))
+            .with_children(|track| {
+                track.spawn((
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(BAR_FILL),
+                    JobLaneBar(lane),
+                ));
+            });
+            row.spawn(clipped_text_tagged(
+                state.detail.clone(),
+                FINE_SIZE,
+                MUTED_COLOR,
+                JobText::Detail(lane),
             ));
         });
-    panel.spawn((
-        clipped_text(job.detail.clone(), BODY_SIZE, MUTED_COLOR),
-        JobDetailText,
-    ));
-    panel.spawn(hint(
-        "The installer is 5 volumes (~7.2 GB) and the patch up to ~0.5 GB more, so this takes \
-         a while. Closing the launcher stops it; a later run resumes from the volumes already \
-         downloaded.",
-    ));
 }
 
 fn build_setup_panel(panel: &mut ChildSpawnerCommands, form: &DatSetupForm, can_go_back: bool) {

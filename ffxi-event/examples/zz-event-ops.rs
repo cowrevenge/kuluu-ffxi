@@ -16,7 +16,9 @@ fn main() {
     let event_id: u16 = args.next().and_then(|s| s.parse().ok()).expect("event id");
     let starts: Vec<usize> = args.filter_map(|s| s.parse().ok()).collect();
     let root = DatRoot::from_env_or_default().expect("DatRoot");
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(zone).expect("event DAT mapping");
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
+        .expect("resolve event DAT");
     let bytes = std::fs::read(loc.path_under(&root)).expect("read event DAT");
     let dat = EventDat::parse(&bytes).expect("parse event DAT");
     for block in dat

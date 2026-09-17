@@ -3,8 +3,10 @@ use bevy::prelude::*;
 
 use kuluu_render::dat_mzb::{LastAutoLoadedZone, LoadMzbInFlight, ZONE_SLOT_MAIN};
 use kuluu_render::SceneState;
-use kuluu_snapshot::Stage;
+use kuluu_session::state::AgentCommand;
+use kuluu_snapshot::{Stage, Vec3 as WireVec3};
 
+use super::input::CommandTx;
 use super::AppPhase;
 
 const FADE_OUT_SECS: f32 = 0.2;
@@ -15,7 +17,21 @@ const FADE_HOLD_MIN_SECS: f32 = 0.35;
 
 const MAX_HOLD_SECS: f32 = 15.0;
 
+/// A new character's first CHAR_PC lands at the origin (the pre-cutscene
+/// "unplaced" position) and the cutscene quest corrects it a few seconds in.
+/// Hold the loading overlay until a real position arrives; if none does within
+/// this window, disconnect and return to the login screen (retail behavior).
+const POSITION_WAIT_TIMEOUT_SECS: f32 = 30.0;
+
 const LOADING_TEXT: &str = "Downloading data";
+
+/// The origin is the "unplaced" sentinel a first-login CHAR_PC carries before
+/// the cutscene quest sets the real spawn; any real zone position is far from
+/// it, so a per-axis epsilon cleanly separates the two.
+fn position_is_real(pos: &WireVec3) -> bool {
+    const EPS: f32 = 1e-2;
+    pos.x.abs() > EPS || pos.y.abs() > EPS || pos.z.abs() > EPS
+}
 
 const DOT_FRAMES: [&str; 4] = ["   ", ".  ", ".. ", "..."];
 
@@ -86,6 +102,11 @@ struct LoadingDots {
     last_frame: usize,
 }
 
+/// One-shot guard so the position-wait timeout disconnects only once per zone
+/// transition, not every frame while the overlay holds.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+struct PositionTimeoutFired(bool);
+
 #[derive(Component)]
 struct ZoneOverlayRoot;
 
@@ -101,6 +122,7 @@ impl Plugin for ZoneTransitionOverlayPlugin {
         app.init_resource::<ZoneOverlayFade>()
             .init_resource::<HudVisibilityStash>()
             .init_resource::<LoadingDots>()
+            .init_resource::<PositionTimeoutFired>()
             .add_systems(OnEnter(AppPhase::InGame), spawn_zone_overlay)
             .add_systems(
                 Update,
@@ -115,8 +137,10 @@ fn spawn_zone_overlay(
     mut commands: Commands,
     mut fade: ResMut<ZoneOverlayFade>,
     mut stash: ResMut<HudVisibilityStash>,
+    mut fired: ResMut<PositionTimeoutFired>,
 ) {
     *fade = ZoneOverlayFade::Holding { elapsed: 0.0 };
+    *fired = PositionTimeoutFired(false);
     stash.0.clear();
 
     commands
@@ -165,6 +189,8 @@ fn drive_zone_overlay_fade(
     last_auto: Res<LastAutoLoadedZone>,
     mut fade: ResMut<ZoneOverlayFade>,
     mut stash: ResMut<HudVisibilityStash>,
+    mut fired: ResMut<PositionTimeoutFired>,
+    cmd_tx: Res<CommandTx>,
     mut hud_roots: Query<(Entity, &mut Visibility), HudRootFilter>,
 ) {
     let stage = scene.snapshot.stage;
@@ -176,6 +202,7 @@ fn drive_zone_overlay_fade(
         )
     {
         *fade = ZoneOverlayFade::FadingOut { elapsed: 0.0 };
+        *fired = PositionTimeoutFired(false);
 
         if stash.0.is_empty() {
             for (e, mut vis) in hud_roots.iter_mut() {
@@ -186,16 +213,41 @@ fn drive_zone_overlay_fade(
     }
 
     let want_file_id = kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot);
+    let pos_real = position_is_real(&scene.snapshot.self_pos.pos);
     let ready = stage == Stage::InZone
         && last_auto.file_id.is_some()
         && last_auto.file_id == want_file_id
         // Slot 0 only: a sub-area interior streaming in behind a doorway is not
         // a zone transition, and gating on it re-raises the loading overlay
         // every time the player walks into a shop.
-        && !mzb_in_flight.pending_in_slot(ZONE_SLOT_MAIN);
+        && !mzb_in_flight.pending_in_slot(ZONE_SLOT_MAIN)
+        // A first-login character sits at the origin (the pre-cutscene
+        // "unplaced" position) until the cutscene quest sets the real spawn;
+        // hold the overlay for that so the world is ready when the position
+        // lands and the player never drops through the ground.
+        && pos_real;
+
+    let dt = time.delta_secs();
+    // While the self position is still the unplaced origin, hold the overlay
+    // past the MZB safety cap. If no real position arrives within the window,
+    // disconnect and return to the login screen (retail behavior).
+    if let ZoneOverlayFade::Holding { elapsed } = *fade {
+        if !pos_real {
+            let next = elapsed + dt;
+            if next >= POSITION_WAIT_TIMEOUT_SECS && !fired.0 {
+                fired.0 = true;
+                tracing::warn!(
+                    "zone-in: no real self position after {POSITION_WAIT_TIMEOUT_SECS:.0}s — disconnecting to login"
+                );
+                let _ = cmd_tx.0.try_send(AgentCommand::Disconnect);
+            }
+            *fade = ZoneOverlayFade::Holding { elapsed: next };
+            return;
+        }
+    }
 
     let prev = *fade;
-    *fade = tick(*fade, time.delta_secs(), ready);
+    *fade = tick(*fade, dt, ready);
 
     if !matches!(prev, ZoneOverlayFade::Idle)
         && *fade == ZoneOverlayFade::Idle
@@ -249,6 +301,34 @@ fn apply_zone_overlay_alpha(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_is_real_separates_origin_from_spawn() {
+        // The pre-cutscene "unplaced" sentinel is the origin.
+        assert!(!position_is_real(&WireVec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0
+        }));
+        // A real spawn (Bastok's first-login correction) is far from it.
+        assert!(position_is_real(&WireVec3 {
+            x: -280.0,
+            y: -12.0,
+            z: -90.0
+        }));
+        // A single non-zero axis counts as real (a ground-plane spawn).
+        assert!(position_is_real(&WireVec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 5.0
+        }));
+        // Sub-centimeter jitter at the origin stays "unplaced".
+        assert!(!position_is_real(&WireVec3 {
+            x: 0.001,
+            y: 0.0,
+            z: -0.001
+        }));
+    }
 
     #[test]
     fn alpha_edges() {

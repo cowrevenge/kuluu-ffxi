@@ -6,8 +6,8 @@ use ffxi_dat::dmsg::{
 };
 use ffxi_dat::event_dat::EventBlock;
 
-use crate::cue::EventCue;
-use crate::vm::{EventVm, StepResult};
+use crate::cue::{ActorLookup, EventCue, FourCc};
+use crate::vm::{EventVm, PendingTag, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
 /// `Work_Zone[1]` (research/XiPackets/world/client/0x005B); LSB scripts match
@@ -31,8 +31,9 @@ pub struct DialogFrame {
     pub params: Vec<i32>,
 }
 
-/// Result of advancing the dialog one step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of advancing the dialog one step. Not `Eq`: [`PendingTag::SendXzy`]
+/// carries floats.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DialogStep {
     /// Show this frame and wait for the player; pass their response to the next
     /// [`DialogRunner::advance`].
@@ -49,6 +50,11 @@ pub enum DialogStep {
     /// drives [`DialogRunner::tick`] until it yields something else; there is no
     /// frame to show and nothing for the player to answer.
     Waiting,
+    /// A mid-event tag was sent to the server (the send-tag or position-tag
+    /// opcode) and execution is held on its case-1 poll. The host
+    /// sends the matching c2s packet, then calls [`DialogRunner::ack_server`]
+    /// when the s2c ack (PENDINGNUM/PENDINGSTR) arrives.
+    AwaitServerAck(PendingTag),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +96,14 @@ impl DialogRunner {
         player: crate::vm::scene::EventPosition,
     ) {
         self.vm.attach_scene(dat, actor, player);
+    }
+
+    /// Spawn an owner-block child onto the scene's request stacks so a
+    /// multi-owner event runs every owner's program in parallel from event
+    /// start (retail's per-entity event instances, research/XiEvents/Event VM
+    /// Functions.md InitEvent2/XiEventInit); see [`EventVm::spawn_owner`].
+    pub fn spawn_owner(&mut self, block: &ffxi_dat::event_dat::EventBlock, entry: usize) {
+        self.vm.spawn_owner(block, entry);
     }
 
     pub fn controls_player_position(&self) -> bool {
@@ -136,6 +150,41 @@ impl DialogRunner {
         self.vm.take_cues()
     }
 
+    /// Arm a host-armed action hold the WAIT* family parks on; see
+    /// [`EventVm::hold_action`]. The session calls this from the DAT-authored
+    /// routine length when it publishes a motion cue.
+    pub fn hold_action(&mut self, actor: ActorLookup, key: FourCc, units: f32) {
+        self.vm.hold_action(actor, key, units);
+    }
+
+    /// Replace the entity Type table the 0x5B/0x66 gate reads; see
+    /// [`EventVm::set_actor_types`]. The session calls this with its current
+    /// map before every drive.
+    pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
+        self.vm.set_actor_types(types);
+    }
+
+    /// Arm the 0x2C SCHEDULOR hold the WAIT* family parks on until the
+    /// renderer reports the routine finished; see
+    /// [`EventVm::hold_action_pending`]. The session calls this when it
+    /// publishes a 0x2C motion cue, whose routine this host never reads.
+    pub fn hold_action_pending(&mut self, actor: ActorLookup, key: FourCc) {
+        self.vm.hold_action_pending(actor, key);
+    }
+
+    /// Release the 0x2C SCHEDULOR hold the renderer's finish report names;
+    /// see [`EventVm::release_action_hold`].
+    pub fn release_action_hold(&mut self, actor: ActorLookup, key: FourCc) {
+        self.vm.release_action_hold(actor, key);
+    }
+
+    /// Arm a host-armed move hold a non-player MOVE case 1 parks on; see
+    /// [`EventVm::hold_move`]. The session calls this from its own entity
+    /// distance and speed when it publishes an [`EventCue::ActorMove`].
+    pub fn hold_move(&mut self, actor: ActorLookup, units: f32) {
+        self.vm.hold_move(actor, units);
+    }
+
     /// Advance a held wait by `dt_secs` of host clock and run on if it expired.
     /// Cheap to call every tick: it is a no-op unless a wait is actually held.
     pub fn tick(&mut self, dt_secs: f32, strings: &StringDat) -> DialogStep {
@@ -144,6 +193,46 @@ impl DialogRunner {
         }
         self.vm.tick(dt_secs);
         self.run(strings)
+    }
+
+    /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
+    /// release the VM's hold and run on to the next frame. No-op advance if
+    /// nothing is pending.
+    pub fn ack_server(&mut self, strings: &StringDat) -> DialogStep {
+        self.vm.ack_server();
+        self.run(strings)
+    }
+
+    /// s2c PENDINGNUM's num[8] into the VM's Work_Zone from index 2; lands
+    /// before the next step even while a tag is held.
+    pub fn apply_pending_num(&mut self, num: &[i32; 8]) {
+        self.vm.apply_pending_num(num);
+    }
+
+    /// s2c PENDINGSTR's four strings into the VM's event string table; lands
+    /// before the next step even while a tag is held, like
+    /// [`Self::apply_pending_num`].
+    pub fn apply_pending_str(&mut self, strings: &[[u8; 16]; 4]) {
+        self.vm.apply_pending_str(strings);
+    }
+
+    /// The pending tag the VM holds on its case-1 poll, if any.
+    pub fn pending_tag(&self) -> Option<&PendingTag> {
+        self.vm.pending_tag()
+    }
+
+    /// Whether ESC may cancel this event right now (retail's `CliEventCancelFlag`;
+    /// armed at start, flipped by the 0x2E/0x42 opcodes).
+    pub fn cancel_armed(&self) -> bool {
+        self.vm.cancel_armed()
+    }
+
+    /// True while a dialog frame (message or choice menu) is displayed and parked
+    /// on its wait — retail's CliEventMessOpenFlag up. The host shows the box for
+    /// exactly this span; dismissal clears it, so the box hides until the next
+    /// message opcode reopens it.
+    pub fn message_awaiting(&self) -> bool {
+        self.vm.message_awaiting()
     }
 
     /// Cancel out of the current frame (the Esc path): a menu reports the
@@ -198,6 +287,9 @@ impl DialogRunner {
                     return DialogStep::Stopped(op)
                 }
                 StepResult::Waiting => return DialogStep::Waiting,
+                StepResult::AwaitServerAck(tag) => {
+                    return DialogStep::AwaitServerAck(tag);
+                }
             }
         }
     }
@@ -371,7 +463,9 @@ mod tests {
     }
 
     /// Advance, running any timed wait to expiry — the tests have no host
-    /// clock, so an authored fade is skipped rather than slept through.
+    /// clock, so an authored fade is skipped rather than slept through. Pending
+    /// tags are answered immediately the way the server would (a unit test has
+    /// no c2s/s2c round-trip).
     fn advance_past_waits(
         runner: &mut DialogRunner,
         choice: Option<u32>,
@@ -379,8 +473,12 @@ mod tests {
     ) -> DialogStep {
         const WAIT_SKIP_SECS: f32 = 3600.0;
         let mut step = runner.advance(choice, strings);
-        while matches!(step, DialogStep::Waiting) {
-            step = runner.tick(WAIT_SKIP_SECS, strings);
+        while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+            step = if matches!(step, DialogStep::Waiting) {
+                runner.tick(WAIT_SKIP_SECS, strings)
+            } else {
+                runner.ack_server(strings)
+            };
         }
         step
     }
@@ -552,7 +650,7 @@ mod tests {
         let mut stopped: std::collections::BTreeMap<u8, usize> = Default::default();
 
         for zone in 1u16..60 {
-            let Some(eloc) = ffxi_dat::event_locate::zone_id_to_event_location(zone) else {
+            let Ok(eloc) = root.resolve(ffxi_dat::event_locate::event_dat_file_id(zone)) else {
                 continue;
             };
             let Ok(ebytes) = std::fs::read(eloc.path_under(&root)) else {
@@ -561,10 +659,7 @@ mod tests {
             let Ok(edat) = EventDat::parse(&ebytes) else {
                 continue;
             };
-            let Some(sfid) = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone) else {
-                continue;
-            };
-            let Ok(sloc) = root.resolve(sfid) else {
+            let Ok(sloc) = root.resolve(ffxi_dat::zone_dat::string_dat_file_id(zone)) else {
                 continue;
             };
             let Ok(sbytes) = std::fs::read(sloc.path_under(&root)) else {
@@ -596,7 +691,9 @@ mod tests {
                                 *stopped.entry(op).or_default() += 1;
                                 break;
                             }
-                            DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                            DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                                unreachable!("consumed by advance_past_waits")
+                            }
                         }
                     }
                 }
@@ -626,10 +723,12 @@ mod tests {
         const TALK_EVENT: u16 = 32759; // guardEvent (Harara_WW.lua), sent as EventPara
         const ACT_INDEX: u16 = 0xBF;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let ebytes = std::fs::read(eloc.path_under(&root)).expect("read event dat");
         let edat = EventDat::parse(&ebytes).expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let sbytes = std::fs::read(sloc.path_under(&root)).expect("read string dat");
         let strings = StringDat::parse(&sbytes).expect("parse string dat");
@@ -650,7 +749,9 @@ mod tests {
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
         assert!(ended, "event 32759 did not end cleanly within 16 steps");
@@ -680,10 +781,12 @@ mod tests {
         const TALK_EVENT: u16 = 32759;
         const ACT_INDEX: u16 = 0xBF;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
@@ -702,7 +805,9 @@ mod tests {
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
         assert_eq!(end_para, Some(1), "Signet pick must return EndPara == 1");
@@ -733,10 +838,12 @@ mod tests {
         /// The rental's "yes" menu option.
         const RENT_OPTION: u32 = 0;
 
-        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
         let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
             .expect("parse event dat");
-        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
         let sloc = root.resolve(sfid).expect("resolve string dat");
         let strings =
             StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
@@ -754,7 +861,9 @@ mod tests {
                 DialogStep::Frame(_) => {}
                 DialogStep::Ended { .. } => break,
                 DialogStep::Stopped(op) => panic!("rental stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
 

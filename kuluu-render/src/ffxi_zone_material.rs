@@ -41,16 +41,11 @@ pub fn zone_fog_flag(fog_enabled: bool) -> f32 {
     }
 }
 
-/// Zone lighting is identical for every zone submesh, so it lives in ONE
-/// persistent GPU buffer shared by all zone-material bind groups
-/// ([`ZoneMaterialBuffers::lighting`]) and is refreshed by `write_buffer`, never
-/// by touching the material assets. The previous design gave each of the
-/// hundreds of per-submesh materials its own lighting uniform and pushed
-/// updates via `Assets::iter_mut()`, which flagged every material Modified the
-/// moment the Vana'diel sun crept past an epsilon — a full bind-group rebuild
-/// wave (~45ms) every ~0.9s, the visible periodic frame hitch.
 #[derive(Resource, Clone, Default)]
-pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
+pub struct ZoneGlobalLighting(
+    pub FfxiLightingUniform,
+    pub HashMap<u32, FfxiLightingUniform>,
+);
 
 /// Pipeline-key half of the MMB/MZB render-state word (ffxi-dat
 /// `MmbRenderState`, decoded from the u16 at subrecord offset 18).
@@ -126,8 +121,41 @@ fn d3d8_z_bias(level: u8) -> DepthBiasState {
     }
 }
 
+pub type ZoneLightBindings = [Option<ffxi_dat::mzb::LightId>; ffxi_dat::mzb::LIGHT_REFERENCE_COUNT];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
+pub struct ZonePointLighting {
+    pub positions: [Vec4; ffxi_dat::mzb::LIGHT_REFERENCE_COUNT],
+    pub colors: [Vec4; ffxi_dat::mzb::LIGHT_REFERENCE_COUNT],
+    pub attenuation: [Vec4; ffxi_dat::mzb::LIGHT_REFERENCE_COUNT],
+}
+
+impl ZonePointLighting {
+    fn from_authored(
+        lights: &[crate::zone_point_lights::ZonePointLight],
+        bindings: &ZoneLightBindings,
+    ) -> Self {
+        const ACTOR_ONLY_PREFIX: u8 = b'c';
+        let selected = bindings
+            .iter()
+            .flatten()
+            .filter(|id| id.to_le_bytes()[0] != ACTOR_ONLY_PREFIX)
+            .filter_map(|id| lights.iter().find(|light| light.light_id == *id));
+        let (positions, colors, attenuation) =
+            crate::zone_point_lights::pack_point_light_arrays(selected);
+        Self {
+            positions: std::array::from_fn(|i| positions[i]),
+            colors: std::array::from_fn(|i| colors[i]),
+            attenuation: std::array::from_fn(|i| attenuation[i]),
+        }
+    }
+}
+
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiZoneMaterial {
+    pub area_id: u32,
+    pub light_bindings: ZoneLightBindings,
+    pub point_lighting: ZonePointLighting,
     pub base_color_texture: Option<Handle<Image>>,
     pub material_flags: FfxiMaterialFlags,
 
@@ -170,6 +198,9 @@ impl FfxiZoneMaterial {
         render_key: FfxiZoneMaterialKey,
     ) -> Self {
         Self {
+            area_id: 0,
+            light_bindings: Default::default(),
+            point_lighting: Default::default(),
             base_color_texture,
             material_flags,
             tint,
@@ -181,6 +212,16 @@ impl FfxiZoneMaterial {
         }
     }
 
+    pub fn with_area(mut self, area_id: u32) -> Self {
+        self.area_id = area_id;
+        self
+    }
+
+    pub fn with_light_bindings(mut self, bindings: ZoneLightBindings) -> Self {
+        self.light_bindings = bindings;
+        self
+    }
+
     pub fn with_sort_depth_bias(mut self, bias: f32) -> Self {
         self.sort_depth_bias = bias;
         self
@@ -188,6 +229,9 @@ impl FfxiZoneMaterial {
 }
 
 struct ZoneInstanceBuffers {
+    area_id: u32,
+    points: Buffer,
+    last_points: ZonePointLighting,
     flags: Buffer,
     tint: Buffer,
     uv: Buffer,
@@ -253,6 +297,7 @@ fn collect_zone_material_touched(
 #[derive(Resource)]
 pub struct ZoneMaterialBuffers {
     lighting: Buffer,
+    areas: HashMap<u32, Buffer>,
     instances: HashMap<u64, ZoneInstanceBuffers>,
 }
 
@@ -266,6 +311,7 @@ impl FromWorld for ZoneMaterialBuffers {
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
+            areas: HashMap::new(),
             instances: HashMap::new(),
         }
     }
@@ -297,9 +343,18 @@ fn upload_zone_material_buffers(
         let Some(mat) = materials.get(*id) else {
             continue;
         };
+        if mat.area_id != 0 {
+            cache.areas.entry(mat.area_id).or_insert_with(|| {
+                uniform_buffer("ffxi_area_lighting", FfxiLightingUniform::min_size())
+            });
+        }
         match cache.instances.entry(mat.instance_id) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let inst = e.get_mut();
+                if inst.last_points != mat.point_lighting {
+                    write_uniform(&queue, &inst.points, &mat.point_lighting);
+                    inst.last_points = mat.point_lighting;
+                }
                 if inst.last_flags != mat.material_flags.flags {
                     write_uniform(&queue, &inst.flags, &mat.material_flags);
                     inst.last_flags = mat.material_flags.flags;
@@ -314,6 +369,8 @@ fn upload_zone_material_buffers(
                 }
             }
             std::collections::hash_map::Entry::Vacant(e) => {
+                let points = uniform_buffer("ffxi_zone_points", ZonePointLighting::min_size());
+                write_uniform(&queue, &points, &mat.point_lighting);
                 let flags = uniform_buffer("ffxi_zone_flags", FfxiMaterialFlags::min_size());
                 let tint = uniform_buffer("ffxi_zone_tint", Vec4::min_size());
                 let uv = uniform_buffer("ffxi_zone_uv", Vec4::min_size());
@@ -321,6 +378,9 @@ fn upload_zone_material_buffers(
                 write_uniform(&queue, &tint, &mat.tint);
                 write_uniform(&queue, &uv, &mat.uv_offset);
                 e.insert(ZoneInstanceBuffers {
+                    area_id: mat.area_id,
+                    points,
+                    last_points: mat.point_lighting,
                     flags,
                     tint,
                     uv,
@@ -330,6 +390,23 @@ fn upload_zone_material_buffers(
                 });
             }
         }
+    }
+    if !touched.dropped.is_empty() {
+        let live: std::collections::HashSet<_> = cache
+            .instances
+            .values()
+            .map(|instance| instance.area_id)
+            .collect();
+        cache.areas.retain(|id, _| live.contains(id));
+    }
+    for (area, buffer) in &cache.areas {
+        let mut value = lighting
+            .1
+            .get(area)
+            .cloned()
+            .unwrap_or_else(|| lighting.0.clone());
+        value.time_params = lighting.0.time_params;
+        write_uniform(&queue, buffer, &value);
     }
 }
 
@@ -369,7 +446,18 @@ impl AsBindGroup for FfxiZoneMaterial {
         };
         Ok(UnpreparedBindGroup {
             bindings: BindingResources(vec![
-                (0, OwnedBindingResource::Buffer(buffers.lighting.clone())),
+                (
+                    0,
+                    OwnedBindingResource::Buffer(if self.area_id == 0 {
+                        buffers.lighting.clone()
+                    } else {
+                        buffers
+                            .areas
+                            .get(&self.area_id)
+                            .ok_or(AsBindGroupError::RetryNextUpdate)?
+                            .clone()
+                    }),
+                ),
                 (
                     1,
                     OwnedBindingResource::TextureView(
@@ -387,6 +475,7 @@ impl AsBindGroup for FfxiZoneMaterial {
                 (3, OwnedBindingResource::Buffer(inst.flags.clone())),
                 (4, OwnedBindingResource::Buffer(inst.tint.clone())),
                 (5, OwnedBindingResource::Buffer(inst.uv.clone())),
+                (6, OwnedBindingResource::Buffer(inst.points.clone())),
             ]),
         })
     }
@@ -426,6 +515,7 @@ impl AsBindGroup for FfxiZoneMaterial {
             uniform(3, FfxiMaterialFlags::min_size()),
             uniform(4, Vec4::min_size()),
             uniform(5, Vec4::min_size()),
+            uniform(6, ZonePointLighting::min_size()),
         ]
     }
 }
@@ -552,6 +642,8 @@ fn update_zone_material_lighting(
         ),
     >,
     mut global: ResMut<ZoneGlobalLighting>,
+    weather: Option<Res<crate::weather::ZoneWeather>>,
+    clock: Option<Res<crate::vana_time::VanaClock>>,
 ) {
     const AMBIENT_REF_LUX: f32 = 1000.0;
     const DIR_REF_LUX: f32 = 12000.0;
@@ -634,20 +726,80 @@ fn update_zone_material_lighting(
     global.0.dir0_color = dir0_color;
     global.0.dir1_dir = dir1_dir;
     global.0.dir1_color = dir1_color;
+    global.1.clear();
+    if let (Some(weather), Some(clock), Some(zone)) = (weather, clock, zone_lighting) {
+        let sky = crate::sun_moon::vana_sky_from_clock(&clock);
+        const MINUTES_PER_HOUR: f32 = 60.0;
+        let minutes = (sky.hour * MINUTES_PER_HOUR) as u32;
+        for &area in weather.sets.by_area.keys() {
+            let Some(record) = weather.sample_for_area(area, minutes) else {
+                continue;
+            };
+            let land = crate::sun_moon::landscape_lighting(
+                &record,
+                zone.sun_dir,
+                zone.moon_dir,
+                sky.sun_altitude > 0.0,
+                sky.moon_altitude > 0.0,
+            );
+            let mut uniform = global.0.clone();
+            uniform.ambient = land.ambient.extend(1.0);
+            uniform.dir0_dir = (-land.sun_dir).normalize_or_zero().extend(0.0);
+            uniform.dir0_color = land.sun_color.extend(land.sun_k);
+            uniform.dir1_dir = (-land.moon_dir).normalize_or_zero().extend(0.0);
+            uniform.dir1_color = land.moon_color.extend(land.moon_k);
+            global.1.insert(area, uniform);
+        }
+    }
 }
 
-// Zone surfaces take their point lighting from Bevy's clustered forward binning
-// (zone_ffxi.wgsl::clustered_point_irradiance), not from the uniform's
-// point_pos/color/atten slots — those stay zeroed here and are read only by
-// skinned_ffxi.wgsl, which shares the struct layout. Clustering replaced a
-// nearest-N global feed that popped lights on and off as the viewer moved.
+fn update_zone_point_lighting(
+    active: Option<Res<crate::zone_point_lights::ActiveSceneLights>>,
+    mut materials: ResMut<Assets<FfxiZoneMaterial>>,
+    mut touched: ResMut<ZoneMaterialTouched>,
+    mut events: MessageReader<AssetEvent<FfxiZoneMaterial>>,
+) {
+    let mut added = false;
+    for event in events.read() {
+        added |= matches!(event, AssetEvent::Added { .. });
+    }
+    if !added && !active.as_ref().is_some_and(|active| active.is_changed()) {
+        return;
+    }
+    let lights = active
+        .as_deref()
+        .map(|a| a.lights.as_slice())
+        .unwrap_or_default();
+    let changes: Vec<_> = materials
+        .iter()
+        .filter_map(|(id, mat)| {
+            let points = ZonePointLighting::from_authored(lights, &mat.light_bindings);
+            (points != mat.point_lighting).then_some((id, points))
+        })
+        .collect();
+    for (id, points) in changes {
+        if let Some(mat) = materials.get_mut_untracked(id) {
+            mat.point_lighting = points;
+            touched.mark(id);
+        }
+    }
+}
 
 /// Writes the shared per-frame animation params (`FfxiLightingUniform::
 /// time_params`) into the single persistent lighting buffer: `x` = elapsed
 /// seconds (uv scroll / wind phase), `y` = global wind strength. Consumers:
 /// scrolling water (Phase A), foliage vertex blend (Phase C).
-fn update_zone_material_time(time: Res<bevy::time::Time>, mut global: ResMut<ZoneGlobalLighting>) {
+fn update_zone_material_time(
+    time: Res<bevy::time::Time>,
+    settings: Option<Res<crate::graphics_settings::GraphicsSettings>>,
+    mut global: ResMut<ZoneGlobalLighting>,
+) {
     global.0.time_params.x = time.elapsed_secs_wrapped();
+    global.0.time_params.z = if settings.is_some_and(|s| s.dynamic_lights.point_shadows_enabled()) {
+        1.0
+    } else {
+        0.0
+    };
 }
 
 pub struct FfxiZoneMaterialPlugin;
@@ -655,6 +807,7 @@ pub struct FfxiZoneMaterialPlugin;
 impl Plugin for FfxiZoneMaterialPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "directional_shadow.wgsl");
+        bevy::shader::load_shader_library!(app, "point_shadow.wgsl");
         embedded_asset!(app, "zone_ffxi.wgsl");
         embedded_asset!(app, "zone_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiZoneMaterial>::default())
@@ -664,7 +817,15 @@ impl Plugin for FfxiZoneMaterialPlugin {
             // update_zone_material_lighting reads the resource unconditionally.
             .init_resource::<crate::weather::ZoneDirectionalLighting>()
             .init_resource::<ZoneMaterialTouched>()
-            .add_systems(Update, update_zone_material_lighting)
+            .add_systems(
+                Update,
+                update_zone_material_lighting.after(crate::sun_moon::sun_moon_system),
+            )
+            .add_systems(
+                Update,
+                update_zone_point_lighting
+                    .after(crate::zone_point_lights::build_active_scene_lights),
+            )
             .add_systems(Update, update_zone_material_time)
             .add_systems(
                 PostUpdate,
@@ -685,6 +846,91 @@ impl Plugin for FfxiZoneMaterialPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_uniform_contains_only_its_authored_terrain_lights() {
+        use crate::zone_point_lights::ZonePointLight;
+        let light = ZonePointLight {
+            light_id: u32::from_le_bytes(*b"pl00"),
+            world_pos: Vec3::ONE,
+            color: Vec3::ONE,
+            range: 6.0,
+            attenuation: 0.125,
+            theta_track: None,
+            theta_multiplier: 1.0,
+        };
+        let ids = [Some(light.light_id), None, None, None];
+        let packed = ZonePointLighting::from_authored(std::slice::from_ref(&light), &ids);
+        assert_eq!(packed.positions[0], Vec3::ONE.extend(0.0));
+        assert_eq!(packed.colors[0], Vec3::ONE.extend(6.0));
+        assert_eq!(packed.attenuation[0], Vec4::new(0.0, 0.0, 0.125, 0.0));
+        assert_eq!(packed.colors[1], Vec4::ZERO);
+        assert_eq!(
+            ZonePointLighting::from_authored(&[light], &[None; 4]),
+            ZonePointLighting::default()
+        );
+    }
+
+    #[test]
+    fn area_buffers_keep_distinct_lighting_when_the_player_crosses() {
+        use crate::weather::{sample_zone_weather, ZoneDirectionalLighting, ZoneWeather};
+        use ffxi_dat::weather::{WeatherRecord, WeatherSet};
+        const AREA: u32 = u32::from_le_bytes(*b"ev01");
+        const NOON: f32 = 12.0;
+        const ZONE_AMBIENT: Vec3 = Vec3::splat(0.7);
+        const AREA_AMBIENT: [f32; 4] = [0.1, 0.2, 0.3, 1.0];
+        let mut weather = ZoneWeather::default();
+        weather.sets.by_type.insert(
+            *b"suny",
+            WeatherSet {
+                outdoor: vec![WeatherRecord::default()],
+                ..default()
+            },
+        );
+        weather.sets.by_area.insert(
+            AREA,
+            [(
+                *b"suny",
+                WeatherSet {
+                    outdoor: vec![WeatherRecord {
+                        ambient_landscape: AREA_AMBIENT,
+                        ..default()
+                    }],
+                    ..default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(weather)
+            .init_resource::<crate::weather_fx::CurrentWeather>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(NOON))
+            .init_resource::<GlobalAmbientLight>()
+            .insert_resource(ZoneDirectionalLighting {
+                valid: true,
+                ambient_landscape: ZONE_AMBIENT,
+                ..default()
+            })
+            .init_resource::<ZoneGlobalLighting>()
+            .add_systems(
+                Update,
+                (sample_zone_weather, update_zone_material_lighting).chain(),
+            );
+        app.update();
+        let before = app.world().resource::<ZoneGlobalLighting>().clone();
+        assert_eq!(before.0.ambient, ZONE_AMBIENT.extend(1.0));
+        assert_eq!(before.1[&AREA].ambient, Vec4::from_array(AREA_AMBIENT));
+        app.world_mut().resource_mut::<ZoneWeather>().area = AREA;
+        app.update();
+        let after = app.world().resource::<ZoneGlobalLighting>();
+        assert_eq!(after.0.ambient, before.0.ambient);
+        assert_eq!(after.1[&AREA].ambient, before.1[&AREA].ambient);
+        *app.world_mut().resource_mut::<ZoneWeather>() = ZoneWeather::default();
+        app.update();
+        assert!(app.world().resource::<ZoneGlobalLighting>().1.is_empty());
+    }
 
     fn bare_material() -> FfxiZoneMaterial {
         FfxiZoneMaterial::new(

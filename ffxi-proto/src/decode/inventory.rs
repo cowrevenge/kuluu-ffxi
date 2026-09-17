@@ -128,17 +128,16 @@ pub struct ItemAttr {
     pub extdata: [u8; 24],
 }
 
-/// Charges + live recast decoded from the 24-byte item extdata of a charged
-/// (usable/enchanted) item. `next_use_vana_ts` is an absolute Vana'diel
-/// timestamp (Earth seconds since `ffxi_vocab::vana_time::VANA_EPOCH_UNIX`).
-/// Readiness is signaled by `ready` (extdata flags-hi bit 0x40), NOT by a zero
-/// timestamp: LSB only writes Attr[4..8] on the cooldown path and leaves stale
-/// m_extra bytes there when ready (0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR), so consumers
-/// must gate on `ready` / `ts > now` rather than `ts == 0`.
+/// Charged-item state from `ItemTimerInfo` extdata.
+///
+/// `vendor/server/src/map/packets/s2c/0x020_item_attr.cpp
+/// GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR` leaves both timestamps
+/// stale on the ready path, so `ready` is the authoritative readiness signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChargeInfo {
     pub charges: u8,
     pub next_use_vana_ts: u32,
+    pub use_delay_end_vana_ts: u32,
     pub ready: bool,
 }
 
@@ -152,6 +151,7 @@ mod extdata {
     pub(crate) const OFF_CHARGES: usize = 1;
     pub(crate) const OFF_FLAGS_HI: usize = 3;
     pub(crate) const NEXT_USE: Range<usize> = 4..8;
+    pub(crate) const USE_DELAY_END: Range<usize> = 8..12;
     pub(crate) const FLAG_READY: u8 = 0x40;
 }
 
@@ -184,6 +184,9 @@ impl ItemAttr {
             charges: self.extdata[extdata::OFF_CHARGES],
             next_use_vana_ts: u32::from_le_bytes(
                 self.extdata[extdata::NEXT_USE].try_into().unwrap(),
+            ),
+            use_delay_end_vana_ts: u32::from_le_bytes(
+                self.extdata[extdata::USE_DELAY_END].try_into().unwrap(),
             ),
             ready: self.extdata[extdata::OFF_FLAGS_HI] & extdata::FLAG_READY != 0,
         })
@@ -373,17 +376,17 @@ mod item_tests {
     }
 
     #[test]
-    fn charge_info_reads_charges_next_use_and_ready() {
-        // 0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR — header 0x01, charges at [1], ready bit
-        // 0x40 in flags-hi [3], next-use vana timestamp at [4..8].
+    fn charge_info_reads_charges_timestamps_and_ready() {
         let mut ext = [0u8; 24];
         ext[0] = 0x01;
         ext[1] = 2;
         ext[3] = 0x90;
         ext[4..8].copy_from_slice(&123_456u32.to_le_bytes());
+        ext[8..12].copy_from_slice(&123_486u32.to_le_bytes());
         let ci = item_attr_with_extdata(ext).charge_info().unwrap();
         assert_eq!(ci.charges, 2);
         assert_eq!(ci.next_use_vana_ts, 123_456);
+        assert_eq!(ci.use_delay_end_vana_ts, 123_486);
         assert!(!ci.ready);
     }
 
@@ -396,6 +399,7 @@ mod item_tests {
         let ci = item_attr_with_extdata(ext).charge_info().unwrap();
         assert_eq!(ci.charges, 1);
         assert_eq!(ci.next_use_vana_ts, 0);
+        assert_eq!(ci.use_delay_end_vana_ts, 0);
         assert!(ci.ready);
     }
 }

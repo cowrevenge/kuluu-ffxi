@@ -56,6 +56,10 @@ pub struct DispatchLocals {
     /// Rising-edge memory for pad stick just_pressed emulation.
     pub pad_edges: PadEdges,
     pub walker: super::walker::Walker,
+    /// Damped bearing (heading-angle space) the locked body/camera turn
+    /// toward; persists across ticks so the look-at integrates instead of
+    /// re-deriving from the lagging server echo.
+    lock_bearing: Option<f32>,
     identity: Option<(Option<u32>, Option<u16>, Option<u32>, u64)>,
 }
 
@@ -142,6 +146,14 @@ const HEADING_LERP_RATE_RAD_PER_SEC: f32 = 2.5;
 // (HorizonXI video 2026-07-20), not a carved arc; turns sharper than this
 // snap instead of lerping.
 const ABOUT_FACE_SNAP_RAD: f32 = 2.0;
+
+// Lock-on look-at is damped, not snapped: camera and body both turn toward
+// the target bearing with framerate-independent exponential smoothing (the
+// carve lerp's primitive). The camera tracks faster so the target stays
+// framed while the body turns behind it; re-snapping the quantized bearing
+// each tick would re-aim both every time it crossed a heading unit.
+const LOCK_CAM_DAMP_RAD_PER_SEC: f32 = 12.0;
+const LOCK_BODY_DAMP_RAD_PER_SEC: f32 = 8.0;
 
 #[derive(Resource, Clone)]
 pub struct CommandTx(pub mpsc::Sender<AgentCommand>);
@@ -397,6 +409,7 @@ pub fn mode_cancels_autorun(mode: &InputMode) -> bool {
             | InputMode::Check
             | InputMode::Bazaar
             | InputMode::Auction
+            | InputMode::Shop
     )
 }
 
@@ -462,12 +475,6 @@ impl DialogWalk {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct SelectTargetMode {
-    pub active: bool,
-    pub prev: Option<u32>,
-}
-
 pub fn handle_input_system(
     input_src: KeyActionSources,
     mut window_close: MessageReader<WindowCloseRequested>,
@@ -482,7 +489,6 @@ pub fn handle_input_system(
     mut rest_stance: ResMut<kuluu_render::combat_stance::RestStance>,
     mut walk_mode: ResMut<kuluu_render::combat_stance::WalkMode>,
     mut tab_stack: ResMut<TabCycleStack>,
-    select_target: Res<SelectTargetMode>,
     mut hud_capture: HudCaptureParams,
 ) {
     let camera_mode = &mut camera.mode;
@@ -574,12 +580,15 @@ pub fn handle_input_system(
         return;
     }
 
-    // The engaged "Switch Target" flow is retail's sanctioned mid-fight
-    // re-target, so it plays the sub-target role here and reaches through the
-    // lock; every other targeting key below is pinned by it.
-    let target_pinned = kuluu_render::suppresses_retarget(lock_on, select_target.active);
+    // Engaged pins the main target beyond the camera lock: releasing the lock
+    // releases the camera only, so these keys stay pinned until /disengage.
+    let engaged = matches!(
+        state.snapshot.current_goal,
+        Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
+    );
+    let target_pinned = kuluu_render::suppresses_retarget(engaged, lock_on);
 
-    if !select_target.active && !target_pinned && just(Action::ClearTarget) {
+    if !target_pinned && just(Action::ClearTarget) {
         target.id = None;
     }
 
@@ -762,6 +771,39 @@ pub fn dispatch_target_change_system(
         target_index,
         kind: ActionKind::ChangeTarget,
     });
+}
+
+/// /attack locks the camera the moment the server accepts the engage — a
+/// purely client-side effect: the server keeps no camera-lock state (0x058
+/// only moves the target). The acceptance is the server's own animation byte
+/// flipping to ATTACK (the 0x058 battle-target push; the server never sends
+/// its own 0x0E), so a "wait longer" rejection never locks. Re-engaging on a
+/// different target moves the lock, which is what makes Switch Target commit
+/// the camera at once, with no swing-delay validation: the swing delay only
+/// gates the weapon-draw transition (idle -> battle stance), and a switch
+/// happens with the weapon already out. H stays the in-fight release —
+/// leaving Engaged never clears the lock, and a repeat for the same target
+/// re-applies nothing.
+pub fn engage_locks_target_system(
+    state: Res<SceneState>,
+    mut lock_on: ResMut<LockOn>,
+    mut last_engaged: Local<Option<u32>>,
+) {
+    let server_engaged = state.snapshot.self_server_status == ffxi_proto::decode::animation::ATTACK;
+    let engaged_target = if server_engaged {
+        match &state.snapshot.current_goal {
+            Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => Some(*target_id),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if engaged_target != *last_engaged {
+        *last_engaged = engaged_target;
+        if let Some(target_id) = engaged_target {
+            lock_on.target_id = Some(target_id);
+        }
+    }
 }
 
 /// Mirror the viewer's lock-on state into the reactor so it only squares the
@@ -1166,7 +1208,11 @@ pub fn dispatch_movement_system(
     let geometry_ready = kuluu_render::snapshot::effective_zone_file_id(&state.snapshot)
         .is_some_and(|file| env.collision.source_file_id() == Some(file));
 
-    let locked_heading: Option<u8> = lock_on.target_id.and_then(|id| {
+    // Continuous bearing to the locked target in heading-angle space (the
+    // `heading_to_forward` convention: forward is (cos a, -sin a)). Kept
+    // unquantized so the damped look-at below integrates smoothly instead of
+    // re-aiming on every heading-unit the bearing crosses.
+    let locked_bearing: Option<f32> = lock_on.target_id.and_then(|id| {
         state
             .snapshot
             .entities
@@ -1178,9 +1224,7 @@ pub fn dispatch_movement_system(
                 if dx.abs() <= 0.001 && dy.abs() <= 0.001 {
                     None
                 } else {
-                    let radians = dy.atan2(dx);
-                    let raw = radians * -(128.0 / std::f32::consts::PI);
-                    Some((raw.round() as i32).rem_euclid(256) as u8)
+                    Some((-dy).atan2(dx))
                 }
             })
     });
@@ -1224,10 +1268,25 @@ pub fn dispatch_movement_system(
         if snapshot_driven {
             return;
         }
-        if let Some(h) = locked_heading {
+        if let Some(bearing) = locked_bearing {
+            // Damped look-at while stopped: the camera keeps turning toward
+            // the target, and a heading-only Move goes out only on the ticks
+            // the quantized facing actually changes.
+            let damped = damp_lock_bearing(
+                &mut locals.lock_bearing,
+                bearing,
+                self_pos.heading,
+                LOCK_BODY_DAMP_RAD_PER_SEC,
+                time.delta_secs(),
+            );
+            damp_lock_camera(
+                &mut chase.yaw,
+                bearing,
+                LOCK_CAM_DAMP_RAD_PER_SEC,
+                time.delta_secs(),
+            );
+            let h = heading_for_angle(damped);
             if h != self_pos.heading {
-                chase.yaw = kuluu_render::yaw_for_heading(h);
-
                 let _ = cmd_tx.0.try_send(AgentCommand::Move {
                     x: basis_pos.x,
                     y: basis_pos.y,
@@ -1353,9 +1412,24 @@ pub fn dispatch_movement_system(
         strafe = 0;
     }
 
-    if let Some(h) = locked_heading {
-        heading = h;
-        chase.yaw = kuluu_render::yaw_for_heading(h);
+    if let Some(bearing) = locked_bearing {
+        // Damped look-at: the body turns toward the target and moves along
+        // its own (smoothly turning) facing - forward closes the gap, strafe
+        // orbits it - instead of snapping the quantized bearing each tick.
+        let damped = damp_lock_bearing(
+            &mut locals.lock_bearing,
+            bearing,
+            self_pos.heading,
+            LOCK_BODY_DAMP_RAD_PER_SEC,
+            time.delta_secs(),
+        );
+        damp_lock_camera(
+            &mut chase.yaw,
+            bearing,
+            LOCK_CAM_DAMP_RAD_PER_SEC,
+            time.delta_secs(),
+        );
+        heading = heading_for_angle(damped);
     }
 
     // Retail buckets the movement vector against the actor's own resolved
@@ -1673,6 +1747,40 @@ pub fn apply_self_prediction_system(
 pub(super) fn heading_to_forward(heading: u8) -> (f32, f32) {
     let angle = (heading as f32) * std::f32::consts::TAU / 256.0;
     (angle.cos(), -angle.sin())
+}
+
+/// Quantize a heading-angle (radians, `heading_to_forward` convention) to the
+/// u8 heading the wire carries.
+fn heading_for_angle(angle: f32) -> u8 {
+    let normalized = angle.rem_euclid(std::f32::consts::TAU);
+    (normalized * 128.0 / std::f32::consts::PI).round() as u32 as u8
+}
+
+/// One step of the lock-on body's damped look-at: exponentially smooth the
+/// persistent bearing toward the target at a framerate-independent rate, so
+/// the facing turns instead of snapping. Seeds from the server's facing on
+/// the first tick (and after a zone change resets the locals).
+fn damp_lock_bearing(
+    damped: &mut Option<f32>,
+    bearing: f32,
+    seed_heading: u8,
+    rate: f32,
+    dt: f32,
+) -> f32 {
+    let seed = wrap_signed_pi(seed_heading as f32 * std::f32::consts::TAU / 256.0);
+    let cur = (*damped).unwrap_or(seed);
+    let alpha = 1.0 - (-rate * dt).exp();
+    let next = wrap_signed_pi(cur + wrap_signed_pi(bearing - cur) * alpha);
+    *damped = Some(next);
+    next
+}
+
+/// One step of the lock-on camera's damped look-at: turn the chase yaw toward
+/// the bearing's camera yaw at a framerate-independent rate.
+fn damp_lock_camera(chase_yaw: &mut f32, bearing: f32, rate: f32, dt: f32) {
+    let target_yaw = kuluu_render::yaw_for_heading(heading_for_angle(bearing));
+    let alpha = 1.0 - (-rate * dt).exp();
+    *chase_yaw += wrap_signed_pi(target_yaw - *chase_yaw) * alpha;
 }
 
 fn radius_for_wire_kind(kind: EntityKind) -> f32 {
@@ -2009,7 +2117,10 @@ mod tests {
             .init_resource::<kuluu_render::combat_stance::WalkMode>()
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<super::super::walker::debug::FieldDebug>()
-            .add_systems(Update, dispatch_movement_system);
+            .add_systems(
+                Update,
+                (dispatch_movement_system, engage_locks_target_system),
+            );
         let mut scene = app.world_mut().resource_mut::<SceneState>();
         scene.snapshot.self_char_id = Some(1);
         scene.snapshot.entities.push(ent(1, 0.0, 0.0));
@@ -2037,6 +2148,66 @@ mod tests {
         app.update();
         assert!(!app.world().resource::<LocalPlayerPrediction>().initialized);
         assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn engage_locks_on_server_accept() {
+        let (mut app, _rx) = movement_app();
+        // The goal flips to Engaged on send, but the camera must not lock yet:
+        // the server has not accepted, so its animation byte is still NONE.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .current_goal = Some(kuluu_snapshot::ReactorGoal::Engaged {
+            target_id: 2,
+            attack_issued: false,
+        });
+        app.update();
+        assert!(
+            app.world().resource::<LockOn>().target_id.is_none(),
+            "a send-time engage must not lock before the server accepts"
+        );
+
+        // The server accepts: its animation byte flips to ATTACK. The lock fires.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .self_server_status = ffxi_proto::decode::animation::ATTACK;
+        app.update();
+        assert_eq!(
+            app.world().resource::<LockOn>().target_id,
+            Some(2),
+            "the server's accepted engage must lock the target"
+        );
+
+        // H clears the lock; the goal staying Engaged must not re-apply it.
+        app.world_mut().resource_mut::<LockOn>().target_id = None;
+        app.update();
+        assert!(
+            app.world().resource::<LockOn>().target_id.is_none(),
+            "the in-fight H release must not be re-applied while the goal stays Engaged"
+        );
+
+        // A re-engage onto a different target moves the lock — this is the
+        // Switch Target commit: the camera follows the chosen target at
+        // once, with no swing-delay validation.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .current_goal = Some(kuluu_snapshot::ReactorGoal::Engaged {
+            target_id: 3,
+            attack_issued: false,
+        });
+        app.update();
+        assert_eq!(app.world().resource::<LockOn>().target_id, Some(3));
+
+        // The goal leaving Engaged never clears the lock; H is the release.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .current_goal = Some(kuluu_snapshot::ReactorGoal::Idle);
+        app.update();
+        assert_eq!(app.world().resource::<LockOn>().target_id, Some(3));
     }
 
     #[test]
@@ -2349,6 +2520,7 @@ mod tests {
             submesh_idx: 0,
             bevy_transform: bevy::prelude::Transform::IDENTITY,
             water_height_bevy: None,
+            lighting: None,
             sub_area_link: 0,
         };
         MzbCollisionGeometry::from_block(build_collision_geometry(&[sub], &[inst], None))
@@ -3345,6 +3517,7 @@ mod tests {
             InputMode::Check,
             InputMode::Bazaar,
             InputMode::Auction,
+            InputMode::Shop,
         ] {
             assert!(mode_cancels_autorun(&mode), "{mode:?}");
             assert!(!mode_swallows_keys(&mode), "{mode:?}");

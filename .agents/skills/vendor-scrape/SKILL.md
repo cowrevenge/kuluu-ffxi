@@ -12,7 +12,8 @@ into Rust statics":
 - `ffxi-proto/build.rs` scrapes `vendor/server/src/map/enums/msg_*.h`
   into typed message-ID tables (`msg_basic`, `msg_channel`,
   `msg_area`, `msg_action_modifier`, `msg_system`).
-- `kuluu-nav/build.rs` scrapes `vendor/server/sql/zonelines.sql` into a
+- `kuluu-nav/build.rs` scrapes the `zonelines:` map of every
+  `vendor/server/data/zones/<zone>/zone.yaml` into a
   static `&[ZoneLine]` array indexed by `from_zone`.
 
 Apply this pattern any time you need values from LSB that are
@@ -195,11 +196,14 @@ narrow so unrelated edits don't trigger rebuilds.
    startup. A running dev stack keeps its image's `CLIENT_VER` until
    recreated (dump the DB first).
 
-### Known blocker for the next bump
+### YAML inputs
 
-At LSB `origin/base`, six scrape inputs no longer exist:
-`scripts/enum/effect.lua`, `scripts/enum/zone.lua`, `sql/status_effects.sql`,
-`sql/transport.sql`, `sql/zonelines.sql`, `src/map/transport.cpp`. Upstream
-replaced them with `data/enums/*.yaml`, `data/status_effects.yaml` and
-`data/zones/<zone>/zone.yaml`. Those walkers must be re-sourced against the
-new shapes before the pin can move; tracked as a bead.
+LSB moved its enums, status effects, zone lines and transport schedules out of
+lua/SQL into `data/enums/*.yaml`, `data/status_effects.yaml` and
+`data/zones/<zone>/zone.yaml`. `lsb_scrape::yaml` walks the block-style subset
+those files use (`parse_yaml`, `parse_yaml_enum_values`, `zone_data_files`)
+and rejects anything outside it, so a format drift fails the build the same
+way a changed SQL column does. `git worktree` checkouts share `target/`
+through the post-checkout hook; a bump rehearsed in a worktree needs its own
+target dir (replace the symlink), or its build-script outputs land in the
+main checkout's artifacts.

@@ -19,11 +19,13 @@ fn main() {
 
     let root = DatRoot::from_env_or_default().expect("DatRoot");
 
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(zone).expect("event DAT mapping");
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
+        .expect("resolve event DAT");
     let bytes = std::fs::read(loc.path_under(&root)).expect("read event DAT");
     let dat = EventDat::parse(&bytes).expect("parse event DAT");
 
-    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone).expect("string DAT mapping");
+    let file_id = ffxi_dat::zone_dat::string_dat_file_id(zone);
     let sloc = root.resolve(file_id).expect("resolve string DAT");
     let sbytes = std::fs::read(sloc.path_under(&root)).expect("read string DAT");
     let strings = StringDat::parse(&sbytes).expect("parse string DAT");
@@ -79,6 +81,10 @@ fn main() {
                 DialogStep::Waiting => {
                     println!("  {step:2}. waiting (clock skipped offline)");
                     next = Some(runner.tick(OFFLINE_WAIT_SKIP_SECS, &strings));
+                }
+                DialogStep::AwaitServerAck(tag) => {
+                    println!("  {step:2}. pending tag (acked offline): {tag:?}");
+                    next = Some(runner.ack_server(&strings));
                 }
             }
         }

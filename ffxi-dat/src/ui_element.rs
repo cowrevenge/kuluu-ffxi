@@ -10,6 +10,12 @@ use crate::texture::{decode_texture, DecodedTexture};
 pub const UI_ELEMENT_GROUP_KIND: u8 = 0x31;
 pub const TEXTURE_KIND: u8 = 0x20;
 
+/// File id of the menu sheet holding the day orbs and weather icons
+/// (research/xim/src/jsMain/kotlin/xim/poc/UiResourceManager.kt uiDats);
+/// `ROM/119/51.DAT` on the horizonxi-2023 and retail-2026-09
+/// [`crate::client_profile::KNOWN_CLIENTS`] rows.
+pub const UI_SHEET_FILE_ID: u32 = 39542;
+
 const NAME_LEN: usize = 0x10;
 
 // Packed QuadData layout (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h).
@@ -258,18 +264,27 @@ mod tests {
 
     const FRAMES_JP: &str = "menu    frames  ";
     const FRAMES_US: &str = "menu    framesus";
-    const ICON_SHEET_DAT: &str = "ROM/119/51.DAT";
 
     // Read the bare install file rather than resolving through overlays: the
-    // xiview Pivot overlay ships an hxi-era 51.DAT, which would mask the
-    // install's own sheet.
+    // xiview Pivot overlay ships an hxi-era sheet, which would mask the
+    // install's own.
     fn read_icon_sheet_unoverlaid(root: &crate::archive::DatRoot) -> Option<Vec<u8>> {
-        match std::fs::read(root.root().join(ICON_SHEET_DAT)) {
+        let path = match root.resolve(UI_SHEET_FILE_ID) {
+            Ok(loc) => loc.join_under(root.root()),
+            Err(e) => {
+                eprintln!(
+                    "SKIP (real-DAT guard): {} does not place file id {UI_SHEET_FILE_ID}: {e}",
+                    root.root().display()
+                );
+                return None;
+            }
+        };
+        match std::fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
                 eprintln!(
-                    "SKIP (real-DAT guard): {} has no {ICON_SHEET_DAT}: {e}",
-                    root.root().display()
+                    "SKIP (real-DAT guard): {} is unreadable: {e}",
+                    path.display()
                 );
                 None
             }

@@ -2,33 +2,6 @@ use std::io::Read;
 
 use crate::{DatError, Result};
 
-include!(concat!(env!("OUT_DIR"), "/map_dat_table.rs"));
-
-pub fn map_dat_for_zone(zone_id: u16) -> Option<u32> {
-    map_dat_for(zone_id, 0)
-}
-
-pub fn map_dat_for(zone_id: u16, map_index: u8) -> Option<u32> {
-    MAP_DAT_TABLE
-        .binary_search_by(|(z, m, _)| (*z, *m).cmp(&(zone_id, map_index)))
-        .ok()
-        .map(|i| MAP_DAT_TABLE[i].2)
-}
-
-/// How many map DATs POLUtils catalogues for the zone. This is neither the
-/// number of maps the client offers nor a roster of the zones that have one:
-/// against the DLL's zone-map table POLUtils lists maps the DLL dropped (zone
-/// 238: 3 vs 2), misses maps it has (zone 50: 1 vs 2), omits 36 zones outright
-/// (157 Middle Delkfutt's Tower: 0 vs 6) and names two the DLL has no record
-/// for (14, 77). A caller deciding what to *show* wants
-/// [`crate::main_dll::MainDll::zone_map_counts`] (kuluu-u8p1).
-pub fn map_count_for_zone(zone_id: u16) -> usize {
-    MAP_DAT_TABLE
-        .iter()
-        .filter(|(z, _, _)| *z == zone_id)
-        .count()
-}
-
 pub const STATUS_ICON_FILE_ID: u32 = 87;
 
 pub const STATUS_ICON_BLOCK_STRIDE: usize = 0x1800;
@@ -418,25 +391,6 @@ mod tests {
     fn parse_graphic_errors_on_truncated_header() {
         let bytes = vec![0x91, 0x00, 0x00];
         assert!(parse_graphic(&bytes).is_err());
-    }
-
-    #[test]
-    fn map_dat_for_zone_konschtat_is_5321() {
-        assert_eq!(map_dat_for_zone(108), Some(5321));
-    }
-
-    #[test]
-    fn map_count_for_psoxja_is_three() {
-        assert_eq!(map_count_for_zone(167), 3);
-        assert_eq!(map_dat_for(167, 0), Some(5401));
-        assert_eq!(map_dat_for(167, 1), Some(5402));
-        assert_eq!(map_dat_for(167, 2), Some(5403));
-        assert_eq!(map_dat_for(167, 3), None);
-    }
-
-    #[test]
-    fn map_dat_for_unknown_zone_returns_none() {
-        assert_eq!(map_dat_for_zone(9999), None);
     }
 
     #[test]

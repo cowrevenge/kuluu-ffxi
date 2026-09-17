@@ -1,3 +1,20 @@
+/// Pins a decoder's hand-written body offset to LSB's own `offsetof`, which
+/// ffxi-proto/build.rs walks out of vendor/server/src/map/packets/s2c/*.h into
+/// [`crate::s2c_layout`]. `$upstream_field` names the member upstream calls it,
+/// so a vendor bump that moves a field fails the build saying which one.
+macro_rules! pin_s2c_offset {
+    ($ours:expr, $upstream:expr, $upstream_field:literal) => {
+        const _: () = assert!(
+            $ours == $upstream,
+            concat!(
+                "LSB moved ",
+                $upstream_field,
+                ": the decoder offset is stale"
+            )
+        );
+    };
+}
+
 pub mod animation;
 
 mod death_menu;
@@ -44,6 +61,8 @@ mod auction;
 pub use auction::*;
 mod assist;
 pub use assist::*;
+mod pending;
+pub use pending::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

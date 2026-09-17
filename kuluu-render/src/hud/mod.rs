@@ -69,6 +69,12 @@ pub struct HudPanels {
     /// in movement. Grounding stays on. Toggled from the Debug menu NoClip row
     /// or /noclip; both flip this same flag.
     pub noclip: bool,
+    /// Debug auto-enter (enternity-style): when on, event-dialog message frames
+    /// advance themselves after their read time instead of waiting for Enter.
+    /// Choice frames, item lines, text-entry frames, server custom menus, and
+    /// the enternity blacklist (Paintbrush of Souls, Geomantic Reservoir) are
+    /// never advanced. Toggled from the Debug menu "Auto-Enter CS" row.
+    pub auto_enter_cs: bool,
     /// Stair-climber debug: when true, shows the status panel populated by
     /// the input crate's stair detection state (orbs, slopes, classification
     /// counts). Independent from `stair_draw` (whether the in-world gizmos
@@ -115,6 +121,11 @@ pub struct DevHud;
 #[derive(Component)]
 pub struct BottomLeftStack;
 
+#[derive(Component)]
+pub struct ChatTools;
+
+pub const BOTTOM_LEFT_INSET_PX: f32 = 54.0;
+
 pub fn spawn_bottom_left_stack(
     mut commands: Commands,
     mut images: ResMut<Assets<bevy::image::Image>>,
@@ -127,7 +138,7 @@ pub fn spawn_bottom_left_stack(
             Node {
                 position_type: PositionType::Absolute,
 
-                bottom: Val::Px(54.0),
+                bottom: Val::Px(BOTTOM_LEFT_INSET_PX),
                 left: Val::Px(0.0),
                 width: Val::Percent(50.0),
 
@@ -143,12 +154,15 @@ pub fn spawn_bottom_left_stack(
             chat_panel::spawn_chat_panels_as_children(p);
             chat_panel::spawn_chat_tab_bar_as_child(p);
 
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::FlexStart,
-                column_gap: Val::Px(4.0),
-                ..default()
-            })
+            p.spawn((
+                ChatTools,
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                },
+            ))
             .with_children(|row| {
                 row.spawn(Node {
                     flex_direction: FlexDirection::Column,
@@ -282,6 +296,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<delivery::DeliveryScreenState>();
         app.init_resource::<delivery::DeliveryInventory>();
 
+        app.init_resource::<shop::ShopScreenState>();
         app.init_resource::<auction::AuctionScreenState>();
         app.init_resource::<auction::AuctionSellInventory>();
         app.init_resource::<auction::AuctionEventCursor>();
@@ -443,6 +458,12 @@ impl Plugin for HudPlugin {
                 .before(chat_panel::update_chat_tab_visuals_system),
         );
         app.add_systems(Update, chat_panel::update_chat_tab_visuals_system);
+        app.add_systems(
+            Update,
+            chat_panel::apply_chat_layout
+                .after(panel_column::layout_panel_column_system)
+                .before(chat_panel::update_chat_panel),
+        );
 
         app.add_systems(Update, weather_icon::update_weather_icon);
         app.add_systems(Update, entity_hover_card::update_entity_hover_card_system);
@@ -509,7 +530,6 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             quick_action::spawn_quick_action,
             target_panel::spawn_target_panel,
             dialog::spawn_dialog_panel,
-            shop::spawn_shop_panel,
             zone_flash::spawn_zone_flash,
             self_fishing::spawn_fishing_hud,
             party_frame::spawn_party_frames,
@@ -546,6 +566,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             equipment_screen::spawn_equipment_screen,
             delivery::spawn_delivery_screen,
             auction::spawn_auction_screen,
+            shop::spawn_shop_panel,
         ),
     );
     // Depends on `crate::minimap` (wasm-gated).

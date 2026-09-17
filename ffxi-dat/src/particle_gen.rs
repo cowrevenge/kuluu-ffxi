@@ -137,6 +137,31 @@ const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 // retail tests as `field_10C & 0x10000000` to pick the D3m element's texture-stage table.
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp CMoD3m::Draw
 const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::PrepDX —
+// `field_10C & 0x2000000` turns D3DRS_FOGENABLE off for the element; every other element takes
+// the area's fog colour and range. research/xim ParticleInitializers.kt read `fogEnabled`.
+const RENDER_STATE_FOG_DISABLED: u16 = 0x0200;
+// CMoElem.cpp CMoElem::OnDraw — the ordering-table key is `field_128 - depth` by default, the
+// constant `field_128` alone under 0x0040 (research/xim ParticleInitializers.kt read
+// `drawPriorityOffset`), and the depth key plus 400 under 0x0800 (`lowPriorityDraw`), which is
+// tested last and so wins over the constant key.
+const RENDER_STATE_PINNED_DRAW: u16 = 0x0040;
+const RENDER_STATE_LOW_PRIORITY_DRAW: u16 = 0x0800;
+// CMoElem.cpp CMoElem::PrepDX — `field_10C & 0x1000`, a billboard-word bit, turns
+// D3DRS_ZWRITEENABLE on for the element.
+const BILLBOARD_DEPTH_WRITE: u16 = 0x1000;
+
+/// Where an element ranks among translucent draws (CMoElem.cpp CMoElem::OnDraw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawPriority {
+    /// Key = `sort_offset - view depth`: back to front with everything else.
+    #[default]
+    Depth,
+    /// Key = `sort_offset` alone: pinned at the table's near end, after the depth-sorted set.
+    Pinned,
+    /// Key = depth key + 400: drawn as if far behind everything else.
+    Low,
+}
 // research/xim ParticleInitializers.kt read `cameraAttachedBasePosition`.
 const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::HandleOne — the
@@ -333,6 +358,17 @@ pub struct ParticleGeneratorDef {
     // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS
     pub ignore_texture_alpha: bool,
 
+    // Clear = the element fogs toward the area's fog colour like terrain (CMoElem.cpp
+    // CMoElem::PrepDX); the weat/ sky layers past the fog range set the bit.
+    pub fog_enabled: bool,
+
+    pub draw_priority: DrawPriority,
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — the element's `field_128`
+    // sort-key offset (research/xim Particle.kt `projectionBias`).
+    pub sort_offset: f32,
+    // CMoElem.cpp CMoElem::PrepDX — D3DRS_ZWRITEENABLE for the element.
+    pub depth_write: bool,
+
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
     pub scale_x_track: Option<[u8; 4]>,
     pub scale_y_track: Option<[u8; 4]>,
@@ -491,6 +527,10 @@ impl ParticleGeneratorDef {
         let mut blend = ParticleBlend::Additive;
         let mut blend_byte = 0u8;
         let mut ignore_texture_alpha = false;
+        let mut fog_enabled = true;
+        let mut draw_priority = DrawPriority::Depth;
+        let mut sort_offset = 0.0;
+        let mut depth_write = false;
         let mut tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS] =
             [None; TOD_COLOR_CHANNELS];
         let mut rotation_velocity = None;
@@ -518,6 +558,15 @@ impl ParticleGeneratorDef {
                         || bb & BILLBOARD_CAMERA_MASK == BILLBOARD_CAMERA_MASK;
                     let render_state = u16_le(body, payload + 2);
                     ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
+                    fog_enabled = render_state & RENDER_STATE_FOG_DISABLED == 0;
+                    draw_priority = if render_state & RENDER_STATE_LOW_PRIORITY_DRAW != 0 {
+                        DrawPriority::Low
+                    } else if render_state & RENDER_STATE_PINNED_DRAW != 0 {
+                        DrawPriority::Pinned
+                    } else {
+                        DrawPriority::Depth
+                    };
+                    depth_write = bb & BILLBOARD_DEPTH_WRITE != 0;
                     follow_camera = bb & BILLBOARD_FOLLOW_CAMERA != 0;
                     camera_attached_base = render_state & RENDER_STATE_CAMERA_ATTACHED_BASE != 0;
                     specular_element = render_state & RENDER_STATE_SPECULAR_ELEMENT != 0;
@@ -604,6 +653,7 @@ impl ParticleGeneratorDef {
                         flags: u32_le(body, payload + 32),
                     });
                 }
+                0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
                 0x16 if payload + 4 <= body.len() => {
                     init_color = [
                         body[payload] as f32 / 255.0,
@@ -792,6 +842,10 @@ impl ParticleGeneratorDef {
             blend,
             blend_byte,
             ignore_texture_alpha,
+            fog_enabled,
+            draw_priority,
+            sort_offset,
+            depth_write,
             scale_x_track,
             scale_y_track,
             alpha_track,
@@ -1426,6 +1480,65 @@ mod tests {
         assert!(!element(0x0FFF), "only bit 0x1000 selects the element");
         assert!(element(0x1000));
         assert!(element(0x1200), "other render-state bits do not mask it");
+    }
+
+    // CMoElem.cpp CMoElem::PrepDX — fog is on unless the element sets 0x0200.
+    #[test]
+    fn render_state_flag_0x0200_disables_fog() {
+        let fogged = |render_state: u16| {
+            let mut setup = op(0x01, 12, &[]);
+            setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
+            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+            let body = build(&setup, 1, 1);
+            ParticleGeneratorDef::parse(&body)
+                .unwrap()
+                .unwrap()
+                .fog_enabled
+        };
+        assert!(fogged(0x0000));
+        assert!(fogged(0x1000));
+        assert!(!fogged(0x0200));
+        assert!(!fogged(0x1200));
+    }
+
+    // CMoElem.cpp CMoElem::OnDraw / CMoElem::PrepDX — Lower Jeuno's sea group as shipped in
+    // DAT 345: `down` is billboard 0x1000 / render-state 0x0800, `col1` and both sheets are
+    // render-state 0x0040.
+    #[test]
+    fn render_state_and_billboard_words_select_draw_priority_and_depth_write() {
+        let parsed = |billboard: u16, render_state: u16| {
+            let mut setup = op(0x01, 12, &[]);
+            setup[4..4 + 2].copy_from_slice(&billboard.to_le_bytes());
+            setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
+            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+            let body = build(&setup, 1, 1);
+            let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+            (def.draw_priority, def.depth_write)
+        };
+        assert_eq!(parsed(0x0000, 0x0000), (DrawPriority::Depth, false));
+        assert_eq!(parsed(0x1000, 0x0800), (DrawPriority::Low, true));
+        assert_eq!(parsed(0x0000, 0x0040), (DrawPriority::Pinned, false));
+        assert_eq!(
+            parsed(0x0000, 0x0840),
+            (DrawPriority::Low, false),
+            "low priority is tested after the pinned key and overrides it"
+        );
+    }
+
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — one float, the sort offset.
+    #[test]
+    fn opcode_0x30_sets_the_sort_offset() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        setup.extend(op(0x30, 2, &7.5f32.to_le_bytes()));
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.sort_offset, 7.5);
+        let mut plain = op(0x01, 12, &[]);
+        plain[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let body = build(&plain, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.sort_offset, 0.0);
     }
 
     fn mesh_setup() -> Vec<u8> {

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Once;
 
+use crate::pol1::{self, SECTION_NAME_LEN};
 use crate::{DatError, Result};
 
 // research/xim MainDll.kt — table offsets are located by scanning FFXiMain.dll for a known
@@ -20,18 +20,7 @@ pub const SCAN_WORDS: usize = 0xC000;
 /// Every marker is 4-byte aligned in both builds, so the scan steps by a word.
 const SCAN_STRIDE: usize = 4;
 
-const PE_E_LFANEW_OFFSET: usize = 0x3C;
-const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
-/// COFF header fields, offset from the `PE\0\0` signature; the section table
-/// follows the signature, the COFF header and the optional header.
-const PE_NUMBER_OF_SECTIONS_OFFSET: usize = 6;
-const PE_SIZE_OF_OPTIONAL_HEADER_OFFSET: usize = 20;
-const PE_SECTION_TABLE_OFFSET: usize = 24;
-const SECTION_HEADER_SIZE: usize = 40;
-const SECTION_NAME_LEN: usize = 8;
-const SECTION_SIZE_OF_RAW_DATA_OFFSET: usize = 16;
-const SECTION_POINTER_TO_RAW_DATA_OFFSET: usize = 20;
-const DATA_SECTION_NAME: &[u8; SECTION_NAME_LEN] = b".data\0\0\0";
+const DATA_SECTION_NAME: [u8; SECTION_NAME_LEN] = pol1::section_name(b".data");
 
 pub const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
 pub const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
@@ -70,6 +59,97 @@ pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 /// carrying `fsh*`. Pinned by `kuluu-render/tests/fishing_pose_clips.rs`.
 pub const ACTION_ANIM_FISHING_OFFSET: u16 = 0x01;
 
+/// The slash-command table: one 24-byte row per name the client accepts on the
+/// input line. `char name[20]` (leading `/`, NUL-padded) then the command id and
+/// a flag word. The run ends at the first row with an empty name, past which
+/// sits a 12-byte `(handler, zero, command_id)` array — so the id, not the name,
+/// is what the client dispatches on, and every row sharing an id is an alias.
+///
+/// KNOWN_CLIENTS retail-2026-09 RVA 0x0035_5408, horizonxi-2023 RVA
+/// 0x0035_12b8; both in `.data`, whose raw bytes ship unpacked, so reading it
+/// needs no POL1 decode. Located by the row pattern rather than by an address:
+/// the table is a property of whichever client the user installed.
+const COMMAND_STRIDE: usize = 24;
+const COMMAND_NAME_LEN: usize = 20;
+const COMMAND_ID_OFFSET: usize = 0x14;
+const COMMAND_FLAGS_OFFSET: usize = 0x16;
+const COMMAND_PREFIX: u8 = b'/';
+/// Consecutive well-formed rows that identify the table. A shorter run risks a
+/// stretch of unrelated `.data` that happens to hold one slash-led string.
+const COMMAND_TABLE_MIN_RUN: usize = 8;
+
+/// One row of the client's slash-command table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCommand {
+    /// The word after the slash; the row stores it with the leading `/`.
+    pub name: String,
+    pub id: u16,
+    /// Undecoded. Commands that behave alike share a value — every emote
+    /// carries one, every chat channel another — so it is carried for a later
+    /// caller rather than interpreted here.
+    pub flags: u16,
+}
+
+/// The client's slash-command table in row order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandTable {
+    entries: Vec<ClientCommand>,
+}
+
+impl CommandTable {
+    /// A table from rows a caller supplies rather than from an install — a
+    /// server policy's extra commands, or a test that needs alias resolution
+    /// without one.
+    pub fn from_entries(entries: Vec<ClientCommand>) -> Self {
+        Self { entries }
+    }
+
+    pub fn entries(&self) -> &[ClientCommand] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Case-insensitive, matching how the client accepts `/Say`.
+    pub fn id_for(&self, name: &str) -> Option<u16> {
+        self.entries
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .map(|c| c.id)
+    }
+
+    /// The long form of a command: its first row. `/attack` precedes `/a`,
+    /// `/shoot` precedes `/range` `/ra` `/throw`.
+    pub fn canonical(&self, id: u16) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    /// Every name the client accepts for one command, long form first.
+    pub fn names_for(&self, id: u16) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter(move |c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = u16> + '_ {
+        let mut seen = std::collections::BTreeSet::new();
+        self.entries
+            .iter()
+            .filter(move |c| seen.insert(c.id))
+            .map(|c| c.id)
+    }
+}
+
 // research/xim ZoneMapTable.kt
 const ZONE_MAP_HINT: u64 = 0x6400_0001_0001_0100;
 const ZONE_MAP_STRIDE: usize = 0x0E;
@@ -77,16 +157,30 @@ const ZONE_MAP_NEXT_DIVISOR: usize = 0x13;
 const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 
 /// The record's low nibble at byte 4 picks which file-table base its
-/// `file_table_offset` counts from. Values from research/xim
-/// ZoneMapTable.kt getFileTableOffset. Indices 0 and 1 are content-verified
-/// on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09: they are the only
-/// nibbles a zone-keyed row picks, and every such row resolves through the
-/// install's VTABLE. Index 2 occurs only on the client-only negative-key rows
-/// (148 rows, 84 of which resolve on both builds). Index 3 is unexercised by
-/// every row of both builds, so it is carried on xim's word alone.
-const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
-const ZONE_MAP_EXERCISED_FILE_TABLE_BASES: usize = 3;
+/// `file_table_offset` counts from, per FFXiMain.dll's switch on
+/// `byte4 & 0x0F` (KNOWN_CLIENTS retail-2026-09 RVA 0x1f85f0, horizonxi-2023
+/// RVA 0x1f4d20): three inline immediates and no arm for any other nibble.
+/// research/xim ZoneMapTable.kt getFileTableOffset reads index 2 as 0xD147;
+/// only 0xD417 resolves all 148 index-2 rows through both installs' VTABLE
+/// (0xD147 resolves 84 and aliases them onto the index-1 `m_2*` maps, while
+/// 0xD417 lands on the disjoint `em_*`/`s?_*` set).
+const ZONE_MAP_FILE_TABLE_BASES: [u32; 3] = [0x14C0, 0xD02F, 0xD417];
+/// What that switch answers for a nibble without an arm: a whole file id,
+/// `file_table_offset` not added. The map loader pre-seeds the same id as its
+/// no-record default (KNOWN_CLIENTS retail-2026-09 RVA 0x1f838a, horizonxi-2023
+/// RVA 0x1f4aba). No row of either build takes this arm; the id resolves to
+/// ROM/18/105.DAT on both installs.
+const ZONE_MAP_FALLBACK_FILE_ID: u32 = 0x1592;
 const ZONE_MAP_FILE_TABLE_BASE_MASK: u8 = 0x0F;
+/// Byte 4's high nibble picks which key-item base signed byte 6 counts from,
+/// naming the map key item the zone's map is gated on (KNOWN_CLIENTS
+/// retail-2026-09 RVA 0x1f7480, horizonxi-2023 RVA 0x1f3bb0). Byte 6 == 0 or a
+/// nibble without an arm answers "no key item"; a negative byte 6 answers
+/// `ZONE_MAP_NEGATIVE_KEY_ITEM` whatever the nibble. Every row naming one lands
+/// on a MAP_OF_* id of vendor/server/scripts/enum/key_item.lua on both builds.
+const ZONE_MAP_KEY_ITEM_BASES: [u16; 3] = [0x180, 0x73F, 0x8FD];
+const ZONE_MAP_KEY_ITEM_BASE_SHIFT: u8 = 4;
+const ZONE_MAP_NEGATIVE_KEY_ITEM: u16 = 0x17F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapRecord {
@@ -96,6 +190,8 @@ pub struct ZoneMapRecord {
     /// take the image and the calibration below from one row, instead of
     /// cross-referencing a table keyed on a different index.
     pub file_id: u32,
+    /// The map key item this map is gated on, when the row names one.
+    pub key_item: Option<u16>,
     pub size: u16,
     pub x_offset: i16,
     pub y_offset: i16,
@@ -111,6 +207,7 @@ pub struct MainDll {
     action_anim_base: Option<usize>,
     battle_anim_base: Option<usize>,
     equipment_base: Option<usize>,
+    command_table_base: Option<usize>,
 }
 
 impl MainDll {
@@ -135,6 +232,7 @@ impl MainDll {
         let action_anim_base = find_offset(&bytes, &window, ACTION_ANIM_HINT);
         let battle_anim_base = find_offset(&bytes, &window, BATTLE_ANIM_HINT);
         let equipment_base = find_offset(&bytes, &window, EQUIPMENT_HINT);
+        let command_table_base = find_command_table(&bytes, &window);
         Ok(Self {
             bytes,
             weapon_skill_base,
@@ -145,7 +243,24 @@ impl MainDll {
             action_anim_base,
             battle_anim_base,
             equipment_base,
+            command_table_base,
         })
+    }
+
+    /// Every slash command this client accepts. Empty when the table could not
+    /// be located, which leaves a caller to fall back on the long forms it
+    /// registers itself rather than losing the surface outright.
+    pub fn commands(&self) -> CommandTable {
+        let mut entries = Vec::new();
+        let mut off = match self.command_table_base {
+            Some(base) => base,
+            None => return CommandTable::default(),
+        };
+        while let Some(entry) = command_record(&self.bytes, off) {
+            entries.push(entry);
+            off += COMMAND_STRIDE;
+        }
+        CommandTable { entries }
     }
 
     pub fn zone_map(&self, zone_id: u16, sub_zone_id: u8) -> Option<ZoneMapRecord> {
@@ -287,36 +402,16 @@ impl MainDll {
     }
 }
 
-fn read_u16_le(bytes: &[u8], off: usize) -> Option<u16> {
-    let b = bytes.get(off..off + 2)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn read_u32_le(bytes: &[u8], off: usize) -> Option<u32> {
-    let b = bytes.get(off..off + 4)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
 /// The `.data` section's raw file span, clipped to the file, from the PE
 /// section table; `None` when the image has no parseable section table or
 /// no `.data` section.
 fn data_section_span(bytes: &[u8]) -> Option<Range<usize>> {
-    let pe = read_u32_le(bytes, PE_E_LFANEW_OFFSET)? as usize;
-    if bytes.get(pe..pe + PE_SIGNATURE.len())? != PE_SIGNATURE {
-        return None;
-    }
-    let sections = read_u16_le(bytes, pe + PE_NUMBER_OF_SECTIONS_OFFSET)? as usize;
-    let optional = read_u16_le(bytes, pe + PE_SIZE_OF_OPTIONAL_HEADER_OFFSET)? as usize;
-    let table = pe + PE_SECTION_TABLE_OFFSET + optional;
-    (0..sections)
-        .map(|i| table + i * SECTION_HEADER_SIZE)
-        .find(|&at| bytes.get(at..at + SECTION_NAME_LEN) == Some(DATA_SECTION_NAME))
-        .and_then(|at| {
-            let raw = read_u32_le(bytes, at + SECTION_SIZE_OF_RAW_DATA_OFFSET)? as usize;
-            let ptr = read_u32_le(bytes, at + SECTION_POINTER_TO_RAW_DATA_OFFSET)? as usize;
-            let end = ptr.checked_add(raw)?.min(bytes.len());
-            (ptr < end).then_some(ptr..end)
-        })
+    let data = pol1::find_section(bytes, &DATA_SECTION_NAME)?;
+    let ptr = data.pointer_to_raw_data as usize;
+    let end = ptr
+        .checked_add(data.size_of_raw_data as usize)?
+        .min(bytes.len());
+    (ptr < end).then_some(ptr..end)
 }
 
 fn scan_window(bytes: &[u8]) -> Range<usize> {
@@ -339,6 +434,51 @@ fn find_offset_u64(bytes: &[u8], window: &Range<usize>, hint: u64) -> Option<usi
     })
 }
 
+/// One `COMMAND_STRIDE`-byte row. `None` for anything that is not a command —
+/// the empty name that ends the run, and any unrelated `.data` the locator
+/// stepped over.
+fn command_record(bytes: &[u8], off: usize) -> Option<ClientCommand> {
+    let rec = bytes.get(off..off + COMMAND_STRIDE)?;
+    let name = rec.get(..COMMAND_NAME_LEN)?;
+    if name[0] != COMMAND_PREFIX {
+        return None;
+    }
+    let len = name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(COMMAND_NAME_LEN);
+    let word = name.get(1..len)?;
+    if word.is_empty() || !word.iter().all(u8::is_ascii_graphic) {
+        return None;
+    }
+    if name[len..].iter().any(|&b| b != 0) {
+        return None;
+    }
+    Some(ClientCommand {
+        name: std::str::from_utf8(word).ok()?.to_owned(),
+        id: u16::from_le_bytes([rec[COMMAND_ID_OFFSET], rec[COMMAND_ID_OFFSET + 1]]),
+        flags: u16::from_le_bytes([rec[COMMAND_FLAGS_OFFSET], rec[COMMAND_FLAGS_OFFSET + 1]]),
+    })
+}
+
+/// First row of the command table, found by the only thing that survives a
+/// client patch: a long run of rows in its shape. Rows are 4-byte aligned in
+/// both known builds, and a position off by less than a stride lands mid-name,
+/// where the leading-slash test fails.
+fn find_command_table(bytes: &[u8], window: &Range<usize>) -> Option<usize> {
+    let run = window.clone().step_by(SCAN_STRIDE).find(|&pos| {
+        (0..COMMAND_TABLE_MIN_RUN)
+            .all(|i| command_record(bytes, pos + i * COMMAND_STRIDE).is_some())
+    })?;
+    let mut base = run;
+    while base >= window.start + COMMAND_STRIDE
+        && command_record(bytes, base - COMMAND_STRIDE).is_some()
+    {
+        base -= COMMAND_STRIDE;
+    }
+    Some(base)
+}
+
 /// One `ZONE_MAP_STRIDE`-byte row. `None` when the divisor is 0, which is how
 /// the table marks a zone that ships no drawable map.
 fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
@@ -347,29 +487,40 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
         return None;
     }
     let table_index = usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK);
-    let base = *ZONE_MAP_FILE_TABLE_BASES.get(table_index)?;
-    if table_index >= ZONE_MAP_EXERCISED_FILE_TABLE_BASES {
-        static UNEXERCISED_BASE: Once = Once::new();
-        UNEXERCISED_BASE.call_once(|| {
-            eprintln!(
-                "FFXiMain.dll zone-map table: file-table base index {table_index} ({base:#x}) is exercised by no row of any known client; trusting research/xim"
-            );
-        });
-    }
     let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
+    let file_id = match ZONE_MAP_FILE_TABLE_BASES.get(table_index) {
+        Some(base) => base.wrapping_add_signed(i32::from(file_table_offset)),
+        None => ZONE_MAP_FALLBACK_FILE_ID,
+    };
     Some(ZoneMapRecord {
         zone_id: u16::from_le_bytes([rec[0], rec[1]]),
         sub_zone_id: rec[2],
-        file_id: base.wrapping_add_signed(i32::from(file_table_offset)),
+        file_id,
+        key_item: zone_map_key_item(rec[4] >> ZONE_MAP_KEY_ITEM_BASE_SHIFT, rec[6] as i8),
         size: ZONE_MAP_SIZE_NUMERATOR / u16::from(divisor),
         x_offset: i16::from_le_bytes([rec[10], rec[11]]),
         y_offset: i16::from_le_bytes([rec[12], rec[13]]),
     })
 }
 
+fn zone_map_key_item(high_nibble: u8, byte6: i8) -> Option<u16> {
+    if byte6 < 0 {
+        return Some(ZONE_MAP_NEGATIVE_KEY_ITEM);
+    }
+    if byte6 == 0 {
+        return None;
+    }
+    let base = ZONE_MAP_KEY_ITEM_BASES.get(usize::from(high_nibble))?;
+    Some(base + u16::from(byte6.unsigned_abs()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pol1::{
+        PE_E_LFANEW_OFFSET, PE_NUMBER_OF_SECTIONS_OFFSET, PE_OPTIONAL_HEADER_OFFSET, PE_SIGNATURE,
+        SECTION_HEADER_SIZE, SECTION_POINTER_TO_RAW_DATA_OFFSET, SECTION_SIZE_OF_RAW_DATA_OFFSET,
+    };
 
     const FALLBACK_WINDOW: Range<usize> = SCAN_START..SCAN_START + SCAN_WORDS * SCAN_STRIDE;
 
@@ -410,16 +561,16 @@ mod tests {
         let mut bytes = vec![0u8; total];
         bytes[PE_E_LFANEW_OFFSET..PE_E_LFANEW_OFFSET + 4]
             .copy_from_slice(&(pe as u32).to_le_bytes());
-        bytes[pe..pe + 4].copy_from_slice(PE_SIGNATURE);
+        bytes[pe..pe + PE_SIGNATURE.len()].copy_from_slice(PE_SIGNATURE);
         bytes[pe + PE_NUMBER_OF_SECTIONS_OFFSET..pe + PE_NUMBER_OF_SECTIONS_OFFSET + 2]
             .copy_from_slice(&2u16.to_le_bytes());
-        let table = pe + PE_SECTION_TABLE_OFFSET;
-        bytes[table..table + SECTION_NAME_LEN].copy_from_slice(b".text\0\0\0");
+        let table = pe + PE_OPTIONAL_HEADER_OFFSET;
+        bytes[table..table + SECTION_NAME_LEN].copy_from_slice(&pol1::section_name(b".text"));
         bytes[table + SECTION_POINTER_TO_RAW_DATA_OFFSET
             ..table + SECTION_POINTER_TO_RAW_DATA_OFFSET + 4]
             .copy_from_slice(&0x400u32.to_le_bytes());
         let data = table + SECTION_HEADER_SIZE;
-        bytes[data..data + SECTION_NAME_LEN].copy_from_slice(DATA_SECTION_NAME);
+        bytes[data..data + SECTION_NAME_LEN].copy_from_slice(&DATA_SECTION_NAME);
         bytes[data + SECTION_SIZE_OF_RAW_DATA_OFFSET..data + SECTION_SIZE_OF_RAW_DATA_OFFSET + 4]
             .copy_from_slice(&data_raw.to_le_bytes());
         bytes[data + SECTION_POINTER_TO_RAW_DATA_OFFSET
@@ -544,7 +695,130 @@ mod tests {
             action_anim_base: None,
             battle_anim_base: None,
             equipment_base: None,
+            command_table_base: None,
         }
+    }
+
+    /// A synthetic command table: `rows` laid out exactly as the client stores
+    /// them, then the empty-name row that ends the run.
+    fn command_bytes(rows: &[(&str, u16, u16)]) -> Vec<u8> {
+        let mut bytes = vec![0u8; (rows.len() + 1) * COMMAND_STRIDE];
+        for (i, &(name, id, flags)) in rows.iter().enumerate() {
+            let at = i * COMMAND_STRIDE;
+            let slashed = format!("/{name}");
+            bytes[at..at + slashed.len()].copy_from_slice(slashed.as_bytes());
+            bytes[at + COMMAND_ID_OFFSET..at + COMMAND_ID_OFFSET + 2]
+                .copy_from_slice(&id.to_le_bytes());
+            bytes[at + COMMAND_FLAGS_OFFSET..at + COMMAND_FLAGS_OFFSET + 2]
+                .copy_from_slice(&flags.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn command_dll(rows: &[(&str, u16, u16)]) -> MainDll {
+        MainDll {
+            command_table_base: Some(0),
+            ..blank(command_bytes(rows))
+        }
+    }
+
+    #[test]
+    fn command_rows_parse_and_stop_at_the_empty_name() {
+        let dll = command_dll(&[("attack", 0x1d, 0x0141), ("a", 0x1d, 0x0141)]);
+        let table = dll.commands();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.id_for("attack"), Some(0x1d));
+        assert_eq!(
+            table.id_for("ATTACK"),
+            Some(0x1d),
+            "the client accepts /Say"
+        );
+        assert_eq!(table.id_for("nosuchcommand"), None);
+        assert_eq!(table.canonical(0x1d), Some("attack"));
+        assert_eq!(
+            table.names_for(0x1d).collect::<Vec<_>>(),
+            vec!["attack", "a"],
+            "long form first, aliases after"
+        );
+        assert_eq!(table.entries()[0].flags, 0x0141);
+    }
+
+    #[test]
+    fn command_table_is_empty_when_it_was_not_located() {
+        assert!(blank(vec![0u8; 0x40]).commands().is_empty());
+    }
+
+    #[test]
+    fn a_name_filling_the_field_with_no_terminator_still_parses() {
+        let full = "x".repeat(COMMAND_NAME_LEN - 1);
+        let dll = command_dll(&[(full.as_str(), 0x8a, 0x0141)]);
+        assert_eq!(dll.commands().id_for(&full), Some(0x8a));
+    }
+
+    #[test]
+    fn a_row_is_rejected_unless_it_has_the_shape_of_a_command() {
+        let good = command_bytes(&[("attack", 0x1d, 0x0141)]);
+        assert!(command_record(&good, 0).is_some());
+
+        let mut no_slash = good.clone();
+        no_slash[0] = b'x';
+        assert_eq!(command_record(&no_slash, 0), None);
+
+        let mut trailing_junk = good.clone();
+        trailing_junk[COMMAND_NAME_LEN - 1] = b'x';
+        assert_eq!(
+            command_record(&trailing_junk, 0),
+            None,
+            "the pad after the name is NUL, not arbitrary bytes"
+        );
+
+        let mut non_ascii = good.clone();
+        non_ascii[2] = 0x80;
+        assert_eq!(command_record(&non_ascii, 0), None);
+
+        let bare_slash = command_bytes(&[("", 0x1d, 0)]);
+        assert_eq!(
+            command_record(&bare_slash, 0),
+            None,
+            "a slash is not a name"
+        );
+    }
+
+    #[test]
+    fn the_table_is_located_by_its_run_of_rows_and_walked_back_to_the_first() {
+        let rows: Vec<(String, u16, u16)> = (0..COMMAND_TABLE_MIN_RUN + 4)
+            .map(|i| (format!("cmd{i}"), i as u16, 0u16))
+            .collect();
+        let borrowed: Vec<(&str, u16, u16)> =
+            rows.iter().map(|(n, i, f)| (n.as_str(), *i, *f)).collect();
+        let table = command_bytes(&borrowed);
+
+        let lead = 0x40usize;
+        let mut bytes = vec![0u8; lead + table.len()];
+        bytes[lead..lead + table.len()].copy_from_slice(&table);
+        let window = 0..bytes.len();
+
+        assert_eq!(
+            find_command_table(&bytes, &window),
+            Some(lead),
+            "the walk-back reaches the first row, not the run it matched at"
+        );
+        let dll = MainDll {
+            command_table_base: find_command_table(&bytes, &window),
+            ..blank(bytes)
+        };
+        assert_eq!(dll.commands().len(), borrowed.len());
+    }
+
+    #[test]
+    fn a_lone_slash_led_string_is_not_mistaken_for_the_table() {
+        let short = command_bytes(&[("attack", 0x1d, 0), ("a", 0x1d, 0)]);
+        let window = 0..short.len();
+        assert_eq!(
+            find_command_table(&short, &window),
+            None,
+            "two rows are not a table"
+        );
     }
 
     #[test]
@@ -576,19 +850,44 @@ mod tests {
     fn zone_map_file_table_base_follows_the_low_nibble() {
         for (nibble, base) in ZONE_MAP_FILE_TABLE_BASES.iter().enumerate() {
             let mut rec = [0u8; ZONE_MAP_STRIDE];
-            rec[4] = 0xF0 | nibble as u8;
+            rec[4] = nibble as u8;
             rec[5] = 4;
             rec[8..10].copy_from_slice(&7i16.to_le_bytes());
             assert_eq!(parse_zone_map(&rec).map(|r| r.file_id), Some(base + 7));
         }
-        let mut rec = [0u8; ZONE_MAP_STRIDE];
-        rec[4] = ZONE_MAP_FILE_TABLE_BASES.len() as u8;
-        rec[5] = 4;
+        for nibble in ZONE_MAP_FILE_TABLE_BASES.len() as u8..=ZONE_MAP_FILE_TABLE_BASE_MASK {
+            let mut rec = [0u8; ZONE_MAP_STRIDE];
+            rec[4] = nibble;
+            rec[5] = 4;
+            rec[8..10].copy_from_slice(&7i16.to_le_bytes());
+            assert_eq!(
+                parse_zone_map(&rec).map(|r| r.file_id),
+                Some(ZONE_MAP_FALLBACK_FILE_ID),
+                "nibble {nibble} takes the fallback whole file id, offset ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_map_key_item_follows_the_high_nibble_and_byte_6() {
+        let key_item = |high: u8, byte6: u8| {
+            let mut rec = [0u8; ZONE_MAP_STRIDE];
+            rec[4] = high << ZONE_MAP_KEY_ITEM_BASE_SHIFT;
+            rec[5] = 4;
+            rec[6] = byte6;
+            parse_zone_map(&rec).unwrap().key_item
+        };
+        for (high, base) in ZONE_MAP_KEY_ITEM_BASES.iter().enumerate() {
+            assert_eq!(key_item(high as u8, 1), Some(base + 1));
+        }
+        assert_eq!(key_item(0, 0), None, "byte 6 == 0 names no key item");
         assert_eq!(
-            parse_zone_map(&rec),
+            key_item(3, 1),
             None,
-            "a nibble past the table is no record"
+            "a nibble without an arm names no key item"
         );
+        assert_eq!(key_item(1, 0xFF), Some(ZONE_MAP_NEGATIVE_KEY_ITEM));
+        assert_eq!(key_item(0, 0xFE), Some(ZONE_MAP_NEGATIVE_KEY_ITEM));
     }
 
     #[test]
@@ -791,6 +1090,75 @@ mod tests {
         );
     }
 
+    /// Row and id totals of the slash-command table, identical on KNOWN_CLIENTS
+    /// horizonxi-2023 and retail-2026-09: HorizonXI ships the table unpatched
+    /// and puts its own commands elsewhere (server commands on `!` in chat
+    /// text, client commands in Ashita addons that intercept the input line
+    /// before the client sees it).
+    const COMMAND_ROWS: usize = 277;
+    const COMMAND_IDS: usize = 209;
+
+    /// Gated on an install (self-skips).
+    #[test]
+    fn real_dll_command_table_matches_both_known_clients() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        assert_eq!(table.len(), COMMAND_ROWS);
+        assert_eq!(table.ids().count(), COMMAND_IDS);
+
+        let mut names: Vec<&str> = table.entries().iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "no name is listed twice");
+        assert!(
+            table.entries().iter().all(|c| c
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && !b.is_ascii_uppercase())),
+            "every stored name is lowercase ASCII, so a lowercasing parser loses nothing"
+        );
+    }
+
+    /// Gated on an install (self-skips). Alias groupings a name-keyed table
+    /// gets wrong: LSB's emote enum has no Nod/Farewell/Upset at all, and
+    /// FFXIclopedia lists /range and /throw as separate commands.
+    #[test]
+    fn real_dll_command_aliases_share_one_id() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        for group in [
+            &["attack", "a"][..],
+            &["shoot", "range", "ra", "throw"],
+            &["nod", "yes"],
+            &["goodbye", "farewell"],
+            &["disgusted", "upset"],
+            &["makelinkshell", "makelinkpearl", "makeli"],
+            &["supportdesk", "sd", "helpdesk"],
+        ] {
+            let canonical = group[0];
+            let id = table
+                .id_for(canonical)
+                .unwrap_or_else(|| panic!("/{canonical} is a command"));
+            assert_eq!(table.canonical(id), Some(canonical));
+            assert_eq!(table.names_for(id).collect::<Vec<_>>(), group);
+        }
+        assert_eq!(
+            table.id_for("ls"),
+            None,
+            "/l and /linkshell are the linkshell names; /ls is not one"
+        );
+        assert_ne!(
+            table.id_for("help"),
+            table.id_for("?"),
+            "/help and /? are separate commands with separate handlers"
+        );
+    }
+
     /// Gated on an install (self-skips). `(table_index, slot, model_id)` cells
     /// of the equipment table, identical on both known clients.
     #[test]
@@ -848,6 +1216,28 @@ mod tests {
         );
     }
 
+    /// Gated on an install (self-skips). The key items the high nibble and
+    /// byte 6 name are LSB's MAP_OF_THE_SAN_DORIA_AREA, MAP_OF_AL_ZAHBI and
+    /// MAP_OF_RALA_WATERWAYS_U (vendor/server/scripts/enum/key_item.lua), one
+    /// per key-item base; 655 rows name one on both known clients.
+    #[test]
+    fn real_dll_zone_map_key_items_are_the_lsb_map_key_items() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        for (zone, key_item) in [(100u16, 385u16), (48, 1856), (259, 2302)] {
+            let maps = dll.zone_maps(zone);
+            assert!(!maps.is_empty(), "zone {zone} ships a map");
+            assert!(
+                maps.iter().all(|r| r.key_item == Some(key_item)),
+                "zone {zone}: {maps:?}"
+            );
+        }
+        let mut named = 0usize;
+        dll.for_each_zone_map(|rec| named += usize::from(rec.key_item.is_some()));
+        assert_eq!(named, 655, "rows naming a map key item");
+    }
+
     /// Raw rows of the zone-map table, walked with the same terminator as
     /// `for_each_zone_map`, for tests that need the file-table nibble the
     /// parsed record does not carry.
@@ -866,13 +1256,13 @@ mod tests {
         rows
     }
 
-    /// Gated on an install (self-skips). Every zone-keyed record's file id is a
-    /// DAT the install's VTABLE knows, which is what makes the first two
-    /// file-table bases content-verified. The client-only negative keys are
-    /// the only rows that reach base index 2, and only part of them resolve,
-    /// so that base is pinned as partially verified rather than trusted.
+    /// Gated on an install (self-skips). Every record's file id, zone-keyed or
+    /// client-only, is a DAT the install's VTABLE knows and ships, across all
+    /// three file-table bases. The 148 client-only rows on base index 2 are
+    /// what separate 0xD417 from the transposed 0xD147, under which only 84
+    /// of them resolved, onto index-1 maps.
     #[test]
-    fn real_dll_every_zone_keyed_map_resolves_through_the_install() {
+    fn real_dll_every_zone_map_resolves_through_the_install() {
         let Some((root, dll)) = open_test_dll() else {
             return;
         };
@@ -887,7 +1277,10 @@ mod tests {
             let nibble = raw[4] & ZONE_MAP_FILE_TABLE_BASE_MASK;
             let entry = tally.entry((zone_keyed, nibble)).or_default();
             entry.0 += 1;
-            if root.resolve(rec.file_id).is_ok() {
+            if root
+                .resolve(rec.file_id)
+                .is_ok_and(|loc| loc.path_under(&root).is_file())
+            {
                 entry.1 += 1;
             } else if zone_keyed {
                 unresolved_zone_keyed.push(rec);
@@ -905,16 +1298,13 @@ mod tests {
                 ((true, 0u8), (284usize, 284usize)),
                 ((true, 1), (377, 377)),
                 ((false, 0), (20, 20)),
-                ((false, 2), (148, 84)),
+                ((false, 2), (148, 148)),
             ]),
             "(zone-keyed, base nibble) -> (rows, resolved)"
         );
-        assert_eq!(
-            unresolved_client_only,
-            (53659u32..=53724)
-                .filter(|id| !matches!(id, 53690 | 53691))
-                .collect(),
-            "the client-only file ids base index 2 leaves unresolved, identical on both known clients"
+        assert!(
+            unresolved_client_only.is_empty(),
+            "unresolved client-only map DATs: {unresolved_client_only:?}"
         );
     }
 

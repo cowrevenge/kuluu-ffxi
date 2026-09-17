@@ -20,7 +20,7 @@ use crate::snapshot::{EventLog, SceneState, ToastEvent};
 // ---------------------------------------------------------------------------
 
 /// One browsable leaf: the retail display label and LSB's wire category id
-/// (vendor/server/documentation/Auction Categories.txt).
+/// (vendor/server/docs/Auction Categories.txt).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AhLeaf {
     pub label: &'static str,
@@ -2074,7 +2074,7 @@ mod tests {
 
     #[test]
     fn leaf_ids_match_the_lsb_category_doc() {
-        // vendor/server/documentation/Auction Categories.txt: every retail-
+        // vendor/server/docs/Auction Categories.txt: every retail-
         // reachable category id, exactly once, nothing else.
         let mut ids = leaf_ids();
         ids.sort_unstable();
@@ -2341,6 +2341,8 @@ mod tests {
             locked,
             charges_remaining: None,
             next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
         };
         let snap = SceneSnapshot {
             containers: vec![ContainerView {

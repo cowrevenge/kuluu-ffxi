@@ -47,7 +47,7 @@ const GM_COLOR_INDICES: [usize; 8] = [10, 10, 11, 12, 13, 14, 15, 16];
 const MIN_GM_LEVEL: u8 = 3;
 
 /// ALLEGIANCE_TYPE values that pick a nation/team colour, and the `ncol` row
-/// each one takes. vendor/server/src/map/entities/baseentity.h `ALLEGIANCE_TYPE`
+/// each one takes. vendor/server/data/enums/allegiance.yaml `ALLEGIANCE_TYPE`
 /// names the allegiances; `NameColorSet` maps them to rows.
 const ALLEGIANCE_COLOR_INDICES: [(u8, usize); 5] = [(2, 18), (3, 19), (4, 20), (5, 21), (6, 22)];
 

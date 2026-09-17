@@ -9,6 +9,7 @@ use bevy::ui_widgets::Activate;
 use crate::launcher_store::{self, keyring_account_key, KEYRING_SERVICE};
 use crate::secret_store::SecretStore;
 
+use super::brand::{spawn_brand_mark, BrandMark};
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_settings_close_titlebar,
 };
@@ -25,6 +26,7 @@ pub(super) fn spawn_ui(
     mut cursor: ResMut<ServerSelectCursor>,
     form: Res<ServerSelectForm>,
     pending: Option<Res<PendingServerDelete>>,
+    mark: Res<BrandMark>,
 ) {
     let store = launcher_store::load();
     let servers = store.servers.clone();
@@ -49,6 +51,7 @@ pub(super) fn spawn_ui(
     commands
         .spawn((ServerSelectRoot, screen_root()))
         .with_children(|root| {
+            spawn_brand_mark(root, &mark);
             root.spawn(panel_node(620.0)).with_children(|panel| {
                 spawn_settings_close_titlebar(panel, "Servers");
                 if n == 0 {

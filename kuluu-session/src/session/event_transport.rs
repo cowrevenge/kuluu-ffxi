@@ -71,7 +71,13 @@ pub(super) fn prepare(
         if super::take_pending_event_end(pending, actor, event) {
             // vendor/server/src/map/map_networking.cpp MapNetworking::parse dispatches in payload order.
             payload.extend(super::build_subpacket_event_end(
-                *sequence, actor, index, zone, event, *end_para,
+                *sequence,
+                actor,
+                index,
+                zone,
+                event,
+                *end_para,
+                ffxi_proto::map::c2s::event_end_mode::END,
             ));
             *sequence = sequence.wrapping_add(1);
         }
@@ -117,6 +123,29 @@ pub(super) fn receive(
                 }
             }
         }
+        // The server's placement of every entity, in event coordinates: the
+        // source for MOVE hold lengths when a scene walks its actors.
+        map::s2c::CHAR_PC | map::s2c::CHAR_NPC => {
+            if let Ok(head) = decode::PosHead::decode(sub.data) {
+                dialog.note_entity_position(
+                    head.unique_no,
+                    event_position(Position {
+                        pos: Vec3 {
+                            x: head.x,
+                            y: head.y,
+                            z: head.z,
+                        },
+                        heading: head.dir,
+                        ..Default::default()
+                    }),
+                );
+                // The 0x5B/0x66 gate's input: the entity Type byte this 0x0E's
+                // SubKind dispatch writes (decode::LookData::retail_type).
+                if let Some(t) = decode::LookData::retail_type(sub.opcode, sub.data) {
+                    dialog.note_entity_type(head.unique_no, head.act_index, t);
+                }
+            }
+        }
         map::s2c::EVENTUCOFF => match super::eventucoff_mode_of(sub.data) {
             Some(map::event_position_wire::EVENT_RECV_PENDING) => dialog.acknowledge_event(),
             Some(map::eventucoff_mode::CANCEL_EVENT) => dialog.clear(),
@@ -159,35 +188,36 @@ fn encode_scene_actions(
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     for action in actions {
-        match action {
+        let encoded = match action {
             SceneAction::PlayerPosition(next) => {
                 *position = session_position(next, *position);
                 let _ = events.send(AgentEvent::PositionChanged { pos: *position });
                 // vendor/server/src/map/packets/c2s/0x015_pos.cpp GP_CLI_COMMAND_POS::process
                 // accepts scripted walking in-event; the final POS must precede EVENTEND.
-                payload.extend(build_subpacket_pos(
+                build_subpacket_pos(
                     *sequence,
                     position.pos.x,
                     position.pos.y,
                     position.pos.z,
                     position.heading,
                     0,
-                ));
+                )
             }
             SceneAction::PositionUpdate {
                 position: next,
                 end_para,
-            } => {
-                payload.extend(build_subpacket_event_position(
-                    *sequence,
-                    identity,
-                    zone,
-                    end_para,
-                    session_position(next, *position),
-                ));
-            }
+            } => Some(build_subpacket_event_position(
+                *sequence,
+                identity,
+                zone,
+                end_para,
+                session_position(next, *position),
+            )),
+        };
+        if let Some(sub_packet) = encoded {
+            payload.extend(sub_packet);
+            *sequence = sequence.wrapping_add(1);
         }
-        *sequence = sequence.wrapping_add(1);
     }
     payload
 }

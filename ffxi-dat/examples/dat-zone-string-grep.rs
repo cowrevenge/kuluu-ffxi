@@ -7,14 +7,13 @@
 use std::process::ExitCode;
 
 use ffxi_dat::dmsg::StringDat;
-use ffxi_dat::zone_dat::zone_id_to_string_file_id;
+use ffxi_dat::zone_dat::string_dat_file_id;
 use ffxi_dat::DatRoot;
 
 const MAX_ZONE_ID: u16 = 300;
 
 fn load(root: &DatRoot, zone: u16) -> Option<StringDat> {
-    let file_id = zone_id_to_string_file_id(zone)?;
-    let loc = root.resolve(file_id).ok()?;
+    let loc = root.resolve(string_dat_file_id(zone)).ok()?;
     let bytes = std::fs::read(loc.path_under(root)).ok()?;
     StringDat::parse(&bytes).ok()
 }

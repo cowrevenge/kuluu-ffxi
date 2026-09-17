@@ -18,27 +18,13 @@
 
 #import bevy_pbr::{
     mesh_functions,
-    view_transformations::position_world_to_clip,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
-    clustered_forward as clustering,
-    shadows,
+    view_transformations::position_world_to_clip,
 }
 
 #import kuluu_render::directional_shadow::directional_shadow_factor
-
-// FFXI point-light falloff, applied to Bevy's clustered point lights (the
-// FaithfulZoneLight PointLights). Mirrors zone_point_lights.rs: peak factor
-// 1/const at the base, quad term K/range². Kept in lockstep with
-// SCENE_LIGHT_CONST_ATTEN / SCENE_LIGHT_FALLOFF_K there.
-const FFXI_POINT_CONST_ATTEN: f32 = 1.0;
-const FFXI_POINT_FALLOFF_K: f32 = 3.0;
-// Bevy encodes clusterable color as `color·(intensity/4π)` (light.rs:1295 +
-// :534). Our FaithfulZoneLight intensity is FAITHFUL_LIGHT_INTENSITY·peak·gate
-// (zone_point_lights.rs), so multiplying by 4π/FAITHFUL_LIGHT_INTENSITY recovers
-// the FFXI-native colour magnitude (~peak·gate) the vertex-lit model expects.
-// 25000 = FAITHFUL_LIGHT_INTENSITY.
-const FFXI_CLUSTER_COLOR_SCALE: f32 = 12.566370614 / 25000.0;
+#import kuluu_render::point_shadow::point_shadow_factor
 
 // D3DTOP_MODULATE2X's gain. Both retail stage chains are built out of it.
 const D3D_MODULATE_2X: f32 = 2.0;
@@ -93,6 +79,13 @@ struct FfxiMaterialFlags {
 // White (1,1,1,1) for every non-cloud zone mesh, so this is a no-op there.
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> tint: vec4<f32>;
 
+struct ZonePointLighting {
+    positions: array<vec4<f32>, 4>,
+    colors: array<vec4<f32>, 4>,
+    attenuation: array<vec4<f32>, 4>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<uniform> points: ZonePointLighting;
+
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -107,6 +100,7 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) color: vec4<f32>,
+    @location(4) point_light: vec3<f32>,
 };
 
 @vertex
@@ -120,67 +114,50 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.world_normal = normalize(mesh_functions::mesh_normal_local_to_world(v.normal, v.instance_index));
     out.uv = v.uv;
     out.color = v.color;
+    out.point_light = authored_point_irradiance(out.world_normal, out.world_position);
     return out;
 }
 
-// Every FFXI zone point light (braziers/lamps) is a real Bevy PointLight, so
-// Bevy's clustered forward lighting bins them spatially and this loops only the
-// lights whose cluster covers the fragment — efficient even in the ~250-light
-// zones, and free of the pop-in a nearest-N-to-viewer feed causes. FFXI falloff
-// (not Bevy PBR) is applied so the look/brightness match the vertex-lit model.
-fn clustered_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag_coord: vec2<f32>) -> vec3<f32> {
+fn authored_point_irradiance(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
     var rgb = vec3<f32>(0.0);
-    let view_z = dot(
-        vec4<f32>(
-            view_bindings::view.view_from_world[0].z,
-            view_bindings::view.view_from_world[1].z,
-            view_bindings::view.view_from_world[2].z,
-            view_bindings::view.view_from_world[3].z,
-        ),
-        vec4<f32>(p, 1.0),
-    );
-    let is_ortho = view_bindings::view.clip_from_view[3].w == 1.0;
-    let cluster_index = clustering::view_fragment_cluster_index(frag_coord, view_z, is_ortho);
-    let ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
-    for (var i = ranges.first_point_light_index_offset;
-            i < ranges.first_spot_light_index_offset; i = i + 1u) {
-        let light_id = clustering::get_clusterable_object_id(i);
-        let lo = view_bindings::clustered_lights.data[light_id];
-        let inv_sq_range = lo.color_inverse_square_range.w;
-        if (inv_sq_range <= 0.0) { continue; }
-        let range = inverseSqrt(inv_sq_range);
-        let to_light = lo.position_radius.xyz - p;
+    for (var i = 0u; i < 4u; i += 1u) {
+        let range = points.colors[i].w;
+        if (range <= 0.0) { continue; }
+        let to_light = points.positions[i].xyz - p;
         let dist = length(to_light);
         if (dist > range) { continue; }
-        let color = lo.color_inverse_square_range.rgb * FFXI_CLUSTER_COLOR_SCALE;
-        // Match zone_point_lights.rs: quad = K/range², const term, windowed to 0
-        // at the range edge (no hard cutoff seam).
-        let denom = FFXI_POINT_CONST_ATTEN + FFXI_POINT_FALLOFF_K * inv_sq_range * dist * dist;
-        let inv = select(0.0, 1.0 / denom, denom > 0.0);
-        let t = dist / range;
-        let window = 1.0 - t * t;
+        let a = points.attenuation[i].xyz;
+        let denom = a.x + a.y * dist + a.z * dist * dist;
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        // Enhanced Dynamic Lights: the lit lights nearest the camera carry cube shadow maps
-        // (zone_point_lights.rs select_shadowed_zone_lights); the rest stay unshadowed.
-        var shadow = 1.0;
-        if ((lo.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            shadow = shadows::fetch_point_shadow(light_id, vec4<f32>(p, 1.0), n, frag_coord);
-        }
-        rgb += shadow * nl * inv * window * window * color;
+        rgb += nl * points.colors[i].rgb / max(denom, 1e-5);
     }
     return rgb;
 }
 
-// Pure scene light (ambient sky fill + 2 directional + clustered point lights),
-// no vertex colour folded in — the caller multiplies by vertex colour, matching
-// skinned_ffxi.wgsl::scene_irradiance.
+fn shadowed_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    var rgb = vec3<f32>(0.0);
+    for (var i = 0u; i < 4u; i += 1u) {
+        let range = points.colors[i].w;
+        if (range <= 0.0) { continue; }
+        let to_light = points.positions[i].xyz - p;
+        let dist = length(to_light);
+        if (dist > range) { continue; }
+        let a = points.attenuation[i].xyz;
+        let denom = a.x + a.y * dist + a.z * dist * dist;
+        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+        let shadow = point_shadow_factor(p, n, points.positions[i].xyz, frag);
+        rgb += shadow * nl * points.colors[i].rgb / max(denom, 1e-5);
+    }
+    return rgb;
+}
+
+
 fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, shadow_scale: vec2<f32>, frag_coord: vec2<f32>) -> vec3<f32> {
     var rgb = lighting.ambient.rgb;
     let nl0 = max(dot(n, -lighting.dir0_dir.xyz), 0.0);
     rgb += shadow_scale.x * nl0 * lighting.dir0_color.rgb * lighting.dir0_color.w;
     let nl1 = max(dot(n, -lighting.dir1_dir.xyz), 0.0);
     rgb += shadow_scale.y * nl1 * lighting.dir1_color.rgb * lighting.dir1_color.w;
-    rgb += clustered_point_irradiance(n, p, frag_coord);
     return rgb;
 }
 
@@ -232,7 +209,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             directional_shadow_factor(in.world_position, n, -lighting.dir1_dir.xyz, in.clip_position.xy),
         ),
     );
-    let lit = scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy) * in.color.rgb;
+    var point_light = in.point_light;
+    if (lighting.time_params.z > 0.0) {
+        point_light = shadowed_point_irradiance(n, in.world_position, in.clip_position.xy);
+    }
+    let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy) + point_light) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.
 #ifdef FFXI_GENERATOR_STAGE_CHAIN

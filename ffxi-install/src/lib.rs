@@ -7,6 +7,7 @@
 //! staged members under `SquareEnix/`. Progress goes to a caller-supplied
 //! sink so a CLI and the launcher UI render the same events.
 
+pub mod install_detect;
 pub mod lz;
 pub mod manifest;
 pub mod patch_client;
@@ -19,12 +20,19 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const CDN_BASE: &str = "https://gdl.square-enix.com/ffxi/download";
 pub const VOLUME_COUNT: usize = 5;
+/// Decimal GB, because that is what the CDN's content-length headers add to
+/// (7,734,210,712 bytes across the five volumes) and what a progress readout
+/// built from them counts up to.
+pub const INSTALLER_SIZE_NOTE: &str = "5 volumes, ~7.7 GB";
+/// The base image is the 2019 release; the patch server's delta to current.
+pub const PATCH_SIZE_NOTE: &str = "~0.5 GB";
 const MSI_DIRS: [&str; 2] = ["PlayOnline", "FINAL_FANTASY_XI"];
 /// The install root every MSI directory chain passes through; everything
 /// above it (`Program Files`, `PlayOnline`) is the installer's choice, not
@@ -38,6 +46,56 @@ const MSI_TABLE_COMPONENT: &str = "Component";
 const MSI_TABLE_DIRECTORY: &str = "Directory";
 const MSI_TABLE_MEDIA: &str = "Media";
 
+/// Which of this crate's concurrent workers a [`Progress`] came from. The
+/// downloader and the cabinet decoder run at the same time (`download_and_unpack`
+/// overlaps the LZX decode with the next volume's transfer), so a UI that
+/// renders one line per lane must be told which one spoke rather than
+/// re-deriving it from the variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Download,
+    Unpack,
+    Patch,
+}
+
+impl Lane {
+    pub const ALL: [Lane; 3] = [Lane::Download, Lane::Unpack, Lane::Patch];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Lane::Download => "Download",
+            Lane::Unpack => "Unpack",
+            Lane::Patch => "Patch",
+        }
+    }
+}
+
+/// Cooperative abort shared with the worker threads: the download loop kills
+/// the transfer in flight, every other loop stops at its next item boundary.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+/// The error text every stage returns once [`Cancel::cancel`] has been called,
+/// so a caller can tell an abort apart from a failure.
+pub const CANCELLED: &str = "cancelled";
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err(CANCELLED.to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     VolumeCached {
@@ -46,6 +104,12 @@ pub enum Progress {
     VolumeDownloading {
         index: usize,
         url: String,
+    },
+    /// Bytes on disk across every volume, so the download bar is monotone for
+    /// the whole transfer instead of restarting once per volume.
+    DownloadBytes {
+        done: u64,
+        total: u64,
     },
     VolumeReady {
         index: usize,
@@ -115,6 +179,32 @@ pub enum Progress {
         bytes: u64,
         root: PathBuf,
     },
+}
+
+impl Progress {
+    pub fn lane(&self) -> Lane {
+        use Progress::*;
+        match self {
+            VolumeCached { .. }
+            | VolumeDownloading { .. }
+            | DownloadBytes { .. }
+            | VolumeReady { .. } => Lane::Download,
+            MemberExtracting { .. }
+            | MemberExtracted { .. }
+            | CabDecoding { .. }
+            | CabProgress { .. }
+            | CabDecoded { .. }
+            | FilesOutsideInstallIgnored { .. }
+            | MsiPlaced { .. }
+            | Finished { .. } => Lane::Unpack,
+            UpdateVersion { .. }
+            | UpdateScanning { .. }
+            | UpdatePlanned { .. }
+            | UpdateFile { .. }
+            | UpdateBytes { .. }
+            | UpdateFinished { .. } => Lane::Patch,
+        }
+    }
 }
 
 pub type Reporter = dyn Fn(Progress) + Send + Sync;
@@ -258,33 +348,64 @@ pub fn scan_volume(path: &Path) -> Result<Vec<Member>, String> {
 
 // --- download ---
 
-pub fn is_complete_download(url: &str, dest: &Path) -> bool {
-    let Ok(meta) = fs::metadata(dest) else {
-        return false;
-    };
-    let Ok(out) = Command::new("curl").args(["-sIL", url]).output() else {
-        return false;
-    };
-    let head = String::from_utf8_lossy(&out.stdout);
-    head.lines()
+/// Transfer size from a HEAD, following redirects. `None` whenever the CDN
+/// declines to say, which downgrades the download bar to indeterminate rather
+/// than inventing a denominator.
+pub fn remote_len(url: &str) -> Option<u64> {
+    let out = Command::new("curl").args(["-sIL", url]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
         .filter_map(|l| l.split_once(':'))
         .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         .filter_map(|(_, v)| v.trim().parse::<u64>().ok())
         .next_back()
-        .is_some_and(|len| len == meta.len())
 }
 
-fn curl(url: &str, dest: &Path) -> Result<(), String> {
-    let status = Command::new("curl")
-        .args(["-L", "--fail", "--retry", "3", "-C", "-", "-o"])
+pub fn is_complete_download(url: &str, dest: &Path) -> bool {
+    let Ok(meta) = fs::metadata(dest) else {
+        return false;
+    };
+    remote_len(url).is_some_and(|len| len == meta.len())
+}
+
+fn local_len(dest: &Path) -> u64 {
+    fs::metadata(dest).map(|m| m.len()).unwrap_or(0)
+}
+
+/// How often the transfer's destination file is stat'd for the progress bar.
+/// `curl` writes continuously, so this is purely the UI's refresh rate.
+const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
+
+/// Runs `curl` as a child so the transfer can be polled for bytes on disk and
+/// killed on cancel; `-C -` makes a resumed volume's size cumulative, which is
+/// what `on_bytes` wants to report.
+fn curl(url: &str, dest: &Path, cancel: &Cancel, on_bytes: &dyn Fn(u64)) -> Result<(), String> {
+    let mut child = Command::new("curl")
+        .args(["-sS", "-L", "--fail", "--retry", "3", "-C", "-", "-o"])
         .arg(dest)
         .arg(url)
-        .status()
+        .spawn()
         .map_err(|e| format!("running curl: {e}"))?;
-    if !status.success() {
-        return Err(format!("curl failed for {url} ({status})"));
+    loop {
+        if cancel.is_cancelled() {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(CANCELLED.to_string());
+        }
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => {
+                on_bytes(local_len(dest));
+                if !status.success() {
+                    return Err(format!("curl failed for {url} ({status})"));
+                }
+                return Ok(());
+            }
+            None => {
+                on_bytes(local_len(dest));
+                thread::sleep(DOWNLOAD_POLL);
+            }
+        }
     }
-    Ok(())
 }
 
 // --- RAR member extraction ---
@@ -584,7 +705,7 @@ pub fn refuse_patched_target(target_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn download_and_unpack(plan: &Plan, report: &Reporter) -> Result<(), String> {
+pub fn download_and_unpack(plan: &Plan, cancel: &Cancel, report: &Reporter) -> Result<(), String> {
     let Plan {
         region,
         installer_dir,
@@ -610,20 +731,36 @@ pub fn download_and_unpack(plan: &Plan, report: &Reporter) -> Result<(), String>
             let tx = tx.clone();
             let volumes = volumes.clone();
             scope.spawn(move || {
+                let lens: Vec<Option<u64>> =
+                    volumes.iter().map(|(url, _)| remote_len(url)).collect();
+                // A partial denominator would make the bar jump when the
+                // volume of unknown length starts, so one unknown zeroes it.
+                let total = lens.iter().copied().sum::<Option<u64>>().unwrap_or(0);
+                let mut base = 0u64;
                 for (i, (url, dest)) in volumes.iter().enumerate() {
                     let index = i + 1;
-                    if is_complete_download(url, dest) {
+                    let cached = lens[i].is_some_and(|len| len == local_len(dest));
+                    if cached {
                         report(Progress::VolumeCached { index });
+                        report(Progress::DownloadBytes { done: base, total });
                     } else {
                         report(Progress::VolumeDownloading {
                             index,
                             url: url.clone(),
                         });
-                        if let Err(e) = curl(url, dest) {
+                        let on_bytes = |done: u64| {
+                            report(Progress::DownloadBytes {
+                                done: base + done,
+                                total,
+                            })
+                        };
+                        if let Err(e) = curl(url, dest, cancel, &on_bytes) {
                             let _ = tx.send(Event::DownloadFailed(e));
                             return;
                         }
                     }
+                    base += lens[i].unwrap_or_else(|| local_len(dest));
+                    report(Progress::DownloadBytes { done: base, total });
                     if tx.send(Event::VolumeReady(index)).is_err() {
                         return;
                     }
@@ -636,6 +773,10 @@ pub fn download_and_unpack(plan: &Plan, report: &Reporter) -> Result<(), String>
             let staging = staging.clone();
             scope.spawn(move || {
                 for cab in cab_rx {
+                    if cancel.is_cancelled() {
+                        let _ = tx.send(Event::CabDone(Err(CANCELLED.to_string())));
+                        return;
+                    }
                     let t = Instant::now();
                     let result = unpack_cab(&cab, &staging, report).map(|n| (cab.clone(), n));
                     if let Ok((_, n)) = &result {
@@ -658,6 +799,7 @@ pub fn download_and_unpack(plan: &Plan, report: &Reporter) -> Result<(), String>
         let mut failure: Option<String> = None;
         let mut msis: Vec<PathBuf> = Vec::new();
         for event in &rx {
+            cancel.check()?;
             match event {
                 Event::DownloadFailed(e) => {
                     failure = Some(e);
@@ -734,6 +876,7 @@ pub fn download_and_unpack(plan: &Plan, report: &Reporter) -> Result<(), String>
             .map_err(|_| "downloader thread panicked")?;
         cab_worker.join().map_err(|_| "cabinet thread panicked")?;
 
+        cancel.check()?;
         let mut total = 0usize;
         for msi_path in MSI_DIRS
             .iter()
@@ -795,7 +938,7 @@ mod tests {
             installer_dir: &dir.join("cache"),
             target_root: &dir,
         };
-        let err = download_and_unpack(&plan, &|_| {}).unwrap_err();
+        let err = download_and_unpack(&plan, &Cancel::default(), &|_| {}).unwrap_err();
         assert!(err.contains("patched"), "{err}");
         fs::remove_dir_all(&dir).ok();
     }

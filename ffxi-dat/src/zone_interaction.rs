@@ -2,7 +2,7 @@
 //! declares for zone lines, doors, sub-areas, fishing areas and elevators. Layout
 //! mirrors research/xim/src/jsMain/kotlin/xim/resource/ZoneInteractionSection.kt ZoneInteractionSection,
 //! verified byte-for-byte on retail DATs (zones 230/235) against LSB
-//! vendor/server/sql/zonelines.sql.
+//! vendor/server/data/zones/<zone>/zone.yaml zonelines.
 
 use crate::datid::DatId;
 use crate::kind::ChunkKind;
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// Pins the coupling with the kuluu-nav zonelines scrape: LSB stores the trigger's
-    /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql zonelines 812805498).
+    /// source fourcc as the zonelines.sql primary key (vendor/server/data/zones/southern_san_doria/zone.yaml zonelines 812805498).
     #[test]
     fn rect_id_matches_lsb_zonelines_primary_key() {
         assert_eq!(u32::from_le_bytes(*b"zmr0"), 812805498);

@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use ffxi_dat::mmb::{self, MmbHeader};
 use ffxi_dat::{walk, ChunkKind, DatRoot};
+use lsb_scrape::{parse_yaml_enum_values, parse_yaml_npcs, Yaml};
 
 #[derive(Debug, Clone, Copy)]
 enum Look {
@@ -27,105 +28,74 @@ enum Look {
     Chocobo,
 }
 
-fn decode_look(bytes: &[u8]) -> Option<Look> {
-    if bytes.len() < 20 {
-        return None;
-    }
-    let size = u16::from_le_bytes([bytes[0], bytes[1]]);
-    match size {
-        0 | 5 | 6 => Some(Look::Standard {
-            modelid: u16::from_le_bytes([bytes[2], bytes[3]]),
-        }),
-        1 => Some(Look::Equipped {
-            face: bytes[2],
-            race: bytes[3],
-            head: u16::from_le_bytes([bytes[4], bytes[5]]),
-            body: u16::from_le_bytes([bytes[6], bytes[7]]),
-        }),
-        2 => Some(Look::Door),
-        3 | 4 => Some(Look::Transport),
-        7 => Some(Look::Chocobo),
-        _ => Some(Look::Standard {
-            modelid: u16::from_le_bytes([bytes[2], bytes[3]]),
-        }),
-    }
-}
-
 struct NpcRow {
     npc_id: u32,
     name: String,
     look: Look,
 }
 
-fn npc_list_sql_path() -> PathBuf {
-    if let Ok(manifest) = env::var("CARGO_MANIFEST_DIR") {
-        let p = PathBuf::from(manifest)
-            .parent()
-            .map(|w| w.join("vendor/server/sql/npc_list.sql"));
-        if let Some(p) = p {
-            if p.exists() {
-                return p;
-            }
-        }
-    }
-    PathBuf::from("vendor/server/sql/npc_list.sql")
+const LSB_ZONE_ENUM_YAML: &str = "vendor/server/data/enums/zone.yaml";
+const LSB_ZONES_DATA_DIR: &str = "vendor/server/data/zones";
+
+fn workspace_root() -> PathBuf {
+    env::var("CARGO_MANIFEST_DIR")
+        .ok()
+        .and_then(|m| PathBuf::from(m).parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn parse_row(line: &str) -> Option<NpcRow> {
-    let after_values = line.find("VALUES (")?;
-    let rest = &line[after_values + "VALUES (".len()..];
-    let close = rest.rfind(");")?;
-    let body = &rest[..close];
-
-    let first_comma = body.find(',')?;
-    let npc_id: u32 = body[..first_comma].trim().parse().ok()?;
-
-    let after_id = &body[first_comma + 1..];
-    let name_start = after_id.find('\'')? + 1;
-    let after_name_open = &after_id[name_start..];
-    let name_end = after_name_open.find('\'')?;
-    let name = after_name_open[..name_end].to_string();
-
-    let hex_start = body.find("0x")? + 2;
-    let look_hex = &body[hex_start..hex_start + 40];
-    if look_hex.len() < 40 || !look_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
+/// `render.look` of a data/zones/<zone>/npcs.yaml entry, in the shape the
+/// survey buckets by (vendor/server/src/map/data/datasets/zones/npcs/yaml.h
+/// Look).
+fn look_from_yaml(look: &Yaml) -> Option<Look> {
+    let kind: String = look.field("type").ok()??;
+    let u16_field = |key: &str| look.field::<u16>(key).ok().flatten();
+    let u8_field = |key: &str| look.field::<u8>(key).ok().flatten();
+    match kind.as_str() {
+        "standard" | "automaton" => Some(Look::Standard {
+            modelid: u16_field("model")?,
+        }),
+        "equipped" => Some(Look::Equipped {
+            race: u8_field("race")?,
+            face: u8_field("face")?,
+            head: u16_field("head")?,
+            body: u16_field("body")?,
+        }),
+        "door" => Some(Look::Door),
+        "ship" | "elevator" => Some(Look::Transport),
+        "chocobo" => Some(Look::Chocobo),
+        _ => None,
     }
-    let look_bytes = hex_decode_20(look_hex)?;
-    let look = decode_look(&look_bytes)?;
-    Some(NpcRow { npc_id, name, look })
 }
 
-fn hex_decode_20(s: &str) -> Option<[u8; 20]> {
-    let mut out = [0u8; 20];
-    let b = s.as_bytes();
-    for i in 0..20 {
-        let hi = (b[i * 2] as char).to_digit(16)?;
-        let lo = (b[i * 2 + 1] as char).to_digit(16)?;
-        out[i] = ((hi << 4) | lo) as u8;
-    }
-    Some(out)
-}
-
-fn rows_for_zone(sql: &str, zone_id: u16) -> Vec<NpcRow> {
-    let marker = format!("(Zone {zone_id})");
-    let Some(start) = sql.find(&marker) else {
-        return Vec::new();
-    };
-    let rest = &sql[start..];
-
-    let after_self = &rest["(Zone ".len()..];
-    let end = after_self
-        .find("(Zone ")
-        .map(|i| i + "(Zone ".len())
-        .unwrap_or(rest.len());
-    let block = &rest[..end.min(rest.len())];
-
-    block
-        .lines()
-        .filter(|l| l.contains("INSERT INTO `npc_list`"))
-        .filter_map(parse_row)
-        .collect()
+fn rows_for_zone(zone_id: u16) -> Result<Vec<NpcRow>, String> {
+    let root = workspace_root();
+    let enum_path = root.join(LSB_ZONE_ENUM_YAML);
+    let enum_src =
+        fs::read_to_string(&enum_path).map_err(|e| format!("read {}: {e}", enum_path.display()))?;
+    let (zone_key, _) = parse_yaml_enum_values(&enum_src)
+        .map_err(|e| format!("{}: {e:#}", enum_path.display()))?
+        .into_iter()
+        .find(|(_, id)| *id == u32::from(zone_id))
+        .ok_or_else(|| format!("zone {zone_id} is not in {}", enum_path.display()))?;
+    let path = root
+        .join(LSB_ZONES_DATA_DIR)
+        .join(&zone_key)
+        .join("npcs.yaml");
+    let src = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let npcs = parse_yaml_npcs(&src).map_err(|e| format!("{}: {e:#}", path.display()))?;
+    Ok(npcs
+        .into_iter()
+        .filter_map(|(npc_id, npc)| {
+            let name = npc
+                .field::<String>("display_name")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let look = look_from_yaml(npc.get("render")?.get("look")?)?;
+            Some(NpcRow { npc_id, name, look })
+        })
+        .collect())
 }
 
 fn parse_probe_arg(args: &[String]) -> Option<(u32, u32)> {
@@ -159,16 +129,13 @@ fn main() -> ExitCode {
     let probe = parse_probe_arg(&args);
     let min_chunks = parse_min_chunks_arg(&args);
 
-    let sql_path = npc_list_sql_path();
-    let sql = match fs::read_to_string(&sql_path) {
-        Ok(s) => s,
+    let rows = match rows_for_zone(zone_id) {
+        Ok(rows) => rows,
         Err(e) => {
-            eprintln!("read {}: {e}", sql_path.display());
+            eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
-
-    let rows = rows_for_zone(&sql, zone_id);
     if rows.is_empty() {
         eprintln!("no NPC rows found for zone {zone_id}");
         return ExitCode::from(1);
@@ -249,8 +216,8 @@ fn main() -> ExitCode {
             "  1. log into zone {zone_id}; target an NPC of interest (e.g. Well, modelid {}).",
             standard.keys().next().copied().unwrap_or(0),
         );
-        println!("  2. run `/look <name>` to read its modelid from the wire.");
-        println!("  3. run `/load_mmb_on <entity_id> <file_id> <chunk_idx>` against candidates");
+        println!("  2. run `//look <name>` to read its modelid from the wire.");
+        println!("  3. run `//load_mmb_on <entity_id> <file_id> <chunk_idx>` against candidates");
         println!("     until the mesh visually matches.");
         println!("  4. add the confirmed row to MODELID_TABLE in");
         println!("     `kuluu-render/src/look_resolver.rs`.");
@@ -350,7 +317,7 @@ fn main() -> ExitCode {
 
     println!();
     println!("Next step: pick one (modelid, file_id) pair, run");
-    println!("  /load_mmb_on <entity_id> <file_id> <modelid>");
+    println!("  //load_mmb_on <entity_id> <file_id> <modelid>");
     println!("against an NPC of that modelid. If the mesh matches, add the row to");
     println!("kuluu-render/src/look_resolver.rs:MODELID_TABLE.");
 

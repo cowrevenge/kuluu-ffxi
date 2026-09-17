@@ -438,6 +438,7 @@ pub struct SessionState {
     pub stage: Stage,
     pub account_id: Option<u32>,
     pub char_id: Option<u32>,
+    pub self_pet_targid: Option<u16>,
     pub character: Option<String>,
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
@@ -1785,6 +1786,11 @@ impl SessionState {
                 }
                 self.entities.len() != before
             }
+            AgentEvent::OwnPetSynced { targid } => {
+                let changed = self.self_pet_targid != *targid;
+                self.self_pet_targid = *targid;
+                changed
+            }
             AgentEvent::NameExtractionMiss { miss } => {
                 self.name_misses.push_back(miss.clone());
                 while self.name_misses.len() > NAME_MISSES_CAP {
@@ -2693,6 +2699,16 @@ pub enum AgentEvent {
     },
     EntityRemoved {
         id: u32,
+    },
+
+    /// 0x068 PetSync is sent to the pet's owner only, so every one we receive
+    /// describes our own pet: `Some` is the up variant carrying the pet's
+    /// targid, `None` the despawn shape. The server redirects PET-flagged
+    /// actions at this pet (vendor/server/src/map/ai/helpers/targetfind.cpp
+    /// CTargetFind::getValidTarget TARGET_PET).
+    OwnPetSynced {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        targid: Option<u16>,
     },
 
     NameExtractionMiss {

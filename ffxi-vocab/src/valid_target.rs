@@ -13,6 +13,7 @@ impl TargetFlags {
     pub const PLAYER: u16 = 0x10;
     pub const PLAYER_DEAD: u16 = 0x20;
     pub const NPC: u16 = 0x40;
+    pub const PET: u16 = 0x0100;
 
     pub fn contains(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -65,6 +66,38 @@ mod tests {
         let flags = spell(1).expect("Cure present");
         assert!(flags.contains(TargetFlags::PLAYER_PARTY));
         assert!(!flags.is_self_only());
+    }
+
+    #[test]
+    fn cure_valid_target_is_the_six_base_flags() {
+        // vendor/server/sql/spell_list.sql spell 1: ENEMY included, so mobs
+        // are valid Cure targets — no special-casing list.
+        assert_eq!(
+            spell(1).expect("Cure present"),
+            TargetFlags(
+                TargetFlags::SELF
+                    | TargetFlags::PLAYER_PARTY
+                    | TargetFlags::ENEMY
+                    | TargetFlags::PLAYER_ALLIANCE
+                    | TargetFlags::PLAYER
+                    | TargetFlags::NPC
+            )
+        );
+    }
+
+    #[test]
+    fn pet_command_abilities_carry_the_pet_bit() {
+        // Sic (72) is a pet command: the server redirects it at the caster's
+        // own pet (vendor/server/src/map/ai/helpers/targetfind.cpp
+        // CTargetFind::getValidTarget TARGET_PET).
+        let flags = ability(72).expect("Sic present");
+        assert!(flags.contains(TargetFlags::PET));
+        // Blood Rage (267) is self-only: its 0x13F column is message1, not
+        // validTarget — pin the column mapping against a re-scrape drift.
+        assert!(!ability(267)
+            .expect("Blood Rage present")
+            .contains(TargetFlags::PET));
+        assert!(!spell(1).expect("Cure present").contains(TargetFlags::PET));
     }
 
     #[test]

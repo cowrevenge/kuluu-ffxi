@@ -2282,6 +2282,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::CharStatsUpdated { .. } => (),
         AgentEvent::EntityUpserted { .. } => (),
         AgentEvent::EntityRemoved { .. } => (),
+        AgentEvent::OwnPetSynced { .. } => (),
         AgentEvent::NameExtractionMiss { .. } => (),
         AgentEvent::EntityPatched { .. } => (),
         AgentEvent::ChatLine { .. } => (),

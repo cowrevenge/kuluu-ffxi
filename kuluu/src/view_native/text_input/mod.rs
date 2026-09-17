@@ -1120,6 +1120,7 @@ fn gather_sub_target_entities(
     use kuluu_snapshot::EntityKind;
     let snap = &scene_state.snapshot;
     let self_id = snap.self_char_id;
+    let self_pet = snap.self_pet_targid;
     let self_pos = snap.self_pos.pos;
     // A pet joins the enemy set only when its allegiance differs from ours:
     // the server's TARGET_ENEMY check is the allegiance inequality
@@ -1151,6 +1152,7 @@ fn gather_sub_target_entities(
                     || (matches!(e.kind, EntityKind::Pet)
                         && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 0x07 != a)),
                 is_npc: matches!(e.kind, EntityKind::Npc),
+                is_own_pet: self_pet.is_some_and(|t| e.act_index == t),
                 is_dead: e.hp_pct == Some(0),
                 dist_sq: dx * dx + dy * dy + dz * dz,
             }
@@ -3242,5 +3244,38 @@ mod sub_target_pick_tests {
             panic!("expected the sub-target picker");
         };
         assert_eq!(st.candidate, Some(PARTY_ID));
+    }
+
+    #[test]
+    fn own_pet_is_marked_from_the_pet_sync_targid() {
+        let mut scene = battle_scene();
+        // Distinct wire targids per entity.
+        for (i, e) in scene.snapshot.entities.iter_mut().enumerate() {
+            e.act_index = i as u16 + 1;
+        }
+        let owned_idx = scene
+            .snapshot
+            .entities
+            .iter()
+            .position(|e| e.id == OWNED_PET_ID)
+            .expect("owned pet in scene");
+        scene.snapshot.self_pet_targid = Some(scene.snapshot.entities[owned_idx].act_index);
+        let ents = gather_sub_target_entities(&scene);
+        let by_id = |id: u32| ents.iter().find(|e| e.id == id).expect("scene entity");
+        assert!(by_id(OWNED_PET_ID).is_own_pet);
+        assert!(!by_id(PARTY_PET_ID).is_own_pet);
+        assert!(!by_id(ENEMY_PET_ID).is_own_pet);
+        // A PET-flagged ability (Sic, 72) accepts the own pet; the
+        // ENEMY-only Switch Target does not.
+        let flags = kuluu_render::sub_target::action_flags(SubTargetAction::Ability(72));
+        assert!(kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(OWNED_PET_ID)
+        ));
+        let pick = kuluu_render::sub_target::action_flags(SubTargetAction::PickSub);
+        assert!(!kuluu_render::sub_target::entity_valid(
+            pick,
+            by_id(OWNED_PET_ID)
+        ));
     }
 }

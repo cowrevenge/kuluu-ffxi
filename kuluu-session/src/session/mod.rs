@@ -1468,6 +1468,9 @@ fn handle_sub_packet(
             if let Ok(pet) =
                 decode::PetSync::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
+                let _ = event_tx.send(AgentEvent::OwnPetSynced {
+                    targid: (pet.pet_targid != 0).then_some(pet.pet_targid),
+                });
                 if pet.pet_targid != 0 {
                     let _ = event_tx.send(AgentEvent::EntityPatched {
                         id: None,

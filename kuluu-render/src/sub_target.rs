@@ -20,6 +20,8 @@ pub struct SubTargetEntity {
     pub is_alliance: bool,
     pub is_enemy: bool,
     pub is_npc: bool,
+    /// The player's own up pet (0x068 PetSync targid match).
+    pub is_own_pet: bool,
     pub is_dead: bool,
     /// Squared distance from the player, used for initial pick + cycling order.
     pub dist_sq: f32,
@@ -54,6 +56,12 @@ pub fn entity_valid(flags: TargetFlags, e: &SubTargetEntity) -> bool {
     }
     if e.is_npc {
         return flags.contains(TargetFlags::NPC);
+    }
+    if e.is_own_pet {
+        // The server redirects a PET-flagged action at the caster's own pet
+        // before any battle-ID check (vendor/server/src/map/ai/helpers/
+        // targetfind.cpp CTargetFind::getValidTarget TARGET_PET).
+        return flags.contains(TargetFlags::PET);
     }
     false
 }
@@ -150,6 +158,7 @@ mod tests {
             is_alliance: false,
             is_enemy: false,
             is_npc: false,
+            is_own_pet: false,
             is_dead: false,
             dist_sq: dist * dist,
         }
@@ -251,6 +260,25 @@ mod tests {
         assert!(!entity_valid(flags, &me()));
         assert!(!entity_valid(flags, &pc));
         assert!(!entity_valid(flags, &npc));
+    }
+
+    #[test]
+    fn own_pet_is_valid_only_for_pet_flagged_actions() {
+        let pet = SubTargetEntity {
+            is_own_pet: true,
+            ..ent(9, 3.0)
+        };
+        // Sic (72) carries the PET bit; Provoke (35) does not.
+        assert!(entity_valid(
+            ffxi_vocab::valid_target::ability(72).expect("Sic present"),
+            &pet
+        ));
+        assert!(!entity_valid(
+            ffxi_vocab::valid_target::ability(35).expect("Provoke present"),
+            &pet
+        ));
+        // Switch Target is ENEMY-only: the own pet is not a re-engage target.
+        assert!(!entity_valid(action_flags(SubTargetAction::PickSub), &pet));
     }
 
     #[test]

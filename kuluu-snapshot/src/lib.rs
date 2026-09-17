@@ -847,6 +847,11 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub self_char_id: Option<u32>,
 
+    /// Targid of the player's own up pet, from 0x068 PetSync (sent to the
+    /// owner only); `None` while the pet is down.
+    #[serde(default)]
+    pub self_pet_targid: Option<u16>,
+
     #[serde(default)]
     pub dialog: Option<DialogState>,
 
@@ -2137,6 +2142,7 @@ mod tests {
             }),
             producer_monotonic_ms: 1_500,
             self_char_id: Some(0xCAFE_F00D),
+            self_pet_targid: Some(0x010E),
             dialog: None,
             shop: None,
             delivery_box: None,
@@ -2683,6 +2689,7 @@ mod tests {
             "last_reconnect",
             "producer_monotonic_ms",
             "self_char_id",
+            "self_pet_targid",
             "dialog",
             "shop",
             "delivery_box",
@@ -2724,7 +2731,7 @@ mod tests {
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

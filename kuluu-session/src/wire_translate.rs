@@ -28,6 +28,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         producer_monotonic_ms: process_monotonic_ms(),
 
         self_char_id: s.char_id,
+        self_pet_targid: s.self_pet_targid,
 
         dialog: s.dialog.as_ref().map(dialog_to_wire),
 

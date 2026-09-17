@@ -238,11 +238,24 @@ pub struct DatRoot {
     /// (which would re-read every VTABLE/FTABLE) or replacing the `Arc` at every
     /// holder. A read per DAT open is nothing against the file I/O that follows.
     overlays: RwLock<Vec<PathBuf>>,
+    /// Held while this root is open so an updater refuses to rewrite it;
+    /// `None` on a root that cannot take one (read-only media), which only
+    /// loses the refusal.
+    _lock: Option<crate::install::lock::SharedLock>,
 }
 
 impl DatRoot {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
+        let lock = match crate::install::lock::shared(&root) {
+            Ok(lock) => Some(lock),
+            Err(e) if e.is_held() => {
+                return Err(DatError::NoInstall {
+                    reason: format!("{} is being updated: {e}", root.display()),
+                })
+            }
+            Err(_) => None,
+        };
         let mut apps: Vec<AppTables> = Vec::new();
         let mut skipped = Vec::new();
 
@@ -285,6 +298,7 @@ impl DatRoot {
             apps,
             skipped,
             overlays,
+            _lock: lock,
         };
         root.profile = ClientProfile::probe_in(&root);
         Ok(root)

@@ -1,6 +1,9 @@
 //! The FFXI install registry: every install has a name under the user data
 //! directory, a one-line `default` file names the one that loads, and
-//! `FFXI_DAT_PATH` overrides it for one run.
+//! `FFXI_DAT_PATH` overrides it for one run. [`lock`] keeps an open install
+//! and its updater out of each other's way.
+
+pub mod lock;
 
 use std::env;
 use std::fmt;

@@ -309,6 +309,13 @@ pub fn update(
     report: &ffxi_install::Reporter,
 ) -> Result<Option<ffxi_install::update::Outcome>, String> {
     refuse_non_retail(root)?;
+    let _claim = install::lock::exclusive(root).map_err(|e| {
+        if e.is_held() {
+            format!("{e}; switch installs and relaunch, then update")
+        } else {
+            e.to_string()
+        }
+    })?;
     ffxi_install::update::run(
         root,
         ffxi_install::update::Options { force: verify },

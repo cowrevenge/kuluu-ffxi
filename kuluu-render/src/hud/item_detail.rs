@@ -311,6 +311,81 @@ pub struct InventorySortRequested {
     pub container: u8,
 }
 
+/// What the inventory looked like the last time auto-sort asked the server to
+/// consolidate it, so a sort the server declines is not re-sent every tick.
+#[derive(Resource, Debug, Default)]
+pub struct AutoSortedInventory {
+    slots: Vec<(u8, u16, u32)>,
+}
+
+pub fn drain_auto_sorted_inventory(mut asked: ResMut<AutoSortedInventory>) {
+    *asked = AutoSortedInventory::default();
+}
+
+/// Whether sorting `items` would free a slot: an item stacks into fewer slots
+/// than it currently occupies. A locked slot is left out — the server refuses
+/// to move one (vendor/server/src/map/packets/c2s/0x029_item_move.cpp
+/// isValidMovement), so it can never be the reason to ask.
+fn consolidates(items: &[kuluu_snapshot::InventoryItem]) -> bool {
+    let mut held: std::collections::HashMap<u16, (usize, u64)> = std::collections::HashMap::new();
+    for slot in items.iter().filter(|s| !s.locked) {
+        let entry = held.entry(slot.item_no).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += u64::from(slot.quantity);
+    }
+    held.iter().any(|(&item_no, &(slots, total))| {
+        let stack = u64::from(ffxi_vocab::item_flags::stack_size(item_no)).max(1);
+        slots as u64 > total.div_ceil(stack)
+    })
+}
+
+/// Auto-sort's standing half: retail's Options box calls it "Auto-sort /
+/// Automatically rearrange items", and the rearranging is the server's
+/// ITEM_STACK (c2s 0x03A, research/XiPackets/world/client/0x003A/README.md) —
+/// so newly obtained items landing in a fresh slot beside a partial stack of
+/// the same item have to be consolidated without the player re-confirming the
+/// option. Only asks when a sort would actually free a slot, and only once per
+/// inventory it has not already asked about, so a sort the server declines does
+/// not repeat.
+///
+/// Unverified against retail: the observation record has the Options box and
+/// its help strings but never confirmed a sort
+/// (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
+pub fn auto_consolidate_inventory_system(
+    sort: Res<SortOptions>,
+    scene: Res<crate::snapshot::SceneState>,
+    mut asked: ResMut<AutoSortedInventory>,
+    mut sort_req: MessageWriter<InventorySortRequested>,
+) {
+    const CONTAINER: u8 = ffxi_proto::map::container::LOC_INVENTORY;
+    if !scene.is_changed() && !sort.is_changed() {
+        return;
+    }
+    let snap = &scene.snapshot;
+    // An ITEM_STACK mid-event is refused by the transport, and a container read
+    // before the bootstrap finishes is not the real inventory yet.
+    if !sort.auto || snap.stage != kuluu_snapshot::Stage::InZone || snap.dialog.is_some() {
+        return;
+    }
+    let Some(items) = snap.container(CONTAINER).map(|c| c.items.as_slice()) else {
+        return;
+    };
+    if !consolidates(items) {
+        return;
+    }
+    let slots: Vec<(u8, u16, u32)> = items
+        .iter()
+        .map(|s| (s.index, s.item_no, s.quantity))
+        .collect();
+    if asked.slots == slots {
+        return;
+    }
+    asked.slots = slots;
+    sort_req.write(InventorySortRequested {
+        container: CONTAINER,
+    });
+}
+
 pub fn item_detail_open(mode: &InputMode) -> bool {
     match mode {
         InputMode::Menu(stack) => stack
@@ -324,6 +399,68 @@ pub fn item_detail_open(mode: &InputMode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Any item the scraped table says stacks, and any it says does not — the
+    /// predicate is about stack arithmetic, not about which item it is.
+    fn stacking() -> (u16, u32) {
+        let id = (1..=u16::MAX)
+            .find(|&id| ffxi_vocab::item_flags::stack_size(id) > 1)
+            .expect("some item stacks");
+        (id, u32::from(ffxi_vocab::item_flags::stack_size(id)))
+    }
+
+    fn unstacking() -> u16 {
+        (1..=u16::MAX)
+            .find(|&id| ffxi_vocab::item_flags::stack_size(id) == 1)
+            .expect("some item does not stack")
+    }
+
+    fn slot(index: u8, item_no: u16, quantity: u32) -> kuluu_snapshot::InventoryItem {
+        kuluu_snapshot::InventoryItem {
+            container: ffxi_proto::map::container::LOC_INVENTORY,
+            index,
+            item_no,
+            quantity,
+            locked: false,
+            charges_remaining: None,
+            next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
+        }
+    }
+
+    #[test]
+    fn a_second_partial_stack_is_worth_consolidating() {
+        let (id, stack) = stacking();
+        let part = stack / 2;
+        assert!(consolidates(&[
+            slot(0, id, part),
+            slot(1, id, stack - part)
+        ]));
+        assert!(
+            !consolidates(&[slot(0, id, stack), slot(1, id, part)]),
+            "a full stack beside a partial one cannot merge into fewer slots"
+        );
+        assert!(
+            !consolidates(&[slot(0, id, part)]),
+            "one stack is already consolidated"
+        );
+    }
+
+    #[test]
+    fn a_locked_slot_is_never_the_reason_to_ask() {
+        let (id, stack) = stacking();
+        let mut locked = slot(0, id, stack / 2);
+        locked.locked = true;
+        assert!(!consolidates(&[locked, slot(1, id, stack / 2)]));
+    }
+
+    #[test]
+    fn unstackable_duplicates_are_not_worth_consolidating() {
+        // Two of the same non-stacking item occupy two slots however they sort.
+        let id = unstacking();
+        assert!(!consolidates(&[slot(0, id, 1), slot(1, id, 1)]));
+    }
 
     #[test]
     fn rare_ex_tag() {

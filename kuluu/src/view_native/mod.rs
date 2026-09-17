@@ -657,6 +657,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             drain_weather_particles,
             drain_cutscene_state,
             kuluu_render::hud::death_prompt::drain_death_prompt_selection,
+            kuluu_render::hud::item_detail::drain_auto_sorted_inventory,
             key_items::drain_key_items_viewed,
         ),
     );

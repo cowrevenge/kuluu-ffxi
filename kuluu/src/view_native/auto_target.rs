@@ -9,11 +9,11 @@ use kuluu_snapshot::{Entity, EntityKind, PartyMember, Vec3};
 use super::engage::{claimed_by_other, claimed_by_party, in_engage_range};
 use super::input::CommandTx;
 
-/// The /autoattack toggle. ON by default. The server's own after-kill scan
-/// (vendor/server/src/map/ai/states/attack_state.cpp CAttackState::UpdateTarget)
-/// retargets only to an attacking mob inside a 64-degree facing cone and 10
-/// yards, first in spawn order; this path covers the rest and applies the
-/// party-claim priority.
+/// The /autoattack toggle. ON by default. The server has its own after-kill
+/// retarget (vendor/server/src/map/ai/states/attack_state.cpp
+/// CAttackState::UpdateTarget) that picks from the mobs attacking the player;
+/// this path covers the same trigger client-side and applies the party-claim
+/// priority.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoAttack {
     pub enabled: bool,

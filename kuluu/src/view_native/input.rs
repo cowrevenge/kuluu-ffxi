@@ -475,12 +475,6 @@ impl DialogWalk {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct SelectTargetMode {
-    pub active: bool,
-    pub prev: Option<u32>,
-}
-
 pub fn handle_input_system(
     input_src: KeyActionSources,
     mut window_close: MessageReader<WindowCloseRequested>,
@@ -495,7 +489,6 @@ pub fn handle_input_system(
     mut rest_stance: ResMut<kuluu_render::combat_stance::RestStance>,
     mut walk_mode: ResMut<kuluu_render::combat_stance::WalkMode>,
     mut tab_stack: ResMut<TabCycleStack>,
-    select_target: Res<SelectTargetMode>,
     mut hud_capture: HudCaptureParams,
 ) {
     let camera_mode = &mut camera.mode;
@@ -589,14 +582,13 @@ pub fn handle_input_system(
 
     // Engaged pins the main target beyond the camera lock: releasing the lock
     // releases the camera only, so these keys stay pinned until /disengage.
-    // Only the sub-target flow (Switch Target, action menus) reaches through.
     let engaged = matches!(
         state.snapshot.current_goal,
         Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
     );
-    let target_pinned = kuluu_render::suppresses_retarget(engaged, lock_on, select_target.active);
+    let target_pinned = kuluu_render::suppresses_retarget(engaged, lock_on);
 
-    if !select_target.active && !target_pinned && just(Action::ClearTarget) {
+    if !target_pinned && just(Action::ClearTarget) {
         target.id = None;
     }
 

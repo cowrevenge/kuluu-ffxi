@@ -144,7 +144,6 @@ pub(super) fn handle_target_action_key(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
-    sub_target: &mut kuluu_render::scene::SubTarget,
     lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
@@ -164,7 +163,6 @@ pub(super) fn handle_target_action_key(
             current_target,
             entities,
             cmd_tx,
-            sub_target,
         );
     }
 
@@ -408,7 +406,6 @@ fn handle_abilities_group_key(
     current_target: Option<u32>,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
-    sub_target: &mut kuluu_render::scene::SubTarget,
 ) -> Option<InputMode> {
     let rows = kuluu_render::hud::menu::ability_group_rows(&scene_state.snapshot, group);
     let count = rows.len();
@@ -439,23 +436,6 @@ fn handle_abilities_group_key(
         if let Some(row) = rows.get(sub.cursor) {
             let action = row.action;
             let sub_action = sub_target_action_for(action);
-            // A set sub-target that is valid for this action is used in place
-            // of the main target and consumed when the action fires on it.
-            if let (Some(sub_action), Some(sub_id)) = (sub_action, sub_target.id) {
-                if selected_target_valid(sub_action, Some(sub_id), scene_state) {
-                    sub_target.id = None;
-                    let self_pos = scene_state.snapshot.self_pos.pos;
-                    dispatch_dynamic_menu_action(
-                        action,
-                        Some(sub_id),
-                        self_pos,
-                        entities,
-                        cmd_tx,
-                        scene_state,
-                    );
-                    return Some(InputMode::World);
-                }
-            }
             if let Some(sub_action) = sub_action {
                 if !selected_target_valid(sub_action, current_target, scene_state) {
                     // No valid target selected: retail's flashing sub-target

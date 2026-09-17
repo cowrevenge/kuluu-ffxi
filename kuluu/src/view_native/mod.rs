@@ -712,7 +712,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
 
     app.init_resource::<input::TabCycleStack>();
-    app.init_resource::<input::SelectTargetMode>();
     app.init_resource::<key_items::KeyItemsViewed>();
 
     app.insert_resource(crate::padbinds_store::load_or_default());

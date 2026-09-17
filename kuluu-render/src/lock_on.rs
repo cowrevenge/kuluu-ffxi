@@ -29,14 +29,14 @@ impl LockOn {
 // targeting input (clear, party-slot, tab-cycle, click-target) cannot move or
 // drop it while either is up. The engage goal outlives the camera lock —
 // releasing the lock releases the camera only, and the pin holds until
-// /disengage takes the goal out of Engaged. Only the sub-target flow reaches
-// through the pin (research/xim/src/jsMain/kotlin/xim/poc/game/
-// PlayerTargetSelector.kt clearTarget — clear, party-slot, tab-cycle and
-// click-target all return early while isTargetLocked(), with a sub-target
-// carve-out). Losing the entity and zoning still clear it; those are not
-// player targeting input.
-pub fn suppresses_retarget(engaged: bool, lock: &LockOn, sub_target_flow: bool) -> bool {
-    (engaged || lock.is_active()) && !sub_target_flow
+// /disengage takes the goal out of Engaged (research/xim/src/jsMain/kotlin/
+// xim/poc/game/PlayerTargetSelector.kt clearTarget — clear, party-slot,
+// tab-cycle and click-target all return early while isTargetLocked()). The
+// sub-target picker never reaches these call sites: both gate on
+// InputMode::World. Losing the entity and zoning still clear it; those are
+// not player targeting input.
+pub fn suppresses_retarget(engaged: bool, lock: &LockOn) -> bool {
+    engaged || lock.is_active()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,20 +102,13 @@ mod tests {
     #[test]
     fn an_active_lock_suppresses_ordinary_retargeting() {
         let locked = LockOn { target_id: Some(7) };
-        assert!(suppresses_retarget(false, &locked, false));
-        assert!(!suppresses_retarget(false, &LockOn::default(), false));
+        assert!(suppresses_retarget(false, &locked));
+        assert!(!suppresses_retarget(false, &LockOn::default()));
     }
 
     #[test]
     fn an_engaged_goal_pins_the_target_without_a_camera_lock() {
-        assert!(suppresses_retarget(true, &LockOn::default(), false));
-    }
-
-    #[test]
-    fn the_sub_target_flow_retargets_through_the_pin() {
-        let locked = LockOn { target_id: Some(7) };
-        assert!(!suppresses_retarget(false, &locked, true));
-        assert!(!suppresses_retarget(true, &LockOn::default(), true));
+        assert!(suppresses_retarget(true, &LockOn::default()));
     }
 
     #[test]
@@ -130,7 +123,6 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(scene);
         world.insert_resource(crate::scene::Target::default());
-        world.insert_resource(crate::scene::SubTarget::default());
         world.insert_resource(LockOn::default());
         world
             .run_system_once(crate::scene::auto_clear_target_system)

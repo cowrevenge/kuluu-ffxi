@@ -127,7 +127,6 @@ pub fn spawn_target_panel(mut commands: Commands) {
 
 pub fn update_target_panel_system(
     target: Res<Target>,
-    sub_target: Res<crate::scene::SubTarget>,
     mode: Res<crate::InputMode>,
     state: Res<SceneState>,
     lock_on: Res<LockOn>,
@@ -187,12 +186,7 @@ pub fn update_target_panel_system(
         ),
     >,
 ) {
-    if !state.is_changed()
-        && !target.is_changed()
-        && !sub_target.is_changed()
-        && !mode.is_changed()
-        && !lock_on.is_changed()
-    {
+    if !state.is_changed() && !target.is_changed() && !mode.is_changed() && !lock_on.is_changed() {
         return;
     }
 
@@ -200,14 +194,11 @@ pub fn update_target_panel_system(
         return;
     };
 
-    // Display swap: while a sub-target is set the frame shows it in place of
-    // the main target (retail). The sub is consumed when the pending action
-    // fires on it, returning the frame to the main target. While the picker is
-    // up the frame tracks the live cursor candidate (the confirmed id only
-    // lands on the sub slot at confirm), so the swap shows before the commit.
+    // While the sub-target picker is up the frame tracks the live cursor
+    // candidate, so the swap shows before the commit.
     let target_id = match &*mode {
-        crate::InputMode::SubTarget(st) => st.candidate.or(sub_target.id).or(target.id),
-        _ => sub_target.id.or(target.id),
+        crate::InputMode::SubTarget(st) => st.candidate.or(target.id),
+        _ => target.id,
     };
     let Some(target_id) = target_id else {
         if panel_node.display != Display::None {

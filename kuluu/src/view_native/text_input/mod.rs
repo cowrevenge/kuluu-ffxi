@@ -137,8 +137,6 @@ pub struct SlashWriters<'w, 's> {
 
     pub shop_state: ResMut<'w, kuluu_render::hud::shop::ShopScreenState>,
 
-    pub select_target: ResMut<'w, SelectTargetMode>,
-
     pub fishing_spot: Res<'w, kuluu_render::fishing_spot::FishingSpot>,
 
     pub active_chat_tab: ResMut<'w, ActiveChatTab>,
@@ -206,7 +204,7 @@ pub struct MenuConfirmWriters<'w> {
 use tokio::sync::mpsc::Sender;
 
 use crate::keybinds_store::KeybindsStateRes;
-use crate::view_native::input::{CommandTx, SelectTargetMode};
+use crate::view_native::input::CommandTx;
 use crate::view_native::slash_commands::{
     parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
 };
@@ -221,7 +219,6 @@ pub(crate) fn text_input_system(
     mut keybinds_state: ResMut<KeybindsStateRes>,
     mut mode: ResMut<InputMode>,
     mut target: ResMut<Target>,
-    mut sub_target: ResMut<kuluu_render::scene::SubTarget>,
     mut scene_state: ResMut<SceneState>,
     mut exit: MessageWriter<AppExit>,
     mut navmesh: NavmeshOverlay,
@@ -326,21 +323,6 @@ pub(crate) fn text_input_system(
                         continue;
                     }
                 }
-                if slash_writers.select_target.active {
-                    if bindings.matches_logical(Action::ConfirmAction, &ev.logical_key) {
-                        if let Some(id) = current_target {
-                            let _ = cmd_tx.0.try_send(AgentCommand::Engage { target_id: id });
-                        }
-                        slash_writers.select_target.active = false;
-                        slash_writers.select_target.prev = None;
-                        continue;
-                    }
-                    if bindings.matches_logical(Action::ClearTarget, &ev.logical_key) {
-                        target.id = slash_writers.select_target.prev.take();
-                        slash_writers.select_target.active = false;
-                        continue;
-                    }
-                }
                 if bindings.matches_logical(Action::SelectActiveWindow, &ev.logical_key) {
                     if slash_writers.graphics.chat_layout
                         != kuluu_render::graphics_settings::ChatLayout::Tabbed
@@ -428,7 +410,6 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.item_viewport,
                     &dynamic_menu,
                     current_target,
-                    &mut sub_target,
                     self_pos,
                     &mut slash_writers.map_screen_state,
                     slash_writers.map_markers.reborrow(),
@@ -497,7 +478,6 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.check_target,
                     &mut slash_writers.trade_state,
                     &mut slash_writers.trade_intent,
-                    &mut sub_target,
                     &mut slash_writers.lock_on,
                 ) {
                     *mode = next;
@@ -511,7 +491,6 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &entities,
                     &cmd_tx.0,
-                    &mut sub_target,
                 ) {
                     *mode = next;
                 }
@@ -1252,7 +1231,6 @@ fn handle_sub_target_key(
     scene_state: &mut SceneState,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
-    sub_target: &mut kuluu_render::scene::SubTarget,
 ) -> Option<InputMode> {
     use ffxi_vocab::valid_target::TargetFlags;
     use kuluu_render::input_mode::SubTargetAction;
@@ -1314,13 +1292,7 @@ fn handle_sub_target_key(
                     format!("[menu] Switch Target dispatch dropped: {err}"),
                 );
             }
-            sub_target.id = None;
             return Some(InputMode::World);
-        }
-        // Consuming the sub only happens when this action fired on it; firing
-        // on the main target (or another candidate) leaves the slot intact.
-        if sub_target.id == Some(id) {
-            sub_target.id = None;
         }
         let self_pos = scene_state.snapshot.self_pos.pos;
         dispatch_dynamic_menu_action(
@@ -1723,7 +1695,6 @@ pub fn mouse_nav_dispatch_system(
     mut keybinds_state: ResMut<KeybindsStateRes>,
     mut mode: ResMut<InputMode>,
     target: Res<Target>,
-    mut sub_target: ResMut<kuluu_render::scene::SubTarget>,
     mut scene_state: ResMut<SceneState>,
     mut menu_writers: MenuConfirmWriters,
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
@@ -1757,7 +1728,6 @@ pub fn mouse_nav_dispatch_system(
                 &mut menu_writers.vana_clock_visible,
                 &dynamic_menu,
                 current_target,
-                &mut sub_target,
                 self_pos,
             ) {
                 *mode = next;
@@ -2759,7 +2729,6 @@ mod cs_input_lock_tests {
         stack.push(MenuKind::Map);
         app.insert_resource(InputMode::Menu(stack));
         app.insert_resource(Target::default());
-        app.insert_resource(kuluu_render::SubTarget::default());
         app.insert_resource(kuluu_render::LockOn::default());
         app.insert_resource(SceneState::default());
         // The plugin initializes this in production; the gate reads it unconditionally.
@@ -2796,7 +2765,6 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::hud::delivery::DeliveryInventory::default());
         app.insert_resource(kuluu_render::hud::auction::AuctionScreenState::default());
         app.insert_resource(kuluu_render::hud::auction::AuctionSellInventory::default());
-        app.insert_resource(crate::view_native::input::SelectTargetMode::default());
         app.insert_resource(crate::view_native::command_surface::CommandSurface::default());
         app.insert_resource(kuluu_render::fishing_spot::FishingSpot::default());
         app.insert_resource(ActiveChatTab::default());
@@ -3164,7 +3132,6 @@ mod sub_target_pick_tests {
         let InputMode::SubTarget(mut st) = mode else {
             panic!("expected the sub-target picker");
         };
-        let mut sub = kuluu_render::scene::SubTarget { id: Some(MOB_ID) };
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let entities = scene.snapshot.entities.clone();
         let next = handle_sub_target_key(
@@ -3174,7 +3141,6 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
-            &mut sub,
         );
         assert!(
             matches!(next, Some(InputMode::World)),
@@ -3184,10 +3150,6 @@ mod sub_target_pick_tests {
         assert!(
             matches!(sent, AgentCommand::Engage { target_id } if target_id == st.candidate.unwrap()),
             "confirm must re-engage on the chosen candidate: {sent:?}"
-        );
-        assert_eq!(
-            sub.id, None,
-            "the sub slot must not hold the switched target"
         );
     }
 
@@ -3211,7 +3173,6 @@ mod sub_target_pick_tests {
             panic!("expected the sub-target picker");
         };
         st.candidate = Some(far_id);
-        let mut sub = kuluu_render::scene::SubTarget::default();
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let entities = scene.snapshot.entities.clone();
         let next = handle_sub_target_key(
@@ -3221,7 +3182,6 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
-            &mut sub,
         );
         assert!(
             matches!(next, Some(InputMode::World)),

@@ -2821,7 +2821,18 @@ async fn keepalive_loop(
                      Some(AgentCommand::SetFps { max }) => {
                          let _ = event_tx.send(AgentEvent::SetFps { max });
                      }
-                     Some(AgentCommand::EndEvent) => {
+                     Some(AgentCommand::EndEventBack) if local_menu.active() => {
+                        match local_menu.pop() {
+                            Some(dialog) => {
+                                let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                            }
+                            None => {
+                                local_menu.clear();
+                                let _ = event_tx.send(AgentEvent::EventEnded);
+                            }
+                        }
+                    }
+                     Some(AgentCommand::EndEvent | AgentCommand::EndEventBack) => {
                         // Local menus first: dismissing one never involves the server.
                         if local_menu.active() {
                             local_menu.clear();
@@ -2964,10 +2975,12 @@ async fn keepalive_loop(
                                     });
                                 }
                                 crate::local_menu::Advance::DeliveryOpen { box_no } => {
-                                    // Cutover: the dedicated screen (gated on the
-                                    // snapshot's delivery_box) now owns the UI, so
-                                    // open non-menu-driven — no legacy DialogState
-                                    // grid re-render on settle.
+                                    // The dedicated screen (gated on the snapshot's
+                                    // delivery_box) takes the display; the menu
+                                    // levels beneath it stay so PostClose lands back
+                                    // on the Receive/Send submenu rather than the
+                                    // world.
+                                    local_menu.suspend();
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                     let op = dbox.request_open(box_no, false);
                                     send_pbx(map, &op, &mut sub_seq, server_last_seq, &event_tx).await;
@@ -4792,14 +4805,11 @@ async fn keepalive_loop(
                                             )
                                             .await;
                                         }
-                                        if out.settled && dbox.menu_driven() {
-                                            let dialog = match dbox.open() {
-                                                Some(box_no) => local_menu
-                                                    .open_delivery_box(box_no, dbox.slots()),
-                                                None => local_menu.open_delivery_submenu(),
-                                            };
-                                            let _ = event_tx
-                                                .send(AgentEvent::EventDialog { dialog });
+                                        if out.settled && dbox.open().is_none() {
+                                            if let Some(dialog) = local_menu.resume() {
+                                                let _ = event_tx
+                                                    .send(AgentEvent::EventDialog { dialog });
+                                            }
                                         }
                                     }
                                     Err(e) => {

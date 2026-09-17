@@ -2225,6 +2225,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::ReportSubArea { .. } => (),
         AgentCommand::CutsceneMotionDone { .. } => (),
         AgentCommand::EndEvent { .. } => (),
+        AgentCommand::EndEventBack { .. } => (),
         AgentCommand::EndEventChoice { .. } => (),
         AgentCommand::CustomMenuRespond { .. } => (),
         AgentCommand::Disconnect { .. } => (),

@@ -644,9 +644,9 @@ pub fn dialog_mode_sync_system(
     let dialog = state.snapshot.dialog.as_ref();
     match (&*mode, dialog.is_some()) {
         (InputMode::World, true) => *mode = InputMode::Dialog(DialogCursor::default()),
-        (InputMode::Dialog(_), false) => {
+        (InputMode::Dialog(c), false) => {
+            cursors.closed(c.cursor);
             *mode = InputMode::World;
-            cursors.closed();
         }
         _ => {}
     }
@@ -686,9 +686,13 @@ impl DialogCursors {
         Some(self.seen.get(&frame).copied().unwrap_or(first_row))
     }
 
-    fn closed(&mut self) {
-        self.open = None;
-        self.seen.clear();
+    /// `seen` outlives the close: retail reopens the Mog Menu on the row it was
+    /// left on (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md,
+    /// "How the menu opens").
+    fn closed(&mut self, cursor: u32) {
+        if let Some(left) = self.open.take() {
+            self.seen.insert(left, cursor);
+        }
     }
 }
 
@@ -1999,8 +2003,10 @@ fn handle_dialog_key(
         {
             return None;
         }
-        // Reconcile via the session snapshot; clearing here flickers multi-frame events.
-        let _ = cmd_tx.try_send(AgentCommand::EndEvent);
+        // Reconcile via the session snapshot; clearing here flickers multi-frame
+        // events. The session decides whether this pops a client-local menu
+        // level or ends the interaction, because only it knows the depth.
+        let _ = cmd_tx.try_send(AgentCommand::EndEventBack);
         return None;
     }
     None
@@ -2492,15 +2498,26 @@ mod dialog_cursor_tests {
         assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 2, NO_GRID), None);
     }
 
-    /// Closing the dialog forgets everything: the next conversation starts
-    /// fresh rather than reopening on a stale row.
+    /// Retail reopens a menu on the row it was left on, including across a
+    /// close (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md,
+    /// "How the menu opens").
     #[test]
-    fn closing_the_dialog_clears_the_memory() {
+    fn the_row_a_menu_was_left_on_survives_a_close() {
         let mut cursors = DialogCursors::default();
         cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
         cursors.switch(Some(DELIVERY_SUBMENU), 3, NO_GRID);
-        cursors.closed();
-        assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID), Some(0));
+        cursors.closed(1);
+        assert_eq!(
+            cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID),
+            Some(1),
+            "the row the panel was closed on"
+        );
+        cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
+        assert_eq!(
+            cursors.switch(Some(MOG_ROOT), 0, NO_GRID),
+            None,
+            "already showing"
+        );
     }
 
     /// A grid frame opens on its first cell, not row 0.

@@ -3423,6 +3423,14 @@ pub enum AgentCommand {
 
     EndEvent,
 
+    /// One step back out of a client-local menu tree (the Mog House Moogle and
+    /// exit-door menus): pop a level, or end the interaction at the root.
+    /// Retail backs out one level per Esc and closes only from the root
+    /// (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md).
+    /// A server-driven event has no levels, so this ends it exactly as
+    /// [`AgentCommand::EndEvent`] does.
+    EndEventBack,
+
     EndEventChoice {
         event_id: u32,
         act_index: u16,

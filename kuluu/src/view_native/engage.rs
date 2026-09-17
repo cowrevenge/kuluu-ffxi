@@ -11,6 +11,15 @@ use kuluu_snapshot::{Entity, PartyMember, Vec3};
 /// `distance < 30`, else MsgBasic::TooFarAway.
 pub const ENGAGE_RANGE: f32 = 30.0;
 
+/// The server's engage-range test: `distance < 30`, else the engage is
+/// refused (MsgBasic::TooFarAway).
+pub fn in_engage_range(target_pos: Vec3, self_pos: Vec3) -> bool {
+    let dx = target_pos.x - self_pos.x;
+    let dy = target_pos.y - self_pos.y;
+    let dz = target_pos.z - self_pos.z;
+    (dx * dx + dy * dy + dz * dz).sqrt() < ENGAGE_RANGE
+}
+
 /// The server's rejection line for an engage it would refuse, or None when
 /// the client sees no reason to withhold the command. Range is checked first,
 /// mirroring the server's Engage order (the claim lands on the first swing).
@@ -22,10 +31,7 @@ pub fn rejection_line(
     self_char_id: Option<u32>,
     party: &[PartyMember],
 ) -> Option<String> {
-    let dx = target.pos.x - self_pos.x;
-    let dy = target.pos.y - self_pos.y;
-    let dz = target.pos.z - self_pos.z;
-    if (dx * dx + dy * dy + dz * dz).sqrt() >= ENGAGE_RANGE {
+    if !in_engage_range(target.pos, self_pos) {
         return Some(format!(
             "{} is too far away.",
             target.name.as_deref().unwrap_or("your target")
@@ -40,10 +46,15 @@ pub fn rejection_line(
 /// The server's IsMobOwner rule mirrored locally: unclaimed, self, or an
 /// owner in our party/alliance is ours to attack; anything else is claimed.
 /// The claim id only rides CHAR_NPC (mobs), so PCs/NPCs pass by construction.
-fn claimed_by_other(target: &Entity, self_char_id: Option<u32>, party: &[PartyMember]) -> bool {
+pub fn claimed_by_other(target: &Entity, self_char_id: Option<u32>, party: &[PartyMember]) -> bool {
     target.claim_id != 0
         && self_char_id.is_none_or(|self_id| target.claim_id != self_id)
         && !party.iter().any(|m| m.id == target.claim_id)
+}
+
+/// The claim is held by self or the party/alliance: ours to fight over.
+pub fn claimed_by_party(target: &Entity, self_char_id: Option<u32>, party: &[PartyMember]) -> bool {
+    target.claim_id != 0 && !claimed_by_other(target, self_char_id, party)
 }
 
 #[cfg(test)]

@@ -109,6 +109,8 @@ pub struct SlashWriters<'w, 's> {
     /// (text_input_system is at the 16-param cap on unix).
     pub lock_on: ResMut<'w, kuluu_render::LockOn>,
 
+    pub auto_attack: ResMut<'w, crate::view_native::auto_target::AutoAttack>,
+
     pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
 
     pub sort_options: ResMut<'w, kuluu_render::hud::item_detail::SortOptions>,
@@ -244,6 +246,38 @@ pub(crate) fn text_input_system(
     );
 
     let target_changed = target.is_changed();
+
+    // A Switch Target confirm holds the picker up until the server's 0x058
+    // commits the candidate into the main target (apply_server_retarget_system
+    // runs before this one); the frame tracks the candidate meanwhile, so the
+    // swap lands on the server's word. The lapse covers the server answering
+    // with a rejection line instead (its not-engaged fall-through). If the main
+    // target dies while the picker is up (auto_clear dropped it, which runs
+    // before this system), the switch is moot: close the picker; the weapon
+    // sheathes on its own since the pose pass gates the weapon on an active
+    // target.
+    if let InputMode::SubTarget(st) = &mut *mode {
+        // A switch already in flight keeps waiting for its 0x058 even if the
+        // old target dies first (the commit lands the new one); only a picker
+        // with no pending switch closes on the main target going away.
+        let main_target_gone = matches!(
+            st.action,
+            kuluu_render::input_mode::SubTargetAction::PickSub
+        ) && st.pending_switch.is_none()
+            && target.id.is_none();
+        let close = main_target_gone
+            || st.pending_switch.is_some_and(|sent| {
+                target.id == Some(sent)
+                    || st
+                        .pending_since
+                        .is_some_and(|since| since.elapsed() >= SWITCH_ANSWER_TIMEOUT)
+            });
+        if close {
+            st.pending_switch = None;
+            st.pending_since = None;
+            *mode = InputMode::World;
+        }
+    }
 
     let pad_synth: Vec<KeyboardInput> = events.pad.read().map(|e| e.0.clone()).collect();
     for ev in events.keyboard.read().chain(pad_synth.iter()) {
@@ -1223,6 +1257,11 @@ fn open_sub_target(
     Some(InputMode::SubTarget(st))
 }
 
+/// How long a Switch Target confirm waits for the server's 0x058 before the
+/// picker closes on its own; the answer lands within one AI tick, so this
+/// only covers the server refusing with a rejection line instead.
+const SWITCH_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Retail sub-target cursor keys: Tab/arrows cycle valid candidates in
 /// distance order, Enter fires the pending action at the candidate, Esc
 /// returns to the originating menu with its cursor preserved.
@@ -1258,6 +1297,10 @@ fn handle_sub_target_key(
     let reverse = bindings.matches_logical(Action::NavUp, key)
         || bindings.matches_logical(Action::NavLeft, key);
     if forward || reverse {
+        // Re-picking cancels the in-flight switch: the sent 0x058 may still
+        // land the main target, but the picker stays up for the new choice.
+        state.pending_switch = None;
+        state.pending_since = None;
         state.candidate = sub_target::cycle_candidate(flags, state.candidate, &ents, reverse);
         return None;
     }
@@ -1270,15 +1313,21 @@ fn handle_sub_target_key(
             return None;
         };
         if matches!(state.action, SubTargetAction::PickSub) {
-            // "Switch Target" re-engages on the candidate: the server moves
-            // the battle target and echoes 0x058, which lands it in the main
-            // target slot (vendor/server/src/map/ai/controllers/
-            // player_controller.cpp CPlayerController::Engage pushes the
-            // assist reply; apply_server_retarget_system applies it).
+            // "Switch Target" asks the server to move the battle target: c2s
+            // 0x01A ChangeTarget, whose engaged branch is a bare
+            // setBattleTarget with no entry validation and no swing-delay
+            // gate (vendor/server/src/map/ai/ai_container.cpp
+            // CAIContainer::Internal_ChangeTarget). The server's 0x058 echo —
+            // one AI tick later — lands it in the main target slot
+            // (apply_server_retarget_system), so the picker holds until then.
             let Some(ent) = entities.iter().find(|e| e.id == id) else {
                 push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
                 return None;
             };
+            // The local engage pre-checks are the only range/claim gate on
+            // this path: a candidate the server would refuse at the next
+            // swing (36/12 + disengage) never leaves the client, the server
+            // keeps swinging the current target, and the cursor stays up.
             if let Some(line) = crate::view_native::engage::rejection_line(
                 ent,
                 scene_state.snapshot.self_pos.pos,
@@ -1286,15 +1335,22 @@ fn handle_sub_target_key(
                 &scene_state.snapshot.party,
             ) {
                 push_system_chat_line(scene_state, line);
-                return Some(InputMode::World);
+                return None;
             }
-            if let Err(err) = cmd_tx.try_send(AgentCommand::Engage { target_id: id }) {
+            if let Err(err) = cmd_tx.try_send(AgentCommand::Action {
+                target_id: id,
+                target_index: ent.act_index,
+                kind: ActionKind::ChangeTarget,
+            }) {
                 push_system_chat_line(
                     scene_state,
                     format!("[menu] Switch Target dispatch dropped: {err}"),
                 );
+                return None;
             }
-            return Some(InputMode::World);
+            state.pending_switch = Some(id);
+            state.pending_since = Some(std::time::Instant::now());
+            return None;
         }
         let self_pos = scene_state.snapshot.self_pos.pos;
         dispatch_dynamic_menu_action(
@@ -2701,7 +2757,7 @@ mod cs_input_lock_tests {
 
     /// The full resource set text_input_system's parameters fetch, so the gate can be driven
     /// on a bare app exactly like cutscene.rs's tests do.
-    fn gate_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
+    pub(super) fn gate_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
         let mut app = App::new();
         // Message storage for every reader/writer the system carries.
         app.add_message::<KeyboardInput>()
@@ -2732,6 +2788,7 @@ mod cs_input_lock_tests {
         app.insert_resource(InputMode::Menu(stack));
         app.insert_resource(Target::default());
         app.insert_resource(kuluu_render::LockOn::default());
+        app.insert_resource(crate::view_native::auto_target::AutoAttack::default());
         app.insert_resource(SceneState::default());
         // The plugin initializes this in production; the gate reads it unconditionally.
         app.insert_resource(kuluu_render::cutscene::CutsceneMode::default());
@@ -3122,7 +3179,7 @@ mod sub_target_pick_tests {
     }
 
     #[test]
-    fn pick_sub_confirm_reengages_on_the_chosen_mob() {
+    fn pick_sub_confirm_sends_a_change_target_and_holds_the_picker() {
         let mut scene = battle_scene();
         let mode = open_sub_target(
             SubTargetAction::PickSub,
@@ -3145,14 +3202,28 @@ mod sub_target_pick_tests {
             &cmd_tx,
         );
         assert!(
-            matches!(next, Some(InputMode::World)),
-            "confirm must return to the world mode: {next:?}"
+            next.is_none(),
+            "confirm must hold the picker up for the server's 0x058: {next:?}"
         );
-        let sent = cmd_rx.try_recv().expect("confirm must send the re-engage");
+        let sent = cmd_rx
+            .try_recv()
+            .expect("confirm must send the ChangeTarget");
         assert!(
-            matches!(sent, AgentCommand::Engage { target_id } if target_id == st.candidate.unwrap()),
-            "confirm must re-engage on the chosen candidate: {sent:?}"
+            matches!(
+                sent,
+                AgentCommand::Action {
+                    target_id,
+                    kind: ActionKind::ChangeTarget,
+                    ..
+                } if target_id == st.candidate.unwrap()
+            ),
+            "confirm must ask the server to move the battle target to the chosen candidate: {sent:?}"
         );
+        assert_eq!(
+            st.pending_switch, st.candidate,
+            "the sent candidate must arm the answer wait"
+        );
+        assert!(st.pending_since.is_some());
     }
 
     #[test]
@@ -3186,12 +3257,16 @@ mod sub_target_pick_tests {
             &cmd_tx,
         );
         assert!(
-            matches!(next, Some(InputMode::World)),
-            "a refused engage must still close the picker: {next:?}"
+            next.is_none(),
+            "a locally refused switch must keep the cursor up for the next candidate: {next:?}"
         );
         assert!(
             cmd_rx.try_recv().is_err(),
-            "no command may leave the client for a doomed engage"
+            "no command may leave the client for a doomed switch"
+        );
+        assert_eq!(
+            st.pending_switch, None,
+            "a refused candidate must not arm the wait"
         );
     }
 
@@ -3277,5 +3352,139 @@ mod sub_target_pick_tests {
             pick,
             by_id(OWNED_PET_ID)
         ));
+    }
+
+    #[test]
+    fn pick_sub_cycling_cancels_the_answer_wait() {
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert!(
+            st.pending_switch.is_some(),
+            "confirm must arm the answer wait"
+        );
+        handle_sub_target_key(
+            &Key::Tab,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+        );
+        assert_eq!(
+            st.pending_switch, None,
+            "cycling to another candidate must cancel the in-flight switch wait"
+        );
+        assert!(st.pending_since.is_none());
+    }
+
+    /// The picker holds while the 0x058 is in flight and closes the moment the
+    /// main target lands on the sent candidate — the swap the frame shows is
+    /// the server's commit, not our send.
+    #[test]
+    fn pick_sub_picker_closes_when_the_server_commits_the_candidate() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let mut st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        st.candidate = Some(MOB2_ID);
+        st.pending_switch = Some(MOB2_ID);
+        st.pending_since = Some(std::time::Instant::now());
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<InputMode>(),
+                InputMode::SubTarget(_)
+            ),
+            "the picker must hold while the server's 0x058 is in flight"
+        );
+        app.world_mut().resource_mut::<Target>().id = Some(MOB2_ID);
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "the committed 0x058 must close the picker"
+        );
+    }
+
+    /// No 0x058, no rejection the client can see: the wait lapses and the
+    /// picker closes on its own, leaving the main target where it was.
+    #[test]
+    fn pick_sub_picker_lapses_when_no_answer_lands() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let mut st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        st.candidate = Some(MOB2_ID);
+        st.pending_switch = Some(MOB2_ID);
+        // Armed past the answer window: the 0x058 never came.
+        st.pending_since = Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "a lapsed answer wait must close the picker on its own"
+        );
+        assert_eq!(
+            app.world().resource::<Target>().id,
+            None,
+            "the main target must stay where it was"
+        );
+    }
+
+    /// The main target dying while the switch-target picker is up makes the
+    /// switch moot: the picker closes (the weapon sheathes on its own via the
+    /// pose pass's active-target gate).
+    #[test]
+    fn pick_sub_picker_closes_when_the_main_target_dies() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        let st = kuluu_render::input_mode::SubTargetState::open(
+            SubTargetAction::PickSub,
+            0,
+            InputMode::World,
+        );
+        // The main target is live while the picker is up.
+        app.world_mut().resource_mut::<Target>().id = Some(MOB_ID);
+        app.world_mut().insert_resource(InputMode::SubTarget(st));
+        app.update();
+        assert!(
+            matches!(
+                *app.world().resource::<InputMode>(),
+                InputMode::SubTarget(_)
+            ),
+            "the picker must stay up while the main target is alive"
+        );
+        // The main target dies: auto_clear drops it, the picker must close.
+        app.world_mut().resource_mut::<Target>().id = None;
+        app.update();
+        assert!(
+            matches!(*app.world().resource::<InputMode>(), InputMode::World),
+            "a dead main target must close the switch-target picker"
+        );
     }
 }

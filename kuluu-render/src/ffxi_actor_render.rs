@@ -3722,6 +3722,30 @@ pub struct FrameScratch {
         std::collections::HashMap<Entity, Vec<crate::scheduler_runtime::ActiveScheduler>>,
 }
 
+/// Status effects that freeze the character's animations, so a swing in
+/// progress can't be sheathed: the server's `HasPreventActionEffect` set
+/// (vendor/server/src/map/status_effect_container.cpp) — sleep, sleep II,
+/// petrify, lullaby, charm, charm II, penalty, stun, terror. Icon id equals
+/// effect id (LSB assigns icon == effect id). While one is on self the weapon
+/// holds drawn even if the target dies; it sheathes once the effect lapses.
+const ANIMATION_LOCK_EFFECTS: &[u16] = &[2, 7, 10, 14, 17, 19, 28, 159, 193];
+
+/// Whether any of self's status icons is an animation-locking effect.
+fn has_animation_lock_effect(icons: &[u16]) -> bool {
+    icons
+        .iter()
+        .any(|icon| ANIMATION_LOCK_EFFECTS.contains(icon))
+}
+
+/// Whether self's weapon is drawn: the server's own ATTACK byte AND (an active
+/// main target OR an animation-locked status). The weapon is never out with no
+/// target to swing at; an animation-locked character is the exception, holding
+/// the weapon until the effect lapses.
+fn weapon_drawn(self_server_status: u8, has_active_target: bool, animation_locked: bool) -> bool {
+    self_server_status == ffxi_proto::decode::animation::ATTACK
+        && (has_active_target || animation_locked)
+}
+
 pub fn tick_live_ffxi_actors(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
@@ -4061,9 +4085,23 @@ pub fn tick_live_ffxi_actors(
         .map(|(id, _)| *id)
         .collect();
 
-    let self_engaged_predicted = matches!(
-        state.snapshot.current_goal,
-        Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
+    // Self's combat stance is the server's own animation byte: it flips to
+    // ATTACK on an accepted engage (the 0x058 push — the server never sends its
+    // own 0x0E) and back to NONE on a disengage. The reactor goal only predicts
+    // on send, so it can't be the source of truth: a "wait longer" rejection
+    // must not draw the weapon. The byte is additionally gated on an active
+    // main target: the weapon is never out with no target to swing at, so a
+    // target that dies (auto_clear drops it) sheathes the weapon even if the
+    // server's ATTACK byte lags the corpse. The one exception is an
+    // animation-locked status (sleep/petrify/lullaby/charm/penalty/stun/terror
+    // — the server's HasPreventActionEffect set, status_effect_container.cpp):
+    // such a character is frozen mid-swing, so the weapon stays drawn until the
+    // effect lapses and the lock clears, then sheathes on the next frame.
+    let self_animation_locked = has_animation_lock_effect(&state.snapshot.status_icons);
+    let self_server_engaged = weapon_drawn(
+        state.snapshot.self_server_status,
+        target.id.is_some(),
+        self_animation_locked,
     );
     let self_reactor_driven = !matches!(
         state.snapshot.current_goal,
@@ -4119,8 +4157,11 @@ pub fn tick_live_ffxi_actors(
             let drives_from_self_input = Some(motion_id) == self_id;
             let sample = motion.sample(motion_id).unwrap_or_default();
 
-            let engaged =
-                snap.map(|s| s.engaged).unwrap_or(false) || (is_self && self_engaged_predicted);
+            let engaged = if is_self {
+                self_server_engaged
+            } else {
+                snap.map(|s| s.engaged).unwrap_or(false)
+            };
             // A Defeated result latches the death path on this frame (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"); the 0x0E hp_pct
             // takes over from there. While the `dead` routine is queued but its
             // fall-over has not started, hold idle instead of flashing cor? for the gap frame;
@@ -6569,6 +6610,43 @@ mod pose_resolution_tests {
             advance_engage(&mut m, false, &routines, &[], &anims, 1.0),
             S::NotEngaged
         );
+    }
+
+    #[test]
+    fn weapon_never_out_without_an_active_target() {
+        use ffxi_proto::decode::animation::ATTACK;
+        // Server says engaged but the target is gone: the weapon sheathes.
+        assert!(!weapon_drawn(ATTACK, false, false));
+        // Server says engaged and the target is live: the weapon is out.
+        assert!(weapon_drawn(ATTACK, true, false));
+        // Server not engaged: never out regardless of the target.
+        assert!(!weapon_drawn(0, true, false));
+        assert!(!weapon_drawn(0, false, false));
+    }
+
+    #[test]
+    fn animation_locked_status_holds_the_weapon_past_the_corpse() {
+        use ffxi_proto::decode::animation::ATTACK;
+        // Target died but self is stone-locked: the weapon stays drawn until
+        // the effect lapses.
+        assert!(weapon_drawn(ATTACK, false, true));
+        // No lock, no target: sheathed even mid-ATTACK byte.
+        assert!(!weapon_drawn(ATTACK, false, false));
+        // Lock with a live target is redundant but still out.
+        assert!(weapon_drawn(ATTACK, true, true));
+    }
+
+    #[test]
+    fn has_animation_lock_effect_matches_the_prevent_action_set() {
+        // Each of the server's HasPreventActionEffect icons locks.
+        for icon in [2u16, 7, 10, 14, 17, 19, 28, 159, 193] {
+            assert!(has_animation_lock_effect(&[icon]), "icon {icon} must lock");
+        }
+        // A non-locking icon (Protect 40 / Shell 41) does not.
+        assert!(!has_animation_lock_effect(&[40, 41]));
+        assert!(!has_animation_lock_effect(&[]));
+        // A lock buried among other icons is still detected.
+        assert!(has_animation_lock_effect(&[40, 7, 41]));
     }
 
     #[test]

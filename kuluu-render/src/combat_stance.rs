@@ -1346,6 +1346,7 @@ pub fn predict_entities_system(
 
 // Once-per-entity dedupe for the off-mesh debug line (same pattern as CLIP_WARN_SEEN in
 // ffxi_actor_render): an entity that stays off-mesh would otherwise log every frame.
+#[cfg(not(target_arch = "wasm32"))]
 static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
 
 /// Per-frame remote grounding, run after the prediction tween.

@@ -213,6 +213,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 },
             },
             Command {
+                names: &["autoattack"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "auto-retarget a mob hitting self when the target dies",
+                handler: |c| parse_autoattack(c.rest),
+            },
+            Command {
                 names: &["attackoff"],
                 set: CommandSet::Retail,
                 usage: "",
@@ -940,6 +947,8 @@ pub enum SlashOutcome {
 
     SetNoClip(Option<bool>),
 
+    SetAutoAttack(Option<bool>),
+
     SetVanaClock(Option<bool>),
 
     /// `Some(scale)` sets the 3D render scale (0.25–2.0); `None` reports it.
@@ -1377,6 +1386,18 @@ fn parse_reqlogout(rest: &str, shutdown: bool) -> SlashOutcome {
         ])
     } else {
         SlashOutcome::Command(AgentCommand::ReqLogout { kind })
+    }
+}
+
+fn parse_autoattack(rest: &str) -> SlashOutcome {
+    let arg = rest.trim().to_ascii_lowercase();
+    match arg.as_str() {
+        "" | "toggle" => SlashOutcome::SetAutoAttack(None),
+        "on" => SlashOutcome::SetAutoAttack(Some(true)),
+        "off" => SlashOutcome::SetAutoAttack(Some(false)),
+        other => SlashOutcome::SystemMessage(format!(
+            "/autoattack: usage `/autoattack [on|off]` (got `{other}`)"
+        )),
     }
 }
 

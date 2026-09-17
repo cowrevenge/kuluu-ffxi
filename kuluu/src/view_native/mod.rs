@@ -1,4 +1,5 @@
 mod app_icon;
+pub mod auto_target;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
@@ -713,6 +714,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     app.init_resource::<input::TabCycleStack>();
     app.init_resource::<key_items::KeyItemsViewed>();
+    app.init_resource::<auto_target::AutoAttack>();
 
     app.insert_resource(crate::padbinds_store::load_or_default());
     app.init_resource::<gamepad_input::PrimaryGamepad>();
@@ -792,6 +794,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         input::reset_interaction_flags_on_zone_change.run_if(in_state(AppPhase::InGame)),
+    );
+
+    // After the input chain: on the frame auto_clear drops a dead target,
+    // dispatch_target_change_system has already queued the deselect 0x01A(0);
+    // the auto-retarget must queue behind it, or the deselect lands second
+    // and undoes the switch.
+    app.add_systems(
+        Update,
+        auto_target::auto_attack_retarget_system
+            .after(cutscene_motion_done::report_cutscene_motion_done_system)
+            .run_if(in_state(AppPhase::InGame)),
     );
 
     app.add_systems(Update, crate::graphics_store::persist_graphics_on_change);

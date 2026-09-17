@@ -773,18 +773,30 @@ pub fn dispatch_target_change_system(
     });
 }
 
-/// /attack locks the target on start: the engage goal sets the camera lock
-/// when it begins, and a re-engage onto a different target moves it. H stays
-/// the in-fight release — the goal leaving Engaged never clears the lock, and
-/// a goal already Engaged on the same target re-applies nothing.
+/// /attack locks the camera the moment the server accepts the engage — a
+/// purely client-side effect: the server keeps no camera-lock state (0x058
+/// only moves the target). The acceptance is the server's own animation byte
+/// flipping to ATTACK (the 0x058 battle-target push; the server never sends
+/// its own 0x0E), so a "wait longer" rejection never locks. Re-engaging on a
+/// different target moves the lock, which is what makes Switch Target commit
+/// the camera at once, with no swing-delay validation: the swing delay only
+/// gates the weapon-draw transition (idle -> battle stance), and a switch
+/// happens with the weapon already out. H stays the in-fight release —
+/// leaving Engaged never clears the lock, and a repeat for the same target
+/// re-applies nothing.
 pub fn engage_locks_target_system(
     state: Res<SceneState>,
     mut lock_on: ResMut<LockOn>,
     mut last_engaged: Local<Option<u32>>,
 ) {
-    let engaged_target = match state.snapshot.current_goal {
-        Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => Some(target_id),
-        _ => None,
+    let server_engaged = state.snapshot.self_server_status == ffxi_proto::decode::animation::ATTACK;
+    let engaged_target = if server_engaged {
+        match &state.snapshot.current_goal {
+            Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => Some(*target_id),
+            _ => None,
+        }
+    } else {
+        None
     };
     if engaged_target != *last_engaged {
         *last_engaged = engaged_target;
@@ -2139,8 +2151,10 @@ mod tests {
     }
 
     #[test]
-    fn engage_goal_locks_the_target_on_start() {
+    fn engage_locks_on_server_accept() {
         let (mut app, _rx) = movement_app();
+        // The goal flips to Engaged on send, but the camera must not lock yet:
+        // the server has not accepted, so its animation byte is still NONE.
         app.world_mut()
             .resource_mut::<SceneState>()
             .snapshot
@@ -2149,10 +2163,21 @@ mod tests {
             attack_issued: false,
         });
         app.update();
+        assert!(
+            app.world().resource::<LockOn>().target_id.is_none(),
+            "a send-time engage must not lock before the server accepts"
+        );
+
+        // The server accepts: its animation byte flips to ATTACK. The lock fires.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .self_server_status = ffxi_proto::decode::animation::ATTACK;
+        app.update();
         assert_eq!(
             app.world().resource::<LockOn>().target_id,
             Some(2),
-            "engage must lock the target on start"
+            "the server's accepted engage must lock the target"
         );
 
         // H clears the lock; the goal staying Engaged must not re-apply it.
@@ -2163,7 +2188,9 @@ mod tests {
             "the in-fight H release must not be re-applied while the goal stays Engaged"
         );
 
-        // A re-engage onto a different target moves the lock.
+        // A re-engage onto a different target moves the lock — this is the
+        // Switch Target commit: the camera follows the chosen target at
+        // once, with no swing-delay validation.
         app.world_mut()
             .resource_mut::<SceneState>()
             .snapshot

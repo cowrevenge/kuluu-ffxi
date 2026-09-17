@@ -2954,18 +2954,21 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
 
 // vendor/server/src/map/enums/four_cc.h — BasicAttack's FourCC is "atk0", the self-targeted
 // voice routine research/xim Actor.kt displayAutoAttack enqueues alongside the swing.
+#[cfg(not(target_arch = "wasm32"))]
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
 // KULUU_COMBAT_LOG=1 - live trace of which BATTLE2 results reach the
 // render, what gets armed on the attacker, whether the DamageCallback fires and where the
 // victim's reaction routine resolves. Read-only; no state, no behaviour change (same pattern
 // as KULUU_MOTION_LOG).
+#[cfg(not(target_arch = "wasm32"))]
 fn combat_log_enabled() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     crate::env_flags::env_flag(&ONCE, "KULUU_COMBAT_LOG")
 }
 
 /// Printable form of a FourCC for COMBAT_ log lines.
+#[cfg(not(target_arch = "wasm32"))]
 fn fourcc(name: [u8; 4]) -> String {
     ffxi_dat::datid::DatId::from_name(&name).as_str()
 }

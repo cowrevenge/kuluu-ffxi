@@ -633,10 +633,10 @@ pub fn apply_invis_flag_system(
         &WorldEntity,
         Option<&mut MeshMaterial3d<StandardMaterial>>,
     )>,
-    mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
     #[cfg(not(target_arch = "wasm32"))] model_roots: Query<
         &crate::ffxi_actor_render::FfxiRenderRoot,
     >,
+    #[cfg(not(target_arch = "wasm32"))] mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
 ) {
     for (_bevy_entity, ent, orb_mat) in &mut q_roots {
         let hide = table.get(ent.id).is_some_and(|r| r.invis_flag());

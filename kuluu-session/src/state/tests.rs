@@ -1973,6 +1973,30 @@ fn apply_event_reports_real_mutations_only() {
     }));
 }
 
+/// The 0x058 battle-target push is the server's engage truth for self: it flips
+/// the animation byte to ATTACK on an accepted engage and back to NONE on a
+/// disengage. A rejection sends no 0x058, so the byte stays put.
+#[test]
+fn apply_event_target_changed_sets_self_engage_byte() {
+    use ffxi_proto::decode::animation::{ATTACK, NONE};
+    let mut s = SessionState::default();
+    assert_eq!(s.self_server_status, NONE);
+
+    // Accepted engage: the byte flips to ATTACK.
+    assert!(s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+    assert_eq!(s.self_server_status, ATTACK);
+    // A repeat for the same target is a no-op fold.
+    assert!(!s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+
+    // Disengage: the byte returns to NONE.
+    assert!(s.apply_event(&AgentEvent::TargetChanged { target_id: None }));
+    assert_eq!(s.self_server_status, NONE);
+}
+
 /// The dismissal edge clears the displayed frame so its advance hint cannot linger over
 /// camera moves and holds; a second dismissal with nothing up is a no-op, and the next
 /// message opcode reopens it.

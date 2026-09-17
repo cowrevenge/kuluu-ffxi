@@ -342,6 +342,14 @@ pub(super) fn apply_slash_outcome(
                 ),
             );
         }
+        SlashOutcome::SetAutoAttack(setting) => {
+            let next = setting.unwrap_or(!slash_writers.auto_attack.enabled);
+            slash_writers.auto_attack.enabled = next;
+            push_system_chat_line(
+                scene_state,
+                format!("/autoattack: {}", if next { "on" } else { "off" }),
+            );
+        }
         SlashOutcome::SetVanaClock(setting) => {
             let next = setting.unwrap_or(!slash_writers.vana_clock_visible.0);
             slash_writers.vana_clock_visible.0 = next;

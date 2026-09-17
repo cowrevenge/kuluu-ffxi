@@ -565,9 +565,11 @@ pub struct SessionState {
     #[serde(default)]
     pub self_fishing: Option<SelfFishing>,
 
-    /// The server's animation byte for self, from 0x037 CHAR_STATUS. Self never
-    /// appears in the CHAR_PC stream that carries `Entity::animation` for other
-    /// players, so this is the only authority for our own rest state.
+    /// The server's animation byte for self. 0x037 CHAR_STATUS carries it
+    /// directly; the engage edge arrives as the 0x058 battle-target push, because
+    /// the server never sends its own 0x0E update (zone_entities.cpp
+    /// UpdateEntityPacket skips the entity's own player). Authority for our own
+    /// combat stance and rest state.
     #[serde(default)]
     pub self_server_status: u8,
 
@@ -2036,10 +2038,24 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::TargetChanged { target_id } => {
+                // The server's engage truth for self: it never sends its own 0x0E
+                // update (zone_entities.cpp UpdateEntityPacket skips the entity's
+                // own player), so the 0x058 battle-target push is what flips this
+                // byte to ATTACK on an accepted engage and back to NONE on a
+                // disengage. A "wait longer" rejection sends no 0x058, so the byte
+                // stays NONE and the weapon never draws.
+                let status = match target_id {
+                    Some(_) => ffxi_proto::decode::animation::ATTACK,
+                    None => ffxi_proto::decode::animation::NONE,
+                };
+                let changed = self.self_server_status != status;
+                self.self_server_status = status;
+                changed
+            }
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }
-            | AgentEvent::TargetChanged { .. }
             | AgentEvent::TellReceived { .. }
             | AgentEvent::SceneSummary { .. }
             | AgentEvent::ActionStarted { .. }

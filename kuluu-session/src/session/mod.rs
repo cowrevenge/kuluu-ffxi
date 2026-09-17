@@ -4805,7 +4805,13 @@ async fn keepalive_loop(
                                             )
                                             .await;
                                         }
-                                        if out.settled && dbox.open().is_none() {
+                                        // A PostClose with an open already in
+                                        // flight is the in-window Receive/Send
+                                        // switch, not the player leaving.
+                                        if out.settled
+                                            && dbox.open().is_none()
+                                            && !dbox.reopening()
+                                        {
                                             if let Some(dialog) = local_menu.resume() {
                                                 let _ = event_tx
                                                     .send(AgentEvent::EventDialog { dialog });

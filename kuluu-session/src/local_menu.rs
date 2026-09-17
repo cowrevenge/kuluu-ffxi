@@ -616,9 +616,7 @@ impl LocalMenuSession {
                     .and_then(|(_, slots)| slots.get(slot as usize))
                     .and_then(Clone::clone);
                 match item {
-                    Some(item) => {
-                        Advance::Frame(self.push(delivery_slot_menu(box_no, slot, &item)))
-                    }
+                    Some(item) => Advance::Frame(self.set(delivery_slot_menu(box_no, slot, &item))),
                     None => {
                         self.clear();
                         Advance::Close
@@ -657,12 +655,7 @@ impl LocalMenuSession {
                 quantity,
             } => {
                 if quantity > 1 {
-                    Advance::Frame(self.push(quantity_menu(
-                        slot,
-                        inventory_slot,
-                        item_no,
-                        quantity,
-                    )))
+                    Advance::Frame(self.set(quantity_menu(slot, inventory_slot, item_no, quantity)))
                 } else {
                     self.stage(slot, inventory_slot, 1)
                 }

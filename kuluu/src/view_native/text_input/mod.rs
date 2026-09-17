@@ -671,6 +671,11 @@ pub struct DialogCursors {
     seen: std::collections::HashMap<u64, u32>,
 }
 
+/// Rows remembered across closes before the map is dropped. The memory is a
+/// convenience; a session's server-driven event frames are unbounded and this
+/// map is a `Local` that outlives every one of them.
+const CURSOR_MEMORY_FRAMES: usize = 64;
+
 impl DialogCursors {
     /// Files `cursor` under the frame being left and returns the row the newly
     /// shown `frame` opens on — `None` while the frame is unchanged.
@@ -691,6 +696,9 @@ impl DialogCursors {
     /// "How the menu opens").
     fn closed(&mut self, cursor: u32) {
         if let Some(left) = self.open.take() {
+            if self.seen.len() >= CURSOR_MEMORY_FRAMES && !self.seen.contains_key(&left) {
+                self.seen.clear();
+            }
             self.seen.insert(left, cursor);
         }
     }

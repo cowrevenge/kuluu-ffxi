@@ -32,6 +32,10 @@ pub struct DeliveryBoxSession {
     slots: [Option<DeliveryItem>; pbx::SLOT_COUNT],
     /// Inbox slot awaiting the Accept → Get chain.
     pending_take: Option<u8>,
+    /// An open request is outstanding. The in-window Receive/Send switch closes
+    /// one box and opens the other, so a PostClose ack alone does not mean the
+    /// player left the delivery screen.
+    reopening: bool,
 }
 
 impl DeliveryBoxSession {
@@ -40,6 +44,7 @@ impl DeliveryBoxSession {
     pub fn request_open(&mut self, box_no: DeliveryBoxNo, menu_driven: bool) -> DeliveryBoxOp {
         self.menu_driven = menu_driven;
         self.pending_take = None;
+        self.reopening = true;
         match box_no {
             DeliveryBoxNo::Incoming => DeliveryBoxOp::PostOpen,
             DeliveryBoxNo::Outgoing => DeliveryBoxOp::DeliOpen,
@@ -51,6 +56,12 @@ impl DeliveryBoxSession {
     pub fn request_take(&mut self, slot: u8) -> DeliveryBoxOp {
         self.pending_take = Some(slot);
         DeliveryBoxOp::Accept { slot }
+    }
+
+    /// Whether the box that just closed is being swapped for the other one
+    /// rather than left.
+    pub fn reopening(&self) -> bool {
+        self.reopening
     }
 
     pub fn open(&self) -> Option<DeliveryBoxNo> {
@@ -85,6 +96,7 @@ impl DeliveryBoxSession {
         match r.command {
             pbx::command::DELI_OPEN | pbx::command::POST_OPEN => {
                 self.open = Some(box_no);
+                self.reopening = false;
                 self.slots = Default::default();
                 out.updates.push((box_no, DeliveryBoxUpdate::Opened));
                 out.sends.push(DeliveryBoxOp::Work { box_no });
@@ -669,5 +681,44 @@ mod tests {
             assert!(out.notices.is_empty());
             assert!(s.slots().iter().all(Option::is_none));
         }
+    }
+    /// The in-window Receive/Send switch closes one box and opens the other, so
+    /// a PostClose ack with an open already in flight must not read as the
+    /// player leaving the delivery screen.
+    #[test]
+    fn a_receive_send_switch_is_not_a_close() {
+        let mut s = DeliveryBoxSession::default();
+        s.open = Some(DeliveryBoxNo::Incoming);
+
+        s.request_open(DeliveryBoxNo::Outgoing, false);
+        let out = s.on_result(&result(
+            pbx::command::POST_CLOSE,
+            DeliveryBoxNo::Incoming,
+            pbx::result::OK,
+        ));
+        assert!(out.settled);
+        assert_eq!(s.open(), None);
+        assert!(s.reopening(), "the other box is still coming");
+
+        s.on_result(&result(
+            pbx::command::DELI_OPEN,
+            DeliveryBoxNo::Outgoing,
+            pbx::result::OK,
+        ));
+        assert!(!s.reopening(), "and the switch is done once it lands");
+    }
+
+    /// Leaving the screen is a PostClose with nothing in flight behind it.
+    #[test]
+    fn a_plain_close_is_not_a_switch() {
+        let mut s = DeliveryBoxSession::default();
+        s.open = Some(DeliveryBoxNo::Incoming);
+        let out = s.on_result(&result(
+            pbx::command::POST_CLOSE,
+            DeliveryBoxNo::Incoming,
+            pbx::result::OK,
+        ));
+        assert!(out.settled);
+        assert!(!s.reopening());
     }
 }

@@ -91,7 +91,7 @@ pub(super) fn handle_delivery_key(
             let qty = binding.spinner.confirm();
             let inv_slot = binding.target.inventory_slot();
             let out_slot = binding.target.out_slot();
-            screen.pick_slot = None;
+            screen.leave_item_list();
             screen.focus = DeliveryFocus::Slot(out_slot as usize);
             if qty > 0 {
                 send(kuluu_session::state::DeliveryBoxOp::Set {
@@ -268,7 +268,13 @@ pub(super) fn handle_delivery_key(
             }
         }
         DeliveryFocus::InvRow(i) => {
-            let target = screen.pick_slot.or_else(|| delivery::first_free_slot(&d));
+            // The slot the list was entered from may have filled from a server
+            // update while it was open, and LSB drops a Set into an occupied
+            // cell with no packet back.
+            let target = screen
+                .pick_slot
+                .filter(|slot| d.slots.get(*slot).is_some_and(Option::is_none))
+                .or_else(|| delivery::first_free_slot(&d));
             if !recipient_ok {
                 notice(scene_state, "Specify a recipient first.");
             } else if let Some(row) = inv.rows.get(i).cloned() {

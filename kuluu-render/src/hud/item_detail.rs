@@ -7,11 +7,8 @@ use bevy::prelude::*;
 use crate::hud::item_meta::{ItemDetail, ItemStatic};
 use crate::input_mode::{InputMode, MenuKind};
 
-mod flag {
-
-    pub const RARE: u16 = 0x8000;
-
-    pub const EX: u16 = 0x4000;
+pub(crate) mod flag {
+    pub use ffxi_dat::item_dat::{ITEM_FLAG_EX as EX, ITEM_FLAG_RARE as RARE};
 }
 
 fn format_rare_ex(flags: u16) -> Option<String> {

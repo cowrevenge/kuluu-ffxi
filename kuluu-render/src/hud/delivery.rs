@@ -191,8 +191,8 @@ fn col_of(slot: usize) -> usize {
     slot % GRID_COLS
 }
 
-/// Move focus up. Grid top row escapes to Recipient (outgoing); the inventory
-/// list scrolls; buttons walk toward the grid.
+/// Move focus up. Grid top row escapes to Recipient (outgoing); the item list
+/// steps a row; buttons walk back toward the grid.
 pub fn focus_up(state: &mut DeliveryScreenState, ctx: &DeliveryCtx) {
     state.remember(ctx.box_no);
     state.focus = match state.focus {
@@ -237,16 +237,14 @@ pub fn focus_down(state: &mut DeliveryScreenState, ctx: &DeliveryCtx) {
         DeliveryFocus::Recipient => DeliveryFocus::Slot(clamp_slot(state.last_out_slot)),
         DeliveryFocus::Slot(i) if row_of(i) + 1 < GRID_ROWS => DeliveryFocus::Slot(i + GRID_COLS),
         DeliveryFocus::Slot(_) if ctx.outgoing() => DeliveryFocus::Gil,
-        DeliveryFocus::Slot(i) if ctx.box_no == DeliveryBoxNo::Incoming => DeliveryFocus::Slot(i),
-        DeliveryFocus::Slot(i) => DeliveryFocus::Slot(i),
         DeliveryFocus::InvRow(i) => step_list(state, i, ctx.inv_len, true),
         DeliveryFocus::Gil => DeliveryFocus::SendOk,
         other => other,
     };
 }
 
-/// Move focus left. From the grid's left edge / the button row, hop to the
-/// inventory-list column's mirror; within a row, step one cell.
+/// Move focus left: one grid cell, or a page back inside the item list. Arrows
+/// never cross between the grid and the list.
 pub fn focus_left(state: &mut DeliveryScreenState, ctx: &DeliveryCtx) {
     state.remember(ctx.box_no);
     state.focus = match state.focus {
@@ -258,8 +256,8 @@ pub fn focus_left(state: &mut DeliveryScreenState, ctx: &DeliveryCtx) {
     };
 }
 
-/// Move focus right. Grid right edge / recipient / gil hop to the inventory
-/// list (outgoing); within a row, step one cell; Send → Exit.
+/// Move focus right: one grid cell, Send -> Exit, Take -> Return, or a page
+/// forward inside the item list.
 pub fn focus_right(state: &mut DeliveryScreenState, ctx: &DeliveryCtx) {
     state.remember(ctx.box_no);
     state.focus = match state.focus {
@@ -371,7 +369,7 @@ pub fn first_free_slot(d: &DeliveryBoxState) -> Option<usize> {
 
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, transparent_placeholder};
-use crate::hud::style::{text_font, theme, window_frame};
+use crate::hud::style::{cursor_prefix, text_font, theme, window_frame};
 use crate::snapshot::SceneState;
 
 /// A styled `Button`-like caption identifying an action region.
@@ -419,6 +417,7 @@ enum Role {
     DetailRow(usize),
     InvHeader,
     InvRow(usize),
+    InvQty(usize),
     Button(BtnId),
     Hint,
     ConfirmPrompt,
@@ -659,6 +658,7 @@ fn spawn_inv_row(p: &mut ChildSpawnerCommands, i: usize, placeholder: Handle<Ima
             display: Display::None,
             ..list_view::row_node()
         },
+        BackgroundColor(theme::CELL_BG),
     ))
     .with_children(|row| {
         row.spawn((
@@ -681,6 +681,16 @@ fn spawn_inv_row(p: &mut ChildSpawnerCommands, i: usize, placeholder: Handle<Ima
                 list_view::row_label_layout(),
             ));
         });
+        row.spawn((
+            DeliveryText(Role::InvQty(i)),
+            Text::new(""),
+            text_font(12.0),
+            TextColor(theme::TEXT),
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ));
     });
 }
 
@@ -706,19 +716,17 @@ pub(crate) fn rebuild_delivery_inventory(
         let s = table
             .as_ref()
             .and_then(|t| crate::hud::item_detail::lookup_static(t, item_no));
-        match s {
-            Some(s) => (
-                s.name,
-                s.flags & (ffxi_dat::item_dat::ITEM_FLAG_RARE | ffxi_dat::item_dat::ITEM_FLAG_EX)
-                    != 0,
-            ),
-            None => (
-                ffxi_vocab::item_names::lookup(item_no)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("Item #{item_no}")),
-                false,
-            ),
-        }
+        let ex_rare = s
+            .as_ref()
+            .map(|s| {
+                s.flags & (crate::hud::item_detail::flag::RARE | crate::hud::item_detail::flag::EX)
+                    != 0
+            })
+            .unwrap_or(false);
+        (
+            crate::hud::bazaar_view::item_name(item_no, s.map(|s| s.name)),
+            ex_rare,
+        )
     };
     let rows = build_inventory(snap, ffxi_vocab::item_flags::deliverable, dat);
     if inv.rows != rows {
@@ -925,12 +933,13 @@ pub(crate) fn update_delivery_screen(
         if *border != want_border {
             *border = want_border;
         }
-        let want_bg = if focused && matches!(tag.0, FrameId::Button(_)) {
+        let tinted = matches!(tag.0, FrameId::Button(_) | FrameId::InvRow(_));
+        let want_bg = if focused && tinted {
             theme::CURSOR_BG
         } else {
             theme::CELL_BG
         };
-        if matches!(tag.0, FrameId::Button(_)) && bg.0 != want_bg {
+        if tinted && bg.0 != want_bg {
             bg.0 = want_bg;
         }
     }
@@ -1031,25 +1040,31 @@ fn text_value(
             let list_idx = inv_start + i;
             match rows.get(list_idx) {
                 Some(r) => {
-                    let name = &r.name;
-                    let qty = if r.quantity > 1 {
-                        format!(" x{}", r.quantity)
-                    } else {
-                        String::new()
-                    };
                     let cursor =
                         matches!(screen.focus, DeliveryFocus::InvRow(_)) && list_idx == inv_cursor;
-                    let prefix = if cursor { "> " } else { "  " };
-                    let color = if !r.deliverable {
-                        theme::MUTED
-                    } else if cursor {
-                        theme::CURSOR
-                    } else {
-                        theme::TEXT
-                    };
-                    (format!("{prefix}{name}{qty}"), color, outgoing)
+                    let prefix = cursor_prefix(cursor);
+                    (
+                        format!("{prefix}{}", r.name),
+                        inv_row_color(r, cursor),
+                        outgoing,
+                    )
                 }
                 None => (String::new(), theme::TEXT, false),
+            }
+        }
+        Role::InvQty(i) => {
+            let list_idx = inv_start + i;
+            match rows.get(list_idx) {
+                Some(r) if r.quantity > 1 => {
+                    let cursor =
+                        matches!(screen.focus, DeliveryFocus::InvRow(_)) && list_idx == inv_cursor;
+                    (
+                        format!(" x{}", r.quantity),
+                        inv_row_color(r, cursor),
+                        outgoing,
+                    )
+                }
+                _ => (String::new(), theme::TEXT, false),
             }
         }
         Role::Button(id) => (id.caption().to_string(), theme::TEXT, true),
@@ -1083,6 +1098,16 @@ fn text_value(
                 (String::new(), theme::CURSOR, false)
             }
         }
+    }
+}
+
+fn inv_row_color(row: &InvRow, cursor: bool) -> Color {
+    if !row.deliverable {
+        theme::MUTED
+    } else if cursor {
+        theme::CURSOR
+    } else {
+        theme::TEXT
     }
 }
 

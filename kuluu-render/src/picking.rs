@@ -479,7 +479,11 @@ pub fn click_to_target_system(
             return;
         }
     }
-    let locked = crate::lock_on::suppresses_retarget(&lock_on, false);
+    let engaged = matches!(
+        scene.snapshot.current_goal,
+        Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
+    );
+    let locked = crate::lock_on::suppresses_retarget(engaged, &lock_on, false);
     match resolve_click_target(hit_id, target.id, locked) {
         ClickResolution::Ignored => {}
         ClickResolution::Set(id) => target.id = Some(id),

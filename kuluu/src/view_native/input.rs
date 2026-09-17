@@ -587,10 +587,14 @@ pub fn handle_input_system(
         return;
     }
 
-    // The engaged "Switch Target" flow is retail's sanctioned mid-fight
-    // re-target, so it plays the sub-target role here and reaches through the
-    // lock; every other targeting key below is pinned by it.
-    let target_pinned = kuluu_render::suppresses_retarget(lock_on, select_target.active);
+    // Engaged pins the main target beyond the camera lock: releasing the lock
+    // releases the camera only, so these keys stay pinned until /disengage.
+    // Only the sub-target flow (Switch Target, action menus) reaches through.
+    let engaged = matches!(
+        state.snapshot.current_goal,
+        Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
+    );
+    let target_pinned = kuluu_render::suppresses_retarget(engaged, lock_on, select_target.active);
 
     if !select_target.active && !target_pinned && just(Action::ClearTarget) {
         target.id = None;

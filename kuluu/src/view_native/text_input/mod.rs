@@ -1142,6 +1142,16 @@ fn gather_sub_target_entities(
     let snap = &scene_state.snapshot;
     let self_id = snap.self_char_id;
     let self_pos = snap.self_pos.pos;
+    // A pet joins the enemy set only when its allegiance differs from ours:
+    // the server's TARGET_ENEMY check is the allegiance inequality
+    // (vendor/server/src/map/entities/battle_entity.cpp
+    // CBattleEntity::ValidTarget) and a pet inherits its master's allegiance
+    // (vendor/server/src/map/utils/petutils.cpp). The 0x00A self sync can OR
+    // in a display belligerence bit (vendor/server/src/map/packets/
+    // char_status.cpp), so compare the low three bits.
+    let self_allegiance = self_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .map(|e| e.char_flags.allegiance & 0x07);
     snap.entities
         .iter()
         .map(|e| {
@@ -1158,7 +1168,9 @@ fn gather_sub_target_entities(
                 // yet; party covers the common case (kuluu: revisit when
                 // alliance lists land).
                 is_alliance: is_party,
-                is_enemy: matches!(e.kind, EntityKind::Mob),
+                is_enemy: matches!(e.kind, EntityKind::Mob)
+                    || (matches!(e.kind, EntityKind::Pet)
+                        && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 0x07 != a)),
                 is_npc: matches!(e.kind, EntityKind::Npc),
                 is_dead: e.hp_pct == Some(0),
                 dist_sq: dx * dx + dy * dy + dz * dz,
@@ -1200,16 +1212,28 @@ fn open_sub_target(
     use kuluu_render::sub_target;
     let flags = sub_target::action_flags(action);
     let ents = gather_sub_target_entities(scene_state);
-    // "Switch Target" picks a *different* target: parking the cursor on the
-    // main target would make the first confirm a no-op (sub == main, the
-    // frame still shows the main target), so the picker starts on the
-    // nearest valid candidate other than it (self, per the retail default).
+    // "Switch Target" picks a *different* mob: parking the cursor on the
+    // main target would make the first confirm a no-op, so the picker starts
+    // on the nearest valid candidate other than it.
     let parked = if matches!(action, SubTargetAction::PickSub) {
         None
     } else {
         current_target
     };
-    let Some(candidate) = sub_target::initial_candidate(flags, parked, &ents) else {
+    let candidate = if matches!(action, SubTargetAction::PickSub) {
+        sub_target::initial_candidate(flags, None, &ents)
+            .filter(|id| Some(*id) != current_target)
+            .or_else(|| {
+                ents.iter()
+                    .filter(|e| e.id != current_target.unwrap_or(0))
+                    .filter(|e| sub_target::entity_valid(flags, e))
+                    .min_by(|a, b| a.dist_sq.total_cmp(&b.dist_sq))
+                    .map(|e| e.id)
+            })
+    } else {
+        sub_target::initial_candidate(flags, parked, &ents)
+    };
+    let Some(candidate) = candidate else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
         return None;
     };
@@ -1266,10 +1290,31 @@ fn handle_sub_target_key(
             return None;
         };
         if matches!(state.action, SubTargetAction::PickSub) {
-            // "Switch Target": store the candidate in the sub slot; the target
-            // frame now shows it in place of the main target until it is
-            // consumed by a firing action or cleared.
-            sub_target.id = Some(id);
+            // "Switch Target" re-engages on the candidate: the server moves
+            // the battle target and echoes 0x058, which lands it in the main
+            // target slot (vendor/server/src/map/ai/controllers/
+            // player_controller.cpp CPlayerController::Engage pushes the
+            // assist reply; apply_server_retarget_system applies it).
+            let Some(ent) = entities.iter().find(|e| e.id == id) else {
+                push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
+                return None;
+            };
+            if let Some(line) = crate::view_native::engage::rejection_line(
+                ent,
+                scene_state.snapshot.self_pos.pos,
+                scene_state.snapshot.self_char_id,
+                &scene_state.snapshot.party,
+            ) {
+                push_system_chat_line(scene_state, line);
+                return Some(InputMode::World);
+            }
+            if let Err(err) = cmd_tx.try_send(AgentCommand::Engage { target_id: id }) {
+                push_system_chat_line(
+                    scene_state,
+                    format!("[menu] Switch Target dispatch dropped: {err}"),
+                );
+            }
+            sub_target.id = None;
             return Some(InputMode::World);
         }
         // Consuming the sub only happens when this action fired on it; firing
@@ -2991,9 +3036,9 @@ mod auto_enter_tests {
     }
 }
 
-/// "Switch Target" (PickSub) must park the sub-target cursor off the main
-/// target and confirm into the sub slot: parking on the main target made the
-/// first Enter a no-op (sub == main, the frame kept showing the main target).
+/// "Switch Target" (PickSub) parks the sub-target cursor off the main target
+/// and confirms into the main target: parking on the main target would make
+/// the first Enter a no-op, and confirming re-engages on the chosen mob.
 #[cfg(test)]
 mod sub_target_pick_tests {
     use super::*;
@@ -3049,16 +3094,38 @@ mod sub_target_pick_tests {
 
     const SELF_ID: u32 = 0x0100_0001;
     const MOB_ID: u32 = 0x0200_0001;
+    const MOB2_ID: u32 = 0x0200_0002;
     const PARTY_ID: u32 = 0x0100_0002;
+    const ENEMY_PET_ID: u32 = 0x0300_0001;
+    const OWNED_PET_ID: u32 = 0x0300_0002;
+    const PARTY_PET_ID: u32 = 0x0300_0003;
 
-    /// Self at the origin, the engaged mob 5 yalms out, a party member 3 yalms out.
+    fn with_allegiance(mut e: Entity, allegiance: u8) -> Entity {
+        e.char_flags.allegiance = allegiance;
+        e
+    }
+
+    // xi::Allegiance values (vendor/server/data/enums/allegiance.yaml): the
+    // nation band, so the scene exercises the PVP pet inequality.
+    const SELF_NATION: u8 = 2;
+    const ENEMY_NATION: u8 = 3;
+
+    /// Self at the origin on the San d'Oria allegiance, the engaged mob 5
+    /// yalms out, a second mob 8 yalms out, a party member 3 yalms out, an
+    /// enemy pet 6 yalms out, and the owned/party pets 4 yalms out. Pets
+    /// carry no claim: the server never sets one on a pet
+    /// (vendor/server/src/map/utils/battleutils.cpp ClaimMob).
     fn battle_scene() -> SceneState {
         let mut s = SceneState::default();
         s.snapshot.self_char_id = Some(SELF_ID);
         s.snapshot.entities = vec![
-            ent(SELF_ID, EntityKind::Pc, 0.0),
+            with_allegiance(ent(SELF_ID, EntityKind::Pc, 0.0), SELF_NATION),
             ent(MOB_ID, EntityKind::Mob, 5.0),
+            ent(MOB2_ID, EntityKind::Mob, 8.0),
             ent(PARTY_ID, EntityKind::Pc, 3.0),
+            with_allegiance(ent(ENEMY_PET_ID, EntityKind::Pet, 6.0), ENEMY_NATION),
+            with_allegiance(ent(OWNED_PET_ID, EntityKind::Pet, 4.0), SELF_NATION),
+            with_allegiance(ent(PARTY_PET_ID, EntityKind::Pet, 4.0), SELF_NATION),
         ];
         s.snapshot.party = vec![party_member(PARTY_ID)];
         s
@@ -3085,7 +3152,7 @@ mod sub_target_pick_tests {
     }
 
     #[test]
-    fn pick_sub_confirms_into_the_sub_slot() {
+    fn pick_sub_confirm_reengages_on_the_chosen_mob() {
         let mut scene = battle_scene();
         let mode = open_sub_target(
             SubTargetAction::PickSub,
@@ -3097,8 +3164,8 @@ mod sub_target_pick_tests {
         let InputMode::SubTarget(mut st) = mode else {
             panic!("expected the sub-target picker");
         };
-        let mut sub = kuluu_render::scene::SubTarget::default();
-        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut sub = kuluu_render::scene::SubTarget { id: Some(MOB_ID) };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let entities = scene.snapshot.entities.clone();
         let next = handle_sub_target_key(
             &Key::Enter,
@@ -3113,11 +3180,90 @@ mod sub_target_pick_tests {
             matches!(next, Some(InputMode::World)),
             "confirm must return to the world mode: {next:?}"
         );
-        assert_eq!(
-            sub.id, st.candidate,
-            "the confirmed candidate must land in the sub slot"
+        let sent = cmd_rx.try_recv().expect("confirm must send the re-engage");
+        assert!(
+            matches!(sent, AgentCommand::Engage { target_id } if target_id == st.candidate.unwrap()),
+            "confirm must re-engage on the chosen candidate: {sent:?}"
         );
-        assert_ne!(sub.id, Some(MOB_ID));
+        assert_eq!(
+            sub.id, None,
+            "the sub slot must not hold the switched target"
+        );
+    }
+
+    #[test]
+    fn pick_sub_confirm_refuses_a_mob_beyond_the_engage_range() {
+        let far_id: u32 = 0x0200_0003;
+        let mut scene = battle_scene();
+        // Inside the sub-target range, beyond the engage range.
+        scene
+            .snapshot
+            .entities
+            .push(ent(far_id, EntityKind::Mob, 40.0));
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .unwrap();
+        let InputMode::SubTarget(mut st) = mode else {
+            panic!("expected the sub-target picker");
+        };
+        st.candidate = Some(far_id);
+        let mut sub = kuluu_render::scene::SubTarget::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let entities = scene.snapshot.entities.clone();
+        let next = handle_sub_target_key(
+            &Key::Enter,
+            &Bindings::default(),
+            &mut st,
+            &mut scene,
+            &entities,
+            &cmd_tx,
+            &mut sub,
+        );
+        assert!(
+            matches!(next, Some(InputMode::World)),
+            "a refused engage must still close the picker: {next:?}"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no command may leave the client for a doomed engage"
+        );
+    }
+
+    #[test]
+    fn switch_target_includes_enemy_pets_not_friendly_pets() {
+        let scene = battle_scene();
+        let flags = kuluu_render::sub_target::action_flags(SubTargetAction::PickSub);
+        let ents = gather_sub_target_entities(&scene);
+        let by_id = |id: u32| ents.iter().find(|e| e.id == id).expect("scene entity");
+        assert!(kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(ENEMY_PET_ID)
+        ));
+        assert!(!kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(OWNED_PET_ID)
+        ));
+        assert!(!kuluu_render::sub_target::entity_valid(
+            flags,
+            by_id(PARTY_PET_ID)
+        ));
+        // The picker itself must park on the enemy pet, not a friendly one.
+        let mut scene = battle_scene();
+        let mode = open_sub_target(
+            SubTargetAction::PickSub,
+            Some(MOB_ID),
+            &mut scene,
+            InputMode::World,
+        )
+        .expect("the picker must open with candidates in range");
+        let InputMode::SubTarget(st) = &mode else {
+            panic!("expected the sub-target picker, got {mode:?}");
+        };
+        assert_eq!(st.candidate, Some(ENEMY_PET_ID));
     }
 
     #[test]

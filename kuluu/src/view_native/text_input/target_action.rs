@@ -281,9 +281,9 @@ pub(super) fn confirm_target_action_at_cursor(
             Some(InputMode::World)
         }
         TargetActionId::SwitchTarget => {
-            // Retail's "Switch Target" opens the sub-target picker: the chosen
-            // candidate becomes the sub slot (drawn in place of the main target)
-            // rather than retargeting the main slot.
+            // Retail's "Switch Target" opens the sub-target picker over the
+            // other mobs; confirming re-engages on the chosen candidate, so
+            // it becomes the main target (the server echoes it as 0x058).
             let sub_action = kuluu_render::input_mode::SubTargetAction::PickSub;
             let return_to = InputMode::TargetAction(state.clone());
             open_sub_target(sub_action, current_target, scene_state, return_to)

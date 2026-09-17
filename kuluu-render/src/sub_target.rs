@@ -128,16 +128,12 @@ pub fn action_flags(action: SubTargetAction) -> TargetFlags {
             TargetFlags(TargetFlags::ENEMY)
         }
         SubTargetAction::Item { .. } => TargetFlags(TargetFlags::SELF),
-        // "Switch Target" accepts any targetable entity — the sub slot is not
-        // bound to one action's valid-target set.
-        SubTargetAction::PickSub => TargetFlags(
-            TargetFlags::SELF
-                | TargetFlags::PLAYER_PARTY
-                | TargetFlags::ENEMY
-                | TargetFlags::PLAYER_ALLIANCE
-                | TargetFlags::PLAYER
-                | TargetFlags::NPC,
-        ),
+        // "Switch Target" re-engages, and the server's engage only accepts an
+        // ENEMY-valid target (vendor/server/src/map/ai/controllers/
+        // player_controller.cpp CPlayerController::Engage), so the picker
+        // filters to mobs and enemy pets; range/claim rejections still land
+        // on confirm.
+        SubTargetAction::PickSub => TargetFlags(TargetFlags::ENEMY),
     }
 }
 
@@ -237,6 +233,24 @@ mod tests {
         let flags = TargetFlags(TargetFlags::ENEMY);
         let ents = [me()];
         assert_eq!(cycle_candidate(flags, None, &ents, false), None);
+    }
+
+    #[test]
+    fn switch_target_is_enemy_only() {
+        let flags = action_flags(SubTargetAction::PickSub);
+        let pc = SubTargetEntity {
+            is_pc: true,
+            is_party: true,
+            ..ent(7, 3.0)
+        };
+        let npc = SubTargetEntity {
+            is_npc: true,
+            ..ent(8, 3.0)
+        };
+        assert!(entity_valid(flags, &mob(10, 5.0)));
+        assert!(!entity_valid(flags, &me()));
+        assert!(!entity_valid(flags, &pc));
+        assert!(!entity_valid(flags, &npc));
     }
 
     #[test]

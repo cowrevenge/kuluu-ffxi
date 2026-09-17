@@ -102,9 +102,8 @@ pub struct Target {
 
 /// Second target slot (retail's sub-target): always exists beside [`Target`],
 /// drawn in its place in the target frame while set, and consumed when the
-/// pending spell/ability fires on it. Set by the sub-target cursor ("Switch
-/// Target"); cleared by [`auto_clear_target_system`] when its entity dies or
-/// leaves, like the main target.
+/// pending spell/ability fires on it. Cleared by [`auto_clear_target_system`]
+/// when its entity dies or leaves, like the main target.
 #[derive(Resource, Default)]
 pub struct SubTarget {
     pub id: Option<u32>,
@@ -162,12 +161,13 @@ pub struct PendingRetarget {
 /// [`auto_clear_target_system`] already drops a target whose entity is gone,
 /// and retail's `RecvAssist` behaviour for a zero id is not established.
 ///
-/// A held lock rides along with the target rather than pinning it: xim keeps the
-/// lock as a flag over the one target slot (research/xim
-/// PlayerTargetSelector.kt's `isTargetLocked` reads `state.targetState.locked`
-/// beside `state.targetState.targetId`, Actor.kt createFrom,932), so only player
-/// targeting input is gated on it ([`crate::lock_on::suppresses_retarget`]) and a
-/// server-side target change carries the lock with it.
+/// A held lock rides along with the target rather than pinning it: xim keeps
+/// the lock as a flag over the one target slot (research/xim/src/jsMain/kotlin/
+/// xim/poc/game/PlayerTargetSelector.kt isTargetLocked reads
+/// `state.targetState.locked` beside `state.targetState.targetId`), so only
+/// player targeting input is gated on it
+/// ([`crate::lock_on::suppresses_retarget`]) and a server-side target change
+/// carries the lock with it.
 ///
 /// The `Target` write deliberately reaches `dispatch_target_change_system` and
 /// goes back out as c2s 0x01A ChangeTarget: `battleutils::assistTarget` pushes

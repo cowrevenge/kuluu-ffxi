@@ -750,6 +750,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::auction_mode_sync_system,
             text_input::event_map_sync_system,
             text_input::shop_mode_sync_system,
+            text_input::shop_mouse_activate_system,
             input::handle_input_system,
             text_input::text_input_system,
             text_input::auto_enter_cs_system,

@@ -3,17 +3,16 @@ use bevy::prelude::*;
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_detail::{self, ItemMenuFocus, SortOptionId, SortOptions, SORT_OPTIONS};
 use crate::hud::item_ui::{self, cursor_prefix, framed_box, text_font, theme};
+use crate::hud::list_view;
 use crate::hud::menu::{self, DynamicMenuRow, MenuRowActivated};
 use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
 use crate::snapshot::SceneState;
 
-/// Rows on one page of the retail item list
-/// (.agents/skills/retail-observe/references/2026-09-11-items-window.md).
-pub const ITEM_LIST_ROWS: usize = 10;
+pub use crate::hud::list_view::{page_cursor, step_cursor, LIST_ROWS as ITEM_LIST_ROWS};
 
 const DETAIL_ROWS: usize = 10;
 
-const ROW_ICON_PX: f32 = 18.0;
+use crate::hud::list_view::ROW_ICON_PX;
 
 const DETAIL_ICON_PX: f32 = 32.0;
 
@@ -22,8 +21,6 @@ const LIST_WIDTH_PX: f32 = 240.0;
 const DETAIL_WIDTH_PX: f32 = 300.0;
 
 const OPTIONS_WIDTH_PX: f32 = 132.0;
-
-const SCROLLBAR_WIDTH_PX: f32 = 4.0;
 
 const BADGE_FONT_PX: f32 = 9.0;
 
@@ -36,55 +33,21 @@ pub const OPTIONS_SORT_LABEL: &str = "Sort";
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ItemScreenContainer(pub u8);
 
-/// First visible row of the item list. Retail scrolls one row when the cursor
-/// leaves the page and shifts the page along with the cursor on Left/Right, so
-/// the offset is state, not a function of the cursor.
+/// The Items window's page offset.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ItemListViewport {
-    pub start: usize,
-}
+pub struct ItemListViewport(pub crate::hud::list_view::ListViewport);
 
-impl ItemListViewport {
-    fn max_start(total: usize) -> usize {
-        total.saturating_sub(ITEM_LIST_ROWS)
-    }
+impl std::ops::Deref for ItemListViewport {
+    type Target = crate::hud::list_view::ListViewport;
 
-    pub fn follow(&mut self, cursor: usize, total: usize) {
-        if cursor < self.start {
-            self.start = cursor;
-        } else if cursor >= self.start + ITEM_LIST_ROWS {
-            self.start = cursor + 1 - ITEM_LIST_ROWS;
-        }
-        self.start = self.start.min(Self::max_start(total));
-    }
-
-    /// Left/Right: the page shifts by a full row count in step with the
-    /// cursor (see [`page_cursor`]), clamped at both ends, no wrap.
-    pub fn page(&mut self, forward: bool, total: usize) {
-        self.start = if forward {
-            (self.start + ITEM_LIST_ROWS).min(Self::max_start(total))
-        } else {
-            self.start.saturating_sub(ITEM_LIST_ROWS)
-        };
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-/// Up/Down in the item list: one row, clamped at both ends (retail: Up on the
-/// first row and Down on the last stay put).
-pub fn step_cursor(cursor: usize, total: usize, down: bool) -> usize {
-    if down {
-        (cursor + 1).min(total.saturating_sub(1))
-    } else {
-        cursor.saturating_sub(1)
-    }
-}
-
-/// Left/Right in the item list: the cursor jumps a full row count, clamped.
-pub fn page_cursor(cursor: usize, total: usize, forward: bool) -> usize {
-    if forward {
-        (cursor + ITEM_LIST_ROWS).min(total.saturating_sub(1))
-    } else {
-        cursor.saturating_sub(ITEM_LIST_ROWS)
+impl std::ops::DerefMut for ItemListViewport {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -510,11 +473,8 @@ fn spawn_list_box(col: &mut ChildSpawnerCommands, placeholder: Handle<Image>) {
                     ItemListRow(i),
                     Button,
                     Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(5.0),
                         display: Display::None,
-                        ..default()
+                        ..list_view::row_node()
                     },
                 ))
                 .with_children(|row| {
@@ -546,40 +506,19 @@ fn spawn_list_box(col: &mut ChildSpawnerCommands, placeholder: Handle<Image>) {
                             },
                         ));
                     });
-                    row.spawn((
-                        ItemText(ItemRole::ListRowText(i)),
-                        Text::new(""),
-                        text_font(13.0),
-                        TextColor(theme::TEXT),
-                    ));
+                    row.spawn(list_view::row_label_clip()).with_children(|col| {
+                        col.spawn((
+                            ItemText(ItemRole::ListRowText(i)),
+                            Text::new(""),
+                            text_font(13.0),
+                            TextColor(theme::TEXT),
+                            list_view::row_label_layout(),
+                        ));
+                    });
                 });
             }
         });
-        p.spawn((
-            ItemScrollTrack,
-            Node {
-                width: Val::Px(SCROLLBAR_WIDTH_PX),
-                align_self: AlignSelf::Stretch,
-                flex_shrink: 0.0,
-                display: Display::None,
-                ..default()
-            },
-            BackgroundColor(theme::CELL_BG),
-        ))
-        .with_children(|track| {
-            track.spawn((
-                ItemScrollThumb,
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    width: Val::Percent(100.0),
-                    top: Val::Percent(0.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundColor(theme::FRAME_EDGE),
-            ));
-        });
+        list_view::spawn_scrollbar(p, ItemScrollTrack, ItemScrollThumb);
     });
 }
 
@@ -834,22 +773,8 @@ pub(crate) fn update_item_scrollbar(
         return;
     };
     let total = list_rows(&state.snapshot, screen_mode, active_bag.0, &sort).len();
-    let scrollable = total > ITEM_LIST_ROWS;
-    if let Ok(mut node) = track_q.single_mut() {
-        set_display(&mut node, scrollable);
-    }
-    if !scrollable {
-        return;
-    }
-    if let Ok(mut node) = thumb_q.single_mut() {
-        let top = Val::Percent(viewport.start as f32 / total as f32 * 100.0);
-        let height = Val::Percent(ITEM_LIST_ROWS as f32 / total as f32 * 100.0);
-        if node.top != top {
-            node.top = top;
-        }
-        if node.height != height {
-            node.height = height;
-        }
+    if let (Ok(mut track), Ok(mut thumb)) = (track_q.single_mut(), thumb_q.single_mut()) {
+        list_view::apply_scrollbar(&mut track, &mut thumb, viewport.start, total);
     }
 }
 
@@ -1184,7 +1109,7 @@ mod tests {
         cursor = page_cursor(cursor, total, true);
         assert_eq!((v.start, cursor), (10, 10));
 
-        let mut v = ItemListViewport { start: 1 };
+        let mut v = ItemListViewport(list_view::ListViewport { start: 1 });
         let mut cursor = 10;
         for expect in [(11, 20), (21, 30), (31, 40), (41, 50), (49, 58), (49, 58)] {
             v.page(true, total);
@@ -1206,7 +1131,7 @@ mod tests {
 
     #[test]
     fn short_lists_never_scroll() {
-        let mut v = ItemListViewport { start: 3 };
+        let mut v = ItemListViewport(list_view::ListViewport { start: 3 });
         v.follow(4, 5);
         assert_eq!(v.start, 0);
         v.page(true, 5);

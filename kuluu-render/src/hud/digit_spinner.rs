@@ -78,8 +78,20 @@ impl DigitSpinner {
         digit_count(self.cap).min(PRICE_DIGITS) - 1
     }
 
+    /// "All": select the whole amount, as [`crate::hud::spinner::Spinner::set_all`]
+    /// does for the arrow-style pickers.
+    pub fn set_all(&mut self) {
+        self.value = self.cap;
+    }
+
+    /// Start the amount over at the picker's floor.
+    pub fn set_min(&mut self) {
+        self.value = self.min;
+    }
+
     /// `◀`: toward higher place values, ending on the All column where one is
-    /// offered and on the top digit otherwise.
+    /// offered. Without that column, stepping off the top instead takes the
+    /// whole amount — the answer All would have given.
     pub fn left(&mut self) {
         self.column = match self.column {
             SpinnerColumn::All => SpinnerColumn::All,
@@ -87,6 +99,7 @@ impl DigitSpinner {
                 if self.all_column {
                     SpinnerColumn::All
                 } else {
+                    self.set_all();
                     SpinnerColumn::Digit(p)
                 }
             }
@@ -94,11 +107,17 @@ impl DigitSpinner {
         };
     }
 
-    /// `▶`: toward the ones digit.
+    /// `▶`: toward the ones digit, and off the end back to the minimum, so the
+    /// same axis that reaches the whole amount also starts over.
     pub fn right(&mut self) {
         self.column = match self.column {
             SpinnerColumn::All => SpinnerColumn::Digit(self.max_power()),
-            SpinnerColumn::Digit(0) => SpinnerColumn::Digit(0),
+            SpinnerColumn::Digit(0) => {
+                if !self.all_column {
+                    self.set_min();
+                }
+                SpinnerColumn::Digit(0)
+            }
             SpinnerColumn::Digit(p) => SpinnerColumn::Digit(p - 1),
         };
     }
@@ -107,7 +126,7 @@ impl DigitSpinner {
     /// clamped to the cap; All jumps to the cap.
     pub fn up(&mut self) {
         match self.column {
-            SpinnerColumn::All => self.value = self.cap,
+            SpinnerColumn::All => self.set_all(),
             SpinnerColumn::Digit(p) => {
                 self.value = self.value.saturating_add(pow10(p)).min(self.cap);
                 self.edited |= 1 << p;
@@ -119,7 +138,7 @@ impl DigitSpinner {
     /// 600 on the tens steps to 590), bounded by the minimum.
     pub fn down(&mut self) {
         match self.column {
-            SpinnerColumn::All => self.value = self.min,
+            SpinnerColumn::All => self.set_min(),
             SpinnerColumn::Digit(p) => {
                 self.value = self.value.saturating_sub(pow10(p)).max(self.min);
                 self.edited |= 1 << p;
@@ -149,19 +168,6 @@ impl DigitSpinner {
         };
         (0..need).rev()
     }
-}
-
-/// Comma-grouped gil amount, no suffix: `80147` → `"80,147"`.
-pub fn format_gil(n: u32) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 pub fn column_style(
@@ -239,7 +245,6 @@ mod tests {
         );
 
         spinner.left();
-        spinner.left();
         assert_eq!(
             spinner.column,
             SpinnerColumn::Digit(1),
@@ -254,6 +259,41 @@ mod tests {
             spinner.value, 12,
             "the top digit still reaches the whole stack"
         );
+    }
+
+    /// Without an All column the ends of the digit row carry the two answers it
+    /// would have given: one step off the top takes everything, one step off the
+    /// ones starts over.
+    #[test]
+    fn walking_off_either_end_takes_the_whole_stack_or_starts_over() {
+        let mut spinner = DigitSpinner::item(12);
+        assert_eq!(spinner.value, 1);
+
+        spinner.left();
+        assert_eq!(spinner.value, 1, "the top digit is still a digit");
+        spinner.left();
+        assert_eq!(spinner.value, 12, "one past the top takes the whole stack");
+        assert_eq!(spinner.column, SpinnerColumn::Digit(1));
+
+        spinner.right();
+        assert_eq!(spinner.value, 12, "the ones digit is still a digit");
+        spinner.right();
+        assert_eq!(spinner.value, 1, "one past the ones starts over at the min");
+        assert_eq!(spinner.column, SpinnerColumn::Digit(0));
+    }
+
+    /// The price picker has an All column to hold those answers, so its ends
+    /// stay put.
+    #[test]
+    fn a_price_pickers_ends_do_not_move_the_value() {
+        let mut spinner = DigitSpinner::with_value(crate::hud::auction::PRICE_CAP, 4_200);
+        spinner.right();
+        assert_eq!(spinner.value, 4_200);
+        for _ in 0..PRICE_DIGITS + 2 {
+            spinner.left();
+        }
+        assert_eq!(spinner.column, SpinnerColumn::All);
+        assert_eq!(spinner.value, 4_200);
     }
 
     /// Retail's Price Set does have one
@@ -352,14 +392,5 @@ mod tests {
         s.up();
         assert_eq!(s.value, 100);
         assert_eq!(s.digit_at(2), 1);
-    }
-
-    #[test]
-    fn gil_formats_comma_grouped() {
-        assert_eq!(format_gil(0), "0");
-        assert_eq!(format_gil(999), "999");
-        assert_eq!(format_gil(1_180), "1,180");
-        assert_eq!(format_gil(80_147), "80,147");
-        assert_eq!(format_gil(999_999_999), "999,999,999");
     }
 }

@@ -4,6 +4,7 @@ use bevy::ui::RelativeCursorPosition;
 use kuluu_snapshot::{ChatChannel, ChatLine, ChatSpanKind};
 
 use crate::graphics_settings::{ChatLayout, GraphicsSettings};
+use crate::hud::list_view::apply_wheel_delta;
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, PassiveCursorFocus};
 use crate::mouse::MousePointer;
@@ -29,8 +30,6 @@ pub struct ChatPanelDecay {
 
     pub prev_filtered_len: usize,
 }
-
-const WHEEL_ROWS_PER_UNIT: f32 = 0.12;
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ChatScroll {
@@ -720,30 +719,6 @@ pub fn channel_color(c: ChatChannel) -> Color {
         // retail_unknowns); reuse the say color until captured.
         ChatChannel::Emote => theme::TEXT,
     }
-}
-
-pub fn apply_wheel_delta(
-    current: usize,
-    accum: f32,
-    delta: f32,
-    buffer_len: usize,
-) -> (usize, f32) {
-    if buffer_len == 0 {
-        return (current, 0.0);
-    }
-    let mut frac = accum + delta * WHEEL_ROWS_PER_UNIT;
-
-    let whole = frac.trunc() as i32;
-    frac -= whole as f32;
-    let max_rows = buffer_len.saturating_sub(1) as i32;
-    let next = (current as i32 + whole).clamp(0, max_rows);
-
-    let frac = if (next == 0 && whole < 0) || (next == max_rows && whole > 0) {
-        0.0
-    } else {
-        frac
-    };
-    (next as usize, frac)
 }
 
 pub fn chat_wheel_scroll_system(
@@ -1504,7 +1479,7 @@ mod tests {
 
     #[test]
     fn accumulator_eventually_spends_a_row() {
-        let ticks = (1.0 / WHEEL_ROWS_PER_UNIT).ceil() as usize;
+        let ticks = (1.0 / crate::hud::list_view::WHEEL_ROWS_PER_UNIT).ceil() as usize;
         let mut rows = 0;
         let mut accum = 0.0;
         for _ in 0..ticks {

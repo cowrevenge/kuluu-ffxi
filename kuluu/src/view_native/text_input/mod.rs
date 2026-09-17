@@ -33,7 +33,7 @@ pub use auto_enter::auto_enter_cs_system;
 
 mod shop;
 use shop::handle_shop_key;
-pub use shop::shop_mode_sync_system;
+pub use shop::{shop_mode_sync_system, shop_mouse_activate_system};
 
 mod map_screen;
 

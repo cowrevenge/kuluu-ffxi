@@ -9,7 +9,8 @@
 use bevy::prelude::*;
 use kuluu_snapshot::{AhSaleView, SceneSnapshot};
 
-use crate::hud::digit_spinner::{format_gil, DigitSpinner, SpinnerColumn};
+use crate::hud::bazaar_view::group_digits;
+use crate::hud::digit_spinner::{DigitSpinner, SpinnerColumn};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, transparent_placeholder};
 use crate::hud::style::{cursor_prefix, text_font, theme, window_frame};
@@ -301,7 +302,10 @@ pub fn fee_confirm_text(stack_quantity: Option<u32>, fee: u32) -> String {
 }
 
 pub fn place_confirm_text(item: &str, price: u32) -> String {
-    format!("Place {item} up on auction for {} gil?", format_gil(price))
+    format!(
+        "Place {item} up on auction for {} gil?",
+        group_digits(price)
+    )
 }
 
 pub const CONFIRM_YES: &str = "Yes";
@@ -1557,7 +1561,7 @@ fn frame_model(
                                 &item_name(s.item_no),
                                 s.quantity as u32,
                             ),
-                            count: format!("{} G", format_gil(s.price)),
+                            count: format!("{} G", group_digits(s.price)),
                             is_cursor: focused && i == cursor,
                             muted: false,
                         },
@@ -1850,14 +1854,17 @@ fn text_value(
                 .hist
                 .as_ref()
                 .and_then(|h| h.rows.get(i))
-                .map(|s| format!("{} G", format_gil(s.price)))
+                .map(|s| format!("{} G", group_digits(s.price)))
                 .unwrap_or_default(),
             theme::TEXT,
         ),
         Role::DetailName => plain(detail_name.to_string(), theme::TITLE),
         Role::DetailRow(i) => plain(detail_rows.get(i).cloned().unwrap_or_default(), theme::TEXT),
         Role::GilLine => match model.price.as_ref() {
-            Some(p) => plain(format!("Current Gil  {} G", format_gil(p.gil)), theme::TEXT),
+            Some(p) => plain(
+                format!("Current Gil  {} G", group_digits(p.gil)),
+                theme::TEXT,
+            ),
             None => plain(String::new(), theme::TEXT),
         },
         Role::SpinnerAll => match model.price.as_ref() {
@@ -1874,7 +1881,7 @@ fn text_value(
         },
         Role::SpinnerSuffix => plain(" G \u{25ba}".to_string(), theme::TEXT),
         Role::SpinnerCap => match model.price.as_ref() {
-            Some(p) => plain(format!("/{} G", format_gil(p.spinner.cap)), theme::MUTED),
+            Some(p) => plain(format!("/{} G", group_digits(p.spinner.cap)), theme::MUTED),
             None => plain(String::new(), theme::TEXT),
         },
         Role::ConfirmText => plain(

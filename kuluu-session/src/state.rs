@@ -2420,25 +2420,10 @@ impl SessionState {
                 self.shop = None;
                 changed
             }
-            // The appraisal that reaches `shop.pending_sale` rides the
-            // `ShopUpdated` that follows this event; this arm only echoes it.
-            AgentEvent::ShopSellAppraisal {
-                price,
-                item_index,
-                count,
-                item_no: _,
-            } => {
-                self.push_chat(ChatLine {
-                    spans: Vec::new(),
-                    channel: ChatChannel::System,
-                    sender: "<shop>".into(),
-                    text: format!(
-                        "Appraisal: slot {item_index} x{count} sells for {price} gil each"
-                    ),
-                    server_ts: 0,
-                });
-                true
-            }
+            // The appraisal reaches `shop.pending_sale` on the `ShopUpdated`
+            // that follows this event, and the shop window puts the price on the
+            // item's row. Retail shows a quote there, not in the chat log.
+            AgentEvent::ShopSellAppraisal { .. } => false,
             AgentEvent::StatusIconsUpdated { icons, expiries } => {
                 let changed = self.status_icons != *icons || self.status_icon_expiries != *expiries;
                 self.status_icons = icons.clone();

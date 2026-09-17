@@ -2,7 +2,8 @@ use super::*;
 
 use kuluu_render::hud::digit_spinner::DigitSpinner;
 use kuluu_render::hud::shop::{
-    self, ShopFocus, ShopMode, ShopRow, ShopScreenState, SHOP_NO, VENDOR_RANGE_YALMS,
+    self, ShopFocus, ShopMode, ShopRegion, ShopRow, ShopRowActivated, ShopScreenState, SHOP_NO,
+    VENDOR_RANGE_YALMS,
 };
 
 /// Keeps the shop window in step with the world around it. The shop has no
@@ -96,6 +97,33 @@ fn out_of_reach(me: kuluu_snapshot::Vec3, vendor: kuluu_snapshot::Vec3) -> bool 
     (dx * dx + dy * dy + dz * dz).sqrt() > VENDOR_RANGE_YALMS
 }
 
+/// A clicked or tapped row answers exactly as Enter would have on that row:
+/// [`shop_mouse_hover_system`](kuluu_render::hud::shop::shop_mouse_hover_system)
+/// has already put the cursor there.
+pub fn shop_mouse_activate_system(
+    mut activated: MessageReader<ShopRowActivated>,
+    mut screen: ResMut<ShopScreenState>,
+    mut scene_state: ResMut<SceneState>,
+    cmd_tx: Res<CommandTx>,
+) {
+    for event in activated.read() {
+        if scene_state.snapshot.shop.is_none() || screen.dismissed {
+            continue;
+        }
+        let rows = shop::rows_for(screen.mode, &scene_state.snapshot);
+        match (event.region, screen.focus) {
+            (ShopRegion::Menu, ShopFocus::Menu) => screen.enter_list(),
+            (ShopRegion::List, ShopFocus::List) => {
+                activate_row(&mut screen, &mut scene_state, &cmd_tx.0, &rows)
+            }
+            (ShopRegion::Confirm, ShopFocus::Confirm) => {
+                answer_confirm(&mut screen, &mut scene_state, &cmd_tx.0)
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Keyboard handling for the shop window. Cancel unwinds exactly one level per
 /// press — confirm box -> list -> Buy/Sell picker -> closed — matching how the
 /// retail primitives nest (`shopmain` over `shopbuy`/`shopsell`).
@@ -186,6 +214,17 @@ fn handle_list_key(
     if !bindings.matches_logical(Action::NavConfirm, key) {
         return;
     }
+    activate_row(screen, scene_state, cmd_tx, rows);
+}
+
+/// Answer the row the cursor is on: size the stack, or move a lone item
+/// outright.
+fn activate_row(
+    screen: &mut ShopScreenState,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+    rows: &[ShopRow],
+) {
     let Some(row) = rows.get(screen.cursor).copied() else {
         return;
     };
@@ -259,7 +298,7 @@ fn handle_quantity_key(
     } else if bindings.matches_logical(Action::NavLeft, key) {
         spinner.left();
     } else if matches!(key, Key::Tab) {
-        spinner.value = spinner.cap;
+        spinner.set_all();
     }
 }
 
@@ -287,10 +326,18 @@ fn handle_confirm_key(
             return;
         }
     }
-    if !bindings.matches_logical(Action::NavConfirm, key) {
-        return;
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        answer_confirm(screen, scene_state, cmd_tx);
     }
-    // Confirming with the cursor on No is the same answer as cancelling.
+}
+
+/// Send the confirm box's answer. Confirming with the cursor on No is the same
+/// answer as cancelling.
+fn answer_confirm(
+    screen: &mut ShopScreenState,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+) {
     if !screen.confirm_yes {
         decline(screen, cmd_tx);
         return;

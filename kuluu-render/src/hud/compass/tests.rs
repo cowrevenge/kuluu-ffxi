@@ -279,7 +279,7 @@ fn logout_despawns_radar_children_and_next_login_recreates_them() {
 
 #[test]
 fn compass_art_uses_all_dat_quadrants_and_north_tint_when_available() {
-    let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
         return;
     };
     let (mut world, _) = fixture();

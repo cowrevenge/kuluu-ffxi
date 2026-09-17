@@ -12,7 +12,6 @@ use ffxi_dat::weather::{
     ZoneWeatherSets, WEATHER_TYPE_FALLBACK,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use ffxi_dat::DatRoot;
 use kuluu_snapshot::Weather;
 
 use crate::camera::OperatorCamera;
@@ -370,7 +369,11 @@ pub fn load_zone_weather(
     scene_state: Res<SceneState>,
     mut zone_weather: ResMut<ZoneWeather>,
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     if current == zone_weather.file_id {
         return;
@@ -385,13 +388,10 @@ pub fn load_zone_weather(
 
     let Some(file_id) = current else { return };
 
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
     let Ok(location) = root.resolve(file_id) else {
         return;
     };
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let Ok(bytes) = fs::read(&path) else { return };
     zone_weather.sets = collect_zone_weather_sets(&bytes);
 

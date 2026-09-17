@@ -73,6 +73,7 @@ fn tag_create_preview_meshes(
 fn spawn_preview(
     mut commands: Commands,
     form: Res<CharCreateForm>,
+    dat_root: Res<crate::view_native::DatRootRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -150,15 +151,18 @@ fn spawn_preview(
         ))
         .id();
 
-    spawn_preview_pc(
-        &mut commands,
-        parent,
-        form.race,
-        form.face,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-    );
+    if let Some(dat) = dat_root.0.as_deref() {
+        spawn_preview_pc(
+            dat,
+            &mut commands,
+            parent,
+            form.race,
+            form.face,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        );
+    }
 
     commands.insert_resource(PreviewRebakeState {
         last_change: Instant::now(),
@@ -192,6 +196,7 @@ fn rebake_if_debounced(
     form: Res<CharCreateForm>,
     mut state: ResMut<PreviewRebakeState>,
     q_parent: Query<(Entity, Option<&Children>), With<CharCreatePreviewParent>>,
+    dat_root: Res<crate::view_native::DatRootRes>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -210,15 +215,18 @@ fn rebake_if_debounced(
             commands.entity(child).despawn();
         }
     }
-    spawn_preview_pc(
-        &mut commands,
-        parent,
-        form.race,
-        form.face,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-    );
+    if let Some(dat) = dat_root.0.as_deref() {
+        spawn_preview_pc(
+            dat,
+            &mut commands,
+            parent,
+            form.race,
+            form.face,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+        );
+    }
     state.dirty = false;
     state.last_race = form.race;
     state.last_face = form.face;

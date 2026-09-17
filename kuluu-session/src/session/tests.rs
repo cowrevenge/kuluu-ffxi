@@ -1709,7 +1709,10 @@ fn ferry_fishing_chat_replays_reported_catches_with_installed_dat() {
     const NUM1_START: usize = 12;
     const STRING1_START: usize = 28;
     const MESNUM_START: usize = 6;
-    let root = std::sync::Arc::new(ffxi_dat::DatRoot::from_env_or_default().unwrap());
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
+    let root = std::sync::Arc::new(root);
     let mut dialog = crate::event_dialog::DialogSession::new(Some(root), "Observer".into());
     let (tx, mut rx) = broadcast::channel(16);
     for (item, name) in [(4451i32, "Silver Shark"), (5128, "Cone Calamary")] {

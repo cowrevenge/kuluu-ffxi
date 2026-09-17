@@ -124,15 +124,8 @@ fn face_lines(root: &DatRoot, face: u8, race: u8, lines: &mut Vec<String>) {
     }
 }
 
-pub fn report(entity_id: u32, name: &str, look: &EntityLook) -> Vec<String> {
+pub fn report(root: &DatRoot, entity_id: u32, name: &str, look: &EntityLook) -> Vec<String> {
     let mut lines = vec![format!("/actordiag: {name} (id {entity_id})")];
-    let root = match DatRoot::from_env_or_default() {
-        Ok(root) => root,
-        Err(e) => {
-            lines.push(format!("  no DAT install: {e}"));
-            return lines;
-        }
-    };
     match look {
         EntityLook::Equipped {
             face,
@@ -147,14 +140,14 @@ pub fn report(entity_id: u32, name: &str, look: &EntityLook) -> Vec<String> {
             ranged,
         } => {
             lines.push(format!("  look: race={race} face={face}"));
-            face_lines(&root, *face, *race, &mut lines);
+            face_lines(root, *face, *race, &mut lines);
             let slot_models = [*head, *body, *hands, *legs, *feet, *main, *sub, *ranged];
             for (i, &model_id) in slot_models.iter().enumerate() {
                 let slot_index = (i + 1) as u8;
                 let status = match resolve_equipment_model(slot_index, model_id, *race) {
                     None => "unresolved (not drawn)".to_string(),
                     Some(fid) => {
-                        let probe = probe_file(&root, fid);
+                        let probe = probe_file(root, fid);
                         match probe.bytes {
                             None => probe.label,
                             Some(bytes) => {
@@ -170,7 +163,7 @@ pub fn report(entity_id: u32, name: &str, look: &EntityLook) -> Vec<String> {
         }
         EntityLook::Standard { modelid } => {
             let fid = npc_dat_id(*modelid);
-            let probe = probe_file(&root, fid);
+            let probe = probe_file(root, fid);
             let status = match probe.bytes {
                 None => probe.label,
                 Some(bytes) => {
@@ -210,10 +203,9 @@ mod tests {
 
     #[test]
     fn equipped_report_covers_face_and_every_slot() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no DAT install");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let look = EntityLook::Equipped {
             face: 0,
             race: 6,
@@ -226,7 +218,7 @@ mod tests {
             sub: 0,
             ranged: 0,
         };
-        let lines = report(1, "TestTaru", &look);
+        let lines = report(&root, 1, "TestTaru", &look);
         let joined = lines.join("\n");
         assert!(joined.contains("face: fid"), "face line missing:\n{joined}");
         for slot in EQUIP_SLOT_NAMES {

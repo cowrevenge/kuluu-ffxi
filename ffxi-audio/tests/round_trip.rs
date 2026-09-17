@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use ffxi_audio::{decode_bytes, decode_file, find_audio, parse_any, AudioKind, SampleFormat};
 
 fn build_synthetic_spw_adpcm() -> Vec<u8> {
@@ -106,11 +104,10 @@ fn spw_no_loop_sentinel_is_handled() {
 
 #[test]
 fn real_install_smoke() {
-    let Ok(install) = std::env::var("FFXI_DAT_PATH") else {
-        eprintln!("skipping: FFXI_DAT_PATH not set");
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
         return;
     };
-    let install = PathBuf::from(install);
+    let install = root.root().to_path_buf();
 
     let mut found: Option<(AudioKind, u32, _)> = None;
     for id in [101u32, 1, 2, 3, 100] {

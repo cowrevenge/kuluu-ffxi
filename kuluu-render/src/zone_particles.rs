@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use ffxi_dat::particle_gen::ParticleGeneratorDef;
-use ffxi_dat::{ChunkKind, DatRoot};
+use ffxi_dat::ChunkKind;
 use kuluu_snapshot::Vec3 as WireVec3;
 
 use crate::particle_sim::{spawn_zone_particle_generator, ParticleSimulator, ZoneGeneratorOptions};
@@ -88,7 +88,11 @@ fn sync_zone_particles(
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let file_id = effective_zone_file_id(&scene_state.snapshot);
     // The global effect dir loads off-thread, so the key carries its arrival: a set built before
     // it lands is missing every generator whose mesh ships there (the campfire flame sheet
@@ -109,13 +113,10 @@ fn sync_zone_particles(
     let Some(file_id) = file_id else {
         return;
     };
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
     let Ok(loc) = root.resolve(file_id) else {
         return;
     };
-    let path = loc.path_under(&root);
+    let path = loc.path_under(root);
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };

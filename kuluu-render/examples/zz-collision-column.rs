@@ -22,7 +22,9 @@ fn main() {
         .expect("zone -> mzb file id");
     println!("zone {zone_id} -> DAT file {file_id}");
 
-    let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load_mzb_placed");
+    let root = ffxi_dat::DatRoot::from_env_or_default()
+        .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)");
+    let (submeshes, instances) = load_mzb_placed(&root, file_id, None).expect("load_mzb_placed");
     println!(
         "submeshes={} instances={}",
         submeshes.len(),

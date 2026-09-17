@@ -635,26 +635,12 @@ fn first_skeleton(bytes: &[u8]) -> Option<Skeleton> {
 #[derive(Resource, Default, Clone)]
 pub struct ActorDatRoot(pub Option<Arc<DatRoot>>);
 
-/// Shared by every hot per-load path (`kick_load_actor_tasks`,
-/// `dat_mmb::process_load_mmb_requests`): reuse the wired root when the host
-/// has one, and only fall back to opening one from the environment (re-running
-/// overlay discovery and the FFXiMain.dll probe) when it does not.
 pub(crate) fn resolve_actor_root(wired: Option<Arc<DatRoot>>) -> Result<Arc<DatRoot>, String> {
-    match wired {
-        Some(root) => Ok(root),
-        None => Ok(Arc::new(
-            DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?,
-        )),
-    }
+    wired.ok_or_else(|| "no DAT root wired".to_string())
 }
 
-pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
+pub fn load_npc(root: &DatRoot, file_id: u32) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
-    let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    load_npc_with_root(&root, file_id)
-}
-
-pub fn load_npc_with_root(root: &DatRoot, file_id: u32) -> Result<LoadedActor, String> {
     let bytes = read_dat(root, file_id).ok_or_else(|| format!("read npc dat {file_id}"))?;
 
     let skeleton =
@@ -739,13 +725,8 @@ fn mount_equipment_table_index(race: u8) -> Option<u8> {
 /// A mount built from a PC race config: the skeleton and its `chi?`/run/walk
 /// clips come from the race DAT, the body parts from the race's equipment table
 /// row at model id 0 — a rented chocobo wears none of the trait variants.
-pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
+pub fn load_mount_race(root: &DatRoot, race: u8) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
-    let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    load_mount_race_with_root(&root, race)
-}
-
-pub fn load_mount_race_with_root(root: &DatRoot, race: u8) -> Result<LoadedActor, String> {
     let dll = main_dll_for_root(root.root())
         .ok_or_else(|| format!("FFXiMain.dll unreadable under {}", root.root().display()))?;
     let table_index = mount_equipment_table_index(race)
@@ -853,28 +834,6 @@ fn action_anim_dat(
 }
 
 pub fn load_pc(
-    race: u8,
-    mounted: bool,
-    equipment: &[u32],
-    body: Option<u32>,
-    main_weapon: Option<u32>,
-
-    sub_weapon: Option<u32>,
-) -> Result<LoadedActor, String> {
-    crate::perf_probe::note_model_load();
-    let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    load_pc_with_root(
-        &root,
-        race,
-        mounted,
-        equipment,
-        body,
-        main_weapon,
-        sub_weapon,
-    )
-}
-
-pub fn load_pc_with_root(
     root: &DatRoot,
     race: u8,
     mounted: bool,
@@ -3306,11 +3265,10 @@ pub fn kick_load_actor_tasks(
         };
         let root_arc = actor_root.0.clone();
         let task = AsyncComputeTaskPool::get().spawn(async move {
-            crate::perf_probe::note_model_load();
             let root = resolve_actor_root(root_arc)?;
             let mut loaded = match subject {
-                ActorSubject::Mount { race } => load_mount_race_with_root(&root, race),
-                ActorSubject::Npc { file_id, .. } => load_npc_with_root(&root, file_id),
+                ActorSubject::Mount { race } => load_mount_race(&root, race),
+                ActorSubject::Npc { file_id, .. } => load_npc(&root, file_id),
                 ActorSubject::Pc {
                     race,
                     mounted,
@@ -3318,7 +3276,7 @@ pub fn kick_load_actor_tasks(
                     body,
                     main_weapon,
                     sub_weapon,
-                } => load_pc_with_root(
+                } => load_pc(
                     &root,
                     race,
                     mounted,
@@ -4351,12 +4309,10 @@ pub struct SpellSuffixCache {
 }
 
 impl SpellSuffixCache {
-    pub(crate) fn suffix(&mut self, spell_id: u32) -> Option<&'static str> {
+    pub(crate) fn suffix(&mut self, root: Option<&DatRoot>, spell_id: u32) -> Option<&'static str> {
         if !self.loaded {
             self.loaded = true;
-            if let Ok(root) = DatRoot::from_env_or_default() {
-                self.table = Some(ffxi_dat::spell_info::SpellTable::open_from_root(&root));
-            }
+            self.table = root.map(ffxi_dat::spell_info::SpellTable::open_from_root);
         }
         self.table
             .as_ref()
@@ -4371,6 +4327,7 @@ pub fn dispatch_action_overlay(
     mut q_actors: Query<&mut FfxiRenderActor>,
     mut last_seen: Local<u64>,
     mut spell_suffix: ResMut<SpellSuffixCache>,
+    actor_root: Res<ActorDatRoot>,
 ) {
     let new_count =
         (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
@@ -4409,7 +4366,7 @@ pub fn dispatch_action_overlay(
         }
         let cast_routine_id = start.map(|m| DatId::from_name(&m.id));
         let cast_suffix = match (action_kind == MAGIC_START_CATEGORY, cast_routine_id) {
-            (true, None) => spell_suffix.suffix(action_id),
+            (true, None) => spell_suffix.suffix(actor_root.0.as_deref(), action_id),
             _ => None,
         };
         // A FourCC start keeps its category's looping semantics: the generic `cast`/`calg`
@@ -5192,19 +5149,16 @@ mod pose_resolution_tests {
     }
 
     fn load_hume_m() -> Option<LoadedActor> {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
-            return None;
-        }
+        let root = ffxi_dat::archive::open_test_install()?;
 
-        Some(load_pc(1, false, &[], None, None, None).expect("load Hume M"))
+        Some(load_pc(&root, 1, false, &[], None, None, None).expect("load Hume M"))
     }
 
     #[test]
     fn live_idle_keeps_animating_with_nonselector_flags() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
         let mut results = Vec::new();
         // vendor/server/data/zones/valkurm_dunes/mobs.yaml Damselfly
@@ -5216,7 +5170,7 @@ mod pose_resolution_tests {
             ("Hare", 1568, 0),
             ("Damselfly without a dedicated sp1 clip", 1748, 1),
         ] {
-            let loaded = load_npc(file_id).expect("installed retail NPC DAT");
+            let loaded = load_npc(&root, file_id).expect("installed retail NPC DAT");
             if animationsub == 1 {
                 // sub=1 names the ini1 routine; on burrowing models its dig motion clip is sp1?,
                 // and this model ships no such clip, so the override falls through to idle.
@@ -5344,12 +5298,12 @@ mod pose_resolution_tests {
 
     #[test]
     fn worm_dig_keeps_its_dedicated_one_shot() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         // Installed ROM/5/64.DAT, the tunnel worm reference.
         let loaded =
-            load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
+            load_npc(&root, crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         // sub=1 names the ini1 routine; its first Motion stage is the dig clip (the clip
         // comes from the routine record, not a hard-coded mapping). The wire slot is what
@@ -5388,23 +5342,23 @@ mod pose_resolution_tests {
 
     #[test]
     fn nameplate_locators_match_installed_retail_dat_measurements() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         // Reference 2 (standard_position::ABOVE_HEAD) offsets read from the
         // installed DATs (identical on horizonxi-2023 and retail-2026-09).
         let models = [
             (
                 "Tarutaru",
-                load_pc(5, false, &[], None, None, None).unwrap(),
+                load_pc(&root, 5, false, &[], None, None, None).unwrap(),
                 1.3,
             ),
             (
                 "Galka",
-                load_pc(8, false, &[], None, None, None).unwrap(),
+                load_pc(&root, 8, false, &[], None, None, None).unwrap(),
                 2.6,
             ),
-            ("Damselfly", load_npc(1748).unwrap(), 3.5),
+            ("Damselfly", load_npc(&root, 1748).unwrap(), 3.5),
         ];
         for (name, loaded, expected_y) in models {
             let locator = crate::scene::NameplateLocator::from_skeleton(&loaded.skeleton, 1.0);
@@ -5425,12 +5379,12 @@ mod pose_resolution_tests {
 
     #[test]
     fn bind_pose_bounds_are_feet_origin_and_race_specific() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let mut heights: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
         for race in 1..=8u8 {
-            let Ok(actor) = load_pc(race, false, &[], None, None, None) else {
+            let Ok(actor) = load_pc(&root, race, false, &[], None, None, None) else {
                 continue;
             };
             let Some((lo, hi)) = actor.bind_pose_bounds(0.0, 1.0) else {
@@ -5504,10 +5458,10 @@ mod pose_resolution_tests {
 
     #[test]
     fn npc_bind_pose_does_not_describe_the_drawn_extent() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
-        let loaded = load_npc(1556).expect("load Huge Hornet dat 1556");
+        };
+        let loaded = load_npc(&root, 1556).expect("load Huge Hornet dat 1556");
         let Some((bind_lo, bind_hi)) = loaded.bind_pose_bounds(0.0, 1.0) else {
             panic!("Huge Hornet: no bind-pose bounds");
         };
@@ -5589,11 +5543,11 @@ mod pose_resolution_tests {
     /// rider needs. Self-skips without a retail install.
     #[test]
     fn chocobo_mount_race_loads_with_a_seat_clip() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let race = chocobo_race_for_colour(kuluu_snapshot::ChocoboColour::Yellow);
-        let actor = load_mount_race(race).expect("yellow chocobo race config");
+        let actor = load_mount_race(&root, race).expect("yellow chocobo race config");
         assert!(
             !actor.skel_meshes.is_empty(),
             "the race config ships no meshes of its own; the body comes from the \
@@ -5614,7 +5568,10 @@ mod pose_resolution_tests {
         // Every colour is its own race config, so they must not collide.
         let black = chocobo_race_for_colour(kuluu_snapshot::ChocoboColour::Black);
         assert_ne!(race, black);
-        assert!(load_mount_race(black).is_ok(), "black chocobo race config");
+        assert!(
+            load_mount_race(&root, black).is_ok(),
+            "black chocobo race config"
+        );
     }
 
     /// Why `mount_seat_local` reads a chocobo's seat off its spine instead of
@@ -5624,11 +5581,11 @@ mod pose_resolution_tests {
     /// floor. Self-skips without a retail install.
     #[test]
     fn chocobo_race_skeletons_define_no_saddle_joints() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let race = chocobo_race_for_colour(kuluu_snapshot::ChocoboColour::Yellow);
-        let actor = load_mount_race(race).expect("yellow chocobo race config");
+        let actor = load_mount_race(&root, race).expect("yellow chocobo race config");
         let pose = pose_world(
             &actor.skeleton,
             |_| None,
@@ -5652,12 +5609,13 @@ mod pose_resolution_tests {
     /// Self-skips without a retail install.
     #[test]
     fn a_chocobos_seat_rises_and_falls_with_its_gait() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
-        let mount = load_mount_race(chocobo_race_for_colour(
-            kuluu_snapshot::ChocoboColour::Yellow,
-        ))
+        };
+        let mount = load_mount_race(
+            &root,
+            chocobo_race_for_colour(kuluu_snapshot::ChocoboColour::Yellow),
+        )
         .expect("yellow chocobo race config");
         let run = DatId::from_str("run?");
         let clips: Vec<SkeletonAnimation> = mount
@@ -5707,11 +5665,11 @@ mod pose_resolution_tests {
     /// The rider's seat clips live in a DAT that is only loaded while mounted.
     #[test]
     fn mounted_rider_gains_the_seat_clip_an_unmounted_one_lacks() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let has_chi = |mounted: bool| {
-            load_pc(1, mounted, &[], None, None, None)
+            load_pc(&root, 1, mounted, &[], None, None, None)
                 .expect("load Hume M")
                 .animations
                 .iter()
@@ -5973,13 +5931,12 @@ mod pose_resolution_tests {
     // frame, never the collapse.
     #[test]
     fn retail_dead_routine_is_a_one_shot_collapse_into_a_static_corpse_pose() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
 
         for (race, expected_frames) in PC_COLLAPSE_FRAMES {
-            let actor = load_pc(race, false, &[], None, None, None).expect("load PC race");
+            let actor = load_pc(&root, race, false, &[], None, None, None).expect("load PC race");
             let routines = actor.all_routines();
 
             let (collapse_id, collapse_frames) =
@@ -6454,7 +6411,7 @@ mod pose_resolution_tests {
         assert_eq!(routine.as_str(), "cabk");
         assert!(looping, "the cast pose loops until the cast resolves");
 
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(HUME_M_SKELETON_FILE) else {
@@ -6487,7 +6444,7 @@ mod pose_resolution_tests {
         const HUME_M: u8 = 1;
         const MAIN_HAND_SLOT: u8 = 6;
 
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let dll = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
@@ -6495,8 +6452,16 @@ mod pose_resolution_tests {
             equipment_dat_id(&dll, MAIN_HAND_SLOT, 0, HUME_M).expect("HumeM main-hand model 0");
         let mut equipment = vec![main_weapon];
         equipment.extend((1u8..=5).filter_map(|slot| equipment_dat_id(&dll, slot, 0, HUME_M)));
-        let actor = load_pc(HUME_M, false, &equipment, None, Some(main_weapon), None)
-            .expect("load Hume M with a main-hand weapon");
+        let actor = load_pc(
+            &root,
+            HUME_M,
+            false,
+            &equipment,
+            None,
+            Some(main_weapon),
+            None,
+        )
+        .expect("load Hume M with a main-hand weapon");
         for id in ["ef h", "se h", "skaz", "chit"] {
             assert!(
                 actor.routines.contains_key(&DatId::from_str(id)),
@@ -6972,7 +6937,7 @@ mod motion_dat_tests {
     // its joints in bind pose rather than degrading gracefully.
     #[test]
     fn real_dat_waist_motion_covers_joints_no_other_set_touches() {
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let dll = main_dll_for_root(root.root());
@@ -7000,7 +6965,7 @@ mod motion_dat_tests {
     // the selector has to come from the body armour's CIB instead of a fixed +3.
     #[test]
     fn real_dat_waist_variants_differ_for_some_race() {
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let dll = main_dll_for_root(root.root());
@@ -7140,11 +7105,6 @@ mod actor_dat_root_tests {
     const KICK_LOAD_TASK_POLLS: usize = 600;
     const KICK_LOAD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
-    // `kick_load_actor_tasks` must resolve through the wired `ActorDatRoot`, not open its own
-    // via `DatRoot::from_env_or_default` -- that per-load reopen is exactly the overlay-discovery
-    // and FFXiMain.dll SHA-256 waste `ActorDatRoot` exists to remove. Proven by identity
-    // (`Arc::ptr_eq`) against the wired root rather than by mutating process-wide env vars, which
-    // would race every other test in this binary that reads `FFXI_DAT_PATH`.
     #[test]
     fn kick_load_actor_tasks_reuses_the_wired_root() {
         let Some(root) = ffxi_dat::archive::open_test_install() else {

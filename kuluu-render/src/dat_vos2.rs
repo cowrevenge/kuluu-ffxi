@@ -63,14 +63,11 @@ pub struct LoadedVos2 {
     pub textures: Vec<Vos2NamedTexture>,
 }
 
-pub fn enumerate_vos2_chunks(file_id: u32) -> Vec<usize> {
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return Vec::new();
-    };
+pub fn enumerate_vos2_chunks(root: &DatRoot, file_id: u32) -> Vec<usize> {
     let Ok(loc) = root.resolve(file_id) else {
         return Vec::new();
     };
-    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
+    let Ok(bytes) = fs::read(loc.path_under(root)) else {
         return Vec::new();
     };
 
@@ -94,25 +91,21 @@ fn has_vos2_recursive(node: &ChunkNode<'_>) -> bool {
         || node.children.iter().any(has_vos2_recursive)
 }
 
-pub fn dat_has_skinned_mesh(file_id: u32) -> bool {
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return false;
-    };
+pub fn dat_has_skinned_mesh(root: &DatRoot, file_id: u32) -> bool {
     let Ok(loc) = root.resolve(file_id) else {
         return false;
     };
-    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
+    let Ok(bytes) = fs::read(loc.path_under(root)) else {
         return false;
     };
     has_vos2_recursive(&walk_tree(&bytes))
 }
 
-pub fn load_vos2(file_id: u32, chunk_idx: usize) -> Result<LoadedVos2, String> {
-    let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
+pub fn load_vos2(root: &DatRoot, file_id: u32, chunk_idx: usize) -> Result<LoadedVos2, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let tree = walk_tree(&bytes);
@@ -202,22 +195,21 @@ struct BakedSkeleton {
     nameplate_locator: crate::scene::NameplateLocator,
 }
 
-fn baked_skeleton_for_file(file_id: u32) -> Option<BakedSkeleton> {
+fn baked_skeleton_for_file(root: &DatRoot, file_id: u32) -> Option<BakedSkeleton> {
     let map =
         BAKED_SKELETONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&file_id) {
         return entry.clone();
     }
-    let loaded = load_skeleton(file_id);
+    let loaded = load_skeleton(root, file_id);
     guard.insert(file_id, loaded.clone());
     loaded
 }
 
-fn load_skeleton(file_id: u32) -> Option<BakedSkeleton> {
-    let root = DatRoot::from_env_or_default().ok()?;
+fn load_skeleton(root: &DatRoot, file_id: u32) -> Option<BakedSkeleton> {
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(&root)).ok()?;
+    let bytes = fs::read(loc.path_under(root)).ok()?;
     let chunks = walk(&bytes).filter_map(Result::ok);
     let chunk = chunks
         .into_iter()
@@ -277,10 +269,12 @@ fn load_skeleton(file_id: u32) -> Option<BakedSkeleton> {
     })
 }
 
-fn load_idle_animation_for_file(file_id: u32) -> Option<ffxi_dat::anim::Mo2Animation> {
-    let root = DatRoot::from_env_or_default().ok()?;
+fn load_idle_animation_for_file(
+    root: &DatRoot,
+    file_id: u32,
+) -> Option<ffxi_dat::anim::Mo2Animation> {
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(&root)).ok()?;
+    let bytes = fs::read(loc.path_under(root)).ok()?;
     for chunk in walk(&bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(chunk.kind) != Some(ChunkKind::AnimMo2) {
             continue;
@@ -302,21 +296,24 @@ static IDLE_ANIMS: OnceLock<
     >,
 > = OnceLock::new();
 
-fn idle_anim_for_file(file_id: u32) -> Option<std::sync::Arc<ffxi_dat::anim::Mo2Animation>> {
+fn idle_anim_for_file(
+    root: &DatRoot,
+    file_id: u32,
+) -> Option<std::sync::Arc<ffxi_dat::anim::Mo2Animation>> {
     let map = IDLE_ANIMS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&file_id) {
         return entry.clone();
     }
-    let loaded = load_idle_animation_for_file(file_id).map(std::sync::Arc::new);
+    let loaded = load_idle_animation_for_file(root, file_id).map(std::sync::Arc::new);
     guard.insert(file_id, loaded.clone());
     loaded
 }
 
-fn baked_skeleton(race: u8) -> Option<BakedSkeleton> {
+fn baked_skeleton(root: &DatRoot, race: u8) -> Option<BakedSkeleton> {
     let dll = crate::scheduler_runtime::main_dll_from_env();
     let file_id = skeleton_file_id_for_race(dll.as_deref(), race)?;
-    baked_skeleton_for_file(file_id)
+    baked_skeleton_for_file(root, file_id)
 }
 
 fn skeleton_fits_mesh(baked: &BakedSkeleton, mesh: &Vos2Mesh) -> bool {
@@ -463,10 +460,14 @@ pub fn process_load_vos2_requests(
 
     mut q_xform: Query<&mut Transform>,
     settings: Res<GraphicsSettings>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     if settings.character_path() == CharacterRenderPath::FfxiFaithful {
         return;
     }
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let queued: Vec<LoadVos2Request> = events.read().copied().collect();
     if queued.is_empty() {
         return;
@@ -488,7 +489,7 @@ pub fn process_load_vos2_requests(
         };
         let entry = load_cache
             .entry((req.file_id, req.chunk_idx))
-            .or_insert_with(|| load_vos2(req.file_id, req.chunk_idx).ok());
+            .or_insert_with(|| load_vos2(root, req.file_id, req.chunk_idx).ok());
         let Some(loaded) = entry.as_ref() else {
             continue;
         };
@@ -501,8 +502,8 @@ pub fn process_load_vos2_requests(
         }
 
         let baked_owned = match req.skeleton_file_id {
-            Some(id) => baked_skeleton_for_file(id),
-            None => baked_skeleton(req.race),
+            Some(id) => baked_skeleton_for_file(root, id),
+            None => baked_skeleton(root, req.race),
         };
 
         if let Some(baked) = baked_owned.as_ref() {
@@ -746,8 +747,8 @@ fn compute_skinned_local_y_extent(loaded: &LoadedVos2, is_pc: bool) -> Option<(f
     }
 }
 
-pub fn probe_skinned_actor(skel_file_id: u32, mesh_file_id: u32, chunk_idx: usize) {
-    let Some(baked) = baked_skeleton_for_file(skel_file_id) else {
+pub fn probe_skinned_actor(root: &DatRoot, skel_file_id: u32, mesh_file_id: u32, chunk_idx: usize) {
+    let Some(baked) = baked_skeleton_for_file(root, skel_file_id) else {
         println!("ERR: failed to load skeleton file_id={skel_file_id}");
         return;
     };
@@ -755,7 +756,7 @@ pub fn probe_skinned_actor(skel_file_id: u32, mesh_file_id: u32, chunk_idx: usiz
         println!("ERR: skeleton file_id={skel_file_id} has no raw bone chunk");
         return;
     };
-    let loaded = match load_vos2(mesh_file_id, chunk_idx) {
+    let loaded = match load_vos2(root, mesh_file_id, chunk_idx) {
         Ok(l) => l,
         Err(e) => {
             println!("ERR: load_vos2({mesh_file_id},{chunk_idx}): {e}");
@@ -1440,10 +1441,14 @@ pub fn process_load_vos2_requests_ffxi(
     tracked: Res<TrackedEntities>,
     q_actor: Query<&FfxiActor>,
     mut q_xform: Query<&mut Transform>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     if settings.character_path() != CharacterRenderPath::FfxiFaithful {
         return;
     }
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let queued: Vec<LoadVos2Request> = events.read().copied().collect();
     if queued.is_empty() {
         return;
@@ -1462,7 +1467,7 @@ pub fn process_load_vos2_requests_ffxi(
         };
         let entry = load_cache
             .entry((req.file_id, req.chunk_idx))
-            .or_insert_with(|| load_vos2(req.file_id, req.chunk_idx).ok());
+            .or_insert_with(|| load_vos2(root, req.file_id, req.chunk_idx).ok());
         let Some(loaded) = entry.as_ref() else {
             continue;
         };
@@ -1471,8 +1476,8 @@ pub fn process_load_vos2_requests_ffxi(
         }
 
         let baked = match req.skeleton_file_id {
-            Some(id) => baked_skeleton_for_file(id),
-            None => baked_skeleton(req.race),
+            Some(id) => baked_skeleton_for_file(root, id),
+            None => baked_skeleton(root, req.race),
         };
         let Some(baked) = baked else {
             continue;
@@ -1583,13 +1588,17 @@ pub fn tick_skinned_actors(
     clip_override: Option<Res<crate::combat_stance::ModelViewerClipOverride>>,
     q_actors: Query<(&crate::components::WorldEntity, &SkinnedActor)>,
     mut q_bones: Query<&mut Transform>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let elapsed = time.elapsed_secs();
     let dt = time.delta_secs();
     let bt_target_by_id = bt_target_index(&state);
 
     for (world, actor) in &q_actors {
-        let Some(baked) = baked_skeleton_for_file(actor.dat_id) else {
+        let Some(baked) = baked_skeleton_for_file(root, actor.dat_id) else {
             continue;
         };
         let Some(raw) = baked.raw else { continue };
@@ -1600,6 +1609,7 @@ pub fn tick_skinned_actors(
             .unwrap_or(false);
 
         let pose = sample_animation_pose(
+            root,
             &raw,
             actor.dat_id,
             world.id,
@@ -1643,10 +1653,14 @@ pub fn tick_ffxi_actors(
     settings: Res<GraphicsSettings>,
     mut registry: ResMut<FfxiSkinRegistry>,
     q_actors: Query<(&crate::components::WorldEntity, &FfxiActor)>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     if settings.character_path() != CharacterRenderPath::FfxiFaithful {
         return;
     }
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let elapsed = time.elapsed_secs();
     let dt = time.delta_secs();
     let bt_target_by_id = bt_target_index(&state);
@@ -1659,6 +1673,7 @@ pub fn tick_ffxi_actors(
             .unwrap_or(false);
 
         let pose = sample_animation_pose(
+            root,
             &actor.skeleton,
             actor.dat_id,
             world.id,
@@ -1756,6 +1771,7 @@ const ANIM_FPS: f32 = 30.0;
 
 #[allow(clippy::too_many_arguments)]
 fn sample_animation_pose(
+    root: &DatRoot,
     raw: &Skeleton,
     dat_id: u32,
     world_id: u32,
@@ -1796,7 +1812,7 @@ fn sample_animation_pose(
 
     if let Some(over) = clip_override {
         let prefix = override_prefix(&over.clip_name);
-        if let Some(anim) = crate::combat_stance::override_anim_for_skel(dat_id, &prefix) {
+        if let Some(anim) = crate::combat_stance::override_anim_for_skel(root, dat_id, &prefix) {
             if anim.frames > 0 {
                 fill(&mut out, &anim, wrap_frame(&anim));
             }
@@ -1807,11 +1823,11 @@ fn sample_animation_pose(
     if is_self {
         use crate::combat_stance::RestKind;
         let rest_anim = match rest.kind {
-            RestKind::Sit => crate::combat_stance::sit_anim_for_skel(dat_id)
-                .or_else(|| idle_anim_for_file(dat_id)),
-            RestKind::Heal => crate::combat_stance::heal_anim_for_skel(dat_id)
-                .or_else(|| crate::combat_stance::sit_anim_for_skel(dat_id))
-                .or_else(|| idle_anim_for_file(dat_id)),
+            RestKind::Sit => crate::combat_stance::sit_anim_for_skel(root, dat_id)
+                .or_else(|| idle_anim_for_file(root, dat_id)),
+            RestKind::Heal => crate::combat_stance::heal_anim_for_skel(root, dat_id)
+                .or_else(|| crate::combat_stance::sit_anim_for_skel(root, dat_id))
+                .or_else(|| idle_anim_for_file(root, dat_id)),
             RestKind::None => None,
         };
         if let Some(anim) = rest_anim {
@@ -1861,37 +1877,47 @@ fn sample_animation_pose(
 
     let resolve = |clip: ClipId| -> Option<(std::sync::Arc<ffxi_dat::anim::Mo2Animation>, f32)> {
         match clip {
-            ClipId::CombatRun => crate::combat_stance::combat_run_anim_for_skel(dat_id)
-                .or_else(|| crate::combat_stance::run_anim_for_skel(dat_id))
-                .or_else(|| crate::combat_stance::battle_idle_anim_for_skel(dat_id))
-                .or_else(|| idle_anim_for_file(dat_id))
+            ClipId::CombatRun => crate::combat_stance::combat_run_anim_for_skel(root, dat_id)
+                .or_else(|| crate::combat_stance::run_anim_for_skel(root, dat_id))
+                .or_else(|| crate::combat_stance::battle_idle_anim_for_skel(root, dat_id))
+                .or_else(|| idle_anim_for_file(root, dat_id))
                 .map(|a| (a, 1.0)),
-            ClipId::BattleIdle => crate::combat_stance::battle_idle_anim_for_skel(dat_id)
-                .or_else(|| idle_anim_for_file(dat_id))
+            ClipId::BattleIdle => crate::combat_stance::battle_idle_anim_for_skel(root, dat_id)
+                .or_else(|| idle_anim_for_file(root, dat_id))
                 .map(|a| (a, 1.0)),
-            ClipId::Run => crate::combat_stance::run_anim_for_skel(dat_id)
-                .or_else(|| idle_anim_for_file(dat_id))
+            ClipId::Run => crate::combat_stance::run_anim_for_skel(root, dat_id)
+                .or_else(|| idle_anim_for_file(root, dat_id))
                 .map(|a| (a, 1.0)),
-            ClipId::Backpedal => crate::combat_stance::directional_anim_for_skel(dat_id, b"bck")
-                .map(|a| (a, 1.0))
-                .or_else(|| crate::combat_stance::run_anim_for_skel(dat_id).map(|a| (a, -1.0)))
-                .or_else(|| idle_anim_for_file(dat_id).map(|a| (a, 1.0))),
-            ClipId::StrafeLeft => crate::combat_stance::directional_anim_for_skel(dat_id, b"stl")
-                .or_else(|| crate::combat_stance::run_anim_for_skel(dat_id))
-                .or_else(|| idle_anim_for_file(dat_id))
+            ClipId::Backpedal => {
+                crate::combat_stance::directional_anim_for_skel(root, dat_id, b"bck")
+                    .map(|a| (a, 1.0))
+                    .or_else(|| {
+                        crate::combat_stance::run_anim_for_skel(root, dat_id).map(|a| (a, -1.0))
+                    })
+                    .or_else(|| idle_anim_for_file(root, dat_id).map(|a| (a, 1.0)))
+            }
+            ClipId::StrafeLeft => {
+                crate::combat_stance::directional_anim_for_skel(root, dat_id, b"stl")
+                    .or_else(|| crate::combat_stance::run_anim_for_skel(root, dat_id))
+                    .or_else(|| idle_anim_for_file(root, dat_id))
+                    .map(|a| (a, 1.0))
+            }
+            ClipId::StrafeRight => {
+                crate::combat_stance::directional_anim_for_skel(root, dat_id, b"str")
+                    .or_else(|| crate::combat_stance::run_anim_for_skel(root, dat_id))
+                    .or_else(|| idle_anim_for_file(root, dat_id))
+                    .map(|a| (a, 1.0))
+            }
+            ClipId::TurnInPlace => {
+                crate::combat_stance::directional_anim_for_skel(root, dat_id, b"trn")
+                    .or_else(|| idle_anim_for_file(root, dat_id))
+                    .map(|a| (a, 1.0))
+            }
+            ClipId::Walk => crate::combat_stance::directional_anim_for_skel(root, dat_id, b"wlk")
+                .or_else(|| crate::combat_stance::run_anim_for_skel(root, dat_id))
+                .or_else(|| idle_anim_for_file(root, dat_id))
                 .map(|a| (a, 1.0)),
-            ClipId::StrafeRight => crate::combat_stance::directional_anim_for_skel(dat_id, b"str")
-                .or_else(|| crate::combat_stance::run_anim_for_skel(dat_id))
-                .or_else(|| idle_anim_for_file(dat_id))
-                .map(|a| (a, 1.0)),
-            ClipId::TurnInPlace => crate::combat_stance::directional_anim_for_skel(dat_id, b"trn")
-                .or_else(|| idle_anim_for_file(dat_id))
-                .map(|a| (a, 1.0)),
-            ClipId::Walk => crate::combat_stance::directional_anim_for_skel(dat_id, b"wlk")
-                .or_else(|| crate::combat_stance::run_anim_for_skel(dat_id))
-                .or_else(|| idle_anim_for_file(dat_id))
-                .map(|a| (a, 1.0)),
-            ClipId::Idle => idle_anim_for_file(dat_id).map(|a| (a, 1.0)),
+            ClipId::Idle => idle_anim_for_file(root, dat_id).map(|a| (a, 1.0)),
         }
     };
 
@@ -1972,6 +1998,7 @@ fn override_prefix(name: &str) -> [u8; 3] {
 }
 
 pub fn spawn_vos2_meshes(
+    root: &DatRoot,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -1981,7 +2008,7 @@ pub fn spawn_vos2_meshes(
     race: u8,
     feet_translation_y: f32,
 ) -> Option<(f32, f32)> {
-    let baked = baked_skeleton(race);
+    let baked = baked_skeleton(root, race);
     spawn_vos2_meshes_with_skeleton(
         commands,
         meshes,
@@ -2228,6 +2255,7 @@ pub struct PreparedEquipped {
 }
 
 pub fn prepare_equipped(
+    root: &DatRoot,
     race: u8,
     face: u8,
     head: u16,
@@ -2246,13 +2274,13 @@ pub fn prepare_equipped(
     let slots = [head, body, hands, legs, feet, main, sub, ranged];
     let dll = crate::scheduler_runtime::main_dll_from_env();
 
-    let baked_skel = baked_skeleton(race);
+    let baked_skel = baked_skeleton(root, race);
     let mut loaded_slots: Vec<LoadedSlot> = Vec::new();
     let mut actor_min_local_y: f32 = f32::INFINITY;
     let mut actor_max_local_y: f32 = f32::NEG_INFINITY;
     let mut load_chunks = |file_id: u32, chunks: Vec<usize>, label: &str| {
         for idx in chunks {
-            match load_vos2(file_id, idx) {
+            match load_vos2(root, file_id, idx) {
                 Ok(loaded)
                     if !loaded.mesh.groups.is_empty() && !loaded.mesh.vertices.is_empty() =>
                 {
@@ -2282,7 +2310,7 @@ pub fn prepare_equipped(
     };
 
     if let Some(file_id) = dll.as_deref().and_then(|dll| face_dat_id(dll, face, race)) {
-        let chunks = enumerate_vos2_chunks(file_id);
+        let chunks = enumerate_vos2_chunks(root, file_id);
         if chunks.is_empty() {
             info!(
                 "spawn_equipped: face file={} has no VOS2 chunks (race={})",
@@ -2305,7 +2333,7 @@ pub fn prepare_equipped(
             }
             continue;
         };
-        let chunks = enumerate_vos2_chunks(file_id);
+        let chunks = enumerate_vos2_chunks(root, file_id);
         if chunks.is_empty() {
             info!(
                 "spawn_equipped: slot {} file={} no VOS2 chunks (slot_id={:#06X} race={})",
@@ -2334,6 +2362,7 @@ pub fn prepare_equipped(
 }
 
 pub fn spawn_prepared_equipped(
+    root: &DatRoot,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2345,6 +2374,7 @@ pub fn spawn_prepared_equipped(
     let mut spawned = 0usize;
     for slot in &prepared.slots {
         if spawn_vos2_meshes(
+            root,
             commands,
             meshes,
             materials,
@@ -2362,7 +2392,7 @@ pub fn spawn_prepared_equipped(
     }
 
     if spawned > 0 {
-        if let Some(baked) = baked_skeleton(prepared.race) {
+        if let Some(baked) = baked_skeleton(root, prepared.race) {
             commands.entity(parent).insert(baked.nameplate_locator);
         } else {
             commands
@@ -2386,6 +2416,7 @@ pub fn spawn_prepared_equipped(
 }
 
 pub fn spawn_equipped(
+    root: &DatRoot,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2402,8 +2433,10 @@ pub fn spawn_equipped(
     sub: u16,
     ranged: u16,
 ) -> usize {
-    let prepared = prepare_equipped(race, face, head, body, hands, legs, feet, main, sub, ranged);
-    spawn_prepared_equipped(commands, meshes, materials, images, parent, &prepared)
+    let prepared = prepare_equipped(
+        root, race, face, head, body, hands, legs, feet, main, sub, ranged,
+    );
+    spawn_prepared_equipped(root, commands, meshes, materials, images, parent, &prepared)
 }
 
 fn pbr_from_specular(exponent: f32, _intensity: f32) -> (f32, f32) {
@@ -2421,11 +2454,11 @@ mod ffxi_skin_tests {
 
     #[test]
     fn nameplate_legacy_loader_retains_authored_locators() {
-        if DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         for (file_id, expected_y) in [(1748, 3.5), (19776, 1.3), (26352, 2.6)] {
-            let skeleton = load_skeleton(file_id).expect("installed retail skeleton");
+            let skeleton = load_skeleton(&root, file_id).expect("installed retail skeleton");
             assert!((skeleton.nameplate_locator.offset.unwrap().y - expected_y).abs() < 1e-5);
         }
     }

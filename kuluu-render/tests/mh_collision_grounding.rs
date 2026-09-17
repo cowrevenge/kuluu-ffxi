@@ -12,12 +12,11 @@ use kuluu_render::dat_mzb::{
 /// mid-transition.) Skips without a retail DAT install.
 #[test]
 fn mh_391_spawn_column_grounds_to_interior_floor_not_roof() {
-    if std::env::var("FFXI_DAT_PATH").is_err() {
-        eprintln!("FFXI_DAT_PATH unset; skipping");
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
         return;
-    }
+    };
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-    let (submeshes, instances) = load_mzb_placed(391, None).expect("load DAT 391");
+    let (submeshes, instances) = load_mzb_placed(&root, 391, None).expect("load DAT 391");
     let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,
@@ -87,12 +86,11 @@ fn mh_391_spawn_column_grounds_to_interior_floor_not_roof() {
 /// Skips without a retail DAT install.
 #[test]
 fn mh_391_doorway_is_a_gap_in_mzb_collision() {
-    if std::env::var("FFXI_DAT_PATH").is_err() {
-        eprintln!("FFXI_DAT_PATH unset; skipping");
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
         return;
-    }
+    };
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-    let (submeshes, instances) = load_mzb_placed(391, None).expect("load DAT 391");
+    let (submeshes, instances) = load_mzb_placed(&root, 391, None).expect("load DAT 391");
     let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,

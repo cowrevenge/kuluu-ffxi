@@ -630,7 +630,7 @@ mod tests {
     }
 
     fn install() -> Option<DatRoot> {
-        DatRoot::from_env_or_default().ok()
+        ffxi_dat::archive::open_test_install()
     }
 
     /// Run real event bytecode from the install through the VM + dialog DAT and

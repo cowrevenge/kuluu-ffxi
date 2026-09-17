@@ -1029,10 +1029,11 @@ pub struct MzbInstance {
 }
 
 pub fn load_mzb_placed(
+    root: &DatRoot,
     file_id: u32,
     chunk_idx: Option<usize>,
 ) -> Result<(Vec<MzbSubMesh>, Vec<MzbInstance>), String> {
-    let (header, plain, _chunks) = load_decrypted(file_id, chunk_idx)?;
+    let (header, plain, _chunks) = load_decrypted(root, file_id, chunk_idx)?;
 
     // A zero CollisionDataOffset is a legal state, not a degraded parse: the
     // voyage scenery has none; the passenger hull occupies a separate MZB.
@@ -1184,15 +1185,14 @@ fn bake_submesh(m: &mzb::MzbMesh) -> MzbSubMesh {
 }
 
 fn load_decrypted(
+    root: &DatRoot,
     file_id: u32,
     chunk_idx: Option<usize>,
 ) -> Result<(mzb::MzbHeader, Vec<u8>, ()), String> {
-    let root =
-        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 
@@ -1555,24 +1555,24 @@ pub(crate) fn water_generator_offsets(bytes: &[u8]) -> std::collections::HashSet
 }
 
 pub fn build_zone_mmb_spawns(
+    root: &DatRoot,
     file_id: u32,
     chunk_idx: Option<usize>,
     active_sub_area: Option<u32>,
 ) -> Result<ZoneMmbBuild, String> {
-    let root =
-        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let voyage_layout = ffxi_dat::vehicle::voyage_layout(&bytes);
     if chunk_idx.is_none() {
         if let Some(layout) = voyage_layout {
-            let mut ship = build_zone_mmb_spawns(file_id, Some(layout.ship_mzb), active_sub_area)?;
+            let mut ship =
+                build_zone_mmb_spawns(root, file_id, Some(layout.ship_mzb), active_sub_area)?;
             let mut scenery =
-                build_zone_mmb_spawns(file_id, Some(layout.scenery_mzb), active_sub_area)?;
+                build_zone_mmb_spawns(root, file_id, Some(layout.scenery_mzb), active_sub_area)?;
             for spawn in &mut scenery.spawns {
                 spawn.voyage_backdrop = true;
                 spawn.lod = None;
@@ -2224,13 +2224,11 @@ pub struct ZoneSubArea {
 ///
 /// A declared sub-area whose interior DAT is missing stays in the list with
 /// `resolves == false` rather than being dropped, so a gap reads as a gap.
-pub fn zone_sub_areas(file_id: u32) -> Result<Vec<ZoneSubArea>, String> {
-    let root =
-        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
+pub fn zone_sub_areas(root: &DatRoot, file_id: u32) -> Result<Vec<ZoneSubArea>, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(sub_area::from_dat(&bytes)
         .map_err(|e| format!("sub-area parse of file {file_id}: {e}"))?
@@ -2242,13 +2240,15 @@ pub fn zone_sub_areas(file_id: u32) -> Result<Vec<ZoneSubArea>, String> {
         .collect())
 }
 
-pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh>, String> {
-    let root =
-        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
+pub fn load_mzb(
+    root: &DatRoot,
+    file_id: u32,
+    chunk_idx: Option<usize>,
+) -> Result<Vec<MzbSubMesh>, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 
@@ -2304,7 +2304,11 @@ pub fn kick_load_mzb_tasks(
     mut in_flight: ResMut<LoadMzbInFlight>,
     mut cache: ResMut<ZoneGeomCache>,
     mut activation: ResMut<crate::sub_area_activation::SubAreaActivation>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
     for req in events.read() {
         if req.slot as usize >= ZONE_BLOCK_SLOTS {
@@ -2344,8 +2348,9 @@ pub fn kick_load_mzb_tasks(
         let chunk_idx = req.chunk_idx;
         let active_sub_area = req.active_sub_area;
         let pool = AsyncComputeTaskPool::get();
+        let root = root.clone();
         let task = pool.spawn(async move {
-            let (submeshes, instances) = match load_mzb_placed(file_id, chunk_idx) {
+            let (submeshes, instances) = match load_mzb_placed(&root, file_id, chunk_idx) {
                 Ok(s) => s,
                 Err(msg) => {
                     return LoadedZoneGeom {
@@ -2355,7 +2360,7 @@ pub fn kick_load_mzb_tasks(
                     };
                 }
             };
-            let mmb_spawns = build_zone_mmb_spawns(file_id, chunk_idx, active_sub_area);
+            let mmb_spawns = build_zone_mmb_spawns(&root, file_id, chunk_idx, active_sub_area);
             LoadedZoneGeom {
                 submeshes: Arc::new(submeshes),
                 instances: Arc::new(instances),
@@ -4392,13 +4397,10 @@ mod real_dat_sub_area_tests {
     const SSANDY_ZONE_DAT: u32 = 330;
 
     fn build(active_sub_area: Option<u32>) -> Option<ZoneMmbBuild> {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no FFXI install");
-            return None;
-        }
+        let root = ffxi_dat::archive::open_test_install()?;
         AsyncComputeTaskPool::get_or_init(Default::default);
         Some(
-            build_zone_mmb_spawns(SSANDY_ZONE_DAT, None, active_sub_area)
+            build_zone_mmb_spawns(&root, SSANDY_ZONE_DAT, None, active_sub_area)
                 .expect("Southern San d'Oria builds"),
         )
     }

@@ -1,7 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use bevy::prelude::*;
-use ffxi_dat::{chunk::walk, generator::Generator, kind::ChunkKind, mzb, DatRoot};
+use ffxi_dat::{chunk::walk, generator::Generator, kind::ChunkKind, mzb};
 use kuluu_snapshot::Vec3 as WireVec3;
 
 use crate::components::InGameEntity;
@@ -322,7 +322,11 @@ fn load_zone_point_lights(
     scene_state: Res<SceneState>,
     activation: Option<Res<crate::sub_area_activation::SubAreaActivation>>,
     mut store: ResMut<ZonePointLights>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     let interior = activation.as_deref().and_then(|a| a.active());
     let interior_file = current.and(interior.map(ffxi_dat::sub_area::sub_area_file_id));
@@ -330,13 +334,10 @@ fn load_zone_point_lights(
         return;
     }
     store.refresh(current, interior, |file_id| {
-        let Ok(root) = DatRoot::from_env_or_default() else {
-            return Vec::new();
-        };
         let Ok(loc) = root.resolve(file_id) else {
             return Vec::new();
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(root)) else {
             return Vec::new();
         };
         let lights = point_lights_from_dat(&bytes);
@@ -561,9 +562,15 @@ mod tests {
 
     #[test]
     fn unchanged_sources_do_not_mark_lights_changed() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
         let mut app = App::new();
         app.init_resource::<SceneState>()
             .init_resource::<ZonePointLights>()
+            .insert_resource(crate::dat_root::SharedDatRoot(Some(std::sync::Arc::new(
+                root,
+            ))))
             .add_systems(Update, load_zone_point_lights);
         app.update();
         app.world_mut().clear_trackers();
@@ -575,7 +582,7 @@ mod tests {
     fn selbina_ferry_dat_supplies_interior_lamps() {
         const SELBINA_FILE: u32 = 348;
         const FERRY_SUB_AREA: u32 = 485;
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let read =

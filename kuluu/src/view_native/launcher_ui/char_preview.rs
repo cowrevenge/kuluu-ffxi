@@ -182,6 +182,7 @@ pub(super) fn refresh_preview_on_cursor_change(
     cursor: Res<CharCursor>,
     mut previewed: ResMut<PreviewedSlot>,
     mut pending: ResMut<PendingPreview>,
+    dat_root: Res<crate::view_native::DatRootRes>,
     q_parent: Query<(Entity, Option<&Children>), With<CharPreviewParent>>,
 ) {
     let active = active_slot(&chars, &cursor);
@@ -199,8 +200,8 @@ pub(super) fn refresh_preview_on_cursor_change(
         }
     }
 
-    match active {
-        Some(slot) if slot.race != 0 => {
+    match (active, dat_root.0.clone()) {
+        (Some(slot), Some(root)) if slot.race != 0 => {
             let race = slot.race;
 
             let equipment = pc_equipment_file_ids(slot);
@@ -210,7 +211,7 @@ pub(super) fn refresh_preview_on_cursor_change(
             let char_id = slot.char_id;
 
             let task = AsyncComputeTaskPool::get()
-                .spawn(async move { load_pc(race, false, &equipment, body, None, None) });
+                .spawn(async move { load_pc(&root, race, false, &equipment, body, None, None) });
             pending.task = Some((char_id, task));
         }
         _ => pending.task = None,
@@ -348,6 +349,7 @@ const NAKED_LEGS: u16 = 4 << SLOT_PREFIX_SHIFT;
 const NAKED_FEET: u16 = 5 << SLOT_PREFIX_SHIFT;
 
 pub(super) fn spawn_preview_pc(
+    root: &ffxi_dat::DatRoot,
     commands: &mut Commands,
     parent: Entity,
     race: u8,
@@ -360,6 +362,7 @@ pub(super) fn spawn_preview_pc(
         return 0;
     }
     spawn_equipped(
+        root,
         commands,
         meshes,
         materials,

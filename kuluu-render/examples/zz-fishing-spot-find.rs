@@ -24,7 +24,9 @@ fn main() {
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let file_id = ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(zone), None)
         .expect("zone -> dat file id");
-    let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load mzb");
+    let root = ffxi_dat::DatRoot::from_env_or_default()
+        .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)");
+    let (submeshes, instances) = load_mzb_placed(&root, file_id, None).expect("load mzb");
     let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,

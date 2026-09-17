@@ -107,12 +107,41 @@ run_style() {
     echo "checks:   domain layer. Move Enhanced behavior into a kuluu-* crate behind an opt-in." >&2
     return 1
   fi
+
+  # One install per process: the shared Arc<DatRoot> that insert_dat_roots
+  # wires is the only root library code reads. A fresh
+  # DatRoot::from_env_or_default() therefore belongs to a process entry point
+  # (main.rs, src/bin, examples), tests go through archive::open_test_install,
+  # and FFXI_DAT_PATH is read in ffxi_dat::install alone. The launcher_ui
+  # sites allowed here re-seat the root from the settings screen and leave
+  # with the relaunch-to-switch change.
+  local root_open_allow='^(ffxi-dat/src/archive\.rs|[^/]+/src/main\.rs|[^/]+/src/bin/|[^/]+/examples/|kuluu/src/view_native/launcher_ui/(dat_setup|settings|mod|client_era_check)\.rs)'
+  local hits
+  hits=$(git ls-files -z -- '*.rs' | xargs -0 grep -In 'from_env_or_default()' \
+    | grep -Ev "$root_open_allow" || true)
+  if [[ -n "$hits" ]]; then
+    echo "checks: style — DatRoot::from_env_or_default() outside a process entry point:" >&2
+    echo "$hits" >&2
+    echo "checks:   library code takes the wired root (kuluu_render::dat_root::SharedDatRoot);" >&2
+    echo "checks:   tests use ffxi_dat::archive::open_test_install()" >&2
+    return 1
+  fi
+  local env_read_allow='^(ffxi-dat/src/install\.rs|ffxi-dat/src/archive\.rs|kuluu-session/tests/install_conformance\.rs)'
+  hits=$(git ls-files -z -- '*.rs' | xargs -0 grep -InE 'env::var(_os)?\(\s*("FFXI_DAT_PATH"|(ffxi_dat::)?(archive::)?DAT_PATH_ENV)' \
+    | grep -Ev "$env_read_allow" || true)
+  if [[ -n "$hits" ]]; then
+    echo "checks: style — FFXI_DAT_PATH read outside ffxi_dat::install:" >&2
+    echo "$hits" >&2
+    echo "checks:   resolve through ffxi_dat::install::resolve() or take the wired root" >&2
+    return 1
+  fi
 }
 
 run_harness() {
   # Invariants of the `.agents/` canonical + harness-adapter split
   # (.agents/AGENTS.md holds the mechanism→wiring table this enforces).
-  # Pure shell, no cargo — runs first in pre-push because it costs ~nothing.
+  # Pure shell, no cargo — runs first in pre-push. Only the hook attribution
+  # suite at the end costs real time, and that is a couple of seconds.
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"

@@ -1969,9 +1969,9 @@ pub fn reload_main_dll_for_root(
     main_dll_for_root(root)
 }
 
-/// The install `DatRoot::from_env_or_default` would open
-/// (`ffxi_dat::install::resolve`), without opening it: callers that only need
-/// the dll must not pay the VTABLE/FTABLE parse a `DatRoot` costs.
+/// The install [`ffxi_dat::install::resolve`] names, without opening it:
+/// callers that only need the dll must not pay the VTABLE/FTABLE parse a
+/// `DatRoot` costs.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install_root_from_env() -> Option<std::path::PathBuf> {
     ffxi_dat::install::resolve().ok().map(|r| r.path)
@@ -2755,6 +2755,7 @@ pub fn dispatch_cast_routine_started(
     mut spell_suffix: ResMut<crate::ffxi_actor_render::SpellSuffixCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
+    actor_root: Res<crate::ffxi_actor_render::ActorDatRoot>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -2794,7 +2795,7 @@ pub fn dispatch_cast_routine_started(
         let routine = match magic {
             Some(m) => ffxi_dat::datid::DatId::from_name(&m.id),
             None => {
-                let suffix = spell_suffix.suffix(action_id);
+                let suffix = spell_suffix.suffix(actor_root.0.as_deref(), action_id);
                 // Category 8 never reads the animation field; None keeps the call honest.
                 match crate::ffxi_actor_render::action_routine(action_kind, action_id, suffix, None)
                 {
@@ -5554,8 +5555,8 @@ mod tests {
             "retail authors Rarab's flinch at 24 frames"
         );
 
-        let loaded =
-            crate::ffxi_actor_render::load_npc(RARAB_FILE).expect("Rarab loads from the install");
+        let loaded = crate::ffxi_actor_render::load_npc(&root, RARAB_FILE)
+            .expect("Rarab loads from the install");
 
         for (kind, want_prefix) in [
             (kuluu_snapshot::EntityKind::Mob, "dfi"),
@@ -5892,16 +5893,11 @@ mod tests {
         let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
-        let opened = ffxi_dat::DatRoot::from_env_or_default().ok();
-        let Some(opened) = opened else {
-            return;
-        };
         assert_eq!(
             install_root_from_env().as_deref(),
-            Some(opened.root()),
-            "the env-resolved root must be the one DatRoot::from_env_or_default opens"
+            Some(root.root()),
+            "the env-resolved root must be the one the install registry names"
         );
-        let _ = root;
     }
 
     // The tables `dispatch_action_started` (weaponskill file ids) and `dispatch_entity_emoted`

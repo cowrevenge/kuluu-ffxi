@@ -59,8 +59,10 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
 
-    let mount = load_mount_race(race).expect("load_mount_race");
-    let rider = load_pc(rider_race, true, &[], None, None, None).expect("load_pc");
+    let root = ffxi_dat::DatRoot::from_env_or_default()
+        .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)");
+    let mount = load_mount_race(&root, race).expect("load_mount_race");
+    let rider = load_pc(&root, rider_race, true, &[], None, None, None).expect("load_pc");
 
     println!("--- mount parts: vertex counts per bound joint ---");
     part_joint_histogram(&mount);

@@ -22,7 +22,7 @@ const REFERENCE_FLAG: u32 = 0x8000;
 const REFERENCE_INDEX_MASK: u32 = 0x7FFF;
 
 fn install() -> Option<DatRoot> {
-    DatRoot::from_env_or_default().ok()
+    ffxi_dat::archive::open_test_install()
 }
 
 #[test]

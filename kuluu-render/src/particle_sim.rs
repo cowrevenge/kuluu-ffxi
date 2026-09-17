@@ -3455,7 +3455,7 @@ mod tests {
     }
 
     fn zone_bytes(file_id: u32) -> Option<Vec<u8>> {
-        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let location = root.resolve(file_id).ok()?;
         std::fs::read(location.path_under(&root)).ok()
     }

@@ -362,13 +362,11 @@ pub fn door_dirs(bytes: &[u8]) -> HashMap<u32, DoorDir> {
     out
 }
 
-fn load_door_dirs(file_id: u32) -> DoorZoneData {
-    let bytes = DatRoot::from_env_or_default()
+fn load_door_dirs(root: &DatRoot, file_id: u32) -> DoorZoneData {
+    let bytes = root
+        .resolve(file_id)
         .ok()
-        .and_then(|root| {
-            let loc = root.resolve(file_id).ok()?;
-            std::fs::read(loc.path_under(&root)).ok()
-        })
+        .and_then(|loc| std::fs::read(loc.path_under(root)).ok())
         .unwrap_or_default();
     let parsed = ZoneDoors::from_dat(&bytes);
     DoorZoneData {
@@ -377,14 +375,23 @@ fn load_door_dirs(file_id: u32) -> DoorZoneData {
     }
 }
 
-pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneDoors>) {
+pub fn sync_zone_door_dirs(
+    scene_state: Res<SceneState>,
+    mut doors: ResMut<ZoneDoors>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
+) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let current = effective_zone_file_id(&scene_state.snapshot);
     if current != doors.source_file_id {
         doors.source_file_id = current;
         doors.clear_zone_state();
         if let Some(file_id) = current {
-            doors.load =
-                Some(AsyncComputeTaskPool::get().spawn(async move { load_door_dirs(file_id) }));
+            let root = root.clone();
+            doors.load = Some(
+                AsyncComputeTaskPool::get().spawn(async move { load_door_dirs(&root, file_id) }),
+            );
         }
     }
 
@@ -1147,12 +1154,11 @@ mod tests {
     /// generator water sheets — the other `ZoneMmbSpawn` constructor — may not.
     #[test]
     fn real_dat_zone_build_tags_exactly_the_group_members() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no FFXI install");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         AsyncComputeTaskPool::get_or_init(Default::default);
-        let build = crate::dat_mzb::build_zone_mmb_spawns(SSANDY_ZONE_DAT, None, None)
+        let build = crate::dat_mzb::build_zone_mmb_spawns(&root, SSANDY_ZONE_DAT, None, None)
             .expect("Southern San d'Oria builds");
 
         let stables = build

@@ -4,7 +4,6 @@ use bevy::prelude::*;
 use ffxi_dat::particle_gen::{AttachType, ParticleGeneratorDef};
 use ffxi_dat::weather::WeatherTypeId;
 use ffxi_dat::ChunkKind;
-use ffxi_dat::DatRoot;
 
 use crate::particle_sim::{
     spawn_zone_particle_generator, CelestialClock, ParticleSimulator, ZoneGeneratorOptions,
@@ -156,10 +155,14 @@ fn sync_celestial_particles(
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     if !dat_celestials_enabled() {
         return;
     }
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let file_id = effective_zone_file_id(&scene_state.snapshot);
     let weather = zone_weather
         .active_weather_type()
@@ -176,14 +179,11 @@ fn sync_celestial_particles(
     }
     dat_celestials.active = false;
 
-    let Some(bytes) = file_id
-        .zip(DatRoot::from_env_or_default().ok())
-        .and_then(|(id, root)| {
-            root.resolve(id)
-                .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
-        })
-    else {
+    let Some(bytes) = file_id.and_then(|id| {
+        root.resolve(id)
+            .ok()
+            .and_then(|loc| std::fs::read(loc.path_under(root)).ok())
+    }) else {
         return;
     };
 

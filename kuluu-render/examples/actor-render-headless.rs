@@ -345,9 +345,16 @@ fn spawn_subject(
         return;
     }
 
+    let root = match ffxi_dat::DatRoot::from_env_or_default() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("no FFXI install: {e}");
+            return;
+        }
+    };
     let loaded = match &params.subject {
-        Subject::Npc(id) => load_npc(*id),
-        Subject::Pc(race, equip) => load_pc(*race, false, equip, None, None, None),
+        Subject::Npc(id) => load_npc(&root, *id),
+        Subject::Pc(race, equip) => load_pc(&root, *race, false, equip, None, None, None),
     };
     match loaded {
         Ok(loaded) => {
@@ -408,14 +415,21 @@ fn spawn_mounted_pair(
     };
     let chocobo = CHOCOBO_RACES.contains(&mount_race);
 
-    let mount = match load_mount_race(mount_race) {
+    let root = match ffxi_dat::DatRoot::from_env_or_default() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("no FFXI install: {e}");
+            return;
+        }
+    };
+    let mount = match load_mount_race(&root, mount_race) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("load_mount_race({mount_race}) failed: {e}");
             return;
         }
     };
-    let rider = match load_pc(rider_race, true, equip, None, None, None) {
+    let rider = match load_pc(&root, rider_race, true, equip, None, None, None) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("load_pc({rider_race}, mounted) failed: {e}");

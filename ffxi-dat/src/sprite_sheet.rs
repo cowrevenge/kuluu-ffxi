@@ -624,10 +624,7 @@ mod tests {
     // West Ronfaure's environment DAT, or None on a machine without the retail install.
     fn west_ronfaure_env_dat() -> Option<Vec<u8>> {
         const WEST_RONFAURE_ENV_DAT: u32 = 201;
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
-            eprintln!("skipping: no DAT root");
-            return None;
-        };
+        let root = crate::archive::open_test_install()?;
         let Ok(loc) = root.resolve(WEST_RONFAURE_ENV_DAT) else {
             eprintln!("skipping: file 201 unresolvable");
             return None;

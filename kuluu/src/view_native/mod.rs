@@ -211,8 +211,7 @@ pub(crate) struct RelayListen(
 #[derive(Resource, Default, Clone)]
 pub(crate) struct AgentListen(pub Option<String>);
 
-#[derive(Resource, Default, Clone)]
-pub(crate) struct DatRootRes(pub Option<std::sync::Arc<ffxi_dat::DatRoot>>);
+pub(crate) use kuluu_render::dat_root::SharedDatRoot as DatRootRes;
 
 /// Lets `insert_dat_roots` serve both the startup path (an `App` builder) and
 /// the launcher reload path (`Commands`), so the DAT-root list exists once.

@@ -23,7 +23,7 @@ const MODEL_ID_SPACE: u16 = 0x1000;
 const SLOT_ID_SHIFT: u16 = 12;
 
 fn install() -> Option<(DatRoot, MainDll)> {
-    let root = DatRoot::from_env_or_default().ok()?;
+    let root = ffxi_dat::archive::open_test_install()?;
     let dll = MainDll::load(root.root()).ok()?;
     Some((root, dll))
 }

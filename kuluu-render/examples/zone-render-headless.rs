@@ -214,6 +214,10 @@ fn main() {
     }
     let zone_particles = p.zone_particles;
     let enhanced_lights = p.enhanced_lights;
+    let root = std::sync::Arc::new(
+        ffxi_dat::DatRoot::from_env_or_default()
+            .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)"),
+    );
     let mut app = App::new();
     app.insert_resource(VanaClock::anchored_at_hour(p.hour))
         .insert_resource(p)
@@ -248,7 +252,11 @@ fn main() {
         .init_resource::<MmbLoadQueue>()
         .init_resource::<MmbParseCache>()
         .init_resource::<MmbTexPools>()
-        .init_resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+        .insert_resource(kuluu_render::ffxi_actor_render::ActorDatRoot(Some(
+            root.clone(),
+        )))
+        .insert_resource(kuluu_render::dat_root::SharedDatRoot(Some(root.clone())))
+        .insert_resource(kuluu_render::moon_material::MoonDatRoot(Some(root.clone())))
         .init_resource::<TrackedEntities>()
         .init_resource::<SceneState>()
         .init_resource::<ZoneWeather>()
@@ -369,6 +377,7 @@ fn main() {
     }
     app.run();
 }
+#[allow(clippy::too_many_arguments)]
 fn spawn_npcs(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -377,12 +386,16 @@ fn spawn_npcs(
     mut registry: ResMut<kuluu_render::skinned_ffxi_material::FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     p: Res<P>,
+    dat_root: Res<kuluu_render::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.0.clone() else {
+        return;
+    };
     for npc in &p.npcs {
         let loaded = match npc.subject {
-            ActorSubject::Npc(id) => kuluu_render::ffxi_actor_render::load_npc(id),
+            ActorSubject::Npc(id) => kuluu_render::ffxi_actor_render::load_npc(&root, id),
             ActorSubject::Pc(race) => {
-                kuluu_render::ffxi_actor_render::load_pc(race, false, &[], None, None, None)
+                kuluu_render::ffxi_actor_render::load_pc(&root, race, false, &[], None, None, None)
             }
         };
         let loaded = match loaded {
@@ -656,6 +669,7 @@ fn spawn_celestials(
 fn load_weather(
     mut c: Commands,
     p: Res<P>,
+    dat_root: Res<kuluu_render::dat_root::SharedDatRoot>,
     mut zone_weather: ResMut<ZoneWeather>,
     mut scene_state: ResMut<SceneState>,
 ) {
@@ -665,13 +679,9 @@ fn load_weather(
     scene_state.snapshot.zone_id =
         (0u16..=0x1FF).find(|z| ffxi_dat::zone_dat::zone_id_to_mzb_file_id(*z) == Some(p.file_id));
 
-    let Ok(root) = ffxi_dat::DatRoot::from_env_or_default().map(std::sync::Arc::new) else {
+    let Some(root) = dat_root.0.clone() else {
         return;
     };
-    // The client hands this to every DAT consumer through view_native's insert_dat_roots;
-    // without it load_moon_sprite_sheet and load_lens_flare_sheet bail on the first line and
-    // the harness silently renders the no-sprite fallbacks instead of the retail assets.
-    c.insert_resource(kuluu_render::moon_material::MoonDatRoot(Some(root.clone())));
     // The client loads this off-thread (scheduler_runtime load_global_effect_dir); the harness
     // reads it inline so zone generators whose mesh ships in syst/effe/ resolve.
     if let Some(global) = root

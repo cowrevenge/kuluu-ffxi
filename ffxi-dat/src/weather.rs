@@ -866,7 +866,7 @@ mod tests {
     // ring 7 at exactly 1.0, with no violations.
     #[test]
     fn real_dat_skybox_altitudes_span_zero_to_one_monotonically() {
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let mut records = 0u32;
@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     fn ambient_zone_dat(file_id: u32) -> Option<ZoneWeatherSets> {
-        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let root = crate::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(collect_zone_weather_sets(&bytes))
@@ -1243,8 +1243,7 @@ mod tests {
         const MIN_INDOOR: usize = 700;
         const MAX_BEDS_PER_DIR: usize = 4;
 
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
-            eprintln!("skipping: no FFXI install");
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let mut seen = std::collections::HashSet::new();

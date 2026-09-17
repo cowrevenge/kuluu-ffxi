@@ -81,65 +81,65 @@ static DIRECTIONAL_ANIMS: OnceLock<Mutex<HashMap<(u32, [u8; 3]), Option<Arc<Mo2A
 const BATTLE_IDLE_PREFIX: &[u8; 3] = b"btl";
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn battle_idle_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
+pub fn battle_idle_anim_for_skel(root: &DatRoot, skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let motion_dat = motion_dat_for_skel(skel_file_id)?;
     let map = BATTLE_IDLE_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&motion_dat) {
         return entry.clone();
     }
-    let loaded = load_battle_idle(motion_dat).map(Arc::new);
+    let loaded = load_battle_idle(root, motion_dat).map(Arc::new);
     guard.insert(motion_dat, loaded.clone());
     loaded
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn load_battle_idle(motion_dat_id: u32) -> Option<Mo2Animation> {
-    load_anim_with_prefix(motion_dat_id, BATTLE_IDLE_PREFIX)
+fn load_battle_idle(root: &DatRoot, motion_dat_id: u32) -> Option<Mo2Animation> {
+    load_anim_with_prefix(root, motion_dat_id, BATTLE_IDLE_PREFIX)
 }
 
-pub fn run_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
+pub fn run_anim_for_skel(root: &DatRoot, skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let map = RUN_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&skel_file_id) {
         return entry.clone();
     }
-    let loaded = load_anim_with_prefix(skel_file_id, b"run").map(Arc::new);
+    let loaded = load_anim_with_prefix(root, skel_file_id, b"run").map(Arc::new);
     guard.insert(skel_file_id, loaded.clone());
     loaded
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn combat_run_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
+pub fn combat_run_anim_for_skel(root: &DatRoot, skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let motion_dat = motion_dat_for_skel(skel_file_id)?;
     let map = COMBAT_RUN_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&motion_dat) {
         return entry.clone();
     }
-    let loaded = load_anim_with_prefix(motion_dat, b"run").map(Arc::new);
+    let loaded = load_anim_with_prefix(root, motion_dat, b"run").map(Arc::new);
     guard.insert(motion_dat, loaded.clone());
     loaded
 }
 
-pub fn sit_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
+pub fn sit_anim_for_skel(root: &DatRoot, skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let map = SIT_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&skel_file_id) {
         return entry.clone();
     }
-    let loaded = load_anim_with_prefix(skel_file_id, b"sit").map(Arc::new);
+    let loaded = load_anim_with_prefix(root, skel_file_id, b"sit").map(Arc::new);
     guard.insert(skel_file_id, loaded.clone());
     loaded
 }
 
-pub fn heal_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
+pub fn heal_anim_for_skel(root: &DatRoot, skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let map = HEAL_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     if let Some(entry) = guard.get(&skel_file_id) {
         return entry.clone();
     }
-    let loaded = load_anim_with_prefix(skel_file_id, b"hea").map(Arc::new);
+    let loaded = load_anim_with_prefix(root, skel_file_id, b"hea").map(Arc::new);
     guard.insert(skel_file_id, loaded.clone());
     loaded
 }
@@ -303,22 +303,29 @@ impl SelfMoveIntent {
     }
 }
 
-pub fn directional_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
+pub fn directional_anim_for_skel(
+    root: &DatRoot,
+    skel_file_id: u32,
+    prefix: &[u8; 3],
+) -> Option<Arc<Mo2Animation>> {
     let map = DIRECTIONAL_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().ok()?;
     let key = (skel_file_id, *prefix);
     if let Some(entry) = guard.get(&key) {
         return entry.clone();
     }
-    let loaded = load_anim_with_prefix(skel_file_id, prefix).map(Arc::new);
+    let loaded = load_anim_with_prefix(root, skel_file_id, prefix).map(Arc::new);
     guard.insert(key, loaded.clone());
     loaded
 }
 
-pub fn load_anim_with_prefix(file_id: u32, prefix: &[u8; 3]) -> Option<Mo2Animation> {
-    let root = DatRoot::from_env_or_default().ok()?;
+pub fn load_anim_with_prefix(
+    root: &DatRoot,
+    file_id: u32,
+    prefix: &[u8; 3],
+) -> Option<Mo2Animation> {
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(&root)).ok()?;
+    let bytes = fs::read(loc.path_under(root)).ok()?;
     for chunk in walk(&bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(chunk.kind) != Some(ChunkKind::AnimMo2) {
             continue;
@@ -1449,7 +1456,10 @@ impl ModelViewerClipOverride {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn enumerate_clips_for_skel(skel_file_id: u32) -> Vec<(String, Arc<Mo2Animation>)> {
+pub fn enumerate_clips_for_skel(
+    root: &DatRoot,
+    skel_file_id: u32,
+) -> Vec<(String, Arc<Mo2Animation>)> {
     let mut out = Vec::new();
     let mut sources: Vec<u32> = vec![skel_file_id];
     if let Some(motion) = motion_dat_for_skel(skel_file_id) {
@@ -1457,7 +1467,7 @@ pub fn enumerate_clips_for_skel(skel_file_id: u32) -> Vec<(String, Arc<Mo2Animat
     }
     let mut seen = std::collections::HashSet::<String>::new();
     for file_id in sources {
-        for_each_anim_chunk_in_dat(file_id, |name, anim| {
+        for_each_anim_chunk_in_dat(root, file_id, |name, anim| {
             if seen.insert(name.clone()) {
                 out.push((name, Arc::new(anim)));
             }
@@ -1468,23 +1478,28 @@ pub fn enumerate_clips_for_skel(skel_file_id: u32) -> Vec<(String, Arc<Mo2Animat
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn override_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
-    if let Some(a) = load_anim_with_prefix(skel_file_id, prefix) {
+pub fn override_anim_for_skel(
+    root: &DatRoot,
+    skel_file_id: u32,
+    prefix: &[u8; 3],
+) -> Option<Arc<Mo2Animation>> {
+    if let Some(a) = load_anim_with_prefix(root, skel_file_id, prefix) {
         return Some(Arc::new(a));
     }
     let motion = motion_dat_for_skel(skel_file_id)?;
-    load_anim_with_prefix(motion, prefix).map(Arc::new)
+    load_anim_with_prefix(root, motion, prefix).map(Arc::new)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn for_each_anim_chunk_in_dat(file_id: u32, mut f: impl FnMut(String, Mo2Animation)) {
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
+fn for_each_anim_chunk_in_dat(
+    root: &DatRoot,
+    file_id: u32,
+    mut f: impl FnMut(String, Mo2Animation),
+) {
     let Ok(loc) = root.resolve(file_id) else {
         return;
     };
-    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
+    let Ok(bytes) = fs::read(loc.path_under(root)) else {
         return;
     };
     for chunk in walk(&bytes).filter_map(Result::ok) {
@@ -1580,12 +1595,12 @@ mod tests {
 
     #[test]
     fn battle_idle_resolves_for_every_pc_race_when_dats_available() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         for skel in [7072u32, 10248, 13424, 16600, 19776, 23176, 26352] {
-            let anim = battle_idle_anim_for_skel(skel).expect("battle-idle MO2 missing for skel");
+            let anim =
+                battle_idle_anim_for_skel(&root, skel).expect("battle-idle MO2 missing for skel");
             assert!(
                 anim.frames > 0,
                 "skel {skel}: btl MO2 has zero frames — parse drift?"
@@ -1595,12 +1610,11 @@ mod tests {
 
     #[test]
     fn run_anim_resolves_for_every_pc_race_when_dats_available() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         for skel in [7072u32, 10248, 13424, 16600, 19776, 23176, 26352] {
-            let anim = run_anim_for_skel(skel).expect("casual run MO2 missing for skel");
+            let anim = run_anim_for_skel(&root, skel).expect("casual run MO2 missing for skel");
             assert!(anim.frames > 0, "skel {skel}: run MO2 has zero frames");
         }
     }
@@ -2943,13 +2957,12 @@ mod tests {
 
     #[test]
     fn combat_run_resolves_with_higher_bone_count_than_casual() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         for skel in [7072u32, 10248, 13424, 16600, 19776, 23176, 26352] {
-            let casual = run_anim_for_skel(skel).expect("casual run");
-            let combat = combat_run_anim_for_skel(skel).expect("combat run");
+            let casual = run_anim_for_skel(&root, skel).expect("casual run");
+            let combat = combat_run_anim_for_skel(&root, skel).expect("combat run");
             assert!(
                 combat.per_bone.len() >= casual.per_bone.len(),
                 "skel {skel}: combat run ({}) should have ≥ bones than casual ({})",

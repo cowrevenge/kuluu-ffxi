@@ -24,5 +24,12 @@ fn main() {
     let mesh = parse(2, "mesh_file_id") as u32;
     let chunk = parse(3, "chunk_idx") as usize;
 
-    kuluu_render::dat_vos2::probe_skinned_actor(skel, mesh, chunk);
+    let root = match ffxi_dat::DatRoot::from_env_or_default() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("no FFXI install: {e}");
+            std::process::exit(2);
+        }
+    };
+    kuluu_render::dat_vos2::probe_skinned_actor(&root, skel, mesh, chunk);
 }

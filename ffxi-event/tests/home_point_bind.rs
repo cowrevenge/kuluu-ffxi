@@ -7,7 +7,6 @@
 
 use ffxi_dat::dmsg::StringDat;
 use ffxi_dat::event_dat::EventDat;
-use ffxi_dat::DatRoot;
 use ffxi_event::{DialogRunner, DialogStep, EventCue};
 
 const BASTOK_MARKETS: u16 = 235;
@@ -22,7 +21,7 @@ const MENU_ROWS: u32 = 4;
 const MAX_STEPS: usize = 40;
 
 fn load() -> Option<(EventDat, StringDat)> {
-    let root = DatRoot::from_env_or_default().ok()?;
+    let root = ffxi_dat::archive::open_test_install()?;
     let loc = root
         .resolve(ffxi_dat::event_locate::event_dat_file_id(BASTOK_MARKETS))
         .ok()?;

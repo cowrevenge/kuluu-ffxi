@@ -3,12 +3,9 @@ use kuluu_render::dat_mzb::{build_collision_geometry, load_mzb_placed, MAX_GROUN
 
 /// Lower Jeuno (DAT 345). Skips without a retail DAT install.
 fn jeuno() -> Option<kuluu_render::dat_mzb::MzbCollisionBlock> {
-    if std::env::var("FFXI_DAT_PATH").is_err() {
-        eprintln!("FFXI_DAT_PATH unset; skipping");
-        return None;
-    }
+    let root = ffxi_dat::archive::open_test_install()?;
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-    let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
+    let (submeshes, instances) = load_mzb_placed(&root, 345, None).expect("load DAT 345");
     Some(build_collision_geometry(&submeshes, &instances, Some(345)))
 }
 
@@ -112,11 +109,9 @@ fn grounding_is_unaffected_by_the_camera_skip() {
         "nothing to be affected by"
     );
 
-    let mut without = build_collision_geometry(
-        &load_mzb_placed(345, None).unwrap().0,
-        &load_mzb_placed(345, None).unwrap().1,
-        Some(345),
-    );
+    let root = ffxi_dat::archive::open_test_install().expect("install opened above");
+    let placed = load_mzb_placed(&root, 345, None).unwrap();
+    let mut without = build_collision_geometry(&placed.0, &placed.1, Some(345));
     without.camera_skip.clear();
 
     // The Lower Jeuno anchor the BVH test uses, which is also where the

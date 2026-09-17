@@ -331,17 +331,7 @@ pub struct LoadedMmb {
     pub zone_mesh_name: String,
 }
 
-pub fn load_mmb(file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
-    let root =
-        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
-    load_mmb_with_root(&root, file_id, chunk_idx)
-}
-
-pub fn load_mmb_with_root(
-    root: &DatRoot,
-    file_id: u32,
-    chunk_idx: usize,
-) -> Result<LoadedMmb, String> {
+pub fn load_mmb(root: &DatRoot, file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
@@ -958,7 +948,7 @@ pub fn process_load_mmb_requests(
                         pool.spawn(async move {
                             let root =
                                 crate::ffxi_actor_render::resolve_actor_root(root_arc).ok()?;
-                            load_mmb_with_root(&root, file_id, chunk_idx).ok()
+                            load_mmb(&root, file_id, chunk_idx).ok()
                         }),
                     );
                 }

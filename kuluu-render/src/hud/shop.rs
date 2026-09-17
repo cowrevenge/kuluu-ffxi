@@ -1355,7 +1355,11 @@ mod tests {
         s.mode = ShopMode::Sell;
 
         s.focus = ShopFocus::List;
-        assert_eq!(running_total(&s, &snap, None), None, "the list shows the purse");
+        assert_eq!(
+            running_total(&s, &snap, None),
+            None,
+            "the list shows the purse"
+        );
 
         s.enter_confirm();
         assert_eq!(

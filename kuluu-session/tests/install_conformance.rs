@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ffxi_dat::archive::{open_test_install, DAT_PATH_ENV};
+use ffxi_dat::archive::{open_test_install, BASE_ROM_INDEX, DAT_PATH_ENV};
 use ffxi_dat::client_profile::{ItemBlockLayout, KNOWN_CLIENTS};
 use ffxi_dat::dmsg::{EmoteTextDat, StringDat, MARKER_KEY_ITEM};
 use ffxi_dat::event_dat::EventDat;
@@ -24,7 +24,8 @@ use ffxi_dat::zone_dat::{
 use ffxi_dat::{ChunkKind, DatRoot};
 use ffxi_proto::fishing_messages::{kind, offset_text, FISHING_ZONE_OFFSET};
 use ffxi_proto::login::{
-    compare_client_ver_era, lobby_accepts_client_ver, VerLock, LSB_CLIENT_VER, LSB_DEFAULT_VER_LOCK,
+    compare_client_ver_era, expansion_display, lobby_accepts_client_ver, VerLock, LSB_CLIENT_VER,
+    LSB_DEFAULT_VER_LOCK,
 };
 use kuluu_session::event_dialog::{find_fishing_block, DialogSession, MAX_ERA_SKEW};
 
@@ -279,11 +280,6 @@ const MULTI_CLAIM_PINS: &[(&str, usize)] = &[("horizonxi-2023", 72), ("retail-20
 /// The per-ROM table pair as the install lays it out (`VTABLE.DAT`/`FTABLE.DAT`
 /// for the base ROM, `ROMn/VTABLEn.DAT` otherwise), read independently of the
 /// merge so the merge has something to be checked against.
-/// The VTABLE marker byte of the base ROM; an expansion's marker is its ROMn
-/// index (research/XIClient/src/XIClient/source/System/FileIO/FileIOVirtualFileSystem.cpp
-/// LoadFileTables).
-const BASE_ROM_INDEX: u8 = 1;
-
 fn app_vtable(root: &DatRoot, rom_dir: &str) -> (u8, VTable) {
     let (index, path) = match rom_dir.strip_prefix("ROM") {
         Some("") => (BASE_ROM_INDEX, root.root().join("VTABLE.DAT")),
@@ -555,6 +551,17 @@ const PORT_SAN_DORIA_FISHING_BASE_PINS: &[(&str, u16)] =
 const NOROD_CHAT_ZONES: [u16; 3] = [100, 245, 280];
 const CONFORMANCE_PLAYER_NAME: &str = "Conformance";
 
+/// The shared block's stacked-item line, verbatim up to its first parameter.
+/// LSB sends it as `ITEM_OBTAINED + 9`
+/// (vendor/server/scripts/globals/npc_util.lua giveItem).
+const ITEM_OBTAINED_PLURAL_PREFIX: &str = "You obtain {Num:1} {Item:0}";
+/// `{Item:0}` + `{Num:1}` as `StringDat::param_slots` reports them.
+const ITEM_AND_COUNT_SLOTS: u32 = (1 << 0) | (1 << 1);
+/// The dispense that exposed the skew: a hatchling shield handing over a stack
+/// of sairui-ran (vendor/server/sql/item_basic.sql).
+const SAIRUI_RAN_ITEM_NO: i32 = 1188;
+const SAIRUI_RAN_DISPENSED: i32 = 8;
+
 #[test]
 fn fishing_blocks_sit_within_the_era_skew_of_the_lsb_pin() {
     let Some(root) = install() else {
@@ -613,11 +620,66 @@ fn fishing_blocks_sit_within_the_era_skew_of_the_lsb_pin() {
             .unwrap_or_else(|| panic!("zone {zone} has no fishing block"));
         let index = usize::from(base) + usize::from(kind::NOROD);
         let line = session
-            .zone_chat_text(zone, index)
+            .zone_chat_text(zone, index as u16, &[])
             .unwrap_or_else(|| panic!("zone {zone} entry {index} is not a chat line"));
         assert!(
             line.starts_with(norod),
             "zone {zone} entry {index}: {line:?} is not the NOROD line"
+        );
+    }
+}
+
+/// The shared system-message block's item-obtained line reads the item id and
+/// the stack count; the lines it sits between read nothing. That contrast is
+/// what lets a zone message name its own line when the server numbers the
+/// dialog table from a different client era, so it has to hold on the real DAT
+/// — the decoder has to see through the `{Auto:N}` terminators and inline tags
+/// these entries carry.
+#[test]
+fn the_item_obtained_line_is_the_only_shape_its_neighbours_are_not() {
+    let Some(root) = install() else {
+        return;
+    };
+    let root = Arc::new(root);
+    for zone in NOROD_CHAT_ZONES {
+        let dat = match parse_string_dat(&root, zone) {
+            Ok(dat) => dat,
+            Err(e) => {
+                eprintln!("shape: zone {zone} skipped: {e}");
+                continue;
+            }
+        };
+        let obtain = (0..dat.len())
+            .find(|&i| {
+                dat.text(i)
+                    .is_some_and(|t| t.starts_with(ITEM_OBTAINED_PLURAL_PREFIX))
+            })
+            .unwrap_or_else(|| panic!("zone {zone} has no {ITEM_OBTAINED_PLURAL_PREFIX:?} line"));
+        assert_eq!(
+            dat.param_slots(obtain),
+            Some(ITEM_AND_COUNT_SLOTS),
+            "zone {zone} entry {obtain}: {:?}",
+            dat.text(obtain)
+        );
+
+        // The message the server sent for a stack of sairui-ran landed on a
+        // parameterless neighbour on both installs in hand; feeding one back in
+        // has to resolve to the obtained line rather than print the neighbour.
+        let wire = (obtain + 1..obtain + 1 + usize::from(MAX_ERA_SKEW))
+            .find(|&i| dat.param_slots(i) == Some(0) && dat.menu(i).is_none())
+            .unwrap_or_else(|| panic!("zone {zone}: no parameterless line after {obtain}"));
+        let mut session =
+            DialogSession::new(Some(Arc::clone(&root)), CONFORMANCE_PLAYER_NAME.into());
+        let line = session
+            .zone_chat_text(
+                zone,
+                wire as u16,
+                &[SAIRUI_RAN_ITEM_NO, SAIRUI_RAN_DISPENSED],
+            )
+            .unwrap_or_else(|| panic!("zone {zone} entry {wire} resolved to nothing"));
+        assert!(
+            line.starts_with(ITEM_OBTAINED_PLURAL_PREFIX),
+            "zone {zone}: wire index {wire} printed {line:?}, not the obtained line at {obtain}"
         );
     }
 }
@@ -642,4 +704,41 @@ fn lsb_pin_era_against_the_install_patch_stamp() {
          lobby under {lock:?} {}",
         if accepted { "accepts it" } else { "rejects it" }
     );
+}
+
+/// The C2S 0x26 excode_client this install's ROM inventory yields
+/// (research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md excode_client).
+/// Pinned only over the bits vendor/server/src/login/login_helpers.h
+/// EXPANSION_DISPLAY names: a private server's extra ROM sets a bit above them
+/// that is reported, not judged.
+#[test]
+fn excode_client_matches_the_rom_inventory_pinned_for_this_row() {
+    let Some(root) = install() else {
+        return;
+    };
+    let Some(pinned) = row_pin(
+        &root,
+        "excode_client",
+        &[
+            ("horizonxi-2023", expansion_display::ALL_KNOWN),
+            ("retail-2019-base", expansion_display::ALL_KNOWN),
+            ("retail-2026-09", expansion_display::ALL_KNOWN),
+        ],
+    ) else {
+        return;
+    };
+    let derived = root.excode_client();
+    assert_eq!(
+        derived & expansion_display::ALL_KNOWN,
+        pinned,
+        "{}: derived {derived:#06x}",
+        root.root().display()
+    );
+    let extra = derived & !expansion_display::ALL_KNOWN;
+    if extra != 0 {
+        eprintln!(
+            "WARN excode_client: {} sets {extra:#06x} above the expansions LSB names",
+            root.root().display()
+        );
+    }
 }

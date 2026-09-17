@@ -5341,7 +5341,7 @@ fn emit_zone_message_chat(
                     // dev stack and era-matched servers.
                     FishingChat::Unresolved => (None, hooked_fish_size(zone_id, msg.message_index)),
                     FishingChat::NotFishing => (
-                        dialog_session.zone_chat_text(zone_id, msg.message_index as usize),
+                        dialog_session.zone_chat_text(zone_id, msg.message_index, &msg.nums),
                         hooked_fish_size(zone_id, msg.message_index),
                     ),
                 };

@@ -4560,6 +4560,7 @@ fn fixture_config() -> Config {
         password: String::new(),
         char_selection: CharSelection::Id(FIXTURE_PLAYER),
         initial_state: None,
+        playonline_session: None,
         user_driven_events: true,
         dat_root: None,
     }
@@ -4698,6 +4699,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
+        auth_code: crate::auth_client::LobbyAuthCode::NONE,
     };
     let bootstrap = fixture_bootstrap();
     let (commands, mut command_rx) = mpsc::channel(1);
@@ -4862,6 +4864,7 @@ async fn enterzone_in_gameok_reply() {
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
+        auth_code: crate::auth_client::LobbyAuthCode::NONE,
     };
     let bootstrap = fixture_bootstrap();
     let (events, _event_rx) = broadcast::channel(256);

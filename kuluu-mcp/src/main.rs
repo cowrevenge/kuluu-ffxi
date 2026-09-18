@@ -1027,6 +1027,7 @@ async fn main() -> Result<()> {
             password: read_env("FFXI_PASS")?,
             char_selection,
             initial_state: None,
+            playonline_session: None,
 
             user_driven_events: false,
             dat_root,

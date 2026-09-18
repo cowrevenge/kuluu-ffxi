@@ -9,7 +9,7 @@ use ffxi_proto::login::{
     LSB_CLIENT_VER,
 };
 
-use crate::auth_client::{AuthRejected, AuthSession};
+use crate::auth_client::{AuthRejected, AuthSession, LobbyAuthCode, LOBBY_AUTH_CODE_LEN};
 
 const DATA_CHARLIST_SIZE: usize = 0x148;
 
@@ -43,6 +43,7 @@ pub const CAP_SKIP_INTRO_CS: u32 = 1 << 0;
 const VIEW_CMD_LOBBY_LOGIN: u32 = 0x26;
 const LOBBY_LOGIN_PACKET_SIZE: usize = 0x98;
 const LOBBY_LOGIN_CLIENT_CODE_OFFSET: usize = 0x2C;
+const LOBBY_LOGIN_AUTH_CODE_OFFSET: usize = 0x34;
 const LOBBY_LOGIN_VERSION_OFFSET: usize = 0x74;
 const LOBBY_LOGIN_VERSION_LEN: usize = 16;
 const LOBBY_LOGIN_EXCODE_OFFSET: usize = 0x84;
@@ -494,12 +495,18 @@ impl LobbyClient {
             .clone()
             .unwrap_or_else(client_version_code);
         let excode_client = self.excode_client.unwrap_or_else(client_excode_client);
-        let login = build_lobby_login(&auth.session_hash, &version_code, excode_client);
+        let login = build_lobby_login(
+            &auth.session_hash,
+            &auth.auth_code,
+            &version_code,
+            excode_client,
+        );
         view.write_all(&login).await?;
         view.flush().await?;
         tracing::info!(
             version_code,
             excode_client = format_args!("{excode_client:#06x}"),
+            auth_code = ?auth.auth_code,
             "lobby: 0x26 lobby login sent"
         );
         let key = lobby_io("0x05 key (view)", read_key_reply(&mut view)).await?;
@@ -644,13 +651,20 @@ fn build_data_a1(account_id: u32, search_server_ip: u32, session_hash: &[u8; 16]
     buf
 }
 
-fn build_lobby_login(session_hash: &[u8; 16], version_code: &str, excode_client: u16) -> Vec<u8> {
+fn build_lobby_login(
+    session_hash: &[u8; 16],
+    auth_code: &LobbyAuthCode,
+    version_code: &str,
+    excode_client: u16,
+) -> Vec<u8> {
     let mut buf = vec![0u8; LOBBY_LOGIN_PACKET_SIZE];
     buf[0..4].copy_from_slice(&(LOBBY_LOGIN_PACKET_SIZE as u32).to_le_bytes());
     buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
     buf[8..12].copy_from_slice(&VIEW_CMD_LOBBY_LOGIN.to_le_bytes());
     buf[12..28].copy_from_slice(session_hash);
     buf[LOBBY_LOGIN_CLIENT_CODE_OFFSET] = LOBBY_LOGIN_CLIENT_CODE_ENGLISH;
+    buf[LOBBY_LOGIN_AUTH_CODE_OFFSET..LOBBY_LOGIN_AUTH_CODE_OFFSET + LOBBY_AUTH_CODE_LEN]
+        .copy_from_slice(&auth_code.0);
     let version = version_code.as_bytes();
     let n = version.len().min(LOBBY_LOGIN_VERSION_LEN - 1);
     buf[LOBBY_LOGIN_VERSION_OFFSET..LOBBY_LOGIN_VERSION_OFFSET + n].copy_from_slice(&version[..n]);
@@ -1235,7 +1249,7 @@ mod tests {
     #[test]
     fn lobby_login_matches_the_retail_layout() {
         let hash = [0x48u8; 16];
-        let buf = build_lobby_login(&hash, "30220329_2", 0x0FFF);
+        let buf = build_lobby_login(&hash, &LobbyAuthCode::NONE, "30220329_2", 0x0FFF);
         assert_eq!(buf.len(), 0x98);
         assert_eq!(&buf[0..4], &[0x98, 0, 0, 0]);
         assert_eq!(&buf[4..8], b"IXFF");
@@ -1248,7 +1262,12 @@ mod tests {
         assert_eq!(&buf[0x88..0x98], &[0u8; 16]);
         // LSB reads six bytes at 0x74 and pads; an overlong stamp cannot spill
         // past the 16-byte field.
-        let long = build_lobby_login(&hash, "30220329_2_this_is_too_long", 0);
+        let long = build_lobby_login(
+            &hash,
+            &LobbyAuthCode::NONE,
+            "30220329_2_this_is_too_long",
+            0,
+        );
         assert_eq!(long[0x74 + LOBBY_LOGIN_VERSION_LEN - 1], 0);
         assert_eq!(&long[0x84..0x88], &[0, 0, 0, 0]);
     }
@@ -1265,7 +1284,7 @@ mod tests {
         let partial = expansion_display::BASE_GAME
             | expansion_display::RISE_OF_ZILART
             | expansion_display::CHAINS_OF_PROMATHIA;
-        let buf = build_lobby_login(&SESSION_HASH, "30230905_0", partial);
+        let buf = build_lobby_login(&SESSION_HASH, &LobbyAuthCode::NONE, "30230905_0", partial);
         assert_eq!(
             &buf[LOBBY_LOGIN_EXCODE_OFFSET..LOBBY_LOGIN_EXCODE_OFFSET + 4],
             &u32::from(partial).to_le_bytes()
@@ -1301,6 +1320,7 @@ mod tests {
         let auth = AuthSession {
             account_id: 1,
             session_hash: SESSION_HASH,
+            auth_code: LobbyAuthCode::NONE,
         };
         let _ = LobbyClient::new("127.0.0.1", data_port, view_port)
             .with_version_code(Some("30230905_0".into()))
@@ -1308,6 +1328,57 @@ mod tests {
             .open(&auth)
             .await;
         assert_eq!(rx.await.unwrap(), u32::from(configured));
+    }
+
+    #[tokio::test]
+    async fn open_sends_the_handed_off_auth_code_where_retail_reads_it() {
+        let mut code = [0u8; LOBBY_AUTH_CODE_LEN];
+        for (i, b) in code.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(3).wrapping_add(1);
+        }
+        let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let view_port = view.local_addr().unwrap().port();
+        let data_port = data.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut view, _) = view.accept().await.unwrap();
+            let (_data, _) = data.accept().await.unwrap();
+            let mut login = [0u8; LOBBY_LOGIN_PACKET_SIZE];
+            view.read_exact(&mut login).await.unwrap();
+            tx.send(login).unwrap();
+        });
+        let auth = AuthSession {
+            account_id: 1,
+            session_hash: SESSION_HASH,
+            auth_code: LobbyAuthCode(code),
+        };
+        let _ = LobbyClient::new("127.0.0.1", data_port, view_port)
+            .with_version_code(Some("30230905_0".into()))
+            .with_excode_client(Some(expansion_display::ALL_KNOWN))
+            .open(&auth)
+            .await;
+        let login = rx.await.unwrap();
+        assert_eq!(&login[12..28], &SESSION_HASH);
+        assert_eq!(
+            &login
+                [LOBBY_LOGIN_AUTH_CODE_OFFSET..LOBBY_LOGIN_AUTH_CODE_OFFSET + LOBBY_AUTH_CODE_LEN],
+            &code
+        );
+        assert_eq!(login[LOBBY_LOGIN_VERSION_OFFSET], b'3');
+    }
+
+    #[test]
+    fn lsb_sessions_leave_the_auth_code_zero() {
+        let buf = build_lobby_login(&SESSION_HASH, &LobbyAuthCode::NONE, "30230905_0", 0);
+        assert!(buf
+            [LOBBY_LOGIN_AUTH_CODE_OFFSET..LOBBY_LOGIN_AUTH_CODE_OFFSET + LOBBY_AUTH_CODE_LEN]
+            .iter()
+            .all(|b| *b == 0));
+        assert_eq!(
+            LOBBY_LOGIN_AUTH_CODE_OFFSET + LOBBY_AUTH_CODE_LEN,
+            LOBBY_LOGIN_VERSION_OFFSET
+        );
     }
 
     /// research/XiPackets/lobby/S2C_0x0005_ResponseKey.md example packet.
@@ -1360,6 +1431,7 @@ mod tests {
         let auth = AuthSession {
             account_id: 1,
             session_hash: [7u8; 16],
+            auth_code: LobbyAuthCode::NONE,
         };
         let err = match LobbyClient::new("127.0.0.1", data_port, view_port)
             .with_version_code(Some("30230905_0".into()))
@@ -1451,6 +1523,7 @@ mod tests {
         let auth = AuthSession {
             account_id: 42,
             session_hash: SESSION_HASH,
+            auth_code: LobbyAuthCode::NONE,
         };
         let handoff = LobbyClient::new("127.0.0.1", data_port, view_port)
             .handshake(&auth, ROSTER_CHAR_ID, 0, KEY3)
@@ -1480,6 +1553,7 @@ mod tests {
         let auth = AuthSession {
             account_id: 42,
             session_hash: SESSION_HASH,
+            auth_code: LobbyAuthCode::NONE,
         };
         let err = LobbyClient::new("127.0.0.1", data_port, view_port)
             .handshake(&auth, UNOWNED_CHAR_ID, 0, KEY3)

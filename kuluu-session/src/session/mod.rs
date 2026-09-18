@@ -209,6 +209,10 @@ pub struct Config {
 
     pub initial_state: Option<InitialState>,
 
+    /// A session the PlayOnline Viewer handed off; when set, no auth server is
+    /// contacted and `user`/`password` only label the session.
+    pub playonline_session: Option<crate::auth_client::AuthSession>,
+
     pub user_driven_events: bool,
 
     pub dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
@@ -239,11 +243,15 @@ pub async fn run(
         }
         None => {
             emit_stage(&event_tx, Stage::Authenticating);
-            auth.ensure_account(&cfg.user, &cfg.password).await.ok();
-            let auth_session = auth
-                .login(&cfg.user, &cfg.password)
-                .await
-                .context("auth login")?;
+            let auth_session = match cfg.playonline_session.clone() {
+                Some(session) => session,
+                None => {
+                    auth.ensure_account(&cfg.user, &cfg.password).await.ok();
+                    auth.login(&cfg.user, &cfg.password)
+                        .await
+                        .context("auth login")?
+                }
+            };
 
             emit_stage(&event_tx, Stage::LobbyHandshake);
             let lobby = LobbyClient::new(cfg.server.clone(), cfg.data_port, cfg.view_port);

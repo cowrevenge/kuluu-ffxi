@@ -151,11 +151,79 @@ fn parse_version_triple(s: &str) -> Option<[u8; 3]> {
     }
 }
 
+/// What the lobby is opened with. LSB's auth server mints `session_hash`
+/// and the client carries it as the 16-byte `identifer` of every lobby
+/// packet header; retail's PlayOnline Viewer supplies the identifer and the
+/// authCode instead (vendor/server/src/login/login_packets.h packet_t).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
     pub account_id: u32,
 
-    pub session_hash: [u8; 16],
+    pub session_hash: [u8; SESSION_HASH_LEN],
+
+    #[serde(default)]
+    pub auth_code: LobbyAuthCode,
+}
+
+impl AuthSession {
+    /// True when the session carries an authCode, which only a PlayOnline
+    /// handoff supplies; both LSB auth flavors leave it zero.
+    pub fn is_playonline(&self) -> bool {
+        !self.auth_code.is_none()
+    }
+}
+
+pub const SESSION_HASH_LEN: usize = 16;
+
+pub const LOBBY_AUTH_CODE_LEN: usize = 64;
+
+/// The authCode retail's lobby validates in the 0x26. LSB never reads the
+/// field, so both of its auth flavors leave it zero; only a PlayOnline
+/// handoff fills it. Debug output redacts it because it is a live credential.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LobbyAuthCode(pub [u8; LOBBY_AUTH_CODE_LEN]);
+
+impl LobbyAuthCode {
+    pub const NONE: Self = Self([0; LOBBY_AUTH_CODE_LEN]);
+
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+}
+
+impl Default for LobbyAuthCode {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl std::fmt::Debug for LobbyAuthCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_none() {
+            "LobbyAuthCode(none)"
+        } else {
+            "LobbyAuthCode(set)"
+        })
+    }
+}
+
+impl Serialize for LobbyAuthCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for LobbyAuthCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let mut code = [0u8; LOBBY_AUTH_CODE_LEN];
+        hex::decode_to_slice(text.trim(), &mut code).map_err(|e| {
+            serde::de::Error::custom(format!(
+                "authCode must be {LOBBY_AUTH_CODE_LEN} bytes as hex: {e}"
+            ))
+        })?;
+        Ok(Self(code))
+    }
 }
 
 pub struct AuthClient {
@@ -299,6 +367,7 @@ impl AuthClient {
         Ok(AuthSession {
             account_id,
             session_hash,
+            auth_code: LobbyAuthCode::NONE,
         })
     }
 
@@ -365,6 +434,7 @@ impl AuthClient {
         Ok(AuthSession {
             account_id,
             session_hash,
+            auth_code: LobbyAuthCode::NONE,
         })
     }
 

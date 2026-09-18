@@ -1540,6 +1540,11 @@ fn bridge_connecting(
         return;
     };
 
+    let playonline_session = selection
+        .initial_state
+        .auth
+        .is_playonline()
+        .then(|| selection.initial_state.auth.clone());
     let cfg = kuluu_session::session::Config {
         server: server.server.clone(),
         map_host_override: ports.map_host_override.clone(),
@@ -1550,6 +1555,7 @@ fn bridge_connecting(
         password: selection.password,
         char_selection: kuluu_session::session::CharSelection::Id(selection.char_id),
         initial_state: Some(selection.initial_state),
+        playonline_session,
 
         user_driven_events: true,
         dat_root: dat_root_res.0.clone(),

@@ -9,6 +9,16 @@ pub const KEYRING_SERVICE: &str = "kuluu";
 pub enum AuthFlavorKind {
     Json,
     Binary,
+    /// No auth server: the lobby is opened with a session the PlayOnline
+    /// Viewer produced (kuluu_session::playonline). Not offered by the
+    /// server editor until the viewer handoff exists.
+    PlayOnline,
+}
+
+impl AuthFlavorKind {
+    pub fn uses_auth_server(self) -> bool {
+        !matches!(self, AuthFlavorKind::PlayOnline)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -325,6 +335,10 @@ mod tests {
         assert_eq!(j, "\"json\"");
         let b = serde_json::to_string(&AuthFlavorKind::Binary).unwrap();
         assert_eq!(b, "\"binary\"");
+        let p = serde_json::to_string(&AuthFlavorKind::PlayOnline).unwrap();
+        assert_eq!(p, "\"playonline\"");
+        assert!(AuthFlavorKind::Json.uses_auth_server());
+        assert!(!AuthFlavorKind::PlayOnline.uses_auth_server());
     }
 
     #[test]

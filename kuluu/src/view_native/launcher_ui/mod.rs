@@ -34,7 +34,7 @@ use super::AppPhase;
 
 pub(crate) fn apply_server_profile(commands: &mut Commands, profile: &ServerProfile) {
     let flavor = match profile.flavor {
-        AuthFlavorKind::Json => AuthFlavor::Json,
+        AuthFlavorKind::Json | AuthFlavorKind::PlayOnline => AuthFlavor::Json,
         AuthFlavorKind::Binary => AuthFlavor::Binary,
     };
     let auth = Arc::new(AuthClient::with_flavor_and_version(
@@ -48,7 +48,11 @@ pub(crate) fn apply_server_profile(commands: &mut Commands, profile: &ServerProf
         profile.data_port,
         profile.view_port,
     ));
-    commands.insert_resource(LauncherClients { auth, lobby });
+    commands.insert_resource(LauncherClients {
+        auth,
+        lobby,
+        uses_auth_server: profile.flavor.uses_auth_server(),
+    });
     commands.insert_resource(ServerInfo {
         server: profile.host.clone(),
         profile_name: Some(profile.name.clone()),
@@ -498,6 +502,10 @@ impl ServerInfo {
 pub(crate) struct LauncherClients {
     pub auth: Arc<AuthClient>,
     pub lobby: Arc<LobbyClient>,
+
+    /// False for a PlayOnline profile, whose session comes from the viewer
+    /// rather than from an auth exchange this client performs.
+    pub uses_auth_server: bool,
 }
 
 #[derive(Default)]
@@ -603,7 +611,11 @@ pub(crate) fn register(
             server: server.to_string(),
             profile_name: None,
         })
-        .insert_resource(LauncherClients { auth, lobby })
+        .insert_resource(LauncherClients {
+            auth,
+            lobby,
+            uses_auth_server: true,
+        })
         .insert_resource(OpenedLobby::default())
         .insert_resource(Credentials::default())
         .insert_resource(CharListData::default())

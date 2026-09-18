@@ -332,10 +332,13 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             let (user, password, char_id, _char_name, initial_state) =
                 match (user, password, char_name) {
                     (Some(u), Some(p), Some(name)) => {
-                        let session = auth
-                            .login(&u, &p)
-                            .await
-                            .context("auth precheck (play direct mode)")?;
+                        let session = match kuluu_session::playonline::session_from_env()? {
+                            Some(session) => session,
+                            None => auth
+                                .login(&u, &p)
+                                .await
+                                .context("auth precheck (play direct mode)")?,
+                        };
                         let handle = lobby
                             .open(&session)
                             .await
@@ -390,6 +393,10 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                     }
                 };
 
+            let playonline_session = initial_state
+                .auth
+                .is_playonline()
+                .then(|| initial_state.auth.clone());
             let cfg = session::Config {
                 server: args.server.clone(),
                 map_host_override: args.map_host_override.clone(),
@@ -400,6 +407,7 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 password,
                 char_selection: session::CharSelection::Id(char_id),
                 initial_state: Some(initial_state),
+                playonline_session,
 
                 user_driven_events: false,
                 dat_root: dat_root.clone(),

@@ -70,6 +70,7 @@ description = "A faithful open-source FINAL FANTASY XI client in Rust + Bevy."
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1.1"
+hex = "0.4"
 md-5 = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pki-types = "1"

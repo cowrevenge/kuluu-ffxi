@@ -4478,6 +4478,7 @@ dependencies = [
  "ffxi-proto",
  "ffxi-vocab",
  "futures-util",
+ "hex",
  "kuluu-nav",
  "kuluu-snapshot",
  "mac_address",

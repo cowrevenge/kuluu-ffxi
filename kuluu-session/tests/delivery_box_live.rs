@@ -101,6 +101,7 @@ async fn delivery_box_against_live_lsb() {
         password: fixture.password.clone(),
         char_selection: CharSelection::Name(fixture.charname.clone()),
         initial_state: None,
+        playonline_session: None,
         dat_root: None,
         user_driven_events: false,
     };

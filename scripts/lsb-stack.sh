@@ -3,7 +3,10 @@
 #
 #   up      bring colima + the containers up, wait for map-server ready,
 #           and arm the idle reaper
-#   down    stop the containers; --vm also stops the colima VM
+#   down    stop the containers AND the colima VM. Stopping the
+#           containers alone leaves the VM holding its whole CPU/memory
+#           allocation, which is the cost worth reclaiming; the ~20-30s
+#           VM boot on the next `up` is the price.
 #   status  one screen of state (VM, containers, reaper deadline)
 #   touch   push the idle deadline out (call from anything long-running
 #           that the process check below can't see)
@@ -84,11 +87,8 @@ cmd_up() {
 }
 
 cmd_down() {
-  local with_vm=${1:-}
   containers_running && { say 'stopping containers'; docker stop "${CONTAINERS[@]}" >/dev/null; }
-  if [ "$with_vm" = '--vm' ]; then
-    vm_running && { say 'stopping colima'; colima stop; }
-  fi
+  vm_running && { say 'stopping colima'; colima stop; }
   rm -f "$DEADLINE_FILE"
 }
 
@@ -97,15 +97,16 @@ cmd_status() {
   IFS=$'\n' read -r -d '' -a filters < <(name_filters; printf '\0')
   colima list 2>/dev/null | sed -n '1,2p'
   docker ps -a "${filters[@]}" --format '{{.Names}}\t{{.Status}}' 2>/dev/null | sort
-  if [ -f "$DEADLINE_FILE" ]; then
-    local left=$(( $(cat "$DEADLINE_FILE") - $(date +%s) ))
-    if in_use; then
-      printf 'idle teardown: held open by a live client\n'
-    else
-      printf 'idle teardown: %sm %ss\n' $(( left / 60 )) $(( left % 60 ))
-    fi
-  else
+  if ! [ -f "$DEADLINE_FILE" ]; then
     printf 'idle teardown: not armed\n'
+  elif in_use; then
+    printf 'idle teardown: held open by a live client\n'
+  elif ! reaper_alive; then
+    printf 'idle teardown: armed but no reaper (stale); run up or touch to re-arm\n'
+  else
+    local left=$(( $(cat "$DEADLINE_FILE") - $(date +%s) ))
+    [ "$left" -lt 0 ] && left=0
+    printf 'idle teardown: %sm %ss\n' $(( left / 60 )) $(( left % 60 ))
   fi
 }
 
@@ -131,7 +132,7 @@ cmd_reap() {
 
 case "${1:-status}" in
   up)     cmd_up ;;
-  down)   cmd_down "${2:-}" ;;
+  down)   cmd_down ;;
   status) cmd_status ;;
   touch)  arm; spawn_reaper ;;
   reap)   cmd_reap ;;

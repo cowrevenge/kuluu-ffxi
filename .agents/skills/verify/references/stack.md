@@ -18,14 +18,18 @@ colima and docker:
 ```bash
 scripts/lsb-stack.sh up        # colima + containers, waits for map-server ready
 scripts/lsb-stack.sh status    # VM, container states, idle-teardown countdown
-scripts/lsb-stack.sh down      # stop the containers, leave the VM warm
-scripts/lsb-stack.sh down --vm # also stop colima (reclaims the VM's whole allocation)
+scripts/lsb-stack.sh down      # stop the containers and the colima VM
 ```
 
+`down` takes the VM down too — stopping only the containers leaves colima
+holding its whole CPU/memory allocation, which is the cost worth reclaiming.
+The price is a ~20-30s VM boot on the next `up` instead of a bare
+`docker start`.
+
 **Stop the stack when you're done verifying.** `up` arms an idle reaper that
-stops the containers after 30 minutes (`LSB_STACK_IDLE_SECS`) with no client
-attached, and the Stop hook `.agents/hooks/stop.d/45-stack.sh` stops them when
-a session settles — but both are backstops, not a reason to leave it running.
+tears it down after 30 minutes (`LSB_STACK_IDLE_SECS`) with no client
+attached, and the Stop hook `.agents/hooks/stop.d/45-stack.sh` tears it down
+when a session settles — but both are backstops, not a reason to leave it up.
 Neither fires while a `kuluu`/`kuluu-mcp` process is alive, so a session you
 are still driving is never pulled out from under you. `LSB_STACK_AUTOSTOP=off`
 disables the hook; `scripts/lsb-stack.sh touch` pushes the idle deadline out

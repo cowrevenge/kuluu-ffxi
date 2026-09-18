@@ -196,10 +196,28 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     c.current_target,
                 ) {
                     Some((id, _idx)) => {
+                        let Some(ent) = c.entities.iter().find(|e| e.id == id) else {
+                            return SlashOutcome::SystemMessage(format!("/{}: no target", c.cmd));
+                        };
+                        if let Some(line) = crate::view_native::engage::rejection_line(
+                            ent,
+                            c.self_pos,
+                            c.self_char_id,
+                            c.party,
+                        ) {
+                            return SlashOutcome::SystemMessage(line);
+                        }
                         SlashOutcome::Command(AgentCommand::Engage { target_id: id })
                     }
                     None => SlashOutcome::SystemMessage(format!("/{}: no target", c.cmd)),
                 },
+            },
+            Command {
+                names: &["autoattack"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "auto-retarget a mob hitting self when the target dies",
+                handler: |c| parse_autoattack(c.rest),
             },
             Command {
                 names: &["attackoff"],
@@ -929,6 +947,8 @@ pub enum SlashOutcome {
 
     SetNoClip(Option<bool>),
 
+    SetAutoAttack(Option<bool>),
+
     SetVanaClock(Option<bool>),
 
     /// `Some(scale)` sets the 3D render scale (0.25–2.0); `None` reports it.
@@ -1366,6 +1386,18 @@ fn parse_reqlogout(rest: &str, shutdown: bool) -> SlashOutcome {
         ])
     } else {
         SlashOutcome::Command(AgentCommand::ReqLogout { kind })
+    }
+}
+
+fn parse_autoattack(rest: &str) -> SlashOutcome {
+    let arg = rest.trim().to_ascii_lowercase();
+    match arg.as_str() {
+        "" | "toggle" => SlashOutcome::SetAutoAttack(None),
+        "on" => SlashOutcome::SetAutoAttack(Some(true)),
+        "off" => SlashOutcome::SetAutoAttack(Some(false)),
+        other => SlashOutcome::SystemMessage(format!(
+            "/autoattack: usage `/autoattack [on|off]` (got `{other}`)"
+        )),
     }
 }
 
@@ -3859,6 +3891,50 @@ mod tests {
             }
             other => panic!("expected Engage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn attack_out_of_engage_range_stays_local() {
+        let entities = vec![ent(42, "Bao Bat", EntityKind::Mob, 40.0, 0.0)];
+        match parse_slash_t("/attack", &entities, origin(), Some(42), None) {
+            SlashOutcome::SystemMessage(msg) => assert_eq!(msg, "Bao Bat is too far away."),
+            other => panic!("expected the range rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attack_on_a_strangers_claim_stays_local() {
+        let mut e = ent(42, "Bao Bat", EntityKind::Mob, 10.0, 0.0);
+        e.claim_id = 0x0100_0002;
+        let entities = vec![e];
+        match parse_slash_t("/attack", &entities, origin(), Some(42), None) {
+            SlashOutcome::SystemMessage(msg) => {
+                assert_eq!(msg, "Cannot attack. Your target is already claimed.")
+            }
+            other => panic!("expected the claim rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attack_on_own_claim_still_engages() {
+        let mut e = ent(42, "Bao Bat", EntityKind::Mob, 10.0, 0.0);
+        e.claim_id = 0x0100_0001;
+        let entities = vec![e];
+        let out = parse_slash(
+            "/attack",
+            &test_surface(),
+            &entities,
+            origin(),
+            Some(42),
+            None,
+            Some(0x0100_0001),
+            &[],
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        assert!(matches!(
+            out,
+            SlashOutcome::Command(AgentCommand::Engage { target_id: 42 })
+        ));
     }
 
     #[test]

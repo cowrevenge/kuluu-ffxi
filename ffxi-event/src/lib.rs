@@ -13,7 +13,10 @@
 //! documented size when safe, or stop the VM ([`StepResult::Unimplemented`])
 //! when they would otherwise desync the exec pointer. The staging opcodes that
 //! do not yield (fade, actor motion, camera lock, …) report through
-//! [`EventCue`] instead — see [`cue`].
+//! [`EventCue`] instead; see [`cue`]. Mid-event server round-trips (the
+//! send-tag and position-tag opcode pairs) hold execution on their case-1 poll
+//! opcode until the host acks via [`EventVm::ack_server`], carrying the c2s
+//! payload in [`PendingTag`].
 
 pub mod cue;
 pub mod opcode_meta;
@@ -21,9 +24,11 @@ pub mod runner;
 pub mod vm;
 
 pub use cue::{
-    dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
-    SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
-    SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    dat_id_helper, event_motion_dat_id, tpc_b_for_waist, tpc_motion_packages, ActorLookup,
+    EventCue, ExtSchedulerMotion, FourCc, TpcMotionPackages, MUSIC_VOLUME_MAX, NO_ACTION_KEY,
+    SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+    SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE,
+    STATUS_EVENT_MOUNT, TPC_PACKAGE_OUT_OF_RANGE,
 };
 pub use runner::{clean_display, DialogFrame, DialogRunner, DialogStep, EVENT_CANCELLED_END_PARA};
-pub use vm::{EventChoice, EventMessage, EventVm, StepResult};
+pub use vm::{EventChoice, EventMessage, EventVm, PendingTag, StepResult, OPCODE_BUDGET_PER_STEP};

@@ -63,18 +63,6 @@ impl NameplateLocator {
     }
 }
 
-const VISUAL_SMOOTH: f32 = 0.4;
-const SNAP_DIST_SQ: f32 = 4.0;
-
-#[inline]
-fn apply_visual_smoothing(current: Vec3, target: Vec3) -> Vec3 {
-    if current.distance_squared(target) >= SNAP_DIST_SQ {
-        target
-    } else {
-        current.lerp(target, VISUAL_SMOOTH)
-    }
-}
-
 #[derive(Resource)]
 pub struct EntityMaterials {
     pub pc: Handle<StandardMaterial>,
@@ -160,12 +148,13 @@ pub struct PendingRetarget {
 /// [`auto_clear_target_system`] already drops a target whose entity is gone,
 /// and retail's `RecvAssist` behaviour for a zero id is not established.
 ///
-/// A held lock rides along with the target rather than pinning it: xim keeps the
-/// lock as a flag over the one target slot (research/xim
-/// PlayerTargetSelector.kt's `isTargetLocked` reads `state.targetState.locked`
-/// beside `state.targetState.targetId`, Actor.kt createFrom,932), so only player
-/// targeting input is gated on it ([`crate::lock_on::suppresses_retarget`]) and a
-/// server-side target change carries the lock with it.
+/// A held lock rides along with the target rather than pinning it: xim keeps
+/// the lock as a flag over the one target slot (research/xim/src/jsMain/kotlin/
+/// xim/poc/game/PlayerTargetSelector.kt isTargetLocked reads
+/// `state.targetState.locked` beside `state.targetState.targetId`), so only
+/// player targeting input is gated on it
+/// ([`crate::lock_on::suppresses_retarget`]) and a server-side target change
+/// carries the lock with it.
 ///
 /// The `Target` write deliberately reaches `dispatch_target_change_system` and
 /// goes back out as c2s 0x01A ChangeTarget: `battleutils::assistTarget` pushes
@@ -431,7 +420,13 @@ pub fn sync_entities_system(
                 EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
             )
         {
-            prediction.observe(wire.id, world_pos, wire.heading);
+            prediction.observe(
+                wire.id,
+                world_pos,
+                wire.heading,
+                wire.speed,
+                wire.speed_base,
+            );
         }
 
         let mat = if is_self {
@@ -454,8 +449,12 @@ pub fn sync_entities_system(
                             t.translation = world_pos;
                         }
                     } else if matches!(wire.kind, EntityKind::Other) {
-                        let smoothed = apply_visual_smoothing(t.translation, world_pos);
-                        t.translation = Vec3::new(smoothed.x, t.translation.y, smoothed.z);
+                        // The Other kind is not server-moved: doors are static (their open/close
+                        // is client-side MMB/DAT rotation) and transports play their authored
+                        // FollowPoints path in pose_transports (PostUpdate), which owns the whole
+                        // transform. So the wire position applies directly here; there is no
+                        // motion to pace between updates, and Y stays with its own owner.
+                        t.translation = Vec3::new(world_pos.x, t.translation.y, world_pos.z);
                         t.rotation = heading_to_quat(wire.heading);
                     }
                 }
@@ -634,10 +633,10 @@ pub fn apply_invis_flag_system(
         &WorldEntity,
         Option<&mut MeshMaterial3d<StandardMaterial>>,
     )>,
-    mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
     #[cfg(not(target_arch = "wasm32"))] model_roots: Query<
         &crate::ffxi_actor_render::FfxiRenderRoot,
     >,
+    #[cfg(not(target_arch = "wasm32"))] mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
 ) {
     for (_bevy_entity, ent, orb_mat) in &mut q_roots {
         let hide = table.get(ent.id).is_some_and(|r| r.invis_flag());
@@ -1024,20 +1023,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn visual_smoothing_lerps_short_then_snaps_long() {
-        let near = apply_visual_smoothing(Vec3::ZERO, Vec3::new(0.25, 0.0, 0.0));
-        assert!(near.x > 0.0 && near.x < 0.25, "lerp partial: {}", near.x);
-        assert!(
-            (near.x - 0.1).abs() < 1e-6,
-            "VISUAL_SMOOTH=0.4 → 0.25 * 0.4 = 0.1, got {}",
-            near.x
-        );
-
-        let far = apply_visual_smoothing(Vec3::ZERO, Vec3::new(50.0, 0.0, 0.0));
-        assert_eq!(far, Vec3::new(50.0, 0.0, 0.0));
-    }
-
     fn dummy_materials() -> EntityMaterials {
         EntityMaterials {
             pc: Handle::default(),
@@ -1091,22 +1076,6 @@ mod tests {
         assert!(std::ptr::eq(h_other, &mats.aggro), "aggro > other-claim");
         let h_unclaimed = pick_mob_material(&mats, 0, 0xCAFE, true);
         assert!(std::ptr::eq(h_unclaimed, &mats.aggro), "aggro > unclaimed");
-    }
-
-    #[test]
-    fn visual_smoothing_snap_threshold_boundary() {
-        let just_under = (SNAP_DIST_SQ - 1e-3).sqrt();
-        let result = apply_visual_smoothing(Vec3::ZERO, Vec3::new(just_under, 0.0, 0.0));
-
-        assert!(
-            result.x < just_under,
-            "below threshold should lerp, got {}",
-            result.x
-        );
-
-        let at_threshold = SNAP_DIST_SQ.sqrt();
-        let result = apply_visual_smoothing(Vec3::ZERO, Vec3::new(at_threshold, 0.0, 0.0));
-        assert_eq!(result.x, at_threshold, "at threshold should snap");
     }
 
     #[test]

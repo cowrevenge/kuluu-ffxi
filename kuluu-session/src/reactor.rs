@@ -380,6 +380,35 @@ impl Reactor {
         }
         self.state.apply_event(ev);
 
+        // vendor/server/src/map/ai/ai_container.cpp CAIContainer::Internal_ChangeTarget:
+        // while engaged the server re-aims the battle target at the new target
+        // (SetBattleTargetID) and clears it for a zero target, so the goal must
+        // follow the 0x058 push or it keeps facing the abandoned target. The
+        // re-aimed target is already being attacked by the server's continuing
+        // attack state, so no fresh Attack action is issued.
+        if let AgentEvent::TargetChanged { target_id } = ev {
+            if let Goal::Engaged { target_id: old, .. } = self.goal {
+                match target_id {
+                    Some(new) if *new != old => {
+                        self.goal = Goal::Engaged {
+                            target_id: *new,
+                            attack_issued: true,
+                        };
+                        out.push(AgentEvent::ReactorGoalChanged {
+                            goal: snapshot_goal(&self.goal),
+                        });
+                    }
+                    None => {
+                        self.goal = Goal::Idle;
+                        out.push(AgentEvent::ReactorGoalChanged {
+                            goal: snapshot_goal(&self.goal),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Feed the fishing machine its server-side inputs and publish any resulting phase
         // change / immediate progress. Commands (e.g. the hook check after a bite) queue
         // for the next tick.
@@ -566,6 +595,23 @@ impl Reactor {
                 }
             }
             AgentCommand::Cancel => {
+                // The wire's disengage is AttackOff (vendor/server/src/map/packets/c2s/
+                // 0x01a_action.cpp GP_CLI_COMMAND_ACTION_ACTIONID::AttackOff routes to
+                // CPlayerController::Disengage); a goal-only cancel would leave the
+                // server auto-swinging on the abandoned target.
+                if let Goal::Engaged { target_id, .. } = self.goal {
+                    if let Some((act_index, _, _)) = self.entity_target_info(target_id) {
+                        self.goal = Goal::Idle;
+                        return CommandRouting::forward_with_goal(
+                            AgentCommand::Action {
+                                target_id,
+                                target_index: act_index,
+                                kind: ActionKind::AttackOff,
+                            },
+                            snapshot_goal(&self.goal),
+                        );
+                    }
+                }
                 self.goal = Goal::Idle;
                 CommandRouting::absorbed_with_goal(snapshot_goal(&self.goal))
             }

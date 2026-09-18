@@ -71,7 +71,13 @@ pub(super) fn prepare(
         if super::take_pending_event_end(pending, actor, event) {
             // vendor/server/src/map/map_networking.cpp MapNetworking::parse dispatches in payload order.
             payload.extend(super::build_subpacket_event_end(
-                *sequence, actor, index, zone, event, *end_para,
+                *sequence,
+                actor,
+                index,
+                zone,
+                event,
+                *end_para,
+                ffxi_proto::map::c2s::event_end_mode::END,
             ));
             *sequence = sequence.wrapping_add(1);
         }
@@ -114,6 +120,29 @@ pub(super) fn receive(
                     } else {
                         dialog.reject_position();
                     }
+                }
+            }
+        }
+        // The server's placement of every entity, in event coordinates: the
+        // source for MOVE hold lengths when a scene walks its actors.
+        map::s2c::CHAR_PC | map::s2c::CHAR_NPC => {
+            if let Ok(head) = decode::PosHead::decode(sub.data) {
+                dialog.note_entity_position(
+                    head.unique_no,
+                    event_position(Position {
+                        pos: Vec3 {
+                            x: head.x,
+                            y: head.y,
+                            z: head.z,
+                        },
+                        heading: head.dir,
+                        ..Default::default()
+                    }),
+                );
+                // The 0x5B/0x66 gate's input: the entity Type byte this 0x0E's
+                // SubKind dispatch writes (decode::LookData::retail_type).
+                if let Some(t) = decode::LookData::retail_type(sub.opcode, sub.data) {
+                    dialog.note_entity_type(head.unique_no, head.act_index, t);
                 }
             }
         }

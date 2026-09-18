@@ -16,7 +16,7 @@ pub(super) fn handle_world_key(
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
         return Some(InputMode::Chat(ChatBuffer::empty()));
@@ -56,7 +56,7 @@ pub(super) fn handle_world_key(
                         scene_state,
                         check_target,
                         trade_state,
-                        select_target,
+                        lock_on,
                     )
                 }
             }
@@ -76,7 +76,7 @@ pub(super) fn handle_world_key(
                 scene_state,
                 check_target,
                 trade_state,
-                select_target,
+                lock_on,
             ),
         };
     }
@@ -99,7 +99,7 @@ fn open_target_action_menu(
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -126,7 +126,7 @@ fn open_target_action_menu(
             cmd_tx,
             check_target,
             trade_state,
-            select_target,
+            lock_on,
         );
     }
     Some(InputMode::TargetAction(state))
@@ -144,7 +144,7 @@ pub(super) fn handle_target_action_key(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
     use kuluu_render::input_mode::SubAction;
@@ -217,7 +217,7 @@ pub(super) fn handle_target_action_key(
             cmd_tx,
             check_target,
             trade_state,
-            select_target,
+            lock_on,
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
@@ -236,7 +236,7 @@ pub(super) fn confirm_target_action_at_cursor(
     cmd_tx: &Sender<AgentCommand>,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
-    select_target: &mut SelectTargetMode,
+    lock_on: &mut kuluu_render::LockOn,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::TargetActionId;
 
@@ -255,7 +255,19 @@ pub(super) fn confirm_target_action_at_cursor(
         TargetActionId::Attack => {
             match target_ent {
                 Some(e) => {
-                    if let Err(err) = cmd_tx.try_send(AgentCommand::Engage { target_id: e.id }) {
+                    // The server's engage rejections, answered locally before the
+                    // command goes out (the server's own 0x029 lines still land
+                    // in the main log; these save the round trip).
+                    if let Some(line) = crate::view_native::engage::rejection_line(
+                        e,
+                        scene_state.snapshot.self_pos.pos,
+                        scene_state.snapshot.self_char_id,
+                        &scene_state.snapshot.party,
+                    ) {
+                        push_system_chat_line(scene_state, line);
+                    } else if let Err(err) =
+                        cmd_tx.try_send(AgentCommand::Engage { target_id: e.id })
+                    {
                         push_system_chat_line(
                             scene_state,
                             format!("[menu] Attack dispatch dropped: {err}"),
@@ -267,15 +279,16 @@ pub(super) fn confirm_target_action_at_cursor(
             Some(InputMode::World)
         }
         TargetActionId::SwitchTarget => {
-            select_target.active = true;
-            select_target.prev = current_target;
-            push_system_chat_line(
-                scene_state,
-                "[menu] Switch Target — Tab to cycle, Enter to confirm, Esc to cancel".to_string(),
-            );
-            Some(InputMode::World)
+            // Retail's "Switch Target" opens the sub-target picker over the
+            // other mobs; confirming asks the server to move the battle
+            // target, and it becomes the main target when the 0x058 lands.
+            let sub_action = kuluu_render::input_mode::SubTargetAction::PickSub;
+            let return_to = InputMode::TargetAction(state.clone());
+            open_sub_target(sub_action, current_target, scene_state, return_to)
         }
         TargetActionId::Disengage => {
+            // Disengage releases the camera lock like the H toggle.
+            lock_on.target_id = None;
             if let Err(err) = cmd_tx.try_send(AgentCommand::Cancel) {
                 push_system_chat_line(
                     scene_state,
@@ -422,7 +435,8 @@ fn handle_abilities_group_key(
     if bindings.matches_logical(Action::NavConfirm, key) {
         if let Some(row) = rows.get(sub.cursor) {
             let action = row.action;
-            if let Some(sub_action) = sub_target_action_for(action) {
+            let sub_action = sub_target_action_for(action);
+            if let Some(sub_action) = sub_action {
                 if !selected_target_valid(sub_action, current_target, scene_state) {
                     // No valid target selected: retail's flashing sub-target
                     // cursor asks "on whom?" first. Esc returns here with the

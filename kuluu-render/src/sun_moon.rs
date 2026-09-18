@@ -429,6 +429,7 @@ pub(crate) fn model_light_mix(time_minutes: u32) -> f32 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn actor_area_lighting(
     record: &ffxi_dat::weather::WeatherRecord,
     minutes: u32,

@@ -13,6 +13,9 @@ pub mod combat_stance;
 pub mod components;
 pub mod cursor;
 pub mod cutscene;
+// The kind 0x06 camera routes a cutscene scheduler routine drives the operator camera along.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cutscene_camera;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_d3m;
 #[cfg(not(target_arch = "wasm32"))]
@@ -24,6 +27,7 @@ pub mod dat_vos2;
 pub mod debug_chat;
 pub mod element_sort;
 pub mod entity_table;
+pub mod env_flags;
 pub mod equip_slot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;
@@ -107,6 +111,8 @@ pub use components::{
 };
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
+#[cfg(not(target_arch = "wasm32"))]
+pub use cutscene_camera::{advance_cutscene_camera_task, CutsceneCameraTasks};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
     config_fields, dlss_config_fields, graphics_fields, AaMode, CharacterRenderPath, DlssQuality,
@@ -410,6 +416,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.init_resource::<combat_stance::EntityMotion>();
         app.init_resource::<combat_stance::EntityPrediction>();
+        app.insert_resource(combat_stance::MotionProbe::init());
         app.init_resource::<combat_stance::RestStance>();
         app.init_resource::<combat_stance::AnimationBlends>();
         app.init_resource::<combat_stance::WalkMode>();
@@ -427,6 +434,16 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_systems(
             Update,
             combat_stance::predict_entities_system.after(sync_entities_system),
+        );
+        // Per-frame remote grounding on the MZB collision mesh, after the prediction tween has
+        // moved the rendered XZ and before motion tracking reads it: LSB's POS Y is a Detour
+        // waypoint height (pathfind.cpp CPathFind::StepTo), not the render surface.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
+            combat_stance::ground_remote_movers_system
+                .after(combat_stance::predict_entities_system)
+                .before(combat_stance::track_entity_motion_system),
         );
         app.add_systems(
             Update,

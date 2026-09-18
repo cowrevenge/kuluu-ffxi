@@ -116,22 +116,29 @@ run_harness() {
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
-  local codex_config=".codex/config.toml" bad=0 link target cmd path doc
+  local codex_config=".codex/config.toml" bad=0 link target cmd path doc mode target_rel
   local hook hook_file recipe check_output
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
-  #    .agents/, or settings.json itself. Content never lives here.
+  #    .agents/, or settings.json itself. Content never lives here. The
+  #    invariant lives in the index: a 120000 blob whose target resolves
+  #    inside .agents/. On disk that is a symlink, except on checkouts that
+  #    cannot materialize symlinks (core.symlinks=false, e.g. Windows), where
+  #    git stores the target string as a plain file. Grade the blob, not the
+  #    filesystem representation.
   while IFS= read -r link; do
     [[ "$link" == "$settings" ]] && continue
-    if [[ ! -L "$link" ]]; then
+    mode=$(git ls-files -s "$link" | cut -d' ' -f1)
+    if [[ "$mode" != "120000" ]]; then
       echo "checks: harness — $link is tracked under .claude/ but is not a symlink" >&2
       echo "checks:   content belongs in .agents/; .claude/ holds symlinks + settings.json" >&2
       bad=1
       continue
     fi
-    target=$(cd "$(dirname "$link")" && cd "$(readlink "$(basename "$link")")" 2>/dev/null && pwd) || target=""
+    target_rel=$(git cat-file blob "$(git ls-files -s "$link" | cut -d' ' -f2)")
+    target=$(cd "$(dirname "$link")" && cd "$target_rel" 2>/dev/null && pwd) || target=""
     if [[ -z "$target" ]]; then
-      echo "checks: harness — $link is a broken symlink (-> $(readlink "$link"))" >&2
+      echo "checks: harness — $link is a broken symlink (-> $target_rel)" >&2
       bad=1
     elif [[ "$target" != "$PWD/.agents"* ]]; then
       echo "checks: harness — $link escapes .agents/ (resolves to $target)" >&2
@@ -186,6 +193,19 @@ run_harness() {
   fi
   if command -v bd >/dev/null 2>&1; then
     for recipe in codex claude factory; do
+      # bd setup claude --check reads CLAUDE.md from disk; on a checkout that
+      # cannot materialize symlinks it is a plain file holding the target
+      # string, so bd reports a false "no beads section". Grade the tracked
+      # target instead — it must point at AGENTS.md, whose markers the grep
+      # above already pins.
+      if [[ "$recipe" == "claude" && -f CLAUDE.md && ! -L CLAUDE.md \
+          && "$(git ls-files -s CLAUDE.md | cut -d' ' -f1)" == "120000" ]]; then
+        if [[ "$(git cat-file blob "$(git ls-files -s CLAUDE.md | cut -d' ' -f2)")" != "AGENTS.md" ]]; then
+          echo "checks: harness — CLAUDE.md is tracked as a symlink but its target is not AGENTS.md" >&2
+          bad=1
+        fi
+        continue
+      fi
       if ! check_output=$(bd setup "$recipe" --check 2>&1); then
         echo "checks: harness — stale Beads $recipe integration:" >&2
         echo "$check_output" >&2
@@ -281,6 +301,24 @@ run_comments() {
   # shellcheck source=../.agents/hooks/comment-rot.lib.sh
   . .agents/hooks/comment-rot.lib.sh
   local bad=0 lines text
+  # Self-test: the dangling-citation detectors must fire on a known offender
+  # and stay silent on a published citation, judged by the very expression the
+  # gate below uses. A green tree is meaningless if the detector cannot fire,
+  # so this runs before the scan and fails the stage when it cannot.
+  local cr_selftest_bad='// Dynamic obstacles (plan §2.5): RID door boxes
+//! Piece 3: the slide direction sweep
+// Step 2: rasterize'
+  local cr_selftest_good='// Ericson §5.1.3: the GJK distance iteration
+/// "Real-Time Collision Detection" §1.3.6
+// a zone step 42 marker'
+  if ! printf '%s\n' "$cr_selftest_bad" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector did not fire on a known offender" >&2
+    return 1
+  fi
+  if printf '%s\n' "$cr_selftest_good" | grep -qE "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL"; then
+    echo "checks: comments - self-test failed: the private-plan / step-label detector fired on a published citation" >&2
+    return 1
+  fi
   if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
     lines=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
       git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #" || true
@@ -318,7 +356,11 @@ run_comments() {
 
   # Every cited in-tree path must exist. vendor/ and research/ roots are only
   # checked when that submodule (or local clone) is populated; docs/ never
-  # exists (the tree was retired), so any docs/ citation is dangling.
+  # exists (the tree was retired), so any docs/ citation is dangling. Any
+  # `<dir>/....md` is checked too, whatever the root: a citation into someone's
+  # local notes tree passes a filesystem test on one machine and nowhere else,
+  # and naming those trees one regex at a time only catches the ones already
+  # seen.
   local missing=''
   while IFS= read -r tok; do
     [ -z "$tok" ] && continue
@@ -341,7 +383,7 @@ run_comments() {
     esac
     missing+="  $path"$'\n'
   done < <(printf '%s\n' "$comments" \
-    | grep -oE '(^|[^A-Za-z0-9._/-])(vendor|research|docs|artifacts|\.agents)/[A-Za-z0-9._/-]+' \
+    | grep -oE '(^|[^A-Za-z0-9._/-])((vendor|research|docs|artifacts|\.agents)/[A-Za-z0-9._/-]+|[A-Za-z0-9._-]+/[A-Za-z0-9._/-]*\.md)' \
     | sed -E 's#^[^A-Za-z0-9._/-]##' | sort -u)
   if [ -n "$missing" ]; then
     echo "checks: comments - cited path does not exist in this tree (moved upstream, a private note, or the retired docs/ tree); fix or drop the citation:" >&2
@@ -403,13 +445,20 @@ run_comments() {
 }
 
 run_contracts() {
-  local contract="session::event_transport::contracts::event_state_contract" listing
+  # Two entry points because the ferry/bootstrap contracts block on their own
+  # current-thread runtime and must run outside an active tokio context; both
+  # are mandatory, so both are named here.
+  local contract listing
   listing=$(cargo test -p kuluu-session --lib --locked -- --list)
-  if ! grep -Fxq "$contract: test" <<< "$listing"; then
-    echo "checks: contracts — mandatory event state contract is missing" >&2
-    return 1
-  fi
-  cargo test -p kuluu-session --lib --locked "$contract" -- --exact --include-ignored
+  for contract in \
+    session::event_transport::contracts::event_state_contract \
+    session::event_transport::contracts::ferry_and_bootstrap_contracts_hold; do
+    if ! grep -Fxq "$contract: test" <<< "$listing"; then
+      echo "checks: contracts — mandatory event state contract is missing: $contract" >&2
+      return 1
+    fi
+    cargo test -p kuluu-session --lib --locked "$contract" -- --exact --include-ignored
+  done
   listing=$(cargo test -p kuluu-render -p kuluu --lib --locked "${FEATURES[@]}" -- --list)
   for contract in \
     transport::tests::transport_state_contract \

@@ -456,6 +456,86 @@ fn emits_idle_goal(events: &[AgentEvent]) -> bool {
 }
 
 #[test]
+fn cancel_while_engaged_sends_attack_off_to_the_wire() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let routing = r.handle_command(AgentCommand::Cancel);
+    assert!(
+        matches!(r.current_goal(), Goal::Idle),
+        "cancel must leave the engage goal"
+    );
+    assert!(
+        matches!(
+            routing.forward,
+            Some(AgentCommand::Action {
+                target_id: 99,
+                target_index: 7,
+                kind: ActionKind::AttackOff,
+            })
+        ),
+        "the wire disengage is AttackOff; a goal-only cancel leaves the server auto-swinging"
+    );
+}
+
+#[test]
+fn target_change_while_engaged_reaims_the_goal() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.observe_event(&upsert(77, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let derived = r.observe_event(&AgentEvent::TargetChanged {
+        target_id: Some(77),
+    });
+    assert!(
+        matches!(
+            r.current_goal(),
+            Goal::Engaged {
+                target_id: 77,
+                attack_issued: true,
+            }
+        ),
+        "the 0x058 push must re-aim the goal; the server already attacks the new target"
+    );
+    assert!(
+        derived.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::ReactorGoalChanged {
+                    goal: ReactorGoalSnapshot::Engaged { target_id: 77, .. }
+                }
+            )
+        }),
+        "the re-aim must be emitted so the folded current_goal updates"
+    );
+}
+
+#[test]
+fn target_cleared_while_engaged_disengages() {
+    let mut r = Reactor::new(ReactorConfig::default());
+    r.observe_event(&connected(1));
+    r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
+    r.observe_event(&upsert(99, Vec3::default(), 100, EntityKind::Mob, 7));
+    r.handle_command(AgentCommand::Engage { target_id: 99 });
+
+    let derived = r.observe_event(&AgentEvent::TargetChanged { target_id: None });
+    assert!(
+        matches!(r.current_goal(), Goal::Idle),
+        "a cleared battle target must end the engage"
+    );
+    assert!(
+        emits_idle_goal(&derived),
+        "the reset must be emitted so the folded current_goal updates"
+    );
+}
+
+#[test]
 fn death_timer_disengages_and_emits_goal_change() {
     let mut r = Reactor::new(step_test_cfg());
     r.observe_event(&connected(1));
@@ -2036,6 +2116,45 @@ fn follow_suppresses_step_when_server_speed_is_zero() {
             assert!(
                 (*x - cur.x).abs() < 1e-3 && (*y - cur.y).abs() < 1e-3 && (*z - cur.z).abs() < 1e-3,
                 "speed=0 follow must not step (only face); got Move to ({x},{y},{z})"
+            );
+        }
+    }
+}
+
+#[test]
+fn self_heading_byte_matches_world_angle() {
+    // The byte kuluu sends for a facing (heading_toward) must be what LSB's worldAngle would
+    // produce for the same displacement: heading_toward is a port of utils.cpp worldAngle over
+    // snapshot-space deltas, which are LSB horizontal x/z. It rounds to the nearest step where
+    // worldAngle truncates, so allow one byte; the direction check catches any convention error.
+    let origin = Vec3::default();
+    for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
+        for dy in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
+            if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
+                continue;
+            }
+            let sent = heading_toward(
+                origin,
+                Vec3 {
+                    x: dx,
+                    y: dy,
+                    z: 0.0,
+                },
+            );
+            let radians = dy.atan2(dx);
+            let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
+            let lsb = ((raw % 256 + 256) % 256) as u8;
+            let diff = ((sent as i32 - lsb as i32 + 128) % 256 + 256) % 256 - 128;
+            assert!(
+                diff.abs() <= 1,
+                "a->b ({dx}, {dy}): sent {sent} vs worldAngle {lsb}"
+            );
+            let (fx, fy) = crate::state::heading_to_forward(sent);
+            let len = (dx * dx + dy * dy).sqrt();
+            let dot = fx * dx / len + fy * dy / len;
+            assert!(
+                dot > 0.99,
+                "a->b ({dx}, {dy}): sent byte {sent} faces the wrong way"
             );
         }
     }

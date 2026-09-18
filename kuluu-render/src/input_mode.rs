@@ -63,6 +63,9 @@ pub enum SubTargetAction {
         index: u8,
         item_no: u16,
     },
+    /// "Switch Target": pick a different mob; confirm asks the server to move
+    /// the battle target and it becomes the main target when the 0x058 lands.
+    PickSub,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +81,15 @@ pub struct SubTargetState {
 
     /// Mode to restore on Esc (retail: back to the menu, cursor preserved).
     pub return_to: Box<InputMode>,
+
+    /// "Switch Target" confirm sent a c2s ChangeTarget for this candidate: the
+    /// picker holds until the server's 0x058 commits it into the main target
+    /// (or the wait lapses), so the target frame only swaps on the server's
+    /// word. Cycling to another candidate cancels the wait.
+    pub pending_switch: Option<u32>,
+
+    /// When `pending_switch` was armed; the wait lapses if no 0x058 lands.
+    pub pending_since: Option<std::time::Instant>,
 }
 
 impl SubTargetState {
@@ -87,6 +99,8 @@ impl SubTargetState {
             flags,
             candidate: None,
             return_to: Box::new(return_to),
+            pending_switch: None,
+            pending_since: None,
         }
     }
 }

@@ -120,7 +120,7 @@ fn sync_zone_particles(
         return;
     };
 
-    let (_schedulers, assets) = parse_action_bytes(&bytes);
+    let (_schedulers, assets, _cameras) = parse_action_bytes(&bytes);
     let global = global.as_ref().map(|g| &g.assets);
     let mut spawned = 0usize;
     let mut unresolved: Vec<String> = Vec::new();
@@ -299,7 +299,7 @@ mod tests {
             return;
         };
         let defs = zone_static_defs(&bytes);
-        let (_, assets) = parse_action_bytes(&bytes);
+        let (_, assets, _) = parse_action_bytes(&bytes);
         for name in [*b"myl7", *b"SPLT"] {
             let d = defs
                 .iter()
@@ -328,8 +328,8 @@ mod tests {
             .find(|d| &d.name == b"fir1")
             .expect("fir1");
         assert_eq!(&fir1.def.mesh_id, b"hi12");
-        let (_s, local) = parse_action_bytes(&bytes);
-        let (_s, global) = parse_action_bytes(&global);
+        let (_s, local, _) = parse_action_bytes(&bytes);
+        let (_s, global, _) = parse_action_bytes(&global);
         assert!(
             !local.sprite_sheets.contains_key(b"hi12") && !local.d3ms.contains_key(b"hi12"),
             "hi12 is not zone-local"

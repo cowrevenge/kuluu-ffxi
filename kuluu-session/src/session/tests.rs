@@ -84,6 +84,7 @@ fn sub_packet_events_with_names(
         &mut std::collections::HashMap::new(),
         &mut std::collections::HashMap::new(),
         &mut std::collections::HashMap::new(),
+        &mut std::collections::HashMap::new(),
         &mut 0,
         &mut Position::default(),
         &mut false,
@@ -856,7 +857,7 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
 }
 
 /// End-to-end HP chain for the delta bridge: when a mob takes damage, LSB sets UPDATE_HP on
-/// its next 0x00E (battleentity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
+/// its next 0x00E (battle_entity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
 /// writes HPP at 0x1E under that bit and broadcasts to every char who spawned the entity).
 /// The fold must mark the entity pending so the O(changed) delta carries the new hpp — this
 /// is what drives the live nameplate HP bar. Regression: "HP bars never move".
@@ -935,7 +936,39 @@ fn flush_inputs(user_driven: bool, watchdog_fires: bool, walked_away: bool) -> E
         user_driven,
         watchdog_fires,
         walked_away,
+        tag_in_flight: false,
     }
+}
+
+#[test]
+fn a_tag_in_flight_holds_the_flush_even_in_agent_mode() {
+    // The auto-release that would otherwise fire every tick in !user_driven
+    // must not drain the event whose pending tag is mid-transaction.
+    let flushes = |tag_in_flight: bool| {
+        let mut pending = vec![PINNED_EVENT];
+        flush_pending_event_end(
+            EventEndFlushInputs {
+                user_driven: false,
+                watchdog_fires: true,
+                walked_away: true,
+                tag_in_flight,
+            },
+            &mut pending,
+            Some(PINNED_EVENT),
+            FLUSH_ZONE,
+            FLUSH_SEQ,
+        )
+        .is_some()
+    };
+
+    assert!(
+        flushes(false),
+        "no tag in flight: the release policy is unchanged"
+    );
+    assert!(
+        !flushes(true),
+        "a tag in flight holds the event open for OnEventUpdate"
+    );
 }
 
 #[test]
@@ -1092,20 +1125,17 @@ fn should_emit_pos_bypasses_rate_limit_on_heading_change() {
 
 #[test]
 fn flood_drain_waits_for_self_pos_seed() {
-    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the seed lands.
+    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the self
+    // position seed (CHAR_PC) lands. The s2c 0x00A LOGIN is tracked but is not
+    // a break condition — it rides a second datagram behind the zone-in burst
+    // and is processed opportunistically by the keepalive loop.
     assert!(
-        !should_break_flood(false, false, false)
-            && !should_break_flood(false, true, false)
-            && !should_break_flood(false, false, true),
-        "unseeded pre-GAMEOK drain must wait"
-    );
-    assert!(
-        should_break_flood(false, true, true),
-        "seeded pre-GAMEOK drain may break on idle"
+        !should_break_flood(false, false) && should_break_flood(false, true),
+        "unseeded pre-GAMEOK drain must wait; a seeded one may break"
     );
     // Quiescence drains (break_on_idle=true): stop on idle regardless of seed.
     assert!(
-        should_break_flood(true, false, false),
+        should_break_flood(true, false) && should_break_flood(true, true),
         "quiescence drain breaks on idle unconditionally"
     );
 }
@@ -1198,7 +1228,15 @@ fn lerp_toward_clamps_to_target_on_overshoot() {
 
 #[test]
 fn event_end_writes_csid_to_event_para_field() {
-    let buf = build_subpacket_event_end(0x1234, 0xDEADBEEF, 0x4242, 230, 535, 0);
+    let buf = build_subpacket_event_end(
+        0x1234,
+        0xDEADBEEF,
+        0x4242,
+        230,
+        535,
+        0,
+        ffxi_proto::map::c2s::event_end_mode::END,
+    );
     assert_eq!(buf.len(), 20, "header(4) + body(16)");
 
     assert_eq!(&buf[4..8], &0xDEADBEEFu32.to_le_bytes(), "UniqueNo");
@@ -1218,6 +1256,66 @@ fn event_end_writes_csid_to_event_para_field() {
         "EventNum carries the zone id (retail echoes LOGIN EventNum, \
              0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); LSB's 0x05B handler never reads it",
     );
+}
+
+/// The UpdatePending mode byte of a pending-tag round-trip: same 0x05B shape
+/// as End, Mode=1 instead of 0 (GP_CLI_COMMAND_EVENTEND_MODE,
+/// vendor/server/src/map/packets/c2s/0x05b_eventend.h).
+#[test]
+fn event_end_writes_update_pending_mode_byte() {
+    let buf = build_subpacket_event_end(
+        0x1234,
+        0xDEADBEEF,
+        0x4242,
+        230,
+        535,
+        7,
+        ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+    );
+    assert_eq!(
+        &buf[8..12],
+        &7u32.to_le_bytes(),
+        "EndPara (Work_Zone[1] at send time)"
+    );
+    assert_eq!(
+        &buf[14..16],
+        &ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING.to_le_bytes(),
+        "Mode = UpdatePending"
+    );
+}
+
+/// Pins the c2s 0x05C GP_CLI_COMMAND_EVENTENDXZY layout against
+/// vendor/server/src/map/packets/c2s/0x05c_eventendxzy.h: x/y/z f32, UniqueNo
+/// u32, EndPara u32, EventNum u16, EventPara u16, ActIndex u16, Mode u8,
+/// dir i8. Note EventNum/EventPara precede ActIndex here, unlike 0x05B.
+#[test]
+fn event_end_xzy_writes_lsb_layout() {
+    let buf = build_subpacket_event_end_xzy(
+        0x1234, 0xDEADBEEF, 1.5, -2.25, 3.75, 63, 9, 0x4242, 230, 535,
+    );
+    assert_eq!(buf.len(), 32, "header(4) + body(28)");
+
+    let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EVENT_END_XZY
+    );
+    assert_eq!(id_and_size >> 9, 8, "size_words = 32/4");
+    assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
+
+    assert_eq!(&buf[4..8], &1.5f32.to_le_bytes(), "x");
+    assert_eq!(&buf[8..12], &(-2.25f32).to_le_bytes(), "y");
+    assert_eq!(&buf[12..16], &3.75f32.to_le_bytes(), "z");
+    assert_eq!(&buf[16..20], &0xDEADBEEFu32.to_le_bytes(), "UniqueNo");
+    assert_eq!(&buf[20..24], &9u32.to_le_bytes(), "EndPara (Work_Zone[1])");
+    assert_eq!(&buf[24..26], &230u16.to_le_bytes(), "EventNum (zone)");
+    assert_eq!(&buf[26..28], &535u16.to_le_bytes(), "EventPara (event id)");
+    assert_eq!(&buf[28..30], &0x4242u16.to_le_bytes(), "ActIndex");
+    assert_eq!(
+        buf[30], 1,
+        "Mode = UpdatePending (the only mode the validator accepts)"
+    );
+    assert_eq!(buf[31], 63, "dir");
 }
 
 /// Pins the c2s 0x064 GP_CLI_COMMAND_SCENARIOITEM layout against
@@ -1681,6 +1779,7 @@ fn event_end_cancel_writes_lsb_cancel_option() {
         230,
         535,
         ffxi_event::EVENT_CANCELLED_END_PARA,
+        ffxi_proto::map::c2s::event_end_mode::END,
     );
     assert_eq!(&buf[8..12], &0x4000_0000u32.to_le_bytes(), "EndPara");
 }
@@ -2486,6 +2585,78 @@ fn fallback_templates_only_shadow_msg_basic_deliberately() {
 }
 
 #[test]
+fn battle_rejection_ids_route_to_the_main_log() {
+    for &id in BATTLE_REJECTION_IDS {
+        assert_eq!(
+            battle_line_channel(id),
+            ChatChannel::System,
+            "id {id} must reach the main log"
+        );
+    }
+}
+
+#[test]
+fn battle_result_and_state_ids_stay_on_the_battle_tab() {
+    // Per-swing/per-cast results (1, 2, 3, 15) and one-shot state events
+    // (6, 8, 9, 38, 53, 97, 203, 253) keep the Battle tab.
+    for id in [1u16, 2, 3, 6, 8, 9, 15, 38, 53, 97, 203, 253] {
+        assert_eq!(
+            battle_line_channel(id),
+            ChatChannel::Battle,
+            "id {id} must stay on the Battle tab"
+        );
+    }
+}
+
+#[test]
+fn battle_rejection_ids_all_resolve_in_the_scrape() {
+    // A rejection id with no msg_basic template would be dropped by
+    // template_for_id, hiding the refusal again; fail the build on scrape drift.
+    for &id in BATTLE_REJECTION_IDS {
+        assert!(
+            ffxi_vocab::msg_basic::lookup(id).is_some(),
+            "id {id} has no msg_basic template"
+        );
+    }
+}
+
+#[test]
+fn battle_message_5_unable_to_see_routes_to_the_main_log() {
+    use std::collections::HashMap;
+
+    let mut data = vec![0u8; 24];
+    data[0..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    data[20..22].copy_from_slice(&5u16.to_le_bytes());
+
+    let mut cache = HashMap::new();
+    cache.insert(0x1111_1111u32, "Sylvie".to_string());
+    cache.insert(0x2222_2222u32, "Mandy".to_string());
+
+    let line = decode_battle_message(&data, &cache, &HashMap::new(), true).expect("decoded");
+    assert_eq!(line.channel, ChatChannel::System);
+    assert!(line.text.contains("Mandy"), "got: {}", line.text);
+}
+
+#[test]
+fn battle_message_4_out_of_range_routes_to_the_main_log() {
+    use std::collections::HashMap;
+
+    let mut data = vec![0u8; 24];
+    data[0..4].copy_from_slice(&0x1111_1111u32.to_le_bytes());
+    data[4..8].copy_from_slice(&0x2222_2222u32.to_le_bytes());
+    data[20..22].copy_from_slice(&4u16.to_le_bytes());
+
+    let mut cache = HashMap::new();
+    cache.insert(0x1111_1111u32, "Sylvie".to_string());
+    cache.insert(0x2222_2222u32, "Mandy".to_string());
+
+    let line = decode_battle_message(&data, &cache, &HashMap::new(), true).expect("decoded");
+    assert_eq!(line.channel, ChatChannel::System);
+    assert!(line.text.contains("Mandy"), "got: {}", line.text);
+}
+
+#[test]
 fn substitute_status_placeholder_resolves_effect_name() {
     let s = substitute_battle_placeholders(
         "gains the effect of <status>.",
@@ -2641,10 +2812,14 @@ const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
     ffxi_proto::melee::MeleeResult {
         resolution: ffxi_proto::melee::ActionResolution::Parry,
         animation: ffxi_proto::melee::AttackAnimation::LeftAttack,
+        info: ffxi_proto::melee::ActionInfo::NONE,
+        hit_distortion: ffxi_proto::melee::HitDistortion::None,
+        knockback: ffxi_proto::melee::KnockbackLevel::None,
     };
 
 fn battle2_single_result_body() -> Vec<u8> {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2671,9 +2846,9 @@ fn battle2_basic_attack_reports_resolution_and_swing_animation() {
     assert_eq!(h.first_result, Some(BATTLE2_PARRIED_LEFT_ATTACK));
 }
 
-// the outcome bits after animation(12): info(5), hitDistortion(2), knockback(3) in LSB
-// write order. A hand-packed critical left-attack with level-2 knockback must come back split,
-// not lumped into one 5-bit "scale".
+// The outcome bits after animation(12): info(5), hitDistortion(2), knockback(3) in LSB write
+// order (vendor/server/src/map/packets/s2c/0x028_battle2.cpp). A hand-packed critical left-attack
+// with level-2 knockback must come back split, not lumped into one 5-bit "scale".
 #[test]
 fn battle2_result_outcome_bits_roundtrip() {
     let mut w = BattleBitWriter::new(8);
@@ -2713,7 +2888,8 @@ fn battle2_result_outcome_bits_roundtrip() {
 // category, not the bit ranges.
 #[test]
 fn battle2_non_basic_category_reports_no_melee_result() {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2733,6 +2909,15 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(h.action_kind, 4);
     assert_eq!(h.primary_target_id, Some(0xBEEF));
     assert_eq!(h.first_result, None);
+    // The outcome is read for every category even though the swing pair is gated off.
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            info: ffxi_proto::melee::ActionInfo::NONE.bits(),
+            hit_distortion: ffxi_proto::melee::HitDistortion::None.to_wire(),
+            knockback: ffxi_proto::melee::KnockbackLevel::None.to_wire(),
+        }),
+    );
 }
 
 // The same 12 bits, uninterpreted, key the caster's effect DAT for every non-attack
@@ -3332,8 +3517,10 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
 /// wire delivers them rather than through the decoders alone.
 fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
     let (tx, mut rx) = broadcast::channel(64);
-    let mut shop = ShopSession::default();
-    shop.last_talk_target = 0x0100_0007;
+    let mut shop = ShopSession {
+        last_talk_target: 0x0100_0007,
+        ..Default::default()
+    };
     for (opcode, body) in packets {
         handle_sub_packet(
             &framing::SubPacket {
@@ -3347,6 +3534,7 @@ fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEve
             0,
             "Tester",
             &mut None,
+            &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
             &mut std::collections::HashMap::new(),
@@ -4358,9 +4546,22 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     const DELAYED_LOGIN: Duration = Duration::from_millis(900);
 
     let packet = fixture_packet;
-    let accepted = matches!(
+    // The fake server cooperates (sends valid stamped replies) only for the
+    // valid self-LOGIN scenarios. The bootstrap no longer gates on the LOGIN, so
+    // this drives the server's behavior, not the acceptance assertion.
+    let server_cooperates = matches!(
         scenario,
         BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
+    );
+    // The session claims InZone / blowfish-Accepted only once a self position
+    // seed has landed; the s2c 0x00A LOGIN is tracked but not gated. This is the
+    // new acceptance signal.
+    let position_seeded = matches!(
+        scenario,
+        BootstrapReply::OtherLoginWithSelfPosition
+            | BootstrapReply::SelfPositionOnly
+            | BootstrapReply::SelfLogin
+            | BootstrapReply::DelayedSelfLogin
     );
     let self_body = login_fixture_body(PLAYER, POSITION);
     let login = packet(s2c::LOGIN, &self_body);
@@ -4396,7 +4597,13 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                 assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
             }
             if count == 1 {
-                peer = Some(MapClient::connect(client, SEED).await.unwrap());
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or parallel scenarios collide on the pinned port.
+                peer = Some(
+                    MapClient::connect_with_local(client, SEED, "0.0.0.0:0")
+                        .await
+                        .unwrap(),
+                );
                 if let Some(ref payload) = initial {
                     peer.as_ref()
                         .unwrap()
@@ -4413,7 +4620,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                         .unwrap();
                 }
             } else if !matches!(scenario, BootstrapReply::Silent) {
-                if accepted {
+                if server_cooperates {
                     peer.as_ref()
                         .unwrap()
                         .send_encrypted(&[], count as u16 + 1, 0)
@@ -4425,7 +4632,11 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             }
         }
     });
-    let mut map = MapClient::connect(address, SEED).await.unwrap();
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2 DNAT
+    // pin), or parallel scenarios collide on the pinned port.
+    let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
     let cfg = fixture_config();
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
@@ -4458,7 +4669,11 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
         fake.await.unwrap_err().is_cancelled(),
         "fake map server panicked"
     );
-    assert_eq!(outcome.is_ok(), accepted, "{scenario:?}: {outcome:?}");
+    // The bootstrap no longer hard-gates on the self LOGIN (it is tracked for
+    // voyage timing but processed opportunistically), so a requested disconnect
+    // always completes cleanly regardless of the scenario. Acceptance is pinned
+    // by saw_in_zone / saw_accepted below, not by the outcome.
+    assert!(outcome.is_ok(), "{scenario:?}: {outcome:?}");
     let mut saw_in_zone = false;
     let mut saw_accepted = false;
     let mut saw_seed = false;
@@ -4484,27 +4699,19 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             _ => {}
         }
     }
-    assert_eq!(saw_in_zone, accepted, "{scenario:?}");
-    assert_eq!(saw_accepted, accepted, "{scenario:?}");
-    if matches!(
-        scenario,
-        BootstrapReply::OtherLoginWithSelfPosition | BootstrapReply::SelfPositionOnly
-    ) {
-        assert!(
-            saw_seed,
-            "{scenario:?}: CHAR_PC fixture must seed a position without granting acceptance"
-        );
-    }
-    if accepted {
-        assert!(saw_seed, "{scenario:?}: missing authoritative position");
-        assert!(outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS);
-    } else {
-        assert_eq!(
-            outgoing.load(Ordering::SeqCst),
-            EXPECTED_BOOTSTRAPS,
-            "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
-        );
-    }
+    // The session claims InZone / blowfish-Accepted and seeds a position only
+    // when a self position seed lands; the s2c 0x00A LOGIN is tracked but not
+    // gated, so these track position_seeded, not server_cooperates.
+    assert_eq!(saw_in_zone, position_seeded, "{scenario:?}");
+    assert_eq!(saw_accepted, position_seeded, "{scenario:?}");
+    assert_eq!(saw_seed, position_seeded, "{scenario:?}");
+    // Post-bootstrap packets (GROUP_LIST_REQ, CLISTATUS) are now sent
+    // unconditionally — the bootstrap no longer gates on the self LOGIN — so
+    // every scenario sends more than the two bootstraps.
+    assert!(
+        outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS,
+        "{scenario:?}: post-bootstrap packets must follow the two bootstraps"
+    );
 }
 
 #[test]
@@ -4548,7 +4755,11 @@ async fn enterzone_in_gameok_reply() {
             let (size, client) = server.recv_from(&mut bytes).await.unwrap();
             count += 1;
             if count == 1 {
-                let connected = MapClient::connect(client, FIXTURE_SEED).await.unwrap();
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
+                let connected = MapClient::connect_with_local(client, FIXTURE_SEED, "0.0.0.0:0")
+                    .await
+                    .unwrap();
                 connected.send_encrypted(&login, 1, 0).await.unwrap();
                 peer = Some(connected);
             }
@@ -4585,7 +4796,11 @@ async fn enterzone_in_gameok_reply() {
             }
         }
     });
-    let mut map = MapClient::connect(address, FIXTURE_SEED).await.unwrap();
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+    // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
+    let mut map = MapClient::connect_with_local(address, FIXTURE_SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
     let cfg = fixture_config();
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
@@ -4717,6 +4932,42 @@ fn bag_capacity_line_is_devhud_only() {
         format!("Bag capacities: c0={}", MAIN_BAG_WIRE_CAP - 1)
     );
     assert!(lines[0].text.is_ascii(), "{}", lines[0].text);
+}
+
+#[test]
+fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
+    let mut target_cache: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    target_cache.insert(7u16, 0x010E_60D5u32);
+    let mut name_cache: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    name_cache.insert(0x010E_60D5u32, "Curilla".to_string());
+
+    // A frame with a speaker resolves to that entity's name.
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: Some(7),
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some("Curilla"));
+
+    // A speakerless frame gets a blank header (retail's no-speaker lines).
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: None,
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some(""));
+
+    // An unresolvable index prints retail's missing-entity marker rather than
+    // guessing the trigger NPC.
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: Some(99),
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some("???"));
 }
 
 #[test]

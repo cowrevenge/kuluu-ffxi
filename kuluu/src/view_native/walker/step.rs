@@ -18,7 +18,7 @@ use super::consts::*;
 use super::field::{self, Sampler};
 use super::obstacles::{DoorObstacle, MobObstacle, ObstacleSet};
 use super::sweep::{self, WallSource};
-use super::{ActorContact, StepResult, VerticalDecision, WalkMode, Walker};
+use super::{ActorContact, HorizontalOutcome, StepResult, VerticalDecision, WalkMode, Walker};
 
 /// Floor source for the walker's column queries: MZB zone collision plus
 /// closed-door triangles (a closed drawbridge is a floor). The support probe
@@ -294,11 +294,37 @@ pub fn step(
     // feet + STEP_MAX is a horizontal obstacle, and vertical authority lands
     // after it. Noclip bypasses walls AND mobs — free-fly for debugging;
     // grounding stays on either way.
-    let mut d = if noclip {
-        d_in
+    let mut outcome;
+    let mut d;
+    if want_len <= 1e-6 {
+        // No input this tick: nothing to sweep; only the idle contact test
+        // below still runs against the standing position.
+        outcome = HorizontalOutcome::NoInput;
+        d = d_in;
+    } else if noclip {
+        outcome = HorizontalOutcome::Noclip;
+        d = d_in;
     } else {
-        sweep::sweep(&walls, feet_xz, feet_y, d_in)
-    };
+        let (swept, exit) = sweep::sweep(&walls, feet_xz, feet_y, d_in);
+        outcome = match exit {
+            // Boxed-in and no-slide stops: the body is at the contact position.
+            sweep::SweepExit::Hold => HorizontalOutcome::WallHold {
+                contact: Some(feet_xz + swept),
+            },
+            sweep::SweepExit::Reversal => HorizontalOutcome::WallReversal {
+                contact: Some(feet_xz + swept),
+            },
+            _ => {
+                let ratio = (swept.length() / want_len).min(1.0);
+                if ratio >= 0.999 {
+                    HorizontalOutcome::Moved
+                } else {
+                    HorizontalOutcome::Slid { ratio }
+                }
+            }
+        };
+        d = swept;
+    }
 
     // Actor contact is all-or-nothing against the single nearest actor to the
     // projected position, and drops the tick's movement instead of
@@ -306,6 +332,10 @@ pub fn step(
     // the expiring budget turns sustained input into a walk-through.
     if !noclip && contact_blocks(&obstacles.mobs, feet_xz + d, dt, &mut state.contact) {
         d = Vec2::ZERO;
+        outcome = HorizontalOutcome::ActorContact {
+            mob: state.contact.target().unwrap_or(0),
+            contact: Some(feet_xz + d_in),
+        };
     }
 
     let new_xz = feet_xz + d;
@@ -513,6 +543,7 @@ pub fn step(
         feet_z: -y_new,
         mode: state.mode,
         decision,
+        outcome,
     }
 }
 

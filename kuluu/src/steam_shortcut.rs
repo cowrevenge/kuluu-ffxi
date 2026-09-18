@@ -1062,11 +1062,17 @@ mod tests {
     fn find_steam_root_requires_a_userdata_dir() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        assert_eq!(find_steam_root(home), None);
-        let candidate = steam_root_candidates(home)
+        // Windows candidates are machine-level Program Files paths a fixture
+        // cannot own: a real Steam install there answers the first assertion
+        // before the fixture does.
+        let Some(candidate) = steam_root_candidates(home)
             .into_iter()
             .find(|c| c.starts_with(home))
-            .unwrap();
+        else {
+            eprintln!("skipping: no home-relative Steam root candidate on this platform");
+            return;
+        };
+        assert_eq!(find_steam_root(home), None);
         fs::create_dir_all(candidate.join("userdata")).unwrap();
         assert_eq!(find_steam_root(home), Some(candidate));
     }

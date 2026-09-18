@@ -10,6 +10,8 @@
 //! Cues are **event-scoped**: each one describes a change retail applies for the
 //! duration of the running event, never a persisted flag.
 
+use crate::vm::scene::EventPosition;
+
 /// A baked `XiEvent::GetActorIndex` operand: the entity an opcode names
 /// (research/XiEvents/Event VM Functions.md). Cues carry it unresolved because
 /// only the host owns the entity table the reserved selectors index; this VM's
@@ -34,6 +36,11 @@ const LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
 impl ActorLookup {
     pub const LOCAL_PLAYER: Self = Self(LOOKUP_LOCAL_PLAYER_B);
     pub const EVENT_ENTITY: Self = Self(LOOKUP_EVENT_ENTITY);
+    /// Hold-table stand-in for a zone-level routine (0x2D/0x54): retail polls the
+    /// zone object, not an actor, so kuluu keys that WAIT* hold on this sentinel
+    /// instead of either cue actor. It sits just past retail's reserved lookup
+    /// range (research/XiEvents/Event VM Functions.md GetActorIndex).
+    pub const ZONE: Self = Self(0x7FFF_FFFA);
 
     pub fn is_local_player(self) -> bool {
         matches!(
@@ -110,6 +117,138 @@ pub fn dat_id_helper(param: i32) -> i32 {
     param
 }
 
+// The 0x5B event motion resource bands (research/XiEvents/OpCodes/0x005B.md,
+// FUNC_XiSkeletonActor_ReadEventMotionRes call sites): the operand selects a
+// base DAT id by which band it falls in.
+const EVENT_MOTION_BAND_1: i32 = 512;
+const EVENT_MOTION_BAND_2: i32 = 1024;
+const EVENT_MOTION_BAND_3: i32 = 2048;
+const EVENT_MOTION_BAND_4: i32 = 3072;
+const EVENT_MOTION_BASE_0: i32 = 32104;
+const EVENT_MOTION_BASE_1: i32 = 49135;
+const EVENT_MOTION_BASE_2: i32 = 56345;
+const EVENT_MOTION_BASE_3: i32 = 59739;
+const EVENT_MOTION_BASE_4: i32 = 66339;
+
+/// DAT id of the event motion resource a 0x5B operand names.
+pub fn event_motion_dat_id(param: i32) -> u32 {
+    let base = if param < EVENT_MOTION_BAND_1 {
+        EVENT_MOTION_BASE_0
+    } else if param < EVENT_MOTION_BAND_2 {
+        EVENT_MOTION_BASE_1
+    } else if param < EVENT_MOTION_BAND_3 {
+        EVENT_MOTION_BASE_2
+    } else if param < EVENT_MOTION_BAND_4 {
+        EVENT_MOTION_BASE_3
+    } else {
+        EVENT_MOTION_BASE_4
+    };
+    param.wrapping_add(base) as u32
+}
+
+// The 0x66 Tpc motion package bands (FFXiMain.dll ReadTpcEventMotionRes @rva 0xD2230):
+// the package number picks a base by which band it falls in, and each band
+// yields three ids - A (resource tag 1) and the two B candidates (resource
+// tag 2), one per CIB waist-byte state.
+pub const TPC_PACKAGE_OUT_OF_RANGE: u32 = 0x118;
+const TPC_PACKAGE_BAND_2: u32 = 0x46;
+const TPC_PACKAGE_BAND_3: u32 = 0x8C;
+const TPC_PACKAGE_BAND_4: u32 = 0xD2;
+const TPC_PACKAGE_A_BASE_1: u32 = 0x7FC8;
+const TPC_PACKAGE_B_SET_BASE_1: u32 = 0x800E;
+const TPC_PACKAGE_B_CLEAR_BASE_1: u32 = 0x8054;
+const TPC_PACKAGE_A_BASE_2: u32 = 0xEF39;
+const TPC_PACKAGE_B_SET_BASE_2: u32 = 0xEF7F;
+const TPC_PACKAGE_B_CLEAR_BASE_2: u32 = 0xEFC5;
+const TPC_PACKAGE_A_BASE_3: u32 = 0x15711;
+const TPC_PACKAGE_B_SET_BASE_3: u32 = 0x15757;
+const TPC_PACKAGE_B_CLEAR_BASE_3: u32 = 0x1579D;
+const TPC_PACKAGE_A_BASE_4: u32 = 0x18F5F;
+const TPC_PACKAGE_B_SET_BASE_4: u32 = 0x18FA5;
+const TPC_PACKAGE_B_CLEAR_BASE_4: u32 = 0x18FEB;
+
+/// The container file ids a 0x66 Tpc motion package names: A is attached
+/// with resource tag 1, B with tag 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TpcMotionPackages {
+    pub a: u32,
+    pub b_set: u32,
+    pub b_clear: u32,
+}
+
+/// The tag-2 container a CIB waist byte selects out of a Tpc package's two
+/// candidates: 1 takes `b_set`, 2..=0x7F takes `b_clear`, 0 or >= 0x80
+/// (including no CIB) loads A only - the re-read after container A lands skips
+/// B when the signed byte is <= 0 (FFXiMain.dll ReadTpcEventMotionRes @rva
+/// 0xD2230).
+pub fn tpc_b_for_waist(b_set: u32, b_clear: u32, waist: u8) -> Option<u32> {
+    match waist {
+        1 => Some(b_set),
+        2..=0x7F => Some(b_clear),
+        _ => None,
+    }
+}
+
+/// The container file ids a 0x66 Tpc motion package `param` names, or `None`
+/// at or past the package limit, where retail logs and loads nothing
+/// (FFXiMain.dll ReadTpcEventMotionRes @rva 0xD2230).
+pub fn tpc_motion_packages(param: i32) -> Option<TpcMotionPackages> {
+    let val = param as u32;
+    if val >= TPC_PACKAGE_OUT_OF_RANGE {
+        return None;
+    }
+    let (v, a_base, b_set_base, b_clear_base) = if val < TPC_PACKAGE_BAND_2 {
+        (
+            val,
+            TPC_PACKAGE_A_BASE_1,
+            TPC_PACKAGE_B_SET_BASE_1,
+            TPC_PACKAGE_B_CLEAR_BASE_1,
+        )
+    } else if val < TPC_PACKAGE_BAND_3 {
+        (
+            val - TPC_PACKAGE_BAND_2,
+            TPC_PACKAGE_A_BASE_2,
+            TPC_PACKAGE_B_SET_BASE_2,
+            TPC_PACKAGE_B_CLEAR_BASE_2,
+        )
+    } else if val < TPC_PACKAGE_BAND_4 {
+        (
+            val - TPC_PACKAGE_BAND_3,
+            TPC_PACKAGE_A_BASE_3,
+            TPC_PACKAGE_B_SET_BASE_3,
+            TPC_PACKAGE_B_CLEAR_BASE_3,
+        )
+    } else {
+        (
+            val - TPC_PACKAGE_BAND_4,
+            TPC_PACKAGE_A_BASE_4,
+            TPC_PACKAGE_B_SET_BASE_4,
+            TPC_PACKAGE_B_CLEAR_BASE_4,
+        )
+    };
+    Some(TpcMotionPackages {
+        a: v + a_base,
+        b_set: v + b_set_base,
+        b_clear: v + b_clear_base,
+    })
+}
+
+/// The motion resource a LOADEXTSCHEDULER cue loads before playing its key
+/// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtSchedulerMotion {
+    /// 0x5B: the event motion resource a single DAT file id names.
+    Event(u32),
+    /// 0x66 in range: container A (resource tag 1) and the two B candidates
+    /// (resource tag 2); the host picks between them from the actor's CIB
+    /// waist byte, which this VM does not carry.
+    Tpc(TpcMotionPackages),
+}
+
+/// The 0x5B "no action" key: retail loads the motion resource and skips
+/// SetAction when the key is zero or these bytes.
+pub const NO_ACTION_KEY: FourCc = *b"xxxx";
+
 /// One staging effect the running event asked for. Emitted in execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCue {
@@ -130,6 +269,26 @@ pub enum EventCue {
         tag: FourCc,
         duration: u16,
     },
+    /// 0x5B/0x66 LOADEXTSCHEDULER: load the motion resource into `actor1`'s
+    /// skeleton, then play action `key` on it with `actor2` as partner
+    /// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md). `motion` is `None`
+    /// for the 0x66 out-of-range package, where retail logs and loads nothing
+    /// and the host plays `key` on the actor's own resources.
+    ExtScheduler {
+        motion: Option<ExtSchedulerMotion>,
+        actor1: ActorLookup,
+        actor2: ActorLookup,
+        key: FourCc,
+    },
+    /// 0x2D MAPSCHEDULOR: start the zone-level routine `key` out of the current
+    /// zone's own model DAT over the two actors, waited on by 0x54
+    /// (research/XiEvents/OpCodes/0x002D.md). The host arms that wait's hold
+    /// from the routine's authored length in the file the key resolved in.
+    ZoneScheduler {
+        key: FourCc,
+        actor1: ActorLookup,
+        actor2: ActorLookup,
+    },
     /// 0x4E EVENTHIDE: set/clear the target's event-hide render flag
     /// (research/XiEvents/OpCodes/0x004E.md).
     ActorHide { target: ActorLookup, hide: bool },
@@ -137,6 +296,13 @@ pub enum EventCue {
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide { hide: bool },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold { stop: bool, hour: Option<u32> },
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
@@ -148,6 +314,59 @@ pub enum EventCue {
         status_event: u8,
         mount_id: Option<u16>,
     },
+    /// 0x1F MOVE case 0 on a non-player actor: walk the event entity to `goal`
+    /// at `speed` (research/XiEvents/OpCodes/0x001F.md). The host arms the
+    /// arrival hold from its own distance and speed; the VM never measures it.
+    ActorMove {
+        actor: ActorLookup,
+        goal: EventPosition,
+        /// Raw 0x32 MainSpeed operand; the host scales it with
+        /// [`crate::vm::scene::EVENT_SPEED_SCALE`].
+        speed: i32,
+    },
+    /// 0x37 on a non-player actor: set the event entity's position (teleport,
+    /// no hold; research/XiEvents/OpCodes/0x0037.md).
+    ActorPlace {
+        actor: ActorLookup,
+        position: EventPosition,
+    },
+    /// 0x39 on a non-player actor: set the event entity's facing from its work
+    /// operand (research/XiEvents/OpCodes/0x0039.md).
+    ActorFace { actor: ActorLookup, heading: i32 },
+    /// 0x4A DTURA, 0x79 lookat case 0 and the motion half of 0x1E
+    /// look-and-talk: turn `actor` toward `target`
+    /// (research/XiEvents/OpCodes/0x004A.md, 0x0079.md, 0x001E.md).
+    ActorLookAt {
+        actor: ActorLookup,
+        target: ActorLookup,
+    },
+    /// 0x5E / 0x6B stop action: kill the current action on `actor` and return
+    /// it to idle; `key` names the routine slot to clear when the operand is a
+    /// nonzero tag (research/XiEvents/OpCodes/0x005E.md, 0x006B.md).
+    ActorStopAction {
+        actor: ActorLookup,
+        key: Option<FourCc>,
+    },
+    /// 0xB5 case 0: set the event entity's display name to `name`, the work
+    /// string its operand selects (research/XiEvents/OpCodes/0x00B5.md). That
+    /// string is filled by 0xB4 case 0 (an inline literal) or case 1 (the
+    /// s2c 0x005D PENDINGSTR table entry its work operand selects).
+    EntityName { actor: ActorLookup, name: [u8; 16] },
+    /// 0xC8 MAP_TUTORIAL: open the map window on zone `map_id`; `tutorial` is
+    /// the LOBYTE of the third work operand (research/XiEvents/OpCodes/0x00C8.md).
+    MapOpen { map_id: i32, tutorial: bool },
+    /// 0x8B MAP_MARKER: place a named marker on the player's map at
+    /// milli-unit coordinates; `name` is the raw 16-byte field with retail's
+    /// underscore-to-space rewrite already applied
+    /// (research/XiEvents/OpCodes/0x008B.md).
+    MapMarker {
+        map_id: i32,
+        x_milli: i32,
+        y_milli: i32,
+        name: [u8; 16],
+    },
+    /// 0x8A CLOSE_MAP: close the map window (research/XiEvents/OpCodes/0x008A.md).
+    MapClose,
 }
 
 impl EventCue {
@@ -182,6 +401,26 @@ impl EventCue {
                 tag,
                 duration,
             },
+            Self::ExtScheduler {
+                motion,
+                actor1,
+                actor2,
+                key,
+            } => Self::ExtScheduler {
+                motion,
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
+                key,
+            },
+            Self::ZoneScheduler {
+                key,
+                actor1,
+                actor2,
+            } => Self::ZoneScheduler {
+                key,
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
+            },
             Self::ActorHide { target, hide } => Self::ActorHide {
                 target: resolve(target),
                 hide,
@@ -195,6 +434,31 @@ impl EventCue {
                 status_event,
                 mount_id,
             },
+            Self::ActorMove { actor, goal, speed } => Self::ActorMove {
+                actor: resolve(actor),
+                goal,
+                speed,
+            },
+            Self::ActorPlace { actor, position } => Self::ActorPlace {
+                actor: resolve(actor),
+                position,
+            },
+            Self::ActorFace { actor, heading } => Self::ActorFace {
+                actor: resolve(actor),
+                heading,
+            },
+            Self::ActorLookAt { actor, target } => Self::ActorLookAt {
+                actor: resolve(actor),
+                target: resolve(target),
+            },
+            Self::ActorStopAction { actor, key } => Self::ActorStopAction {
+                actor: resolve(actor),
+                key,
+            },
+            Self::EntityName { actor, name } => Self::EntityName {
+                actor: resolve(actor),
+                name,
+            },
             other => other,
         }
     }
@@ -203,6 +467,28 @@ impl EventCue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Band bases read back off FFXiMain.dll independently of the consts above:
+    // the band-edge tests are only worth running while their expected values
+    // come from a second source, so they are pinned here rather than imported.
+    const EVENT_MOTION_BASE_0_PINNED: u32 = 32104;
+    const EVENT_MOTION_BASE_1_PINNED: u32 = 49135;
+    const EVENT_MOTION_BASE_2_PINNED: u32 = 56345;
+    const EVENT_MOTION_BASE_3_PINNED: u32 = 59739;
+    const EVENT_MOTION_BASE_4_PINNED: u32 = 66339;
+    const EVENT_MOTION_BAND_4_PINNED: u32 = 3072;
+    const TPC_A_BASE_1_PINNED: u32 = 32712;
+    const TPC_B_SET_BASE_1_PINNED: u32 = 32782;
+    const TPC_B_CLEAR_BASE_1_PINNED: u32 = 32852;
+    const TPC_A_BASE_2_PINNED: u32 = 61241;
+    const TPC_B_SET_BASE_2_PINNED: u32 = 61311;
+    const TPC_B_CLEAR_BASE_2_PINNED: u32 = 61381;
+    const TPC_A_BASE_3_PINNED: u32 = 87825;
+    const TPC_B_SET_BASE_3_PINNED: u32 = 87895;
+    const TPC_B_CLEAR_BASE_3_PINNED: u32 = 87965;
+    const TPC_A_BASE_4_PINNED: u32 = 102239;
+    const TPC_B_SET_BASE_4_PINNED: u32 = 102309;
+    const TPC_B_CLEAR_BASE_4_PINNED: u32 = 102379;
 
     /// The fade pair's DAT id is the one the 0x45 base plus its authored work
     /// operand resolves to; both consts must keep agreeing.
@@ -234,6 +520,141 @@ mod tests {
     }
 
     #[test]
+    fn event_motion_dat_id_picks_its_base_at_each_band_edge() {
+        // Each band edge lands on the next base exactly once; the value just
+        // below an edge stays in the current band.
+        let band_4 = EVENT_MOTION_BAND_4_PINNED;
+        assert_eq!(event_motion_dat_id(0), EVENT_MOTION_BASE_0_PINNED);
+        assert_eq!(event_motion_dat_id(511), EVENT_MOTION_BASE_0_PINNED + 511);
+        assert_eq!(event_motion_dat_id(512), EVENT_MOTION_BASE_1_PINNED + 512);
+        assert_eq!(event_motion_dat_id(1023), EVENT_MOTION_BASE_1_PINNED + 1023);
+        assert_eq!(event_motion_dat_id(1024), EVENT_MOTION_BASE_2_PINNED + 1024);
+        assert_eq!(event_motion_dat_id(2047), EVENT_MOTION_BASE_2_PINNED + 2047);
+        assert_eq!(event_motion_dat_id(2048), EVENT_MOTION_BASE_3_PINNED + 2048);
+        assert_eq!(event_motion_dat_id(3071), EVENT_MOTION_BASE_3_PINNED + 3071);
+        assert_eq!(
+            event_motion_dat_id(band_4 as i32),
+            EVENT_MOTION_BASE_4_PINNED + band_4
+        );
+    }
+
+    #[test]
+    fn tpc_motion_packages_picks_its_base_at_each_band_edge() {
+        // Each band edge lands on the next base exactly once; the value just
+        // below an edge stays in the current band.
+        assert_eq!(
+            tpc_motion_packages(0),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_1_PINNED,
+                b_set: TPC_B_SET_BASE_1_PINNED,
+                b_clear: TPC_B_CLEAR_BASE_1_PINNED,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x45),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_1_PINNED + 0x45,
+                b_set: TPC_B_SET_BASE_1_PINNED + 0x45,
+                b_clear: TPC_B_CLEAR_BASE_1_PINNED + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x46),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_2_PINNED,
+                b_set: TPC_B_SET_BASE_2_PINNED,
+                b_clear: TPC_B_CLEAR_BASE_2_PINNED,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x8B),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_2_PINNED + 0x45,
+                b_set: TPC_B_SET_BASE_2_PINNED + 0x45,
+                b_clear: TPC_B_CLEAR_BASE_2_PINNED + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x8C),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_3_PINNED,
+                b_set: TPC_B_SET_BASE_3_PINNED,
+                b_clear: TPC_B_CLEAR_BASE_3_PINNED,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0xD1),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_3_PINNED + 0x45,
+                b_set: TPC_B_SET_BASE_3_PINNED + 0x45,
+                b_clear: TPC_B_CLEAR_BASE_3_PINNED + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0xD2),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_4_PINNED,
+                b_set: TPC_B_SET_BASE_4_PINNED,
+                b_clear: TPC_B_CLEAR_BASE_4_PINNED,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x117),
+            Some(TpcMotionPackages {
+                a: TPC_A_BASE_4_PINNED + 0x45,
+                b_set: TPC_B_SET_BASE_4_PINNED + 0x45,
+                b_clear: TPC_B_CLEAR_BASE_4_PINNED + 0x45,
+            })
+        );
+        assert_eq!(tpc_motion_packages(0x118), None);
+        assert_eq!(tpc_motion_packages(0x118 + 1), None);
+        // Negative operands are huge unsigned packages: out of range.
+        assert_eq!(tpc_motion_packages(-1), None);
+    }
+
+    #[test]
+    fn tpc_motion_packages_hits_the_retail_anchors() {
+        // Package 20 (the Sandy opening scene) and 12, cross-checked against
+        // the install's DATs: 32732 holds tlk0 + thk1, 32724 holds kka0.
+        assert_eq!(
+            tpc_motion_packages(20),
+            Some(TpcMotionPackages {
+                a: 32732,
+                b_set: 32802,
+                b_clear: 32872,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(12),
+            Some(TpcMotionPackages {
+                a: 32724,
+                b_set: 32794,
+                b_clear: 32864,
+            })
+        );
+    }
+
+    #[test]
+    fn tpc_b_for_waist_follows_the_retail_flag_rule() {
+        let pkgs = tpc_motion_packages(20).unwrap();
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 1),
+            Some(pkgs.b_set)
+        );
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 2),
+            Some(pkgs.b_clear)
+        );
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0x7F),
+            Some(pkgs.b_clear)
+        );
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0), None);
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0x80), None);
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0xFF), None);
+    }
+
+    #[test]
     fn actor_lookup_separates_the_player_the_event_entity_and_server_ids() {
         assert!(ActorLookup::LOCAL_PLAYER.is_local_player());
         assert!(!ActorLookup::LOCAL_PLAYER.is_event_entity());
@@ -252,5 +673,9 @@ mod tests {
 
         // No high byte and not reserved: the default handler's fallback.
         assert!(ActorLookup(0x0000_0042).is_event_entity());
+
+        // The zone sentinel is neither an actor selector nor a server id.
+        assert!(!ActorLookup::ZONE.is_local_player());
+        assert!(!ActorLookup::ZONE.is_event_entity());
     }
 }

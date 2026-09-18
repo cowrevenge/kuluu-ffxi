@@ -1973,6 +1973,63 @@ fn apply_event_reports_real_mutations_only() {
     }));
 }
 
+/// The 0x058 battle-target push is the server's engage truth for self: it flips
+/// the animation byte to ATTACK on an accepted engage and back to NONE on a
+/// disengage. A rejection sends no 0x058, so the byte stays put.
+#[test]
+fn apply_event_target_changed_sets_self_engage_byte() {
+    use ffxi_proto::decode::animation::{ATTACK, NONE};
+    let mut s = SessionState::default();
+    assert_eq!(s.self_server_status, NONE);
+
+    // Accepted engage: the byte flips to ATTACK.
+    assert!(s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+    assert_eq!(s.self_server_status, ATTACK);
+    // A repeat for the same target is a no-op fold.
+    assert!(!s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+
+    // Disengage: the byte returns to NONE.
+    assert!(s.apply_event(&AgentEvent::TargetChanged { target_id: None }));
+    assert_eq!(s.self_server_status, NONE);
+}
+
+/// The dismissal edge clears the displayed frame so its advance hint cannot linger over
+/// camera moves and holds; a second dismissal with nothing up is a no-op, and the next
+/// message opcode reopens it.
+#[test]
+fn apply_event_dialog_dismissed_clears_the_frame() {
+    let mut s = SessionState::default();
+    assert!(
+        !s.apply_event(&AgentEvent::DialogDismissed),
+        "nothing up yet"
+    );
+
+    let dialog = DialogState {
+        event_id: 503,
+        prompt: Some("The coupon line".into()),
+        ..Default::default()
+    };
+    assert!(s.apply_event(&AgentEvent::EventDialog {
+        dialog: dialog.clone()
+    }));
+    assert!(s.dialog.is_some());
+
+    // The dismissal clears the frame — and reports a mutation only because it did.
+    assert!(s.apply_event(&AgentEvent::DialogDismissed));
+    assert!(s.dialog.is_none());
+    assert!(
+        !s.apply_event(&AgentEvent::DialogDismissed),
+        "already clear"
+    );
+
+    // Reopening after dismissal still mutates (the next message opcode).
+    assert!(s.apply_event(&AgentEvent::EventDialog { dialog }));
+}
+
 #[test]
 fn apply_event_dedupes_identical_entity_upserts() {
     let mut s = SessionState::default();
@@ -2106,6 +2163,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MarkKeyItemsSeen { .. } => (),
         AgentCommand::CancelBuff { .. } => (),
         AgentCommand::ReportSubArea { .. } => (),
+        AgentCommand::CutsceneMotionDone { .. } => (),
         AgentCommand::EndEvent { .. } => (),
         AgentCommand::EndEventChoice { .. } => (),
         AgentCommand::CustomMenuRespond { .. } => (),
@@ -2248,11 +2306,13 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::CharStatsUpdated { .. } => (),
         AgentEvent::EntityUpserted { .. } => (),
         AgentEvent::EntityRemoved { .. } => (),
+        AgentEvent::OwnPetSynced { .. } => (),
         AgentEvent::NameExtractionMiss { .. } => (),
         AgentEvent::EntityPatched { .. } => (),
         AgentEvent::ChatLine { .. } => (),
         AgentEvent::EventStart { .. } => (),
         AgentEvent::EventDialog { .. } => (),
+        AgentEvent::DialogDismissed { .. } => (),
         AgentEvent::CutsceneStarted { .. } => (),
         AgentEvent::CutsceneCue { .. } => (),
         AgentEvent::CutsceneEnded { .. } => (),
@@ -2342,6 +2402,9 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::AuctionSalesStatusReset { .. } => (),
         AgentEvent::AuctionSalesSlot { .. } => (),
         AgentEvent::AuctionCancelResult { .. } => (),
+        AgentEvent::MapOpen { .. } => (),
+        AgentEvent::MapMarkerPlaced { .. } => (),
+        AgentEvent::MapClosed => (),
     }
 }
 

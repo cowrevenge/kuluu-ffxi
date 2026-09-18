@@ -2,6 +2,7 @@
 
 pub(crate) mod event_transport;
 use anyhow::{anyhow, Context, Result};
+use ffxi_event::PendingTag;
 use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
 
@@ -414,6 +415,8 @@ async fn run_map_session(
     let mut self_act_index: Option<u16> = None;
     let mut name_cache: std::collections::HashMap<u32, String> = Default::default();
 
+    let mut target_cache: std::collections::HashMap<u16, u32> = Default::default();
+
     let mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind> =
         Default::default();
 
@@ -439,6 +442,9 @@ async fn run_map_session(
     let mut self_pos = Position::default();
 
     let mut self_pos_seeded = false;
+
+    // Set by drain_zone_flood when ENTERZONE (s2c 0x008) lands inside a flood;
+    // consumed by keepalive_loop to fire the post-GAMEOK handshake.
     let mut enterzone_seen = false;
 
     let mut flood_in_mog_house = false;
@@ -464,6 +470,7 @@ async fn run_map_session(
         bootstrap.char_name,
         &mut self_act_index,
         &mut name_cache,
+        &mut target_cache,
         &mut kind_cache,
         &mut claim_cache,
         &mut name_miss_dedup,
@@ -489,11 +496,29 @@ async fn run_map_session(
         self_pos_seeded,
         "zone-in flood drained"
     );
-    // vendor/server/src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process.
-    anyhow::ensure!(
-        self_login_received && self_pos_seeded,
-        "map bootstrap failed: required self LOGIN/position missing (login={self_login_received}, position={self_pos_seeded}, received_subpackets={total_subs}, server_sync={server_last_seq})"
-    );
+    // The self-position seed (CHAR_PC) is the only hard bootstrap requirement:
+    // without it we cannot seed outbound POS. The s2c 0x00A LOGIN (vendor/server/
+    // src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process) carries
+    // the voyage timing but rides a second datagram behind the zone-in burst, so
+    // it is not a hard gate — if it did not land in the pre-GAMEOK drain it is
+    // still processed opportunistically by the keepalive loop (handle_sub_packet).
+    if !self_pos_seeded {
+        tracing::warn!(
+            iteration,
+            current_zone_id,
+            "zone-in flood ended without a self-position seed (no CHAR_PC for self \
+             before deadline) — outbound POS suppressed until a CHAR_PC for self lands"
+        );
+    }
+    if !self_login_received {
+        tracing::info!(
+            iteration,
+            total_subs,
+            server_sync = server_last_seq,
+            "self 0x00A LOGIN not in the pre-GAMEOK drain (voyage timing deferred \
+             to the keepalive loop)"
+        );
+    }
 
     let mut sub_seq: u16 = map_client::BOOTSTRAP_SUB_SYNC.wrapping_add(1);
 
@@ -520,6 +545,7 @@ async fn run_map_session(
                 bootstrap.char_name,
                 &mut self_act_index,
                 &mut name_cache,
+                &mut target_cache,
                 &mut kind_cache,
                 &mut claim_cache,
                 &mut name_miss_dedup,
@@ -606,18 +632,28 @@ async fn run_map_session(
             "sent 0x061 CLISTATUS (zone-in self status request)"
         );
     }
-    emit_stage(event_tx, Stage::InZone);
-    let _ = event_tx.send(AgentEvent::Diagnostics {
-        diagnostics: Diagnostics {
-            stage: Some(Stage::InZone),
-            blowfish_status: Some(BlowfishStatus::Accepted),
-            sync_in: Some(server_last_seq),
-            sync_out: Some(datagram_header_id(sub_seq)),
-            last_server_packet_age_ms: Some(0),
-            cert_sha256,
-            map_server_addr: Some(map.server_addr().to_string()),
-        },
-    });
+    // Claim InZone / blowfish-Accepted only once the self position seed has
+    // landed: without it the session cannot spawn the player, so it must not
+    // present itself as connected. The seed is the sole hard bootstrap
+    // requirement (the s2c 0x00A LOGIN is tracked but not gated), so a server
+    // that never sends a self CHAR_PC leaves the session in Zoning rather than
+    // a false InZone.
+    if self_pos_seeded {
+        emit_stage(event_tx, Stage::InZone);
+        let _ = event_tx.send(AgentEvent::Diagnostics {
+            diagnostics: Diagnostics {
+                stage: Some(Stage::InZone),
+                blowfish_status: Some(BlowfishStatus::Accepted),
+                sync_in: Some(server_last_seq),
+                sync_out: Some(datagram_header_id(sub_seq)),
+                last_server_packet_age_ms: Some(0),
+                cert_sha256,
+                map_server_addr: Some(map.server_addr().to_string()),
+            },
+        });
+    } else {
+        tracing::warn!("bootstrap completed without a self position seed — staying in Zoning");
+    }
 
     keepalive_loop(
         map,
@@ -634,6 +670,7 @@ async fn run_map_session(
         event_tx.clone(),
         cfg.user_driven_events,
         name_cache,
+        target_cache,
         kind_cache,
         claim_cache,
         name_miss_dedup,
@@ -662,17 +699,17 @@ async fn run_map_session(
 /// vendor/server/scripts/zones/Attohwa_Chasm/Zone.lua).
 const FLOOD_ZONE_MESSAGE_MAX: usize = 32;
 
-fn should_break_flood(
-    break_on_idle: bool,
-    self_pos_seeded: bool,
-    self_login_received: bool,
-) -> bool {
-    break_on_idle || (self_pos_seeded && self_login_received)
+fn should_break_flood(break_on_idle: bool, self_pos_seeded: bool) -> bool {
+    break_on_idle || self_pos_seeded
 }
 
 /// Drains and processes zone-in traffic until `deadline`, or earlier once the
 /// socket has been idle for one recv window: unconditionally when
-/// `break_on_idle`, otherwise only after self LOGIN and its position have landed.
+/// `break_on_idle`, otherwise only after the self position seed (CHAR_PC) has
+/// landed. The s2c 0x00A LOGIN is tracked (returned) for voyage timing but is
+/// not a break condition — it rides a second datagram behind the zone-in burst,
+/// so gating the break on it stalls the whole bootstrap when that datagram is
+/// late or lost.
 /// When `ack_at_send` is Some (post-send quiescence), also breaks as soon as a
 /// datagram stamped differently from that ack arrives — the server's id only
 /// advances when it accepts one of our c2s, so any post-acceptance stamp is
@@ -696,6 +733,7 @@ async fn drain_zone_flood(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+    target_cache: &mut std::collections::HashMap<u16, u32>,
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
     claim_cache: &mut std::collections::HashMap<u32, u32>,
     name_miss_dedup: &mut std::collections::HashMap<
@@ -741,9 +779,10 @@ async fn drain_zone_flood(
                         self_login_received |= decode::ServerLogin::decode(sub.data)
                             .is_ok_and(|login| login.unique_no == self_char_id);
                     }
-                    // 0x008 answers 0x00C GAMEOK (vendor/server/src/map/packets/c2s/
-                    // 0x00c_gameok.cpp GP_CLI_COMMAND_GAMEOK::process), so it lands in
-                    // the post-send drain, before the keepalive loop can watch for it.
+                    // GP_CLI_COMMAND_GAMEOK::process answers c2s 0x00C with ENTERZONE
+                    // first (vendor/server/src/map/packets/c2s/0x00c_gameok.cpp), so on a
+                    // fast link it lands inside this post-GAMEOK drain instead of the
+                    // keepalive loop. Record it here; the in-loop check still covers slow links.
                     if sub.opcode == ffxi_proto::map::s2c::ENTERZONE {
                         *enterzone_seen = true;
                     }
@@ -756,6 +795,7 @@ async fn drain_zone_flood(
                         self_char_name,
                         self_act_index,
                         name_cache,
+                        target_cache,
                         kind_cache,
                         claim_cache,
                         name_miss_dedup,
@@ -788,7 +828,7 @@ async fn drain_zone_flood(
             Ok(Err(_)) => break,
 
             Err(_) => {
-                if should_break_flood(break_on_idle, *self_pos_seeded, self_login_received) {
+                if should_break_flood(break_on_idle, *self_pos_seeded) {
                     break;
                 }
             }
@@ -859,6 +899,15 @@ fn first_decode_err(opcode: u16) -> bool {
         .unwrap_or(true)
 }
 
+// Read-once env switch for the gated diagnostics in this module (same pattern as
+// kuluu-render's env_flags::env_flag): any value enables, unset disables.
+fn env_flag(cell: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+/// Special-pose wire diagnostics on target "special" (RUST_LOG=special=debug): raw
+/// status/sub observations for every CHAR_NPC update that could drive a special-pose
+/// transition.
 fn special_wire_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
 }
@@ -873,6 +922,8 @@ fn handle_sub_packet(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+
+    target_cache: &mut std::collections::HashMap<u16, u32>,
 
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
 
@@ -1220,6 +1271,8 @@ fn handle_sub_packet(
                     wire_name
                 };
 
+                target_cache.insert(head.act_index, head.unique_no);
+
                 let name = name.map(|n| n.replace('_', " "));
                 if let Some(n) = name.as_ref() {
                     if !n.is_empty() {
@@ -1415,6 +1468,9 @@ fn handle_sub_packet(
             if let Ok(pet) =
                 decode::PetSync::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
+                let _ = event_tx.send(AgentEvent::OwnPetSynced {
+                    targid: (pet.pet_targid != 0).then_some(pet.pet_targid),
+                });
                 if pet.pet_targid != 0 {
                     let _ = event_tx.send(AgentEvent::EntityPatched {
                         id: None,
@@ -1493,6 +1549,9 @@ fn handle_sub_packet(
             }
         }
         s2c::BATTLE2 => {
+            if combat_log_enabled() {
+                battle2_debug_dump(sub.data);
+            }
             if let Some(h) = decode_battle2_header(sub.data) {
                 tracing::debug!(target: "combat", header = ?h, "BATTLE2");
                 let _ = event_tx.send(AgentEvent::ActionStarted {
@@ -1882,6 +1941,7 @@ fn handle_sub_packet(
                     prompt: Some(title),
                     choices: options,
                     custom_menu: true,
+                    cancel_armed: true, // ESC answers "Canceled." via the customMenu branch
                     ..Default::default()
                 };
                 let _ = event_tx.send(AgentEvent::EventDialog { dialog });
@@ -2201,6 +2261,11 @@ const EVENT_WALKAWAY_YALMS: f32 = 2.0;
 
 const NAME_MISS_BODY_HEX_CAP: usize = 96;
 
+/// Marker the auto-release chat line carries. The live event tests assert its
+/// absence to prove the event played rather than being skipped, so a silent
+/// reword here would turn every one of them permanently green.
+pub const EVENT_AUTO_SKIPPED_MARKER: &str = "auto-skipped";
+
 fn record_name_miss(
     opcode: u16,
     unique_no: u32,
@@ -2268,17 +2333,77 @@ fn is_fresh_bundle(last_applied: Option<u16>, incoming: u16) -> bool {
     }
 }
 
+/// Send the c2s half of a pending tag round-trip: an EVENT_END subpacket with
+/// Mode=UpdatePending for a plain tag, or the position-tag packet (the only
+/// mode its validator accepts). Both process() functions push s2c EVENTUCOFF
+/// EventRecvPending back; the keepalive intercept on that ack calls
+/// [`crate::event_dialog::DialogSession::ack_server`] to release the VM's hold
+/// and run on (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp,
+/// 0x05c_eventendxzy.cpp GP_CLI_COMMAND_EVENTEND*::process).
+async fn send_pending_tag(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
+    unique_no: u32,
+    act_index: u16,
+    event_id: u16,
+    tag: &PendingTag,
+) {
+    let payload = match tag {
+        PendingTag::SendTag { end_para } => build_subpacket_event_end(
+            *sub_seq,
+            unique_no,
+            act_index,
+            current_zone_id,
+            event_id,
+            *end_para,
+            ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+        ),
+        PendingTag::SendXzy {
+            x,
+            y,
+            z,
+            dir,
+            end_para,
+        } => build_subpacket_event_end_xzy(
+            *sub_seq,
+            unique_no,
+            *x,
+            *y,
+            *z,
+            *dir,
+            *end_para,
+            act_index,
+            current_zone_id,
+            event_id,
+        ),
+    };
+    let header = datagram_header_id(*sub_seq);
+    *sub_seq = sub_seq.wrapping_add(1);
+    if let Err(e) = map.send_encrypted(&payload, header, server_last_seq).await {
+        tracing::warn!(error = %e, "pending-tag c2s send failed");
+    }
+}
+
 /// Route a server-initiated event into the event VM: display it when the VM
 /// can drive it (EVENT_END goes out when the script ends), auto-release it
 /// otherwise so the char never sticks server-side InEvent (which rejects
 /// zonelines, logout, and ~100 other c2s until 0x05B lands).
-fn begin_server_event(
+#[allow(clippy::too_many_arguments)]
+async fn begin_server_event(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
     dialog_session: &mut crate::event_dialog::DialogSession,
     trigger: EventTrigger,
     event_tx: &broadcast::Sender<AgentEvent>,
     cutscene: &mut crate::event_dialog::CutsceneScope,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     auto_event_end: &mut Vec<(u32, u16, u16, u32)>,
+    name_cache: &std::collections::HashMap<u32, String>,
+    target_cache: &std::collections::HashMap<u16, u32>,
 ) {
     let (zone_id, unique_no, act_index, event_id) = (
         trigger.event_zone,
@@ -2288,6 +2413,10 @@ fn begin_server_event(
     );
     let outcome = dialog_session.begin(trigger);
     let cues = dialog_session.take_cues();
+    // Syncs the up→down edge detector for this event's first frame.
+    if dialog_session.take_message_closed() {
+        let _ = event_tx.send(AgentEvent::DialogDismissed);
+    }
     // A choreography-only script runs to completion inside `begin`, so its
     // cues have to open and close a session of their own or nothing downstream
     // would ever see them.
@@ -2301,11 +2430,12 @@ fn begin_server_event(
         }
     }
     match outcome {
-        crate::event_dialog::Begin::Frame(dialog) => {
+        crate::event_dialog::Begin::Frame(mut dialog) => {
             cutscene.start(dialog.event_id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart {
                 event_id: dialog.event_id,
             });
+            attribute_event_speaker(&mut dialog, target_cache, name_cache);
             emit_event_speech_to_chat(event_tx, &dialog);
             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
             pending_event_end.push((unique_no, act_index, event_id));
@@ -2319,6 +2449,26 @@ fn begin_server_event(
             cutscene.start(id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
             pending_event_end.push((unique_no, act_index, event_id));
+        }
+        crate::event_dialog::Begin::AwaitServerAck(tag) => {
+            // The script opened on a pending tag (0x43/0x47 case 0): the event
+            // is live server-side and owes its first frame to the s2c ack, so
+            // it tracks like Waiting until then.
+            let id = crate::event_dialog::agent_event_id(unique_no, event_id);
+            cutscene.start(id, event_tx);
+            let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
+            pending_event_end.push((unique_no, act_index, event_id));
+            send_pending_tag(
+                map,
+                sub_seq,
+                server_last_seq,
+                current_zone_id,
+                unique_no,
+                act_index,
+                event_id,
+                &tag,
+            )
+            .await;
         }
         crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
             tracing::warn!(
@@ -2339,10 +2489,10 @@ fn begin_server_event(
                     sender: "client".into(),
                     text: match stopped_op {
                         Some(op) => format!(
-                            "[event] cutscene {event_id} auto-skipped (unimplemented opcode 0x{op:02X})"
+                            "[event] cutscene {event_id} {EVENT_AUTO_SKIPPED_MARKER} (unimplemented opcode 0x{op:02X})"
                         ),
                         None => format!(
-                            "[event] cutscene {event_id} auto-skipped ({})",
+                            "[event] cutscene {event_id} {EVENT_AUTO_SKIPPED_MARKER} ({})",
                             reason.as_str()
                         ),
                     },
@@ -2457,6 +2607,9 @@ async fn keepalive_loop(
     event_tx: broadcast::Sender<AgentEvent>,
     user_driven_events: bool,
     mut name_cache: std::collections::HashMap<u32, String>,
+    // Target index -> unique_no for live entities; resolves a VM frame's
+    // speaker_index to the entity that speaks it.
+    mut target_cache: std::collections::HashMap<u16, u32>,
     mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind>,
     mut claim_cache: std::collections::HashMap<u32, u32>,
     mut name_miss_dedup: std::collections::HashMap<
@@ -2495,6 +2648,9 @@ async fn keepalive_loop(
 
     let mut zone_transition_sent = false;
 
+    // One warn per pinned event when the player moves while it is held.
+    let mut walk_warning_sent = false;
+
     let mut resrdy_sent = false;
 
     let mut server_seq_applied: Option<u16> = None;
@@ -2505,6 +2661,12 @@ async fn keepalive_loop(
 
     let mut reconnect_via_zoneline: Option<u32> = None;
     let mut terminal_disconnect = false;
+    // The kind of the last 0x0E7 REQLOGOUT the client sent: retail's /shutdown
+    // must return to the login/server-select screen while /logout returns to the
+    // character list, so the terminal 0x00B LOGOUT reason carries which one was
+    // requested (issue #156). A server-initiated logout (no client request) keeps
+    // the logout flavor.
+    let mut last_reqlogout_shutdown = false;
 
     let mut pending_maprect: Option<(std::time::Instant, u32)> = None;
 
@@ -2659,8 +2821,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -2672,11 +2838,26 @@ async fn keepalive_loop(
                                 // next message wait; if none follows, the scene
                                 // just plays out (kuluu-bxts: cancel latch).
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    if let Some((u, a, n)) = dialog_session.active_end() {
+                                        send_pending_tag(
+                                            map,
+                                            &mut sub_seq,
+                                            server_last_seq,
+                                            current_zone_id,
+                                            u,
+                                            a,
+                                            n,
+                                            &tag,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         } else if !pending_event_end.is_empty() {
                             let mut payload = Vec::new();
                             for (unique_no, act_index, event_num) in pending_event_end.drain(..) {
-                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0));
+                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0, ffxi_proto::map::c2s::event_end_mode::END));
                                 sub_seq = sub_seq.wrapping_add(1);
                             }
                             if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
@@ -2826,8 +3007,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -2836,6 +3021,21 @@ async fn keepalive_loop(
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    if let Some((u, a, n)) = dialog_session.active_end() {
+                                        send_pending_tag(
+                                            map,
+                                            &mut sub_seq,
+                                            server_last_seq,
+                                            current_zone_id,
+                                            u,
+                                            a,
+                                            n,
+                                            &tag,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                         } else {
                             let payload = build_subpacket_event_end(
@@ -2845,6 +3045,7 @@ async fn keepalive_loop(
                                 current_zone_id,
                                 event_num,
                                 choice,
+                                ffxi_proto::map::c2s::event_end_mode::END,
                             );
                             sub_seq = sub_seq.wrapping_add(1);
                             if let Err(e) = map
@@ -2864,7 +3065,12 @@ async fn keepalive_loop(
                         break;
                     }
                     Some(AgentCommand::ReqLogout { kind }) => {
-
+                        last_reqlogout_shutdown = matches!(
+                            kind,
+                            crate::state::ReqLogoutKind::ShutdownToggle
+                                | crate::state::ReqLogoutKind::ShutdownOn
+                                | crate::state::ReqLogoutKind::ShutdownOff
+                        );
                         let (mode, kind_wire) = kind.wire_pair();
                         let payload = build_subpacket_reqlogout(sub_seq, mode, kind_wire);
                         tracing::info!(
@@ -3697,6 +3903,12 @@ async fn keepalive_loop(
                             tracing::warn!(error = %e, "submapchange send failed");
                         }
                     }
+                    // The renderer's finish report for a 0x2C SCHEDULOR routine:
+                    // releases the event VM's pending hold on it so the 0x53
+                    // past it advances on the next tick. No server traffic.
+                    Some(AgentCommand::CutsceneMotionDone { actor, key }) => {
+                        dialog_session.motion_done(actor, key);
+                    }
                     Some(AgentCommand::TreasureLot { slot }) => {
                         let payload = build_subpacket_trophy_lot(sub_seq, slot);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -4042,8 +4254,12 @@ async fn keepalive_loop(
                     for cue in cues {
                         cutscene.push(cue, &event_tx);
                     }
+                    if dialog_session.take_message_closed() {
+                        let _ = event_tx.send(AgentEvent::DialogDismissed);
+                    }
                     match advance {
-                        crate::event_dialog::Advance::Frame(dialog) => {
+                        crate::event_dialog::Advance::Frame(mut dialog) => {
+                            attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                             emit_event_speech_to_chat(&event_tx, &dialog);
                             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                         }
@@ -4052,6 +4268,21 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                         crate::event_dialog::Advance::Waiting => {}
+                        crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                            if let Some((u, a, n)) = dialog_session.active_end() {
+                                send_pending_tag(
+                                    map,
+                                    &mut sub_seq,
+                                    server_last_seq,
+                                    current_zone_id,
+                                    u,
+                                    a,
+                                    n,
+                                    &tag,
+                                )
+                                .await;
+                            }
+                        }
                     }
                 }
 
@@ -4120,6 +4351,7 @@ async fn keepalive_loop(
                     (false, false) => {
                         pending_event_end_since = Some(std::time::Instant::now());
                         pending_event_end_anchor = Some(self_pos.pos);
+                        walk_warning_sent = false;
                     }
                     (true, true) => {
                         pending_event_end_since = None;
@@ -4138,6 +4370,11 @@ async fn keepalive_loop(
                 });
                 let walked_away = !dialog_session.controls_player_position()
                     && should_release_on_walkaway(user_driven_events, walk_dist);
+                // Auto/headless mode never releases on drift (user_driven is false), so a
+                // pinned event can sit while the player moves: warn once per episode.
+                let moved_during_event = !walked_away
+                    && !dialog_session.controls_player_position()
+                    && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS);
 
                 let mut payload = Vec::new();
                 let mut resrdy_in_payload = false;
@@ -4156,6 +4393,10 @@ async fn keepalive_loop(
                     if let Some(ev) = mog.zone_in_event.take() {
                         dialog_session.set_player_position(event_transport::event_position(self_pos));
                         begin_server_event(
+                            map,
+                            &mut sub_seq,
+                            server_last_seq,
+                            current_zone_id,
                             &mut dialog_session,
                             EventTrigger {
                                 event_zone: ev.event_num,
@@ -4170,7 +4411,10 @@ async fn keepalive_loop(
                             &mut cutscene,
                             &mut pending_event_end,
                             &mut auto_event_end,
-                        );
+                            &name_cache,
+                            &target_cache,
+                        )
+                        .await;
                     }
                 }
                 for (unique_no, act_index, event_num, end_para) in auto_event_end.drain(..) {
@@ -4181,6 +4425,7 @@ async fn keepalive_loop(
                         current_zone_id,
                         event_num,
                         end_para,
+                        ffxi_proto::map::c2s::event_end_mode::END,
                     ));
                     sub_seq = sub_seq.wrapping_add(1);
                 }
@@ -4211,6 +4456,7 @@ async fn keepalive_loop(
                         user_driven: user_driven_events,
                         watchdog_fires,
                         walked_away,
+                        tag_in_flight: dialog_session.has_pending_tag(),
                     },
                     &mut pending_event_end,
                     dialog_session.active_end(),
@@ -4256,6 +4502,24 @@ async fn keepalive_loop(
                     }
                     pending_event_end_since = None;
                     pending_event_end_anchor = None;
+                }
+
+                if moved_during_event && !walk_warning_sent && !pending_event_end.is_empty() {
+                    walk_warning_sent = true;
+                    tracing::warn!(
+                        moved_yalms = walk_dist.unwrap_or(0.0),
+                        "player moving while a server event is pinned"
+                    );
+                    let _ = event_tx.send(AgentEvent::ChatLine {
+                        line: ChatLine {
+                            spans: Vec::new(),
+                            channel: ChatChannel::System,
+                            sender: "<client>".into(),
+                            text: "You moved while a server event is pending; hold position for the cutscene."
+                                .into(),
+                            server_ts: 0,
+                        },
+                    });
                 }
 
                 // Deferred 0x076 GROUP_LIST_REQ (skipped at zone-in while InEvent —
@@ -4384,11 +4648,13 @@ async fn keepalive_loop(
                                     reconnect_via_zoneline =
                                         pending_maprect.map(|(_, line_id)| line_id);
                                 } else {
+                                    let flavor = if last_reqlogout_shutdown {
+                                        "server shutdown"
+                                    } else {
+                                        "server logout"
+                                    };
                                     let _ = event_tx.send(AgentEvent::Disconnected {
-                                        reason: format!(
-                                            "server logout state={}",
-                                            logout.logout_state
-                                        ),
+                                        reason: format!("{flavor} state={}", logout.logout_state),
                                     });
                                     terminal_disconnect = true;
                                 }
@@ -4554,18 +4820,96 @@ async fn keepalive_loop(
                                         });
                                     dialog_session.set_player_position(event_transport::event_position(self_pos));
                                     begin_server_event(
+                                        map,
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        current_zone_id,
                                         &mut dialog_session,
                                         trigger,
                                         &event_tx,
                                         &mut cutscene,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
-                                    );
+                                        &name_cache,
+                                        &target_cache,
+                                    )
+                                    .await;
                                     continue;
                                 }
                             }
 
+                            // s2c PENDINGNUM writes the event VM's Work_Zone loop
+                            // conditions from index 2; it must land before the next
+                            // step even while a tag is held (research/XiPackets/
+                            // world/server/0x005C GP_SERV_PENDINGNUM).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGNUM {
+                                match decode::PendingNum::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_num(&p.num),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
+                            // s2c PENDINGSTR copies four 16-byte strings into
+                            // PTR_EventStrings, the table the event VM's 0xB4
+                            // case 1 reads; it must land before the next step even
+                            // while a tag is held, like PENDINGNUM above
+                            // (research/XiPackets/world/server/0x005D).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGSTR {
+                                match decode::PendingStr::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_str(&p.strings),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
                             event_transport::receive(&mut dialog_session, &sub, self_char_id, self_pos);
+
+                            // The ack both c2s event-end process() functions push after
+                            // handling a pending tag: release the VM's hold and run on to
+                            // the next frame. Gated on has_pending_tag so an EventRecvPending
+                            // with no held tag is only the scene-module acknowledgement in
+                            // event_transport::receive.
+                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
+                                && eventucoff_mode_of(sub.data)
+                                    == Some(ffxi_proto::map::eventucoff_mode::EVENT_RECV_PENDING)
+                                && dialog_session.has_pending_tag()
+                            {
+                                let Some((u, a, n)) = dialog_session.active_end() else {
+                                    continue;
+                                };
+                                let advance = dialog_session.ack_server();
+                                for cue in dialog_session.take_cues() {
+                                    cutscene.push(cue, &event_tx);
+                                }
+                                if dialog_session.take_message_closed() {
+                                    let _ = event_tx.send(AgentEvent::DialogDismissed);
+                                }
+                                match advance {
+                                    crate::event_dialog::Advance::Frame(mut dialog) => {
+                                        attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
+                                        emit_event_speech_to_chat(&event_tx, &dialog);
+                                        let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                                    }
+                                    crate::event_dialog::Advance::Ended { end_para, .. } => {
+                                        if take_pending_event_end(&mut pending_event_end, u, n) {
+                                            let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
+                                            sub_seq = sub_seq.wrapping_add(1);
+                                            if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                                tracing::warn!(error = %e, "EVENT_END (vm ack) send failed");
+                                            }
+                                        }
+                                        cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                                        let _ = event_tx.send(AgentEvent::EventEnded);
+                                    }
+                                    // Chained tag: the next hold in the same script. Send it
+                                    // now; its own EventRecvPending drives the next ack.
+                                    crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                        send_pending_tag(map, &mut sub_seq, server_last_seq, current_zone_id, u, a, n, &tag).await;
+                                    }
+                                    crate::event_dialog::Advance::Waiting => {}
+                                }
+                            }
 
                             // Keep the LOC_INVENTORY mirror for the delivery-box
                             // item picker current (category 0; index 0 is Gil).
@@ -4618,6 +4962,7 @@ async fn keepalive_loop(
                                 &character_name,
                                 &mut self_act_index,
                                 &mut name_cache,
+                                &mut target_cache,
                                 &mut kind_cache,
                                 &mut claim_cache,
                                 &mut name_miss_dedup,
@@ -5110,6 +5455,25 @@ fn emit_battle_message_audio_event(
     }
 }
 
+// vendor/server/src/map/enums/msg_basic.h MsgBasic — the ids whose client text reports a
+// refused action (the engage refusals "Unable to see <target>." / "<target> is out of
+// range.", plus the spell/item/pet refusal family). The Battle tab is display-hidden by
+// default, so a refused action whose only feedback parks there reads as nothing happened;
+// these route to the main log instead.
+const BATTLE_REJECTION_IDS: &[u16] = &[
+    4, 5, 12, 16, 18, 22, 34, 35, 36, 39, 40, 47, 49, 56, 62, 71, 76, 78, 87, 88, 89, 92, 94, 155,
+    190, 191, 192, 199, 210, 215, 216, 217, 218, 235, 307, 313, 315, 316, 328, 337, 339, 347, 356,
+    428, 429, 445, 446, 512, 574, 575, 660, 661, 662, 665, 666, 700, 717, 742, 745, 773,
+];
+
+fn battle_line_channel(message_num: u16) -> ChatChannel {
+    if BATTLE_REJECTION_IDS.contains(&message_num) {
+        ChatChannel::System
+    } else {
+        ChatChannel::Battle
+    }
+}
+
 fn decode_battle_message(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
@@ -5147,7 +5511,7 @@ fn decode_battle_message(
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
         return vec![ChatLine {
             spans: Vec::new(),
-            channel: ChatChannel::Battle,
+            channel: battle_line_channel(message_num),
             sender: cas_name,
             text,
             server_ts: 0,
@@ -5192,7 +5556,7 @@ fn decode_battle_message(
     );
     vec![ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
+        channel: battle_line_channel(message_num),
         sender,
         text,
         server_ts: 0,
@@ -5276,6 +5640,49 @@ pub struct Battle2Header {
     pub first_outcome: Option<ffxi_proto::melee::ResultOutcome>,
 }
 
+// KULUU_COMBAT_LOG=1 - ground-truth trace of BATTLE2 packets: re-reads the header bits
+// independently (same order as vendor/server/src/map/packets/s2c/0x028_battle2.cpp) so "the
+// packet carries no result block" is distinguishable from
+// "our parser dropped it". Read-only; no behaviour change.
+fn combat_log_enabled() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    env_flag(&ONCE, "KULUU_COMBAT_LOG")
+}
+
+fn battle2_debug_dump(data: &[u8]) {
+    let mut br = BattleBitReader::new(data, 8);
+    let actor_id = br.read(32).map(|v| v as u32);
+    let trg_sum = br.read(6);
+    let _res_sum = br.read(4);
+    let kind = br.read(4);
+    let action_id = br.read(32).map(|v| v as u32);
+    let _info = br.read(32);
+    let target = br.read(32).map(|v| v as u32);
+    let nres = br.read(4);
+    let first = matches!(nres, Some(n) if n > 0).then(|| {
+        (
+            br.read(3),  // resolution
+            br.read(2),  // kind
+            br.read(12), // animation
+            br.read(5),  // info
+            br.read(2),  // hitDistortion
+            br.read(3),  // knockback
+        )
+    });
+    tracing::debug!(
+        target: "combat",
+        "COMBAT_B2 len={} actor={:?} trg_sum={:?} kind={:?} actid={:?} target={:?} nres={:?} first=(res,kind,anim,info,dist,kb)={:?}",
+        data.len(),
+        actor_id,
+        trg_sum,
+        kind,
+        action_id,
+        target,
+        nres,
+        first
+    );
+}
+
 pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let mut br = BattleBitReader::new(data, 8);
     let actor_id = br.read(32)? as u32;
@@ -5307,8 +5714,14 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
         });
     let first_result = first
         .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
-        .and_then(|(resolution, animation, _)| {
-            ffxi_proto::melee::MeleeResult::from_wire(resolution, animation)
+        .and_then(|(resolution, animation, outcome)| {
+            ffxi_proto::melee::MeleeResult::from_wire(
+                resolution,
+                animation,
+                outcome.info,
+                outcome.hit_distortion,
+                outcome.knockback,
+            )
         });
     Some(Battle2Header {
         actor_id,
@@ -5469,7 +5882,7 @@ fn build_battle2_line(
     );
     vec![ChatLine {
         spans: Vec::new(),
-        channel: ChatChannel::Battle,
+        channel: battle_line_channel(message_num),
         sender: sender.to_string(),
         text,
         server_ts: 0,
@@ -6059,6 +6472,9 @@ fn decode_event_0x032(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6107,6 +6523,9 @@ fn decode_event_0x033(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6144,6 +6563,9 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6383,6 +6805,27 @@ fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
         out.push((timer_id, now_unix.saturating_add(timer as u32)));
     }
     out
+}
+
+/// Attribute a VM frame to its speaker for the dialog header and chat:
+/// resolve the frame's target index to an entity name. A speakerless frame
+/// (retail's no-speaker lines) stays blank; an unresolvable index prints
+/// "???", retail's missing-entity speaker (research/XiEvents/OpCodes/0x001D.md).
+fn attribute_event_speaker(
+    dialog: &mut crate::state::DialogState,
+    target_cache: &std::collections::HashMap<u16, u32>,
+    name_cache: &std::collections::HashMap<u32, String>,
+) {
+    let resolved = dialog
+        .speaker_index
+        .and_then(|idx| target_cache.get(&idx).and_then(|id| name_cache.get(id)));
+    dialog.npc_name = match resolved {
+        Some(name) => Some(name.clone()),
+        None => Some(match dialog.speaker_index {
+            Some(_) => "???".to_string(),
+            None => String::new(),
+        }),
+    };
 }
 
 /// Copy an NPC's event *speech* (a VM message frame — `prompt` set, no `choices`)
@@ -6912,6 +7355,9 @@ struct EventEndFlushInputs {
     user_driven: bool,
     watchdog_fires: bool,
     walked_away: bool,
+    /// A VM pending tag is in flight: its event must stay open server-side for
+    /// OnEventUpdate, so no Mode-0 END may drain it this tick.
+    tag_in_flight: bool,
 }
 
 /// What the tick owes the rest of the loop once the pinned events are drained.
@@ -6941,8 +7387,11 @@ fn flush_pending_event_end(
     sub_seq: u16,
 ) -> Option<EventEndFlush> {
     let dialog_open = active_dialog.is_some();
-    let flush =
-        inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open);
+    // A pending tag in flight owns the server-side event until its s2c ack: a
+    // Mode-0 END here would kill it mid-transaction and OnEventUpdate would
+    // find no currentEvent (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+    let flush = !inputs.tag_in_flight
+        && (inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open));
     if !flush || pending_event_end.is_empty() {
         return None;
     }
@@ -6961,6 +7410,7 @@ fn flush_pending_event_end(
             event_zone,
             event_id,
             0,
+            ffxi_proto::map::c2s::event_end_mode::END,
         ));
         out.next_sub_seq = out.next_sub_seq.wrapping_add(1);
         out.released += 1;

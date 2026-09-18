@@ -3,6 +3,7 @@ pub mod anim;
 pub mod archive;
 pub mod autotranslate_names;
 pub mod bone;
+pub mod camera;
 pub mod chunk;
 pub mod cib;
 pub mod client_profile;
@@ -50,6 +51,7 @@ pub mod zone_dat;
 pub mod zone_interaction;
 
 pub use archive::{discover_overlays, DatLocation, DatRoot};
+pub use camera::CameraResource;
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use client_profile::{ClientProfile, ItemBlockLayout};
 pub use item_dat::ItemStatic;

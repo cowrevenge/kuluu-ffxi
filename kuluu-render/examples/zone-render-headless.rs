@@ -667,7 +667,8 @@ fn load_weather(
         .ok()
         .and_then(|l| std::fs::read(l.path_under(&root)).ok())
     {
-        let (schedulers, assets) = kuluu_render::scheduler_runtime::parse_action_bytes(&global);
+        let (schedulers, assets, _cameras) =
+            kuluu_render::scheduler_runtime::parse_action_bytes(&global);
         c.insert_resource(kuluu_render::scheduler_runtime::GlobalEffectDir { schedulers, assets });
     }
     let Ok(location) = root.resolve(p.file_id) else {

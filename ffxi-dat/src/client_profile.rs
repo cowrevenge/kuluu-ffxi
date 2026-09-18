@@ -136,8 +136,8 @@ pub struct KnownClient {
     /// `None` on a row whose `.text` nobody has unpacked, so no citation into
     /// its code can be pinned.
     pub unpacked_text: Option<UnpackedText>,
-    /// `None` for an install PlayOnline Viewer has never patched: SE's base
-    /// image ships without `patch.cfg`.
+    /// `None` when the install carries no `patch.cfg` stamp: SE's base image
+    /// ships without one, and a POL-patched install can lack it too.
     pub patch_version: Option<&'static str>,
     pub item_layout: ItemBlockLayout,
     /// Square Enix's own lineage, which the PlayOnline patch server can bring
@@ -182,6 +182,16 @@ pub const KNOWN_CLIENTS: &[KnownClient] = &[
         }),
         patch_version: Some("30260904_1"),
         item_layout: ItemBlockLayout::Retail2026,
+        retail: true,
+    },
+    // Square Enix retail PlayOnline install (polboot.exe + patch.txt, no
+    // patch.cfg stamp): the developer's Phoenix bundle, measured in place.
+    KnownClient {
+        name: "phoenix-bundle",
+        ffximain_sha256: "6f8844eb7f0380f30a3db2fc3c435e1145f5c450bdd0999133cc75c516ec3c3b",
+        unpacked_text: None,
+        patch_version: None,
+        item_layout: ItemBlockLayout::Legacy,
         retail: true,
     },
 ];

@@ -4,7 +4,7 @@ use bevy::feathers::theme::ThemedText;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::input_focus::tab_navigation::TabIndex;
-use bevy::input_focus::{FocusCause, InputFocus};
+use bevy::input_focus::{FocusCause, InputFocus, InputFocusVisible};
 use bevy::prelude::*;
 use bevy::ui::{Checked, ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, ValueChange};
@@ -15,7 +15,7 @@ use crate::secret_store::SecretStore;
 use super::brand::{spawn_brand_mark, BrandMark};
 use super::client_era_check::{ClientEraStatus, EraVerdict};
 use super::common::{
-    chip_group, hint, panel_node, row, screen_root, spawn_breadcrumb,
+    chip_group, hint, panel_node, pick_directional, row, screen_root, spawn_breadcrumb,
     spawn_settings_close_titlebar, Crumb, DefaultFocusTarget, ScrollRegion,
 };
 use super::server_edit::ver_lock_label;
@@ -190,6 +190,7 @@ fn build_login_ui(
                         (),
                         Spawn((Text::new("Create account"), ThemedText)),
                     ))
+                    .insert_if(DefaultFocusTarget, || blocked)
                     .observe(
                         |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
                             next.set(LauncherState::CreateAccount);
@@ -613,7 +614,7 @@ pub(super) fn despawn_login_ui(mut commands: Commands, q: Query<Entity, With<Log
 
 pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
-    mut form: ResMut<LoginForm>,
+    form: Res<LoginForm>,
     version: Res<ServerVersionStatus>,
     era: Res<ClientEraStatus>,
     mut next: ResMut<NextState<LauncherState>>,
@@ -623,9 +624,12 @@ pub(super) fn keyboard_input_system(
             continue;
         }
         match ev.logical_key {
+            // Back, not a credential wipe: the pad's Cancel lands here too and
+            // needs a back action. `LoginForm` survives the transition, so
+            // nothing typed is lost.
             Key::Escape => {
-                form.user.clear();
-                form.pass.clear();
+                next.set(LauncherState::ServerSelect);
+                return;
             }
             // Real keyboard Enter: submits whenever BOTH fields are filled,
             // regardless of which widget (if any) holds UI focus. The
@@ -645,27 +649,6 @@ pub(super) fn keyboard_input_system(
     }
 }
 
-/// Initial keyboard focus for this screen: land on the `DefaultFocusTarget`
-/// widget once per spawned instance. The blue outline then starts on "Log in"
-/// instead of nowhere, so a bare Enter activates it right away (in addition to
-/// the global both-fields-filled handler). Tab can move away freely - we never
-/// steal focus back until a new screen instance appears (rebuild or re-entry).
-pub(super) fn focus_default_target_system(
-    mut input_focus: ResMut<InputFocus>,
-    mut last: Local<Option<Entity>>,
-    q: Query<Entity, With<DefaultFocusTarget>>,
-) {
-    let Some(target) = q.iter().next() else {
-        *last = None;
-        return;
-    };
-    if *last == Some(target) {
-        return;
-    }
-    input_focus.set(target, FocusCause::Navigated);
-    *last = Some(target);
-}
-
 /// Arrow-key navigation for the login form: move the blue focus outline between
 /// tabbable widgets (saved-account chips, fields, remember checkbox, buttons)
 /// in visual order, wrapping at the edges. While a text field holds focus,
@@ -673,6 +656,7 @@ pub(super) fn focus_default_target_system(
 pub(super) fn arrow_nav_system(
     mut events: MessageReader<KeyboardInput>,
     mut input_focus: ResMut<InputFocus>,
+    mut visible: ResMut<InputFocusVisible>,
     q_tabs: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<TabIndex>>,
     q_fields: Query<(), With<TextField>>,
 ) {
@@ -700,50 +684,13 @@ pub(super) fn arrow_nav_system(
             .iter()
             .map(|(e, cn, gt)| (gt.affine().translation + cn.size * 0.5, e))
             .collect();
-        if cands.is_empty() {
+        let centers: Vec<Vec2> = cands.iter().map(|(p, _)| *p).collect();
+        let current = cur.and_then(|c| cands.iter().position(|(_, e)| *e == c));
+        let Some(i) = pick_directional(&centers, current, dir) else {
             continue;
-        }
-
-        let cur_pos = match cur.and_then(|c| cands.iter().find(|(_, e)| *e == c)) {
-            Some(c) => c.0,
-            // Focus is on the window/panel (nothing selected): anchor to the
-            // group's center so any arrow lands on a sensible first element.
-            None => cands.iter().map(|(p, _)| *p).sum::<Vec2>() / cands.len() as f32,
         };
-
-        const CROSS_W: f32 = 2.5; // perpendicular misalignment is heavily penalized
-        let mut best_forward: Option<(f32, Entity)> = None;
-        let mut best_wrap: Option<(f32, f32, Entity)> = None; // (along, cross)
-        for (p, e) in &cands {
-            if cur.is_some_and(|ce| *e == ce) {
-                continue;
-            }
-            let d = *p - cur_pos;
-            let along = d.dot(dir);
-            let cross = (d.x * dir.y - d.y * dir.x).abs();
-            if along > 0.25 {
-                // Ahead of us: nearest in direction wins.
-                let score = along + cross * CROSS_W;
-                if best_forward.is_none_or(|(s, _)| score < s) {
-                    best_forward = Some((score, *e));
-                }
-            } else if along < 0.0 {
-                // Behind us: wrap candidate. Farthest behind on this axis wins
-                // (top edge + Up jumps to the far row), misaligned loses.
-                if best_wrap.is_none_or(|(a, c, _)| (along, cross) < (a, c)) {
-                    best_wrap = Some((along, cross, *e));
-                }
-            }
-        }
-
-        let target = match best_forward
-            .map(|(_, e)| e)
-            .or(best_wrap.map(|(_, _, e)| e))
-        {
-            Some(e) => e,
-            None => continue,
-        };
-        input_focus.set(target, FocusCause::Navigated);
+        input_focus.set(cands[i].1, FocusCause::Navigated);
+        visible.0 = true;
     }
 }
 
@@ -792,7 +739,7 @@ pub(super) fn spawn_error_ui(
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new(back_label), ThemedText)),
                     ))
                     .observe(

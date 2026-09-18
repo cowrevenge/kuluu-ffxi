@@ -3,12 +3,14 @@ use bevy::feathers::controls::{button_bundle, ButtonBundleProps, ButtonVariant};
 use bevy::feathers::theme::ThemedText;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
+use bevy::input_focus::{FocusCause, InputFocus, InputFocusVisible};
 use bevy::picking::events::{Over, Pointer};
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_back_titlebar, spawn_breadcrumb, Crumb,
+    DefaultFocusTarget,
 };
 use super::{
     CharListData, Credentials, DefaultCharName, LauncherState, OpenedLobby, SelectedChar,
@@ -132,6 +134,7 @@ pub(super) fn spawn_char_list_ui(
                                 CharRowButton(idx),
                                 Spawn((Text::new(label), ThemedText)),
                             ))
+                            .insert_if(DefaultFocusTarget, || idx == initial_cursor)
                             .observe(
                                 move |_ev: On<Activate>,
                                       chars: Res<CharListData>,
@@ -146,10 +149,16 @@ pub(super) fn spawn_char_list_ui(
                                 },
                             )
                             .observe(
-                                move |_ev: On<Pointer<Over>>, mut cursor: ResMut<CharCursor>| {
+                                move |ev: On<Pointer<Over>>,
+                                      mut cursor: ResMut<CharCursor>,
+                                      mut focus: ResMut<InputFocus>| {
                                     if cursor.0 != idx {
                                         cursor.0 = idx;
                                     }
+                                    // `InputFocusVisible` is deliberately left
+                                    // alone: hover shares the selection model
+                                    // without painting a focus ring.
+                                    focus.set(ev.entity, FocusCause::Pressed);
                                 },
                             );
 
@@ -189,6 +198,7 @@ pub(super) fn spawn_char_list_ui(
                         CharRowButton(new_char_index),
                         Spawn((Text::new("+ New character"), ThemedText)),
                     ))
+                    .insert_if(DefaultFocusTarget, || new_char_index == initial_cursor)
                     .observe(
                         move |_ev: On<Activate>,
                               mut cursor: ResMut<CharCursor>,
@@ -224,26 +234,42 @@ pub(super) fn handle_keyboard_system(
     }
 }
 
+/// Arrow keys move `InputFocus`, not [`CharCursor`] - the cursor follows via
+/// [`sync_cursor_to_focus_system`], so the focus ring, the Primary-variant row
+/// and the 3D preview cannot disagree whether the keyboard, the pad or the
+/// mouse drove the move.
 pub(super) fn keyboard_nav_system(
     mut events: MessageReader<KeyboardInput>,
     chars: Res<CharListData>,
-    mut cursor: ResMut<CharCursor>,
+    cursor: Res<CharCursor>,
+    mut focus: ResMut<InputFocus>,
+    mut visible: ResMut<InputFocusVisible>,
+    q_rows: Query<(Entity, &CharRowButton)>,
     mut sel: ResMut<SelectedChar>,
     mut next: ResMut<NextState<LauncherState>>,
 ) {
     let count = chars.0.len() + 1;
+    let step = |delta: usize, focus: &mut InputFocus, visible: &mut InputFocusVisible| {
+        let target = (cursor.0 + delta) % count;
+        if let Some((e, _)) = q_rows.iter().find(|(_, row)| row.0 == target) {
+            focus.set(e, FocusCause::Navigated);
+            visible.0 = true;
+        }
+    };
     for ev in events.read() {
         if ev.state != ButtonState::Pressed {
             continue;
         }
         match &ev.logical_key {
-            Key::ArrowUp => cursor.0 = (cursor.0 + count - 1) % count,
-            Key::ArrowDown => cursor.0 = (cursor.0 + 1) % count,
+            Key::ArrowUp => step(count - 1, &mut focus, &mut visible),
+            Key::ArrowDown => step(1, &mut focus, &mut visible),
             Key::Character(s) if s.eq_ignore_ascii_case("w") => {
-                cursor.0 = (cursor.0 + count - 1) % count
+                step(count - 1, &mut focus, &mut visible)
             }
-            Key::Character(s) if s.eq_ignore_ascii_case("s") => cursor.0 = (cursor.0 + 1) % count,
-            Key::Enter => {
+            Key::Character(s) if s.eq_ignore_ascii_case("s") => step(1, &mut focus, &mut visible),
+            // A focused row already activates itself through its own `Activate`
+            // observer; this arm is the fallback for focus resting elsewhere.
+            Key::Enter if !focus.get().is_some_and(|e| q_rows.contains(e)) => {
                 if cursor.0 == chars.0.len() {
                     next.set(LauncherState::CharCreate);
                 } else if let Some(slot) = chars.0.get(cursor.0).cloned() {
@@ -272,6 +298,35 @@ pub(super) fn redraw_char_list_system(
             ButtonVariant::Normal
         };
         commands.entity(e).insert(v);
+    }
+}
+
+/// The row highlight and the 3D preview key off [`CharCursor`], not
+/// `InputFocus`, so the pad's focus ring has to drag the cursor along - the
+/// same thing the `Pointer<Over>` observer does for the mouse. Hover stays
+/// authoritative between focus changes.
+pub(super) fn sync_cursor_to_focus_system(
+    focus: Res<InputFocus>,
+    q_rows: Query<&CharRowButton>,
+    cursor: Option<ResMut<CharCursor>>,
+    mut last: Local<Option<Entity>>,
+) {
+    let Some(mut cursor) = cursor else {
+        return;
+    };
+    let current = focus.get();
+    if *last == current {
+        return;
+    }
+    *last = current;
+    let Some(e) = current else {
+        return;
+    };
+    let Ok(row) = q_rows.get(e) else {
+        return;
+    };
+    if cursor.0 != row.0 {
+        cursor.0 = row.0;
     }
 }
 
@@ -318,9 +373,11 @@ pub(super) fn spawn_delete_confirm_ui(mut commands: Commands, sel: Res<SelectedC
                         },
                     );
 
+                    // The ring starts on Cancel, not on the destructive
+                    // action: a stray pad Confirm must not delete a character.
                     r.spawn(button_bundle(
                         ButtonBundleProps::default(),
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new("Cancel"), ThemedText)),
                     ))
                     .observe(
@@ -360,6 +417,36 @@ pub(super) fn delete_confirm_keyboard_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input_focus::FocusCause;
+
+    #[test]
+    fn focused_char_row_moves_the_cursor() {
+        let mut app = App::new();
+        app.init_resource::<InputFocus>();
+        app.insert_resource(CharCursor(0));
+        app.add_systems(Update, sync_cursor_to_focus_system);
+        let row0 = app.world_mut().spawn(CharRowButton(0)).id();
+        let row1 = app.world_mut().spawn(CharRowButton(1)).id();
+        let other = app.world_mut().spawn_empty().id();
+
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(row1, FocusCause::Navigated);
+        app.update();
+        assert_eq!(app.world().resource::<CharCursor>().0, 1);
+
+        app.world_mut()
+            .resource_mut::<InputFocus>()
+            .set(other, FocusCause::Navigated);
+        app.update();
+        assert_eq!(app.world().resource::<CharCursor>().0, 1);
+
+        // A mouse hover moved the cursor; an unchanged focus must not undo it.
+        app.world_mut().resource_mut::<CharCursor>().0 = 0;
+        app.update();
+        assert_eq!(app.world().resource::<CharCursor>().0, 0);
+        assert!(app.world().get::<CharRowButton>(row0).is_some());
+    }
 
     #[test]
     fn expansions_line_titles_names_and_hides_the_base_game_bit() {

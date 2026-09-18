@@ -11,7 +11,9 @@ use crate::launcher_store::{self, AuthFlavorKind, ServerProfile};
 use ffxi_proto::login::{VerLock, LSB_CLIENT_VER, LSB_DEFAULT_VER_LOCK};
 use kuluu_session::auth_client;
 
-use super::common::{hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb};
+use super::common::{
+    hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb, DefaultFocusTarget,
+};
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
 
@@ -108,7 +110,7 @@ fn build_ui(commands: &mut Commands, form: &ServerEditForm, server: &ServerInfo)
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new("Save"), ThemedText)),
                     ))
                     .observe(

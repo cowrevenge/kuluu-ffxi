@@ -1,10 +1,8 @@
 use std::collections::BTreeSet;
 
 use bevy::input::gamepad::{Gamepad, GamepadConnectionEvent};
-use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
-use bevy::input_focus::tab_navigation::{NavAction, TabNavigation, TabNavigationError};
-use bevy::input_focus::{FocusCause, InputFocus, InputFocusVisible};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -79,61 +77,185 @@ impl PadPressed {
 #[derive(Message, Debug, Clone)]
 pub struct PadKeyEvent(pub KeyboardInput);
 
-/// D-pad moves focus between launcher UI widgets (mirrors Tab/Shift+Tab); South
-/// activates the focused widget (mirrors Enter). Both ride the same
-/// `bevy_input_focus`/`bevy_ui_widgets` machinery every launcher_ui screen
-/// already uses for keyboard/mouse, so no per-screen changes are needed.
+/// One step of launcher focus movement, in screen space: `+y` is down, the
+/// convention `ComputedNode`/`UiGlobalTransform` centers are scored in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NavDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl NavDir {
+    pub(super) fn as_vec2(self) -> Vec2 {
+        match self {
+            NavDir::Up => Vec2::new(0.0, -1.0),
+            NavDir::Down => Vec2::new(0.0, 1.0),
+            NavDir::Left => Vec2::new(-1.0, 0.0),
+            NavDir::Right => Vec2::new(1.0, 0.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PageDir {
+    Prev,
+    Next,
+}
+
+/// Pad intent for the launcher, consumed by `launcher_ui::common`. A message
+/// rather than direct focus manipulation so the keyboard and mouse paths keep
+/// their own, unchanged handlers.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LauncherNav {
+    Move(NavDir),
+    Confirm,
+    Cancel,
+    Page(PageDir),
+}
+
+/// Deflection past the deadzone that arms a fresh stick-driven move, and the
+/// lower one it must fall back under to re-arm. A stick parked exactly at the
+/// activation edge would otherwise cross it every frame and walk the ring.
+const STICK_NAV_ACTIVATE: f32 = 0.55;
+const STICK_NAV_RELEASE: f32 = 0.33;
+
+/// Hold time before a held direction starts repeating, and the gap between
+/// repeats after that: slow enough that one flick is one step, fast enough
+/// that holding crosses a long settings list without feeling stuck.
+const NAV_REPEAT_DELAY_SECS: f32 = 0.42;
+const NAV_REPEAT_INTERVAL_SECS: f32 = 0.11;
+
+pub(super) fn stick_nav_dir(stick: Vec2, deadzone: f32, currently_held: bool) -> Option<NavDir> {
+    let v = apply_stick_deadzone(stick, deadzone);
+    let threshold = if currently_held {
+        STICK_NAV_RELEASE
+    } else {
+        STICK_NAV_ACTIVATE
+    };
+    if v.length() < threshold {
+        return None;
+    }
+    if v.x.abs() >= v.y.abs() {
+        Some(if v.x > 0.0 {
+            NavDir::Right
+        } else {
+            NavDir::Left
+        })
+    } else {
+        // A pad stick's +y is up; screen space's is down.
+        Some(if v.y > 0.0 { NavDir::Up } else { NavDir::Down })
+    }
+}
+
+/// Edge-plus-repeat state for the one shared launcher direction slot, so a
+/// held d-pad or stick moves focus on a timer instead of every frame.
+#[derive(Resource, Default, Debug)]
+pub(super) struct LauncherNavRepeat {
+    held: Option<NavDir>,
+    elapsed: f32,
+    repeating: bool,
+    stick_held: bool,
+}
+
+impl LauncherNavRepeat {
+    pub(super) fn update(&mut self, dir: Option<NavDir>, dt: f32) -> Option<NavDir> {
+        let Some(dir) = dir else {
+            self.held = None;
+            self.elapsed = 0.0;
+            self.repeating = false;
+            return None;
+        };
+        if self.held != Some(dir) {
+            self.held = Some(dir);
+            self.elapsed = 0.0;
+            self.repeating = false;
+            return Some(dir);
+        }
+        self.elapsed += dt;
+        let threshold = if self.repeating {
+            NAV_REPEAT_INTERVAL_SECS
+        } else {
+            NAV_REPEAT_DELAY_SECS
+        };
+        if self.elapsed < threshold {
+            return None;
+        }
+        // Reset rather than subtract: a frame spike longer than several
+        // intervals must still be one step, not a burst of banked ones.
+        self.elapsed = 0.0;
+        self.repeating = true;
+        Some(dir)
+    }
+}
+
+fn pad_button(bindings: &PadBindings, action: PadAction) -> Option<GamepadButton> {
+    bindings
+        .button(action)
+        .or_else(|| PadBindings::retail().button(action))
+}
+
+/// Turns the pad into [`LauncherNav`] intent for every launcher screen. Pure
+/// producer: the focus ring, activation and paging all live in
+/// `launcher_ui::common`, so no screen needs its own pad code.
 pub(super) fn gamepad_launcher_nav_system(
     gamepads: Query<&Gamepad>,
     primary: Res<PrimaryGamepad>,
-    nav: TabNavigation,
-    mut focus: ResMut<InputFocus>,
-    mut visible: ResMut<InputFocusVisible>,
-    windows: Query<Entity, With<PrimaryWindow>>,
-    mut keyboard_writer: MessageWriter<KeyboardInput>,
+    pad_bindings: Res<PadBindings>,
+    time: Res<Time<Real>>,
+    mut repeat: ResMut<LauncherNavRepeat>,
+    mut nav: MessageWriter<LauncherNav>,
 ) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
     let Some(gamepad) = primary_gamepad(&primary, &gamepads) else {
+        *repeat = LauncherNavRepeat::default();
         return;
     };
 
-    let nav_action = if gamepad.just_pressed(GamepadButton::DPadDown)
-        || gamepad.just_pressed(GamepadButton::DPadRight)
-    {
-        Some(NavAction::Next)
-    } else if gamepad.just_pressed(GamepadButton::DPadUp)
-        || gamepad.just_pressed(GamepadButton::DPadLeft)
-    {
-        Some(NavAction::Previous)
-    } else {
-        None
-    };
-    if let Some(action) = nav_action {
-        match nav.navigate(&focus, action) {
-            Ok(next) => {
-                focus.set(next, FocusCause::Navigated);
-                visible.0 = true;
-            }
-            Err(TabNavigationError::NoTabGroupForCurrentFocus { new_focus, .. }) => {
-                focus.set(new_focus, FocusCause::Navigated);
-                visible.0 = true;
-            }
-            Err(_) => {}
+    let dpad = [
+        (GamepadButton::DPadUp, NavDir::Up),
+        (GamepadButton::DPadDown, NavDir::Down),
+        (GamepadButton::DPadLeft, NavDir::Left),
+        (GamepadButton::DPadRight, NavDir::Right),
+    ]
+    .into_iter()
+    .find(|(button, _)| gamepad.pressed(*button))
+    .map(|(_, dir)| dir);
+
+    let stick = stick_nav_dir(
+        gamepad.left_stick(),
+        pad_bindings.stick_deadzone,
+        repeat.stick_held,
+    );
+    repeat.stick_held = stick.is_some();
+
+    if let Some(dir) = repeat.update(dpad.or(stick), time.delta_secs()) {
+        nav.write(LauncherNav::Move(dir));
+    }
+
+    for (action, msg) in [
+        (PadAction::Confirm, LauncherNav::Confirm),
+        (PadAction::Cancel, LauncherNav::Cancel),
+    ] {
+        if pad_button(&pad_bindings, action).is_some_and(|b| gamepad.just_pressed(b)) {
+            nav.write(msg);
         }
     }
 
-    if gamepad.just_pressed(GamepadButton::South) {
-        keyboard_writer.write(KeyboardInput {
-            key_code: KeyCode::Enter,
-            logical_key: Key::Enter,
-            state: ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window,
-        });
+    // The shoulder bumpers, not the analog triggers (`*Trigger2`); their
+    // in-game `PadAction` roles do not apply on launcher screens.
+    for (button, page) in [
+        (GamepadButton::LeftTrigger, PageDir::Prev),
+        (GamepadButton::RightTrigger, PageDir::Next),
+    ] {
+        if gamepad.just_pressed(button) {
+            nav.write(LauncherNav::Page(page));
+        }
     }
+}
+
+pub(super) fn drain_launcher_nav(mut repeat: ResMut<LauncherNavRepeat>) {
+    *repeat = LauncherNavRepeat::default();
 }
 
 pub(super) fn gamepad_stick_system(
@@ -339,6 +461,159 @@ pub(super) fn drain_pad_state(mut intent: ResMut<PadStickIntent>, mut pressed: R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuluu_render::keybinds::pad::STICK_DEADZONE_DEFAULT;
+
+    const TEST_FRAME_DT: f32 = 1.0 / 60.0;
+
+    fn full_up() -> Vec2 {
+        Vec2::new(0.0, 1.0)
+    }
+
+    #[test]
+    fn nav_repeat_fires_on_press_then_holds_for_the_delay() {
+        let mut repeat = LauncherNavRepeat::default();
+        assert_eq!(repeat.update(Some(NavDir::Down), 0.0), Some(NavDir::Down));
+
+        let mut waited = 0.0;
+        while waited + TEST_FRAME_DT < NAV_REPEAT_DELAY_SECS {
+            assert_eq!(
+                repeat.update(Some(NavDir::Down), TEST_FRAME_DT),
+                None,
+                "repeated before the delay elapsed"
+            );
+            waited += TEST_FRAME_DT;
+        }
+        assert_eq!(
+            repeat.update(Some(NavDir::Down), NAV_REPEAT_DELAY_SECS),
+            Some(NavDir::Down)
+        );
+    }
+
+    #[test]
+    fn nav_repeat_ticks_once_per_interval_while_held() {
+        let mut repeat = LauncherNavRepeat::default();
+        repeat.update(Some(NavDir::Up), 0.0);
+        repeat.update(Some(NavDir::Up), NAV_REPEAT_DELAY_SECS);
+
+        let half = NAV_REPEAT_INTERVAL_SECS * 0.5;
+        assert_eq!(repeat.update(Some(NavDir::Up), half), None);
+        assert_eq!(repeat.update(Some(NavDir::Up), half), Some(NavDir::Up));
+
+        let many_intervals = NAV_REPEAT_INTERVAL_SECS * 10.0;
+        assert_eq!(
+            repeat.update(Some(NavDir::Up), many_intervals),
+            Some(NavDir::Up)
+        );
+        assert_eq!(
+            repeat.update(Some(NavDir::Up), 0.0),
+            None,
+            "a long frame must not bank extra steps"
+        );
+    }
+
+    #[test]
+    fn nav_repeat_rearms_on_release_and_on_direction_change() {
+        let mut repeat = LauncherNavRepeat::default();
+        repeat.update(Some(NavDir::Down), 0.0);
+        repeat.update(Some(NavDir::Down), NAV_REPEAT_DELAY_SECS);
+        assert_eq!(repeat.update(None, TEST_FRAME_DT), None);
+        assert_eq!(repeat.update(Some(NavDir::Down), 0.0), Some(NavDir::Down));
+        assert_eq!(repeat.update(Some(NavDir::Down), TEST_FRAME_DT), None);
+
+        assert_eq!(repeat.update(Some(NavDir::Up), 0.0), Some(NavDir::Up));
+        assert_eq!(
+            repeat.update(Some(NavDir::Up), NAV_REPEAT_INTERVAL_SECS),
+            None,
+            "a direction change restarts the longer initial delay"
+        );
+    }
+
+    #[test]
+    fn stick_inside_deadzone_reports_no_direction() {
+        for stick in [
+            Vec2::ZERO,
+            full_up() * STICK_DEADZONE_DEFAULT,
+            full_up() * (STICK_DEADZONE_DEFAULT * 0.5),
+        ] {
+            assert_eq!(stick_nav_dir(stick, STICK_DEADZONE_DEFAULT, false), None);
+            assert_eq!(stick_nav_dir(stick, STICK_DEADZONE_DEFAULT, true), None);
+        }
+    }
+
+    #[test]
+    fn stick_hysteresis_needs_activate_then_holds_until_release() {
+        let between = (STICK_NAV_ACTIVATE + STICK_NAV_RELEASE) * 0.5;
+        // Undo the deadzone renormalization so the processed magnitude lands
+        // between the two thresholds.
+        let raw = between * (1.0 - STICK_DEADZONE_DEFAULT) + STICK_DEADZONE_DEFAULT;
+        let stick = full_up() * raw;
+        assert_eq!(stick_nav_dir(stick, STICK_DEADZONE_DEFAULT, false), None);
+        assert_eq!(
+            stick_nav_dir(stick, STICK_DEADZONE_DEFAULT, true),
+            Some(NavDir::Up)
+        );
+    }
+
+    #[test]
+    fn stick_reports_the_dominant_axis_direction() {
+        assert_eq!(
+            stick_nav_dir(Vec2::new(0.9, 0.1), STICK_DEADZONE_DEFAULT, false),
+            Some(NavDir::Right)
+        );
+        assert_eq!(
+            stick_nav_dir(Vec2::new(-0.9, 0.1), STICK_DEADZONE_DEFAULT, false),
+            Some(NavDir::Left)
+        );
+        // A pad's +y is up; screen space's is down, so the Up step vector
+        // matches the arrow-key convention the focus picker scores in.
+        assert_eq!(
+            stick_nav_dir(Vec2::new(0.1, 0.9), STICK_DEADZONE_DEFAULT, false),
+            Some(NavDir::Up)
+        );
+        assert_eq!(
+            stick_nav_dir(Vec2::new(0.1, -0.9), STICK_DEADZONE_DEFAULT, false),
+            Some(NavDir::Down)
+        );
+        assert_eq!(NavDir::Up.as_vec2(), Vec2::new(0.0, -1.0));
+    }
+
+    #[test]
+    fn dpad_direction_wins_over_the_stick_in_one_repeat_slot() {
+        let dpad = Some(NavDir::Down);
+        let stick = stick_nav_dir(Vec2::new(0.0, 1.0), STICK_DEADZONE_DEFAULT, false);
+        assert_eq!(stick, Some(NavDir::Up));
+        assert_eq!(dpad.or(stick), Some(NavDir::Down));
+
+        let mut repeat = LauncherNavRepeat::default();
+        let both = Some(NavDir::Down);
+        assert_eq!(repeat.update(both, 0.0), Some(NavDir::Down));
+        assert_eq!(
+            repeat.update(both, TEST_FRAME_DT),
+            None,
+            "d-pad and stick share one repeat slot"
+        );
+    }
+
+    #[test]
+    fn launcher_buttons_follow_pad_bindings_with_retail_fallback() {
+        let mut bindings = PadBindings::retail();
+        bindings.set(PadAction::Confirm, Some(GamepadButton::North));
+        assert_eq!(
+            pad_button(&bindings, PadAction::Confirm),
+            Some(GamepadButton::North)
+        );
+
+        bindings.set(PadAction::Confirm, None);
+        bindings.set(PadAction::Cancel, None);
+        assert_eq!(
+            pad_button(&bindings, PadAction::Confirm),
+            PadBindings::retail().button(PadAction::Confirm)
+        );
+        assert_eq!(
+            pad_button(&bindings, PadAction::Cancel),
+            PadBindings::retail().button(PadAction::Cancel)
+        );
+    }
 
     #[test]
     fn confirm_mirrors_a_bound_key_on_both_channels() {

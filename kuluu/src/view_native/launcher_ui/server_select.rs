@@ -12,6 +12,7 @@ use crate::secret_store::SecretStore;
 use super::brand::{spawn_brand_mark, BrandMark};
 use super::common::{
     chip_group, hint, panel_node, row, screen_root, spawn_settings_close_titlebar,
+    DefaultFocusTarget,
 };
 use super::{LauncherState, ServerSelectCursor, ServerSelectForm};
 
@@ -81,6 +82,7 @@ pub(super) fn spawn_ui(
                                 (),
                                 Spawn((Text::new(label), ThemedText)),
                             ))
+                            .insert_if(DefaultFocusTarget, || idx == cursor_idx)
                             .observe(
                                 move |_ev: On<Activate>,
                                       mut commands: Commands,
@@ -221,6 +223,7 @@ pub(super) fn spawn_ui(
                         (),
                         Spawn((Text::new("+ Add server"), ThemedText)),
                     ))
+                    .insert_if(DefaultFocusTarget, || n == 0)
                     .observe(
                         |_ev: On<Activate>,
                          mut edit: ResMut<super::ServerEditForm>,

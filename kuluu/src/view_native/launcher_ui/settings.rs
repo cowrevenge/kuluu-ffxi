@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use crate::launcher_store::{self, EnvOverride, Settings};
 
-use super::common::{hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb};
+use super::common::{
+    hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb, DefaultFocusTarget,
+};
 use super::{DatSetupReturn, LauncherState, ServerInfo};
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
@@ -195,7 +197,7 @@ fn build_ui(commands: &mut Commands, form: &SettingsForm, server: &ServerInfo) {
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new("Save & reload"), ThemedText)),
                     ))
                     .observe(save_observer);

@@ -656,6 +656,37 @@ pub(crate) fn register(
             .run_if(in_state(AppPhase::Launcher)),
     );
 
+    // One pad-driven focus model for every launcher screen: the producer in
+    // `gamepad_input` writes `LauncherNav` earlier in the same `Update`, so the
+    // ring moves on the frame the pad was read.
+    app.add_message::<super::gamepad_input::LauncherNav>()
+        .init_resource::<super::gamepad_input::LauncherNavRepeat>()
+        .init_resource::<common::LauncherFocusMode>()
+        .add_systems(
+            Update,
+            (
+                common::reconcile_focus_system,
+                common::focus_default_target_system,
+                common::launcher_focus_nav_system,
+                common::launcher_page_scroll_system,
+                common::scroll_focus_into_view_system,
+            )
+                .chain()
+                .after(super::gamepad_input::gamepad_launcher_nav_system)
+                .run_if(in_state(AppPhase::Launcher)),
+        )
+        .add_systems(
+            First,
+            common::drop_keys_leaving_screen_system.run_if(in_state(AppPhase::Launcher)),
+        )
+        .add_systems(
+            OnExit(AppPhase::Launcher),
+            (
+                common::drain_focus_mode,
+                super::gamepad_input::drain_launcher_nav,
+            ),
+        );
+
     app.add_systems(
         OnEnter(AppPhase::Launcher),
         (
@@ -810,15 +841,9 @@ pub(crate) fn register(
                 .run_if(in_state(LauncherState::Login)),
         );
 
-    // Initial keyboard focus + arrow-key navigation for the login form (see
-    // login::focus_default_target_system / login::arrow_nav_system): the blue
-    // outline starts on "Log in" so a bare Enter activates it; arrows move
-    // between tabbable widgets in visual order, wrapping at the edges.
     app.add_systems(
         Update,
-        (login::focus_default_target_system, login::arrow_nav_system)
-            .chain()
-            .run_if(in_state(LauncherState::Login)),
+        login::arrow_nav_system.run_if(in_state(LauncherState::Login)),
     );
 
     app.add_systems(
@@ -853,6 +878,10 @@ pub(crate) fn register(
             char_list::handle_click_system,
             char_list::handle_keyboard_system,
             char_list::keyboard_nav_system,
+            char_list::sync_cursor_to_focus_system
+                .after(char_list::keyboard_nav_system)
+                .before(char_list::redraw_char_list_system)
+                .before(char_preview::refresh_preview_on_cursor_change),
             char_list::redraw_char_list_system,
             char_preview::refresh_preview_on_cursor_change,
             char_preview::poll_pending_preview,
@@ -1184,5 +1213,143 @@ fn direct_mode_charlist_autoselect(
         sel.0 = Some(slot.clone());
         next.set(LauncherState::ConnectInFlight);
         commands.remove_resource::<DirectModeAutostart>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::input_focus::InputFocus;
+    use common::{focus_default_target_system, DefaultFocusTarget};
+
+    /// Every launcher screen the pad can open must offer one landing spot for
+    /// the focus ring, in every configuration that screen spawns in. The
+    /// in-flight screens carry no interactive widget at all.
+    fn screens_with_a_landing_spot() -> Vec<(LauncherState, &'static str, fn(&mut World))> {
+        fn run<M, S: bevy::ecs::system::IntoSystem<(), (), M> + 'static>(
+            world: &mut World,
+            system: S,
+        ) {
+            world.run_system_once(system).expect("screen spawn failed");
+        }
+        vec![
+            (LauncherState::DatSetup, "as spawned", |w| {
+                run(w, dat_setup::spawn_ui)
+            }),
+            (LauncherState::ServerEdit, "as spawned", |w| {
+                run(w, server_edit::spawn_ui)
+            }),
+            (LauncherState::Settings, "as spawned", |w| {
+                run(w, settings::spawn_ui)
+            }),
+            (LauncherState::Graphics, "as spawned", |w| {
+                run(w, graphics::spawn_ui)
+            }),
+            (LauncherState::Config, "as spawned", |w| {
+                run(w, graphics::spawn_config_ui)
+            }),
+            (LauncherState::ChangePassword, "as spawned", |w| {
+                run(w, change_password::spawn_ui)
+            }),
+            (LauncherState::CreateAccount, "as spawned", |w| {
+                run(w, account_create::spawn_ui)
+            }),
+            (LauncherState::CreateAccountError, "as spawned", |w| {
+                run(w, account_create::spawn_error_ui)
+            }),
+            (LauncherState::CharCreate, "as spawned", |w| {
+                run(w, char_create::spawn_ui)
+            }),
+            (LauncherState::CharCreateError, "as spawned", |w| {
+                run(w, char_create::spawn_error_ui)
+            }),
+            (LauncherState::CharDeleteConfirm, "as spawned", |w| {
+                run(w, char_list::spawn_delete_confirm_ui)
+            }),
+            (LauncherState::LoginError, "as spawned", |w| {
+                run(w, login::spawn_error_ui)
+            }),
+            (LauncherState::Login, "as spawned", |w| {
+                run(w, login::spawn_login_ui)
+            }),
+            (LauncherState::ServerSelect, "as spawned", |w| {
+                run(w, server_select::spawn_ui)
+            }),
+            (LauncherState::CharList, "as spawned", |w| {
+                run(w, char_list::spawn_char_list_ui)
+            }),
+            (LauncherState::Login, "blocked by the server version", |w| {
+                w.insert_resource(server_version_check::ServerVersionStatus {
+                    violation: server_version_check::VersionViolation::BelowMinimum,
+                    ..default()
+                });
+                run(w, login::spawn_login_ui)
+            }),
+        ]
+    }
+
+    fn screen_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(ServerInfo {
+            server: "127.0.0.1".into(),
+            profile_name: None,
+        })
+        .insert_resource(dat_setup::DatSetupForm::default())
+        .insert_resource(DatSetupReturn(Some(LauncherState::Settings)))
+        .insert_resource(ServerEditForm::default())
+        .insert_resource(settings::SettingsForm::default())
+        .insert_resource(kuluu_render::GraphicsSettings::default())
+        .insert_resource(graphics::GraphicsAdvancedOpen::default())
+        .insert_resource(graphics::GraphicsDlssOpen::default())
+        .insert_resource(ChangePasswordForm::default())
+        .insert_resource(CreateAccountForm::default())
+        .insert_resource(CreateAccountErrorMsg::default())
+        .insert_resource(CharCreateForm::default())
+        .insert_resource(CharCreateError::default())
+        .insert_resource(OpenedLobby::default())
+        .insert_resource(SelectedChar::default())
+        .insert_resource(LoginErrorMsg::default())
+        .insert_resource(LoginErrorReturn::default())
+        .insert_resource(brand::BrandMark::default())
+        .insert_resource(LoginForm::default())
+        .insert_resource(ServerSelectForm::default())
+        .insert_resource(ServerSelectCursor::default())
+        .insert_resource(server_version_check::ServerVersionStatus::default())
+        .insert_resource(client_era_check::ClientEraStatus::default())
+        .insert_resource(CharListData::default())
+        .insert_resource(DefaultCharName::default())
+        .insert_resource(Credentials::default())
+        .init_resource::<InputFocus>();
+        app
+    }
+
+    #[test]
+    fn every_pad_reachable_screen_lands_the_focus_ring_on_one_target() {
+        for (state, variant, spawn) in screens_with_a_landing_spot() {
+            let mut app = screen_app();
+            spawn(app.world_mut());
+            app.world_mut().flush();
+
+            let targets: Vec<Entity> = app
+                .world_mut()
+                .query_filtered::<Entity, With<DefaultFocusTarget>>()
+                .iter(app.world())
+                .collect();
+            assert_eq!(
+                targets.len(),
+                1,
+                "{state:?} ({variant}) must offer exactly one DefaultFocusTarget"
+            );
+
+            app.world_mut()
+                .run_system_once(focus_default_target_system)
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<InputFocus>().get(),
+                Some(targets[0]),
+                "{state:?} ({variant}) did not land the focus ring on its default target"
+            );
+        }
     }
 }

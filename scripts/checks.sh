@@ -302,6 +302,22 @@ run_harness() {
     bad=1
   fi
 
+  # 8. The Bash edit-ledger attribution hooks decide which paths a session is
+  #    told to commit, and a misattribution demands work from the wrong agent.
+  #    Their suite is hand-written and tool-discovered by nothing, so run it
+  #    here or it rots.
+  local hook_tests=".agents/hooks/tests/session-edits-bash-attribution.test.sh"
+  if [[ ! -f "$hook_tests" ]]; then
+    echo "checks: harness — missing $hook_tests" >&2
+    echo "checks:   the Bash edit-ledger hooks ship with this suite; a deleted or renamed" >&2
+    echo "checks:   suite must fail here, not turn the rule green" >&2
+    bad=1
+  elif ! check_output=$(bash "$hook_tests" 2>&1); then
+    echo "checks: harness — session-edit attribution hooks are broken:" >&2
+    echo "$check_output" >&2
+    bad=1
+  fi
+
   # Cargo records path overrides that no longer match the resolved dependency
   # graph here. Fail before an engine upgrade can silently bypass a required
   # vendor fix while leaving its [patch.crates-io] declaration in place.

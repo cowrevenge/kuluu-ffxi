@@ -7,6 +7,13 @@ pub fn lookup(id: u16) -> Option<&'static str> {
         .map(|i| ABILITY_NAMES[i].1)
 }
 
+pub fn id_for(name: &str) -> Option<u16> {
+    ABILITY_NAMES
+        .iter()
+        .find(|(_, n)| n.eq_ignore_ascii_case(name))
+        .map(|&(id, _)| id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16,6 +23,28 @@ mod tests {
         assert_eq!(lookup(16), Some("Mighty Strikes"));
 
         assert_eq!(lookup(22), Some("Invincible"));
+    }
+
+    #[test]
+    fn names_resolve_back_to_their_id_ignoring_case() {
+        assert_eq!(id_for("Flee"), id_for("flee"));
+        assert_eq!(id_for("Flee").and_then(lookup), Some("Flee"));
+        assert_eq!(id_for("Mighty Strikes"), Some(16));
+        assert!(id_for("Not An Ability").is_none());
+    }
+
+    /// `id_for` takes the first name that matches, so a duplicate would make
+    /// the reverse lookup depend on table order.
+    #[test]
+    fn names_are_unique_case_insensitively() {
+        let mut seen: Vec<String> = ABILITY_NAMES
+            .iter()
+            .map(|(_, n)| n.to_ascii_lowercase())
+            .collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len());
     }
 
     #[test]

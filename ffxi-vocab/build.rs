@@ -55,6 +55,7 @@ mod floor {
     pub const ABILITY_RECAST_ID: usize = scrape_floor(616);
     pub const ABILITY_ANIMATION: usize = scrape_floor(616);
     pub const TP_MOVE: usize = scrape_floor(2652);
+    pub const WEAPON_SKILL_NAME: usize = scrape_floor(226);
     pub const ITEM: usize = scrape_floor(23233);
     pub const ITEM_FLAGS: usize = scrape_floor(23187);
     pub const ITEM_STACK_SIZE: usize = scrape_floor(4231);
@@ -400,8 +401,24 @@ fn main() -> Result<()> {
         floor::MOB_SKILL_ANIMATION,
     )?;
 
+    // The PC-usable subset on its own: /weaponskill resolves a typed name, and a
+    // mob-only TP move is not a name the command may answer to.
+    let ws_name_entries = parse_sql_insert_rows(&ws_src, "weapon_skills", 0, 1)?;
+    write_u16_table(
+        &out_dir.join("weapon_skill_names_table.rs"),
+        "WEAPON_SKILL_NAMES",
+        LSB_WEAPON_SKILLS_SQL,
+        &ws_name_entries,
+    )?;
+    check_scrape_count(
+        "weapon-skill name entries",
+        LSB_WEAPON_SKILLS_SQL,
+        ws_name_entries.len(),
+        floor::WEAPON_SKILL_NAME,
+    )?;
+
     let mut tp_move_entries = parse_sql_insert_rows(&mob_skill_src, "mob_skills", 0, 2)?;
-    tp_move_entries.extend(parse_sql_insert_rows(&ws_src, "weapon_skills", 0, 1)?);
+    tp_move_entries.extend(ws_name_entries);
     write_u16_table(
         &out_dir.join("tp_move_names_table.rs"),
         "TP_MOVE_NAMES",

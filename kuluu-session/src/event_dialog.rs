@@ -166,9 +166,9 @@ pub struct DialogSession {
         (ActorLookup, u32, std::time::Instant, std::time::Duration),
     >,
     /// Whether a frame was displayed before the last step, so
-    /// [`take_message_closed`](Self::take_message_closed) fires exactly once per
+    /// [`take_frame_closed`](Self::take_frame_closed) fires exactly once per
     /// up→down transition instead of on every tick parked after it.
-    message_was_up: bool,
+    frame_was_up: bool,
     /// Per-zone dialog-numbering skew between the server and this install,
     /// learned from the messages themselves.
     skew: std::collections::HashMap<u16, ZoneTextSkew>,
@@ -193,7 +193,7 @@ impl DialogSession {
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
             pending_motion_holds: std::collections::HashMap::new(),
-            message_was_up: false,
+            frame_was_up: false,
             skew: std::collections::HashMap::new(),
         }
     }
@@ -430,10 +430,10 @@ impl DialogSession {
     /// box hides until the next message opcode reopens it; a plain
     /// `Advance::Waiting` cannot signal this because ticks parked while a frame
     /// is up report Waiting too.
-    pub fn take_message_closed(&mut self) -> bool {
-        let up = self.runner.as_ref().is_some_and(|r| r.message_awaiting());
-        let closed = self.message_was_up && !up;
-        self.message_was_up = up;
+    pub fn take_frame_closed(&mut self) -> bool {
+        let up = self.runner.as_ref().is_some_and(|r| r.frame_displayed());
+        let closed = self.frame_was_up && !up;
+        self.frame_was_up = up;
         closed
     }
 
@@ -568,7 +568,7 @@ impl DialogSession {
     fn finish(&mut self) {
         self.runner = None;
         self.active = None;
-        self.message_was_up = false;
+        self.frame_was_up = false;
         self.pending_motion_holds.clear();
     }
 
@@ -2529,7 +2529,7 @@ pub(crate) mod tests {
             panic!("the program produced no first frame");
         };
         assert!(
-            !session.take_message_closed(),
+            !session.take_frame_closed(),
             "no close before any dismissal"
         );
 
@@ -2540,7 +2540,7 @@ pub(crate) mod tests {
                 panic!("parked tick should wait");
             };
             assert!(
-                !session.take_message_closed(),
+                !session.take_frame_closed(),
                 "frame still up, nothing closed"
             );
         }
@@ -2549,17 +2549,89 @@ pub(crate) mod tests {
         let Advance::Waiting = session.advance(None) else {
             panic!("dismissal should park on the hold");
         };
-        assert!(
-            session.take_message_closed(),
-            "the dismissal must fire once"
-        );
+        assert!(session.take_frame_closed(), "the dismissal must fire once");
 
         // Further ticks parked after it: no re-fire.
         for _ in 0..3 {
             let Advance::Waiting = session.tick(1.0 / 60.0) else {
                 panic!("parked tick should wait");
             };
-            assert!(!session.take_message_closed(), "no re-fire while parked");
+            assert!(!session.take_frame_closed(), "no re-fire while parked");
+        }
+    }
+
+    /// The menu half of the same rule: answering a choice frame closes it, so the box must
+    /// hide exactly as a dismissed message does. Before this, only MESWAIT frames raised the
+    /// flag the detector reads, so an answered menu produced no up→down edge and stayed on
+    /// screen for the rest of the event — the chocobo rental's "Do you wish to rent a
+    /// chocobo?" sat over the whole rental cutscene.
+    #[test]
+    fn answering_a_menu_closes_its_frame() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            // refs[0] is the string index; refs[1] a long WAIT so the post-answer hold
+            // outlives every tick this test runs.
+            references: vec![900, 60 * 100],
+            event_data: vec![
+                0x24, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, // QUERY refs[0], default 0
+                0x25, // QUERYWAIT
+                0x1C, 0x01, 0x80, // WAIT refs[1] (timed hold after the answer)
+                0x21, // END
+            ],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 54,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+
+        let Begin::Frame(_menu) = session.begin(trigger) else {
+            panic!("the program produced no menu frame");
+        };
+        assert!(!session.take_frame_closed(), "no close before any answer");
+
+        // Parked on the QUERYWAIT with the menu still displayed.
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(
+                !session.take_frame_closed(),
+                "menu still up, nothing closed"
+            );
+        }
+
+        // The answer closes the menu and parks on the timed WAIT — exactly one fire.
+        let Advance::Waiting = session.advance(Some(0)) else {
+            panic!("the answer should park on the hold");
+        };
+        assert!(
+            session.take_frame_closed(),
+            "answering the menu must close its frame"
+        );
+
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(!session.take_frame_closed(), "no re-fire while parked");
         }
     }
 

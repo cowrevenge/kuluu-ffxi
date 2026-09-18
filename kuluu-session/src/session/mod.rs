@@ -2450,7 +2450,7 @@ async fn begin_server_event(
     let outcome = dialog_session.begin(trigger);
     let cues = dialog_session.take_cues();
     // Syncs the up→down edge detector for this event's first frame.
-    if dialog_session.take_message_closed() {
+    if dialog_session.take_frame_closed() {
         let _ = event_tx.send(AgentEvent::DialogDismissed);
     }
     // A choreography-only script runs to completion inside `begin`, so its
@@ -2868,7 +2868,7 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
-                            if dialog_session.take_message_closed() {
+                            if dialog_session.take_frame_closed() {
                                 let _ = event_tx.send(AgentEvent::DialogDismissed);
                             }
                             match advance {
@@ -3056,7 +3056,7 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
-                            if dialog_session.take_message_closed() {
+                            if dialog_session.take_frame_closed() {
                                 let _ = event_tx.send(AgentEvent::DialogDismissed);
                             }
                             match advance {
@@ -4330,7 +4330,7 @@ async fn keepalive_loop(
                     for cue in cues {
                         cutscene.push(cue, &event_tx);
                     }
-                    if dialog_session.take_message_closed() {
+                    if dialog_session.take_frame_closed() {
                         let _ = event_tx.send(AgentEvent::DialogDismissed);
                     }
                     match advance {
@@ -4961,7 +4961,7 @@ async fn keepalive_loop(
                                 for cue in dialog_session.take_cues() {
                                     cutscene.push(cue, &event_tx);
                                 }
-                                if dialog_session.take_message_closed() {
+                                if dialog_session.take_frame_closed() {
                                     let _ = event_tx.send(AgentEvent::DialogDismissed);
                                 }
                                 match advance {

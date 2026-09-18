@@ -888,14 +888,17 @@ impl EventVm {
         self.cancel_armed
     }
 
-    /// True while a message frame is displayed and parked on its MESWAIT —
-    /// retail's CliEventMessOpenFlag up (research/XiEvents/OpCodes/0x0023.md).
-    /// The host shows the box exactly for this span: dismissal clears the flag,
-    /// so the box hides until the next message opcode reopens it. A child
-    /// request holding the open frame counts too (retail's one global flag is
-    /// shared by every entity's VM).
-    pub fn message_awaiting(&self) -> bool {
-        self.open_frame_holder().is_some() || self.message_open == MESSAGE_OPEN_AWAITING
+    /// True while a dialog frame is displayed and unanswered: a message parked
+    /// on its MESWAIT with retail's CliEventMessOpenFlag up
+    /// (research/XiEvents/OpCodes/0x0023.md), or a menu parked on its QUERYWAIT
+    /// (0x0024.md). The host shows the box exactly for this span, so both kinds
+    /// must count — an answered menu closes its frame just as a dismissed
+    /// message does. A child request holding the open frame counts too (retail's
+    /// one global flag is shared by every entity's VM).
+    pub fn frame_displayed(&self) -> bool {
+        self.open_frame_holder().is_some()
+            || self.message_open == MESSAGE_OPEN_AWAITING
+            || self.pending_choice.is_some()
     }
 
     /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):

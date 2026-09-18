@@ -231,8 +231,8 @@ impl DialogRunner {
     /// on its wait — retail's CliEventMessOpenFlag up. The host shows the box for
     /// exactly this span; dismissal clears it, so the box hides until the next
     /// message opcode reopens it.
-    pub fn message_awaiting(&self) -> bool {
-        self.vm.message_awaiting()
+    pub fn frame_displayed(&self) -> bool {
+        self.vm.frame_displayed()
     }
 
     /// Cancel out of the current frame (the Esc path): a menu reports the

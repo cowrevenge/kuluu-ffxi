@@ -5,6 +5,10 @@
 //! (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md
 //! "Send flow" step 4) are the same control over different bounds. Model here,
 //! cell layout here; each screen only places the cells.
+//!
+//! `All` is a readout, not a column to steer into: the columns are the decimal
+//! places, and the marker lights when the amount they add up to covers the
+//! whole cap.
 
 use bevy::prelude::Color;
 use ffxi_vocab::gil::{group_digits, GROUP_SEPARATOR, GROUP_SIZE};
@@ -17,14 +21,6 @@ pub const PRICE_DIGITS: u32 = 9;
 /// Text cells one drawn row needs: every digit place plus the separators
 /// between its groups.
 pub const SPINNER_CELLS: usize = PRICE_DIGITS as usize + (PRICE_DIGITS as usize - 1) / GROUP_SIZE;
-
-/// The active column: a decimal place, or the whole-value "All" column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpinnerColumn {
-    All,
-    /// `Digit(p)` is the 10^p place; 0 = ones.
-    Digit(u32),
-}
 
 /// What the amount counts, which decides the unit drawn after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +41,12 @@ impl SpinnerUnit {
 /// One text node of a drawn spinner row, in [`slots`] order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpinnerSlot {
+    /// Lights once the amount covers the whole cap.
     All,
+    /// The chrome arrow toward higher places.
+    Less,
     Cell(usize),
+    /// The chrome arrow toward the ones digit, carrying the unit.
     Suffix,
     Cap,
 }
@@ -59,7 +59,8 @@ pub fn cells() -> impl Iterator<Item = SpinnerSlot> {
 /// The whole row on one line, the retail stack quantity's shape
 /// (`All < 1 / 2 >`).
 pub fn slots() -> impl Iterator<Item = SpinnerSlot> {
-    std::iter::once(SpinnerSlot::All)
+    [SpinnerSlot::All, SpinnerSlot::Less]
+        .into_iter()
         .chain(cells())
         .chain([SpinnerSlot::Cap, SpinnerSlot::Suffix])
 }
@@ -69,7 +70,8 @@ pub fn slots() -> impl Iterator<Item = SpinnerSlot> {
 /// is how retail's Price Set fits `/999,999,999 G` under the price
 /// (.agents/skills/retail-observe/references/auction-house.md).
 pub fn slots_without_cap() -> impl Iterator<Item = SpinnerSlot> {
-    std::iter::once(SpinnerSlot::All)
+    [SpinnerSlot::All, SpinnerSlot::Less]
+        .into_iter()
         .chain(cells())
         .chain([SpinnerSlot::Suffix])
 }
@@ -126,7 +128,8 @@ pub struct DigitSpinner {
     pub value: u32,
     pub cap: u32,
     pub min: u32,
-    pub column: SpinnerColumn,
+    /// Active decimal place; 0 is the ones digit.
+    pub place: u32,
     /// Bitmask of 10^p places the user has stepped (retail tints just-edited
     /// digits orange).
     pub edited: u16,
@@ -155,7 +158,7 @@ impl DigitSpinner {
             value: 0,
             cap,
             min: 0,
-            column: SpinnerColumn::Digit(0),
+            place: 0,
             edited: 0,
         }
     }
@@ -180,7 +183,7 @@ impl DigitSpinner {
         digit_count(self.cap).min(PRICE_DIGITS) - 1
     }
 
-    /// "All": select the whole amount.
+    /// Take the whole amount outright.
     pub fn set_all(&mut self) {
         self.value = self.cap;
     }
@@ -199,46 +202,28 @@ impl DigitSpinner {
         self.value == self.cap
     }
 
-    /// Toward higher place values, ending on the All column.
+    /// Toward higher place values, stopping at the widest the cap allows.
     pub fn left(&mut self) {
-        self.column = match self.column {
-            SpinnerColumn::All => SpinnerColumn::All,
-            SpinnerColumn::Digit(p) if p >= self.max_power() => SpinnerColumn::All,
-            SpinnerColumn::Digit(p) => SpinnerColumn::Digit(p + 1),
-        };
+        self.place = (self.place + 1).min(self.max_power());
     }
 
     /// Toward the ones digit.
     pub fn right(&mut self) {
-        self.column = match self.column {
-            SpinnerColumn::All => SpinnerColumn::Digit(self.max_power()),
-            SpinnerColumn::Digit(0) => SpinnerColumn::Digit(0),
-            SpinnerColumn::Digit(p) => SpinnerColumn::Digit(p - 1),
-        };
+        self.place = self.place.saturating_sub(1);
     }
 
     /// Add the active place value (carrying into higher digits), clamped to the
-    /// cap; All jumps to the cap.
+    /// cap — which is how the amount reaches "all".
     pub fn up(&mut self) {
-        match self.column {
-            SpinnerColumn::All => self.set_all(),
-            SpinnerColumn::Digit(p) => {
-                self.value = self.value.saturating_add(pow10(p)).min(self.cap);
-                self.edited |= 1 << p;
-            }
-        }
+        self.value = self.value.saturating_add(pow10(self.place)).min(self.cap);
+        self.edited |= 1 << self.place;
     }
 
     /// Subtract the active place value (borrowing from higher digits — 600 on
     /// the tens steps to 590), bounded by the minimum.
     pub fn down(&mut self) {
-        match self.column {
-            SpinnerColumn::All => self.set_min(),
-            SpinnerColumn::Digit(p) => {
-                self.value = self.value.saturating_sub(pow10(p)).max(self.min);
-                self.edited |= 1 << p;
-            }
-        }
+        self.value = self.value.saturating_sub(pow10(self.place)).max(self.min);
+        self.edited |= 1 << self.place;
     }
 
     /// Digit at place `p` of the current value.
@@ -249,11 +234,7 @@ impl DigitSpinner {
     /// Places wide enough for the current value and to keep the active column
     /// visible, most significant first.
     pub fn visible_powers(&self) -> impl DoubleEndedIterator<Item = u32> {
-        let need = match self.column {
-            SpinnerColumn::All => digit_count(self.value),
-            SpinnerColumn::Digit(p) => digit_count(self.value).max(p + 1),
-        };
-        (0..need).rev()
+        (0..digit_count(self.value).max(self.place + 1)).rev()
     }
 }
 
@@ -265,7 +246,18 @@ pub fn slot_style(
 ) -> (String, Color, Color) {
     use crate::hud::item_ui::theme;
     match slot {
-        SpinnerSlot::All => column_style(spinner, SpinnerColumn::All),
+        // A readout, not a control: it lights when the digits beside it already
+        // add up to the whole cap.
+        SpinnerSlot::All => (
+            "All".to_string(),
+            if spinner.is_all() {
+                theme::CURSOR
+            } else {
+                theme::MUTED
+            },
+            Color::NONE,
+        ),
+        SpinnerSlot::Less => (format!(" {ARROW_LEFT} "), theme::TEXT, Color::NONE),
         SpinnerSlot::Cell(i) => cell_style(spinner, i),
         SpinnerSlot::Suffix => (
             format!("{} {ARROW_RIGHT}", unit.suffix()),
@@ -291,44 +283,32 @@ fn cell_style(spinner: &DigitSpinner, cell: usize) -> (String, Color, Color) {
         }
         Some(CellKind::Separator { .. }) => blank,
         Some(CellKind::Digit(p)) if p >= width => blank,
-        Some(CellKind::Digit(p)) => column_style(spinner, SpinnerColumn::Digit(p)),
+        Some(CellKind::Digit(p)) => digit_style(spinner, p),
     }
 }
 
-pub fn column_style(spinner: &DigitSpinner, column: SpinnerColumn) -> (String, Color, Color) {
+/// Text, tint and background for the 10^`power` place.
+pub fn digit_style(spinner: &DigitSpinner, power: u32) -> (String, Color, Color) {
     use crate::hud::item_ui::theme;
-    match column {
-        SpinnerColumn::All => (
-            format!("All {ARROW_LEFT} "),
-            if spinner.column == column {
-                theme::CURSOR
-            } else {
-                theme::TEXT
-            },
-            Color::NONE,
-        ),
-        SpinnerColumn::Digit(power) => {
-            if !spinner.visible_powers().any(|p| p == power) {
-                return (String::new(), theme::TEXT, Color::NONE);
-            }
-            let active = spinner.column == column;
-            (
-                spinner.digit_at(power).to_string(),
-                if active {
-                    Color::WHITE
-                } else if spinner.edited & (1 << power) != 0 {
-                    SPINNER_EDITED
-                } else {
-                    theme::TEXT
-                },
-                if active {
-                    SPINNER_ACTIVE_BG
-                } else {
-                    Color::NONE
-                },
-            )
-        }
+    if !spinner.visible_powers().any(|p| p == power) {
+        return (String::new(), theme::TEXT, Color::NONE);
     }
+    let active = spinner.place == power;
+    (
+        spinner.digit_at(power).to_string(),
+        if active {
+            Color::WHITE
+        } else if spinner.edited & (1 << power) != 0 {
+            SPINNER_EDITED
+        } else {
+            theme::TEXT
+        },
+        if active {
+            SPINNER_ACTIVE_BG
+        } else {
+            Color::NONE
+        },
+    )
 }
 
 /// The chrome retail brackets the digits with, and the unit it writes after a
@@ -347,7 +327,7 @@ mod tests {
     use super::*;
     use crate::hud::auction::PRICE_CAP;
 
-    /// Walk the column cursor to the far left, wherever the cap puts the top
+    /// Walk the place cursor to the far left, wherever the cap puts the top
     /// digit.
     fn walk_left(spinner: &mut DigitSpinner) {
         for _ in 0..=PRICE_DIGITS {
@@ -361,19 +341,28 @@ mod tests {
             .collect()
     }
 
-    /// "All" is a column, not a caption: it is lit only while it is the
-    /// selected one, so the row never claims the whole amount over a partial
-    /// value.
+    /// "All" reports, it does not offer: it lights exactly when the digits
+    /// beside it already add up to the whole stack, and there is no way to
+    /// steer onto it.
     #[test]
-    fn the_all_column_is_only_highlighted_when_it_is_selected() {
+    fn the_all_marker_lights_only_once_the_amount_covers_the_stack() {
         use crate::hud::item_ui::theme;
         let mut spinner = DigitSpinner::item(12);
         assert_eq!(
             slot_style(&spinner, SpinnerSlot::All, SpinnerUnit::Count).1,
-            theme::TEXT
+            theme::MUTED
         );
         walk_left(&mut spinner);
-        assert_eq!(spinner.column, SpinnerColumn::All);
+        assert_eq!(spinner.place, 1, "the walk ends on the cap's top digit");
+        spinner.up();
+        assert_eq!(spinner.value, 11);
+        assert_eq!(
+            slot_style(&spinner, SpinnerSlot::All, SpinnerUnit::Count).1,
+            theme::MUTED,
+            "a partial amount may not claim the stack"
+        );
+        spinner.up();
+        assert_eq!(spinner.value, 12);
         assert_eq!(
             slot_style(&spinner, SpinnerSlot::All, SpinnerUnit::Count).1,
             theme::CURSOR
@@ -399,8 +388,8 @@ mod tests {
         );
     }
 
-    /// Navigation moves the column and nothing else, including at the ends of
-    /// the walk where there is no further column to move to.
+    /// Navigation moves the place and nothing else, including at the ends of
+    /// the walk where there is no further place to move to.
     #[test]
     fn walking_off_either_end_never_moves_the_value() {
         let mut spinner = DigitSpinner::item(12);
@@ -410,28 +399,33 @@ mod tests {
         for _ in 0..PRICE_DIGITS + 2 {
             spinner.left();
         }
-        assert_eq!(spinner.column, SpinnerColumn::All);
-        assert_eq!(spinner.value, 2, "the left walk ends on All, untouched");
+        assert_eq!(spinner.place, 1, "a stack of twelve is two digits wide");
+        assert_eq!(spinner.value, 2, "the left walk leaves the amount alone");
 
         for _ in 0..PRICE_DIGITS + 2 {
             spinner.right();
         }
-        assert_eq!(spinner.column, SpinnerColumn::Digit(0));
+        assert_eq!(spinner.place, 0);
         assert_eq!(spinner.value, 2, "the right walk ends on ones, untouched");
     }
 
-    /// Every instance offers the All column, so "take the whole amount" is one
-    /// reachable control rather than a shortcut key some screens bind.
+    /// "All" is what the top digit saturating at the cap looks like, on a
+    /// quantity and on a price alike, so no screen needs a take-all binding.
     #[test]
-    fn all_is_reachable_on_a_quantity_and_on_a_price() {
+    fn stepping_the_top_digit_reaches_the_cap_on_a_quantity_and_on_a_price() {
         for mut spinner in [DigitSpinner::item(12), DigitSpinner::new(1_180)] {
             let cap = spinner.cap;
             walk_left(&mut spinner);
-            assert_eq!(spinner.column, SpinnerColumn::All);
-            spinner.up();
+            for _ in 0..10 {
+                spinner.up();
+            }
             assert_eq!(spinner.value, cap);
-            spinner.down();
+            assert!(spinner.is_all());
+            for _ in 0..10 {
+                spinner.down();
+            }
             assert_eq!(spinner.value, spinner.min);
+            assert!(!spinner.is_all());
         }
     }
 
@@ -453,7 +447,7 @@ mod tests {
     fn opens_on_ones_at_zero() {
         let s = DigitSpinner::new(PRICE_CAP);
         assert_eq!(s.value, 0);
-        assert_eq!(s.column, SpinnerColumn::Digit(0));
+        assert_eq!(s.place, 0);
     }
 
     #[test]
@@ -474,7 +468,7 @@ mod tests {
     #[test]
     fn down_borrows_across_digits() {
         let mut s = DigitSpinner::with_value(PRICE_CAP, 600);
-        s.column = SpinnerColumn::Digit(1);
+        s.place = 1;
         s.down();
         assert_eq!(s.value, 590, "600 minus a tens step borrows from the 6");
         s.up();
@@ -495,34 +489,26 @@ mod tests {
     }
 
     #[test]
-    fn column_walk_ends_on_all_and_returns() {
+    fn the_place_walk_stops_at_the_caps_width_and_at_ones() {
         let mut s = DigitSpinner::new(80_121);
         for _ in 0..10 {
             s.left();
         }
-        assert_eq!(s.column, SpinnerColumn::All, "left walk stops at All");
+        assert_eq!(s.place, 4, "left walk stops at the cap's top digit");
         s.up();
-        assert_eq!(s.value, 80_121, "All + up selects the whole cap");
-        s.down();
-        assert_eq!(s.value, 0);
-        s.right();
-        assert_eq!(
-            s.column,
-            SpinnerColumn::Digit(4),
-            "right off All lands on the cap's top digit"
-        );
+        assert_eq!(s.value, 10_000, "the top place steps by its own value");
+        for _ in 0..8 {
+            s.up();
+        }
+        assert_eq!(s.value, 80_121, "a step past the cap lands on it exactly");
         for _ in 0..10 {
             s.right();
         }
-        assert_eq!(
-            s.column,
-            SpinnerColumn::Digit(0),
-            "right walk stops at ones"
-        );
+        assert_eq!(s.place, 0, "right walk stops at ones");
     }
 
     #[test]
-    fn visible_powers_cover_value_and_active_column() {
+    fn visible_powers_cover_value_and_active_place() {
         let mut s = DigitSpinner::new(PRICE_CAP);
         assert_eq!(s.visible_powers().collect::<Vec<_>>(), vec![0]);
         s.left();

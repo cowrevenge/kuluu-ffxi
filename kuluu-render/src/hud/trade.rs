@@ -425,10 +425,11 @@ mod tests {
         }
     }
 
-    /// Gil rides the same picker as every other amount: walk left to the All
-    /// column, step up, and the whole purse is selected.
+    /// Gil rides the same picker as every other amount: walk left to the widest
+    /// place the purse allows and step it up until the clamp bites, and the
+    /// whole purse is selected.
     #[test]
-    fn the_all_column_commits_the_whole_purse() {
+    fn stepping_the_top_place_commits_the_whole_purse() {
         let mut s = TradeState::open(42);
         s.gil = 777;
         begin_gil_entry(&mut s, 5000);
@@ -437,7 +438,10 @@ mod tests {
         for _ in 0..=digit_spinner::PRICE_DIGITS {
             spinner.left();
         }
-        spinner.up();
+        for _ in 0..10 {
+            spinner.up();
+        }
+        assert!(spinner.is_all());
 
         assert_eq!(gil_confirm(&mut s), Some(5000));
         assert_eq!(s.gil, 5000);

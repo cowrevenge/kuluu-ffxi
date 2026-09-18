@@ -419,6 +419,7 @@ mod tests {
             item_no,
             quantity,
             locked: false,
+            unselectable: false,
             charges_remaining: None,
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,

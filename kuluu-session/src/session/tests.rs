@@ -5125,3 +5125,17 @@ fn shop_raw_appraisal_ignores_other_slots_and_survives_duplicate_unit_quotes() {
     let sale = shop.open.unwrap().pending_sale.unwrap();
     assert_eq!((sale.item_index, sale.count), (2, 10));
 }
+
+/// An equipped enchanted item is already permanently locked — 0x020's lockFlagFor answers NoDrop
+/// for anything equipped — so a plain "is it locked" read cannot tell a use in flight from a
+/// shield sitting on the arm. Only the NoSelect flag marks the slot as spoken for.
+#[test]
+fn only_the_no_select_flag_marks_a_slot_an_action_owns() {
+    const NO_SELECT: u8 = ffxi_proto::decode::lock_flg::NO_SELECT;
+    assert!(slot_unselectable(NO_SELECT));
+    for other in 0..=u8::MAX {
+        if other != NO_SELECT {
+            assert!(!slot_unselectable(other), "lock flag {other:#04X}");
+        }
+    }
+}

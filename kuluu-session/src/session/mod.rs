@@ -929,6 +929,14 @@ fn special_wire_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
 }
 
+/// Whether an inventory packet's lock byte means the slot is committed to something in flight —
+/// an item use, a synth, a trade offer — and so cannot be picked. Not the same question as
+/// `lock_flg != 0`: an equipped or bazaar-priced slot is permanently locked and still selectable
+/// (vendor/server/src/map/packets/s2c/0x020_item_attr.cpp lockFlagFor).
+fn slot_unselectable(lock_flg: u8) -> bool {
+    lock_flg == decode::lock_flg::NO_SELECT
+}
+
 fn handle_sub_packet(
     sub: &framing::SubPacket<'_>,
     event_tx: &broadcast::Sender<AgentEvent>,
@@ -2135,6 +2143,7 @@ fn handle_sub_packet(
                             item_no: l.item_no,
                             quantity: l.quantity,
                             locked: l.lock_flg != 0,
+                            unselectable: slot_unselectable(l.lock_flg),
 
                             price: 0,
                             charges_remaining: None,
@@ -2176,6 +2185,7 @@ fn handle_sub_packet(
                             item_no: a.item_no,
                             quantity: a.quantity,
                             locked: a.lock_flg != 0,
+                            unselectable: slot_unselectable(a.lock_flg),
                             price: a.price,
                             charges_remaining: ci.map(|c| c.charges),
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),

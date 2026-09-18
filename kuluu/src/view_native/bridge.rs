@@ -418,6 +418,7 @@ mod tests {
             item_no: 16448,
             quantity: 1,
             locked: true,
+            unselectable: false,
             price: 0,
             charges_remaining: None,
             next_use_vana_ts: None,

@@ -1216,6 +1216,10 @@ pub struct ItemSlot {
     pub item_no: u16,
     pub quantity: u32,
     pub locked: bool,
+    /// The server has the slot marked unpickable — see
+    /// [`ffxi_proto::decode::lock_flg::NO_SELECT`].
+    #[serde(default)]
+    pub unselectable: bool,
     pub price: u32,
     #[serde(default)]
     pub charges_remaining: Option<u8>,

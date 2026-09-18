@@ -65,6 +65,16 @@ impl ItemSame {
     }
 }
 
+/// Slot lock flags the server stamps on an item.
+/// vendor/server/src/map/enums/item_lockflg.h ItemLockFlg.
+pub mod lock_flg {
+    /// The slot cannot be picked: LSB raises it for the span of an item use, a synth or a trade
+    /// offer and clears it when that resolves (vendor/server/src/map/ai/states/item_state.cpp
+    /// CItemState::init and CItemState::Cleanup). For a use it is the only signal that lands
+    /// before the ITEM_ATTR carrying the new recast, which LSB only sends at the span's end.
+    pub const NO_SELECT: u8 = 0x0F;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ItemNum {
     pub quantity: u32,
@@ -329,6 +339,15 @@ mod item_tests {
         assert_eq!(l.item_no, 4112);
         assert_eq!(l.category, 5);
         assert_eq!(l.index, 12);
+        assert_eq!(l.lock_flg, 0);
+
+        // The lock byte is the only field an item use rewrites, and it sits right after the
+        // slot index - reading either a byte off swaps two small numbers with no other symptom.
+        // (The flag's value is pinned by the ItemLockFlg citation, not by this test.)
+        buf[8] = lock_flg::NO_SELECT;
+        let locked = ItemList::decode(&buf).unwrap();
+        assert_eq!(locked.lock_flg, lock_flg::NO_SELECT);
+        assert_eq!(locked.index, 12, "the index is its own byte");
     }
 
     #[test]

@@ -48,7 +48,14 @@ pub fn now_vana_ts() -> u32 {
 /// elapsed. Non-charged items (`charges_remaining` is `None`) are never greyed
 /// by this predicate. Job/level/zone/status gating is server-side and
 /// deliberately not reproduced here (see kuluu-ng3o notes).
+///
+/// The NoSelect lock outranks both, and covers the several seconds between a use starting and
+/// the recast arriving: without it a one-charge item reads ready again the moment its "uses a"
+/// line prints, and stays that way until the item state exits.
 pub fn item_unusable(item: &InventoryItem, now_vana: u32) -> bool {
+    if item.unselectable {
+        return true;
+    }
     match item.charges_remaining {
         None => false,
         Some(0) => true,
@@ -141,6 +148,7 @@ mod tests {
             item_no: 4096,
             quantity: 1,
             locked: false,
+            unselectable: false,
             charges_remaining: charges,
             next_use_vana_ts: next_use,
             use_delay_end_vana_ts: use_delay_end,
@@ -181,6 +189,19 @@ mod tests {
         ));
     }
 
+    /// The seconds between a use starting and its recast arriving: the server has already
+    /// restated the slot with no charge info and the NoSelect lock, which is all the client has
+    /// to go on until the item state exits.
+    #[test]
+    fn a_slot_an_action_owns_is_unusable_without_any_charge_info() {
+        let mut in_use = charged(None, None, None, None);
+        in_use.unselectable = true;
+        assert!(item_unusable(&in_use, 1000));
+
+        in_use.unselectable = false;
+        assert!(!item_unusable(&in_use, 1000));
+    }
+
     #[test]
     fn clear_ready_bit_blocks_use_with_past_recast_timestamp() {
         let item = charged(Some(1), Some(500), Some(2000), Some(false));
@@ -199,6 +220,7 @@ mod tests {
             item_no: 4096,
             quantity: 1,
             locked: false,
+            unselectable: false,
             charges_remaining: Some(1),
             next_use_vana_ts: Some(0),
             use_delay_end_vana_ts: Some(0),

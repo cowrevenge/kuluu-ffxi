@@ -1546,6 +1546,7 @@ fn inventory_fold_slot_changed_inserts_then_updates_then_removes() {
         item_no: 4112,
         quantity: 5,
         locked: false,
+        unselectable: false,
         price: 0,
         charges_remaining: None,
         next_use_vana_ts: None,
@@ -1586,6 +1587,7 @@ fn inventory_fold_item_list_after_item_attr_keeps_charge_state() {
         item_no: 28652,
         quantity: 1,
         locked: false,
+        unselectable: false,
         price: 0,
         charges_remaining: Some(1),
         next_use_vana_ts: Some(1_000),
@@ -1638,6 +1640,66 @@ fn inventory_fold_item_list_after_item_attr_keeps_charge_state() {
     );
 }
 
+/// The packet order an enchanted-equipment use produces
+/// (vendor/server/src/map/ai/states/item_state.cpp CItemState::init then CItemState::Cleanup):
+/// a bare ITEM_LIST marks the slot NoSelect as the use starts, and only seconds later — once the
+/// item state exits — does the ITEM_ATTR carrying the new recast arrive. The NoSelect slot has no
+/// charge info of its own, so folding it must keep the charges *and* take the new lock.
+#[test]
+fn inventory_fold_no_select_covers_a_use_until_its_recast_lands() {
+    let mut s = SessionState::default();
+    let equipped = ItemSlot {
+        index: 3,
+        item_no: 28652,
+        quantity: 1,
+        locked: true,
+        unselectable: false,
+        price: 0,
+        charges_remaining: Some(1),
+        next_use_vana_ts: Some(0),
+        use_delay_end_vana_ts: Some(0),
+        ready: Some(true),
+    };
+    let fold = |s: &mut SessionState, slot: ItemSlot| {
+        s.apply_event(&AgentEvent::InventoryUpdated {
+            container: 0,
+            update: InventoryUpdate::SlotChanged { slot },
+        });
+    };
+    fold(&mut s, equipped.clone());
+
+    let bare = |unselectable| ItemSlot {
+        unselectable,
+        charges_remaining: None,
+        next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
+        ..equipped.clone()
+    };
+    fold(&mut s, bare(true));
+    let slot = &s.inventory.containers[&0].slots[0];
+    assert!(slot.unselectable, "the use owns the slot");
+    assert_eq!(
+        slot.charges_remaining,
+        Some(1),
+        "a lock-only update restates no charge info and must not erase it"
+    );
+
+    // The use resolves: the slot is selectable again, and the recast is what keeps it greyed.
+    fold(&mut s, bare(false));
+    fold(
+        &mut s,
+        ItemSlot {
+            next_use_vana_ts: Some(86_400),
+            ready: Some(false),
+            ..equipped
+        },
+    );
+    let slot = &s.inventory.containers[&0].slots[0];
+    assert!(!slot.unselectable);
+    assert_eq!(slot.next_use_vana_ts, Some(86_400));
+}
+
 #[test]
 fn inventory_fold_quantity_changed_updates_existing_slot_only() {
     let mut s = SessionState::default();
@@ -1668,6 +1730,7 @@ fn inventory_fold_quantity_changed_updates_existing_slot_only() {
                 item_no: 4112,
                 quantity: 1,
                 locked: false,
+                unselectable: false,
                 price: 0,
                 charges_remaining: None,
                 next_use_vana_ts: None,

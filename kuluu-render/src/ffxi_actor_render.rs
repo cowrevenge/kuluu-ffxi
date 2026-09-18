@@ -1472,6 +1472,7 @@ impl FfxiRenderActor {
             transition_in: motion.transition_in.whole_frames(),
             transition_out: motion.transition_out.whole_frames(),
             cast_pose: false,
+            settle: None,
         });
     }
 }
@@ -1538,6 +1539,19 @@ struct ActionPlayback {
     transition_out: f32,
 
     cast_pose: bool,
+
+    /// The stage this playback hands off to when `clip_id` runs out, held until the action
+    /// resolves (see [`settle_motion_clip`]). `None` releases the overlay to idle instead.
+    settle: Option<DatId>,
+}
+
+impl ActionPlayback {
+    /// Whether this playback outlives its own clip and so needs the action's resolution or
+    /// interrupt to end it. A wind-up with a settled stage still pending counts: it is one
+    /// frame away from the hold.
+    fn held(&self) -> bool {
+        self.looping || self.settle.is_some()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -2265,6 +2279,20 @@ fn routine_motion_miss(id: u32, name: &str, model: &str, routine: DatId, miss: &
     clip_warn_once(id, name, model, &routine, reason);
 }
 
+/// The stage a once-through start routine settles into after its wind-up, or `None` when the
+/// routine carries a single Motion stage and so has nothing to hold. `cait` is authored this way
+/// (`dat-routine-stages 7072 ca`: `mi0?` dur=28 half-frames at frame 0, then `mi1?` dur=99) to
+/// cover an item's activation window — `item_usable.activation`, 2s for the Hatchling Shield
+/// (vendor/server/src/map/ai/states/item_state.cpp CItemState::Update) — which the wind-up alone
+/// is a third of.
+fn settle_motion_clip(
+    routines: &HashMap<DatId, Scheduler>,
+    routine: DatId,
+    wind_up: DatId,
+) -> Option<DatId> {
+    routine_motion_clip_last(routines, routine).filter(|last| *last != wind_up)
+}
+
 /// The `ded?` collapse clip and the routine-authored frames retail plays it for
 /// before swapping to the held `cor?` corpse pose. Both are Motion stages of the
 /// `dead` routine (`dat-routine-stages 7072 dead`: `ded?` dur=116 half-frames at
@@ -2315,7 +2343,9 @@ pub(crate) fn action_routine(
 
         7 | 9 | 10 | 12 => match fourcc.as_ref().filter(|m| !m.interrupt) {
             // A valid "ca??" start keeps its category's looping semantics: the generic
-            // `cast`/`calg` holds loop until resolution, while `cate`/`cait` play once.
+            // `cast`/`calg` loops its single Motion stage until resolution, while `cate`/`cait`
+            // are authored as a wind-up plus a settled stage and hold the second one instead
+            // (see `settle_motion_clip`).
             Some(m) => (DatId::from_name(&m.id), matches!(action_kind, 10 | 12)),
             None => match action_kind {
                 7 => (DatId::from_str("cate"), false),
@@ -2499,9 +2529,23 @@ fn advance_actor_pose(
             // frame in the coordinator (num_loops = 1), so this is what holds a buried/emerged
             // pose until the lock lapses - the general form of the old burrow_holding flag.
             if act.remaining <= 0.0 && !animation_locked {
-                *action = None;
-                action_clips.clear();
-                None
+                match act.settle {
+                    // The wind-up is over but the action is not: hold the routine's settled
+                    // stage until its resolution (or interrupt) clears the overlay.
+                    Some(settled) => {
+                        act.clip_id = settled;
+                        act.settle = None;
+                        act.looping = true;
+                        act.num_loops = None;
+                        act.remaining = CAST_TIMEOUT_FRAMES;
+                        Some(settled)
+                    }
+                    None => {
+                        *action = None;
+                        action_clips.clear();
+                        None
+                    }
+                }
             } else {
                 Some(act.clip_id)
             }
@@ -4357,9 +4401,9 @@ pub fn dispatch_action_overlay(
             .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
             .flatten();
         if start.is_some_and(|m| m.interrupt) {
-            // Only a pose that is still held (looping) needs dropping; one-shot starts have
-            // already finished by the time an interrupt could matter.
-            if actor.action.map(|a| a.looping).unwrap_or(false) {
+            // Only a pose that outlives its own clip needs dropping; a one-shot has already
+            // finished by the time an interrupt could matter.
+            if actor.action.is_some_and(|a| a.held()) {
                 actor.action = None;
             }
             continue;
@@ -4370,14 +4414,15 @@ pub fn dispatch_action_overlay(
             _ => None,
         };
         // A FourCC start keeps its category's looping semantics: the generic `cast`/`calg`
-        // holds loop until resolution, while `cate`/`cait` play once.
+        // loops its one Motion stage until resolution, while `cate`/`cait` wind up and settle.
         let fourcc_looping = matches!(action_kind, 10 | 12);
+        let is_start = matches!(action_kind, 7 | 9 | 10 | 12 | MAGIC_START_CATEGORY);
         match cast_routine_id
             .map(|id| (id, action_kind == MAGIC_START_CATEGORY || fourcc_looping))
             .or_else(|| action_routine(action_kind, action_id, cast_suffix, animation))
         {
             None => {
-                if actor.action.map(|a| a.looping).unwrap_or(false) {
+                if actor.action.is_some_and(|a| a.held()) {
                     actor.action = None;
                 }
             }
@@ -4403,6 +4448,11 @@ pub fn dispatch_action_overlay(
                 } else {
                     len.max(1.0)
                 };
+                // Only a start holds a pose past its wind-up; a swing or a completion motion
+                // is over when its clip is.
+                let settle = (is_start && !looping)
+                    .then(|| settle_motion_clip(&actor.routines, routine, clip_id))
+                    .flatten();
                 actor.action = Some(ActionPlayback {
                     clip_id,
                     looping,
@@ -4411,6 +4461,7 @@ pub fn dispatch_action_overlay(
                     transition_in: LOCOMOTION_XFADE_IN,
                     transition_out: LOCOMOTION_XFADE_OUT,
                     cast_pose: action_kind == MAGIC_START_CATEGORY,
+                    settle,
                 });
             }
         }
@@ -6396,6 +6447,91 @@ mod pose_resolution_tests {
         assert_eq!(
             routine_motion_clip(&routines, &[], DatId::from_str("cawh")),
             None
+        );
+    }
+
+    #[test]
+    fn settle_motion_clip_is_the_stage_after_the_wind_up() {
+        let mut routines = synth_routines(&[(b"cait", b"mi0?"), (b"cast", b"mb0?")]);
+        let wind_up = routine_motion_clip(&routines, DatId::from_str("cait")).unwrap();
+        assert_eq!(
+            settle_motion_clip(&routines, DatId::from_str("cait"), wind_up),
+            None,
+            "a routine with one Motion stage has nothing to hand off to"
+        );
+
+        let stage = routines[&DatId::from_str("cait")].stages[0];
+        routines
+            .get_mut(&DatId::from_str("cait"))
+            .unwrap()
+            .stages
+            .push(ffxi_dat::scheduler::TimedStage {
+                stage: ffxi_dat::scheduler::SchedulerStage {
+                    id: *b"mi1?",
+                    ..stage.stage
+                },
+                ..stage
+            });
+        assert_eq!(
+            settle_motion_clip(&routines, DatId::from_str("cait"), wind_up).map(|d| d.as_str()),
+            Some("mi1?".to_string())
+        );
+
+        let cast = routine_motion_clip(&routines, DatId::from_str("cast")).unwrap();
+        assert_eq!(
+            settle_motion_clip(&routines, DatId::from_str("cast"), cast),
+            None,
+            "the magic cast pose loops its single stage; it never settles elsewhere"
+        );
+    }
+
+    // Retail-DAT guard (skips without an install). An item use has an activation window the
+    // server times (vendor/server/src/map/ai/states/item_state.cpp CItemState::Update reads
+    // `item_usable.activation`), and `cait` is authored to cover it: a short wind-up plus a
+    // settled stage several times its length. Stopping at the wind-up drops the character back
+    // to idle while the use is still running.
+    #[test]
+    fn an_item_use_holds_its_settled_stage_past_the_wind_up() {
+        let Some(loaded) = load_hume_m() else {
+            return;
+        };
+        let routines = loaded.all_routines();
+        let routine = DatId::from_str("cait");
+        let wind_up = routine_motion_clip(&routines, routine).expect("HumeM cait wind-up");
+        let settled = settle_motion_clip(&routines, routine, wind_up).expect("HumeM cait settles");
+
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let len = rest_clip_len_frames(&actor.battle_clips, wind_up)
+            .max(rest_clip_len_frames(&actor.animations, wind_up));
+        assert!(len > 0.0, "HumeM ships the wind-up clip");
+        actor.action = Some(ActionPlayback {
+            clip_id: wind_up,
+            looping: false,
+            remaining: len,
+            num_loops: None,
+            transition_in: LOCOMOTION_XFADE_IN,
+            transition_out: LOCOMOTION_XFADE_OUT,
+            cast_pose: false,
+            settle: Some(settled),
+        });
+
+        advance_actor_pose_standalone(&mut actor, 1.0, None);
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&wind_up)),
+            "the wind-up plays first"
+        );
+
+        // Well past the wind-up's own length, and past anything the activation window could be.
+        for _ in 0..(len as usize * 8) {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&settled)),
+            "the settled stage owns the pose until the use resolves"
         );
     }
 

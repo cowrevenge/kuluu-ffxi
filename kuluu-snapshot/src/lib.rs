@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v40: InventoryItem.unselectable - the NoSelect lock an in-flight item use holds, which is the
+// only word the client gets that the item is spent until the use resolves seconds later.
 // v39: CutsceneCue::ActorMove.speed is the raw 0x32 MainSpeed operand (i32,
 // scaled by ffxi_event EVENT_SPEED_SCALE at the consumer) instead of yalms/sec
 // as f32, which restores Eq on CutsceneCue for keyed hold tables.
@@ -91,7 +93,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 39;
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1338,6 +1340,11 @@ pub struct InventoryItem {
     /// rejects moving locked items (0x029_item_move.cpp isValidMovement).
     #[serde(default)]
     pub locked: bool,
+    /// The server has the slot marked unpickable for as long as an action owns it
+    /// (`ffxi_proto::decode::lock_flg::NO_SELECT`). Distinct from `locked`, which every
+    /// equipped or reserved item carries all the time.
+    #[serde(default)]
+    pub unselectable: bool,
     /// Current charges of a charged (usable/enchanted) item; `None` for
     /// non-charged items. From item extdata
     /// (vendor/server/src/map/items/exdata/timer_info.h ItemTimerInfo Header, memcpy'd at
@@ -2395,7 +2402,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 39;
+        const VERSION: u32 = 40;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

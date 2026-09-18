@@ -1221,6 +1221,117 @@ mod tests {
     use super::*;
     use kuluu_snapshot::DeliverySlot;
 
+    /// The picker the player actually sees: spawn the panel, open a stack
+    /// quantity on it, run the real update system, and read the drawn row back
+    /// off the entities. Covers the spawn/marker/update wiring that a direct
+    /// `slot_style` call cannot.
+    #[test]
+    fn the_spawned_panel_draws_the_shared_quantity_row() {
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.init_resource::<ItemDatRoot>();
+        app.init_resource::<ItemIconCache>();
+        app.init_resource::<DeliveryInventory>();
+
+        let mut screen = DeliveryScreenState::default();
+        screen.open(DeliveryBoxNo::Outgoing);
+        screen.selector = Some(SpinnerBinding {
+            spinner: DigitSpinner::item(12),
+            target: SpinnerTarget::ItemQty {
+                inv_slot: 1,
+                out_slot: 0,
+            },
+        });
+        app.insert_resource(screen);
+        app.insert_resource(SceneState {
+            snapshot: SceneSnapshot {
+                delivery_box: Some(DeliveryBoxState {
+                    box_no: DeliveryBoxNo::Outgoing,
+                    slots: vec![None; GRID_SLOTS],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        app.add_systems(Startup, spawn_delivery_screen);
+        app.add_systems(Update, update_delivery_screen);
+        app.update();
+
+        let drawn = drawn_spinner_row(&mut app);
+        assert_eq!(drawn, "All \u{25c4} 1/12 \u{25ba}");
+    }
+
+    /// The same panel, same nodes, showing a gil amount: only the bound target
+    /// changes, and the unit follows it.
+    #[test]
+    fn the_same_row_draws_a_gil_amount_with_its_unit() {
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<Image>();
+        app.init_resource::<ItemDatRoot>();
+        app.init_resource::<ItemIconCache>();
+        app.init_resource::<DeliveryInventory>();
+
+        let mut screen = DeliveryScreenState::default();
+        screen.open(DeliveryBoxNo::Outgoing);
+        let mut spinner = DigitSpinner::new(17_488);
+        for _ in 0..3 {
+            spinner.left();
+        }
+        for _ in 0..9 {
+            spinner.up();
+        }
+        screen.selector = Some(SpinnerBinding {
+            spinner,
+            target: SpinnerTarget::Gil { out_slot: 0 },
+        });
+        app.insert_resource(screen);
+        app.insert_resource(SceneState {
+            snapshot: SceneSnapshot {
+                delivery_box: Some(DeliveryBoxState {
+                    box_no: DeliveryBoxNo::Outgoing,
+                    slots: vec![None; GRID_SLOTS],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        app.add_systems(Startup, spawn_delivery_screen);
+        app.add_systems(Update, update_delivery_screen);
+        app.update();
+
+        assert_eq!(
+            drawn_spinner_row(&mut app),
+            "All \u{25c4} 9,000/17,488 G \u{25ba}"
+        );
+    }
+
+    /// Concatenate the panel's spinner cells in draw order.
+    fn drawn_spinner_row(app: &mut App) -> String {
+        let mut cells: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&DeliveryText, &Text)>()
+            .iter(app.world())
+            .filter_map(|(tag, text)| match tag.0 {
+                Role::Spinner(slot) => Some((slot_order(slot), text.0.clone())),
+                _ => None,
+            })
+            .collect();
+        cells.sort_by_key(|(order, _)| *order);
+        cells.into_iter().map(|(_, s)| s).collect()
+    }
+
+    fn slot_order(slot: SpinnerSlot) -> usize {
+        digit_spinner::slots()
+            .position(|s| s == slot)
+            .expect("slot is drawn by this panel")
+    }
+
     fn ctx_out(inv_len: usize, recipient_ok: bool) -> DeliveryCtx {
         DeliveryCtx {
             box_no: DeliveryBoxNo::Outgoing,
@@ -1488,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_stackable_opens_spinner_singleton_preconfirmed() {
+    fn a_stack_opens_at_one_and_a_singleton_is_already_the_whole_stack() {
         let stack = InvRow {
             inv_slot: 3,
             item_no: 4096,

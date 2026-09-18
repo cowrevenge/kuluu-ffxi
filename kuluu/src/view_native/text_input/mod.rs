@@ -46,6 +46,27 @@ use slash_apply::apply_slash_outcome;
 mod target_action;
 use target_action::{confirm_target_action_at_cursor, handle_target_action_key, handle_world_key};
 
+/// The one key map for every amount the game asks for — auction price, shop and
+/// bazaar quantity, delivery quantity and gil. Up/Down step the active digit,
+/// Left/Right move the column. Taking the whole amount is the All column at the
+/// left end of that walk, not a separate key: retail draws it as a column
+/// (.agents/skills/retail-observe/references/auction-house.md "Price Set").
+fn spinner_nav(
+    spinner: &mut kuluu_render::hud::digit_spinner::DigitSpinner,
+    key: &Key,
+    bindings: &Bindings,
+) {
+    if bindings.matches_logical(Action::NavUp, key) {
+        spinner.up();
+    } else if bindings.matches_logical(Action::NavDown, key) {
+        spinner.down();
+    } else if bindings.matches_logical(Action::NavLeft, key) {
+        spinner.left();
+    } else if bindings.matches_logical(Action::NavRight, key) {
+        spinner.right();
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct CaptureMode {
     pub active: bool,
@@ -732,60 +753,17 @@ fn handle_trade_key(
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
     scene_state: &mut SceneState,
 ) -> Option<InputMode> {
-    use kuluu_render::hud::trade::{self, TradeFocus, TradeSelector};
+    use kuluu_render::hud::trade::{self, TradeFocus};
 
-    if let Some(selector) = trade_state.selector.clone() {
-        match selector {
-            TradeSelector::Gil { .. } => {
-                if bindings.matches_logical(Action::NavConfirm, key) {
-                    trade::gil_confirm(trade_state);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavCancel, key) {
-                    trade_state.selector = None;
-                    return None;
-                }
-
-                if matches!(key, Key::Tab) {
-                    trade::gil_fill_max(trade_state);
-                    return None;
-                }
-
-                if let Key::Character(s) = key {
-                    for c in s.chars() {
-                        trade::gil_push_digit(trade_state, c);
-                    }
-                }
-                return None;
-            }
-            TradeSelector::Stack { .. } => {
-                if bindings.matches_logical(Action::NavConfirm, key) {
-                    trade::stack_confirm(trade_state);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavCancel, key) {
-                    trade_state.selector = None;
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavUp, key) {
-                    trade::stack_adjust(trade_state, 1);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavDown, key) {
-                    trade::stack_adjust(trade_state, -1);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavRight, key) {
-                    if let Some(TradeSelector::Stack { value, max, .. }) =
-                        trade_state.selector.as_mut()
-                    {
-                        *value = *max;
-                    }
-                    return None;
-                }
-                return None;
-            }
+    if let Some(spinner) = trade_state.selector.as_mut() {
+        if bindings.matches_logical(Action::NavConfirm, key) {
+            trade::gil_confirm(trade_state);
+        } else if bindings.matches_logical(Action::NavCancel, key) {
+            trade_state.selector = None;
+        } else {
+            spinner_nav(spinner, key, bindings);
         }
+        return None;
     }
 
     if bindings.matches_logical(Action::NavUp, key) {

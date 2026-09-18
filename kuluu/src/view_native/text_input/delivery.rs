@@ -108,23 +108,7 @@ pub(super) fn handle_delivery_key(
             return;
         }
         if let Some(b) = screen.selector.as_mut() {
-            if bindings.matches_logical(Action::NavUp, key) {
-                b.spinner.up();
-            } else if bindings.matches_logical(Action::NavDown, key) {
-                b.spinner.down();
-            } else if bindings.matches_logical(Action::NavRight, key) {
-                b.spinner.jump_up();
-            } else if bindings.matches_logical(Action::NavLeft, key) {
-                b.spinner.jump_down();
-            } else if matches!(key, Key::Tab) {
-                b.spinner.set_all();
-            } else if matches!(key, Key::Backspace) {
-                b.spinner.backspace();
-            } else if let Key::Character(s) = key {
-                for c in s.chars() {
-                    b.spinner.push_digit(c);
-                }
-            }
+            spinner_nav(&mut b.spinner, key, bindings);
         }
         return;
     }

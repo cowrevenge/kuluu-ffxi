@@ -20,7 +20,7 @@ use kuluu_snapshot::{SceneSnapshot, ShopItem, ShopSale};
 
 use crate::hud::bazaar_view::{group_digits, item_name};
 use crate::hud::delivery::current_gil;
-use crate::hud::digit_spinner::{DigitSpinner, SpinnerColumn};
+use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
 use crate::hud::list_view::{self, ListViewport, LIST_ROWS, ROW_ICON_PX};
@@ -448,7 +448,7 @@ enum ShopTextRole {
     GilLabel,
     GilValue,
     ConfirmChoice(bool),
-    QuantityColumn(SpinnerColumn),
+    QuantityColumn(SpinnerSlot),
     DetailName,
     DetailBody,
 }
@@ -619,24 +619,8 @@ pub(crate) fn spawn_shop_panel(mut commands: Commands, mut images: ResMut<Assets
                         text_font(13.0),
                         TextColor(theme::TEXT),
                     ));
-                    g.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        for column in std::iter::once(SpinnerColumn::All).chain(
-                            (0..crate::hud::digit_spinner::PRICE_DIGITS)
-                                .rev()
-                                .map(SpinnerColumn::Digit),
-                        ) {
-                            row.spawn((
-                                ShopText(ShopTextRole::QuantityColumn(column)),
-                                Text::new(""),
-                                text_font(13.0),
-                                TextColor(theme::TEXT),
-                                BackgroundColor(Color::NONE),
-                            ));
-                        }
+                    digit_spinner::spawn_row(g, digit_spinner::slots(), |s| {
+                        ShopText(ShopTextRole::QuantityColumn(s))
                     });
                     for (slot, yes) in [true, false].into_iter().enumerate() {
                         g.spawn((
@@ -794,7 +778,9 @@ pub(crate) fn update_shop_panel_system(
             // stack is being sized. The priced step then labels what the figure
             // under it is, so it cannot be misread as the player's purse.
             ShopTextRole::GilLabel => match (screen.quantity.as_ref(), screen.focus) {
-                (Some(spin), _) => (format!("Quantity /{}", spin.cap), theme::TITLE),
+                // The picker under this label carries the cap, so the label does
+                // not repeat it.
+                (Some(_), _) => ("Quantity".to_string(), theme::TITLE),
                 (None, ShopFocus::Confirm) => (confirm_total_label(screen.mode), theme::MUTED),
                 (None, _) => ("Current Gil".to_string(), theme::MUTED),
             },
@@ -829,11 +815,11 @@ pub(crate) fn update_shop_panel_system(
                 ),
                 _ => (String::new(), theme::TEXT),
             },
-            ShopTextRole::QuantityColumn(column) => {
+            ShopTextRole::QuantityColumn(slot) => {
                 let (label, tint, bg) = screen
                     .quantity
                     .as_ref()
-                    .map(|spinner| crate::hud::digit_spinner::column_style(spinner, column))
+                    .map(|spinner| digit_spinner::slot_style(spinner, slot, SpinnerUnit::Count))
                     .unwrap_or((String::new(), theme::TEXT, Color::NONE));
                 if let Some(mut background) = background {
                     background.0 = bg;
@@ -1142,6 +1128,7 @@ mod tests {
             item_no,
             quantity,
             locked,
+            unselectable: false,
             charges_remaining: None,
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,

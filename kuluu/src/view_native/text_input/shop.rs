@@ -289,17 +289,7 @@ fn handle_quantity_key(
         screen.focus = ShopFocus::List;
         return;
     }
-    if bindings.matches_logical(Action::NavUp, key) {
-        spinner.up();
-    } else if bindings.matches_logical(Action::NavDown, key) {
-        spinner.down();
-    } else if bindings.matches_logical(Action::NavRight, key) {
-        spinner.right();
-    } else if bindings.matches_logical(Action::NavLeft, key) {
-        spinner.left();
-    } else if matches!(key, Key::Tab) {
-        spinner.set_all();
-    }
+    spinner_nav(spinner, key, bindings);
 }
 
 fn handle_confirm_key(

@@ -41,7 +41,6 @@ pub mod stair_debug;
 pub mod party_frame;
 pub mod self_fishing;
 pub mod shop;
-pub mod spinner;
 pub mod stage_bar;
 pub mod status_panel;
 pub mod status_ribbon;

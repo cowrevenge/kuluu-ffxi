@@ -14,10 +14,10 @@ use bevy::prelude::*;
 use kuluu_snapshot::{BazaarEntry, SceneSnapshot};
 
 use crate::hud::delivery::current_gil;
+use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_detail;
 use crate::hud::item_ui::{framed_box, text_font, theme, transparent_placeholder};
-use crate::hud::spinner::Spinner;
 use crate::snapshot::SceneState;
 
 /// Rows retail keeps drawn, filled or not.
@@ -33,7 +33,7 @@ pub const MAX_BUY_QUANTITY: u32 = 99;
 pub struct BazaarScreenState {
     pub cursor: usize,
     /// Active quantity picker for the focused row, once confirmed into.
-    pub quantity: Option<Spinner>,
+    pub quantity: Option<DigitSpinner>,
     /// Sized purchase awaiting the retail "Purchase N x for Y gil?" answer.
     pub pending: Option<PendingBuy>,
 }
@@ -71,9 +71,9 @@ impl BazaarScreenState {
 
     /// Open the quantity picker for `entry`, or `None` for a single item (retail
     /// buys a lone item outright rather than asking for a count).
-    pub fn begin_quantity(entry: &BazaarEntry) -> Option<Spinner> {
+    pub fn begin_quantity(entry: &BazaarEntry) -> Option<DigitSpinner> {
         let max = entry.quantity.min(MAX_BUY_QUANTITY);
-        (max > 1).then(|| Spinner::item(max))
+        (max > 1).then(|| DigitSpinner::item(max))
     }
 
     pub fn stage_purchase(&mut self, entry: &BazaarEntry, quantity: u32) -> PendingBuy {
@@ -109,6 +109,7 @@ enum BazaarRole {
     RowPrice(usize),
     GilLabel,
     GilValue,
+    Spinner(SpinnerSlot),
     DetailName,
     DetailBody,
 }
@@ -217,6 +218,9 @@ pub(crate) fn spawn_bazaar_view(mut commands: Commands, mut images: ResMut<Asset
                         text_font(13.0),
                         TextColor(theme::TEXT),
                     ));
+                    digit_spinner::spawn_row(g, digit_spinner::slots(), |s| {
+                        BazaarText(BazaarRole::Spinner(s))
+                    });
                 });
 
                 let (mut n, bg, bd) = framed_box();
@@ -278,7 +282,15 @@ pub(crate) fn update_bazaar_view(
             Without<BazaarDetailIcon>,
         ),
     >,
-    mut text_q: Query<(&BazaarText, &mut Text, &mut TextColor), Without<BazaarRowIcon>>,
+    mut text_q: Query<
+        (
+            &BazaarText,
+            &mut Text,
+            &mut TextColor,
+            Option<&mut BackgroundColor>,
+        ),
+        Without<BazaarRowIcon>,
+    >,
     mut icon_q: Query<(&BazaarRowIcon, &mut ImageNode), Without<BazaarDetailIcon>>,
     mut detail_icon_q: Query<&mut ImageNode, With<BazaarDetailIcon>>,
 ) {
@@ -306,7 +318,16 @@ pub(crate) fn update_bazaar_view(
             .and_then(|t| item_detail::lookup_static(t, item_no))
     };
 
-    for (tag, mut text, mut color) in text_q.iter_mut() {
+    for (tag, mut text, mut color, background) in text_q.iter_mut() {
+        if let (Some(mut background), BazaarRole::Spinner(slot)) = (background, tag.0) {
+            let bg = match screen.quantity.as_ref() {
+                Some(spin) => digit_spinner::slot_style(spin, slot, SpinnerUnit::Count).2,
+                None => Color::NONE,
+            };
+            if background.0 != bg {
+                background.0 = bg;
+            }
+        }
         let (want, want_color) = match tag.0 {
             BazaarRole::RowName(i) => match view.items.get(start + i) {
                 Some(entry) => (
@@ -324,9 +345,16 @@ pub(crate) fn update_bazaar_view(
             },
             // Retail swaps the Current Gil box for the quantity picker while a
             // purchase is being sized.
-            BazaarRole::GilLabel => match screen.quantity.as_ref() {
-                Some(spin) => (spin.label(), theme::TITLE),
-                None => ("Current Gil".to_string(), theme::MUTED),
+            BazaarRole::GilLabel => match screen.quantity.is_some() {
+                true => (String::new(), theme::MUTED),
+                false => ("Current Gil".to_string(), theme::MUTED),
+            },
+            BazaarRole::Spinner(slot) => match screen.quantity.as_ref() {
+                Some(spin) => {
+                    let (s, c, _) = digit_spinner::slot_style(spin, slot, SpinnerUnit::Count);
+                    (s, c)
+                }
+                None => (String::new(), theme::TEXT),
             },
             BazaarRole::GilValue => match screen.pending.as_ref() {
                 Some(buy) => (
@@ -457,7 +485,7 @@ mod tests {
     fn an_empty_list_leaves_the_cursor_alone_and_drops_the_pending_buy() {
         let mut s = BazaarScreenState {
             cursor: 0,
-            quantity: Some(Spinner::item(5)),
+            quantity: Some(DigitSpinner::item(5)),
             pending: Some(PendingBuy {
                 index: 1,
                 item_no: 4096,
@@ -476,20 +504,20 @@ mod tests {
     fn quantity_picker_only_opens_for_a_real_stack() {
         assert!(BazaarScreenState::begin_quantity(&entry(1, 4096, 1, 100, 0)).is_none());
         let spin = BazaarScreenState::begin_quantity(&entry(1, 4096, 12, 100, 0)).expect("stack");
-        assert_eq!(spin.max, 12);
+        assert_eq!(spin.cap, 12);
         assert_eq!(spin.confirm(), 1, "defaults to one like retail");
     }
 
     #[test]
     fn quantity_picker_respects_the_server_cap() {
         let spin = BazaarScreenState::begin_quantity(&entry(1, 4096, 250, 100, 0)).expect("stack");
-        assert_eq!(spin.max, MAX_BUY_QUANTITY);
+        assert_eq!(spin.cap, MAX_BUY_QUANTITY);
     }
 
     #[test]
     fn staging_a_purchase_prices_it_and_closes_the_picker() {
         let mut s = BazaarScreenState {
-            quantity: Some(Spinner::item(5)),
+            quantity: Some(DigitSpinner::item(5)),
             ..Default::default()
         };
         let buy = s.stage_purchase(&entry(3, 4096, 5, 1000, 500), 4);

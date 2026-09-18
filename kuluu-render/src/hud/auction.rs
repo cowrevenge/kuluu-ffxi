@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use kuluu_snapshot::{AhSaleView, SceneSnapshot};
 
 use crate::hud::bazaar_view::group_digits;
-use crate::hud::digit_spinner::{DigitSpinner, SpinnerColumn};
+use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_ui::{self, transparent_placeholder};
 use crate::hud::style::{cursor_prefix, text_font, theme, window_frame};
@@ -1042,10 +1042,7 @@ enum Role {
     DetailName,
     DetailRow(usize),
     GilLine,
-    SpinnerAll,
-    SpinnerDigit(usize),
-    SpinnerSuffix,
-    SpinnerCap,
+    Spinner(SpinnerSlot),
     ConfirmText,
     ConfirmChoice(YesNo),
 }
@@ -1106,8 +1103,8 @@ const DETAIL_ICON_PX: f32 = 32.0;
 const LIST_ICON_PX: f32 = 18.0;
 const LEFT_COL_W: f32 = 340.0;
 const DOCK_W: f32 = 200.0;
-/// Fixed digit cells: 9 digits + 2 group commas.
-const SPINNER_CELLS: usize = 11;
+/// The cap line under the price, small enough to sit beside the Current Gil box.
+const SPINNER_CAP_TEXT_PX: f32 = 12.0;
 
 pub fn spawn_auction_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let placeholder = transparent_placeholder(&mut images);
@@ -1230,26 +1227,15 @@ pub fn spawn_auction_screen(mut commands: Commands, mut images: ResMut<Assets<Im
                     let (n, bg, bd) = window_frame();
                     bar.spawn((AhFrame(FrameId::SpinnerBox), n, bg, bd))
                         .with_children(|p| {
-                            p.spawn(Node {
-                                flex_direction: FlexDirection::Row,
-                                align_items: AlignItems::Center,
-                                column_gap: Val::Px(2.0),
-                                ..default()
-                            })
-                            .with_children(|line| {
-                                spawn_text(line, Role::SpinnerAll, 14.0, theme::TEXT);
-                                for i in 0..SPINNER_CELLS {
-                                    line.spawn((
-                                        AhText(Role::SpinnerDigit(i)),
-                                        Text::new(""),
-                                        text_font(15.0),
-                                        TextColor(theme::TEXT),
-                                        BackgroundColor(Color::NONE),
-                                    ));
-                                }
-                                spawn_text(line, Role::SpinnerSuffix, 14.0, theme::TEXT);
+                            digit_spinner::spawn_row(p, digit_spinner::slots_without_cap(), |s| {
+                                AhText(Role::Spinner(s))
                             });
-                            spawn_text(p, Role::SpinnerCap, 12.0, theme::MUTED);
+                            spawn_text(
+                                p,
+                                Role::Spinner(SpinnerSlot::Cap),
+                                SPINNER_CAP_TEXT_PX,
+                                theme::MUTED,
+                            );
                         });
                 });
             });
@@ -1867,22 +1853,9 @@ fn text_value(
             ),
             None => plain(String::new(), theme::TEXT),
         },
-        Role::SpinnerAll => match model.price.as_ref() {
-            Some(p) => {
-                let active = p.spinner.column == SpinnerColumn::All;
-                let color = if active { theme::CURSOR } else { theme::TEXT };
-                plain("All \u{25c4} ".to_string(), color)
-            }
-            None => plain(String::new(), theme::TEXT),
-        },
-        Role::SpinnerDigit(cell) => match model.price.as_ref() {
-            Some(p) => spinner_cell_value(&p.spinner, cell),
+        Role::Spinner(slot) => match model.price.as_ref() {
+            Some(p) => digit_spinner::slot_style(&p.spinner, slot, SpinnerUnit::Gil),
             None => (String::new(), theme::TEXT, Color::NONE),
-        },
-        Role::SpinnerSuffix => plain(" G \u{25ba}".to_string(), theme::TEXT),
-        Role::SpinnerCap => match model.price.as_ref() {
-            Some(p) => plain(format!("/{} G", group_digits(p.spinner.cap)), theme::MUTED),
-            None => plain(String::new(), theme::TEXT),
         },
         Role::ConfirmText => plain(
             model
@@ -1909,34 +1882,6 @@ fn text_value(
             None => plain(String::new(), theme::TEXT),
         },
     }
-}
-
-/// One fixed spinner cell (9 digits + the two group commas), most significant
-/// first. Cells above the visible width blank out.
-fn spinner_cell_value(spinner: &DigitSpinner, cell: usize) -> (String, Color, Color) {
-    // Cell layout: d d d , d d d , d d d — comma cells sit at indices 3 and 7.
-    let width = spinner.visible_powers().count();
-    if cell == 3 || cell == 7 {
-        // A comma renders once any digit left of it is drawn (powers >= 6 for
-        // the first group, >= 3 for the second).
-        let show = width > if cell == 3 { 6 } else { 3 };
-        return (
-            if show { ",".to_string() } else { String::new() },
-            theme::TEXT,
-            Color::NONE,
-        );
-    }
-    // Digit index among the 9 digit cells, most significant first.
-    let digit_idx = match cell {
-        0..=2 => cell,
-        4..=6 => cell - 1,
-        _ => cell - 2,
-    };
-    let power = 8 - digit_idx as u32;
-    if power as usize >= width {
-        return (String::new(), theme::TEXT, Color::NONE);
-    }
-    crate::hud::digit_spinner::column_style(spinner, SpinnerColumn::Digit(power))
 }
 
 // ---------------------------------------------------------------------------
@@ -2326,6 +2271,7 @@ mod tests {
             item_no,
             quantity: 1,
             locked,
+            unselectable: false,
             charges_remaining: None,
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,

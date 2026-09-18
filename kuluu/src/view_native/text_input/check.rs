@@ -141,17 +141,7 @@ pub(super) fn handle_bazaar_key(
             screen.quantity = None;
             return None;
         }
-        if bindings.matches_logical(Action::NavUp, key) {
-            spinner.up();
-        } else if bindings.matches_logical(Action::NavDown, key) {
-            spinner.down();
-        } else if bindings.matches_logical(Action::NavRight, key) {
-            spinner.jump_up();
-        } else if bindings.matches_logical(Action::NavLeft, key) {
-            spinner.jump_down();
-        } else if matches!(key, Key::Tab) {
-            spinner.set_all();
-        }
+        spinner_nav(spinner, key, bindings);
         return None;
     }
 

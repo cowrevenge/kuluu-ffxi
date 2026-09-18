@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use kuluu_snapshot::SceneSnapshot;
 
+use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerUnit};
 use crate::hud::item_meta::{self, ItemDetail, ItemStatic};
 use crate::hud::style::{self, theme};
 use crate::snapshot::SceneState;
@@ -12,8 +13,6 @@ pub const ITEM_FLAG_EX: u16 = 0x4000;
 pub const TRADE_COLS: usize = 4;
 pub const TRADE_ROWS: usize = 2;
 pub const TRADE_SLOTS: usize = TRADE_COLS * TRADE_ROWS;
-
-pub const STACK_MAX: u16 = 99;
 
 pub const PLACED_TINT: Color = Color::srgb(0.85, 0.35, 0.10);
 
@@ -40,13 +39,6 @@ impl Default for TradeFocus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TradeSelector {
-    Gil { digits: String, max: u32 },
-
-    Stack { slot: usize, value: u16, max: u16 },
-}
-
 #[derive(Resource, Debug, Clone, Default)]
 pub struct TradeState {
     pub open: bool,
@@ -59,7 +51,8 @@ pub struct TradeState {
 
     pub focus: TradeFocus,
 
-    pub selector: Option<TradeSelector>,
+    /// The shared amount picker, open while a gil amount is being sized.
+    pub selector: Option<DigitSpinner>,
 }
 
 impl TradeState {
@@ -85,25 +78,6 @@ impl TradeState {
     pub fn first_free_slot(&self) -> Option<usize> {
         self.slots.iter().position(|s| s.is_none())
     }
-}
-
-pub fn parse_gil(digits: &str) -> u32 {
-    let mut v: u32 = 0;
-    for c in digits.chars() {
-        if let Some(d) = c.to_digit(10) {
-            v = v.saturating_mul(10).saturating_add(d);
-        }
-    }
-    v
-}
-
-pub fn effective_gil(digits: &str, max: u32) -> u32 {
-    parse_gil(digits).min(max)
-}
-
-pub fn clamp_stack(value: u16, max: u16) -> u16 {
-    let ceiling = max.clamp(1, STACK_MAX);
-    value.clamp(1, ceiling)
 }
 
 pub fn is_tradeable(item_no: u16, dat: Option<&ItemStatic>, snapshot: &SceneSnapshot) -> bool {
@@ -186,60 +160,13 @@ pub fn focus_right(state: &mut TradeState) {
 }
 
 pub fn begin_gil_entry(state: &mut TradeState, snapshot_gil: u32) {
-    state.selector = Some(TradeSelector::Gil {
-        digits: String::new(),
-        max: snapshot_gil,
-    });
-}
-
-pub fn gil_push_digit(state: &mut TradeState, c: char) {
-    if let Some(TradeSelector::Gil { digits, .. }) = state.selector.as_mut() {
-        if c.is_ascii_digit() {
-            digits.push(c);
-        }
-    }
-}
-
-pub fn gil_fill_max(state: &mut TradeState) {
-    if let Some(TradeSelector::Gil { digits, max }) = state.selector.as_mut() {
-        *digits = max.to_string();
-    }
+    state.selector = Some(DigitSpinner::new(snapshot_gil));
 }
 
 pub fn gil_confirm(state: &mut TradeState) -> Option<u32> {
-    if let Some(TradeSelector::Gil { digits, max }) = state.selector.take() {
-        let amount = effective_gil(&digits, max);
-        state.gil = amount;
-        Some(amount)
-    } else {
-        None
-    }
-}
-
-pub fn begin_stack_entry(state: &mut TradeState, slot: usize, stack_max: u16) {
-    let max = stack_max.clamp(1, STACK_MAX);
-    state.selector = Some(TradeSelector::Stack {
-        slot,
-        value: max,
-        max,
-    });
-}
-
-pub fn stack_adjust(state: &mut TradeState, delta: i32) {
-    if let Some(TradeSelector::Stack { value, max, .. }) = state.selector.as_mut() {
-        let next = (*value as i32 + delta).max(1) as u16;
-        *value = clamp_stack(next, *max);
-    }
-}
-
-pub fn stack_confirm(state: &mut TradeState) -> Option<(usize, u16)> {
-    if let Some(TradeSelector::Stack { slot, value, .. }) = state.selector.take() {
-        if let Some(item) = state.slots[slot].as_mut() {
-            item.count = value;
-            return Some((slot, value));
-        }
-    }
-    None
+    let amount = state.selector.take()?.confirm();
+    state.gil = amount;
+    Some(amount)
 }
 
 pub fn place_item(
@@ -468,12 +395,9 @@ fn cell_text(trade: &TradeState, focus: TradeFocus) -> String {
 
 fn status_text(trade: &TradeState, _snapshot: &SceneSnapshot) -> String {
     match &trade.selector {
-        Some(TradeSelector::Gil { digits, max }) => {
-            format!("Gil ▸ {} / {}", effective_gil(digits, *max), max)
-        }
-        Some(TradeSelector::Stack { value, max, .. }) => {
-            format!("Count ▸ {value} / {max}")
-        }
+        Some(spinner) => digit_spinner::slots()
+            .map(|slot| digit_spinner::slot_style(spinner, slot, SpinnerUnit::Gil).0)
+            .collect(),
         None => match trade.focus {
             TradeFocus::Slot(i) => match trade.slots[i] {
                 Some(item) => format!("#{}", item.item_no),
@@ -501,63 +425,40 @@ mod tests {
         }
     }
 
+    /// Gil rides the same picker as every other amount: walk left to the All
+    /// column, step up, and the whole purse is selected.
     #[test]
-    fn parse_gil_ignores_non_digits_and_saturates() {
-        assert_eq!(parse_gil(""), 0);
-        assert_eq!(parse_gil("0123"), 123);
-        assert_eq!(parse_gil("99999999999999999999"), u32::MAX);
-    }
-
-    #[test]
-    fn effective_gil_clamps_to_max() {
-        assert_eq!(effective_gil("5000", 1000), 1000);
-        assert_eq!(effective_gil("500", 1000), 500);
-    }
-
-    #[test]
-    fn gil_reentry_resets_then_tab_fills_max() {
+    fn the_all_column_commits_the_whole_purse() {
         let mut s = TradeState::open(42);
         s.gil = 777;
         begin_gil_entry(&mut s, 5000);
 
-        gil_fill_max(&mut s);
-        let committed = gil_confirm(&mut s).unwrap();
-        assert_eq!(committed, 5000);
+        let spinner = s.selector.as_mut().expect("picker open");
+        for _ in 0..=digit_spinner::PRICE_DIGITS {
+            spinner.left();
+        }
+        spinner.up();
+
+        assert_eq!(gil_confirm(&mut s), Some(5000));
         assert_eq!(s.gil, 5000);
         assert!(s.selector.is_none());
     }
 
+    /// Stepping a digit past the purse clamps to it rather than overcommitting.
     #[test]
-    fn gil_digit_fill_then_confirm_clamps() {
+    fn stepping_a_digit_clamps_to_the_purse() {
         let mut s = TradeState::open(1);
         begin_gil_entry(&mut s, 1500);
-        for c in "9000".chars() {
-            gil_push_digit(&mut s, c);
+
+        let spinner = s.selector.as_mut().expect("picker open");
+        for _ in 0..3 {
+            spinner.left();
         }
+        for _ in 0..9 {
+            spinner.up();
+        }
+
         assert_eq!(gil_confirm(&mut s), Some(1500));
-    }
-
-    #[test]
-    fn stack_selector_clamps_to_99() {
-        assert_eq!(clamp_stack(0, 99), 1);
-        assert_eq!(clamp_stack(50, 99), 50);
-        assert_eq!(clamp_stack(120, 99), 99);
-        assert_eq!(clamp_stack(120, 12), 12);
-    }
-
-    #[test]
-    fn stack_entry_defaults_to_full_stack_and_adjusts() {
-        let mut s = TradeState::open(1);
-
-        s.slots[2] = Some(TradeSlotItem {
-            item_no: 4096,
-            count: 1,
-        });
-        begin_stack_entry(&mut s, 2, 12);
-        stack_adjust(&mut s, -3);
-        let (slot, count) = stack_confirm(&mut s).unwrap();
-        assert_eq!((slot, count), (2, 9));
-        assert_eq!(s.slots[2].unwrap().count, 9);
     }
 
     #[test]

@@ -2,16 +2,16 @@
 //!
 //! Replaces the old dialog+grid delivery UI. One modal window, gated on
 //! `SceneSnapshot::delivery_box`, with a 4x2 slot grid, a recipient field, the
-//! rich inventory list (reused item detail + icons), a numeric quantity/gil
-//! spinner ([`super::spinner`]), and a Current Gil line. Rendering reads the
-//! snapshot + [`DeliveryScreenState`]; the native input layer drives focus and
-//! emits the delivery `AgentCommand`s.
+//! rich inventory list (reused item detail + icons), the shared numeric picker
+//! ([`super::digit_spinner`]) for quantity and gil, and a Current Gil line.
+//! Rendering reads the snapshot + [`DeliveryScreenState`]; the native input
+//! layer drives focus and emits the delivery `AgentCommand`s.
 
 use bevy::prelude::*;
 use kuluu_snapshot::{DeliveryBoxNo, DeliveryBoxState, RecipientStatus, SceneSnapshot};
 
+use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::list_view::{self, ListViewport, LIST_ROWS, ROW_ICON_PX};
-use crate::hud::spinner::{Spinner, SpinnerBinding, SpinnerTarget};
 
 /// Retail lays the 8 outgoing/incoming slots out 4 across, 2 down.
 pub const GRID_COLS: usize = 4;
@@ -283,6 +283,15 @@ fn page_list(
     DeliveryFocus::InvRow(row)
 }
 
+/// The active digit's tint, which rides a cell's background rather than its
+/// text (.agents/skills/retail-observe/references/auction-house.md "Price Set").
+fn spinner_slot_bg(screen: &DeliveryScreenState, role: Role) -> Color {
+    let (Role::Spinner(slot), Some(b)) = (role, screen.selector.as_ref()) else {
+        return Color::NONE;
+    };
+    digit_spinner::slot_style(&b.spinner, slot, b.target.unit()).2
+}
+
 fn clamp_slot(slot: usize) -> usize {
     slot.min(GRID_SLOTS - 1)
 }
@@ -295,6 +304,45 @@ fn clamp_row(row: usize, len: usize) -> usize {
     }
 }
 
+/// What a confirmed amount applies to. Both route to a delivery `Set`: gil is
+/// inventory slot 0 (LSB stores gil as item 65535 at LOC_INVENTORY[0]), items
+/// use their inventory index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpinnerTarget {
+    ItemQty { inv_slot: u8, out_slot: u8 },
+    Gil { out_slot: u8 },
+}
+
+impl SpinnerTarget {
+    /// LOC_INVENTORY index for the `Set` (gil = slot 0).
+    pub fn inventory_slot(&self) -> u8 {
+        match self {
+            SpinnerTarget::ItemQty { inv_slot, .. } => *inv_slot,
+            SpinnerTarget::Gil { .. } => 0,
+        }
+    }
+
+    pub fn out_slot(&self) -> u8 {
+        match self {
+            SpinnerTarget::ItemQty { out_slot, .. } | SpinnerTarget::Gil { out_slot } => *out_slot,
+        }
+    }
+
+    pub fn unit(&self) -> SpinnerUnit {
+        match self {
+            SpinnerTarget::ItemQty { .. } => SpinnerUnit::Count,
+            SpinnerTarget::Gil { .. } => SpinnerUnit::Gil,
+        }
+    }
+}
+
+/// An open picker plus what it will stage on confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpinnerBinding {
+    pub spinner: DigitSpinner,
+    pub target: SpinnerTarget,
+}
+
 /// Begin staging the inventory item at `row` into `target`, the outbox slot the
 /// cursor entered the list from. `None` if the row is not deliverable.
 pub fn begin_item_stage(row: &InvRow, target: Option<usize>) -> Option<SpinnerBinding> {
@@ -302,24 +350,20 @@ pub fn begin_item_stage(row: &InvRow, target: Option<usize>) -> Option<SpinnerBi
         return None;
     }
     let out_slot = target? as u8;
-    let target = SpinnerTarget::ItemQty {
-        inv_slot: row.inv_slot,
-        item_no: row.item_no,
-        out_slot,
-    };
-    let mut spinner = Spinner::item(row.quantity.max(1));
-    if row.quantity <= 1 {
-        // Singleton: pre-confirm quantity 1 (no spinner needed).
-        spinner.set_all();
-    }
-    Some(SpinnerBinding { spinner, target })
+    Some(SpinnerBinding {
+        spinner: DigitSpinner::item(row.quantity.max(1)),
+        target: SpinnerTarget::ItemQty {
+            inv_slot: row.inv_slot,
+            out_slot,
+        },
+    })
 }
 
 /// Begin entering a gil amount to send into the first free outbox slot.
 pub fn begin_gil_stage(current_gil: u32, first_free: Option<usize>) -> Option<SpinnerBinding> {
     let out_slot = first_free? as u8;
     Some(SpinnerBinding {
-        spinner: Spinner::gil(current_gil),
+        spinner: DigitSpinner::new(current_gil),
         target: SpinnerTarget::Gil { out_slot },
     })
 }
@@ -412,7 +456,7 @@ enum Role {
     CellQty(usize),
     GilLine,
     SenderLine,
-    SpinnerLine,
+    Spinner(SpinnerSlot),
     DetailName,
     DetailRow(usize),
     InvHeader,
@@ -536,7 +580,9 @@ pub(crate) fn spawn_delivery_screen(mut commands: Commands, mut images: ResMut<A
                 n.display = Display::None;
                 col.spawn((DeliveryFrame(FrameId::SpinnerBox), n, bg, bd))
                     .with_children(|p| {
-                        spawn_text(p, Role::SpinnerLine, 15.0, theme::CURSOR);
+                        digit_spinner::spawn_row(p, digit_spinner::slots(), |s| {
+                            DeliveryText(Role::Spinner(s))
+                        });
                     });
 
                 // Button row.
@@ -767,7 +813,13 @@ pub(crate) fn update_delivery_screen(
         ),
     >,
     mut text_q: Query<
-        (&DeliveryText, &mut Text, &mut TextColor, &mut Node),
+        (
+            &DeliveryText,
+            &mut Text,
+            &mut TextColor,
+            &mut Node,
+            Option<&mut BackgroundColor>,
+        ),
         (
             Without<DeliveryScreenRoot>,
             Without<DeliveryIcon>,
@@ -841,7 +893,13 @@ pub(crate) fn update_delivery_screen(
     let inv_start = screen.viewport.start.min(ListViewport::max_start(total));
 
     // Text nodes.
-    for (tag, mut text, mut color, mut node) in text_q.iter_mut() {
+    for (tag, mut text, mut color, mut node, background) in text_q.iter_mut() {
+        if let Some(mut background) = background {
+            let want = spinner_slot_bg(&screen, tag.0);
+            if background.0 != want {
+                background.0 = want;
+            }
+        }
         let (s, c, visible) = text_value(
             tag.0,
             d,
@@ -1026,9 +1084,12 @@ fn text_value(
                 None => (String::new(), theme::TEXT, false),
             }
         }
-        Role::SpinnerLine => match &screen.selector {
-            Some(b) => (b.spinner.label(), theme::CURSOR, true),
-            None => (String::new(), theme::CURSOR, false),
+        Role::Spinner(slot) => match &screen.selector {
+            Some(b) => {
+                let (s, c, _) = digit_spinner::slot_style(&b.spinner, slot, b.target.unit());
+                (s, c, true)
+            }
+            None => (String::new(), theme::TEXT, false),
         },
         Role::DetailName => (detail_name.to_string(), theme::TITLE, true),
         Role::DetailRow(i) => match detail_rows.get(i) {
@@ -1437,7 +1498,7 @@ mod tests {
         };
         let b = begin_item_stage(&stack, Some(0)).expect("binding");
         assert_eq!(b.spinner.value, 1, "stackable starts at 1");
-        assert_eq!(b.spinner.max, 12);
+        assert_eq!(b.spinner.cap, 12);
 
         let single = InvRow {
             inv_slot: 4,
@@ -1471,7 +1532,7 @@ mod tests {
     #[test]
     fn gil_stage_binds_slot_zero() {
         let b = begin_gil_stage(17_488, Some(1)).expect("binding");
-        assert_eq!(b.spinner.max, 17_488);
+        assert_eq!(b.spinner.cap, 17_488);
         assert_eq!(b.target.inventory_slot(), 0);
         assert_eq!(b.target.out_slot(), 1);
     }

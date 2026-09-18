@@ -319,21 +319,21 @@ pub fn drain_auto_sorted_inventory(mut asked: ResMut<AutoSortedInventory>) {
     *asked = AutoSortedInventory::default();
 }
 
-/// Whether sorting `items` would free a slot: an item stacks into fewer slots
-/// than it currently occupies. A locked slot is left out — the server refuses
-/// to move one (vendor/server/src/map/packets/c2s/0x029_item_move.cpp
-/// isValidMovement), so it can never be the reason to ask.
+/// Whether the server's sort pass would move anything: it tops off every pair of
+/// same-item slots that are both under their stack size
+/// (vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp
+/// GP_CLI_COMMAND_ITEM_STACK::process). Freeing a slot is not the test — 11 + 3
+/// of a 12-stack merges to 12 + 2 and still occupies two slots. A slot carrying
+/// any lock byte is left out: the server skips an item some transaction owns
+/// (vendor/server/src/map/items/item.cpp CItem::isBusy), and treating every lock
+/// as that one only costs an ask we did not need to make.
 fn consolidates(items: &[kuluu_snapshot::InventoryItem]) -> bool {
-    let mut held: std::collections::HashMap<u16, (usize, u64)> = std::collections::HashMap::new();
-    for slot in items.iter().filter(|s| !s.locked) {
-        let entry = held.entry(slot.item_no).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += u64::from(slot.quantity);
-    }
-    held.iter().any(|(&item_no, &(slots, total))| {
-        let stack = u64::from(ffxi_vocab::item_flags::stack_size(item_no)).max(1);
-        slots as u64 > total.div_ceil(stack)
-    })
+    let mut partial: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|s| !s.locked && !s.unselectable)
+        .filter(|s| s.quantity < u32::from(ffxi_vocab::item_flags::stack_size(s.item_no)))
+        .any(|s| !partial.insert(s.item_no))
 }
 
 /// Auto-sort's standing half: retail's Options box calls it "Auto-sort /
@@ -443,6 +443,23 @@ mod tests {
             !consolidates(&[slot(0, id, part)]),
             "one stack is already consolidated"
         );
+    }
+
+    #[test]
+    fn partial_stacks_are_topped_off_even_when_no_slot_is_freed() {
+        let (id, stack) = stacking();
+        assert!(
+            consolidates(&[slot(0, id, stack - 1), slot(1, id, 1)]),
+            "a near-full stack beside a remainder still merges, into a full stack and a smaller remainder"
+        );
+    }
+
+    #[test]
+    fn a_slot_an_action_owns_is_never_the_reason_to_ask() {
+        let (id, stack) = stacking();
+        let mut busy = slot(0, id, stack / 2);
+        busy.unselectable = true;
+        assert!(!consolidates(&[busy, slot(1, id, stack / 2)]));
     }
 
     #[test]

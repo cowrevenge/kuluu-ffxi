@@ -269,6 +269,14 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
     })
 }
 
+#[cfg(not(any(unix, windows)))]
+fn symlink_dir(_src: &Path, _dst: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this target has no directory symlinks; link with copy instead",
+    ))
+}
+
 fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for e in fs::read_dir(src)?.flatten() {

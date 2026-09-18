@@ -11,7 +11,6 @@ use ffxi_dat::weather::{
     sample_weather, weather_type_id_or_default, WeatherRecord, WeatherSetsByType, WeatherTypeId,
     ZoneWeatherSets, WEATHER_TYPE_FALLBACK,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use kuluu_snapshot::Weather;
 
 use crate::camera::OperatorCamera;

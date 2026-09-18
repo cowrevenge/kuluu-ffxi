@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use kuluu_snapshot::DialogState;
 
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
-use crate::hud::item_grid::{spawn_item_cell, CELL_GAP_PX, CELL_PX};
+use crate::hud::item_grid::{spawn_item_cell, CellOverlay, CELL_GAP_PX, CELL_PX};
 use crate::hud::item_ui::transparent_placeholder;
 use crate::hud::style::{self, theme};
 use crate::hud_hide::HudHideExempt;
@@ -134,7 +134,7 @@ pub fn spawn_dialog_panel(mut commands: Commands, mut images: ResMut<Assets<Imag
                         DialogGridCellFrame { index },
                         DialogGridIcon { index },
                         DialogGridLabel { index },
-                        "",
+                        CellOverlay::StackCount,
                         placeholder.clone(),
                     );
                 }
@@ -254,7 +254,7 @@ pub fn update_dialog_grid_system(
         (&DialogGridIcon, &mut Node, &mut ImageNode),
         (Without<DialogGridBox>, Without<DialogGridCellFrame>),
     >,
-    mut label_q: Query<(&DialogGridLabel, &mut Text)>,
+    mut label_q: Query<(&DialogGridLabel, &mut Text, &mut Node), Without<DialogGridIcon>>,
 ) {
     if !state.is_changed() && !mode.is_changed() {
         return;
@@ -337,14 +337,24 @@ pub fn update_dialog_grid_system(
         }
     }
 
-    for (label, mut text) in &mut label_q {
+    // The count rides a chip, so nothing to count hides the node rather than
+    // leaving an empty plate on the art.
+    for (label, mut text, mut node) in &mut label_q {
         let cell = grid.cells.get(label.index);
         let want = match cell {
             Some(c) if c.item_no.is_some() && c.quantity > 1 => c.quantity.to_string(),
             _ => String::new(),
         };
+        let display = if want.is_empty() {
+            Display::None
+        } else {
+            Display::Flex
+        };
         if **text != want {
             **text = want;
+        }
+        if node.display != display {
+            node.display = display;
         }
     }
 }

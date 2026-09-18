@@ -195,9 +195,7 @@ pub(super) fn handle_delivery_key(
     // "How the menu opens", "Send flow" step 7).
     if bindings.matches_logical(Action::NavCancel, key) {
         match screen.focus {
-            DeliveryFocus::TakeBtn | DeliveryFocus::RejectBtn => {
-                screen.focus = DeliveryFocus::Slot(screen.last_in_slot);
-            }
+            DeliveryFocus::TakeBtn | DeliveryFocus::RejectBtn => screen.leave_parcel_actions(),
             DeliveryFocus::InvRow(_) => screen.leave_item_list(),
             _ if screen.confirm_send => screen.confirm_send = false,
             _ => close(),
@@ -311,11 +309,13 @@ pub(super) fn handle_delivery_key(
             let _ = cmd_tx.try_send(AgentCommand::DeliveryTake {
                 slot: screen.last_in_slot as u8,
             });
+            screen.leave_parcel_actions();
         }
         DeliveryFocus::RejectBtn => {
             send(kuluu_session::state::DeliveryBoxOp::Reject {
                 slot: screen.last_in_slot as u8,
             });
+            screen.leave_parcel_actions();
         }
     }
 }

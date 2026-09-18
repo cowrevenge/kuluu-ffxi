@@ -107,6 +107,13 @@ impl DeliveryScreenState {
         self.focus = DeliveryFocus::Slot(clamp_slot(self.pick_slot.take().unwrap_or(0)));
     }
 
+    /// Back to the grid cell the Take/Return buttons were acting on. Both
+    /// actions consume the parcel, so staying on the button would leave the
+    /// cursor on a control aimed at an empty slot.
+    pub fn leave_parcel_actions(&mut self) {
+        self.focus = DeliveryFocus::Slot(clamp_slot(self.last_in_slot));
+    }
+
     pub fn close(&mut self) {
         *self = DeliveryScreenState::default();
     }
@@ -560,7 +567,7 @@ pub(crate) fn spawn_delivery_screen(mut commands: Commands, mut images: ResMut<A
                                         DeliveryFrame(FrameId::Cell(slot)),
                                         DeliveryIcon(IconId::Cell(slot)),
                                         DeliveryText(Role::CellQty(slot)),
-                                        "",
+                                        crate::hud::item_grid::CellOverlay::StackCount,
                                         placeholder.clone(),
                                     );
                                 }
@@ -1055,7 +1062,7 @@ fn text_value(
                 .map(|it| it.quantity);
             match qty {
                 Some(q) => (q.to_string(), theme::TEXT, true),
-                None => (String::new(), theme::MUTED, true),
+                None => (String::new(), theme::MUTED, false),
             }
         }
         // Retail shows Current Gil on both panels, comma-grouped with a " G"

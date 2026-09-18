@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_detail::{self, ItemMenuFocus, SortOptionId, SortOptions, SORT_OPTIONS};
+use crate::hud::item_grid;
 use crate::hud::item_ui::{self, cursor_prefix, framed_box, text_font, theme};
 use crate::hud::list_view;
 use crate::hud::menu::{self, DynamicMenuRow, MenuRowActivated};
@@ -21,8 +22,6 @@ const LIST_WIDTH_PX: f32 = 240.0;
 const DETAIL_WIDTH_PX: f32 = 300.0;
 
 const OPTIONS_WIDTH_PX: f32 = 132.0;
-
-const BADGE_FONT_PX: f32 = 9.0;
 
 pub const OPTIONS_TITLE: &str = "Options";
 
@@ -492,18 +491,21 @@ fn spawn_list_box(col: &mut ChildSpawnerCommands, placeholder: Handle<Image>) {
                     .with_children(|icon| {
                         // Retail overlays the stack count on the icon's
                         // top-left corner rather than suffixing the name.
+                        let (badge, badge_bg, badge_edge) = item_grid::stack_badge_chip(Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(0.0),
+                            top: Val::Px(-2.0),
+                            display: Display::None,
+                            ..default()
+                        });
                         icon.spawn((
                             ItemText(ItemRole::ListBadge(i)),
                             Text::new(""),
-                            text_font(BADGE_FONT_PX),
+                            text_font(item_grid::BADGE_FONT_PX),
                             TextColor(theme::TEXT),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(0.0),
-                                top: Val::Px(-2.0),
-                                display: Display::None,
-                                ..default()
-                            },
+                            badge,
+                            badge_bg,
+                            badge_edge,
                         ));
                     });
                     row.spawn(list_view::row_label_clip()).with_children(|col| {

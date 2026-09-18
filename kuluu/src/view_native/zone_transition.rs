@@ -26,6 +26,17 @@ const LOADING_TEXT: &str = "Downloading data";
 /// The origin is the "unplaced" sentinel a first-login CHAR_PC carries before
 /// the cutscene quest sets the real spawn; any real zone position is far from
 /// it, so a per-axis epsilon cleanly separates the two.
+/// Whether the overlay must keep waiting for a spawn position. The origin is the
+/// "unplaced" position a first-login character sits at until the cutscene quest
+/// sets its real spawn, and lifting on it drops the player through unloaded
+/// ground — so wait, but only while an event that could still set it is running.
+/// With nothing running, nothing is going to move us: a server that simply
+/// stored the origin is no reason to sit on a loading screen. `timed_out` is the
+/// backstop for an event that runs but never places us.
+fn hold_for_spawn(pos_real: bool, correctable: bool, timed_out: bool) -> bool {
+    !pos_real && correctable && !timed_out
+}
+
 fn position_is_real(pos: &WireVec3) -> bool {
     const EPS: f32 = 1e-2;
     pos.x.abs() > EPS || pos.y.abs() > EPS || pos.z.abs() > EPS
@@ -185,6 +196,7 @@ fn drive_zone_overlay_fade(
     scene: Res<SceneState>,
     mzb_in_flight: Res<LoadMzbInFlight>,
     last_auto: Res<LastAutoLoadedZone>,
+    cutscene: Res<kuluu_render::cutscene::CutsceneMode>,
     mut fade: ResMut<ZoneOverlayFade>,
     mut stash: ResMut<HudVisibilityStash>,
     mut fired: ResMut<PositionTimeoutFired>,
@@ -212,15 +224,12 @@ fn drive_zone_overlay_fade(
     let want_file_id = kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot);
     let pos_real = position_is_real(&scene.snapshot.self_pos.pos);
 
+    let correctable = cutscene.active || scene.snapshot.dialog.is_some();
+    let hold = hold_for_spawn(pos_real, correctable, fired.0);
+
     let dt = time.delta_secs();
-    // While the self position is still the unplaced origin, hold the overlay past
-    // the MZB safety cap: a first-login character sits there until the cutscene
-    // quest sets the real spawn, and lifting early drops the player through
-    // unloaded ground. A server that never corrects it is not a reason to end a
-    // working session, so the hold expires and the world comes up where the
-    // server put us.
     if let ZoneOverlayFade::Holding { elapsed } = *fade {
-        if !pos_real && !fired.0 {
+        if hold {
             let next = elapsed + dt;
             if next < POSITION_WAIT_TIMEOUT_SECS {
                 *fade = ZoneOverlayFade::Holding { elapsed: next };
@@ -228,7 +237,7 @@ fn drive_zone_overlay_fade(
             }
             fired.0 = true;
             tracing::warn!(
-                "zone-in: self position is still the origin after \
+                "zone-in: the running event did not set a spawn position within \
                  {POSITION_WAIT_TIMEOUT_SECS:.0}s — lifting the overlay where the server placed us"
             );
         }
@@ -241,7 +250,7 @@ fn drive_zone_overlay_fade(
         // a zone transition, and gating on it re-raises the loading overlay
         // every time the player walks into a shop.
         && !mzb_in_flight.pending_in_slot(ZONE_SLOT_MAIN)
-        && (pos_real || fired.0);
+        && !hold_for_spawn(pos_real, correctable, fired.0);
 
     let prev = *fade;
     *fade = tick(*fade, dt, ready);
@@ -298,6 +307,21 @@ fn apply_zone_overlay_alpha(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_origin_position_only_holds_the_overlay_while_an_event_can_place_us() {
+        // A first-login character at the origin with the quest cutscene running:
+        // wait, or the player lands under the world before it places them.
+        assert!(hold_for_spawn(false, true, false));
+        // The same origin with no event running: nothing is going to move us, so
+        // the world comes up where the server put us instead of on a timer.
+        assert!(!hold_for_spawn(false, false, false));
+        // An event that ran but never placed us stops holding at the backstop.
+        assert!(!hold_for_spawn(false, true, true));
+        // A real position never waits, event or not.
+        assert!(!hold_for_spawn(true, true, false));
+        assert!(!hold_for_spawn(true, false, false));
+    }
 
     #[test]
     fn position_is_real_separates_origin_from_spawn() {

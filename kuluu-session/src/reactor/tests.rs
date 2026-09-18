@@ -1624,7 +1624,7 @@ fn zmr0_rect() -> ffxi_dat::zone_interaction::ZoneInteraction {
 }
 
 #[test]
-fn dat_obb_wide_axis_in_short_axis_out() {
+fn dat_rect_wide_axis_in_short_axis_out() {
     let rect = zmr0_rect();
     // Box center (state axes: x, ground z, vertical y).
     let center = Vec3 {
@@ -1632,7 +1632,7 @@ fn dat_obb_wide_axis_in_short_axis_out() {
         y: 164.792,
         z: -5.547,
     };
-    assert!(is_inside_dat_obb(center, &rect));
+    assert!(rect.contains(to_native(center)));
 
     // 4y along the door's wide (12y) axis — bearing 135° in ground space.
     let wide = Vec3 {
@@ -1640,7 +1640,7 @@ fn dat_obb_wide_axis_in_short_axis_out() {
         y: center.y + 2.83,
         ..center
     };
-    assert!(is_inside_dat_obb(wide, &rect), "wide axis half-extent is 6");
+    assert!(rect.contains(to_native(wide)), "wide axis half-extent is 6");
 
     // 3y along the walk-through (2y-deep) axis — bearing 225°.
     let deep = Vec3 {
@@ -1649,7 +1649,7 @@ fn dat_obb_wide_axis_in_short_axis_out() {
         ..center
     };
     assert!(
-        !is_inside_dat_obb(deep, &rect),
+        !rect.contains(to_native(deep)),
         "walk axis half-extent is 1"
     );
 
@@ -1660,13 +1660,40 @@ fn dat_obb_wide_axis_in_short_axis_out() {
         y: 160.0,
         z: -2.0,
     };
-    assert!(!is_inside_dat_obb(exit_spawn, &rect));
+    assert!(!rect.contains(to_native(exit_spawn)));
 
     // Vertical extent is centered: ±4y around the box center (-5.547).
     let above = Vec3 { z: -2.0, ..center };
-    assert!(is_inside_dat_obb(above, &rect));
+    assert!(rect.contains(to_native(above)));
     let far_above = Vec3 { z: 3.0, ..center };
-    assert!(!is_inside_dat_obb(far_above, &rect));
+    assert!(!rect.contains(to_native(far_above)));
+}
+
+#[test]
+fn dat_rect_sweep_catches_a_tick_that_steps_over_the_door() {
+    let rect = zmr0_rect();
+    // The 200ms reactor tick is 40x retail's frame period, so a run-speed step
+    // can clear a 2-unit-deep trigger entirely. Retail sweeps the segment
+    // instead of sampling the endpoint, which is why this has to hit.
+    let center = Vec3 {
+        x: 164.933,
+        y: 164.792,
+        z: -5.547,
+    };
+    let (dx, dy) = (1.77, 1.77);
+    let before = Vec3 {
+        x: center.x + dx,
+        y: center.y + dy,
+        ..center
+    };
+    let after = Vec3 {
+        x: center.x - dx,
+        y: center.y - dy,
+        ..center
+    };
+    assert!(!rect.contains(to_native(before)));
+    assert!(!rect.contains(to_native(after)));
+    assert!(rect.crossed_by(to_native(before), to_native(after)));
 }
 
 #[test]

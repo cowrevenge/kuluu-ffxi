@@ -38,6 +38,41 @@ const ELEVATOR_Y_SCALE: f32 = 256.0;
 /// `[-0.5, 0.5]` — see [`ZoneInteraction::contains`].
 const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
 
+/// Corners of the unit cube a rect's local space maps onto, in the order
+/// [`UNIT_BOX_FACES`] indexes them
+/// (research/XIClient/src/XIClient/source/Common/Math/KO_RectData.cpp KO_RectData::HitCheck).
+const UNIT_BOX_VERTICES: [[f32; 3]; 8] = [
+    [-0.5, -0.5, -0.5],
+    [0.5, -0.5, -0.5],
+    [0.5, -0.5, 0.5],
+    [-0.5, -0.5, 0.5],
+    [-0.5, 0.5, -0.5],
+    [0.5, 0.5, -0.5],
+    [0.5, 0.5, 0.5],
+    [-0.5, 0.5, 0.5],
+];
+
+/// The six faces a segment is tested against, as
+/// `([UNIT_BOX_VERTICES] indices, outward normal)`
+/// (KO_RectData.cpp KO_RectData::DataTbl).
+const UNIT_BOX_FACES: [([usize; 4], [f32; 3]); 6] = [
+    ([0, 1, 2, 3], [0.0, -1.0, 0.0]),
+    ([2, 1, 5, 6], [1.0, 0.0, 0.0]),
+    ([3, 2, 6, 7], [0.0, 0.0, 1.0]),
+    ([0, 3, 7, 4], [-1.0, 0.0, 0.0]),
+    ([1, 0, 4, 5], [0.0, 0.0, -1.0]),
+    ([5, 4, 7, 6], [0.0, 1.0, 0.0]),
+];
+
+/// Retail admits a face crossing on `[0, 1)` of the segment, so a segment that
+/// only *ends* on the far plane is not a crossing — the endpoint containment
+/// test is what catches that (KO_RectData.cpp KO_RectData::HitCheck).
+const SEGMENT_FACTOR_MAX: f32 = 1.0;
+
+/// Slack retail allows on each inside-edge winding test, so a segment grazing a
+/// face's boundary still counts (KO_RectData.cpp KO_RectData::HitCheck).
+const WINDING_TOLERANCE: f32 = -0.0001;
+
 /// Mog House residence zone-line tag prefixes, the emitter side of the contract LSB
 /// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix
 /// ("zmr* classic cities; zms* WoTG [S] + Adoulin").
@@ -142,6 +177,13 @@ impl ZoneInteraction {
     /// [`ZoneInteraction::orientation`] shapes the box, and [`ZoneInteraction::size`]
     /// is its full extent.
     pub fn contains(&self, p: [f32; 3]) -> bool {
+        in_unit_box(self.unit_box_coords(p))
+    }
+
+    /// `p` in the rect's unit-cube space: retail's
+    /// `T(-position) · RotateY(-orientation.y) · S(1/size)`
+    /// (RidManager.cpp RidManager::Add).
+    fn unit_box_coords(&self, p: [f32; 3]) -> [f32; 3] {
         let (dx, dy, dz) = (
             p[0] - self.position[0],
             p[1] - self.position[1],
@@ -149,7 +191,28 @@ impl ZoneInteraction {
         );
         let (sin, cos) = self.orientation[1].sin_cos();
         let local = [dx * cos - dz * sin, dy, dx * sin + dz * cos];
-        (0..3).all(|i| (local[i] / self.size[i]).abs() <= UNIT_BOX_HALF_EXTENT)
+        [
+            local[0] / self.size[0],
+            local[1] / self.size[1],
+            local[2] / self.size[2],
+        ]
+    }
+
+    /// Whether moving `from` → `to` trips the rect. Retail sweeps the segment
+    /// rather than sampling a point, which is what makes a 2-unit-thick zone
+    /// line untunnelable at speed: it accepts when either endpoint is inside, or
+    /// when the segment crosses a face of the unit cube
+    /// (RidManager.cpp RidManager::ZoneLineHitCheck).
+    pub fn crossed_by(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let start = self.unit_box_coords(from);
+        let end = self.unit_box_coords(to);
+        if in_unit_box(end) || in_unit_box(start) {
+            return true;
+        }
+        let dir = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        UNIT_BOX_FACES
+            .iter()
+            .any(|(verts, normal)| face_crossed(verts, normal, start, dir))
     }
 
     /// The RectID c2s 0x05E carries and the primary key of LSB zonelines.sql:
@@ -157,6 +220,64 @@ impl ZoneInteraction {
     pub fn rect_id(&self) -> u32 {
         u32::from_le_bytes(self.source_id.0)
     }
+}
+
+fn in_unit_box(p: [f32; 3]) -> bool {
+    p.iter().all(|c| c.abs() <= UNIT_BOX_HALF_EXTENT)
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Retail scales `cross(edge, offset)` componentwise by the face normal and
+/// requires every component to clear [`WINDING_TOLERANCE`], rather than summing
+/// into a dot product. With the axis-aligned normals of [`UNIT_BOX_FACES`] the
+/// two agree, since the other two components are identically zero.
+fn inside_edge(normal: [f32; 3], edge: [f32; 3], offset: [f32; 3]) -> bool {
+    let c = cross(edge, offset);
+    (0..3).all(|i| c[i] * normal[i] >= WINDING_TOLERANCE)
+}
+
+fn face_crossed(verts: &[usize; 4], normal: &[f32; 3], start: [f32; 3], dir: [f32; 3]) -> bool {
+    let normal = *normal;
+    let direction_projection = dot(normal, dir);
+    if direction_projection == 0.0 {
+        return false;
+    }
+    let v = verts.map(|i| UNIT_BOX_VERTICES[i]);
+    let factor = (dot(normal, start) - dot(normal, v[0])) * (-1.0 / direction_projection);
+    if factor < 0.0 || factor >= SEGMENT_FACTOR_MAX {
+        return false;
+    }
+    let hit = [
+        start[0] + factor * dir[0],
+        start[1] + factor * dir[1],
+        start[2] + factor * dir[2],
+    ];
+    // XIClient's third winding test reads the offset from v0 rather than from
+    // v2 (KO_RectData.cpp KO_RectData::HitCheck). Taken literally that pairs
+    // with the first test to demand the hit be collinear with edge v0->v1
+    // within the tolerance, which would leave face crossings unable to fire at
+    // all; it is a reconstruction artifact, not retail's rule, so each edge is
+    // tested against its own start vertex here.
+    (0..4).all(|i| {
+        let a = v[i];
+        let b = v[(i + 1) % 4];
+        inside_edge(normal, sub(b, a), sub(hit, a))
+    })
 }
 
 fn rd_u32(body: &[u8], off: usize) -> u32 {
@@ -274,6 +395,108 @@ pub fn from_dat(bytes: &[u8]) -> Result<Vec<ZoneInteraction>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Southern San d'Oria east-Ronfaure gate as the `retail-2026-09` DAT
+    /// ships it (dumped with examples/dat-rid-zoneline-probe.rs, recorded in
+    /// .agents/skills/retail-observe/references/2026-09-18-zone-line-crossing.md
+    /// "What LSB's zonelines table is worth").
+    fn sandoria_z6e0() -> ZoneInteraction {
+        ZoneInteraction {
+            position: [113.458, -4.079, -57.351],
+            rect_class: RECT_CLASS_HIT_CHECKED,
+            orientation: [0.0, 2.356194, 0.0],
+            size: [15.0, 10.0, 2.0],
+            source_id: DatId(*b"z6e0"),
+            dest_id: Some(DatId(*b"z6e1")),
+            param: 0,
+            terrain_flags: 0,
+            map_id: 0,
+            elevator_bottom_y: 0.0,
+            elevator_top_y: 0.0,
+        }
+    }
+
+    /// World directions of the rect's local axes. `unit_box_coords` rotates a world
+    /// delta by `-yaw`, so the inverse sends local x to `(cos, 0, -sin)` and
+    /// local z to `(sin, 0, cos)`.
+    fn local_axes(r: &ZoneInteraction) -> ([f32; 3], [f32; 3]) {
+        let (sin, cos) = r.orientation[1].sin_cos();
+        ([cos, 0.0, -sin], [sin, 0.0, cos])
+    }
+
+    fn offset(from: [f32; 3], axis: [f32; 3], d: f32) -> [f32; 3] {
+        [
+            from[0] + axis[0] * d,
+            from[1] + axis[1] * d,
+            from[2] + axis[2] * d,
+        ]
+    }
+
+    #[test]
+    fn local_axes_match_the_declared_extents() {
+        let gate = sandoria_z6e0();
+        let (wide, thin) = local_axes(&gate);
+        // 15 wide, 2 thick: just inside each half-extent, just outside it.
+        assert!(gate.contains(offset(gate.position, wide, 7.4)));
+        assert!(!gate.contains(offset(gate.position, wide, 7.6)));
+        assert!(gate.contains(offset(gate.position, thin, 0.9)));
+        assert!(!gate.contains(offset(gate.position, thin, 1.1)));
+    }
+
+    #[test]
+    fn sweep_catches_a_step_that_clears_the_gate_entirely() {
+        let gate = sandoria_z6e0();
+        let (_, thin) = local_axes(&gate);
+        // 2.5 units either side of the center along the 2-unit-thick axis, so
+        // neither endpoint is in the box and a point test sees nothing.
+        let before = offset(gate.position, thin, 2.5);
+        let after = offset(gate.position, thin, -2.5);
+        assert!(!gate.contains(before));
+        assert!(!gate.contains(after));
+        assert!(
+            gate.crossed_by(before, after),
+            "a single step straight through the gate must trip it"
+        );
+        assert!(gate.crossed_by(after, before), "and in either direction");
+    }
+
+    #[test]
+    fn sweep_accepts_either_endpoint_inside() {
+        let gate = sandoria_z6e0();
+        let (wide, _) = local_axes(&gate);
+        let outside = offset(gate.position, wide, 40.0);
+        assert!(gate.crossed_by(outside, gate.position));
+        assert!(gate.crossed_by(gate.position, outside));
+    }
+
+    #[test]
+    fn sweep_misses_a_step_that_walks_around_the_gate() {
+        let gate = sandoria_z6e0();
+        let (wide, thin) = local_axes(&gate);
+        // Displaced past the gate's 15-unit width, then stepped across the
+        // thin axis the same way the crossing test does.
+        let beside = offset(gate.position, wide, 10.0);
+        assert!(!gate.crossed_by(offset(beside, thin, 2.5), offset(beside, thin, -2.5)));
+    }
+
+    #[test]
+    fn sweep_is_vertically_bounded() {
+        let gate = sandoria_z6e0();
+        let (_, thin) = local_axes(&gate);
+        // The gate is 10 units tall, centered on its position; a crossing well
+        // above it is not one. The LSB scrape carries no vertical extent at
+        // all, so this is the axis it cannot express.
+        let high = [gate.position[0], gate.position[1] + 20.0, gate.position[2]];
+        assert!(!gate.crossed_by(offset(high, thin, 2.5), offset(high, thin, -2.5)));
+    }
+
+    #[test]
+    fn sweep_ignores_a_zero_length_step_outside() {
+        let gate = sandoria_z6e0();
+        let (wide, _) = local_axes(&gate);
+        let outside = offset(gate.position, wide, 40.0);
+        assert!(!gate.crossed_by(outside, outside));
+    }
 
     const TEST_DATA_OFFSET: usize = 0x30;
 

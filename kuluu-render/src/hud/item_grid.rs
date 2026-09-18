@@ -127,3 +127,79 @@ fn spawn_cell_icon(
         ImageNode::new(placeholder),
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hud::item_ui::transparent_placeholder;
+
+    #[derive(Component)]
+    struct Frame;
+
+    #[derive(Component)]
+    struct Icon;
+
+    #[derive(Component)]
+    struct Overlay;
+
+    #[derive(Resource)]
+    struct WantName(bool);
+
+    fn spawn_one(mut commands: Commands, mut images: ResMut<Assets<Image>>, want: Res<WantName>) {
+        let placeholder = transparent_placeholder(&mut images);
+        commands.spawn(Node::default()).with_children(|p| {
+            let overlay = if want.0 {
+                CellOverlay::Name("Main")
+            } else {
+                CellOverlay::StackCount
+            };
+            spawn_item_cell(p, Frame, Icon, Overlay, overlay, placeholder);
+        });
+    }
+
+    fn cell(want_name: bool) -> (Vec<Entity>, App) {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .insert_resource(WantName(want_name))
+            .add_systems(Startup, spawn_one);
+        app.update();
+        let mut q = app.world_mut().query_filtered::<&Children, With<Frame>>();
+        let kids = q.single(app.world()).expect("one cell").to_vec();
+        (kids, app)
+    }
+
+    /// Child order is draw order, and the two overlays want opposite answers:
+    /// an equipped slot must read as its gear, and a stack count must read over
+    /// whatever art it is counting.
+    #[test]
+    fn a_slot_name_sits_under_the_art_and_a_stack_count_over_it() {
+        let (kids, app) = cell(true);
+        assert_eq!(kids.len(), 2);
+        assert!(
+            app.world().get::<Overlay>(kids[0]).is_some(),
+            "the slot name is spawned first, so the icon covers it"
+        );
+        assert!(app.world().get::<Icon>(kids[1]).is_some());
+
+        let (kids, app) = cell(false);
+        assert_eq!(kids.len(), 2);
+        assert!(
+            app.world().get::<Icon>(kids[0]).is_some(),
+            "the count is spawned last, so it draws over the icon"
+        );
+        assert!(app.world().get::<Overlay>(kids[1]).is_some());
+    }
+
+    /// The count carries its own plate, so it stays legible on art of any
+    /// colour rather than depending on the icon under it being dark.
+    #[test]
+    fn a_stack_count_rides_a_bordered_chip() {
+        let (kids, app) = cell(false);
+        let badge = kids[1];
+        let node = app.world().get::<Node>(badge).expect("badge node");
+        assert_ne!(node.border, UiRect::ZERO);
+        assert_ne!(node.padding, UiRect::ZERO);
+        let bg = app.world().get::<BackgroundColor>(badge).expect("chip");
+        assert_ne!(bg.0, Color::NONE);
+    }
+}

@@ -2744,7 +2744,7 @@ mod dialog_esc_gate_tests {
         .is_none());
 
         let sent = drain(&mut cmd_rx);
-        assert_eq!(sent, vec![AgentCommand::EndEvent]);
+        assert_eq!(sent, vec![AgentCommand::EndEventBack]);
     }
 }
 

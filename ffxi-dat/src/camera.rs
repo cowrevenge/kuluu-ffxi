@@ -488,7 +488,7 @@ mod tests {
     const FADE_FILE_ID: u32 = 30904; // ROM/62/110.DAT
 
     fn file_bytes(file_id: u32) -> Option<Vec<u8>> {
-        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let root = crate::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
     }

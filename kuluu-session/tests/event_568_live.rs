@@ -72,13 +72,7 @@ const PLAYBACK_DEADLINE: Duration = Duration::from_secs(2 * 60);
 const MIN_DIALOG_FRAMES: u32 = 1;
 
 fn open_dat_root() -> Option<ffxi_dat::DatRoot> {
-    match ffxi_dat::DatRoot::from_env_or_default() {
-        Ok(root) => Some(root),
-        Err(e) => {
-            eprintln!("no dat root: {e:#}");
-            None
-        }
-    }
+    ffxi_dat::archive::open_test_install()
 }
 
 fn artifact_dir() -> PathBuf {
@@ -176,8 +170,8 @@ async fn event_568_full_playback_against_live_lsb() {
 
     let Some(dat_root) = open_dat_root() else {
         eprintln!(
-            "skipping: no FFXI install found (set FFXI_DAT_PATH, or install under \
-             vendor/game-files/); without DATs the VM cannot drive the \
+            "skipping: no FFXI install found (register one with \
+             `kuluu install`, or set FFXI_DAT_PATH); without DATs the VM cannot drive the \
              568 program and this test would only re-prove the skip-to-end \
              failure mode"
         );
@@ -217,6 +211,7 @@ async fn event_568_full_playback_against_live_lsb() {
         password: fixture.password.clone(),
         char_selection: CharSelection::Name(fixture.charname.clone()),
         initial_state: None,
+        playonline_session: None,
         dat_root: Some(Arc::new(dat_root)),
         user_driven_events: false,
     };

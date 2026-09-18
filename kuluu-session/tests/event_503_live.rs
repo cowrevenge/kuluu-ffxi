@@ -68,13 +68,7 @@ const SERVER_RESPONSE_GRACE: Duration = Duration::from_secs(30);
 const NO_EVENT_GRACE: Duration = Duration::from_secs(60);
 
 fn open_dat_root() -> Option<ffxi_dat::DatRoot> {
-    match ffxi_dat::DatRoot::from_env_or_default() {
-        Ok(root) => Some(root),
-        Err(e) => {
-            eprintln!("no dat root: {e:#}");
-            None
-        }
-    }
+    ffxi_dat::archive::open_test_install()
 }
 
 fn artifact_dir() -> PathBuf {
@@ -270,8 +264,8 @@ async fn event_503_full_playback_against_live_lsb() {
 
     let Some(dat_root) = open_dat_root() else {
         eprintln!(
-            "skipping: no FFXI install found (set FFXI_DAT_PATH, or install under \
-             vendor/game-files/); without DATs the holds cannot arm and this \
+            "skipping: no FFXI install found (register one with \
+             `kuluu install`, or set FFXI_DAT_PATH); without DATs the holds cannot arm and this \
              test would only re-prove the skip-to-end failure mode"
         );
         return;
@@ -313,6 +307,7 @@ async fn event_503_full_playback_against_live_lsb() {
         password: fixture.password.clone(),
         char_selection: CharSelection::Name(fixture.charname.clone()),
         initial_state: None,
+        playonline_session: None,
         dat_root: Some(Arc::new(dat_root)),
         user_driven_events: false,
     };

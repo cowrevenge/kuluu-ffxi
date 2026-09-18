@@ -2072,7 +2072,7 @@ mod vehicle_contract_tests {
     // scan's dominant rule.
     #[test]
     fn zone_scene_resolves_in_the_zones_own_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let file =
@@ -2090,7 +2090,7 @@ mod vehicle_contract_tests {
     // runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
     #[test]
     fn zone_scene_resolves_sealions_den_lwon_in_its_own_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let file =
@@ -2105,7 +2105,7 @@ mod vehicle_contract_tests {
     // per-key counter.
     #[test]
     fn zone_scene_lookups_are_memoized_and_cleared() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let key = *b"zz99";
@@ -2136,7 +2136,7 @@ mod vehicle_contract_tests {
     // Fountain (170)'s model DAT: a ZONE_SCENE_PARTNERS instance/entrance pair.
     #[test]
     fn zone_scene_falls_back_to_the_partner_zone_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let own =

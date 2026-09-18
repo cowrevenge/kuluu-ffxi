@@ -2287,10 +2287,14 @@ fn routine_motion_miss(id: u32, name: &str, model: &str, routine: DatId, miss: &
 /// is a third of.
 fn settle_motion_clip(
     routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
     routine: DatId,
     wind_up: DatId,
 ) -> Option<DatId> {
-    routine_motion_clip_last(routines, routine).filter(|last| *last != wind_up)
+    routine_motion_lookup(routines, rejected_routines, routine, true)
+        .ok()
+        .flatten()
+        .filter(|last| *last != wind_up)
 }
 
 /// The `ded?` collapse clip and the routine-authored frames retail plays it for
@@ -4451,7 +4455,14 @@ pub fn dispatch_action_overlay(
                 // Only a start holds a pose past its wind-up; a swing or a completion motion
                 // is over when its clip is.
                 let settle = (is_start && !looping)
-                    .then(|| settle_motion_clip(&actor.routines, routine, clip_id))
+                    .then(|| {
+                        settle_motion_clip(
+                            &actor.routines,
+                            &actor.rejected_routines,
+                            routine,
+                            clip_id,
+                        )
+                    })
                     .flatten();
                 actor.action = Some(ActionPlayback {
                     clip_id,
@@ -6164,10 +6175,9 @@ mod pose_resolution_tests {
     // must not re-fire it: no ActiveScheduler named `dead` may exist after the raise tick.
     #[test]
     fn a_raise_clears_the_defeated_latch_and_returns_to_idle() {
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no retail DAT root");
+        let Some(install_root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
 
         let mut app = App::new();
@@ -6212,7 +6222,7 @@ mod pose_resolution_tests {
 
         // Mob case: the latch is what dispatch_melee_action_started inserts on a Defeated
         // result; here it is inserted directly and the wire hp_pct owns death state.
-        let loaded = load_npc(1568).expect("installed retail NPC DAT"); // Hare
+        let loaded = load_npc(&install_root, 1568).expect("installed retail NPC DAT"); // Hare
         let skin = app
             .world_mut()
             .resource_mut::<FfxiSkinRegistry>()
@@ -6306,7 +6316,8 @@ mod pose_resolution_tests {
         // Self case: self's entity hp_pct stays 100 (it only updates when CHAR_PC carries
         // UPDATE_HP), so death and raise both arrive through the party row / homepoint timer
         // channel that self_dead reads.
-        let loaded = load_pc(1, false, &[], None, None, None).expect("installed retail PC DAT");
+        let loaded = load_pc(&install_root, 1, false, &[], None, None, None)
+            .expect("installed retail PC DAT");
         let skin = app
             .world_mut()
             .resource_mut::<FfxiSkinRegistry>()
@@ -6453,9 +6464,9 @@ mod pose_resolution_tests {
     #[test]
     fn settle_motion_clip_is_the_stage_after_the_wind_up() {
         let mut routines = synth_routines(&[(b"cait", b"mi0?"), (b"cast", b"mb0?")]);
-        let wind_up = routine_motion_clip(&routines, DatId::from_str("cait")).unwrap();
+        let wind_up = routine_motion_clip(&routines, &[], DatId::from_str("cait")).unwrap();
         assert_eq!(
-            settle_motion_clip(&routines, DatId::from_str("cait"), wind_up),
+            settle_motion_clip(&routines, &[], DatId::from_str("cait"), wind_up),
             None,
             "a routine with one Motion stage has nothing to hand off to"
         );
@@ -6473,13 +6484,14 @@ mod pose_resolution_tests {
                 ..stage
             });
         assert_eq!(
-            settle_motion_clip(&routines, DatId::from_str("cait"), wind_up).map(|d| d.as_str()),
+            settle_motion_clip(&routines, &[], DatId::from_str("cait"), wind_up)
+                .map(|d| d.as_str()),
             Some("mi1?".to_string())
         );
 
-        let cast = routine_motion_clip(&routines, DatId::from_str("cast")).unwrap();
+        let cast = routine_motion_clip(&routines, &[], DatId::from_str("cast")).unwrap();
         assert_eq!(
-            settle_motion_clip(&routines, DatId::from_str("cast"), cast),
+            settle_motion_clip(&routines, &[], DatId::from_str("cast"), cast),
             None,
             "the magic cast pose loops its single stage; it never settles elsewhere"
         );
@@ -6497,8 +6509,9 @@ mod pose_resolution_tests {
         };
         let routines = loaded.all_routines();
         let routine = DatId::from_str("cait");
-        let wind_up = routine_motion_clip(&routines, routine).expect("HumeM cait wind-up");
-        let settled = settle_motion_clip(&routines, routine, wind_up).expect("HumeM cait settles");
+        let wind_up = routine_motion_clip(&routines, &[], routine).expect("HumeM cait wind-up");
+        let settled =
+            settle_motion_clip(&routines, &[], routine, wind_up).expect("HumeM cait settles");
 
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         let len = rest_clip_len_frames(&actor.battle_clips, wind_up)

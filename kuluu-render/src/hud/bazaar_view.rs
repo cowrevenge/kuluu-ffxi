@@ -17,11 +17,9 @@ use crate::hud::delivery::current_gil;
 use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_detail;
-use crate::hud::item_ui::{framed_box, text_font, theme, transparent_placeholder};
+use crate::hud::item_ui::{framed_box, set_icon, text_font, theme, transparent_placeholder};
+use crate::hud::list_view::{self, row_color, ListViewport, LIST_ROWS, ROW_ICON_PX};
 use crate::snapshot::SceneState;
-
-/// Rows retail keeps drawn, filled or not.
-pub const LIST_ROWS: usize = 10;
 
 /// LSB's purchase validator caps a single buy at 99
 /// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp validate).
@@ -32,6 +30,7 @@ pub const MAX_BUY_QUANTITY: u32 = 99;
 #[derive(Resource, Debug, Clone, Default)]
 pub struct BazaarScreenState {
     pub cursor: usize,
+    pub viewport: ListViewport,
     /// Active quantity picker for the focused row, once confirmed into.
     pub quantity: Option<DigitSpinner>,
     /// Sized purchase awaiting the retail "Purchase N x for Y gil?" answer.
@@ -55,6 +54,7 @@ impl BazaarScreenState {
     /// Keep the cursor inside a list the server may have shrunk under us.
     pub fn clamp(&mut self, len: usize) {
         self.cursor = self.cursor.min(len.saturating_sub(1));
+        self.viewport.follow(self.cursor, len);
         if len == 0 {
             self.quantity = None;
             self.pending = None;
@@ -67,6 +67,7 @@ impl BazaarScreenState {
         }
         let n = len as i32;
         self.cursor = (self.cursor as i32 + dy).rem_euclid(n) as usize;
+        self.viewport.follow(self.cursor, len);
     }
 
     /// Open the quantity picker for `entry`, or `None` for a single item (retail
@@ -123,10 +124,16 @@ pub(crate) struct BazaarRowIcon(usize);
 #[derive(Component)]
 pub(crate) struct BazaarDetailIcon;
 
+#[derive(Component)]
+pub(crate) struct BazaarScrollTrack;
+
+#[derive(Component)]
+pub(crate) struct BazaarScrollThumb;
+
 const PANEL_WIDTH_PX: f32 = 340.0;
-const ROW_ICON_PX: f32 = 18.0;
 const PRICE_COL_PX: f32 = 110.0;
 const GIL_BOX_PX: f32 = 116.0;
+const LIST_GAP_PX: f32 = 4.0;
 
 pub(crate) fn spawn_bazaar_view(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let placeholder = transparent_placeholder(&mut images);
@@ -149,51 +156,57 @@ pub(crate) fn spawn_bazaar_view(mut commands: Commands, mut images: ResMut<Asset
         .with_children(|root| {
             let (mut n, bg, bd) = framed_box();
             n.width = Val::Px(PANEL_WIDTH_PX);
+            n.flex_direction = FlexDirection::Row;
+            n.column_gap = Val::Px(LIST_GAP_PX);
             root.spawn((n, bg, bd)).with_children(|p| {
-                for i in 0..LIST_ROWS {
-                    p.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(5.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn((
-                            BazaarRowIcon(i),
-                            Node {
-                                width: Val::Px(ROW_ICON_PX),
-                                height: Val::Px(ROW_ICON_PX),
-                                ..default()
-                            },
-                            ImageNode::new(placeholder.clone()),
-                            BackgroundColor(theme::CELL_BG),
-                        ));
-                        row.spawn((
-                            BazaarText(BazaarRole::RowName(i)),
-                            Text::new(""),
-                            text_font(13.0),
-                            TextColor(theme::TEXT),
-                            Node {
-                                flex_grow: 1.0,
-                                ..default()
-                            },
-                        ));
-                        row.spawn((
-                            BazaarText(BazaarRole::RowPrice(i)),
-                            Text::new(""),
-                            text_font(13.0),
-                            TextColor(theme::TEXT),
-                            TextLayout {
-                                justify: Justify::Right,
-                                linebreak: LineBreak::NoWrap,
-                            },
-                            Node {
-                                width: Val::Px(PRICE_COL_PX),
-                                ..default()
-                            },
-                        ));
-                    });
-                }
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    flex_grow: 1.0,
+                    min_width: Val::Px(0.0),
+                    ..default()
+                })
+                .with_children(|list| {
+                    for i in 0..LIST_ROWS {
+                        list.spawn(list_view::row_node()).with_children(|row| {
+                            row.spawn((
+                                BazaarRowIcon(i),
+                                Node {
+                                    width: Val::Px(ROW_ICON_PX),
+                                    height: Val::Px(ROW_ICON_PX),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                                ImageNode::new(placeholder.clone()),
+                                BackgroundColor(theme::CELL_BG),
+                            ));
+                            row.spawn(list_view::row_label_clip()).with_children(|col| {
+                                col.spawn((
+                                    BazaarText(BazaarRole::RowName(i)),
+                                    Text::new(""),
+                                    text_font(13.0),
+                                    TextColor(theme::TEXT),
+                                    list_view::row_label_layout(),
+                                ));
+                            });
+                            row.spawn((
+                                BazaarText(BazaarRole::RowPrice(i)),
+                                Text::new(""),
+                                text_font(13.0),
+                                TextColor(theme::TEXT),
+                                TextLayout {
+                                    justify: Justify::Right,
+                                    linebreak: LineBreak::NoWrap,
+                                },
+                                Node {
+                                    width: Val::Px(PRICE_COL_PX),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                            ));
+                        });
+                    }
+                });
+                list_view::spawn_scrollbar(p, BazaarScrollTrack, BazaarScrollThumb);
             });
 
             root.spawn(Node {
@@ -260,13 +273,6 @@ pub(crate) fn spawn_bazaar_view(mut commands: Commands, mut images: ResMut<Asset
         });
 }
 
-/// First visible row, keeping the cursor on screen.
-pub fn viewport_start(cursor: usize, len: usize) -> usize {
-    cursor
-        .saturating_sub(LIST_ROWS / 2)
-        .min(len.saturating_sub(LIST_ROWS))
-}
-
 pub(crate) fn update_bazaar_view(
     state: Res<SceneState>,
     screen: Res<BazaarScreenState>,
@@ -309,7 +315,10 @@ pub(crate) fn update_bazaar_view(
     }
 
     let gil = current_gil(snap);
-    let start = viewport_start(screen.cursor, view.items.len());
+    let start = screen
+        .viewport
+        .start
+        .min(ListViewport::max_start(view.items.len()));
     let focused = view.items.get(screen.cursor);
     let table = icon_cache.table(&dat_root);
     let static_of = |item_no: u16| {
@@ -400,26 +409,24 @@ pub(crate) fn update_bazaar_view(
     }
 }
 
-/// An empty row/slot keeps its plate but shows no art, so the list holds its
-/// retail height instead of collapsing.
-fn set_icon(image: &mut ImageNode, handle: Option<Handle<Image>>) {
-    let want_alpha = if handle.is_some() { 1.0 } else { 0.0 };
-    if let Some(h) = handle {
-        if image.image != h {
-            image.image = h;
-        }
-    }
-    if image.color.alpha() != want_alpha {
-        image.color.set_alpha(want_alpha);
-    }
-}
-
-/// Retail dims a row the player cannot afford and paints the cursor row gold.
-fn row_color(cursor: bool, affordable: bool) -> Color {
-    match (cursor, affordable) {
-        (true, _) => theme::CURSOR,
-        (false, true) => theme::TEXT,
-        (false, false) => theme::FAINT,
+/// The wares list's scrollbar, in its own system so its `&mut Node` queries stay
+/// disjoint from the panel's.
+pub(crate) fn update_bazaar_scrollbar(
+    state: Res<SceneState>,
+    screen: Res<BazaarScreenState>,
+    mut track_q: Query<&mut Node, (With<BazaarScrollTrack>, Without<BazaarScrollThumb>)>,
+    mut thumb_q: Query<&mut Node, (With<BazaarScrollThumb>, Without<BazaarScrollTrack>)>,
+) {
+    let Some(view) = state.snapshot.bazaar.as_ref() else {
+        return;
+    };
+    if let (Ok(mut track), Ok(mut thumb)) = (track_q.single_mut(), thumb_q.single_mut()) {
+        list_view::apply_scrollbar(
+            &mut track,
+            &mut thumb,
+            screen.viewport.start,
+            view.items.len(),
+        );
     }
 }
 
@@ -463,13 +470,6 @@ mod tests {
     }
 
     #[test]
-    fn unaffordable_rows_dim_and_the_cursor_row_stays_gold() {
-        assert_eq!(row_color(false, true), theme::TEXT);
-        assert_eq!(row_color(false, false), theme::FAINT);
-        assert_eq!(row_color(true, false), theme::CURSOR);
-    }
-
-    #[test]
     fn cursor_wraps_and_clamps_to_a_shrinking_list() {
         let mut s = BazaarScreenState::default();
         s.move_cursor(-1, 3);
@@ -485,6 +485,7 @@ mod tests {
     fn an_empty_list_leaves_the_cursor_alone_and_drops_the_pending_buy() {
         let mut s = BazaarScreenState {
             cursor: 0,
+            viewport: ListViewport::default(),
             quantity: Some(DigitSpinner::item(5)),
             pending: Some(PendingBuy {
                 index: 1,
@@ -527,10 +528,81 @@ mod tests {
     }
 
     #[test]
-    fn viewport_follows_the_cursor_without_running_past_the_end() {
-        assert_eq!(viewport_start(0, 30), 0);
-        assert_eq!(viewport_start(12, 30), 7);
-        assert_eq!(viewport_start(29, 30), 20);
-        assert_eq!(viewport_start(2, 4), 0, "short lists never scroll");
+    fn the_page_trails_the_cursor_by_a_row_at_a_time() {
+        const LEN: usize = 30;
+        let mut s = BazaarScreenState::default();
+        for _ in 0..LIST_ROWS - 1 {
+            s.move_cursor(1, LEN);
+        }
+        assert_eq!(
+            (s.cursor, s.viewport.start),
+            (LIST_ROWS - 1, 0),
+            "the last drawn row needs no scroll"
+        );
+        s.move_cursor(1, LEN);
+        assert_eq!((s.cursor, s.viewport.start), (LIST_ROWS, 1));
+        s.move_cursor(-1, LEN);
+        assert_eq!(
+            (s.cursor, s.viewport.start),
+            (LIST_ROWS - 1, 1),
+            "coming back inside the page leaves it where it was"
+        );
+    }
+
+    #[test]
+    fn wrapping_to_the_end_carries_the_page_with_it() {
+        const LEN: usize = 30;
+        let mut s = BazaarScreenState::default();
+        s.move_cursor(-1, LEN);
+        assert_eq!(
+            (s.cursor, s.viewport.start),
+            (LEN - 1, LEN - LIST_ROWS),
+            "the wrapped-to row has to be drawn"
+        );
+    }
+
+    #[test]
+    fn a_sold_out_list_pulls_the_page_back_to_the_top() {
+        let mut s = BazaarScreenState {
+            cursor: 25,
+            viewport: ListViewport { start: 16 },
+            ..Default::default()
+        };
+        s.clamp(4);
+        assert_eq!((s.cursor, s.viewport.start), (3, 0));
+    }
+
+    /// A ware name too long for its column has to clip on its row: the row plate
+    /// is a fixed height and the label sits inside a clipping column, so the list
+    /// cannot grow out from under the page that indexes it.
+    #[test]
+    fn a_long_ware_name_clips_instead_of_growing_its_row() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .add_systems(Startup, spawn_bazaar_view);
+        app.update();
+
+        let world = app.world_mut();
+        let mut labels = world.query::<(Entity, &BazaarText, &TextLayout)>();
+        let rows: Vec<(Entity, LineBreak, Justify)> = labels
+            .iter(world)
+            .filter(|(_, tag, _)| matches!(tag.0, BazaarRole::RowName(_)))
+            .map(|(e, _, layout)| (e, layout.linebreak, layout.justify))
+            .collect();
+        assert_eq!(rows.len(), LIST_ROWS);
+
+        for (label, linebreak, justify) in rows {
+            let want = list_view::row_label_layout();
+            assert_eq!(linebreak, want.linebreak);
+            assert_eq!(justify, want.justify);
+            let clip = world.get::<ChildOf>(label).expect("label has a column").0;
+            let clip_node = world.get::<Node>(clip).expect("column is a node");
+            assert_eq!(clip_node.overflow, list_view::row_label_clip().overflow);
+            assert_eq!(clip_node.flex_basis, list_view::row_label_clip().flex_basis);
+            let plate = world.get::<ChildOf>(clip).expect("column has a row").0;
+            let plate_node = world.get::<Node>(plate).expect("row is a node");
+            assert_eq!(plate_node.height, list_view::row_node().height);
+            assert_eq!(plate_node.overflow, list_view::row_node().overflow);
+        }
     }
 }

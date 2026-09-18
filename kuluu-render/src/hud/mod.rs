@@ -417,6 +417,7 @@ impl Plugin for HudPlugin {
                 trade::update_trade_window,
                 check_view::update_check_view,
                 bazaar_view::update_bazaar_view,
+                bazaar_view::update_bazaar_scrollbar.after(bazaar_view::update_bazaar_view),
                 status_panel::update_status_panel,
                 equipment_screen::update_equipment_screen.after(menu::refresh_dynamic_menu_rows),
                 delivery::rebuild_delivery_inventory,

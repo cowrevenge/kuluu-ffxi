@@ -112,6 +112,16 @@ pub fn row_label_layout() -> TextLayout {
     }
 }
 
+/// Retail paints the cursor row gold and dims a row the player cannot act on
+/// (a ware they cannot afford, an entry the window will not take).
+pub fn row_color(cursor: bool, enabled: bool) -> Color {
+    match (cursor, enabled) {
+        (true, _) => theme::CURSOR,
+        (false, true) => theme::TEXT,
+        (false, false) => theme::FAINT,
+    }
+}
+
 /// Rows one unit of wheel travel walks. A notch reports 1.0 and a trackpad
 /// reports a stream of small fractions, so the carry below is what makes both
 /// feel like the same list.
@@ -249,6 +259,13 @@ mod tests {
             Val::Px(0.0),
             "a long label may not take the fixed columns' space"
         );
+    }
+
+    #[test]
+    fn a_row_the_player_cannot_act_on_dims_and_the_cursor_row_stays_gold() {
+        assert_eq!(row_color(false, true), theme::TEXT);
+        assert_eq!(row_color(false, false), theme::FAINT);
+        assert_eq!(row_color(true, false), theme::CURSOR);
     }
 
     #[test]

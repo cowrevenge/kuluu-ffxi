@@ -22,8 +22,8 @@ use crate::hud::bazaar_view::{group_digits, item_name};
 use crate::hud::delivery::current_gil;
 use crate::hud::digit_spinner::{self, DigitSpinner, SpinnerSlot, SpinnerUnit};
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
-use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
-use crate::hud::list_view::{self, ListViewport, LIST_ROWS, ROW_ICON_PX};
+use crate::hud::item_ui::{self, framed_box, set_icon, text_font, theme, transparent_placeholder};
+use crate::hud::list_view::{self, row_color, ListViewport, LIST_ROWS, ROW_ICON_PX};
 use crate::snapshot::SceneState;
 
 /// `ShopNo` in c2s 0x083 SHOP_BUY. The retail client never sets it and the
@@ -1076,29 +1076,6 @@ fn affordable(row: &ShopRow, gil: u32) -> bool {
     row.price <= gil
 }
 
-/// An empty row keeps its plate but shows no art, so the list holds its height
-/// instead of collapsing.
-fn set_icon(image: &mut ImageNode, handle: Option<Handle<Image>>) {
-    let want_alpha = if handle.is_some() { 1.0 } else { 0.0 };
-    if let Some(h) = handle {
-        if image.image != h {
-            image.image = h;
-        }
-    }
-    if image.color.alpha() != want_alpha {
-        image.color.set_alpha(want_alpha);
-    }
-}
-
-/// Retail dims a row the player cannot afford and paints the cursor row gold.
-fn row_color(cursor: bool, affordable: bool) -> Color {
-    match (cursor, affordable) {
-        (true, _) => theme::CURSOR,
-        (false, true) => theme::TEXT,
-        (false, false) => theme::FAINT,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1654,13 +1631,6 @@ mod tests {
             ..Default::default()
         };
         assert!(confirm_line(&state, &snap).is_none());
-    }
-
-    #[test]
-    fn unaffordable_rows_dim_and_the_cursor_row_stays_gold() {
-        assert_eq!(row_color(false, true), theme::TEXT);
-        assert_eq!(row_color(false, false), theme::FAINT);
-        assert_eq!(row_color(true, false), theme::CURSOR);
     }
 
     #[test]

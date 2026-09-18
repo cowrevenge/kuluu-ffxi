@@ -30,6 +30,21 @@ pub fn transparent_placeholder(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
+/// Swap the art on an icon plate spawned over a [`transparent_placeholder`]. An
+/// empty row or slot keeps its plate but shows no art, so a list holds its
+/// height instead of collapsing.
+pub fn set_icon(image: &mut ImageNode, handle: Option<Handle<Image>>) {
+    let want_alpha = if handle.is_some() { 1.0 } else { 0.0 };
+    if let Some(h) = handle {
+        if image.image != h {
+            image.image = h;
+        }
+    }
+    if image.color.alpha() != want_alpha {
+        image.color.set_alpha(want_alpha);
+    }
+}
+
 /// What [`focus_detail`] returns as the item name when nothing is focused;
 /// exported so a window that wants its own empty-slot wording can tell the
 /// prompt apart from a real item name.

@@ -17,12 +17,13 @@ session against the real server — not re-running tests or reading code. The
 work splits into four steps; each has a reference file with the exact recipes.
 
 ```
-1. Stack up      → references/stack.md      (colima/docker bring-up + env gotchas)
+1. Stack up      → scripts/lsb-stack.sh up   (references/stack.md: env gotchas)
 2. Pick surface  → table below
 3. Drive + observe → references/drive-headless.md | references/drive-gui.md
                      (mechanical drive loops → haiku subagent, see below)
 4. Evidence      → JSON events / tracing log / scripts/capture.sh screenshots
 5. Record it     → scripts/record-evidence.sh (feeds the stop-hook verify gate)
+6. Stack down    → scripts/lsb-stack.sh down (once nothing else needs it)
 ```
 
 ## Picking the surface

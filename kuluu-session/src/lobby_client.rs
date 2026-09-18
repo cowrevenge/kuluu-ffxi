@@ -145,6 +145,9 @@ pub struct LobbyClient {
     /// versionCode for the 0x26; `None` resolves [`client_version_code`] at
     /// open time.
     pub version_code: Option<String>,
+    /// excode_client for the 0x26; `None` resolves [`client_excode_client`] at
+    /// open time.
+    pub excode_client: Option<u16>,
 }
 
 /// S2C 0x05: the lobby admitted the client version; the bitmasks say which
@@ -157,15 +160,22 @@ pub struct LobbyKey {
     pub excode_server2: u32,
 }
 
+/// The expansions an excode bitmask names, in either direction: the client's
+/// own C2S 0x26 mask and the server's S2C 0x05 reply share the
+/// vendor/server/src/login/login_helpers.h EXPANSION_DISPLAY layout. Bits LSB
+/// has no name for are dropped, so a ROM that predates the enum reads as
+/// nothing rather than as UNUSED_EXPANSION_1.
+fn expansion_names(mask: u32) -> Vec<&'static str> {
+    expansion_display::NAMES
+        .iter()
+        .filter(|(bit, name)| mask & u32::from(*bit) != 0 && !name.starts_with("UNUSED_"))
+        .map(|(_, name)| *name)
+        .collect()
+}
+
 impl LobbyKey {
     pub fn expansion_names(&self) -> Vec<&'static str> {
-        expansion_display::NAMES
-            .iter()
-            .filter(|(bit, name)| {
-                self.excode_server & u32::from(*bit) != 0 && !name.starts_with("UNUSED_")
-            })
-            .map(|(_, name)| *name)
-            .collect()
+        expansion_names(self.excode_server)
     }
 
     pub fn feature_names(&self) -> Vec<&'static str> {
@@ -209,6 +219,35 @@ pub fn client_version_code() -> String {
             LSB_CLIENT_VER.to_string()
         }
     }
+}
+
+fn choose_excode_client(probed: Option<u16>) -> u16 {
+    probed.unwrap_or(expansion_display::ALL_KNOWN)
+}
+
+/// The excode_client bitmask the 0x26 advertises
+/// (research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md excode_client):
+/// the expansions the install `ffxi_dat::install::resolve` names actually
+/// ships, else every expansion LSB knows. The fallback cannot cost a login
+/// here, since vendor/server/src/login/view_session.cpp view_session::read_func
+/// reads only versionCode out of the 0x26, but a retail lobby judges the
+/// client by it.
+pub fn client_excode_client() -> u16 {
+    let root = ffxi_dat::install::resolve().ok().map(|r| r.path);
+    let probed = root.as_deref().and_then(ffxi_dat::excode_client_at);
+    let mask = choose_excode_client(probed);
+    let source = match (&root, probed) {
+        (Some(root), Some(_)) => format!("ROM inventory of {}", root.display()),
+        (Some(root), None) => format!("full known set: {} has no FTABLE.DAT", root.display()),
+        (None, _) => "full known set: no FFXI install resolved".to_string(),
+    };
+    tracing::info!(
+        excode_client = format_args!("{mask:#06x}"),
+        expansions = ?expansion_names(u32::from(mask)),
+        source,
+        "lobby: 0x26 excode_client chosen"
+    );
+    mask
 }
 
 pub struct LobbyHandle {
@@ -430,11 +469,17 @@ impl LobbyClient {
             data_port,
             view_port,
             version_code: None,
+            excode_client: None,
         }
     }
 
     pub fn with_version_code(mut self, version_code: Option<String>) -> Self {
         self.version_code = version_code;
+        self
+    }
+
+    pub fn with_excode_client(mut self, excode_client: Option<u16>) -> Self {
+        self.excode_client = excode_client;
         self
     }
 
@@ -448,14 +493,15 @@ impl LobbyClient {
             .version_code
             .clone()
             .unwrap_or_else(client_version_code);
-        let login = build_lobby_login(
-            &auth.session_hash,
-            &version_code,
-            expansion_display::ALL_KNOWN,
-        );
+        let excode_client = self.excode_client.unwrap_or_else(client_excode_client);
+        let login = build_lobby_login(&auth.session_hash, &version_code, excode_client);
         view.write_all(&login).await?;
         view.flush().await?;
-        tracing::info!(version_code, "lobby: 0x26 lobby login sent");
+        tracing::info!(
+            version_code,
+            excode_client = format_args!("{excode_client:#06x}"),
+            "lobby: 0x26 lobby login sent"
+        );
         let key = lobby_io("0x05 key (view)", read_key_reply(&mut view)).await?;
         tracing::info!(
             key = format_args!("{:#010x}", key.key),
@@ -1205,6 +1251,63 @@ mod tests {
         let long = build_lobby_login(&hash, "30220329_2_this_is_too_long", 0);
         assert_eq!(long[0x74 + LOBBY_LOGIN_VERSION_LEN - 1], 0);
         assert_eq!(&long[0x84..0x88], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn excode_client_falls_back_to_the_full_known_set_when_the_probe_fails() {
+        assert_eq!(choose_excode_client(None), expansion_display::ALL_KNOWN);
+        let partial = expansion_display::BASE_GAME | expansion_display::RISE_OF_ZILART;
+        assert_eq!(choose_excode_client(Some(partial)), partial);
+    }
+
+    #[test]
+    fn lobby_login_carries_the_probed_excode_client() {
+        let partial = expansion_display::BASE_GAME
+            | expansion_display::RISE_OF_ZILART
+            | expansion_display::CHAINS_OF_PROMATHIA;
+        let buf = build_lobby_login(&SESSION_HASH, "30230905_0", partial);
+        assert_eq!(
+            &buf[LOBBY_LOGIN_EXCODE_OFFSET..LOBBY_LOGIN_EXCODE_OFFSET + 4],
+            &u32::from(partial).to_le_bytes()
+        );
+        assert_eq!(
+            expansion_names(u32::from(partial)),
+            vec!["BASE_GAME", "RISE_OF_ZILART", "CHAINS_OF_PROMATHIA"]
+        );
+    }
+
+    #[tokio::test]
+    async fn open_sends_the_configured_excode_client() {
+        let configured = expansion_display::BASE_GAME
+            | expansion_display::RISE_OF_ZILART
+            | expansion_display::WINGS_OF_THE_GODDESS;
+        let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let view_port = view.local_addr().unwrap().port();
+        let data_port = data.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut view, _) = view.accept().await.unwrap();
+            let (_data, _) = data.accept().await.unwrap();
+            let mut login = [0u8; LOBBY_LOGIN_PACKET_SIZE];
+            view.read_exact(&mut login).await.unwrap();
+            let seen = u32::from_le_bytes(
+                login[LOBBY_LOGIN_EXCODE_OFFSET..LOBBY_LOGIN_EXCODE_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            tx.send(seen).unwrap();
+        });
+        let auth = AuthSession {
+            account_id: 1,
+            session_hash: SESSION_HASH,
+        };
+        let _ = LobbyClient::new("127.0.0.1", data_port, view_port)
+            .with_version_code(Some("30230905_0".into()))
+            .with_excode_client(Some(configured))
+            .open(&auth)
+            .await;
+        assert_eq!(rx.await.unwrap(), u32::from(configured));
     }
 
     /// research/XiPackets/lobby/S2C_0x0005_ResponseKey.md example packet.

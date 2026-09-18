@@ -51,7 +51,7 @@ pub mod weather;
 pub mod zone_dat;
 pub mod zone_interaction;
 
-pub use archive::{discover_overlays, DatLocation, DatRoot};
+pub use archive::{discover_overlays, excode_client_at, DatLocation, DatRoot};
 pub use camera::CameraResource;
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use client_profile::{ClientProfile, ItemBlockLayout};

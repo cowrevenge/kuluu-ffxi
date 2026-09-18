@@ -208,7 +208,26 @@ pub fn export(settings: &Settings) -> Result<Located, Unresolved> {
 /// lies outside the registry, and clear the launcher's legacy saved path so
 /// the pointer is the one saved choice.
 pub fn persist(root: &Path) -> Result<String, String> {
-    let name = match install::name_of(root) {
+    let name = persist_registry(root)?;
+    let mut store = launcher_store::load();
+    if !store.settings.dat_path.value.trim().is_empty() {
+        store.settings.dat_path = EnvOverride::default();
+        launcher_store::save(&store).map_err(|e| format!("writing launcher.json: {e}"))?;
+    }
+    Ok(name)
+}
+
+/// The registry half of [`persist`], with the directory as a parameter so
+/// tests never touch the real registry.
+fn persist_registry(root: &Path) -> Result<String, String> {
+    persist_registry_in(
+        &install::installs_dir().ok_or("no installs registry directory")?,
+        root,
+    )
+}
+
+fn persist_registry_in(dir: &Path, root: &Path) -> Result<String, String> {
+    let name = match install::name_of_in(dir, root) {
         Some(name) => name,
         None => {
             let name = detected_name(root);
@@ -218,16 +237,11 @@ pub fn persist(root: &Path) -> Result<String, String> {
                     root.display()
                 ));
             }
-            install::link(&name, root, false).map_err(|e| e.to_string())?;
+            install::link_in(dir, &name, root, false).map_err(|e| e.to_string())?;
             name
         }
     };
-    install::set_default(&name).map_err(|e| e.to_string())?;
-    let mut store = launcher_store::load();
-    if !store.settings.dat_path.value.trim().is_empty() {
-        store.settings.dat_path = EnvOverride::default();
-        launcher_store::save(&store).map_err(|e| format!("writing launcher.json: {e}"))?;
-    }
+    install::set_default_in(dir, &name).map_err(|e| e.to_string())?;
     Ok(name)
 }
 
@@ -828,6 +842,44 @@ mod tests {
             detected_name(Path::new("/x/HorizonXI/SquareEnix/FINAL FANTASY XI")),
             "HorizonXI"
         );
+    }
+
+    fn registry_install(dir: &Path, name: &str) -> PathBuf {
+        let root = install::install_root_in(dir, name);
+        std::fs::create_dir_all(root.join("ROM")).unwrap();
+        std::fs::write(root.join(install_detect::VTABLE_MARKER), b"").unwrap();
+        root
+    }
+
+    // The DAT-gate picker commits through this: the selection has to land in
+    // the registry default, which is what cold starts and the lobby version
+    // stamp resolve.
+    #[test]
+    fn persist_registry_makes_the_choice_the_default_install() {
+        let dir = std::env::temp_dir().join(format!("kuluu-persist-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let old = registry_install(&dir, "old");
+        let new = registry_install(&dir, "new");
+        install::set_default_in(&dir, "old").unwrap();
+
+        assert_eq!(persist_registry_in(&dir, &new).as_deref(), Ok("new"));
+        assert_eq!(install::read_default_in(&dir).as_deref(), Some("new"));
+        let r = install::resolve_in(Some(&dir), None).unwrap();
+        assert_eq!(r.path, new);
+
+        // a folder outside the registry is linked in, then defaulted
+        let foreign = fake_root("foreign");
+        let name = persist_registry_in(&dir, &foreign).unwrap();
+        assert_eq!(
+            install::read_default_in(&dir).as_deref(),
+            Some(name.as_str())
+        );
+        let r = install::resolve_in(Some(&dir), None).unwrap();
+        assert!(install::same_dir(&r.path, &foreign));
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&foreign).ok();
+        drop(old);
     }
 
     // The shell value is captured once per process, so this test pins both

@@ -693,6 +693,11 @@ pub struct ParticleGeneratorDef {
     // ParticleUpdaters.kt VelocityDampener). The engine does not model the velocity
     // dampener (the I35 0x69 precedent), so parse-only.
     pub velocity_dampener: Option<[f32; 2]>,
+    // sec3 0x26 VelocityRotator: three floats, the rotateAmount added to the velocity
+    // rotation × (0.5 × dt) per frame (research/xim ParticleUpdaters.kt VelocityRotator —
+    // the actor-space axis hack and the 0.5 factor are unmodeled). The engine has no
+    // velocityRotation, so parse-only.
+    pub velocity_rotator: Option<[f32; 3]>,
 
     // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
     // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
@@ -1417,6 +1422,7 @@ impl ParticleGeneratorDef {
         let mut position_updater = false;
         let mut camera_shake = None;
         let mut velocity_dampener = None;
+        let mut velocity_rotator = None;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -1495,6 +1501,16 @@ impl ParticleGeneratorDef {
                     // sec2 0x69 track. The engine does not model the velocity dampener,
                     // so the block arms nothing and only consumes (the U1/U2 precedent).
                     0x44 => {}
+                    // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
+                    // the rotateAmount added to the velocity rotation × (0.5 × dt) per
+                    // frame. The engine has no velocityRotation, so parse-only.
+                    0x26 if payload + 12 <= body.len() => {
+                        velocity_rotator = Some([
+                            f32_le(body, payload),
+                            f32_le(body, payload + 4),
+                            f32_le(body, payload + 8),
+                        ]);
+                    }
                     // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — these
                     // carry no payload; they mark which 0x60..0x63 track drives its channel.
                     0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
@@ -1708,6 +1724,7 @@ impl ParticleGeneratorDef {
             parent_scale,
             velocity_dampener_track,
             velocity_dampener,
+            velocity_rotator,
             fixed_point_position_variance,
             fixed_point_position_variance_2,
             child_generator_2,
@@ -3291,6 +3308,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.velocity_dampener, None);
+    }
+
+    // sec3 0x26 VelocityRotator: three floats, the rotateAmount (research/xim
+    // ParticleUpdaters.kt VelocityRotator). Shipped census: 8524 blocks, all size_words=4.
+    #[test]
+    fn velocity_rotator_reads_the_three_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = [0u8; 12];
+        payload[0..4].copy_from_slice(&0.1f32.to_le_bytes());
+        payload[4..8].copy_from_slice(&(-0.2f32).to_le_bytes());
+        payload[8..12].copy_from_slice(&0.3f32.to_le_bytes());
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x26, 4, &payload));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.velocity_rotator, Some([0.1, -0.2, 0.3]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.velocity_rotator, None);
     }
 
     // sec3 0x44 dampening-factor ProgressValueUpdater: no payload, it samples the sec2 0x69

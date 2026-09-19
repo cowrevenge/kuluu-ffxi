@@ -698,6 +698,13 @@ pub struct ParticleGeneratorDef {
     // — 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but
     // not applied: the engine does not model the specular element's rotation.
     pub specular_rot_z_track: Option<[u8; 4]>,
+
+    // sec2 0x5F KeyFrameValueSetup (specular color.a): the 0x27/0x28/0x29 track shape
+    // bound to the specular element's color alpha (research/xim
+    // ParticleGeneratorParser.kt — 0x5C..0x5F are the Specular Color r/g/b/a
+    // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
+    // specular element's color.
+    pub specular_color_a_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -851,6 +858,7 @@ impl ParticleGeneratorDef {
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
         let mut specular_rot_z_track = None;
+        let mut specular_color_a_track = None;
         let mut camera_shake_track = None;
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
@@ -1085,6 +1093,12 @@ impl ParticleGeneratorDef {
                 // ParticleGeneratorParser.kt).
                 0x5B if payload + 8 <= body.len() => {
                     specular_rot_z_track = track_id(body, payload + 4);
+                }
+                // 0x5F KeyFrameValueSetup (specular color.a): the 0x5A shape bound to
+                // the specular element's color alpha (research/xim
+                // ParticleGeneratorParser.kt).
+                0x5F if payload + 8 <= body.len() => {
+                    specular_color_a_track = track_id(body, payload + 4);
                 }
                 // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32,
                 // unk1 f32, unk2 u32] — the DAT id of the keyframe track the section-3
@@ -1520,6 +1534,7 @@ impl ParticleGeneratorDef {
             fixed_point_position_variance_2,
             child_generator_2,
             specular_rot_z_track,
+            specular_color_a_track,
         }))
     }
 
@@ -2772,6 +2787,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.specular_rot_z_track, None);
+    }
+
+    // 0x5F KeyFrameValueSetup (specular color.a): the 0x5A shape bound to the specular
+    // element's color alpha (research/xim ParticleGeneratorParser.kt). Shipped census:
+    // 133 sec2 0x5F blocks in the parser-accepted corpus.
+    #[test]
+    fn specular_color_a_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x5F, 4, &[0, 0, 0, 0, b's', b'p', b'a', b'0']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.specular_color_a_track, Some(*b"spa0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.specular_color_a_track, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

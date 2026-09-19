@@ -2248,6 +2248,7 @@ mod tests {
             fixed_point_position_variance_2: None,
             child_generator_2: None,
             specular_rot_z_track: None,
+            specular_color_a_track: None,
         }
     }
 

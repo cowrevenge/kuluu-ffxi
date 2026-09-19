@@ -1080,7 +1080,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         };
     }
     g.elements_emitted += 1;
-    let pos = pos_local * g.vel_basis;
+    let mut pos = pos_local * g.vel_basis;
     // 0x03 VelocityVarianceSetup: a uniform [-v, v] draw per axis on top of the 0x02 base
     // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the shipped blocks all
     // sit after their 0x02, so base-plus-variance is the authored order).
@@ -1110,6 +1110,14 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         if pos_local.length_squared() > 0.0 {
             vel += pos_local.normalize() * ((next_unit(&mut g.emit_rng) * 2.0 - 1.0) * v);
         }
+    }
+    // 0x67 ReverseDisplacementSetup: the particle spawns at the trajectory's endpoint and
+    // traces the path backward — position'(t) = P0 + v × (maxAge − t)
+    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup — position gains the
+    // total velocity × maxAge, then the velocity is negated; the payload float is unused).
+    if g.def.reverse_displacement.is_some() {
+        pos += vel * g.vel_basis * life_frames;
+        vel = -vel;
     }
     // 0x0A RotationVarianceInitializer: a uniform [-v, v] draw per axis on top of the 0x09
     // base rotation (research/xim ParticleInitializers.kt RotationVarianceInitializer).
@@ -2029,6 +2037,7 @@ mod tests {
             velocity_variance: None,
             relative_velocity: None,
             relative_velocity_variance: None,
+            reverse_displacement: None,
             rotation_variance: None,
             init_rotation: [0.0; 3],
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
@@ -3803,6 +3812,25 @@ mod tests {
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);
         assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
+    }
+
+    // 0x67 ReverseDisplacementSetup: the particle spawns at the trajectory's endpoint and
+    // traces the path backward (research/xim ParticleInitializers.kt ReverseDisplacementSetup
+    // — position += total velocity × maxAge, then velocity ×= −1). Shipped census: 307
+    // blocks, all size_words=2, payload always 0.0.
+    #[test]
+    fn reverse_displacement_spawns_at_the_endpoint_and_reverses() {
+        let mut d = def(10.0, 1.0, 1);
+        d.init_velocity = [0.0, 0.1, 0.0];
+        d.reverse_displacement = Some(0.0);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        let p = &g.particles[0];
+        assert_eq!(p.vel, Vec3::from_array([0.0, -0.1, 0.0]));
+        assert_eq!(p.pos, Vec3::from_array([0.0, 1.0, 0.0]));
+        advance(&mut g, 5.0);
+        assert_eq!(g.particles[0].pos, Vec3::from_array([0.0, 0.5, 0.0]));
     }
 
     // 0x0A RotationVarianceInitializer: each particle's rotation draws a uniform

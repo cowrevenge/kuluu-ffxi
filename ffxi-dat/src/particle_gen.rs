@@ -426,6 +426,12 @@ pub struct ParticleGeneratorDef {
     // decompile's CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x41 scales the normalized
     // spawn offset by frand of this value and adds it to the same allocation vector as 0x08).
     pub relative_velocity_variance: Option<f32>,
+    // sec2 0x67 ReverseDisplacementSetup: the block's presence arms the spawn-at-endpoint
+    // behavior; its single float payload is never read by the effect
+    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup — the read float is
+    // stored but unused in apply; the retail decompile's ElemGenerate has no 0x67 case,
+    // so xim's mapping is the available evidence).
+    pub reverse_displacement: Option<f32>,
     // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
     // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
     // RotationVarianceInitializer — the retail decompile's ElemGenerate default is
@@ -662,6 +668,7 @@ impl ParticleGeneratorDef {
         let mut velocity_variance = None;
         let mut relative_velocity = None;
         let mut relative_velocity_variance = None;
+        let mut reverse_displacement = None;
         let mut rotation_variance = None;
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
@@ -925,6 +932,11 @@ impl ParticleGeneratorDef {
                 0x60..=0x63 if payload + 8 <= body.len() => {
                     tod_color_tracks[(opcode - 0x60) as usize] = track_id(body, payload + 4);
                 }
+                // 0x67 ReverseDisplacementSetup: one float, never read by the effect
+                // (research/xim ParticleInitializers.kt ReverseDisplacementSetup).
+                0x67 if payload + 4 <= body.len() => {
+                    reverse_displacement = Some(f32_le(body, payload));
+                }
                 // 0x1D SpriteSheetInitializer: retail derives the flipbook's per-frame interval
                 // from the frame count inside the CMoD3a resource, not the DAT (research/XIClient
                 // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1D), so the payload word is
@@ -1121,6 +1133,7 @@ impl ParticleGeneratorDef {
             velocity_variance,
             relative_velocity,
             relative_velocity_variance,
+            reverse_displacement,
             rotation_variance,
             init_rotation,
             blend,
@@ -1909,6 +1922,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.relative_velocity_variance, None);
+    }
+
+    // 0x67 ReverseDisplacementSetup: a single float, never read by the effect — the block's
+    // presence arms the spawn-at-endpoint behavior
+    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup). Shipped census:
+    // 307 blocks, all size_words=2, payload always 0.0.
+    #[test]
+    fn reverse_displacement_reads_the_single_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x67, 2, &0.0f32.to_le_bytes()));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.reverse_displacement, Some(0.0));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.reverse_displacement, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

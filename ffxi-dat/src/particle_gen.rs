@@ -673,6 +673,14 @@ pub struct ParticleGeneratorDef {
     // Keyframe resources). Parsed but not applied: the engine does not model the velocity
     // dampener.
     pub velocity_dampener_track: Option<[u8; 4]>,
+
+    // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
+    // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
+    // position offsets (research/xim ParticleInitializers.kt
+    // FixedPointPositionVarianceSetup). Retail's sec2 walk handles neither 0x4E nor 0x4F
+    // (research/XIClient CYyGenerator.cpp ElemGenerate), so the id is kept for
+    // reconstruction only.
+    pub fixed_point_position_variance: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -831,6 +839,7 @@ impl ParticleGeneratorDef {
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
+        let mut fixed_point_position_variance = None;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1182,6 +1191,13 @@ impl ParticleGeneratorDef {
                 0x69 if payload + 8 <= body.len() => {
                     velocity_dampener_track = track_id(body, payload + 4);
                 }
+                // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
+                // expect32(0, 1)] — the point list a per-emitted-particle position offset
+                // cycles through (research/xim ParticleInitializers.kt
+                // FixedPointPositionVarianceSetup).
+                0x4E if payload + 12 <= body.len() => {
+                    fixed_point_position_variance = track_id(body, payload + 4);
+                }
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1464,6 +1480,7 @@ impl ParticleGeneratorDef {
             parent_color,
             parent_scale,
             velocity_dampener_track,
+            fixed_point_position_variance,
         }))
     }
 
@@ -2632,6 +2649,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.velocity_dampener_track, None);
+    }
+
+    // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id, expect32
+    // (0, 1)] (research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup).
+    // Shipped census: 46 sec2 0x4E blocks in the parser-accepted corpus.
+    #[test]
+    fn fixed_point_position_variance_reads_the_point_list_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut payload = [0u8; 12];
+        payload[4..8].copy_from_slice(b"pts0");
+        payload[8..12].copy_from_slice(&1u32.to_le_bytes());
+        sec2.extend(op(0x4E, 4, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.fixed_point_position_variance, Some(*b"pts0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.fixed_point_position_variance, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

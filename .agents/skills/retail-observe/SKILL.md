@@ -240,7 +240,9 @@ Prefer `click-text '<regex>'` over raw coordinates for anything you located by
 reading a screenshot. It OCRs, clicks the matched text's centre, and fails loudly
 when the text is not there -- self-verifying, where a bare coordinate click
 silently lands on wallpaper. Permission classifiers also tend to accept it where
-they deny a blind coordinate click.
+they deny a blind coordinate click. Anchor the regex (`'^Accept'`, not
+`Accept`): it takes the first matching OCR line, and a dialog's body text
+usually contains the button's word before the button does.
 
 ## Reading captures
 

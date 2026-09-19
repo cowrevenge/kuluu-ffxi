@@ -56,8 +56,25 @@ What was verified on this host (macOS 26, Apple Silicon, Homebrew `wine-stable`
 - `System Events` lists the GUI process as `wine`, which is how `show` focuses
   it when the window's owning pid is a child process it cannot address.
 
-Two Wine-specific traps:
+Four Wine-specific traps:
 
+- **The game exits about a second after login, with no window and no error.**
+  This is not the renderer: under `WINEDEBUG=+d3d8` the client makes no D3D
+  calls at all, so it quits before graphics. It is FFXI's `patch.ver`
+  interface-id check reading `HKLM\SOFTWARE\PlayOnlineUS\Interface`, and it
+  needs all three of: the values present in the **32-bit view**
+  (`Software\Wow6432Node\...`, which is the one a 32-bit client reads -- having
+  them only in the 64-bit view reads as "absent"), `0001` holding a real
+  interface id rather than `"0"`, and `0002`/`1000` likewise. A private-server
+  install ships those values in its own registry script; run its NSIS installer
+  unattended (`wine <installer>.exe /S`) rather than clicking through it. A
+  server whose client expects Ashita's Sandbox to fake the check instead will
+  write `0001="0"`, and then the client only boots under Ashita.
+- **A registry edit does not reach the next launch while `wineserver` lives.**
+  The running server holds the pre-edit registry, so the game reads the old
+  values and the change looks like it did nothing -- which turns one wrong
+  value into an afternoon of contradictory results. `wineserver -k` between the
+  edit and the launch, every time.
 - **A window can outlive its app.** Kill `wineserver` (or the app hangs) and
   macOS keeps compositing the last frame: the window still resolves, captures
   fine, and accepts no input. The tell is OCR that is byte-identical across

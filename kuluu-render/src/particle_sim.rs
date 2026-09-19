@@ -2243,6 +2243,7 @@ mod tests {
             parent_rotate: false,
             parent_color: false,
             parent_scale: false,
+            velocity_dampener_track: None,
         }
     }
 

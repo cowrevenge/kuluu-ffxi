@@ -666,6 +666,13 @@ pub struct ParticleGeneratorDef {
     // no-op without a parent). Parsed but not applied until the child-generator path
     // lands (the sec2 0x44 ChildGeneratorSetup).
     pub parent_scale: bool,
+
+    // sec2 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape
+    // bound to the element's velocity dampener (research/xim ParticleGeneratorParser.kt
+    // sec2Handler 0x69; retail's keyframe pre-load pass references the same blocks as
+    // Keyframe resources). Parsed but not applied: the engine does not model the velocity
+    // dampener.
+    pub velocity_dampener_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -823,6 +830,7 @@ impl ParticleGeneratorDef {
         let mut parent_rotate = false;
         let mut parent_color = false;
         let mut parent_scale = false;
+        let mut velocity_dampener_track = None;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1168,6 +1176,12 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's scale (research/xim
                 // ParticleInitializers.kt ParentScaleConfig).
                 0x49 => parent_scale = true,
+                // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
+                // shape bound to the element's velocity dampener
+                // (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x69 if payload + 8 <= body.len() => {
+                    velocity_dampener_track = track_id(body, payload + 4);
+                }
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1449,6 +1463,7 @@ impl ParticleGeneratorDef {
             parent_rotate,
             parent_color,
             parent_scale,
+            velocity_dampener_track,
         }))
     }
 
@@ -2598,6 +2613,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_scale);
+    }
+
+    // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape bound to
+    // the element's velocity dampener (research/xim ParticleGeneratorParser.kt sec2Handler).
+    // Shipped census: 2 sec2 0x69 blocks in the parser-accepted corpus.
+    #[test]
+    fn velocity_dampener_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x69, 4, &[0, 0, 0, 0, b'v', b'd', b'm', b'0']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.velocity_dampener_track, Some(*b"vdm0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.velocity_dampener_track, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

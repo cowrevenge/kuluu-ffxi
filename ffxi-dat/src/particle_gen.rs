@@ -712,6 +712,13 @@ pub struct ParticleGeneratorDef {
     // keeps both. Parsed but not applied until the child-generator path lands (the
     // sec2 0x44 ChildGeneratorSetup).
     pub parent_rotate_2: bool,
+
+    // sec2 0x56 BatchingSetup: one expectZero32 word — xim's apply sets the particle's
+    // batched flag, which skips movement-orientation (research/xim ParticleInitializers.kt
+    // BatchingSetup; Particle.kt applyMovementOrientation). Kept separate from `batched`:
+    // retail's generator walk has no 0x56 case (research/XIClient CYyGenerator.cpp), so the
+    // block does not arm the GEN_FLAG_BATCHED flag's CheckFlag29 behavior — parsed only.
+    pub batching_setup: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -870,6 +877,7 @@ impl ParticleGeneratorDef {
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
         let mut parent_rotate_2 = false;
+        let mut batching_setup = false;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1233,6 +1241,9 @@ impl ParticleGeneratorDef {
                 // 0x79 ParentRotateConfig: the 0x47 marker — xim maps both opcodes to
                 // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
                 0x79 => parent_rotate_2 = true,
+                // 0x56 BatchingSetup: one expectZero32 word (research/xim
+                // ParticleInitializers.kt BatchingSetup).
+                0x56 if payload + 4 <= body.len() => batching_setup = true,
                 // 0x48 ParentColorConfig: no payload — the marker that makes a child
                 // particle copy its parent's color (research/xim
                 // ParticleInitializers.kt ParentColorConfig).
@@ -1547,6 +1558,7 @@ impl ParticleGeneratorDef {
             specular_rot_z_track,
             specular_color_a_track,
             parent_rotate_2,
+            batching_setup,
         }))
     }
 
@@ -2678,6 +2690,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_rotate_2);
+    }
+
+    // 0x56 BatchingSetup: one expectZero32 word (research/xim ParticleInitializers.kt
+    // BatchingSetup). Shipped census: 387 sec2 0x56 blocks in the parser-accepted corpus.
+    #[test]
+    fn batching_setup_is_a_single_word_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x56, 2, &[0, 0, 0, 0]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.batching_setup);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.batching_setup);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

@@ -157,11 +157,12 @@ mod tests {
     use super::*;
 
     const PASSWD: [u8; SESSION_HASH_LEN] = [0x5A; SESSION_HASH_LEN];
+    const AUTH_CODE_BYTE_MASK: u8 = 0x3C;
 
     fn pol_session() -> AuthSession {
         let mut code = [0u8; LOBBY_AUTH_CODE_LEN];
         for (i, b) in code.iter_mut().enumerate() {
-            *b = i as u8 ^ 0x3C;
+            *b = i as u8 ^ AUTH_CODE_BYTE_MASK;
         }
         AuthSession {
             account_id: 9,

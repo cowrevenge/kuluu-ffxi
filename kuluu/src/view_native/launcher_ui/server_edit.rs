@@ -289,14 +289,15 @@ const POL_SESSION_HINTS: [&str; 3] = [
 ];
 
 fn spawn_playonline_fields(panel: &mut ChildSpawnerCommands, form: &ServerEditForm) {
-    let default_path = playonline::expected_session_path(None);
     spawn_field(
         panel,
         "Session file",
         &form.pol_session_file,
-        &default_path.display().to_string(),
+        playonline::SESSION_FILE_NAME,
         ServerEditField::PolSessionFile,
     );
+    let default_path = playonline::expected_session_path(None);
+    panel.spawn(hint(format!("Default: {}", default_path.display())));
     for line in POL_SESSION_HINTS {
         panel.spawn(hint(line));
     }

@@ -302,6 +302,13 @@ pub enum StageKind {
     /// the payload is [`SchedulerStage::model_visibility`].
     SetModelVisibility,
 
+    /// 0x15 - ActorPositionSnapshot: argument-less. From this stage on, the routine's effect
+    /// context freezes the actor's position and joints at their current values, so effects
+    /// spawned later anchor where the routine fired even if the actor moves (research/xim
+    /// EffectRoutineInstance.kt handleActorPositionSnapshot: applyPositionSnapshot plus
+    /// applyJointSnapshot(true)).
+    ActorPositionSnapshot,
+
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
     /// and `init` stops `ini1` this way.
@@ -429,6 +436,9 @@ impl StageKind {
             SET_MODEL_VISIBILITY_OPCODE if length_words * 4 >= SET_MODEL_VISIBILITY_PAYLOAD_LEN => {
                 Self::SetModelVisibility
             }
+            // research/xim EffectRoutineParser.kt parseSection2 - ActorPositionSnapshotEffect,
+            // argument-less.
+            ACTOR_POSITION_SNAPSHOT_OPCODE => Self::ActorPositionSnapshot,
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -1812,6 +1822,11 @@ mod tests {
                 SET_MODEL_VISIBILITY_OPCODE,
                 4,
                 StageKind::SetModelVisibility,
+            ),
+            (
+                ACTOR_POSITION_SNAPSHOT_OPCODE,
+                2,
+                StageKind::ActorPositionSnapshot,
             ),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),

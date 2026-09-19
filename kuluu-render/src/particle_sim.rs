@@ -2241,6 +2241,7 @@ mod tests {
             camera_shake_track: None,
             haze_offset_x: None,
             parent_rotate: false,
+            parent_color: false,
         }
     }
 

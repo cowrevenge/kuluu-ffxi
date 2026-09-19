@@ -654,6 +654,12 @@ pub struct ParticleGeneratorDef {
     // a no-op without a parent). Parsed but not applied until the child-generator path
     // lands (the sec2 0x44 ChildGeneratorSetup).
     pub parent_rotate: bool,
+
+    // sec2 0x48 ParentColorConfig: a no-payload marker — the child particle copies its
+    // parent's color (research/xim ParticleInitializers.kt ParentColorConfig; apply is a
+    // no-op without a parent). Parsed but not applied until the child-generator path
+    // lands (the sec2 0x44 ChildGeneratorSetup).
+    pub parent_color: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -809,6 +815,7 @@ impl ParticleGeneratorDef {
         let mut camera_shake_track = None;
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
+        let mut parent_color = false;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1146,6 +1153,10 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's rotation (research/xim
                 // ParticleInitializers.kt ParentRotateConfig).
                 0x47 => parent_rotate = true,
+                // 0x48 ParentColorConfig: no payload — the marker that makes a child
+                // particle copy its parent's color (research/xim
+                // ParticleInitializers.kt ParentColorConfig).
+                0x48 => parent_color = true,
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1425,6 +1436,7 @@ impl ParticleGeneratorDef {
             camera_shake_track,
             haze_offset_x,
             parent_rotate,
+            parent_color,
         }))
     }
 
@@ -2536,6 +2548,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_rotate);
+    }
+
+    // 0x48 ParentColorConfig: a no-payload marker (research/xim
+    // ParticleInitializers.kt ParentColorConfig). Shipped census: 37 sec2 0x48 blocks in
+    // the parser-accepted corpus.
+    #[test]
+    fn parent_color_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x48, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_color);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_color);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

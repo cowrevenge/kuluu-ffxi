@@ -483,6 +483,9 @@ pub struct ParticleGeneratorDef {
     // Keyframe resources). Parsed but not applied: the engine sets the particle's rgb at
     // spawn from the 0x16 base / 0x17 variance and has no per-frame rgb track path.
     pub color_r_track: Option<[u8; 4]>,
+    // sec2 0x2B KeyFrameValueSetup (color.g): the green-channel twin of 0x2A
+    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, the 0x2A precedent.
+    pub color_g_track: Option<[u8; 4]>,
 
     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
     // MoonPhaseColorUpdater (0x4F, 12xRGBA): indexed by day-of-week / moon-phase frame and
@@ -694,6 +697,7 @@ impl ParticleGeneratorDef {
         let mut scale_z_track = None;
         let mut alpha_track = None;
         let mut color_r_track = None;
+        let mut color_g_track = None;
         let mut blend = ParticleBlend::Additive;
         let mut blend_byte = 0u8;
         let mut ignore_texture_alpha = false;
@@ -957,6 +961,9 @@ impl ParticleGeneratorDef {
                 // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to
                 // the element's red channel (research/xim ParticleGeneratorParser.kt).
                 0x2A if payload + 8 <= body.len() => color_r_track = track_id(body, payload + 4),
+                // 0x2B KeyFrameValueSetup (color.g): the 0x27/0x28/0x29 track shape bound to
+                // the element's green channel (research/xim ParticleGeneratorParser.kt).
+                0x2B if payload + 8 <= body.len() => color_g_track = track_id(body, payload + 4),
                 // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are the same
                 // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
                 // the section-3 ClockValueUpdater 0x3C..0x3F.
@@ -1180,6 +1187,7 @@ impl ParticleGeneratorDef {
             scale_z_track,
             alpha_track,
             color_r_track,
+            color_g_track,
             day_of_week_color,
             moon_phase_color,
             tod_color_tracks,
@@ -2036,6 +2044,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.color_r_track, None);
+    }
+
+    // 0x2B KeyFrameValueSetup (color.g): the 0x27/0x28/0x29 track shape bound to the
+    // element's green channel (research/xim ParticleGeneratorParser.kt). Shipped census:
+    // 5933 blocks, all size_words=4, first payload word always zero.
+    #[test]
+    fn color_g_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x2B, 4, &[0, 0, 0, 0, b'c', b'g', b'0', b'1']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.color_g_track, Some(*b"cg01"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_g_track, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

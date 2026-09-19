@@ -550,6 +550,12 @@ pub struct ParticleGeneratorDef {
     // until the child-generator path lands (the sec2 0x44 ChildGeneratorSetup).
     pub parent_position_copy: bool,
 
+    // sec2 0x46 ParentVelocityConfig: one float, the multiplier on the parent's total
+    // velocity copied into the child's velocity transform (research/xim
+    // ParticleInitializers.kt ParentVelocityConfig; apply is a no-op without a parent).
+    // Parsed but not applied until the child-generator path lands.
+    pub parent_velocity: Option<f32>,
+
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
@@ -776,6 +782,7 @@ impl ParticleGeneratorDef {
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
+        let mut parent_velocity = None;
         let mut oscillation_accel_z = None;
         let mut oscillation_accel_x = None;
         let mut oscillation_accel_y = None;
@@ -1075,6 +1082,12 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's position (research/xim
                 // ParticleInitializers.kt ParentPositionCopyConfig).
                 0x45 => parent_position_copy = true,
+                // 0x46 ParentVelocityConfig: one float — the multiplier on the parent's
+                // total velocity copied into the child's velocity
+                // (research/xim ParticleInitializers.kt ParentVelocityConfig).
+                0x46 if payload + 4 <= body.len() => {
+                    parent_velocity = Some(f32_le(body, payload));
+                }
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1333,6 +1346,7 @@ impl ParticleGeneratorDef {
             foot_mark,
             oscillation,
             parent_position_copy,
+            parent_velocity,
             oscillation_accel_z,
             oscillation_accel_x,
             oscillation_accel_y,
@@ -2438,6 +2452,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_position_copy);
+    }
+
+    // 0x46 ParentVelocityConfig: one float, the multiplier on the parent's total velocity
+    // (research/xim ParticleInitializers.kt ParentVelocityConfig). Shipped census: 252
+    // sec2 0x46 blocks in the parser-accepted corpus.
+    #[test]
+    fn parent_velocity_reads_the_single_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x46, 2, &2.5f32.to_le_bytes()));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.parent_velocity, Some(2.5));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.parent_velocity, None);
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the

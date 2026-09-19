@@ -1101,6 +1101,16 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             vel += pos_local.normalize() * speed;
         }
     }
+    // 0x41 RelativeVelocityVarianceSetup: a uniform [-v, v] draw along the same spawn offset
+    // direction as 0x08, no direction without an offset (research/xim
+    // ParticleInitializers.kt RelativeVelocityVarianceSetup — retail's CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x41 scales the normalized offset by frand of the
+    // value and adds it to the same allocation vector as 0x08).
+    if let Some(v) = g.def.relative_velocity_variance {
+        if pos_local.length_squared() > 0.0 {
+            vel += pos_local.normalize() * ((next_unit(&mut g.emit_rng) * 2.0 - 1.0) * v);
+        }
+    }
     // 0x0A RotationVarianceInitializer: a uniform [-v, v] draw per axis on top of the 0x09
     // base rotation (research/xim ParticleInitializers.kt RotationVarianceInitializer).
     let mut rotation = Vec3::from_array(g.def.init_rotation);
@@ -1995,6 +2005,7 @@ mod tests {
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
             relative_velocity: None,
+            relative_velocity_variance: None,
             rotation_variance: None,
             init_rotation: [0.0; 3],
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
@@ -3660,6 +3671,51 @@ mod tests {
     fn relative_velocity_without_a_spawn_offset_is_inert() {
         let mut d = def(0.0, 1.0, 1);
         d.relative_velocity = Some(0.5);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
+    }
+
+    // 0x41 RelativeVelocityVarianceSetup: each particle's velocity gains a uniform
+    // [-v, v] draw along its own spawn offset's direction, on top of the 0x08 speed
+    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
+    #[test]
+    fn relative_velocity_variance_spreads_along_the_spawn_offset() {
+        let mut d = def(10.0, 1.0, 1);
+        d.position_variance = Some(ffxi_dat::particle_gen::PositionVariance {
+            radius_variance: 0.0,
+            base_radius: 1.0,
+            axis_scale: [1.0; 3],
+        });
+        d.relative_velocity = Some(0.5);
+        d.relative_velocity_variance = Some(0.2);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 3.0);
+        assert_eq!(g.particles.len(), 3);
+        for p in &g.particles {
+            let dir = p.pos.normalize();
+            let extra = p.vel - Vec3::from_array([0.0, 0.01, 0.0]);
+            let along = extra.dot(dir);
+            assert!(
+                (0.3..0.7).contains(&along),
+                "the added speed is 0.5 plus a [-0.2, 0.2) draw along the offset: {along}"
+            );
+            let perpendicular = extra - dir * along;
+            assert!(
+                perpendicular.length() < 1e-5,
+                "the added velocity stays on the spawn offset's direction: {perpendicular:?}"
+            );
+        }
+    }
+
+    // With no spawn offset there is no direction, so 0x41 contributes nothing even with
+    // 0x08 present.
+    #[test]
+    fn relative_velocity_variance_without_a_spawn_offset_is_inert() {
+        let mut d = def(0.0, 1.0, 1);
+        d.relative_velocity = Some(0.5);
+        d.relative_velocity_variance = Some(0.2);
         let mut g = live(d, 30.0);
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);

@@ -403,6 +403,12 @@ pub struct ParticleGeneratorDef {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x08 normalizes field_54 minus the
     // position captured at element spawn, i.e. the offsets the earlier blocks added).
     pub relative_velocity: Option<f32>,
+    // sec2 0x41 RelativeVelocityVarianceSetup: the bound of the uniform random magnitude added
+    // to the 0x08 relative velocity along the spawn offset's direction per particle
+    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup; the retail
+    // decompile's CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x41 scales the normalized
+    // spawn offset by frand of this value and adds it to the same allocation vector as 0x08).
+    pub relative_velocity_variance: Option<f32>,
     // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
     // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
     // RotationVarianceInitializer — the retail decompile's ElemGenerate default is
@@ -627,6 +633,7 @@ impl ParticleGeneratorDef {
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
         let mut relative_velocity = None;
+        let mut relative_velocity_variance = None;
         let mut rotation_variance = None;
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
@@ -826,6 +833,12 @@ impl ParticleGeneratorDef {
                     });
                 }
                 0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
+                // 0x41 RelativeVelocityVarianceSetup: one float, the bound of the random
+                // magnitude added to the 0x08 relative velocity
+                // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
+                0x41 if payload + 4 <= body.len() => {
+                    relative_velocity_variance = Some(f32_le(body, payload));
+                }
                 0x16 if payload + 4 <= body.len() => {
                     init_color = [
                         body[payload] as f32 / 255.0,
@@ -1036,6 +1049,7 @@ impl ParticleGeneratorDef {
             init_velocity,
             velocity_variance,
             relative_velocity,
+            relative_velocity_variance,
             rotation_variance,
             init_rotation,
             blend,
@@ -1803,6 +1817,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.relative_velocity, None);
+    }
+
+    // 0x41 RelativeVelocityVarianceSetup: a single float — the bound of the uniform random
+    // magnitude added to the 0x08 relative velocity along the spawn offset's direction
+    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup). Shipped census:
+    // 9199 blocks, all size_words=2.
+    #[test]
+    fn relative_velocity_variance_reads_the_single_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x41, 2, &0.2f32.to_le_bytes()));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.relative_velocity_variance, Some(0.2));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.relative_velocity_variance, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

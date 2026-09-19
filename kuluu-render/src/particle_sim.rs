@@ -311,6 +311,18 @@ struct LiveGenerator {
     // See weather_particles::WEATHER_EMIT_SCALE for why it is applied to batched generators too.
     emit_scale: f32,
     emit_rng: u64,
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1F — retail's stepped azimuth indexes
+    // the generator's element counter (field_9C), advanced once per emitted element; it resets
+    // with the generator (field_9C = 0 at resource load and routine start).
+    elements_emitted: u32,
+    // The camera rotation at the last sync, for the 0x1F camera-oriented ring: the ring is
+    // authored in the camera's frame, so the offset is mapped camera->local before it lands
+    // in the generator's local space (retail multiplies the offset chain by the inverse of
+    // attach x view). One sync behind like `emit_culled`.
+    cam_view: Quat,
+    // The mesh entity's world rotation — the actor root's for actor-local generators, whose
+    // local frame is the actor's FFXI frame; identity otherwise.
+    actor_rot: Quat,
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
@@ -648,6 +660,9 @@ pub fn spawn_particle_generators(
             emit_culled: false,
             emit_scale: UNSCALED_EMISSION,
             emit_rng: emit_seed(entity),
+            elements_emitted: 0,
+            cam_view: Quat::IDENTITY,
+            actor_rot: Quat::IDENTITY,
             built_key: MeshKey::Empty,
         });
     }
@@ -737,6 +752,9 @@ pub fn spawn_actor_auto_run_particles(
                 emit_culled: false,
                 emit_scale: UNSCALED_EMISSION,
                 emit_rng: emit_seed(entity),
+                elements_emitted: 0,
+                cam_view: Quat::IDENTITY,
+                actor_rot: Quat::IDENTITY,
                 built_key: MeshKey::Empty,
                 def,
             });
@@ -811,6 +829,9 @@ pub fn spawn_zone_particle_generator(
         emit_culled: def.emit_cull.is_some(),
         emit_scale: opts.emit_scale,
         emit_rng: emit_seed(entity),
+        elements_emitted: 0,
+        cam_view: Quat::IDENTITY,
+        actor_rot: Quat::IDENTITY,
         built_key: MeshKey::Empty,
         def,
     });
@@ -1025,7 +1046,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
 
     // The 0x08 relative velocity lives in the generator's local space (the space the 0x02
     // base is scaled into by vel_basis), so its direction comes off the pre-basis offset.
-    let pos_local = match g.def.position_variance {
+    let mut pos_local = match g.def.position_variance {
         Some(v) => {
             let u = next_unit(&mut g.emit_rng);
             let yaw = (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI;
@@ -1034,6 +1055,31 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         }
         None => Vec3::ZERO,
     };
+    // 0x1F SphericalPositionVarianceFull: a spherical spawn spread whose azimuth is a random
+    // draw or one of the generator's evenly spaced steps (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x1F — the stepped azimuth indexes field_9C, the
+    // element counter advanced once per emitted element). Added on top of the 0x06/0x07
+    // spread, so the 0x08 relative direction sees the sum.
+    if let Some(sp) = g.def.spherical_full {
+        let u = next_unit(&mut g.emit_rng);
+        let azimuth = if sp.azimuth_steps == 0 {
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI
+        } else {
+            let step = (g.elements_emitted % sp.azimuth_steps) as f32 / sp.azimuth_steps as f32;
+            2.0 * std::f32::consts::PI * (step - 0.5)
+        };
+        let tilt = sp.tilt + (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * sp.tilt_variance;
+        let offset = Vec3::from_array(sp.offset(u, azimuth, tilt));
+        pos_local += if sp.camera_oriented {
+            // The ring is authored in the camera's frame: map it camera->local before it
+            // lands in the generator's space (retail multiplies the offset chain by the
+            // inverse of attach x view).
+            g.actor_rot.inverse() * g.cam_view * offset
+        } else {
+            offset
+        };
+    }
+    g.elements_emitted += 1;
     let pos = pos_local * g.vel_basis;
     // 0x03 VelocityVarianceSetup: a uniform [-v, v] draw per axis on top of the 0x02 base
     // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the shipped blocks all
@@ -1184,6 +1230,13 @@ pub fn sync_particle_meshes(
             reap.push((i, false));
             continue;
         };
+        // The 0x1F camera-oriented ring resolves against the camera and the actor's world
+        // rotation; sync runs after tick, so both reach emit() one frame behind like
+        // `emit_culled`.
+        g.cam_view = cam_rot;
+        if g.actor_local {
+            g.actor_rot = entity_xf.rotation();
+        }
         // A camera-pinned generator sits at the eye by construction, inside every band.
         if let Some(cull) = g.def.emit_cull.filter(|_| !g.camera_relative) {
             let emitter = if g.actor_local {
@@ -1925,6 +1978,7 @@ mod tests {
             follow_camera: false,
             camera_attached_base: false,
             position_variance: None,
+            spherical_full: None,
             continuous: false,
             auto_run: false,
             batched: false,
@@ -2005,6 +2059,9 @@ mod tests {
             emit_culled: false,
             emit_scale: UNSCALED_EMISSION,
             emit_rng: emit_seed(Entity::PLACEHOLDER),
+            elements_emitted: 0,
+            cam_view: Quat::IDENTITY,
+            actor_rot: Quat::IDENTITY,
             built_key: MeshKey::Empty,
             bound_radius: 0.0,
         }
@@ -2535,6 +2592,100 @@ mod tests {
             "a constant-radius shell leaves the interior empty"
         );
         assert!(centroid.length() < RADIUS * 0.2, "off-centre: {centroid}");
+    }
+
+    // 0x1F SphericalPositionVarianceFull: with a zero tilt the ring lies flat, and the stepped
+    // azimuth puts consecutive particles on consecutive steps of the ring (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x1F — the step indexes the element counter).
+    #[test]
+    fn spherical_full_stepped_azimuth_walks_the_ring() {
+        const STEPS: u32 = 6;
+        let mut d = def(60.0, 1.0, STEPS);
+        d.init_velocity = [0.0; 3];
+        d.spherical_full = Some(ffxi_dat::particle_gen::SphericalPositionVarianceFull {
+            radius_variance: 0.0,
+            base_radius: 2.0,
+            axis_scale: [1.0; 3],
+            rotation_z: 0.0,
+            rotation_y: 0.0,
+            tilt: 0.0,
+            tilt_variance: 0.0,
+            camera_oriented: false,
+            azimuth_steps: STEPS,
+        });
+        let mut g = live(d, f32::MAX);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), STEPS as usize);
+
+        let mut angles: Vec<f32> = g
+            .particles
+            .iter()
+            .map(|p| {
+                let (x, z) = (p.pos.x, p.pos.z);
+                let mut a = z.atan2(x);
+                if a < 0.0 {
+                    a += 2.0 * std::f32::consts::PI;
+                }
+                a
+            })
+            .collect();
+        angles.sort_by(|a, b| a.total_cmp(b));
+        let step = 2.0 * std::f32::consts::PI / STEPS as f32;
+        for (i, a) in angles.iter().enumerate() {
+            let expected = i as f32 * step;
+            assert!(
+                (a - expected).abs() < 1e-4,
+                "step {i} at {a}, expected {expected}"
+            );
+        }
+    }
+
+    // The camera flag authors the ring in the camera's frame: the same flat ring that a
+    // non-oriented block puts on the x/z axes rides the camera's rotation instead.
+    #[test]
+    fn spherical_full_camera_oriented_ring_follows_the_camera() {
+        let ring = |camera_oriented: bool| {
+            let mut d = def(60.0, 1.0, 2);
+            d.init_velocity = [0.0; 3];
+            d.spherical_full = Some(ffxi_dat::particle_gen::SphericalPositionVarianceFull {
+                radius_variance: 0.0,
+                base_radius: 2.0,
+                axis_scale: [1.0; 3],
+                rotation_z: 0.0,
+                rotation_y: 0.0,
+                tilt: 0.0,
+                tilt_variance: 0.0,
+                camera_oriented,
+                azimuth_steps: 2,
+            });
+            let mut g = live(d, f32::MAX);
+            g.cam_view = Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2);
+            advance(&mut g, 1.0);
+            g.particles
+                .iter()
+                .map(|p| (p.pos.x, p.pos.z))
+                .collect::<Vec<_>>()
+        };
+
+        let free = ring(false);
+        for (x, z) in &free {
+            assert!(
+                z.abs() < 1e-5,
+                "the un-oriented ring stays on the x axis: {x} {z}"
+            );
+        }
+
+        let oriented = ring(true);
+        for (x, z) in &oriented {
+            assert!(
+                x.abs() < 1e-5,
+                "the camera ring moves off the x axis: {x} {z}"
+            );
+        }
+        assert!(
+            oriented[0].1 > 0.0 && oriented[1].1 < 0.0,
+            "the ring spans the z axis"
+        );
     }
 
     // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS. A template

@@ -256,6 +256,42 @@ impl PositionVariance {
     }
 }
 
+/// sec2 0x1F SphericalPositionVarianceFull: a spherical spawn spread whose ring azimuth is
+/// either a random draw or one of a fixed number of evenly spaced steps; the ring can be
+/// tilted and, with the camera flag, authored in the camera's frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphericalPositionVarianceFull {
+    pub radius_variance: f32,
+    pub base_radius: f32,
+    pub axis_scale: [f32; 3],
+    pub rotation_z: f32,
+    pub rotation_y: f32,
+    pub tilt: f32,
+    pub tilt_variance: f32,
+    pub camera_oriented: bool,
+    // 0 = random azimuth draw; k = k evenly spaced azimuth steps.
+    pub azimuth_steps: u32,
+}
+
+impl SphericalPositionVarianceFull {
+    pub fn max_radius(&self) -> f32 {
+        self.radius_variance + self.base_radius
+    }
+
+    // `unit_radius` in 0..=1 is retail's `ufrand(A + B)` draw; `azimuth` and `tilt` are the
+    // resolved angles (the caller does the step-or-random azimuth draw and the
+    // `frand(tilt_variance)` tilt draw). The chain is retail's Rz(tilt) x Ry(azimuth) x S on
+    // (r, 0, 0) in the D3D row-vector convention (CYyGenerator.cpp CYyGenerator::ElemGenerate
+    // case 0x1F): the authored outer rotation is identity in every shipped block and only the
+    // x-axis scale can act on an x-axis offset, so neither is observable here.
+    pub fn offset(&self, unit_radius: f32, azimuth: f32, tilt: f32) -> [f32; 3] {
+        let r = self.max_radius() * unit_radius * self.axis_scale[0];
+        let (sa, ca) = azimuth.sin_cos();
+        let (st, ct) = tilt.sin_cos();
+        [r * ct * ca, r * st, -r * ct * sa]
+    }
+}
+
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ConstructFromData size — the resource
 // body from byte 0x60 is memcpy'd onto the object at `field_C0`, so object offset X reads back at
 // body index X - 0x70 (our `body` already drops the 16-byte chunk header). `flags` (CYyGenerator.h
@@ -333,6 +369,12 @@ pub struct ParticleGeneratorDef {
     pub camera_attached_base: bool,
     // The spawn spread applied to every emitted particle; None puts them all on one point.
     pub position_variance: Option<PositionVariance>,
+
+    // sec2 0x1F SphericalPositionVarianceFull: the spherical spawn spread whose azimuth is a
+    // random draw or one of the generator's evenly spaced steps (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x1F — the stepped azimuth indexes the generator's
+    // element counter; the camera flag maps the ring into the camera's frame).
+    pub spherical_full: Option<SphericalPositionVarianceFull>,
 
     pub continuous: bool,
     pub auto_run: bool,
@@ -577,6 +619,7 @@ impl ParticleGeneratorDef {
         let mut follow_camera = false;
         let mut camera_attached_base = false;
         let mut position_variance = None;
+        let mut spherical_full = None;
         let mut is_particle = false;
         let mut init_scale = [1.0f32; 3];
         let mut single_scale_variance = None;
@@ -691,6 +734,32 @@ impl ParticleGeneratorDef {
                 }
                 0x08 if payload + 4 <= body.len() => {
                     relative_velocity = Some(f32_le(body, payload));
+                }
+                // 0x1F SphericalPositionVarianceFull: nine floats, the camera flag u32, and the
+                // azimuth-step u16 (0 = random azimuth, otherwise one higher than the steps).
+                0x1F if payload + 42 <= body.len() => {
+                    spherical_full = Some(SphericalPositionVarianceFull {
+                        radius_variance: f32_le(body, payload),
+                        base_radius: f32_le(body, payload + 4),
+                        axis_scale: [
+                            f32_le(body, payload + 8),
+                            f32_le(body, payload + 12),
+                            f32_le(body, payload + 16),
+                        ],
+                        rotation_z: f32_le(body, payload + 20),
+                        rotation_y: f32_le(body, payload + 24),
+                        tilt: f32_le(body, payload + 28),
+                        tilt_variance: f32_le(body, payload + 32),
+                        camera_oriented: u32_le(body, payload + 36) & 1 != 0,
+                        azimuth_steps: {
+                            let raw = u16_le(body, payload + 40);
+                            if raw == 0 {
+                                0
+                            } else {
+                                raw as u32 + 1
+                            }
+                        },
+                    });
                 }
                 0x09 if payload + 12 <= body.len() => {
                     init_rotation = [
@@ -953,6 +1022,7 @@ impl ParticleGeneratorDef {
             follow_camera,
             camera_attached_base,
             position_variance,
+            spherical_full,
             continuous,
             auto_run,
             batched,
@@ -1816,6 +1886,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.single_scale_variance, None);
+    }
+
+    // 0x1F SphericalPositionVarianceFull: nine floats, the camera flag u32, and the
+    // azimuth-step u16, which CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1F reads as
+    // 0 in the random-azimuth case and one higher than the step count otherwise.
+    #[test]
+    fn spherical_full_reads_the_payload_fields() {
+        let payload = |camera: u32, raw_steps: u16| {
+            let mut p: Vec<u8> = Vec::new();
+            for f in [0.25f32, 0.5, 1.0, 1.5, 2.0, 0.1, 0.2, 0.3, 0.4] {
+                p.extend_from_slice(&f.to_le_bytes());
+            }
+            p.extend_from_slice(&camera.to_le_bytes());
+            p.extend_from_slice(&raw_steps.to_le_bytes());
+            p
+        };
+        let mut sec2 = mesh_setup();
+        sec2.extend(op(0x1F, 12, &payload(1, 4)));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
+            .unwrap()
+            .unwrap();
+        let sp = def.spherical_full.expect("sec2 0x1F block");
+        assert_eq!(sp.radius_variance, 0.25);
+        assert_eq!(sp.base_radius, 0.5);
+        assert_eq!(sp.axis_scale, [1.0, 1.5, 2.0]);
+        assert_eq!(sp.rotation_z, 0.1);
+        assert_eq!(sp.rotation_y, 0.2);
+        assert_eq!(sp.tilt, 0.3);
+        assert_eq!(sp.tilt_variance, 0.4);
+        assert!(sp.camera_oriented);
+        assert_eq!(sp.azimuth_steps, 5);
+
+        let mut sec2 = mesh_setup();
+        sec2.extend(op(0x1F, 12, &payload(0, 0)));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
+            .unwrap()
+            .unwrap();
+        let sp = def.spherical_full.expect("sec2 0x1F block");
+        assert!(!sp.camera_oriented);
+        assert_eq!(sp.azimuth_steps, 0, "raw 0 is the random-azimuth case");
+
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.spherical_full, None);
     }
 
     // 0x12 ScaleVelocitySetup: three floats, the per-frame scale rate per axis; only the sec3

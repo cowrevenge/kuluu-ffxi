@@ -398,6 +398,12 @@ pub struct ParticleGeneratorDef {
     // one [0, 1) draw per channel; the retail decompile's ElemGenerate has no 0x17 case, so
     // xim's mapping is the available evidence).
     pub color_variance: Option<[f32; 4]>,
+    // sec2 0x19 ColorTransformSetup: four i16s (r,g,b,a) written to the element's allocation
+    // slot. Parsed, not applied: the retail decompile's ElemGenerate has no 0x19 case
+    // (XICLIENT_CODE_MISSING) and xim allocates the transform but its drawers never read it
+    // (research/xim ParticleInitializers.kt ColorTransformSetup — particle.allocate only), so
+    // the application is unknown and the shipped alpha is always 0.
+    pub color_transform: Option<[i16; 4]>,
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
     // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
@@ -645,6 +651,7 @@ impl ParticleGeneratorDef {
         let mut single_scale_variance = None;
         let mut init_color = [1.0f32; 4];
         let mut color_variance = None;
+        let mut color_transform = None;
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
         let mut relative_velocity = None;
@@ -883,6 +890,16 @@ impl ParticleGeneratorDef {
                         body[payload + 3] as f32 / 255.0,
                     ]);
                 }
+                // 0x19 ColorTransformSetup: four i16s, parsed only (the application is
+                // unknown — see the `color_transform` field).
+                0x19 if payload + 8 <= body.len() => {
+                    color_transform = Some([
+                        i16::from_le_bytes([body[payload], body[payload + 1]]),
+                        i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
+                        i16::from_le_bytes([body[payload + 4], body[payload + 5]]),
+                        i16::from_le_bytes([body[payload + 6], body[payload + 7]]),
+                    ]);
+                }
                 // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
@@ -1083,6 +1100,7 @@ impl ParticleGeneratorDef {
             single_scale_variance,
             init_color,
             color_variance,
+            color_transform,
             init_velocity,
             velocity_variance,
             relative_velocity,
@@ -2147,6 +2165,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.color_variance, None);
+    }
+
+    // 0x19 ColorTransformSetup: four i16s, parsed only — the retail decompile's ElemGenerate
+    // has no 0x19 case and xim's drawers never read the allocated transform
+    // (research/xim ParticleInitializers.kt ColorTransformSetup). Shipped census: 15815
+    // blocks, all size_words=3, alpha always 0, every one behind a 0x16 base color.
+    #[test]
+    fn color_transform_reads_the_four_i16s() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = Vec::new();
+        for v in [-160i16, -160, 0, 0] {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        setup.extend(op(0x19, 3, &payload));
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.color_transform, Some([-160, -160, 0, 0]));
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_transform, None);
     }
 
     fn mesh_setup() -> Vec<u8> {

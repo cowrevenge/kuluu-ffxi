@@ -1534,6 +1534,13 @@ impl ParticleGeneratorDef {
                     // has no per-frame rgb track path (the I19 0x2A precedent), so the
                     // blocks arm nothing and only consume (the U1/U2 precedent).
                     0x18..=0x1A => {}
+                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x36/0x37/0x3B —
+                    // the specular rotation.y/z and color.a ProgressValueUpdaters: no
+                    // payload, they sample the sec2 0x5A/0x5B/0x5F specular tracks. The
+                    // engine does not model the specular element (the I18/I39/I40
+                    // precedent), so the blocks arm nothing and only consume (the U1/U2
+                    // precedent).
+                    0x36 | 0x37 | 0x3B => {}
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
                     // frame. The engine has no velocityRotation, so parse-only.
@@ -3465,6 +3472,44 @@ mod tests {
         .unwrap()
         .unwrap();
         for op in [0x18, 0x19, 0x1A] {
+            assert!(
+                outcomes.iter().any(|(s, o, outcome)| {
+                    *s == GeneratorSection::Updaters
+                        && *o == op
+                        && *outcome == GeneratorOpcodeOutcome::Decoded
+                }),
+                "sec3 {op:02X} must report decoded: {outcomes:?}"
+            );
+        }
+    }
+
+    // sec3 0x36/0x37/0x3B specular rotation.y/z and color.a ProgressValueUpdaters: no
+    // payload — they sample the sec2 0x5A/0x5B/0x5F specular tracks; the engine does not
+    // model the specular element (research/xim ParticleGeneratorParser.kt sec3Handler; the
+    // I18/I39/I40 precedent). Shipped census: all size_words=1, every one behind its sec2
+    // specular track (0x36 n=1481, 100% paired with the sec2 0x5A).
+    #[test]
+    fn specular_progress_updaters_consume_the_blocks_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x36, 1, &[]));
+        body.extend_from_slice(&op(0x37, 1, &[]));
+        body.extend_from_slice(&op(0x3B, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        for op in [0x36, 0x37, 0x3B] {
             assert!(
                 outcomes.iter().any(|(s, o, outcome)| {
                     *s == GeneratorSection::Updaters

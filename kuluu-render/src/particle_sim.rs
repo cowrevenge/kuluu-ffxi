@@ -2251,6 +2251,7 @@ mod tests {
             specular_color_a_track: None,
             parent_rotate_2: false,
             batching_setup: false,
+            parent_tex_coord: false,
         }
     }
 

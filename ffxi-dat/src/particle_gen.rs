@@ -719,6 +719,12 @@ pub struct ParticleGeneratorDef {
     // retail's generator walk has no 0x56 case (research/XIClient CYyGenerator.cpp), so the
     // block does not arm the GEN_FLAG_BATCHED flag's CheckFlag29 behavior — parsed only.
     pub batching_setup: bool,
+
+    // sec2 0x4A ParentTexCoordConfig: a no-payload marker — a child particle copies the
+    // parent's tex-coord translate (research/xim ParticleInitializers.kt
+    // ParentTexCoordConfig). A no-op without a parent, so parsed but not applied until the
+    // child-generator path lands (the 0x45 marker precedent).
+    pub parent_tex_coord: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -878,6 +884,7 @@ impl ParticleGeneratorDef {
         let mut parent_rotate = false;
         let mut parent_rotate_2 = false;
         let mut batching_setup = false;
+        let mut parent_tex_coord = false;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1252,6 +1259,10 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's scale (research/xim
                 // ParticleInitializers.kt ParentScaleConfig).
                 0x49 => parent_scale = true,
+                // 0x4A ParentTexCoordConfig: no payload — the marker that makes a child
+                // particle copy its parent's tex-coord translate (research/xim
+                // ParticleInitializers.kt ParentTexCoordConfig).
+                0x4A => parent_tex_coord = true,
                 // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
                 // shape bound to the element's velocity dampener
                 // (research/xim ParticleGeneratorParser.kt sec2Handler).
@@ -1559,6 +1570,7 @@ impl ParticleGeneratorDef {
             specular_color_a_track,
             parent_rotate_2,
             batching_setup,
+            parent_tex_coord,
         }))
     }
 
@@ -2708,6 +2720,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.batching_setup);
+    }
+
+    // 0x4A ParentTexCoordConfig: a no-payload marker (research/xim
+    // ParticleInitializers.kt ParentTexCoordConfig). Shipped census: 115 sec2 0x4A blocks in
+    // the parser-accepted corpus.
+    #[test]
+    fn parent_tex_coord_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x4A, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_tex_coord);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_tex_coord);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

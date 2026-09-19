@@ -82,6 +82,13 @@ SESSION_EDITS_CMD_START_RE=$'((^|[;&|(\n])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^
 SESSION_EDITS_WRITER_OPERAND="[[:space:]]+(-[^[:space:]]+[[:space:]]+)*[^-[:space:]]"
 SESSION_EDITS_WRITER_RE="${SESSION_EDITS_CMD_START_RE}((sed|perl)[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-[a-zA-Z]*i|(mv|cp|rm|touch|install|patch|rmcm|rustfmt)${SESSION_EDITS_WRITER_OPERAND}|cargo[[:space:]]+(fmt|fix)([[:space:]]|\$)|cargo[[:space:]]+clippy[[:space:]].*--fix|git[[:space:]]+(apply|checkout|restore|mv|rm)${SESSION_EDITS_WRITER_OPERAND}|git[[:space:]]+stash([[:space:]]+(push|save|pop|apply|drop|clear)([[:space:]]|\$)|[[:space:]]*\$))"
 
+# The cargo fmt/fix arm of the writer form, on its own: these shapes carry no
+# file operand, so the writer bit must not credit every dirty path in their
+# window (a peer write during a long cargo fmt --all is not this session's).
+# Spelled as a separate pattern because the writer form's alternation cannot
+# be tested for one arm in isolation.
+SESSION_EDITS_CARGO_FMT_RE='cargo[[:space:]]+(fmt|fix)([[:space:]]|\$)'
+
 # Tools that write files they never name on the command line, paired with the
 # directory each one owns. Crediting is scoped to that directory, so the
 # window of a tool nobody can predict the outputs of still withholds a peer's
@@ -543,4 +550,50 @@ cmd_is_writer_form() {
     return 0
   done < <(cmd_write_targets "$cmd")
   return 1
+}
+
+# cmd_writer_plausible <cmd> <cwd> <root> <root-relative-path>: for a command
+# whose shape is a writer form, is THIS path inside the tool's plausible file
+# set? The blanket licence is withheld for the shapes that carry no file
+# operand: cargo fmt/fix can only touch tracked *.rs under the workspace, and
+# rmcm only the operands it was pointed at (a directory operand reaches into
+# its tree). Every other writer form names its operands, so the naming arm and
+# the blanket backstop stay as they are.
+cmd_writer_plausible() {
+  local cmd="$1" cwd="$2" root="$3" p="${4:-}"
+  [ -n "$p" ] || return 1
+  if [[ "$cmd" =~ $SESSION_EDITS_CARGO_FMT_RE ]]; then
+    case "$p" in
+      *.rs) git -C "$root" ls-files --error-unmatch -- "$p" >/dev/null 2>&1 ;;
+      *) return 1 ;;
+    esac
+    return $?
+  fi
+  if [[ "$cmd" =~ ${SESSION_EDITS_CMD_START_RE}rmcm([[:space:]]|$) ]]; then
+    local t abs prefix
+    set -f
+    # shellcheck disable=SC2086
+    for t in $cmd; do
+      t="${t%\'}"; t="${t#\'}"
+      t="${t%\"}"; t="${t#\"}"
+      t="${t%;}"; t="${t%,}"
+      case "$t" in ''|-*) continue ;; esac
+      case "$t" in
+        /*) abs="$t" ;;
+        *) abs="$cwd/${t#./}" ;;
+      esac
+      [ -e "$abs" ] || continue
+      case "$abs" in "$root"/*) ;; *) continue ;; esac
+      if [ -d "$abs" ]; then
+        [ "$abs" = "$root" ] && return 0
+        prefix="${abs#"$root"/}"
+        case "$p" in "$prefix"/*) return 0 ;; esac
+      elif [ "$abs" = "$root/$p" ]; then
+        return 0
+      fi
+    done
+    set +f
+    return 1
+  fi
+  return 0
 }

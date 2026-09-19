@@ -146,16 +146,56 @@ test_named_but_unchanged_path_not_attributed() {
   assert_not_in_ledger "$SID" src/b.txt
 }
 
-# The broad arm, pinned as intended behaviour: a writer form with no path
-# operand credits whatever changed in its window. Narrowing it risks dropping
-# a real edit, which would silence the commit nudge on work that is ours.
+# A bare writer form with no file operand still credits a real reformat: the
+# plausible set for cargo fmt/fix is the workspace's tracked *.rs, and
+# dropping this arm would silence the commit nudge on work that is ours.
 test_writer_form_without_named_path_attributed() {
   new_repo
   local p; p=$(payload "$SID" "cargo fmt --all")
   run_hook session-edits-bash-pre.sh "$p"
-  printf 'formatted\n' > "$REPO/src/a.txt"
+  printf 'formatted\n' > "$REPO/mod.rs"
   run_hook session-edits-bash-post.sh "$p"
-  assert_in_ledger "$SID" src/a.txt
+  assert_in_ledger "$SID" mod.rs
+}
+
+# The race kuluu-6mj5 closed for non-writer commands: a peer's write to a
+# path cargo fmt cannot touch, concurrent with a bare cargo fmt --all, must
+# land in the suspect log, not the ledger.
+test_peer_write_outside_fmt_plausible_set_is_suspect() {
+  new_repo
+  local p; p=$(payload "$SID" "cargo fmt --all")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'peer\n' >> "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_not_in_ledger "$SID" src/a.txt
+  assert_in_suspect "$SID" src/a.txt
+}
+
+# cargo fmt formats the workspace's tracked sources; an untracked .rs file a
+# peer drops into the tree during the window is not in the plausible set.
+test_untracked_rs_outside_fmt_plausible_set_is_suspect() {
+  new_repo
+  local p; p=$(payload "$SID" "cargo fmt --all")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'peer\n' > "$REPO/src/peer.rs"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_not_in_ledger "$SID" src/peer.rs
+  assert_in_suspect "$SID" src/peer.rs
+}
+
+# rmcm names its operands, so only its operands are plausible (a directory
+# operand reaches into its tree); a peer write elsewhere in the window is a
+# suspect.
+test_rmcm_plausible_set_is_its_operands() {
+  new_repo
+  local p; p=$(payload "$SID" "rmcm hud")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'formatted\n' > "$REPO/hud/mod.rs"
+  printf 'peer\n' >> "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_in_ledger "$SID" hud/mod.rs
+  assert_not_in_ledger "$SID" src/a.txt
+  assert_in_suspect "$SID" src/a.txt
 }
 
 # Without this carve-out almost every command is a writer form and the whole
@@ -602,6 +642,9 @@ CASES=(  test_peer_write_not_attributed
   test_named_write_to_already_dirty_path_attributed
   test_named_but_unchanged_path_not_attributed
   test_writer_form_without_named_path_attributed
+  test_peer_write_outside_fmt_plausible_set_is_suspect
+  test_untracked_rs_outside_fmt_plausible_set_is_suspect
+  test_rmcm_plausible_set_is_its_operands
   test_redirect_to_dev_null_is_not_a_writer_form
   test_redirect_into_tree_is_a_writer_form
   test_snapshot_key_matches_between_pre_and_post

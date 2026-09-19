@@ -79,7 +79,7 @@ if [ -n "$candidates" ]; then
   [ "$capped" = 1 ] && reason="$SESSION_EDITS_SUSPECT_CAPPED"
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    if [ "$writer" = 1 ] \
+    if { [ "$writer" = 1 ] && cmd_writer_plausible "$cmd" "$cwd" "$root" "$p"; } \
       || cmd_names_path "$cmd" "$root" "$prefix" "$p" \
       || { [ "$capped" = 0 ] && cmd_owns_path "$cmd" "$p"; }; then
       ledger_add "$session_id" "$root" "$p"

@@ -432,6 +432,14 @@ pub struct ParticleGeneratorDef {
     // stored but unused in apply; the retail decompile's ElemGenerate has no 0x67 case,
     // so xim's mapping is the available evidence).
     pub reverse_displacement: Option<f32>,
+    // sec3 0x02 PositionUpdater: a no-payload marker — retail's ElemIdle case 0x02 adds the
+    // element's total velocity × dt to its position, and only while the block is present
+    // (research/xim ParticleUpdaters.kt PositionUpdater; CYyGenerator.cpp
+    // CYyGenerator::ElemIdle case 0x02). Shipped census: 92938 sec3 0x02 blocks, all
+    // size_words=1, 92937 of them in generators carrying a sec2 0x02 base velocity; the 8
+    // velocity-carrying generators without the block are never position-stepped by retail,
+    // so the flag gates the engine's velocity integration.
+    pub position_updater: bool,
     // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
     // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
     // RotationVarianceInitializer — the retail decompile's ElemGenerate default is
@@ -811,6 +819,7 @@ const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
+const SEC3_OPCODE_POSITION: u8 = 0x02;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
 const SEC3_OPCODE_SPRITE_SHEET_FRAME: u8 = 0x0D;
@@ -1393,6 +1402,7 @@ impl ParticleGeneratorDef {
         let mut moon_phase_color = None;
         let mut moon_phase_sprite = false;
         let mut rotation_updater = false;
+        let mut position_updater = false;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -1411,6 +1421,7 @@ impl ParticleGeneratorDef {
                 }
                 let mut decoded = true;
                 match opcode {
+                    SEC3_OPCODE_POSITION => position_updater = true,
                     SEC3_OPCODE_ROTATION_UPDATER => rotation_updater = true,
                     SEC3_OPCODE_SCALE_UPDATER => scale_updater = true,
                     0x27 if payload + 4 <= body.len() => uv_scroll[0] = f32_le(body, payload),
@@ -1627,6 +1638,7 @@ impl ParticleGeneratorDef {
             rotation_velocity,
             rotation_velocity_variance,
             rotation_updater,
+            position_updater,
             scale_velocity,
             scale_updater,
             scale_velocity_variance,
@@ -2363,6 +2375,49 @@ mod tests {
             }),
             "sec3 0x0E must report decoded: {outcomes:?}"
         );
+    }
+
+    // sec3 0x02 PositionUpdater: a no-payload marker that arms the position gate (research/xim
+    // ParticleUpdaters.kt PositionUpdater; CYyGenerator.cpp CYyGenerator::ElemIdle case 0x02).
+    // Shipped census: 92938 blocks, all size_words=1; the flag is set only while the block is
+    // present, so a generator without it stays off.
+    #[test]
+    fn position_updater_flag_arms_only_with_the_block() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(SEC3_OPCODE_POSITION, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(def.position_updater);
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Updaters
+                    && *op == SEC3_OPCODE_POSITION
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "sec3 0x02 must report decoded: {outcomes:?}"
+        );
+
+        // Without the block the flag stays off and the walk still terminates cleanly.
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(!def.position_updater);
     }
 
     // 0x1B color.a ProgressValueUpdater is a no-payload marker (research/xim

@@ -1032,12 +1032,19 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     let osc_applier_x = g.def.oscillation_applier_x;
     let osc_applier_y = g.def.oscillation_applier_y;
     let osc_applier_z = g.def.oscillation_applier_z;
+    // CYyGenerator.cpp CYyGenerator::ElemIdle case 0x02 — retail position-steps the element
+    // only while the generator's sec3 carries the 0x02 PositionUpdater, so a velocity without
+    // the block never moves the particle (research/xim ParticleUpdaters.kt PositionUpdater is
+    // the only integrator of the position transform's velocity).
+    let position_updater = g.def.position_updater;
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
         }
-        p.pos += p.vel * frames;
+        if position_updater {
+            p.pos += p.vel * frames;
+        }
         // sec3 0x29/0x2A/0x2B OscillationApplier (X/Y/Z): after the base position step, add
         // the amplitude change over the tick per active axis (research/xim
         // ParticleUpdaters.kt OscillationApplier — particle.position += direction × delta).
@@ -2231,6 +2238,7 @@ mod tests {
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,
+            position_updater: true,
             scale_velocity: None,
             scale_updater: false,
             scale_velocity_variance: None,
@@ -4078,6 +4086,23 @@ mod tests {
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);
         assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
+    }
+
+    // sec3 0x02 PositionUpdater off: the velocity still exists (the 0x03/0x06/0x09 accelerators
+    // keep charging it) but the position never steps, retail's ElemIdle behavior for the 8
+    // shipped generators that carry a base velocity without the block.
+    #[test]
+    fn position_updater_off_holds_the_particle_at_its_spawn() {
+        let mut d = def(10.0, 1.0, 1);
+        d.position_updater = false;
+        d.accel = Some([0.0, 0.001, 0.0]);
+        let mut g = live(d, 30.0);
+        for _ in 0..3 {
+            advance(&mut g, 1.0);
+        }
+        let p = &g.particles[0];
+        assert_eq!(p.pos, Vec3::ZERO, "no position step");
+        assert!(p.vel.y > 0.01, "the velocity keeps charging: {:?}", p.vel);
     }
 
     // 0x08 RelativeVelocitySetup: each particle's velocity gains the payload speed along its

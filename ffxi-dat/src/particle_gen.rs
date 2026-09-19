@@ -477,6 +477,12 @@ pub struct ParticleGeneratorDef {
     // has no z axis (the 0x10/0x11 z-bound precedent).
     pub scale_z_track: Option<[u8; 4]>,
     pub alpha_track: Option<[u8; 4]>,
+    // sec2 0x2A KeyFrameValueSetup (color.r): a keyframe track on the element's red channel
+    // (research/xim ParticleGeneratorParser.kt — 0x2A/0x2B/0x2C are the Color.r/g/b
+    // KeyFrameValueSetup; retail's keyframe pre-load pass references the same blocks as
+    // Keyframe resources). Parsed but not applied: the engine sets the particle's rgb at
+    // spawn from the 0x16 base / 0x17 variance and has no per-frame rgb track path.
+    pub color_r_track: Option<[u8; 4]>,
 
     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
     // MoonPhaseColorUpdater (0x4F, 12xRGBA): indexed by day-of-week / moon-phase frame and
@@ -687,6 +693,7 @@ impl ParticleGeneratorDef {
         let mut scale_y_track = None;
         let mut scale_z_track = None;
         let mut alpha_track = None;
+        let mut color_r_track = None;
         let mut blend = ParticleBlend::Additive;
         let mut blend_byte = 0u8;
         let mut ignore_texture_alpha = false;
@@ -947,6 +954,9 @@ impl ParticleGeneratorDef {
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
                 0x29 if payload + 8 <= body.len() => scale_z_track = track_id(body, payload + 4),
                 0x2D if payload + 8 <= body.len() => alpha_track = track_id(body, payload + 4),
+                // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to
+                // the element's red channel (research/xim ParticleGeneratorParser.kt).
+                0x2A if payload + 8 <= body.len() => color_r_track = track_id(body, payload + 4),
                 // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are the same
                 // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
                 // the section-3 ClockValueUpdater 0x3C..0x3F.
@@ -1169,6 +1179,7 @@ impl ParticleGeneratorDef {
             scale_y_track,
             scale_z_track,
             alpha_track,
+            color_r_track,
             day_of_week_color,
             moon_phase_color,
             tod_color_tracks,
@@ -2006,6 +2017,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.specular_rot_y_track, None);
+    }
+
+    // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the
+    // element's red channel (research/xim ParticleGeneratorParser.kt). Shipped census:
+    // 4431 blocks, all size_words=4, first payload word always zero.
+    #[test]
+    fn color_r_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x2A, 4, &[0, 0, 0, 0, b'c', b'r', b'0', b'1']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.color_r_track, Some(*b"cr01"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_r_track, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

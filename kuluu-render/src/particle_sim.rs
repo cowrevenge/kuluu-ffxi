@@ -1030,6 +1030,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
     let osc_applier_x = g.def.oscillation_applier_x;
+    let osc_applier_y = g.def.oscillation_applier_y;
     let osc_applier_z = g.def.oscillation_applier_z;
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
@@ -1037,10 +1038,10 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
             p.vel += a;
         }
         p.pos += p.vel * frames;
-        // sec3 0x29/0x2B OscillationApplier (X/Z): after the base position step, add the
-        // amplitude change over the tick per active axis (research/xim ParticleUpdaters.kt
-        // OscillationApplier — particle.position += direction × delta).
-        for (axis, applier) in [(0, osc_applier_x), (2, osc_applier_z)] {
+        // sec3 0x29/0x2A/0x2B OscillationApplier (X/Y/Z): after the base position step, add
+        // the amplitude change over the tick per active axis (research/xim
+        // ParticleUpdaters.kt OscillationApplier — particle.position += direction × delta).
+        for (axis, applier) in [(0, osc_applier_x), (1, osc_applier_y), (2, osc_applier_z)] {
             if let (Some(applier), Some(osc)) = (applier, p.osc.as_mut()) {
                 p.pos += oscillation_delta(
                     applier,
@@ -2211,6 +2212,7 @@ mod tests {
             oscillation_accel_y: None,
             oscillation_applier_x: None,
             oscillation_applier_z: None,
+            oscillation_applier_y: None,
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,
@@ -3456,6 +3458,33 @@ mod tests {
         }
         let z_full = g.particles[0].pos.z;
         assert!(z_full.abs() < 1e-2, "full-period return: {z_full}");
+    }
+
+    // sec3 0x2A OscillationApplier (Y): the y position sways with the amplitude curve. The
+    // default generator is world-space, so the FFXI +Y unit hat lands on Bevy −Y through the
+    // (x, −y, −z) basis — the peak is negative. The base velocity is zeroed so its drift does
+    // not mix into the asserted axis.
+    #[test]
+    fn oscillation_applier_y_oscillates_the_position() {
+        let mut d = def(1000.0, 1.0, 1);
+        d.init_velocity = [0.0; 3];
+        d.oscillation = true;
+        d.oscillation_accel_y = Some([0.5, 0.0]);
+        d.oscillation_applier_y = Some([2.0, 0.0, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1, "one particle");
+        g.stopped = true;
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let y_peak = g.particles[0].pos.y;
+        assert!((y_peak + 22.5).abs() < 1e-2, "half-period peak: {y_peak}");
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let y_full = g.particles[0].pos.y;
+        assert!(y_full.abs() < 1e-2, "full-period return: {y_full}");
     }
 
     // The 0x3E acceleration without the sec3 0x29 applier is parsed but never moves the

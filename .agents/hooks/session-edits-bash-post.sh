@@ -89,4 +89,5 @@ if [ -n "$candidates" ]; then
   done <<< "$changed"
 fi
 rm -f "$sigs" "$post_sigs"
+ledger_touch "$session_id"
 exit 0

@@ -45,6 +45,16 @@ SESSION_EDITS_SNAP_TTL="${SESSION_EDITS_SNAP_TTL:-$SESSION_EDITS_SNAP_TTL_DEFAUL
 case "$SESSION_EDITS_SNAP_TTL" in
   ''|*[!0-9]*) SESSION_EDITS_SNAP_TTL=$SESSION_EDITS_SNAP_TTL_DEFAULT ;;
 esac
+# A session's ledger and suspect log outlive its last tool call by no more
+# than this. Every hook touch refreshes the mtime, so the TTL only ever reaps
+# a session that has stopped calling tools; it is session scale, not the
+# command-window scale of the snapshot TTL, and a live multi-hour session can
+# never reach it.
+SESSION_EDITS_LEDGER_TTL_DEFAULT=604800
+SESSION_EDITS_LEDGER_TTL="${SESSION_EDITS_LEDGER_TTL:-$SESSION_EDITS_LEDGER_TTL_DEFAULT}"
+case "$SESSION_EDITS_LEDGER_TTL" in
+  ''|*[!0-9]*) SESSION_EDITS_LEDGER_TTL=$SESSION_EDITS_LEDGER_TTL_DEFAULT ;;
+esac
 case "$SESSION_EDITS_MAX_SIG_PATHS" in
   ''|*[!0-9]*) SESSION_EDITS_MAX_SIG_PATHS=$SESSION_EDITS_MAX_SIG_PATHS_DEFAULT ;;
 esac
@@ -142,6 +152,20 @@ snap_sweep() {
   return 0
 }
 
+# ledger_sweep: reap ledger and suspect logs whose owner has made no tool call
+# for the ledger TTL. A stale <sid>.suspect must not keep counting into the
+# commit nudge if the session id is reused. find's minute granularity is
+# rounded UP, so the sweep can only ever run later than the TTL asks (the
+# snap_sweep precedent).
+ledger_sweep() {
+  local dir
+  dir=$(ledger_dir)
+  [ -d "$dir" ] || return 0
+  find "$dir" -maxdepth 1 -type f \( -name '*.paths' -o -name '*.suspect' \) \
+    -mmin "+$(((SESSION_EDITS_LEDGER_TTL + 59) / 60))" -delete 2>/dev/null
+  return 0
+}
+
 # repo_root <dir>: the worktree root. Every ledger line, signature and
 # porcelain line is relative to it, never to the session's cwd, which may be a
 # subdirectory: `git hash-object --stdin-paths` resolves its input against the
@@ -192,6 +216,19 @@ ledger_add() {
     [ -n "$file" ] || continue
     printf '%s\n' "$(_rel "$cwd" "$file")" >> "$out"
   done
+}
+
+# ledger_touch <session_id>: refresh the mtime of this session's ledger and
+# suspect log on every hook call, so the sweep's TTL measures time since the
+# session last called a tool, not since it last wrote a file: a live session
+# in a long read-only phase must not lose its ledger.
+ledger_touch() {
+  local f
+  [ -n "${1:-}" ] || return 0
+  for f in "$(ledger_path "$1")" "$(suspect_path "$1")"; do
+    [ -f "$f" ] && touch "$f" 2>/dev/null
+  done
+  return 0
 }
 
 # ledger_read <session_id>: sorted unique paths, empty when absent.

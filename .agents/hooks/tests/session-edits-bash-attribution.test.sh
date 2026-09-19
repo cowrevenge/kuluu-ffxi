@@ -207,6 +207,60 @@ test_stale_snapshot_pair_is_swept() {
   return 0
 }
 
+# A dead session's ledger and suspect log would accumulate for the life of the
+# temp dir, and a stale <sid>.suspect keeps counting into the commit nudge if
+# the session id is reused.
+test_stale_ledger_is_swept() {
+  new_repo
+  local p lp sp
+  p=$(payload "$SID" "sed -i '' 's/alpha/beta/' src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  p=$(payload "$SID" "wc -l README.md")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'peer\n' >> "$REPO/src/b.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  lp=$(ledger_path "$SID")
+  sp=$(suspect_path "$SID")
+  [ -f "$lp" ] || fail "ledger missing before the sweep"
+  [ -f "$sp" ] || fail "suspect log missing before the sweep"
+  touch -t 202001010000 "$lp" "$sp"
+  run_hook session-edits-bash-pre.sh "$(payload "sess-b" "wc -l README.md")"
+  [ -f "$lp" ] && fail "stale ledger survived the sweep"
+  [ -f "$sp" ] && fail "stale suspect log survived the sweep"
+  return 0
+}
+
+# The mtime refreshes on every tool call, not only on writes: a live session
+# mid-way through a long read-only phase must not lose its ledger to the
+# sweep.
+test_live_ledger_survives_the_sweep() {
+  new_repo
+  local p lp
+  p=$(payload "$SID" "sed -i '' 's/alpha/beta/' src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  lp=$(ledger_path "$SID")
+  touch -t 202001010000 "$lp"
+  run_hook session-edits-bash-pre.sh "$(payload "$SID" "wc -l README.md")"
+  [ -f "$lp" ] || fail "sweep took the live session's ledger"
+  return 0
+}
+
+# Same guard as the snapshot TTL: an operator's junk ledger-TTL override must
+# not turn a hook into a talker.
+test_malformed_ledger_ttl_override_stays_silent() {
+  new_repo
+  export SESSION_EDITS_LEDGER_TTL=not-a-number
+  local p; p=$(payload "$SID" "sed -i '' 's/alpha/beta/' src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_in_ledger "$SID" src/a.txt
+}
+
 # stat_shim <flavour>: put a stand-in `stat` first on PATH. "gnu" rejects the
 # BSD -f format the way GNU stat does, so a Darwin runner can still exercise
 # the Linux path; "none" fails outright.
@@ -552,6 +606,9 @@ CASES=(  test_peer_write_not_attributed
   test_redirect_into_tree_is_a_writer_form
   test_snapshot_key_matches_between_pre_and_post
   test_stale_snapshot_pair_is_swept
+  test_stale_ledger_is_swept
+  test_live_ledger_survives_the_sweep
+  test_malformed_ledger_ttl_override_stays_silent
   test_portable_snapshot_mtime
   test_attribution_survives_gnu_only_stat
   test_snapshot_key_is_single_sourced

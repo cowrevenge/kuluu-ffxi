@@ -26,4 +26,5 @@ file=$(printf '%s' "$payload" \
 [ -n "$file" ] || exit 0
 
 ledger_add "$session_id" "$cwd" "$file"
+ledger_touch "$session_id"
 exit 0

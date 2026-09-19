@@ -485,6 +485,41 @@ fn attach_joint_offset(
     .unwrap_or(Vec3::ZERO)
 }
 
+// The world origin a generator emits from: the attach actor's root plus the joint the def
+// hangs off (research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition). The spawn
+// path computes it once; `track_attached_origins` recomputes it every frame for the defs that
+// carry the 0x11 follow.
+fn attached_origin(
+    def: &ParticleGeneratorDef,
+    owner: Entity,
+    target: Option<Entity>,
+    q_xf: &Query<&Transform>,
+    q_children: &Query<&Children>,
+    q_render: &Query<&FfxiRenderActor>,
+) -> Option<Vec3> {
+    let origin_entity =
+        crate::scheduler_runtime::particle_origin_entity(def.attach_type, owner, target);
+    let origin_xf = q_xf.get(origin_entity).ok()?;
+    // research/xim SkeletonInstance.kt getStandardJointExtended has no source-vs-target
+    // guard: it always walks the ring and keeps the reference nearest the other actor. On a
+    // self-targeted action both sides ARE the same actor, and the winner is the ring point
+    // nearest the actor's own origin — torso height, which is the whole point of this bead.
+    // Only an attachment with no second actor at all falls back to the root.
+    let other_world = if origin_entity == owner {
+        target
+    } else {
+        Some(owner)
+    }
+    .and_then(|e| q_xf.get(e).ok())
+    .map(|xf| xf.translation);
+    let joint_offset = attach_joint_offset(
+        def,
+        attach_pose(origin_entity, q_children, q_xf, q_render),
+        other_world,
+    );
+    Some(origin_xf.translation + joint_offset + Vec3::Y * def.base_position[1])
+}
+
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<(&Transform, Option<&ActionAssets>)>,
@@ -535,30 +570,8 @@ pub fn spawn_particle_generators(
             continue;
         };
         let target = q_action_target.get(ev.actor).ok().and_then(|t| t.0);
-        let origin_entity =
-            crate::scheduler_runtime::particle_origin_entity(def.attach_type, ev.actor, target);
-        let origin_xf = if origin_entity == ev.actor {
-            actor_xf
-        } else {
-            q_xf.get(origin_entity).unwrap_or(actor_xf)
-        };
-        // research/xim SkeletonInstance.kt getStandardJointExtended has no source-vs-target
-        // guard: it always walks the ring and keeps the reference nearest the other actor. On a
-        // self-targeted action both sides ARE the same actor, and the winner is the ring point
-        // nearest the actor's own origin — torso height, which is the whole point of this bead.
-        // Only an attachment with no second actor at all falls back to the root.
-        let other_world = if origin_entity == ev.actor {
-            target
-        } else {
-            Some(ev.actor)
-        }
-        .and_then(|e| q_xf.get(e).ok())
-        .map(|xf| xf.translation);
-        let joint_offset = attach_joint_offset(
-            &def,
-            attach_pose(origin_entity, &q_children, &q_xf, &q_render),
-            other_world,
-        );
+        let origin = attached_origin(&def, ev.actor, target, &q_xf, &q_children, &q_render)
+            .unwrap_or(actor_xf.translation + Vec3::Y * def.base_position[1]);
         let mat = mats.add(FfxiParticleMaterial::for_def(&def, tex, NO_DAT_ORDER));
         let mesh = meshes.add(empty_mesh());
 
@@ -601,7 +614,7 @@ pub fn spawn_particle_generators(
             draw_path: D3mDrawPath::D3m,
             sprite_frames,
             def,
-            origin: origin_xf.translation + joint_offset + Vec3::Y * def.base_position[1],
+            origin,
             particles: Vec::new(),
             emit_accum: 0.0,
             age_frames: 0.0,
@@ -830,6 +843,57 @@ pub fn stop_generators_for_despawned_owners(
     mut sim: ResMut<ParticleSimulator>,
 ) {
     sim.stop_generators_of_dead_owners(|e| q_alive.get(e).is_ok());
+}
+
+// 0x11 AssociationUpdater: retail re-snaps the associated position to the attach actor's
+// position plus joint every frame (research/xim ParticleGeneratorAttachment.kt
+// updateAssociatedPosition - a hard copy; the follow-rate factor is parsed but unused
+// there). The spawn path computes the origin once, so without this a cast aura or hit
+// flash keeps emitting from where the actor stood when the stage fired.
+pub fn track_attached_origins(
+    q_xf: Query<&Transform>,
+    q_children: Query<&Children>,
+    q_render: Query<&FfxiRenderActor>,
+    q_action_target: Query<&crate::scheduler_runtime::ActionTarget>,
+    mut sim: ResMut<ParticleSimulator>,
+) {
+    use ffxi_dat::particle_gen::AttachType;
+    for g in &mut sim.generators {
+        // Only scheduled generators track: auto-run zone generators are parented to their
+        // actor root and ride along, and the camera/celestial origins have their own
+        // per-frame setters.
+        let Some(origin_routine) = g.origin_routine else {
+            continue;
+        };
+        if !g
+            .def
+            .association
+            .as_ref()
+            .is_some_and(|a| a.follow_position)
+        {
+            continue;
+        }
+        // xim's AttachType.None branch updates nothing; Sun/Moon ride
+        // `set_celestial_origins` instead.
+        match g.def.attach_type {
+            AttachType::None | AttachType::Sun | AttachType::Moon => continue,
+            _ => {}
+        }
+        let target = q_action_target
+            .get(origin_routine.owner)
+            .ok()
+            .and_then(|t| t.0);
+        if let Some(origin) = attached_origin(
+            &g.def,
+            origin_routine.owner,
+            target,
+            &q_xf,
+            &q_children,
+            &q_render,
+        ) {
+            g.origin = origin;
+        }
+    }
 }
 
 pub fn tick_particle_simulator(time: Res<Time>, mut sim: ResMut<ParticleSimulator>) {
@@ -1810,6 +1874,7 @@ mod tests {
             uv_scroll: [0.0, 0.0],
             accel: None,
             emit_cull: None,
+            association: None,
             rotation_velocity: None,
             rotation_updater: false,
             relife_on_expiry: false,
@@ -3002,6 +3067,82 @@ mod tests {
         assert!(
             sim.generators[0].particles.is_empty(),
             "live particles finish their lifetime and none replace them"
+        );
+    }
+
+    // 0x11 AssociationUpdater: retail re-snaps the associated position to the attach actor's
+    // position every frame (research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition),
+    // so the live origin tracks the actor instead of staying at the spawn-time position.
+    #[test]
+    fn attached_generator_origin_tracks_the_actor_while_the_effect_runs() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let owner = world.spawn(Transform::from_translation(Vec3::ZERO)).id();
+        let mut d = def(600.0, 1.0, 1);
+        d.association = Some(ffxi_dat::particle_gen::AssociationFollow {
+            follow_position: true,
+            follow_facing: false,
+            factor: 255,
+        });
+        let mut g = live(d, 0.0);
+        g.origin_routine = Some(RoutineOrigin {
+            owner,
+            gen_id: *b"gn10",
+            routine: *b"cabk",
+        });
+        g.origin = Vec3::new(9.0, 0.0, 0.0);
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(g);
+        world.insert_resource(sim);
+
+        world.run_system_once(track_attached_origins).unwrap();
+        assert_eq!(
+            world.resource::<ParticleSimulator>().generators[0].origin,
+            Vec3::new(0.0, 0.5, 0.0),
+            "the origin snaps to the actor's position plus base height"
+        );
+
+        *world.get_mut::<Transform>(owner).unwrap() =
+            Transform::from_translation(Vec3::new(3.0, 0.0, -4.0));
+        world.run_system_once(track_attached_origins).unwrap();
+        assert_eq!(
+            world.resource::<ParticleSimulator>().generators[0].origin,
+            Vec3::new(3.0, 0.5, -4.0),
+            "and keeps tracking as the actor moves"
+        );
+    }
+
+    // Without the 0x11 updater the origin stays where the spawn path put it - retail's handler
+    // only runs for defs that carry the updater.
+    #[test]
+    fn generator_without_the_association_updater_keeps_its_spawn_origin() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let owner = world
+            .spawn(Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)))
+            .id();
+        let g = {
+            let d = def(600.0, 1.0, 1);
+            let mut g = live(d, 0.0);
+            g.origin_routine = Some(RoutineOrigin {
+                owner,
+                gen_id: *b"gn10",
+                routine: *b"cabk",
+            });
+            g.origin = Vec3::new(9.0, 0.0, 0.0);
+            g
+        };
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(g);
+        world.insert_resource(sim);
+
+        world.run_system_once(track_attached_origins).unwrap();
+        assert_eq!(
+            world.resource::<ParticleSimulator>().generators[0].origin,
+            Vec3::new(9.0, 0.0, 0.0),
+            "no 0x11 follow: the spawn-time origin is untouched"
         );
     }
 

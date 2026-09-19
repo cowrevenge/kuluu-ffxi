@@ -405,6 +405,10 @@ pub struct ParticleGeneratorDef {
     // ParticleGeneratorParser.kt sec1Handler GeneratorCullUpdater.
     pub emit_cull: Option<EmitCull>,
 
+    // Section 1 generator-level updater 0x11, research/xim ParticleGeneratorParser.kt
+    // sec1Handler AssociationUpdater.
+    pub association: Option<AssociationFollow>,
+
     // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
     // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
@@ -451,6 +455,19 @@ pub struct EmitCull {
     pub unlink_out_of_range: bool,
 }
 
+// research/xim ParticleGeneratorUpdaters.kt AssociationUpdater - the section-1 0x11
+// config word: bit 0 re-snaps the generator's associated position to the attach actor
+// every frame, bit 1 the associated facing. The high word is a follow-rate factor that
+// retail parses but its own handler ignores - ParticleGeneratorAttachment.kt
+// updateAssociatedPosition is a hard copy ("it's not supposed to be an instant update,
+// but most effects are so fast that it doesn't really matter").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AssociationFollow {
+    pub follow_position: bool,
+    pub follow_facing: bool,
+    pub factor: u32,
+}
+
 impl EmitCull {
     pub fn out_of_range(&self, distance: f32, zone_draw_distance: f32) -> bool {
         let max = if self.max_distance == 0.0 {
@@ -463,6 +480,7 @@ impl EmitCull {
 }
 
 const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
+const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
@@ -760,6 +778,7 @@ impl ParticleGeneratorDef {
 
         // Section 1 (body[0x70]) — generator-level per-frame updaters, the same block framing.
         let mut emit_cull = None;
+        let mut association = None;
         let sec1_raw = u32_le(body, 0x70) as usize;
         if sec1_raw >= CHUNK_HEADER_LEN && sec1_raw - CHUNK_HEADER_LEN < body.len() {
             let mut cursor = sec1_raw - CHUNK_HEADER_LEN;
@@ -782,6 +801,16 @@ impl ParticleGeneratorDef {
                             max_distance: f32_le(body, payload),
                             min_distance: f32_le(body, payload + 4),
                             unlink_out_of_range: u32_le(body, payload + 8) & 1 != 0,
+                        });
+                    }
+                    // research/xim ParticleGeneratorUpdaters.kt AssociationUpdater read:
+                    // followPosition(0x1), followFacing(0x2), followFactor(>>2).
+                    SEC1_OPCODE_ASSOCIATION if payload + 4 <= body.len() => {
+                        let cfg = u32_le(body, payload);
+                        association = Some(AssociationFollow {
+                            follow_position: cfg & 1 != 0,
+                            follow_facing: cfg & 2 != 0,
+                            factor: cfg >> 2,
                         });
                     }
                     _ => decoded = false,
@@ -857,6 +886,7 @@ impl ParticleGeneratorDef {
             uv_scroll,
             accel,
             emit_cull,
+            association,
             rotation_velocity,
             rotation_updater,
             relife_on_expiry,
@@ -1924,6 +1954,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.emit_cull, None, "no section 1: never culled");
+    }
+
+    // 0x11's config word is followPosition(0x1), followFacing(0x2), factor(>>2) - research/xim
+    // ParticleGeneratorUpdaters.kt AssociationUpdater read. The shipped census is 0x0003fd
+    // (follow position only, factor 255) and 0x0003ff (both, factor 255).
+    #[test]
+    fn association_follow_reads_the_flags_and_factor_from_section_1() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let parse_cfg = |cfg: u32| {
+            let mut sec1 = op(0x04, 2, &[0, 0, 0, 0]);
+            sec1.extend(op(SEC1_OPCODE_ASSOCIATION, 2, &cfg.to_le_bytes()));
+            sec1.extend(op(OPCODE_END, 0, &[]));
+            let body = with_sec1(build(&setup, 1, GEN_FLAG_AUTO_RUN | 1), &sec1);
+            ParticleGeneratorDef::parse(&body).unwrap().unwrap()
+        };
+        assert_eq!(
+            parse_cfg(0x0003fd).association,
+            Some(AssociationFollow {
+                follow_position: true,
+                follow_facing: false,
+                factor: 0x3fd >> 2,
+            })
+        );
+        assert_eq!(
+            parse_cfg(0x0003ff).association,
+            Some(AssociationFollow {
+                follow_position: true,
+                follow_facing: true,
+                factor: 0x3ff >> 2,
+            })
+        );
+
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, GEN_FLAG_AUTO_RUN | 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.association, None, "no section 1: no follow");
     }
 
     #[test]

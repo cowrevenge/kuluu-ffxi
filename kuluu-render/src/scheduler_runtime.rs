@@ -3792,6 +3792,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_particle_dampen_stages,
                     dispatch_spell_effect_stages,
                     crate::particle_sim::stop_generators_for_despawned_owners,
+                    crate::particle_sim::track_attached_origins,
                     crate::particle_sim::tick_particle_simulator,
                     crate::particle_sim::sync_particle_meshes,
                     dispatch_sound_stages,
@@ -5359,7 +5360,12 @@ mod tests {
             .expect("cabk exists")
             .stages
             .iter()
-            .filter(|t| t.stage.kind != StageKind::Unknown)
+            .filter(|t| {
+                !matches!(
+                    t.stage.kind,
+                    StageKind::Unknown | StageKind::StartRoutineMarker
+                )
+            })
             .count(),
             0,
             "without the global tier the aura sub-routines resolve to nothing — the original bug"

@@ -2014,6 +2014,7 @@ mod tests {
             fog_enabled: true,
             draw_priority: Default::default(),
             sort_offset: 0.0,
+            projection_bias: None,
             depth_write: false,
             scale_x_track: None,
             scale_y_track: None,

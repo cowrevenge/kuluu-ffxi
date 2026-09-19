@@ -434,6 +434,14 @@ pub struct ParticleGeneratorDef {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — the element's `field_128`
     // sort-key offset (research/xim Particle.kt `projectionBias`).
     pub sort_offset: f32,
+    // sec2 0x72 ProjectionBiasInitializer: two floats. param0 is the same `field_128` 0x30
+    // writes (the ordering-table key via CMoElem.cpp CMoElem::CheckSomethingWasTrue ->
+    // OT->Insert), so it lands in `sort_offset`; param1 is the attached SkeletalMeshActor
+    // depth-scale factor (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x72 —
+    // field_128 *= (GetDepthScale() - 1) * (param1 != 0 ? param1 : 1) + 1), which the engine
+    // does not reproduce (no actor depth scale) and xim ignores (research/xim
+    // ParticleInitializers.kt ProjectionBiasInitializer — only param0 reaches the draw bias).
+    pub projection_bias: Option<[f32; 2]>,
     // CMoElem.cpp CMoElem::PrepDX — D3DRS_ZWRITEENABLE for the element.
     pub depth_write: bool,
 
@@ -645,6 +653,7 @@ impl ParticleGeneratorDef {
         let mut fog_enabled = true;
         let mut draw_priority = DrawPriority::Depth;
         let mut sort_offset = 0.0;
+        let mut projection_bias = None;
         let mut depth_write = false;
         let mut tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS] =
             [None; TOD_COLOR_CHANNELS];
@@ -838,6 +847,16 @@ impl ParticleGeneratorDef {
                 // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
                 0x41 if payload + 4 <= body.len() => {
                     relative_velocity_variance = Some(f32_le(body, payload));
+                }
+                // 0x72 ProjectionBiasInitializer: two floats — param0 sets the same field_128
+                // as 0x30 (last write in stream order wins, as in retail's sequential walk; the
+                // shipped data never carries both), param1 is the actor depth-scale factor
+                // (research/xim ParticleInitializers.kt ProjectionBiasInitializer).
+                0x72 if payload + 8 <= body.len() => {
+                    let p0 = f32_le(body, payload);
+                    let p1 = f32_le(body, payload + 4);
+                    sort_offset = p0;
+                    projection_bias = Some([p0, p1]);
                 }
                 0x16 if payload + 4 <= body.len() => {
                     init_color = [
@@ -1058,6 +1077,7 @@ impl ParticleGeneratorDef {
             fog_enabled,
             draw_priority,
             sort_offset,
+            projection_bias,
             depth_write,
             scale_x_track,
             scale_y_track,
@@ -2064,6 +2084,31 @@ mod tests {
         let body = build(&plain, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, 0.0);
+    }
+
+    // 0x72 ProjectionBiasInitializer: two floats — param0 lands in sort_offset (the same
+    // field_128 0x30 writes), param1 is kept as the actor depth-scale factor
+    // (research/xim ParticleInitializers.kt ProjectionBiasInitializer). Shipped census:
+    // 24180 blocks, all size_words=3, param0 [-26, 1], param1 [-8.6, 2.5] (14388 zero),
+    // zero co-occurrence with 0x30.
+    #[test]
+    fn projection_bias_reads_the_two_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = Vec::new();
+        for f in [-0.5f32, 2.0] {
+            payload.extend_from_slice(&f.to_le_bytes());
+        }
+        setup.extend(op(0x72, 3, &payload));
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.sort_offset, -0.5);
+        assert_eq!(def.projection_bias, Some([-0.5, 2.0]));
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.sort_offset, 0.0);
+        assert_eq!(plain.projection_bias, None);
     }
 
     fn mesh_setup() -> Vec<u8> {

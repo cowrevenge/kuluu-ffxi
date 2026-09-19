@@ -346,6 +346,10 @@ pub struct ParticleGeneratorDef {
     pub init_scale: [f32; 3],
     pub init_color: [f32; 4],
     pub init_velocity: [f32; 3],
+    // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
+    // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup — the allocationOffset binds it to the position transform).
+    pub velocity_variance: Option<[f32; 3]>,
     pub init_rotation: [f32; 3],
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
@@ -546,6 +550,7 @@ impl ParticleGeneratorDef {
         let mut init_scale = [1.0f32; 3];
         let mut init_color = [1.0f32; 4];
         let mut init_velocity = [0.0f32; 3];
+        let mut velocity_variance = None;
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
         let mut scale_y_track = None;
@@ -621,6 +626,13 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                0x03 if payload + 12 <= body.len() => {
+                    velocity_variance = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
                 }
                 0x06 if payload + 8 <= body.len() => {
                     position_variance = Some(PositionVariance {
@@ -886,6 +898,7 @@ impl ParticleGeneratorDef {
             init_scale,
             init_color,
             init_velocity,
+            velocity_variance,
             init_rotation,
             blend,
             blend_byte,
@@ -1586,6 +1599,37 @@ mod tests {
             }),
             "0x8E must report decoded: {outcomes:?}"
         );
+    }
+
+    // 0x03 VelocityVarianceSetup: the three floats are the per-axis bounds of the random
+    // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup); the shipped census is 6311 blocks, all size_words=4, and every
+    // one sits after its generator's 0x02.
+    #[test]
+    fn velocity_variance_reads_the_three_axis_bounds() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let axis = |values: [f32; 3], block: &mut Vec<u8>, opcode: u8| {
+            let mut bytes = Vec::new();
+            for f in values {
+                bytes.extend_from_slice(&f.to_le_bytes());
+            }
+            block.extend(op(opcode, 4, &bytes));
+        };
+        let vel: [f32; 3] = [0.5, -0.25, 0.0];
+        axis(vel, &mut sec2, 0x02);
+        let var: [f32; 3] = [0.1, 0.2, 0.3];
+        axis(var, &mut sec2, 0x03);
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.init_velocity, vel);
+        assert_eq!(def.velocity_variance, Some(var));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.velocity_variance, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

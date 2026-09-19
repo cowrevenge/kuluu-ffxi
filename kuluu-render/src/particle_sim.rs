@@ -1021,10 +1021,21 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         }
         None => Vec3::ZERO,
     };
+    // 0x03 VelocityVarianceSetup: a uniform [-v, v] draw per axis on top of the 0x02 base
+    // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the shipped blocks all
+    // sit after their 0x02, so base-plus-variance is the authored order).
+    let mut vel = Vec3::from_array(g.def.init_velocity);
+    if let Some(var) = g.def.velocity_variance {
+        vel += Vec3::new(
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[0],
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[1],
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
+        );
+    }
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
-        vel: Vec3::from_array(g.def.init_velocity) * g.vel_basis,
+        vel: vel * g.vel_basis,
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
@@ -1858,6 +1869,7 @@ mod tests {
             init_scale: [0.1, 0.1, 1.0],
             init_color: [0.2, 0.2, 0.6, 0.5],
             init_velocity: [0.0, 0.01, 0.0],
+            velocity_variance: None,
             init_rotation: [0.0; 3],
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
             blend_byte: 0x48,
@@ -3249,6 +3261,39 @@ mod tests {
         }
         assert_eq!(g.particles.len(), 1, "singleton emits exactly once");
         assert!(g.particles[0].pos.y > 0.0, "velocity integrated");
+    }
+
+    // 0x03 VelocityVarianceSetup: every emitted particle draws a uniform [-v, v] offset
+    // per axis on top of the 0x02 base velocity (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup; RandHelper rand() in [-1, 1)).
+    #[test]
+    fn velocity_variance_spreads_each_axis_around_the_base() {
+        let mut d = def(10.0, 1.0, 1);
+        d.velocity_variance = Some([0.001, 0.002, 0.003]);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 5.0);
+        assert_eq!(g.particles.len(), 5, "one draw per particle");
+        for p in &g.particles {
+            assert!(
+                (-0.001..=0.001).contains(&p.vel.x)
+                    && (0.008..=0.012).contains(&p.vel.y)
+                    && (-0.003..=0.003).contains(&p.vel.z),
+                "each axis inside base ± bound: {:?}",
+                p.vel
+            );
+        }
+        assert!(
+            g.particles.windows(2).any(|w| w[0].vel != w[1].vel),
+            "the variance is a per-particle draw, not a constant"
+        );
+    }
+
+    #[test]
+    fn velocity_without_variance_is_exactly_the_base() {
+        let mut g = live(def(0.0, 1.0, 1), 30.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
     }
 
     #[test]

@@ -541,6 +541,10 @@ pub enum LookData {
         model_id: Option<u32>,
         #[serde(default)]
         animation_start: Option<u32>,
+        /// Seconds a lift spends between floors, elevators only
+        /// (`getTransportNPCName` writes it at name+8).
+        #[serde(default)]
+        travel_secs: Option<u8>,
     },
 }
 
@@ -598,14 +602,19 @@ impl LookData {
                 // vendor/server/src/map/packets/entity_update.cpp getTransportNPCName
                 const MODEL_OFFSET: usize = 0x30;
                 const TIME_OFFSET: usize = 0x34;
+                const TRAVEL_OFFSET: usize = 0x38;
                 let word = |offset| {
                     body.get(offset..offset + 4)
                         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
                 };
+                let travel_secs = (size == ffxi_vocab::transport::MODEL_ELEVATOR)
+                    .then(|| body.get(TRAVEL_OFFSET).copied())
+                    .flatten();
                 Some(LookData::Transport {
                     size,
                     model_id: word(MODEL_OFFSET),
                     animation_start: word(TIME_OFFSET),
+                    travel_secs,
                 })
             }
             _ => None,
@@ -1949,13 +1958,20 @@ mod transport_tests {
         const MODEL: usize = 44;
         const SELECTOR: usize = 48;
         const START: usize = 52;
-        const FULL: usize = 56;
+        const TRAVEL: usize = 56;
+        const FULL: usize = 57;
         const STAMP: u32 = 0x1200_3400;
-        for size in [3u16, 4] {
+        const TRAVEL_SECS: u8 = 8;
+        for size in [
+            ffxi_vocab::transport::MODEL_ELEVATOR,
+            ffxi_vocab::transport::MODEL_SHIP,
+        ] {
+            let elevator = size == ffxi_vocab::transport::MODEL_ELEVATOR;
             let mut body = [0u8; FULL];
             body[MODEL..MODEL + 2].copy_from_slice(&size.to_le_bytes());
-            body[SELECTOR] = 14;
-            body[START..].copy_from_slice(&STAMP.to_le_bytes());
+            body[SELECTOR..SELECTOR + 4].copy_from_slice(b"@6l0");
+            body[START..START + 4].copy_from_slice(&STAMP.to_le_bytes());
+            body[TRAVEL] = TRAVEL_SECS;
             for length in 0..=FULL {
                 let decoded = LookData::decode_char_npc(&body[..length]);
                 if length < SELECTOR {
@@ -1965,9 +1981,11 @@ mod transport_tests {
                         decoded,
                         Some(LookData::Transport {
                             size,
-                            model_id: (length >= START).then_some(14),
-                            animation_start: (length == FULL).then_some(STAMP),
-                        })
+                            model_id: (length >= START).then_some(u32::from_le_bytes(*b"@6l0")),
+                            animation_start: (length >= TRAVEL).then_some(STAMP),
+                            travel_secs: (elevator && length == FULL).then_some(TRAVEL_SECS),
+                        }),
+                        "size {size} length {length}"
                     );
                 }
             }
@@ -1978,6 +1996,7 @@ mod transport_tests {
                     size,
                     model_id: Some(0),
                     animation_start: Some(0),
+                    travel_secs: elevator.then_some(0),
                 })
             );
         }

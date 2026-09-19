@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v41: EntityLook::Transport.travel_secs - the lift's seconds between floors from the 0x0E
+// name block, the fallback for a shaft whose zone DAT routine states no travel of its own.
 // v40: InventoryItem.unselectable - the NoSelect lock an in-flight item use holds, which is the
 // only word the client gets that the item is spent until the use resolves seconds later.
 // v39: CutsceneCue::ActorMove.speed is the raw 0x32 MainSpeed operand (i32,
@@ -93,7 +95,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 40;
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -268,6 +270,9 @@ pub enum EntityLook {
         size: u16,
         model_id: Option<u32>,
         animation_start: Option<u32>,
+        /// Seconds a lift spends between floors, elevators only; `None` for
+        /// ships and for a producer older than v41.
+        travel_secs: Option<u8>,
     },
 }
 
@@ -294,6 +299,7 @@ entity_look_codecs! {
         size: u16,
         #[serde(default)] model_id: Option<u32>,
         #[serde(default)] animation_start: Option<u32>,
+        #[serde(default)] travel_secs: Option<u8>,
     },
 }
 
@@ -2320,6 +2326,7 @@ mod tests {
                 size: 3,
                 model_id: None,
                 animation_start: None,
+                travel_secs: None,
             }),
             ..base.clone()
         };
@@ -2354,7 +2361,7 @@ mod tests {
 
     #[test]
     fn entity_look_codecs_preserve_every_variant() {
-        const TRANSPORT_POSTCARD: &[u8] = &[3, 4, 1, 14, 1, 192, 196, 7];
+        const TRANSPORT_POSTCARD: &[u8] = &[3, 3, 1, 14, 1, 192, 196, 7, 1, 8];
         let variants = [
             (EntityLook::Standard { modelid: 321 }, "standard"),
             (
@@ -2381,9 +2388,10 @@ mod tests {
             ),
             (
                 EntityLook::Transport {
-                    size: 4,
+                    size: 3,
                     model_id: Some(14),
                     animation_start: Some(123_456),
+                    travel_secs: Some(8),
                 },
                 "transport",
             ),
@@ -2402,7 +2410,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 40;
+        const VERSION: u32 = 41;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2416,6 +2424,7 @@ mod tests {
             size: 4,
             model_id: Some(14),
             animation_start: Some(STAMP),
+            travel_secs: None,
         });
         let bytes = postcard::to_allocvec(&snapshot).unwrap();
         let decoded: SceneSnapshot = postcard::from_bytes(&bytes).unwrap();
@@ -2436,7 +2445,8 @@ mod tests {
             EntityLook::Transport {
                 size: 4,
                 model_id: None,
-                animation_start: None
+                animation_start: None,
+                travel_secs: None,
             }
         );
     }

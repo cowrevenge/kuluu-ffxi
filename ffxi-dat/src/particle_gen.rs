@@ -610,6 +610,11 @@ pub struct ParticleGeneratorDef {
     // model the specular element's rotation (the 0x55 record is kept for reconstruction
     // inputs only).
     pub specular_rot_y_track: Option<[u8; 4]>,
+    // sec2 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32, unk1 f32,
+    // unk2 u32] — the keyframe DAT id the section-3 0x5F CameraShakeUpdater samples at the
+    // particle's progress (research/xim ParticleInitializers.kt CameraShakeSetup). Parsed
+    // but not applied until the section-3 updater lands.
+    pub camera_shake_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -761,6 +766,7 @@ impl ParticleGeneratorDef {
         let mut specular = None;
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
+        let mut camera_shake_track = None;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut oscillation_accel_z = None;
@@ -966,6 +972,14 @@ impl ParticleGeneratorDef {
                 // (research/xim ParticleGeneratorParser.kt).
                 0x5A if payload + 8 <= body.len() => {
                     specular_rot_y_track = track_id(body, payload + 4);
+                }
+                // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32,
+                // unk1 f32, unk2 u32] — the DAT id of the keyframe track the section-3
+                // 0x5F CameraShakeUpdater samples at the particle's progress
+                // (research/xim ParticleInitializers.kt CameraShakeSetup). The whole 6-word
+                // block is consumed; only the track id is kept.
+                0x82 if payload + 8 <= body.len() => {
+                    camera_shake_track = track_id(body, payload + 4);
                 }
                 0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
                 // 0x41 RelativeVelocityVarianceSetup: one float, the bound of the random
@@ -1322,6 +1336,7 @@ impl ParticleGeneratorDef {
             specular_element,
             specular,
             specular_rot_y_track,
+            camera_shake_track,
         }))
     }
 
@@ -2369,6 +2384,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.specular_rot_y_track, None);
+    }
+
+    // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32, unk1 f32, unk2
+    // u32] (research/xim ParticleInitializers.kt CameraShakeSetup). Shipped census: 4032
+    // blocks, all size_words=6, first payload word always zero, 46 distinct track ids, and
+    // 4032/4032 generators also carry the section-3 0x5F CameraShakeUpdater.
+    #[test]
+    fn camera_shake_setup_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut payload = [0u8; 20];
+        payload[4..8].copy_from_slice(b"shak");
+        sec2.extend(op(0x82, 6, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.camera_shake_track, Some(*b"shak"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.camera_shake_track, None);
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the

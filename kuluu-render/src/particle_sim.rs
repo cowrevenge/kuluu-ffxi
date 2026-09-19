@@ -2222,6 +2222,7 @@ mod tests {
             specular_element: false,
             specular: None,
             specular_rot_y_track: None,
+            camera_shake_track: None,
         }
     }
 

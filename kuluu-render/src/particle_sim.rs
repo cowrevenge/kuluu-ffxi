@@ -401,6 +401,23 @@ struct Particle {
     // (research/xim Particle.kt — negateRotationY multiplies rotation.y by −1 in the
     // particle transform, set by IncrementalRotationApplier even for an all-zero payload).
     negate_rotation_y: bool,
+    // The 0x08/0x41 relative-velocity portion in the integration frame, negated by 0x67: the
+    // oscillation applier's direction source (research/xim ParticleUpdaters.kt
+    // getOscillationDirection reads ParticleTransform.relativeVelocity, not the total
+    // velocity; Particle.kt getTotalVelocity keeps the two transforms separate).
+    rel_vel: Vec3,
+    // Some while the generator carries the sec2 0x3D marker (research/xim
+    // ParticleGeneratorSettings.kt OscillationParams): the per-axis acceleration (0x3E/0x3F/
+    // 0x40 base plus one variance draw) and the applier's last-amplitude memory.
+    osc: Option<Oscillation>,
+}
+
+// research/xim ParticleGeneratorSettings.kt OscillationParams — the per-particle oscillation
+// state the sec3 appliers integrate: per-axis acceleration and the applier's previous-amplitude
+// memory. [0]/[1]/[2] are the X/Y/Z axes.
+struct Oscillation {
+    accel: [f32; 3],
+    prev_amplitude: [f32; 3],
 }
 
 // research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a source joint naming
@@ -1012,12 +1029,27 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .def
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
+    let osc_applier = g.def.oscillation_applier_x;
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
         }
         p.pos += p.vel * frames;
+        // sec3 0x29 OscillationApplier (X): after the base position step, add the
+        // amplitude change over the tick (research/xim ParticleUpdaters.kt
+        // OscillationApplier — particle.position += direction × delta).
+        if let (Some(applier), Some(osc)) = (osc_applier, p.osc.as_mut()) {
+            p.pos += oscillation_delta(
+                applier,
+                0,
+                osc,
+                p.rel_vel,
+                p.age_frames - frames,
+                p.age_frames,
+                g.actor_local,
+            );
+        }
         p.scale += p.scale_vel * frames;
         p.rotation += p.spin * frames;
     }
@@ -1035,6 +1067,63 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
 
 fn continuous_active(g: &LiveGenerator) -> bool {
     !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0))
+}
+
+// research/xim ParticleUpdaters.kt OscillationApplier — the position delta the applier adds
+// to a particle: with oscillationRate = 180f / divisor (a zero divisor is an infinite rate,
+// which xim skips), frequency = π × age / rate, and
+// baseAmplitude = 0.5 × (sin(baseOffset + frequency − π/2) + cos(baseOffset)), the amplitude
+// is 0.5 × accel × baseAmplitude × rate and the delta is its change since the previous
+// frame. The engine ticks by a variable frame count, so the previous amplitude is evaluated
+// at age − frames instead of read from memory (the two coincide while the applier runs
+// every tick). The direction is the particle's relative-velocity direction (getOscillationDirection:
+// X = forward, Y = forward × Ẑ, Z = forward × Ŷ, the FFXI-frame unit hats basised into the
+// integration frame for world-space generators; vel_basis is an involution with det +1, so it
+// commutes with the cross products), falling back to the unit axis when the relative velocity
+// is near zero.
+fn oscillation_delta(
+    applier: [f32; 3],
+    axis: usize,
+    osc: &mut Oscillation,
+    rel_vel: Vec3,
+    prev_age_frames: f32,
+    age_frames: f32,
+    actor_local: bool,
+) -> Vec3 {
+    let divisor = applier[0];
+    if divisor == 0.0 {
+        return Vec3::ZERO;
+    }
+    let rate = 180.0 / divisor;
+    let base_offset = applier[1];
+    let amplitude = |age: f32| -> f32 {
+        let frequency = std::f32::consts::PI * (age / rate);
+        let base = 0.5
+            * ((base_offset + frequency - std::f32::consts::FRAC_PI_2).sin() + base_offset.cos());
+        0.5 * osc.accel[axis] * base * rate
+    };
+    let delta = amplitude(age_frames) - amplitude(prev_age_frames);
+    osc.prev_amplitude[axis] = amplitude(age_frames);
+    let (y_hat, z_hat) = if actor_local {
+        (Vec3::Y, Vec3::Z)
+    } else {
+        (Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, -1.0))
+    };
+    let direction = if rel_vel.length() < 1e-7 {
+        match axis {
+            0 => Vec3::X,
+            1 => y_hat,
+            _ => z_hat,
+        }
+    } else {
+        let forward = rel_vel.normalize();
+        match axis {
+            0 => forward,
+            1 => forward.cross(z_hat).normalize_or_zero(),
+            _ => forward.cross(y_hat).normalize_or_zero(),
+        }
+    };
+    direction * delta
 }
 
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle counter — the emit loop
@@ -1105,9 +1194,12 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // no offset there is no direction and the block contributes nothing (research/xim
     // ParticleInitializers.kt RelativeVelocitySetup — normalize of the initial position
     // relative to the spawn point).
+    let mut rel_vel = Vec3::ZERO;
     if let Some(speed) = g.def.relative_velocity {
         if pos_local.length_squared() > 0.0 {
-            vel += pos_local.normalize() * speed;
+            let add = pos_local.normalize() * speed;
+            vel += add;
+            rel_vel += add;
         }
     }
     // 0x41 RelativeVelocityVarianceSetup: a uniform [-v, v] draw along the same spawn offset
@@ -1117,7 +1209,9 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // value and adds it to the same allocation vector as 0x08).
     if let Some(v) = g.def.relative_velocity_variance {
         if pos_local.length_squared() > 0.0 {
-            vel += pos_local.normalize() * ((next_unit(&mut g.emit_rng) * 2.0 - 1.0) * v);
+            let add = pos_local.normalize() * ((next_unit(&mut g.emit_rng) * 2.0 - 1.0) * v);
+            vel += add;
+            rel_vel += add;
         }
     }
     // 0x67 ReverseDisplacementSetup: the particle spawns at the trajectory's endpoint and
@@ -1127,6 +1221,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     if g.def.reverse_displacement.is_some() {
         pos += vel * g.vel_basis * life_frames;
         vel = -vel;
+        rel_vel = -rel_vel;
     }
     // 0x0A RotationVarianceInitializer: a uniform [-v, v] draw per axis on top of the 0x09
     // base rotation (research/xim ParticleInitializers.kt RotationVarianceInitializer).
@@ -1203,6 +1298,26 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             var[2] * next_unit(&mut g.emit_rng),
         );
     }
+    // sec2 0x3D OscillationSetup + 0x3E/0x3F/0x40 OscillationAccelerationSetup: the
+    // per-particle oscillation state — each present axis gets acceleration + one [−1, 1)
+    // variance draw, absent axes stay 0 (research/xim ParticleInitializers.kt
+    // OscillationAccelerationSetup — acceleration + variance × RandHelper rand()).
+    let osc = g.def.oscillation.then(|| {
+        let mut accel = [0.0f32; 3];
+        for (axis, block) in accel.iter_mut().zip([
+            g.def.oscillation_accel_x,
+            g.def.oscillation_accel_y,
+            g.def.oscillation_accel_z,
+        ]) {
+            if let Some(a) = block {
+                *axis = a[0] + a[1] * (next_unit(&mut g.emit_rng) * 2.0 - 1.0);
+            }
+        }
+        Oscillation {
+            accel,
+            prev_amplitude: [0.0; 3],
+        }
+    });
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
@@ -1216,6 +1331,8 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         rotation,
         spin,
         negate_rotation_y,
+        rel_vel: rel_vel * g.vel_basis,
+        osc,
     });
 }
 
@@ -2089,6 +2206,7 @@ mod tests {
             oscillation_accel_z: None,
             oscillation_accel_x: None,
             oscillation_accel_y: None,
+            oscillation_applier_x: None,
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,
@@ -2944,6 +3062,8 @@ mod tests {
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
                 negate_rotation_y: false,
+                rel_vel: Vec3::ZERO,
+                osc: None,
             });
             g
         }
@@ -3283,6 +3403,89 @@ mod tests {
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
     }
 
+    // sec2 0x3D + 0x3E with the sec3 0x29 applier: the particle's x position sways with the
+    // applier's amplitude curve (research/xim ParticleUpdaters.kt OscillationApplier —
+    // rate = 180f / 2 = 90, baseOffset 0, so the amplitude peaks at half a period, 90 frames,
+    // and returns to zero at the full period).
+    #[test]
+    fn oscillation_applier_x_oscillates_the_position() {
+        let mut d = def(1000.0, 1.0, 1);
+        d.oscillation = true;
+        d.oscillation_accel_x = Some([0.5, 0.0]);
+        d.oscillation_applier_x = Some([2.0, 0.0, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1, "one particle");
+        g.stopped = true;
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let x_peak = g.particles[0].pos.x;
+        assert!((x_peak - 22.5).abs() < 1e-2, "half-period peak: {x_peak}");
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let x_full = g.particles[0].pos.x;
+        assert!(x_full.abs() < 1e-2, "full-period return: {x_full}");
+    }
+
+    // The 0x3E acceleration without the sec3 0x29 applier is parsed but never moves the
+    // particle (research/xim ParticleUpdaters.kt — the applier is the only integrator).
+    #[test]
+    fn oscillation_without_the_applier_stays_inert() {
+        let mut d = def(1000.0, 1.0, 1);
+        d.oscillation = true;
+        d.oscillation_accel_x = Some([0.5, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        g.stopped = true;
+        for _ in 0..180 {
+            advance(&mut g, 1.0);
+        }
+        let p = &g.particles[0];
+        assert_eq!(p.pos.x, 0.0, "no applier, no x motion");
+    }
+
+    // With a relative velocity the applier moves the particle along it, not along the axis
+    // (research/xim ParticleUpdaters.kt getOscillationDirection — the X axis follows the
+    // relative-velocity direction).
+    #[test]
+    fn oscillation_applier_x_follows_the_relative_velocity_direction() {
+        let mut d = def(1000.0, 1.0, 1);
+        d.oscillation_applier_x = Some([2.0, 0.0, 0.0]);
+        let mut g = live(d, 1000.0);
+        g.stopped = true;
+        g.particles.push(Particle {
+            pos: Vec3::ZERO,
+            spawn_origin: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            age_frames: 0.0,
+            life_frames: 1000.0,
+            rgb: Vec3::ONE,
+            scale: Vec2::ONE,
+            scale_seed: Vec2::ONE,
+            scale_vel: Vec2::ZERO,
+            rotation: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            negate_rotation_y: false,
+            rel_vel: Vec3::Y,
+            osc: Some(Oscillation {
+                accel: [0.5, 0.0, 0.0],
+                prev_amplitude: [0.0; 3],
+            }),
+        });
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let p = &g.particles[0];
+        assert!(
+            (p.pos.y - 22.5).abs() < 1e-2,
+            "along the relative velocity: {}",
+            p.pos.y
+        );
+        assert_eq!(p.pos.x, 0.0, "no x motion");
+    }
+
     // kuluu-b5nt: rebuild_mesh only fires when its quantized inputs differ from the last BUILT
     // mesh, so a tracked get_mut (AssetEvent::Modified, a full GPU re-upload) stops scaling
     // with fps.
@@ -3304,6 +3507,8 @@ mod tests {
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
                 negate_rotation_y: false,
+                rel_vel: Vec3::ZERO,
+                osc: None,
             });
             g
         }
@@ -3966,6 +4171,8 @@ mod tests {
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
             negate_rotation_y: false,
+            rel_vel: Vec3::ZERO,
+            osc: None,
         });
         g
     }
@@ -4645,6 +4852,8 @@ mod tests {
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
             negate_rotation_y: false,
+            rel_vel: Vec3::ZERO,
+            osc: None,
         };
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];

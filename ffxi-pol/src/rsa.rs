@@ -78,7 +78,7 @@ fn b64_reverse(c: u8) -> u8 {
 pub fn b64_decode(text: &[u8], nchars: usize) -> Vec<u8> {
     let take = nchars.min(text.len());
     let mut chunk: Vec<u8> = text[..take].to_vec();
-    while chunk.len() % 4 != 0 {
+    while !chunk.len().is_multiple_of(4) {
         chunk.push(B64_FILL);
     }
     let mut out = Vec::with_capacity(chunk.len() / 4 * 3);
@@ -131,6 +131,16 @@ impl KeyPair {
     /// The base64 of the modulus wire bytes: the realname field itself.
     pub fn realname(&self) -> String {
         b64_encode(&self.modulus_wire_bytes())
+    }
+
+    /// polcore `0x10063eb0` seeds the stream cipher from the low two limbs of
+    /// the client's own modulus, so the IV is client-chosen per session.
+    pub fn stream_iv(&self) -> (u32, u32) {
+        let b = self.modulus_wire_bytes();
+        (
+            u32::from_le_bytes(b[0..4].try_into().unwrap()),
+            u32::from_le_bytes(b[4..8].try_into().unwrap()),
+        )
     }
 
     /// polcore `0x10016182`: decode numeric 300's payload token, RSA-decrypt
@@ -277,6 +287,53 @@ fn modinv(a: &BigUint, m: &BigUint) -> Option<BigUint> {
     }
     let x = ((egcd.x % &m) + &m) % &m;
     x.to_biguint()
+}
+
+/// The stream IV a modulus (as little-endian wire bytes) seeds: its low two
+/// limbs, matching `KeyPair::stream_iv` for the peer that only holds `n`.
+#[cfg(test)]
+pub(crate) fn stream_iv_from_modulus_le(modulus_le: &[u8]) -> (u32, u32) {
+    let mut b = [0u8; MODULUS_BYTES];
+    let n = modulus_le.len().min(MODULUS_BYTES);
+    b[..n].copy_from_slice(&modulus_le[..n]);
+    (
+        u32::from_le_bytes(b[0..4].try_into().unwrap()),
+        u32::from_le_bytes(b[4..8].try_into().unwrap()),
+    )
+}
+
+/// The numeric-300 payload a conforming server would send to deliver
+/// `session_key` to the holder of the modulus `modulus_le` (little-endian wire
+/// bytes). Reconstructed from what the client's decryptor accepts (any PKCS#1
+/// v1.5 type-2 block); it exists to close the handshake round trip in tests,
+/// and is not the retail server.
+#[cfg(test)]
+pub(crate) fn encrypt_session_key(
+    session_key: &[u8; SESSION_KEY_BYTES],
+    modulus_le: &[u8],
+    rng: &mut dyn RandomBytes,
+) -> String {
+    let n = BigUint::from_bytes_le(&modulus_le[..MODULUS_BYTES.min(modulus_le.len())]);
+    let mut msg: Vec<u8> = session_key.iter().rev().copied().collect();
+    let ps_len = MODULUS_BYTES - 3 - msg.len();
+    let mut ps = Vec::with_capacity(ps_len);
+    while ps.len() < ps_len {
+        let mut b = [0u8; 1];
+        rng.fill(&mut b);
+        if b[0] != 0 {
+            ps.push(b[0]);
+        }
+    }
+    let mut em = vec![0x00, 0x02];
+    em.extend_from_slice(&ps);
+    em.push(0x00);
+    em.append(&mut msg);
+    let c = BigUint::from_bytes_be(&em).modpow(&BigUint::from(PUBLIC_EXPONENT), &n);
+    let mut be = c.to_bytes_be();
+    while be.len() < MODULUS_BYTES {
+        be.insert(0, 0);
+    }
+    b64_encode(&be)
 }
 
 #[cfg(test)]

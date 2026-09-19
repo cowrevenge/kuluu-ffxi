@@ -685,6 +685,13 @@ pub struct ParticleGeneratorDef {
     // (research/xim ParticleGeneratorParser.kt sec2Handler); a second slot so a
     // generator carrying both keeps both ids.
     pub fixed_point_position_variance_2: Option<[u8; 4]>,
+
+    // sec2 0x53 ChildGeneratorSetup: [expectZero32, child generator DAT id] — xim maps
+    // both 0x44 and 0x53 to the same class (research/xim ParticleGeneratorParser.kt
+    // sec2Handler); a second slot so a generator carrying both keeps both ids. Parsed
+    // but not applied until the child-generator runtime lands (the sec3 0x25/0x33 child
+    // updaters).
+    pub child_generator_2: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -850,6 +857,7 @@ impl ParticleGeneratorDef {
         let mut parent_position_copy = false;
         let mut parent_velocity = None;
         let mut child_generator = None;
+        let mut child_generator_2 = None;
         let mut oscillation_accel_z = None;
         let mut oscillation_accel_x = None;
         let mut oscillation_accel_y = None;
@@ -1178,6 +1186,11 @@ impl ParticleGeneratorDef {
                 0x44 if payload + 8 <= body.len() => {
                     child_generator = track_id(body, payload + 4);
                 }
+                // 0x53 ChildGeneratorSetup: the 0x44 shape — xim maps both opcodes to
+                // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x53 if payload + 8 <= body.len() => {
+                    child_generator_2 = track_id(body, payload + 4);
+                }
                 // 0x47 ParentRotateConfig: no payload — the marker that makes a child
                 // particle copy its parent's rotation (research/xim
                 // ParticleInitializers.kt ParentRotateConfig).
@@ -1492,6 +1505,7 @@ impl ParticleGeneratorDef {
             velocity_dampener_track,
             fixed_point_position_variance,
             fixed_point_position_variance_2,
+            child_generator_2,
         }))
     }
 
@@ -2705,6 +2719,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.fixed_point_position_variance_2, None);
+    }
+
+    // 0x53 ChildGeneratorSetup: the 0x44 shape — xim maps both opcodes to the same class
+    // (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 392 sec2
+    // 0x53 blocks in the parser-accepted corpus.
+    #[test]
+    fn child_generator_twin_reads_the_child_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x53, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'2']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.child_generator_2, Some(*b"kid2"));
+        assert_eq!(def.child_generator, None);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.child_generator_2, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

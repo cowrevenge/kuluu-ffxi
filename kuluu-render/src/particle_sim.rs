@@ -90,6 +90,20 @@ impl ParticleSimulator {
         self.stop_where(|o| o.owner == owner && o.gen_id == gen_id);
     }
 
+    // research/xim EffectRoutineInstance.kt handleParticleEffectDampen — 0x1E ParticleDampen:
+    // unlike StopParticle the already-live particles are force-expired at once (their audio
+    // fades out there; this engine's particle generators carry no audio).
+    pub fn dampen_generator(&mut self, owner: Entity, gen_id: [u8; 4]) {
+        for g in &mut self.generators {
+            if g.origin_routine
+                .is_some_and(|o| o.owner == owner && o.gen_id == gen_id)
+            {
+                g.stopped = true;
+                g.particles.clear();
+            }
+        }
+    }
+
     pub fn stop_routine(&mut self, owner: Entity, routine: [u8; 4]) {
         self.stop_where(|o| o.owner == owner && o.routine == routine);
     }
@@ -1846,6 +1860,41 @@ mod tests {
     // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
         advance_generator(g, frames);
+    }
+
+    // 0x1E ParticleDampen: emission stops and the already-live particles are force-expired
+    // at once (research/xim EffectRoutineInstance.kt handleParticleEffectDampen), unlike
+    // StopParticle which lets them play out.
+    #[test]
+    fn dampen_generator_stops_emission_and_clears_live_particles() {
+        let owner = Entity::from_raw_u32(1).unwrap();
+        let mut sim = ParticleSimulator {
+            generators: vec![live(def(60.0, 1.0, 1), 60.0)],
+            clock: CelestialClock::default(),
+        };
+        sim.generators[0].origin_routine = Some(RoutineOrigin {
+            owner,
+            gen_id: *b"gr01",
+            routine: *b"cate",
+        });
+        advance(&mut sim.generators[0], 2.0);
+        assert!(
+            !sim.generators[0].particles.is_empty(),
+            "two frames emit two particles"
+        );
+
+        sim.dampen_generator(owner, *b"gr01");
+        assert!(sim.generators[0].stopped);
+        assert!(
+            sim.generators[0].particles.is_empty(),
+            "the live particles expire at once"
+        );
+
+        advance(&mut sim.generators[0], 10.0);
+        assert!(
+            sim.generators[0].particles.is_empty(),
+            "no re-emission after the dampen"
+        );
     }
 
     // The campfire flame `hi12` rises toward negative DAT y; a world-space screen billboard has

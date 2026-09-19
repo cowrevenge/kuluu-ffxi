@@ -3488,6 +3488,21 @@ pub fn dispatch_stop_particle_stages(
     }
 }
 
+// 0x1E ParticleDampen: emission stops and the already-live particles are force-expired at
+// once (research/xim EffectRoutineInstance.kt handleParticleEffectDampen).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_particle_dampen_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::ParticleDampen {
+            continue;
+        }
+        sim.dampen_generator(ev.actor, ev.stage.stage.id);
+    }
+}
+
 pub const EMOTE_ROUTINES_PER_FILE: u16 = 8;
 
 const SALUTE_NATION_MAX: u16 = 2;
@@ -3736,6 +3751,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     crate::particle_sim::spawn_actor_auto_run_particles,
                     crate::particle_sim::spawn_particle_generators,
                     dispatch_stop_particle_stages,
+                    dispatch_particle_dampen_stages,
                     crate::particle_sim::stop_generators_for_despawned_owners,
                     crate::particle_sim::tick_particle_simulator,
                     crate::particle_sim::sync_particle_meshes,

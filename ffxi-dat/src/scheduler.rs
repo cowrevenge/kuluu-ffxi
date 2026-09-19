@@ -58,6 +58,9 @@ const SET_MODEL_VISIBILITY_PAYLOAD_LEN: usize = 16;
 // delay/duration is consumed and unused; the handler only sets the context's joint-snapshot
 // flag (EffectRoutineInstance.kt handleJointSnapshotEffect applyJointSnapshot(true)).
 const JOINT_SNAPSHOT_OPCODE: u8 = 0x22;
+// research/xim EffectRoutineParser.kt parseSection2 0x1E ParticleDampenRoutine: genRef
+// (DatId) + zero32 after delay/duration - a 4-dword stage.
+const PARTICLE_DAMPEN_OPCODE: u8 = 0x1E;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -285,6 +288,12 @@ pub enum StageKind {
 
     StopParticle,
 
+    /// 0x1E - ParticleDampen: `id` names the generator; emission stops and the already-live
+    /// particles are force-expired at once (research/xim EffectRoutineInstance.kt
+    /// handleParticleEffectDampen: stopEmitting plus forceExpire, with the looping audio
+    /// faded out).
+    ParticleDampen,
+
     DamageCallback,
 
     FollowPoints,
@@ -430,6 +439,10 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt parseSection2 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
+            // research/xim EffectRoutineParser.kt parseSection2 - ParticleDampenRoutine:
+            // genRef + zero32; the handler force-expires the generator's live particles as
+            // well as stopping emission (EffectRoutineInstance.kt handleParticleEffectDampen).
+            PARTICLE_DAMPEN_OPCODE => Self::ParticleDampen,
             // research/xim EffectRoutineParser.kt parseSection2 — DamageCallbackRoutine, the stage the
             // damage/battle-message callback is invoked on (EffectRoutineInstance.kt handleDamageCallbackRoutine).
             // Every spell routine tail-calls a `mdam` sub-routine that holds exactly this stage.
@@ -1843,6 +1856,7 @@ mod tests {
                 StageKind::ActorPositionSnapshot,
             ),
             (JOINT_SNAPSHOT_OPCODE, 3, StageKind::JointSnapshot),
+            (PARTICLE_DAMPEN_OPCODE, 4, StageKind::ParticleDampen),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),
             (

@@ -392,6 +392,12 @@ pub struct ParticleGeneratorDef {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x11 — a single ufrand added to x, y, z).
     pub single_scale_variance: Option<f32>,
     pub init_color: [f32; 4],
+    // sec2 0x17 ColorVarianceSetup: four bytes (R,G,B,A) / 255 — the per-channel bound of the
+    // upward color draw added to the 0x16 base per particle (research/xim
+    // ParticleInitializers.kt ColorVarianceSetup — color.rgba[i] += (byte/255) * posRand(1f),
+    // one [0, 1) draw per channel; the retail decompile's ElemGenerate has no 0x17 case, so
+    // xim's mapping is the available evidence).
+    pub color_variance: Option<[f32; 4]>,
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
     // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
@@ -638,6 +644,7 @@ impl ParticleGeneratorDef {
         let mut init_scale = [1.0f32; 3];
         let mut single_scale_variance = None;
         let mut init_color = [1.0f32; 4];
+        let mut color_variance = None;
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
         let mut relative_velocity = None;
@@ -866,6 +873,16 @@ impl ParticleGeneratorDef {
                         body[payload + 3] as f32 / 255.0,
                     ];
                 }
+                // 0x17 ColorVarianceSetup: four bytes, the per-channel upward variance bound
+                // (research/xim ParticleInitializers.kt ColorVarianceSetup).
+                0x17 if payload + 4 <= body.len() => {
+                    color_variance = Some([
+                        body[payload] as f32 / 255.0,
+                        body[payload + 1] as f32 / 255.0,
+                        body[payload + 2] as f32 / 255.0,
+                        body[payload + 3] as f32 / 255.0,
+                    ]);
+                }
                 // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
@@ -1065,6 +1082,7 @@ impl ParticleGeneratorDef {
             init_scale,
             single_scale_variance,
             init_color,
+            color_variance,
             init_velocity,
             velocity_variance,
             relative_velocity,
@@ -2109,6 +2127,26 @@ mod tests {
             .unwrap();
         assert_eq!(plain.sort_offset, 0.0);
         assert_eq!(plain.projection_bias, None);
+    }
+
+    // 0x17 ColorVarianceSetup: four bytes / 255, the per-channel upward variance bound
+    // (research/xim ParticleInitializers.kt ColorVarianceSetup). Shipped census: 7654 blocks,
+    // all size_words=2, alpha byte always 0, every one behind a 0x16 base color.
+    #[test]
+    fn color_variance_reads_the_four_bytes() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        setup.extend(op(0x17, 2, &[20u8, 10, 5, 0]));
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(
+            def.color_variance,
+            Some([20.0 / 255.0, 10.0 / 255.0, 5.0 / 255.0, 0.0])
+        );
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_variance, None);
     }
 
     fn mesh_setup() -> Vec<u8> {

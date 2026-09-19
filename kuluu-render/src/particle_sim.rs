@@ -1154,13 +1154,24 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         .scale_rate()
         .map(|r| Vec2::new(r[0], r[1]))
         .unwrap_or_default();
+    // 0x17 ColorVarianceSetup: each rgb channel gains its bound times one [0, 1) draw, on top
+    // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup — the shipped
+    // alpha byte is always 0 and the engine's alpha comes from the 0x16 base / alpha track).
+    let mut rgb = Vec3::from_slice(&g.def.init_color[..3]);
+    if let Some(var) = g.def.color_variance {
+        rgb += Vec3::new(
+            var[0] * next_unit(&mut g.emit_rng),
+            var[1] * next_unit(&mut g.emit_rng),
+            var[2] * next_unit(&mut g.emit_rng),
+        );
+    }
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
         vel: vel * g.vel_basis,
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
-        rgb: Vec3::from_slice(&g.def.init_color[..3]),
+        rgb,
         scale,
         scale_seed: scale,
         scale_vel,
@@ -2002,6 +2013,7 @@ mod tests {
             init_scale: [0.1, 0.1, 1.0],
             single_scale_variance: None,
             init_color: [0.2, 0.2, 0.6, 0.5],
+            color_variance: None,
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
             relative_velocity: None,
@@ -3706,6 +3718,33 @@ mod tests {
             assert!(
                 perpendicular.length() < 1e-5,
                 "the added velocity stays on the spawn offset's direction: {perpendicular:?}"
+            );
+        }
+    }
+
+    // 0x17 ColorVarianceSetup: each rgb channel gains its bound times one [0, 1) draw on top
+    // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup).
+    #[test]
+    fn color_variance_spreads_each_channel_upward() {
+        let mut d = def(10.0, 1.0, 1);
+        d.init_color = [0.5, 0.5, 0.5, 1.0];
+        d.color_variance = Some([0.5, 0.25, 0.125, 0.0]);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 3.0);
+        assert_eq!(g.particles.len(), 3);
+        for p in &g.particles {
+            let c = p.rgb;
+            assert!(
+                (0.5..1.0).contains(&c.x),
+                "the red channel stays in [base, base + bound): {c:?}"
+            );
+            assert!(
+                (0.5..0.75).contains(&c.y),
+                "the green channel stays in [base, base + bound): {c:?}"
+            );
+            assert!(
+                (0.5..0.625).contains(&c.z),
+                "the blue channel stays in [base, base + bound): {c:?}"
             );
         }
     }

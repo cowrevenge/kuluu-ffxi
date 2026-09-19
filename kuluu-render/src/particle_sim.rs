@@ -1012,15 +1012,19 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // elem, skipping it when CheckFlag29 is set because a batched elem carries its own
     // sub-particles. Our Particle models the sub-particle in that case, so the spread applies
     // either way — without it every drop of a rain curtain spawns on one point.
-    let pos = match g.def.position_variance {
+
+    // The 0x08 relative velocity lives in the generator's local space (the space the 0x02
+    // base is scaled into by vel_basis), so its direction comes off the pre-basis offset.
+    let pos_local = match g.def.position_variance {
         Some(v) => {
             let u = next_unit(&mut g.emit_rng);
             let yaw = (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI;
             let pitch = (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI;
-            Vec3::from_array(v.offset(u, yaw, pitch)) * g.vel_basis
+            Vec3::from_array(v.offset(u, yaw, pitch))
         }
         None => Vec3::ZERO,
     };
+    let pos = pos_local * g.vel_basis;
     // 0x03 VelocityVarianceSetup: a uniform [-v, v] draw per axis on top of the 0x02 base
     // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the shipped blocks all
     // sit after their 0x02, so base-plus-variance is the authored order).
@@ -1031,6 +1035,15 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[1],
             (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
         );
+    }
+    // 0x08 RelativeVelocitySetup: the payload speed along the spawn offset's direction; with
+    // no offset there is no direction and the block contributes nothing (research/xim
+    // ParticleInitializers.kt RelativeVelocitySetup — normalize of the initial position
+    // relative to the spawn point).
+    if let Some(speed) = g.def.relative_velocity {
+        if pos_local.length_squared() > 0.0 {
+            vel += pos_local.normalize() * speed;
+        }
     }
     g.particles.push(Particle {
         pos,
@@ -1870,6 +1883,7 @@ mod tests {
             init_color: [0.2, 0.2, 0.6, 0.5],
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
+            relative_velocity: None,
             init_rotation: [0.0; 3],
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
             blend_byte: 0x48,
@@ -3291,6 +3305,42 @@ mod tests {
     #[test]
     fn velocity_without_variance_is_exactly_the_base() {
         let mut g = live(def(0.0, 1.0, 1), 30.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
+    }
+
+    // 0x08 RelativeVelocitySetup: each particle's velocity gains the payload speed along its
+    // own spawn offset's direction (research/xim ParticleInitializers.kt
+    // RelativeVelocitySetup).
+    #[test]
+    fn relative_velocity_points_along_the_spawn_offset() {
+        let mut d = def(10.0, 1.0, 1);
+        d.position_variance = Some(ffxi_dat::particle_gen::PositionVariance {
+            radius_variance: 0.0,
+            base_radius: 1.0,
+            axis_scale: [1.0; 3],
+        });
+        d.relative_velocity = Some(0.5);
+        let mut g = live(d, 30.0);
+        // One frame: the lone particle is un-aged, so its position is exactly the spawn offset.
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        let p = &g.particles[0];
+        let extra = p.vel - Vec3::from_array([0.0, 0.01, 0.0]);
+        let offset = p.pos;
+        assert!(
+            (extra - offset.normalize() * 0.5).length() < 1e-6,
+            "the added velocity is 0.5 along the spawn offset: {extra:?} vs {offset:?}"
+        );
+    }
+
+    // With no spawn offset there is no direction, so 0x08 contributes nothing.
+    #[test]
+    fn relative_velocity_without_a_spawn_offset_is_inert() {
+        let mut d = def(0.0, 1.0, 1);
+        d.relative_velocity = Some(0.5);
+        let mut g = live(d, 30.0);
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);
         assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));

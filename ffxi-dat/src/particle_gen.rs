@@ -350,6 +350,12 @@ pub struct ParticleGeneratorDef {
     // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
     // VelocityVarianceSetup — the allocationOffset binds it to the position transform).
     pub velocity_variance: Option<[f32; 3]>,
+    // sec2 0x08 RelativeVelocitySetup: the magnitude of the per-particle velocity added along
+    // the spawn offset's direction (research/xim ParticleInitializers.kt RelativeVelocitySetup —
+    // direction = normalize of the initial position relative to the spawn point; research/XIClient
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x08 normalizes field_54 minus the
+    // position captured at element spawn, i.e. the offsets the earlier blocks added).
+    pub relative_velocity: Option<f32>,
     pub init_rotation: [f32; 3],
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
@@ -551,6 +557,7 @@ impl ParticleGeneratorDef {
         let mut init_color = [1.0f32; 4];
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
+        let mut relative_velocity = None;
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
         let mut scale_y_track = None;
@@ -651,6 +658,9 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 16),
                         ],
                     });
+                }
+                0x08 if payload + 4 <= body.len() => {
+                    relative_velocity = Some(f32_le(body, payload));
                 }
                 0x09 if payload + 12 <= body.len() => {
                     init_rotation = [
@@ -899,6 +909,7 @@ impl ParticleGeneratorDef {
             init_color,
             init_velocity,
             velocity_variance,
+            relative_velocity,
             init_rotation,
             blend,
             blend_byte,
@@ -1630,6 +1641,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.velocity_variance, None);
+    }
+
+    // 0x08 RelativeVelocitySetup: a single float — the magnitude of the per-particle velocity
+    // along the spawn offset's direction (research/xim ParticleInitializers.kt
+    // RelativeVelocitySetup). Shipped census: 12461 blocks, all size_words=2, every one after
+    // its generator's 0x02 base-velocity block.
+    #[test]
+    fn relative_velocity_reads_the_single_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut base: Vec<u8> = Vec::new();
+        for f in [0.5f32, -0.25, 0.0] {
+            base.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x02, 4, &base));
+        sec2.extend(op(0x08, 2, &0.25f32.to_le_bytes()));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.relative_velocity, Some(0.25));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.relative_velocity, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

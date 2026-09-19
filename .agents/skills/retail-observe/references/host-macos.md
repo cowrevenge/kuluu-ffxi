@@ -135,6 +135,7 @@ with an override, e.g.
 |---|---|
 | Black or empty capture | Screen Recording not granted, or the display is asleep -> `doctor`, and keep `caffeinate -d -u` for long sessions |
 | Keys/clicks silently ignored | Accessibility not granted, or the window is not frontmost -> `doctor`, then `show` |
+| Captures and OCR keep working, but no input has any effect, and `show` reports some other app frontmost | The Mac is **locked**. The window server still hands `screencapture -l` the client's window, so every read-only verb looks healthy while the login window swallows all synthesized input. `doctor` reports the lock and the input verbs refuse. Unlock the machine; nothing on the agent side can work around it |
 | Input lands in the terminal instead of the game | A raise that happened in an *earlier* invocation. Every input verb re-raises in-invocation; do not batch keys around a single `show` |
 | OCR identical across several inputs, caret/counter frozen | Wine app orphaned from its `wineserver` (stale composited window) -> relaunch the client |
 | No window matches, but the client is running | It is titled differently (launcher, config tool) -> `targets`, then set `FFXI_OBSERVE_WINDOW_TITLE` |

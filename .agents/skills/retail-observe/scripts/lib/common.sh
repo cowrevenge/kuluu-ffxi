@@ -130,6 +130,11 @@ select_window() {
   printf '%s\n' "$hit"
 }
 
+# Backends override this where the host can be in a state that accepts
+# captures but silently discards synthesized input. Defaulting to "fine" keeps
+# a backend that cannot detect such a state from blocking every drive loop.
+host_input_or_die() { :; }
+
 need_window() {
   WIN=$(select_window) || {
     host_raise_hint

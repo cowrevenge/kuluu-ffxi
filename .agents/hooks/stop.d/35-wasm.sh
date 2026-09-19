@@ -56,6 +56,14 @@ fi
 # runs concurrent agent sessions and a pre-push gate against one target/).
 # Blaming the code for those is the misreport this check exists to avoid,
 # and recording the signature would suppress the real check next Stop.
+# A jobserver stall kills rustc mid-crate, and cargo then reports the corpse as
+# "error: could not compile" -- a diagnostic shape indistinguishable from a real
+# break, so the wedge has to be recognised before the diagnostics are read.
+if grep -q 'WEDGE DETECTED' "$log"; then
+  rm -f "$log"
+  exit 0
+fi
+
 # "os error 35" is EAGAIN, which cargo also prints on an `error:` line, so
 # the environment lines have to be dropped before the diagnostic test --
 # otherwise the very failure this guard exists for reads as a compile error.

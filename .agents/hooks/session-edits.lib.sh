@@ -78,6 +78,18 @@ SESSION_EDITS_WRITER_RE="${SESSION_EDITS_CMD_START_RE}((sed|perl)[[:space:]]+(-[
 # concurrent write elsewhere.
 SESSION_EDITS_OWNED_WRITES='bd:.beads/'
 
+# Programs that only read the paths they name: while one of these runs, a
+# peer's concurrent write to a named path is a suspect, not a ledger line.
+# The list is an allowlist - a program missing from it keeps the naming arm
+# alive, because an unknown tool may write from its code (python, perl, awk,
+# find -delete), and miscrediting one peer write is cheaper than silencing
+# every real edit an unusual tool makes.
+SESSION_EDITS_READONLY_PROGRAMS='basename cat comm cmp cut date df du dirname echo egrep file fgrep grep head less ls md5sum more nproc od printf pwd readlink realpath sha256sum shasum sort stat strings tail tr uname uniq wc which xxd'
+# git writes through most of its subcommands, so it is judged by the first
+# bare argument after the global options (-C, -c, --git-dir, --work-tree).
+# `stash` additionally needs its own sub-argument: bare `git stash` pushes.
+SESSION_EDITS_GIT_READONLY_SUBCMDS='blame cat-file describe diff grep hash-object log ls-files ls-tree rev-parse shortlog show status var help'
+
 ledger_dir() { printf '%s/claude-session-edits' "${TMPDIR:-/tmp}"; }
 
 ledger_path() {
@@ -319,13 +331,126 @@ cmd_mentions() {
   done
 }
 
+# git_subcommand <cmd>: the first bare argument after git's global options,
+# or empty when the command runs no git at a command boundary. The walk is
+# boundary-aware, so a `git` that is only an argument of another program
+# (echo git status) never starts it, and -C/-c and friends consume their
+# value so `git -C repo stash list` reads as stash.
+git_subcommand() {
+  local cmd="$1" t seen=0 skip=0 sub=""
+  set -f
+  for t in $cmd; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$t" in
+      ';'*) seen=0; skip=0; case "$t" in *git) [ "${t#*;}" = "git" ] && seen=1 ;; esac; continue ;;
+    esac
+    if [ "$seen" = 1 ]; then
+      case "$t" in
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix) skip=1; continue ;;
+        -*) continue ;;
+        *) sub="$t"; break ;;
+      esac
+    fi
+    case "$t" in
+      git) seen=1 ;;
+    esac
+  done
+  set +f
+  printf '%s' "$sub"
+}
+
+# git_stash_subarg <cmd>: the first bare argument after `stash` in the first
+# git invocation, empty when the command has no `git stash ...`. Bare `git
+# stash` pushes, so only list/show keep the command read-only.
+git_stash_subarg() {
+  local cmd="$1" t seen=0 skip=0 in_stash=0 arg=""
+  set -f
+  for t in $cmd; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$t" in
+      ';'*) seen=0; skip=0; in_stash=0; case "$t" in *git) [ "${t#*;}" = "git" ] && seen=1 ;; esac; continue ;;
+    esac
+    if [ "$in_stash" = 1 ]; then
+      case "$t" in
+        -*) continue ;;
+        *) arg="$t"; break ;;
+      esac
+    fi
+    if [ "$seen" = 1 ]; then
+      case "$t" in
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix) skip=1; continue ;;
+        -*) continue ;;
+        stash) in_stash=1 ;;
+      esac
+    fi
+    case "$t" in
+      git) seen=1 ;;
+    esac
+  done
+  set +f
+  printf '%s' "$arg"
+}
+
+# in_word_list <word> <list>: the word equals one of the list's words. A case
+# pattern would read the unquoted list as a single space-joined pattern, so
+# membership is a word loop (the OWNED_WRITES precedent).
+in_word_list() {
+  local w="$1" e
+  shift
+  for e in "$@"; do
+    [ "$e" = "$w" ] && return 0
+  done
+  return 1
+}
+
+# cmd_readonly <cmd>: every program the command runs is read-only, so a path
+# it names is being read, not written. git counts by subcommand; a program
+# missing from the lists fails the check and the naming arm stays alive. The
+# walk is bash =~, not grep: the boundary class carries a literal newline,
+# which grep's ERE reads as backslash-n and the extraction would mis-parse.
+cmd_readonly() {
+  local cmd="$1" rest="$1" pat pat_mid prog sub m first=1
+  [ -n "$cmd" ] || return 1
+  pat="${SESSION_EDITS_CMD_START_RE}([A-Za-z_][A-Za-z0-9_+.-]*)"
+  # The ^ alternative is only a boundary at the true start of the text; after
+  # the first match it would read a consumed command's first argument as a new
+  # program (git diff -> diff), so later passes use the boundary-class form.
+  pat_mid="((${SESSION_EDITS_CMD_START_RE:4}([A-Za-z_][A-Za-z0-9_+.-]*)"
+  while :; do
+    if [ "$first" = 1 ]; then
+      [[ "$rest" =~ $pat ]] || break
+      first=0
+    else
+      [[ "$rest" =~ $pat_mid ]] || break
+    fi
+    m="${BASH_REMATCH[0]}"
+    prog="${BASH_REMATCH[7]##*/}"
+    rest="${rest/"$m"/ }"
+    case "$prog" in
+      git)
+        sub=$(git_subcommand "$cmd")
+        case "$sub" in
+          '') return 1 ;;
+          stash) [ "$(git_stash_subarg "$cmd")" = list ] || [ "$(git_stash_subarg "$cmd")" = show ] || return 1 ;;
+          *) in_word_list "$sub" $SESSION_EDITS_GIT_READONLY_SUBCMDS || return 1 ;;
+        esac
+        ;;
+      *) in_word_list "$prog" $SESSION_EDITS_READONLY_PROGRAMS || return 1 ;;
+    esac
+  done
+  return 0
+}
+
 # cmd_names_path <cmd> <root> <subdir-prefix> <root-relative-path>: the command
-# text names this path. Three spellings are tried, since a session working in a
-# subdirectory writes `a.txt` for the ledger's `sub/a.txt`, and an absolute
-# path has the root in front of it.
+# text names this path as a whole token. Three spellings are tried, since a
+# session working in a subdirectory writes `a.txt` for the ledger's
+# `sub/a.txt`, and an absolute path has the root in front of it. A read-only
+# command names its paths to read them, so the naming arm is withheld for it
+# and a peer's concurrent write to a named path lands in the suspect log.
 cmd_names_path() {
   local cmd="$1" root="$2" prefix="${3:-}" p="${4:-}" rel
   [ -n "$p" ] || return 1
+  cmd_readonly "$cmd" && return 1
   cmd_mentions "$cmd" "$p" && return 0
   [ -n "$root" ] && cmd_mentions "$cmd" "$root/$p" && return 0
   [ -n "$prefix" ] || return 1

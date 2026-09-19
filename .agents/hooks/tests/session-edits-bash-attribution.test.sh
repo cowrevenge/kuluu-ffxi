@@ -473,6 +473,41 @@ test_naming_a_basename_does_not_credit_a_nested_path() {
   assert_in_suspect "$SID" hud/mod.rs
 }
 
+# A read-only command names its paths to read them: a peer's concurrent write
+# to the named path is a suspect, not a ledger line, whatever the content did.
+test_read_only_named_path_not_attributed() {
+  new_repo
+  local p; p=$(payload "$SID" "wc -l src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'peer\n' >> "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_not_in_ledger "$SID" src/a.txt
+  assert_in_suspect "$SID" src/a.txt
+}
+
+# git is judged by subcommand: diff reads the path it names, so the peer's
+# write to it stays a suspect even though the content genuinely moved.
+test_git_diff_named_path_not_attributed() {
+  new_repo
+  local p; p=$(payload "$SID" "git diff src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'peer\n' >> "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_not_in_ledger "$SID" src/a.txt
+  assert_in_suspect "$SID" src/a.txt
+}
+
+# A compound command that also writes is not read-only: the sed -i in the
+# second clause keeps the naming arm alive for the path it names.
+test_compound_read_only_plus_write_still_attributed() {
+  new_repo
+  local p; p=$(payload "$SID" "wc -l src/a.txt && sed -i '' 's/alpha/beta/' src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_in_ledger "$SID" src/a.txt
+}
+
 # bd names no file on its command line, and .beads/issues.jsonl is the export
 # that has to cross into git - withholding it silences the commit nudge on a
 # file almost every session writes. Crediting stays scoped to the directory bd
@@ -534,6 +569,9 @@ CASES=(  test_peer_write_not_attributed
   test_suspect_log_records_a_reason_not_the_command
   test_naming_a_nested_path_does_not_credit_its_basename
   test_naming_a_basename_does_not_credit_a_nested_path
+  test_read_only_named_path_not_attributed
+  test_git_diff_named_path_not_attributed
+  test_compound_read_only_plus_write_still_attributed
   test_owned_tool_write_is_attributed
   test_commit_nudge_names_the_suspect_log
 )

@@ -814,6 +814,7 @@ const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
 const SEC3_OPCODE_SPRITE_SHEET_FRAME: u8 = 0x0D;
+const SEC3_OPCODE_NO_OP: u8 = 0x0E;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
 
@@ -1453,6 +1454,11 @@ impl ParticleGeneratorDef {
                     // flipbook_index already does for every SpriteSheet (the I1 0x1D precedent;
                     // retail's ElemIdle case 0x0D accumulator is the same sequence).
                     SEC3_OPCODE_SPRITE_SHEET_FRAME => {}
+                    // research/xim ParticleUpdaters.kt NoOpParticleUpdater: no payload — retail's
+                    // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114),
+                    // the elapsed-life fraction the engine's `progress` (age/life, particle_sim.rs)
+                    // already is, so the block arms nothing and only consumes.
+                    SEC3_OPCODE_NO_OP => {}
                     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: expectZero32
                     // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
                     0x4E if payload + 4 + 4 * DAYS_OF_WEEK <= body.len() => {
@@ -2314,6 +2320,41 @@ mod tests {
                     && *o == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x0D must report decoded: {outcomes:?}"
+        );
+    }
+
+    // 0x0E NoOpParticleUpdater is a no-payload marker (research/xim ParticleUpdaters.kt
+    // NoOpParticleUpdater); the shipped census is 71013 blocks, all size_words=1. retail's
+    // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114) — the
+    // elapsed-life fraction the engine's `progress` (age/life, particle_sim.rs) already is — so
+    // the block arms nothing and only consumes, the 0x0D precedent.
+    #[test]
+    fn no_op_particle_updater_consumes_the_block_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(SEC3_OPCODE_NO_OP, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(def.mesh_kind == ParticleMeshKind::SpriteSheet);
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Updaters
+                    && *op == SEC3_OPCODE_NO_OP
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "sec3 0x0E must report decoded: {outcomes:?}"
         );
     }
 

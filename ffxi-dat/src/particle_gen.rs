@@ -528,7 +528,8 @@ pub struct ParticleGeneratorDef {
     // sectionHeader+offset-0x10 convention as the setup section). TextureCoordinateUpdater
     // 0x27/0x28 carry the per-frame UV-translate velocity that scrolls the sprite/sheet
     // texture (cascade/moat water). VelocityAccelerator 0x03/0x06/0x09 read a Vector3f at
-    // payload+0; only 0x03 (gravity) affects the visible arc. [0,0]/None = static.
+    // payload+0 and add it × dt to the same velocity allocation (CYyGenerator.cpp
+    // CYyGenerator::ElemIdle cases 0x06/0x09), so their payloads sum. [0,0]/None = static.
     pub uv_scroll: [f32; 2],
     pub accel: Option<[f32; 3]>,
 
@@ -1456,6 +1457,18 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 8),
                         ]);
                     }
+                    // research/xim ParticleGeneratorParser.kt sec3Handler — 0x03/0x06/0x09 all
+                    // map to VelocityAccelerator: a Vector3f added × dt to the velocity
+                    // allocation, ungated for 0x06/0x09 (CYyGenerator.cpp
+                    // CYyGenerator::ElemIdle cases 0x06/0x09), so the payloads sum.
+                    0x06 | 0x09 if payload + 12 <= body.len() => {
+                        let v = [
+                            f32_le(body, payload),
+                            f32_le(body, payload + 4),
+                            f32_le(body, payload + 8),
+                        ];
+                        accel = Some(accel.map_or(v, |a| [a[0] + v[0], a[1] + v[1], a[2] + v[2]]));
+                    }
                     // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — these
                     // carry no payload; they mark which 0x60..0x63 track drives its channel.
                     0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
@@ -2061,6 +2074,44 @@ mod tests {
             "0x28 -> uv_scroll[1]"
         );
         assert_eq!(def.accel, Some([0.0, -0.02, 0.0]), "0x03 -> accel");
+    }
+
+    // sec3 0x06/0x09 VelocityAccelerator: xim maps all three of 0x03/0x06/0x09 to the same
+    // updater and retail's ElemIdle adds each payload × dt to the same velocity allocation,
+    // so the payloads sum (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09).
+    #[test]
+    fn velocity_accelerators_06_09_sum_into_the_03_accel() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        let vec3 = |x: f32, y: f32, z: f32| -> [u8; 12] {
+            let mut p = [0u8; 12];
+            p[0..4].copy_from_slice(&x.to_le_bytes());
+            p[4..8].copy_from_slice(&y.to_le_bytes());
+            p[8..12].copy_from_slice(&z.to_le_bytes());
+            p
+        };
+        let mut sec3 = op(0x03, 4, &vec3(0.0, -0.03125, 0.0));
+        sec3.extend(op(0x06, 4, &vec3(0.0, 0.015625, 0.0)));
+        sec3.extend(op(0x09, 4, &vec3(0.0078125, 0.0, 0.0)));
+        body.extend_from_slice(&sec3);
+
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.accel, Some([0.0078125, -0.015625, 0.0]));
+
+        // Without the 0x03 base the two payloads still sum from nothing.
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        let mut sec3 = op(0x06, 4, &vec3(0.0, 0.015625, 0.0));
+        sec3.extend(op(0x09, 4, &vec3(0.0078125, 0.0, 0.0)));
+        body.extend_from_slice(&sec3);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.accel, Some([0.0078125, 0.015625, 0.0]));
     }
 
     // The celestial opcodes live in the section-3 updater stream (body[0x78]), NOT the

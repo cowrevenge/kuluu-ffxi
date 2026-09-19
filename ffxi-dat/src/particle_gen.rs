@@ -725,6 +725,15 @@ pub struct ParticleGeneratorDef {
     // ParentTexCoordConfig). A no-op without a parent, so parsed but not applied until the
     // child-generator path lands (the 0x45 marker precedent).
     pub parent_tex_coord: bool,
+
+    // sec2 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem
+    // ptr, point list DAT id] — the spline a particle follows, the keyframe id remapping
+    // its progress and zero when the raw progress drives it (research/xim
+    // ParticleInitializers.kt PointListPositionSetup; retail's ElemGenerate case 0x54
+    // offsets the first emitted elem by the spline's start point, a shared allocation slot
+    // zeroing the delta for later elems). Parsed but not applied until the sec3 0x34
+    // PointListPositionUpdater lands (the I29→U19 parse-first precedent).
+    pub point_list_position: Option<([u8; 4], [u8; 4])>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -885,6 +894,7 @@ impl ParticleGeneratorDef {
         let mut parent_rotate_2 = false;
         let mut batching_setup = false;
         let mut parent_tex_coord = false;
+        let mut point_list_position = None;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1263,6 +1273,15 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's tex-coord translate (research/xim
                 // ParticleInitializers.kt ParentTexCoordConfig).
                 0x4A => parent_tex_coord = true,
+                // 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero,
+                // in-mem ptr, point list DAT id] (research/xim ParticleInitializers.kt
+                // PointListPositionSetup).
+                0x54 if payload + 20 <= body.len() => {
+                    point_list_position = Some((
+                        DatId::from(body, payload + 4).0,
+                        DatId::from(body, payload + 16).0,
+                    ));
+                }
                 // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
                 // shape bound to the element's velocity dampener
                 // (research/xim ParticleGeneratorParser.kt sec2Handler).
@@ -1571,6 +1590,7 @@ impl ParticleGeneratorDef {
             parent_rotate_2,
             batching_setup,
             parent_tex_coord,
+            point_list_position,
         }))
     }
 
@@ -2739,6 +2759,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_tex_coord);
+    }
+
+    // 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem ptr,
+    // point list DAT id] (research/xim ParticleInitializers.kt PointListPositionSetup).
+    // Shipped census: 50 sec2 0x54 blocks in the parser-accepted corpus.
+    #[test]
+    fn point_list_position_reads_the_two_dat_ids() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0x1122_3344u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0x5566_7788u32.to_le_bytes());
+        sec2.extend(op(0x54, 6, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(
+            def.point_list_position,
+            Some(([0x44, 0x33, 0x22, 0x11], [0x88, 0x77, 0x66, 0x55]))
+        );
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.point_list_position, None);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

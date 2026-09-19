@@ -2252,6 +2252,7 @@ mod tests {
             parent_rotate_2: false,
             batching_setup: false,
             parent_tex_coord: false,
+            point_list_position: None,
         }
     }
 

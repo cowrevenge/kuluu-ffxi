@@ -2088,6 +2088,7 @@ mod tests {
             oscillation: false,
             oscillation_accel_z: None,
             oscillation_accel_x: None,
+            oscillation_accel_y: None,
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,

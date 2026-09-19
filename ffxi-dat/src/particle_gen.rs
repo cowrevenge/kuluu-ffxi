@@ -553,6 +553,11 @@ pub struct ParticleGeneratorDef {
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup). Parsed but not
     // applied until the section-3 applier lands.
     pub oscillation_accel_x: Option<[f32; 2]>,
+    // sec2 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40 (research/xim
+    // ParticleInitializers.kt OscillationAccelerationSetup). Present in 30 shipped generators
+    // though absent from the launch log. Parsed but not applied until the section-3 applier
+    // lands.
+    pub oscillation_accel_y: Option<[f32; 2]>,
 
     // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
@@ -748,6 +753,7 @@ impl ParticleGeneratorDef {
         let mut oscillation = false;
         let mut oscillation_accel_z = None;
         let mut oscillation_accel_x = None;
+        let mut oscillation_accel_y = None;
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -1042,6 +1048,11 @@ impl ParticleGeneratorDef {
                 0x3E if payload + 8 <= body.len() => {
                     oscillation_accel_x = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                 }
+                // 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40
+                // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
+                0x3F if payload + 8 <= body.len() => {
+                    oscillation_accel_y = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
+                }
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
@@ -1260,6 +1271,7 @@ impl ParticleGeneratorDef {
             oscillation,
             oscillation_accel_z,
             oscillation_accel_x,
+            oscillation_accel_y,
             rotation_velocity,
             rotation_velocity_variance,
             rotation_updater,
@@ -2040,6 +2052,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.oscillation_accel_x, None);
+    }
+
+    // 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40 (research/xim
+    // ParticleInitializers.kt OscillationAccelerationSetup). Shipped census: 34 blocks, all
+    // size_words=3, every one behind a 0x3D marker.
+    #[test]
+    fn oscillation_accel_y_reads_the_two_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
+        let mut p = Vec::new();
+        p.extend_from_slice(&0.44f32.to_le_bytes());
+        p.extend_from_slice(&0.6f32.to_le_bytes());
+        sec2.extend(op(0x3F, 3, &p));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.oscillation);
+        assert_eq!(def.oscillation_accel_y, Some([0.44, 0.6]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.oscillation_accel_y, None);
     }
 
     // 0x03 VelocityVarianceSetup: the three floats are the per-axis bounds of the random

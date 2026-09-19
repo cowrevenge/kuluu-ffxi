@@ -8,7 +8,8 @@ pub fn delivery_mode_sync_system(
     mut mode: ResMut<InputMode>,
     mut screen: ResMut<kuluu_render::hud::delivery::DeliveryScreenState>,
 ) {
-    let open = state.snapshot.delivery_box.is_some();
+    let box_no = state.snapshot.delivery_box.as_ref().map(|d| d.box_no);
+    let open = box_no.is_some();
     match (&*mode, open) {
         (InputMode::DeliveryBox, false) => {
             *mode = InputMode::World;
@@ -20,9 +21,16 @@ pub fn delivery_mode_sync_system(
         // is open (see `update_dialog_panel_system`).
         (m, true) if !matches!(m, InputMode::DeliveryBox) => {
             *mode = InputMode::DeliveryBox;
-            screen.open();
+            screen.open(box_no.expect("open"));
         }
         _ => {}
+    }
+    // A Receive/Send switch keeps the mode, so the focus reset has to key off
+    // the box as well: the panels do not draw the same regions.
+    if let (InputMode::DeliveryBox, Some(box_no)) = (&*mode, box_no) {
+        if screen.box_no != Some(box_no) {
+            screen.open(box_no);
+        }
     }
 }
 
@@ -58,6 +66,7 @@ pub(super) fn handle_delivery_key(
     let gil = delivery::current_gil(&scene_state.snapshot);
     let outgoing = d.box_no == WireBox::Outgoing;
     let recipient_ok = matches!(d.recipient_status, RecipientStatus::Ok { .. });
+    screen.reclamp(inv.rows.len());
     let ctx = DeliveryCtx {
         box_no: d.box_no,
         inv_len: inv.rows.len(),
@@ -82,6 +91,7 @@ pub(super) fn handle_delivery_key(
             let qty = binding.spinner.confirm();
             let inv_slot = binding.target.inventory_slot();
             let out_slot = binding.target.out_slot();
+            screen.leave_item_list();
             screen.focus = DeliveryFocus::Slot(out_slot as usize);
             if qty > 0 {
                 send(kuluu_session::state::DeliveryBoxOp::Set {
@@ -98,23 +108,7 @@ pub(super) fn handle_delivery_key(
             return;
         }
         if let Some(b) = screen.selector.as_mut() {
-            if bindings.matches_logical(Action::NavUp, key) {
-                b.spinner.up();
-            } else if bindings.matches_logical(Action::NavDown, key) {
-                b.spinner.down();
-            } else if bindings.matches_logical(Action::NavRight, key) {
-                b.spinner.jump_up();
-            } else if bindings.matches_logical(Action::NavLeft, key) {
-                b.spinner.jump_down();
-            } else if matches!(key, Key::Tab) {
-                b.spinner.set_all();
-            } else if matches!(key, Key::Backspace) {
-                b.spinner.backspace();
-            } else if let Key::Character(s) = key {
-                for c in s.chars() {
-                    b.spinner.push_digit(c);
-                }
-            }
+            spinner_nav(&mut b.spinner, key, bindings);
         }
         return;
     }
@@ -172,28 +166,38 @@ pub(super) fn handle_delivery_key(
         return;
     }
 
-    // 3. Navigation + confirm/cancel.
+    // 3. Navigation + confirm/cancel. Moving the cursor disarms a pending
+    // dispatch confirmation so it can never be answered by accident later.
     if bindings.matches_logical(Action::NavUp, key) {
+        screen.confirm_send = false;
         delivery::focus_up(screen, &ctx);
         return;
     }
     if bindings.matches_logical(Action::NavDown, key) {
+        screen.confirm_send = false;
         delivery::focus_down(screen, &ctx);
         return;
     }
     if bindings.matches_logical(Action::NavLeft, key) {
+        screen.confirm_send = false;
         delivery::focus_left(screen, &ctx);
         return;
     }
     if bindings.matches_logical(Action::NavRight, key) {
+        screen.confirm_send = false;
         delivery::focus_right(screen, &ctx);
         return;
     }
+    // Esc unwinds one level: the item list to the slot it was entered from,
+    // Take/Return to the grid, an armed dispatch to unarmed. From the panel
+    // itself it closes the box, which lands back on Receive/Send
+    // (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md
+    // "How the menu opens", "Send flow" step 7).
     if bindings.matches_logical(Action::NavCancel, key) {
         match screen.focus {
-            DeliveryFocus::TakeBtn | DeliveryFocus::RejectBtn => {
-                screen.focus = DeliveryFocus::Slot(screen.last_in_slot);
-            }
+            DeliveryFocus::TakeBtn | DeliveryFocus::RejectBtn => screen.leave_parcel_actions(),
+            DeliveryFocus::InvRow(_) => screen.leave_item_list(),
+            _ if screen.confirm_send => screen.confirm_send = false,
             _ => close(),
         }
         return;
@@ -217,8 +221,7 @@ pub(super) fn handle_delivery_key(
                 } else if inv.rows.is_empty() {
                     notice(scene_state, "No deliverable items.");
                 } else {
-                    let row = screen.last_inv_row.min(inv.rows.len() - 1);
-                    screen.focus = DeliveryFocus::InvRow(row);
+                    screen.enter_item_list(i, inv.rows.len());
                 }
             }
             Some(item) if item.stat == sent => {
@@ -248,35 +251,56 @@ pub(super) fn handle_delivery_key(
             }
         }
         DeliveryFocus::InvRow(i) => {
+            // The slot the list was entered from may have filled from a server
+            // update while it was open, and LSB drops a Set into an occupied
+            // cell with no packet back.
+            let target = screen
+                .pick_slot
+                .filter(|slot| d.slots.get(*slot).is_some_and(Option::is_none))
+                .or_else(|| delivery::first_free_slot(&d));
             if !recipient_ok {
                 notice(scene_state, "Specify a recipient first.");
             } else if let Some(row) = inv.rows.get(i).cloned() {
                 if !row.deliverable {
                     notice(scene_state, "That item cannot be delivered.");
                 } else {
-                    match delivery::first_free_slot(&d) {
+                    match target {
                         None => notice(scene_state, "The delivery box is full."),
-                        Some(free) if row.quantity <= 1 => {
+                        Some(slot) if row.quantity <= 1 => {
+                            screen.leave_item_list();
                             send(kuluu_session::state::DeliveryBoxOp::Set {
-                                slot: free as u8,
+                                slot: slot as u8,
                                 inventory_slot: row.inv_slot,
                                 quantity: 1,
                                 recipient: String::new(),
                             });
                         }
-                        Some(free) => {
-                            screen.selector = delivery::begin_item_stage(&row, Some(free));
+                        Some(slot) => {
+                            screen.selector = delivery::begin_item_stage(&row, Some(slot));
                         }
                     }
                 }
             }
         }
+        // Dispatch is irreversible, so it takes a second press: the first arms
+        // the confirmation, the second sends.
         DeliveryFocus::SendOk => {
-            for (i, cell) in d.slots.iter().enumerate() {
-                if let Some(it) = cell {
-                    if it.stat != sent {
-                        send(kuluu_session::state::DeliveryBoxOp::Send { slot: i as u8 });
-                    }
+            let staged: Vec<u8> = d
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, cell)| cell.as_ref().filter(|it| it.stat != sent).map(|_| i as u8))
+                .collect();
+            if !recipient_ok {
+                notice(scene_state, "Specify a recipient first.");
+            } else if staged.is_empty() {
+                notice(scene_state, "Place an item in the delivery box first.");
+            } else if !screen.confirm_send {
+                screen.confirm_send = true;
+            } else {
+                screen.confirm_send = false;
+                for slot in staged {
+                    send(kuluu_session::state::DeliveryBoxOp::Send { slot });
                 }
             }
         }
@@ -285,11 +309,13 @@ pub(super) fn handle_delivery_key(
             let _ = cmd_tx.try_send(AgentCommand::DeliveryTake {
                 slot: screen.last_in_slot as u8,
             });
+            screen.leave_parcel_actions();
         }
         DeliveryFocus::RejectBtn => {
             send(kuluu_session::state::DeliveryBoxOp::Reject {
                 slot: screen.last_in_slot as u8,
             });
+            screen.leave_parcel_actions();
         }
     }
 }

@@ -16,7 +16,7 @@ use ffxi_dat::install_detect;
 use ffxi_install::Lane;
 
 use super::client_job::{self, ClientJob, JobKind, JobLaneBar, JobStageLabel, JobText};
-use super::common::{hint, panel_node, screen_root, title, PANEL_BORDER_COLOR};
+use super::common::{hint, panel_node, screen_root, title, DefaultFocusTarget, PANEL_BORDER_COLOR};
 use super::{DatGateDone, DatSetupReturn, LauncherState};
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
@@ -523,7 +523,7 @@ fn build_setup_panel(panel: &mut ChildSpawnerCommands, form: &DatSetupForm, can_
                     variant: ButtonVariant::Primary,
                     ..default()
                 },
-                (),
+                DefaultFocusTarget,
                 Spawn((Text::new("Continue"), ThemedText)),
             ))
             .observe(continue_observer);
@@ -841,15 +841,29 @@ fn try_continue(
         return;
     }
 
+    // The selection has to become the registry's default install, not just the
+    // launcher's saved path: cold starts and the lobby version stamp
+    // (lobby_client::client_version_code) resolve the registry default, so a
+    // choice saved only here reverted on relaunch and kept reporting the old
+    // install's era to the server.
+    if let Err(e) = ffxi_client::persist(Path::new(&path)) {
+        form.feedback = Some(Err(format!("Could not make that the default install: {e}")));
+        dirty.0 = true;
+        return;
+    }
+
     let mut store = launcher_store::load();
-    // This screen is reached when the shell's FFXI_DAT_PATH is unusable, so the
-    // saved choice has to beat it; with no shell value there is nothing to override.
-    store.settings.dat_path = EnvOverride {
-        value: path,
-        override_env: ffxi_client::shell_dat_path().is_some(),
-    };
-    if let Err(e) = launcher_store::save(&store) {
-        tracing::warn!(error = %e, "launcher_store: dat_path save failed");
+    // persist() clears the legacy saved path; re-arm it only while the shell
+    // exports FFXI_DAT_PATH, which otherwise outranks the registry at every
+    // launch (this screen is reached exactly in that situation).
+    if ffxi_client::shell_dat_path().is_some() {
+        store.settings.dat_path = EnvOverride {
+            value: path.clone(),
+            override_env: true,
+        };
+        if let Err(e) = launcher_store::save(&store) {
+            tracing::warn!(error = %e, "launcher_store: dat_path save failed");
+        }
     }
     crate::ffxi_client::export(&store.settings).ok();
 

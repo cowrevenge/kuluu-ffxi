@@ -37,7 +37,9 @@ fn main() {
 
     let file_id = ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(zone_id), None)
         .expect("zone -> mzb file id");
-    let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load_mzb_placed");
+    let root = ffxi_dat::DatRoot::from_env_or_default()
+        .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)");
+    let (submeshes, instances) = load_mzb_placed(&root, file_id, None).expect("load_mzb_placed");
 
     let geom: MzbCollisionGeometry = MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,

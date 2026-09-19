@@ -208,6 +208,14 @@ pub struct ClientProfile {
     pub item_layout: Option<ItemBlockLayout>,
 }
 
+/// The install's latest patch stamp alone, for callers that need the version
+/// string the client puts on the wire without hashing FFXiMain.dll.
+pub fn patch_version_at(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(PATCH_CFG))
+        .ok()
+        .and_then(|cfg| latest_patch_version(&cfg))
+}
+
 pub fn latest_patch_version(patch_cfg: &str) -> Option<String> {
     patch_cfg
         .lines()
@@ -260,9 +268,7 @@ impl ClientProfile {
             .and_then(|hash| KNOWN_CLIENTS.iter().find(|k| k.ffximain_sha256 == hash));
         let item_layout =
             ItemBlockLayout::probe_file(item_layout_dat).or(known.map(|k| k.item_layout));
-        let patch_version = std::fs::read_to_string(root.join(PATCH_CFG))
-            .ok()
-            .and_then(|cfg| latest_patch_version(&cfg));
+        let patch_version = patch_version_at(root);
         ClientProfile {
             known,
             ffximain_sha256,
@@ -380,14 +386,13 @@ mod tests {
         assert_eq!(latest_patch_version("file x {\n}\n"), None);
     }
 
-    /// The `retail` named target, when a developer has downloaded and updated
-    /// it; skips otherwise.
+    /// The install registered as `retail`, when a developer has downloaded
+    /// and updated it; skips otherwise.
     #[test]
-    fn retail_target_is_a_known_client() {
-        let targets = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(crate::archive::TARGETS_DIR);
-        let root = crate::archive::target_install_dir(&targets, "retail");
+    fn retail_install_is_a_known_client() {
+        let Some(root) = crate::install::named("retail") else {
+            return;
+        };
         if !root.join(FFXIMAIN_DLL).is_file() {
             return;
         }

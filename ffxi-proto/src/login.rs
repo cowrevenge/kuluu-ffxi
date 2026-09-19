@@ -2,12 +2,12 @@ use std::cmp::Ordering;
 
 include!(concat!(env!("OUT_DIR"), "/xiloader_version_table.rs"));
 include!(concat!(env!("OUT_DIR"), "/login_settings_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/lobby_tables.rs"));
+
+/// Overrides the patch stamp the lobby login (C2S 0x26 versionCode) carries.
+pub const CLIENT_VER_ENV: &str = "FFXI_CLIENT_VER";
 
 pub const IXFF_TERMINATOR: u32 = u32::from_le_bytes(*b"IXFF");
-
-pub const LOGIN_AUTH_PORT: u16 = 54231;
-pub const LOGIN_DATA_PORT: u16 = 54230;
-pub const LOGIN_VIEW_PORT: u16 = 54001;
 
 // vendor/server/src/login/view_session.cpp view_session::read_func case 0x26:
 // the lobby compares only the first six characters of the client's patch
@@ -66,11 +66,42 @@ mod tests {
     // pin bump updates both literals alongside the scrape.
     const LSB_PINNED_CLIENT_VER: &str = "30260904_1";
     const LSB_PINNED_VER_LOCK: u8 = 2;
+    // vendor/server/settings/default/network.lua LOGIN_*_PORT / MAP_PORT
+    const LSB_PINNED_LOGIN_AUTH_PORT: u16 = 54231;
+    const LSB_PINNED_LOGIN_DATA_PORT: u16 = 54230;
+    const LSB_PINNED_LOGIN_VIEW_PORT: u16 = 54001;
+    const LSB_PINNED_MAP_PORT: u16 = 54230;
+
+    /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md example
+    /// packet: excode_client 0x0FFF, i.e. every expansion bit LSB names.
+    #[test]
+    fn scraped_lobby_tables_match_the_pinned_lsb_tree_and_the_retail_capture() {
+        assert_eq!(expansion_display::ALL_KNOWN, 0x0FFF);
+        assert_eq!(expansion_display::RISE_OF_ZILART, 0x0002);
+        assert_eq!(expansion_display::SEEKERS_OF_ADOULIN, 0x0800);
+        assert_eq!(feature_display::SECURE_TOKEN, 0x0001);
+        assert_eq!(lobby_error::GAMES_DATA_HAS_BEEN_UPDATED, 331);
+        assert_eq!(lobby_error::name(331), Some("GAMES_DATA_HAS_BEEN_UPDATED"));
+        assert_eq!(lobby_error::name(1), None);
+    }
+
+    #[test]
+    fn scraped_auth_enums_match_the_pinned_lsb_tree() {
+        assert_eq!(login_cmd::LOGIN_ATTEMPT, 0x10);
+        assert_eq!(login_result::LOGIN_SUCCESS, 0x01);
+        assert_eq!(login_result::LOGIN_ERROR, 0x02);
+        assert_eq!(login_result::LOGIN_ERROR_ALREADY_LOGGED_IN, 0x0A);
+        assert_eq!(login_result::LOGIN_ERROR_VERSION_UNSUPPORTED, 0x0B);
+    }
 
     #[test]
     fn scraped_login_settings_match_the_pinned_lsb_tree() {
         assert_eq!(LSB_CLIENT_VER, LSB_PINNED_CLIENT_VER);
         assert_eq!(LSB_DEFAULT_VER_LOCK, LSB_PINNED_VER_LOCK);
+        assert_eq!(LOGIN_AUTH_PORT, LSB_PINNED_LOGIN_AUTH_PORT);
+        assert_eq!(LOGIN_DATA_PORT, LSB_PINNED_LOGIN_DATA_PORT);
+        assert_eq!(LOGIN_VIEW_PORT, LSB_PINNED_LOGIN_VIEW_PORT);
+        assert_eq!(crate::map::MAP_PORT, LSB_PINNED_MAP_PORT);
     }
 
     #[test]

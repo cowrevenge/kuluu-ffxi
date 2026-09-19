@@ -20,6 +20,7 @@ pub mod generator;
 // (unrar in particular, a C++ build via cc-rs) into every ffxi-dat consumer,
 // including the wasm32 target (kuluu-viewer-wasm -> kuluu-render ->
 // ffxi-actor/ffxi-dat), which has no C++ stdlib to link against.
+pub mod install;
 #[path = "../../ffxi-install/src/install_detect.rs"]
 pub mod install_detect;
 pub mod item_dat;
@@ -50,7 +51,7 @@ pub mod weather;
 pub mod zone_dat;
 pub mod zone_interaction;
 
-pub use archive::{discover_overlays, DatLocation, DatRoot};
+pub use archive::{discover_overlays, excode_client_at, DatLocation, DatRoot};
 pub use camera::CameraResource;
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use client_profile::{ClientProfile, ItemBlockLayout};
@@ -73,8 +74,8 @@ pub enum DatError {
     #[error("FFXI_DAT_PATH environment variable not set")]
     EnvMissing,
 
-    #[error("FFXI_CLIENT_TARGET={name} names no install under vendor/game-files/targets/{name}")]
-    TargetMissing { name: String },
+    #[error("no FFXI install: {reason}")]
+    NoInstall { reason: String },
 
     #[error("invalid table file {path}: expected size multiple of {stride}, got {len}")]
     InvalidTableSize {

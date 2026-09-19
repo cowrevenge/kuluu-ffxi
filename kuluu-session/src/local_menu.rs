@@ -147,6 +147,8 @@ fn district_rows(exit_bit: u8) -> &'static [(&'static str, u8)] {
 #[derive(Debug, Clone)]
 enum Action {
     Close,
+    /// One Esc: back to the level that opened this one.
+    Back,
     Exit(MogHouseExit),
     OpenAreas {
         exit_bit: u8,
@@ -164,7 +166,6 @@ enum Action {
         container: u8,
     },
     OpenDeliveryBox,
-    OpenMogRoot,
     /// Start the 0x04D open flow for `box_no` (Receive/Send rows).
     DeliveryOpen {
         box_no: DeliveryBoxNo,
@@ -265,7 +266,13 @@ pub enum Advance {
 
 #[derive(Default)]
 pub struct LocalMenuSession {
-    menu: Option<Menu>,
+    /// Root first. Retail backs out one level per Esc and closes only from the
+    /// root (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md,
+    /// "How the menu opens").
+    levels: Vec<Menu>,
+    /// A dedicated modal screen (the delivery panel) owns the display while the
+    /// levels below it wait to be unwound back into.
+    suspended: bool,
     job_info: Option<JobInfoState>,
     container_caps: Option<Vec<u16>>,
     /// Snapshot behind the open box-content menu, so slot submenus can offer
@@ -282,14 +289,46 @@ impl LocalMenuSession {
         Self::default()
     }
 
+    /// A frame is on screen right now. False while a modal screen has the
+    /// display suspended, so choices route to that screen instead.
     pub fn active(&self) -> bool {
-        self.menu.is_some()
+        !self.levels.is_empty() && !self.suspended
+    }
+
+    /// Levels are waiting to be unwound back into, whether or not one is drawn.
+    pub fn has_levels(&self) -> bool {
+        !self.levels.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.menu = None;
+        self.levels.clear();
+        self.suspended = false;
         self.delivery = None;
         self.recipient = None;
+    }
+
+    /// Hand the display to a dedicated modal screen, keeping the levels beneath
+    /// it so its close can land back on the level that opened it.
+    pub fn suspend(&mut self) {
+        self.suspended = !self.levels.is_empty();
+    }
+
+    /// Take the display back from a modal screen.
+    pub fn resume(&mut self) -> Option<DialogState> {
+        if !self.suspended {
+            return None;
+        }
+        self.suspended = false;
+        self.levels.last().map(frame)
+    }
+
+    /// One Esc. `None` at the root, which is the caller's cue to close.
+    pub fn pop(&mut self) -> Option<DialogState> {
+        if self.suspended || self.levels.len() < 2 {
+            return None;
+        }
+        self.levels.pop();
+        self.levels.last().map(frame)
     }
 
     /// The exit-door "Where to?" menu. "Change floors." shows when the player is
@@ -332,7 +371,7 @@ impl LocalMenuSession {
             MOG_GARDEN_ROW.to_string(),
             Action::Exit(MogHouseExit::MogGarden),
         ));
-        self.set(Menu {
+        self.open_root(Menu {
             npc_id: MH_DOOR_ENTITY_ID,
             npc_name: MH_DOOR_NAME,
             prompt: WHERE_TO_PROMPT.to_string(),
@@ -351,7 +390,7 @@ impl LocalMenuSession {
     ) -> DialogState {
         self.job_info = job_info;
         self.container_caps = container_caps.map(<[u16]>::to_vec);
-        self.set(mog_menu())
+        self.open_root(mog_menu())
     }
 
     /// The box-content menu, rendered once the 0x04D open flow settles: one row
@@ -497,7 +536,7 @@ impl LocalMenuSession {
             self.clear();
             return Advance::Close;
         };
-        self.menu = None;
+        self.levels.clear();
         Advance::Delivery {
             op: DeliveryBoxOp::Set {
                 slot,
@@ -509,7 +548,7 @@ impl LocalMenuSession {
     }
 
     pub fn advance(&mut self, choice: Option<u32>) -> Advance {
-        let Some(menu) = self.menu.as_ref() else {
+        let Some(menu) = self.levels.last() else {
             return Advance::Close;
         };
         let action = match choice.and_then(|c| menu.rows.get(c as usize)) {
@@ -524,24 +563,31 @@ impl LocalMenuSession {
                 self.clear();
                 Advance::Close
             }
-            Action::Exit(kind) => {
-                self.clear();
-                Advance::Exit(kind)
-            }
-            Action::OpenAreas { exit_bit } => Advance::Frame(self.set(areas_menu(exit_bit))),
-            Action::OpenJobType => match self.job_info {
-                Some(info) => Advance::Frame(self.set(job_type_menu(&info))),
-                None => Advance::Stub {
-                    notice: "Job data has not arrived yet (no 0x01B JOB_INFO) — try again.",
-                    frame: frame(self.menu.as_ref().expect("menu still active")),
-                },
-            },
-            Action::OpenJobList { support } => match self.job_info {
-                Some(info) => Advance::Frame(self.set(job_list_menu(&info, support))),
+            Action::Back => match self.pop() {
+                Some(frame) => Advance::Frame(frame),
                 None => {
                     self.clear();
                     Advance::Close
                 }
+            },
+            Action::Exit(kind) => {
+                self.clear();
+                Advance::Exit(kind)
+            }
+            Action::OpenAreas { exit_bit } => Advance::Frame(self.push(areas_menu(exit_bit))),
+            Action::OpenJobType => match self.job_info {
+                Some(info) => Advance::Frame(self.push(job_type_menu(&info))),
+                None => Advance::Stub {
+                    notice: "Job data has not arrived yet (no 0x01B JOB_INFO) — try again.",
+                    frame: frame(self.levels.last().expect("menu still active")),
+                },
+            },
+            Action::OpenJobList { support } => match self.job_info {
+                Some(info) => Advance::Frame(self.push(job_list_menu(&info, support))),
+                None => Advance::Stub {
+                    notice: "Job data has not arrived yet (no 0x01B JOB_INFO) - try again.",
+                    frame: frame(self.levels.last().expect("menu still active")),
+                },
             },
             Action::PickJob { support, job } => {
                 self.clear();
@@ -551,7 +597,7 @@ impl LocalMenuSession {
                 }
             }
             Action::OpenStorageList => {
-                Advance::Frame(self.set(storage_menu(self.container_caps.as_deref())))
+                Advance::Frame(self.push(storage_menu(self.container_caps.as_deref())))
             }
             Action::OpenStorage { container } => {
                 self.clear();
@@ -559,12 +605,10 @@ impl LocalMenuSession {
             }
             // Retail lets you choose which box to open (Receive default); the
             // dedicated screen also toggles between them in-window.
-            Action::OpenDeliveryBox => Advance::Frame(self.set(delivery_menu())),
-            Action::OpenMogRoot => Advance::Frame(self.set(mog_menu())),
-            Action::DeliveryOpen { box_no } => {
-                self.clear();
-                Advance::DeliveryOpen { box_no }
-            }
+            Action::OpenDeliveryBox => Advance::Frame(self.push(delivery_menu())),
+            // The levels stay: the caller suspends them so the panel's close
+            // can land back on the Receive/Send submenu.
+            Action::DeliveryOpen { box_no } => Advance::DeliveryOpen { box_no },
             Action::DeliverySlot { box_no, slot } => {
                 let item = self
                     .delivery
@@ -623,14 +667,30 @@ impl LocalMenuSession {
             } => self.stage(slot, inventory_slot, quantity),
             Action::Stub(notice) => Advance::Stub {
                 notice,
-                frame: frame(self.menu.as_ref().expect("menu still active")),
+                frame: frame(self.levels.last().expect("menu still active")),
             },
         }
     }
 
+    /// Start a fresh tree at `menu`.
+    fn open_root(&mut self, menu: Menu) -> DialogState {
+        self.levels.clear();
+        self.suspended = false;
+        self.push(menu)
+    }
+
+    /// Redraw the level in place (its rows changed), keeping the stack depth.
     fn set(&mut self, menu: Menu) -> DialogState {
         let f = frame(&menu);
-        self.menu = Some(menu);
+        self.levels.pop();
+        self.levels.push(menu);
+        f
+    }
+
+    /// Drill one level down; [`Self::pop`] is what comes back up.
+    fn push(&mut self, menu: Menu) -> DialogState {
+        let f = frame(&menu);
+        self.levels.push(menu);
         f
     }
 }
@@ -668,7 +728,7 @@ fn areas_menu(exit_bit: u8) -> Menu {
                 Action::Exit(MogHouseExit::from_bit_slot(exit_bit, slot)),
             )
         })
-        .chain(std::iter::once((CANCEL_ROW.to_string(), Action::Close)))
+        .chain(std::iter::once((CANCEL_ROW.to_string(), Action::Back)))
         .collect();
     Menu {
         npc_id: MH_DOOR_ENTITY_ID,
@@ -754,10 +814,7 @@ fn storage_menu(container_caps: Option<&[u16]>) -> Menu {
         .iter()
         .filter(|&&(_, container)| granted(container))
         .map(|&(label, container)| (label.to_string(), Action::OpenStorage { container }))
-        .chain(std::iter::once((
-            CANCEL_ROW.to_string(),
-            Action::OpenMogRoot,
-        )))
+        .chain(std::iter::once((CANCEL_ROW.to_string(), Action::Back)))
         .collect();
     Menu {
         npc_id: MOG_MENU_ID,
@@ -781,7 +838,7 @@ fn delivery_menu() -> Menu {
                 box_no: DeliveryBoxNo::Outgoing,
             },
         ),
-        (CANCEL_ROW.to_string(), Action::OpenMogRoot),
+        (CANCEL_ROW.to_string(), Action::Back),
     ];
     Menu {
         npc_id: MOG_MENU_ID,
@@ -943,7 +1000,7 @@ fn job_type_menu(info: &JobInfoState) -> Menu {
             Action::OpenJobList { support: true },
         ));
     }
-    rows.push((CANCEL_ROW.to_string(), Action::Close));
+    rows.push((CANCEL_ROW.to_string(), Action::Back));
     Menu {
         npc_id: MOG_MENU_ID,
         npc_name: MOG_MENU_NPC_NAME,
@@ -976,7 +1033,7 @@ fn job_list_menu(info: &JobInfoState, support: bool) -> Menu {
             Action::PickJob { support, job },
         ));
     }
-    rows.push((CANCEL_ROW.to_string(), Action::Close));
+    rows.push((CANCEL_ROW.to_string(), Action::Back));
     Menu {
         npc_id: MOG_MENU_ID,
         npc_name: MOG_MENU_NPC_NAME,
@@ -1008,6 +1065,77 @@ mod tests {
             .position(|c| c.starts_with(label))
             .unwrap_or_else(|| panic!("row `{label}` in {:?}", frame.choices));
         session.advance(Some(idx as u32))
+    }
+
+    /// Retail: "Esc backs out one level; esc at top level closes the menu."
+    /// (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md)
+    #[test]
+    fn esc_unwinds_one_level_and_closes_only_at_the_root() {
+        let mut s = LocalMenuSession::new();
+        let root = s.open_mog_menu(Some(job_info()), None);
+        assert!(s.pop().is_none(), "root has nothing to back out to");
+
+        let storage = match pick(&mut s, &root, STORAGE_ROW) {
+            Advance::Frame(f) => f,
+            other => panic!("{other:?}"),
+        };
+        assert!(storage.choices.iter().any(|c| c == MOG_SAFE_ROW));
+
+        let back = s.pop().expect("storage backs out to the root");
+        assert_eq!(back.choices, root.choices);
+        assert!(s.pop().is_none(), "back at the root");
+    }
+
+    /// Every Cancel row is the same action as Esc: one level, not the world.
+    #[test]
+    fn cancel_rows_back_out_one_level() {
+        for (row, child) in [
+            (STORAGE_ROW, MOG_SAFE_ROW),
+            (DELIVERY_BOX_ROW, RECEIVE_ROW),
+            (CHANGE_JOBS_ROW, MAIN_JOB_ROW),
+        ] {
+            let mut s = LocalMenuSession::new();
+            let root = s.open_mog_menu(Some(job_info()), None);
+            let sub = match pick(&mut s, &root, row) {
+                Advance::Frame(f) => f,
+                other => panic!("{row}: {other:?}"),
+            };
+            assert!(sub.choices.iter().any(|c| c == child), "{row}");
+            match pick(&mut s, &sub, CANCEL_ROW) {
+                Advance::Frame(f) => assert_eq!(f.choices, root.choices, "{row}"),
+                other => panic!("{row} Cancel left the tree: {other:?}"),
+            }
+        }
+    }
+
+    /// The delivery panel owns the display while it is open, and handing it
+    /// back lands on the Receive/Send submenu rather than the world.
+    #[test]
+    fn suspended_panel_resumes_onto_the_level_that_opened_it() {
+        let mut s = LocalMenuSession::new();
+        let root = s.open_mog_menu(Some(job_info()), None);
+        let submenu = match pick(&mut s, &root, DELIVERY_BOX_ROW) {
+            Advance::Frame(f) => f,
+            other => panic!("{other:?}"),
+        };
+        match pick(&mut s, &submenu, RECEIVE_ROW) {
+            Advance::DeliveryOpen { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        s.suspend();
+        assert!(!s.active(), "the panel owns the display");
+        assert!(s.has_levels(), "the levels beneath it survive");
+        assert!(
+            s.pop().is_none(),
+            "Esc belongs to the panel while suspended"
+        );
+
+        let back = s.resume().expect("close hands the display back");
+        assert_eq!(back.choices, submenu.choices);
+        assert!(s.active());
+
+        let up = s.pop().expect("and Esc there reaches the root");
+        assert_eq!(up.choices, root.choices);
     }
 
     fn job_info() -> JobInfoState {
@@ -1400,7 +1528,9 @@ mod tests {
                 Advance::DeliveryOpen { box_no } => assert_eq!(box_no, expected),
                 _ => panic!("`{row}` must start the open flow"),
             }
+            s.suspend();
             assert!(!s.active(), "protocol takes over until the flow settles");
+            assert!(s.has_levels(), "and the submenu waits to be returned to");
         }
     }
 

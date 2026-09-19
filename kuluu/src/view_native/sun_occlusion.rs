@@ -3,7 +3,7 @@ use bevy::camera::visibility::ViewVisibility;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 use kuluu_render::camera::OperatorCamera;
-use kuluu_render::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
+use kuluu_render::dat_mzb::{DrawDistance, MMB_LOAD_DISTANCE_MARGIN};
 use kuluu_render::ffxi_actor_render::FfxiActorMeshChild;
 use kuluu_render::lens_flare::SunOcclusion;
 use kuluu_render::sun_moon::{sun_angular_radius, sun_direction, VanaSky, SKY_RADIUS};
@@ -126,12 +126,13 @@ fn sun_visibility_target(
 // research/xim ParticleDrawer.kt renderHazeTexture queryLensFlare: retail's flare visibility is a
 // depth-buffer occlusion query, so only geometry actually drawn that frame occludes, while our
 // collision BVH holds the whole zone block. Three bounds decide what the player can see: zone
-// placements are only spawned inside view_distance * MMB_LOAD_DISTANCE_MARGIN (dat_mmb.rs process_load_mmb_requests),
-// DAT distance fog leaves no contrast past its visibility distance while the sky dome is drawn
-// unfogged (weather.rs apply_zone_weather), and the sun billboard itself sits at SKY_RADIUS so
-// anything past it is behind the sun.
-fn occlusion_reach(view_distance: f32, fog_visibility: Option<f32>) -> f32 {
-    (view_distance * MMB_LOAD_DISTANCE_MARGIN)
+// placements are only spawned inside the zone draw distance * MMB_LOAD_DISTANCE_MARGIN
+// (dat_mmb.rs process_load_mmb_requests) and culled at the draw distance itself
+// (dat_mzb.rs select_zone_mmb_lod), DAT distance fog leaves no contrast past its visibility
+// distance while the sky dome is drawn unfogged (weather.rs apply_zone_weather), and the sun
+// billboard itself sits at SKY_RADIUS so anything past it is behind the sun.
+fn occlusion_reach(draw_distance: f32, fog_visibility: Option<f32>) -> f32 {
+    (draw_distance * MMB_LOAD_DISTANCE_MARGIN)
         .min(fog_visibility.unwrap_or(f32::INFINITY))
         .min(SKY_RADIUS)
 }
@@ -150,13 +151,17 @@ pub fn update_sun_occlusion_system(
     sky: Res<VanaSky>,
     zone_bvh: Res<ZoneCollisionBvh>,
     settings: Res<kuluu_render::graphics_settings::GraphicsSettings>,
+    draw: Res<DrawDistance>,
     zone_weather: Res<ZoneWeather>,
     cam_q: Query<&GlobalTransform, With<OperatorCamera>>,
     actor_q: Query<(&GlobalTransform, &Aabb, &ViewVisibility), With<FfxiActorMeshChild>>,
     time: Res<Time>,
     mut occlusion: ResMut<SunOcclusion>,
 ) {
-    let reach = occlusion_reach(settings.view_distance, zone_weather.fog_visibility_dist());
+    let reach = occlusion_reach(
+        draw.world,
+        zone_weather.fog_visibility_dist(settings.draw_distance_scale),
+    );
     let sun_up = sky.sun_altitude > 0.0;
     let target = match (sun_up, cam_q.single()) {
         (true, Ok(cam)) => {
@@ -194,13 +199,12 @@ mod tests {
     // reported in.
     const TEST_FOG_VISIBILITY: f32 = 1200.0;
 
-    // What update_sun_occlusion_system passes at the shipping default (GraphicsSettings::default()
-    // is QualityPreset::High).
+    // A zone authored to draw past its own fog, as Lower Jeuno is at noon.
+    const TEST_ZONE_DRAW_DISTANCE: f32 = 1000.0;
+
+    // What update_sun_occlusion_system passes in that zone at the vanilla multiplier.
     fn default_reach() -> f32 {
-        occlusion_reach(
-            kuluu_render::graphics_settings::GraphicsSettings::default().view_distance,
-            Some(TEST_FOG_VISIBILITY),
-        )
+        occlusion_reach(TEST_ZONE_DRAW_DISTANCE, Some(TEST_FOG_VISIBILITY))
     }
 
     // The point-sample cone this fix replaced (~6px at a 1080p-tall 60-degree FoV viewport).
@@ -299,24 +303,26 @@ mod tests {
     }
 
     #[test]
-    fn the_shipping_default_reach_is_bounded_by_what_is_drawn() {
-        let high = kuluu_render::graphics_settings::GraphicsSettings::for_preset(
-            kuluu_render::QualityPreset::High,
-        );
+    fn the_reach_is_bounded_by_what_is_drawn() {
         assert_eq!(
-            occlusion_reach(high.view_distance, Some(TEST_FOG_VISIBILITY)),
+            default_reach(),
             TEST_FOG_VISIBILITY,
-            "fog must bound the ray at the High preset's view distance"
+            "fog must bound the ray in a zone drawn past it"
         );
         assert!(
             default_reach() < SKY_RADIUS,
-            "reach at the shipping default must be shorter than the sun's own sphere"
+            "the reach must be shorter than the sun's own sphere"
+        );
+        assert!(
+            occlusion_reach(DrawDistance::default().world, Some(TEST_FOG_VISIBILITY))
+                < TEST_FOG_VISIBILITY,
+            "before a zone record resolves, the fallback draw distance bounds the ray"
         );
 
-        let low_view_distance = 200.0;
+        let cave_draw_distance = 120.0;
         assert_eq!(
-            occlusion_reach(low_view_distance, None),
-            low_view_distance * MMB_LOAD_DISTANCE_MARGIN,
+            occlusion_reach(cave_draw_distance, None),
+            cave_draw_distance * MMB_LOAD_DISTANCE_MARGIN,
             "with no weather record the spawn radius bounds the ray"
         );
         assert_eq!(
@@ -336,8 +342,11 @@ mod tests {
         };
         assert_eq!(
             occlusion_reach(
-                kuluu_render::graphics_settings::GraphicsSettings::default().view_distance,
-                Some(kuluu_render::weather::fog_visibility_dist(&rec)),
+                TEST_ZONE_DRAW_DISTANCE,
+                Some(kuluu_render::weather::fog_visibility_dist(
+                    &rec,
+                    ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
+                )),
             ),
             default_reach(),
             "the fog bound must be the emitter's visibility distance, not a local copy"

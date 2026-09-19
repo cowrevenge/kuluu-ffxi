@@ -4,10 +4,41 @@ use kuluu_snapshot::{Entity as WireEntity, Vec3 as WireVec3};
 use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, HealMode, ReqLogoutKind};
 
 use crate::view_native::command_surface::{
-    self, CommandSet, CommandSurface, Surface, EXTENSION_PREFIX, FIRST_PARTY_OWNER,
+    self, CommandSet, CommandSurface, Surface, EXTENSION_HELP_NAMES, EXTENSION_PREFIX,
+    FIRST_PARTY_OWNER,
 };
 
 const MAX_ZONE_ID: u16 = 600;
+
+/// Retail wraps an action name containing spaces in these (`/ma "Cure II"
+/// <me>`), so an argument list cannot simply split on whitespace.
+const ARG_QUOTE: char = '"';
+const TARGET_TOKEN_OPEN: char = '<';
+const TARGET_TOKEN_CLOSE: char = '>';
+const SELF_TARGET_TOKEN: &str = "<me>";
+const CURRENT_TARGET_TOKEN: &str = "<t>";
+
+/// Party and alliance target tokens, in the one index space the client keeps
+/// them in: `<p0>`..`<p5>` are the player's own party, then the two alliance
+/// parties. FFXiMain.dll carries the token list in .data as 8-byte records
+/// (char* name, u32 packed kind and slot index), and the slot index runs
+/// straight through all eighteen without restarting per party (KNOWN_CLIENTS
+/// retail-2026-09, RVA 0x00357860).
+const PARTY_TARGET_TOKENS: &[&str] = &[
+    "<p0>", "<p1>", "<p2>", "<p3>", "<p4>", "<p5>", "<a10>", "<a11>", "<a12>", "<a13>", "<a14>",
+    "<a15>", "<a20>", "<a21>", "<a22>", "<a23>", "<a24>", "<a25>",
+];
+
+/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp — an alliance is
+/// three parties of this many.
+const PARTY_SLOTS: usize = 6;
+
+/// Retail target tokens Kuluu parses but has no state to answer with yet, kept
+/// apart from a typo so the two report differently.
+const UNRESOLVED_TARGET_TOKENS: &[&str] = &[
+    "<st>", "<stpc>", "<stnpc>", "<stal>", "<stpt>", "<bt>", "<ft>", "<ht>", "<r>", "<pet>",
+    "<scan>", "<lastst>", "<focust>",
+];
 
 struct SlashCtx<'a> {
     cmd: &'a str,
@@ -69,15 +100,26 @@ fn unknown_command(cmd: &str) -> SlashOutcome {
 const COMMANDS: &[(&str, &[Command])] = &[
     (
         "Help",
-        &[Command {
-            // Two retail commands, one handler for now: /help opens retail's
-            // help window and /? answers about a named command.
-            names: &["help", "?"],
-            set: CommandSet::Retail,
-            usage: "",
-            summary: "show this slash-command reference",
-            handler: |c| SlashOutcome::SystemMessage(render_help(c.surface)),
-        }],
+        &[
+            Command {
+                names: &["help", "?"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "list the retail commands this client answers",
+                handler: |c| {
+                    SlashOutcome::SystemMessage(render_help(c.surface, Surface::Retail))
+                },
+            },
+            Command {
+                names: EXTENSION_HELP_NAMES,
+                set: CommandSet::Core,
+                usage: "",
+                summary: "list Kuluu's own commands",
+                handler: |c| {
+                    SlashOutcome::SystemMessage(render_help(c.surface, Surface::Extension))
+                },
+            },
+        ],
     ),
     (
         "Movement & Navigation",
@@ -121,7 +163,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["pathtoforce", "pathtof"],
                 set: CommandSet::Dev,
                 usage: "<x> <y> [z] | <name> | target",
-                summary: "pathfind ignoring collision (straight-lines through walls when no route — stuck-recovery)",
+                summary: "pathfind ignoring collision (straight-lines through walls when no route -- stuck-recovery)",
                 handler: |c| {
                     parse_pathto(
                         c.rest,
@@ -334,7 +376,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["check", "checkname", "checkparam"],
                 set: CommandSet::Retail,
                 usage: "[name]",
-                summary: "check target — strength / name / parameters",
+                summary: "check target -- strength / name / parameters",
                 handler: |c| match resolve_action_target(
                     c.rest,
                     c.entities,
@@ -358,35 +400,35 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 set: CommandSet::Retail,
                 usage: "<spell> [target]",
                 summary: "cast a spell",
-                handler: |c| parse_cast(c.rest, c.entities, c.self_pos, c.current_target),
+                handler: parse_cast,
             },
             Command {
                 names: &["weaponskill"],
                 set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "weapon skill",
-                handler: |c| parse_weaponskill(c.rest, c.entities, c.self_pos, c.current_target),
+                handler: parse_weaponskill,
             },
             Command {
                 names: &["jobability"],
                 set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "job ability",
-                handler: |c| parse_job_ability(c.rest, c.entities, c.self_pos, c.current_target),
+                handler: parse_job_ability,
             },
             Command {
                 names: &["shoot"],
                 set: CommandSet::Retail,
                 usage: "[target]",
                 summary: "ranged attack",
-                handler: |c| parse_ranged_attack(c.rest, c.entities, c.self_pos, c.current_target),
+                handler: parse_ranged_attack,
             },
             Command {
                 names: &["item"],
                 set: CommandSet::Retail,
                 usage: "<name> [target]",
                 summary: "use an item",
-                handler: |c| parse_use_item(c.rest, c.entities, c.self_pos, c.current_target),
+                handler: parse_use_item,
             },
             Command {
                 names: &["equip"],
@@ -476,7 +518,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
             Command {
                 names: &["jobemote"],
                 set: CommandSet::Retail,
-                usage: "[war|mnk|…] [motion|text]",
+                usage: "[war|mnk|...] [motion|text]",
                 summary: "job gesture (defaults to current main job; needs its JOB_GESTURE key item)",
                 handler: |c| parse_jobemote(c.rest, c),
             },
@@ -560,9 +602,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
-            // Not a retail command — a dev/diagnostic convenience (echoes the raw
-            // 0x0F4 tracking list to chat for copying). Debug builds only; the
-            // retail-faithful path is the Map screen's Wide Scan submenu.
             #[cfg(debug_assertions)]
             Command {
                 names: &["widescan", "wscan"],
@@ -629,6 +668,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "[on|off]",
                 summary: "request shutdown (LeaveGame, then close)",
                 handler: |c| parse_reqlogout(c.rest,  true),
+            },
+            Command {
+                names: &["exit"],
+                set: CommandSet::Core,
+                usage: "",
+                summary: "request shutdown and close the window now",
+                handler: |_| SlashOutcome::Quit,
             },
         ],
     ),
@@ -791,7 +837,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["zoneline", "zonelines"],
                 set: CommandSet::Dev,
                 usage: "[off|pillar|gate|toggle]",
-                summary: "zone-line trigger markers — off (retail-faithful, default), pillar (debug column), or gate (real oriented footprint)",
+                summary: "zone-line trigger markers -- off (retail-faithful, default), pillar (debug column), or gate (real oriented footprint)",
                 handler: |c| parse_zoneline(c.rest),
             },
             Command {
@@ -848,13 +894,25 @@ const COMMANDS: &[(&str, &[Command])] = &[
     ),
 ];
 
-fn render_help(surface: &CommandSurface) -> String {
-    let mut out = String::from("=== Slash command reference ===");
+/// The two surfaces list separately: `/?` answers about the client the player
+/// installed, and says where the rest lives.
+fn render_help(surface: &CommandSurface, which: Surface) -> String {
+    let mut out = String::from(match which {
+        Surface::Retail => "=== Retail commands ===",
+        Surface::Extension => "=== Kuluu commands ===",
+    });
     for (category, entries) in COMMANDS {
+        let listed: Vec<&Command> = entries
+            .iter()
+            .filter(|e| listed_on(e, surface, which))
+            .collect();
+        if listed.is_empty() {
+            continue;
+        }
         out.push_str("\n[");
         out.push_str(category);
         out.push(']');
-        for entry in *entries {
+        for entry in listed {
             out.push_str("\n  ");
             for (i, name) in entry.names.iter().enumerate() {
                 if i > 0 {
@@ -862,6 +920,9 @@ fn render_help(surface: &CommandSurface) -> String {
                 }
                 out.push_str(entry.prefix());
                 out.push_str(name);
+                if !entry.set.is_retail() {
+                    continue;
+                }
                 // A retail command's other spellings are the install's answer,
                 // not ours, so they are listed from its table.
                 for alias in surface.alias_group(name).into_iter().filter(|a| a != name) {
@@ -877,7 +938,28 @@ fn render_help(surface: &CommandSurface) -> String {
             out.push_str(entry.summary);
         }
     }
+    if which == Surface::Retail {
+        out.push_str("\nKuluu's own commands are typed with ");
+        out.push_str(EXTENSION_PREFIX);
+        out.push_str(" -- see ");
+        out.push_str(EXTENSION_PREFIX);
+        out.push_str(EXTENSION_HELP_NAMES[0]);
+    }
     out
+}
+
+fn listed_on(entry: &Command, surface: &CommandSurface, which: Surface) -> bool {
+    match which {
+        Surface::Retail => entry.set.is_retail(),
+        Surface::Extension => {
+            !entry.set.is_retail()
+                && (is_extension_help(entry) || surface.enabled.is_enabled(entry.set))
+        }
+    }
+}
+
+fn is_extension_help(entry: &Command) -> bool {
+    !entry.set.is_retail() && entry.names == EXTENSION_HELP_NAMES
 }
 
 #[derive(Debug, Clone)]
@@ -951,7 +1033,7 @@ pub enum SlashOutcome {
 
     SetVanaClock(Option<bool>),
 
-    /// `Some(scale)` sets the 3D render scale (0.25–2.0); `None` reports it.
+    /// `Some(scale)` sets the 3D render scale (0.25-2.0); `None` reports it.
     SetRenderScale(Option<f32>),
 
     SetZoneLines(ZoneLineOp),
@@ -1056,7 +1138,7 @@ pub enum OverlayOp {
     Add(std::path::PathBuf),
     /// Drop the 1-based entry `n` from the active list and persist.
     Remove(usize),
-    /// Persist an empty list — the way to run a private-server install with the
+    /// Persist an empty list -- the way to run a private-server install with the
     /// server's overlays off, which is distinct from `Reset`.
     Clear,
     /// Forget the override and go back to what discovery finds.
@@ -1178,7 +1260,9 @@ fn dispatch_extension(
         return SlashOutcome::SystemMessage(format!("{EXTENSION_PREFIX}{owner}: no such owner"));
     }
     match commands().find(|c| !c.set.is_retail() && c.names.contains(&word)) {
-        Some(command) if surface.enabled.is_enabled(command.set) => (command.handler)(ctx),
+        Some(command) if is_extension_help(command) || surface.enabled.is_enabled(command.set) => {
+            (command.handler)(ctx)
+        }
         Some(command) => SlashOutcome::SystemMessage(format!(
             "{EXTENSION_PREFIX}{word}: the {} command set is off",
             command.set.word()
@@ -1195,8 +1279,8 @@ fn emote_target(ctx: &SlashCtx) -> (Option<u32>, Option<u16>) {
     (ent.map(|e| e.id), ent.map(|e| e.act_index))
 }
 
-/// `[motion|text]` trailing argument → EmoteMode (default All; XiPackets
-/// client 0x005D: 'motion' → 2, 'text' → 1).
+/// `[motion|text]` trailing argument -> EmoteMode (default All; XiPackets
+/// client 0x005D: 'motion' -> 2, 'text' -> 1).
 fn parse_emote_mode(arg: &str) -> Option<u8> {
     use ffxi_proto::map::emote::mode;
     match arg {
@@ -1260,7 +1344,7 @@ fn parse_jobemote(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
     };
     if job_id == 0 {
         return SlashOutcome::SystemMessage(format!(
-            "/jobemote: unknown job `{job_arg}` (use WAR/MNK/… or omit for main job)"
+            "/jobemote: unknown job `{job_arg}` (use WAR/MNK/... or omit for main job)"
         ));
     }
     emote_outcome(
@@ -1562,8 +1646,8 @@ fn resolve_position_needle(
                     z: line.from_pos[2],
                 };
                 let label = kuluu_nav::zone_name(line.to_zone)
-                    .map(|n| format!("zone-line → {n} ({})", line.to_zone))
-                    .unwrap_or_else(|| format!("zone-line → zone {}", line.to_zone));
+                    .map(|n| format!("zone-line -> {n} ({})", line.to_zone))
+                    .unwrap_or_else(|| format!("zone-line -> zone {}", line.to_zone));
                 return Some((pos, label));
             }
         }
@@ -1608,67 +1692,144 @@ fn parse_raw(
     }
 }
 
-fn parse_cast(
-    rest: &str,
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> SlashOutcome {
-    let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
-    if parts.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/cast: usage `/cast <spell_id> [target_id] [target_index] [x y z]`".into(),
-        );
-    }
-    let spell_id: u32 = match parts[0].parse() {
-        Ok(n) => n,
-        Err(_) => {
-            return SlashOutcome::SystemMessage(format!("/cast: bad spell_id `{}`", parts[0]));
-        }
-    };
-    let (target_id, target_index) = match parts.get(1) {
-        Some(s) => {
-            let id: u32 = match s.parse() {
-                Ok(n) => n,
-                Err(_) => {
-                    return SlashOutcome::SystemMessage(format!("/cast: bad target_id `{s}`"));
+/// Split a retail command's arguments, honouring the double quotes that wrap a
+/// name containing spaces.
+fn split_command_args(rest: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut open = false;
+    let mut started = false;
+    for ch in rest.chars() {
+        match ch {
+            ARG_QUOTE => {
+                open = !open;
+                started = true;
+            }
+            _ if ch.is_whitespace() && !open => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
                 }
-            };
-            let idx: u16 = match parts.get(2) {
-                Some(t) => match t.parse() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return SlashOutcome::SystemMessage(format!(
-                            "/cast: bad target_index `{t}`"
-                        ));
-                    }
-                },
-                None => entities
+            }
+            _ => {
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
+}
+
+/// A spell/ability/weaponskill argument: retail takes the name, and Kuluu keeps
+/// accepting the raw id the menus and the agent socket speak in.
+fn action_id(word: &str, by_name: fn(&str) -> Option<u16>) -> Option<u32> {
+    word.parse::<u32>()
+        .ok()
+        .or_else(|| by_name(word).map(u32::from))
+}
+
+/// The party/alliance member in one of retail's eighteen `<pN>`/`<aNN>` slots.
+fn party_slot_target(slot: usize, party: &[kuluu_snapshot::PartyMember]) -> Option<(u32, u16)> {
+    let party_no = (slot / PARTY_SLOTS) as u8;
+    party
+        .iter()
+        .filter(|m| m.party_no == party_no)
+        .nth(slot % PARTY_SLOTS)
+        .map(|m| (m.id, m.act_index))
+}
+
+fn resolve_target_token(token: &str, ctx: &SlashCtx) -> Result<(u32, u16), String> {
+    let lower = token.to_ascii_lowercase();
+    match lower.as_str() {
+        SELF_TARGET_TOKEN => {
+            let id = ctx
+                .self_char_id
+                .ok_or_else(|| format!("{token}: self not resolved yet"))?;
+            let index = ctx
+                .entities
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.act_index)
+                .unwrap_or(0);
+            Ok((id, index))
+        }
+        CURRENT_TARGET_TOKEN => {
+            resolve_action_target("", ctx.entities, ctx.self_pos, ctx.current_target)
+                .ok_or_else(|| format!("{token}: no target"))
+        }
+        _ => match PARTY_TARGET_TOKENS.iter().position(|t| *t == lower) {
+            Some(slot) => party_slot_target(slot, ctx.party)
+                .ok_or_else(|| format!("{token}: nobody in that slot")),
+            None if UNRESOLVED_TARGET_TOKENS.contains(&lower.as_str()) => {
+                Err(format!("{token}: not supported yet"))
+            }
+            None => Err(format!("unknown target token `{token}`")),
+        },
+    }
+}
+
+/// Resolve the target argument of an action command, returning how many
+/// arguments it took. An absent target falls back to the current one; a raw
+/// `id [index]` pair stays accepted alongside retail's `<token>` and name forms.
+fn resolve_command_target(args: &[String], ctx: &SlashCtx) -> Result<((u32, u16), usize), String> {
+    let Some(first) = args.first() else {
+        let pair = resolve_action_target("", ctx.entities, ctx.self_pos, ctx.current_target)
+            .ok_or_else(|| "no target".to_string())?;
+        return Ok((pair, 0));
+    };
+    if let Ok(id) = first.parse::<u32>() {
+        return match args.get(1).map(|t| t.parse::<u16>()) {
+            Some(Ok(index)) => Ok(((id, index), 2)),
+            Some(Err(_)) | None => {
+                let index = ctx
+                    .entities
                     .iter()
                     .find(|e| e.id == id)
                     .map(|e| e.act_index)
-                    .unwrap_or(0),
-            };
-            (id, idx)
-        }
-        None => match resolve_action_target("", entities, self_pos, current_target) {
-            Some((id, idx)) => (id, idx),
-            None => return SlashOutcome::SystemMessage("/cast: no target".into()),
-        },
-    };
-    let coords: [f32; 3] = match parts.len() {
-        n if n >= 6 => {
-            let xyz: Result<Vec<f32>, _> = parts[3..6].iter().map(|p| p.parse()).collect();
-            match xyz {
-                Ok(v) => [v[0], v[1], v[2]],
-                Err(_) => {
-                    return SlashOutcome::SystemMessage(
-                        "/cast: bad ground-target coords (expected three floats)".into(),
-                    );
-                }
+                    .unwrap_or(0);
+                Ok(((id, index), 1))
             }
+        };
+    }
+    if first.starts_with(TARGET_TOKEN_OPEN) && first.ends_with(TARGET_TOKEN_CLOSE) {
+        return resolve_target_token(first, ctx).map(|pair| (pair, 1));
+    }
+    resolve_action_target(first, ctx.entities, ctx.self_pos, ctx.current_target)
+        .map(|pair| (pair, 1))
+        .ok_or_else(|| format!("no one named `{first}` nearby"))
+}
+
+fn parse_ground_target(args: &[String]) -> Result<[f32; 3], String> {
+    match args {
+        [] => Ok([0.0, 0.0, 0.0]),
+        [x, y, z] => {
+            let xyz: Result<Vec<f32>, _> = [x, y, z].iter().map(|p| p.parse::<f32>()).collect();
+            xyz.map(|v| [v[0], v[1], v[2]])
+                .map_err(|_| "bad ground-target coords (expected three floats)".to_string())
         }
-        _ => [0.0, 0.0, 0.0],
+        _ => Err("bad ground-target coords (expected three floats)".to_string()),
+    }
+}
+
+fn parse_cast(ctx: &SlashCtx) -> SlashOutcome {
+    let cmd = ctx.cmd;
+    let args = split_command_args(ctx.rest);
+    let Some(name) = args.first() else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: usage `/{cmd} <spell> [target]`"));
+    };
+    let Some(spell_id) = action_id(name, ffxi_vocab::spell_names::id_for) else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: unknown spell `{name}`"));
+    };
+    let ((target_id, target_index), used) = match resolve_command_target(&args[1..], ctx) {
+        Ok(pair) => pair,
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
+    };
+    let coords = match parse_ground_target(&args[1 + used..]) {
+        Ok(c) => c,
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
     };
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
@@ -1682,27 +1843,19 @@ fn parse_cast(
     })
 }
 
-fn parse_weaponskill(
-    rest: &str,
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> SlashOutcome {
-    let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
-    if parts.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/ws: usage `/ws <skill_id> [target_id] [target_index]`".into(),
-        );
-    }
-    let skill_id: u32 = match parts[0].parse() {
-        Ok(n) => n,
-        Err(_) => return SlashOutcome::SystemMessage(format!("/ws: bad skill_id `{}`", parts[0])),
+fn parse_weaponskill(ctx: &SlashCtx) -> SlashOutcome {
+    let cmd = ctx.cmd;
+    let args = split_command_args(ctx.rest);
+    let Some(name) = args.first() else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: usage `/{cmd} <skill> [target]`"));
     };
-    let (target_id, target_index) =
-        match resolve_target_args(&parts[1..], entities, self_pos, current_target) {
-            Ok(pair) => pair,
-            Err(msg) => return SlashOutcome::SystemMessage(format!("/ws: {msg}")),
-        };
+    let Some(skill_id) = action_id(name, ffxi_vocab::weapon_skill_names::id_for) else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: unknown weapon skill `{name}`"));
+    };
+    let ((target_id, target_index), _) = match resolve_command_target(&args[1..], ctx) {
+        Ok(pair) => pair,
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
+    };
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
         target_index,
@@ -1710,20 +1863,14 @@ fn parse_weaponskill(
     })
 }
 
-/// `/ra [target]` — ranged attack (c2s action 0x10). Takes no id, only a target
+/// `/ra [target]` -- ranged attack (c2s action 0x10). Takes no id, only a target
 /// (defaults to the current target).
-fn parse_ranged_attack(
-    rest: &str,
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> SlashOutcome {
-    let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
-    let (target_id, target_index) =
-        match resolve_target_args(&parts, entities, self_pos, current_target) {
-            Ok(pair) => pair,
-            Err(msg) => return SlashOutcome::SystemMessage(format!("/ra: {msg}")),
-        };
+fn parse_ranged_attack(ctx: &SlashCtx) -> SlashOutcome {
+    let args = split_command_args(ctx.rest);
+    let ((target_id, target_index), _) = match resolve_command_target(&args, ctx) {
+        Ok(pair) => pair,
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{}: {msg}", ctx.cmd)),
+    };
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
         target_index,
@@ -1731,27 +1878,34 @@ fn parse_ranged_attack(
     })
 }
 
-fn parse_job_ability(
-    rest: &str,
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> SlashOutcome {
-    let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
-    if parts.is_empty() {
-        return SlashOutcome::SystemMessage(
-            "/ja: usage `/ja <ability_id> [target_id] [target_index]`".into(),
-        );
-    }
-    let ability_id: u32 = match parts[0].parse() {
-        Ok(n) => n,
-        Err(_) => {
-            return SlashOutcome::SystemMessage(format!("/ja: bad ability_id `{}`", parts[0]));
-        }
+fn parse_job_ability(ctx: &SlashCtx) -> SlashOutcome {
+    let cmd = ctx.cmd;
+    let args = split_command_args(ctx.rest);
+    let Some(name) = args.first() else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: usage `/{cmd} <ability> [target]`"));
+    };
+    let Some(ability_id) = action_id(name, ffxi_vocab::ability_names::id_for) else {
+        return SlashOutcome::SystemMessage(format!("/{cmd}: unknown ability `{name}`"));
     };
 
-    let (target_id, target_index) =
-        resolve_target_args(&parts[1..], entities, self_pos, current_target).unwrap_or_default();
+    // An ability whose validTarget is SELF alone takes no target argument in
+    // retail, and the menus already route those to <me>
+    // (vendor/server/sql/abilities.sql validTarget).
+    let self_only = u16::try_from(ability_id)
+        .ok()
+        .and_then(ffxi_vocab::valid_target::ability)
+        .is_some_and(|f| f.is_self_only());
+    let target = if args.len() > 1 {
+        match resolve_command_target(&args[1..], ctx) {
+            Ok((pair, _)) => Some(pair),
+            Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
+        }
+    } else if self_only {
+        resolve_target_token(SELF_TARGET_TOKEN, ctx).ok()
+    } else {
+        resolve_command_target(&[], ctx).ok().map(|(pair, _)| pair)
+    };
+    let (target_id, target_index) = target.unwrap_or_default();
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
         target_index,
@@ -1759,39 +1913,34 @@ fn parse_job_ability(
     })
 }
 
-fn parse_use_item(
-    rest: &str,
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> SlashOutcome {
-    let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
+fn parse_use_item(ctx: &SlashCtx) -> SlashOutcome {
+    let cmd = ctx.cmd;
+    let parts = split_command_args(ctx.rest);
     if parts.len() < 2 {
-        return SlashOutcome::SystemMessage(
-            "/useitem: usage `/useitem <container> <slot> [item_no] [target_id] [target_index]`"
-                .into(),
-        );
+        return SlashOutcome::SystemMessage(format!(
+            "/{cmd}: usage `/{cmd} <container> <slot> [item_no] [target]`"
+        ));
     }
     let container: u8 = match parts[0].parse() {
         Ok(n) => n,
         Err(_) => {
-            return SlashOutcome::SystemMessage(format!("/useitem: bad container `{}`", parts[0]));
+            return SlashOutcome::SystemMessage(format!("/{cmd}: bad container `{}`", parts[0]));
         }
     };
     let slot: u8 = match parts[1].parse() {
         Ok(n) => n,
-        Err(_) => return SlashOutcome::SystemMessage(format!("/useitem: bad slot `{}`", parts[1])),
+        Err(_) => return SlashOutcome::SystemMessage(format!("/{cmd}: bad slot `{}`", parts[1])),
     };
     let item_no: u32 = match parts.get(2) {
         Some(s) => match s.parse() {
             Ok(n) => n,
-            Err(_) => return SlashOutcome::SystemMessage(format!("/useitem: bad item_no `{s}`")),
+            Err(_) => return SlashOutcome::SystemMessage(format!("/{cmd}: bad item_no `{s}`")),
         },
         None => 0,
     };
-    let tail: &[&str] = parts.get(3..).unwrap_or(&[]);
-    let (target_id, target_index) =
-        resolve_target_args(tail, entities, self_pos, current_target).unwrap_or_default();
+    let (target_id, target_index) = resolve_command_target(&parts[3.min(parts.len())..], ctx)
+        .map(|(pair, _)| pair)
+        .unwrap_or_default();
     SlashOutcome::Command(AgentCommand::UseItem {
         container,
         slot,
@@ -1878,7 +2027,7 @@ fn parse_overlay(rest: &str) -> SlashOutcome {
         "reset" | "auto" => OverlayOp::Reset,
         other => {
             return SlashOutcome::SystemMessage(format!(
-                "/overlay: unknown `{other}` — try list|add <dir>|remove <n>|clear|reset"
+                "/overlay: unknown `{other}` -- try list|add <dir>|remove <n>|clear|reset"
             ))
         }
     };
@@ -1903,29 +2052,6 @@ fn parse_zone_change(rest: &str) -> SlashOutcome {
     match trimmed.parse::<u32>() {
         Ok(line_id) => SlashOutcome::Command(AgentCommand::RequestZoneChange { line_id }),
         Err(_) => SlashOutcome::SystemMessage(format!("/zonechange: bad line_id `{trimmed}`")),
-    }
-}
-
-fn resolve_target_args(
-    parts: &[&str],
-    entities: &[WireEntity],
-    self_pos: WireVec3,
-    current_target: Option<u32>,
-) -> Result<(u32, u16), String> {
-    if let Some(s) = parts.first() {
-        let id: u32 = s.parse().map_err(|_| format!("bad target_id `{s}`"))?;
-        let idx: u16 = match parts.get(1) {
-            Some(t) => t.parse().map_err(|_| format!("bad target_index `{t}`"))?,
-            None => entities
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.act_index)
-                .unwrap_or(0),
-        };
-        Ok((id, idx))
-    } else {
-        resolve_action_target("", entities, self_pos, current_target)
-            .ok_or_else(|| "no target".to_string())
     }
 }
 
@@ -2096,7 +2222,7 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
     s.push_str(&format!("  look_tag={}", look_tag(e.look.as_ref())));
     use kuluu_snapshot::EntityLook;
     match &e.look {
-        None => s.push_str(" (none decoded — no look-bearing tick yet)"),
+        None => s.push_str(" (none decoded -- no look-bearing tick yet)"),
         Some(EntityLook::Standard { modelid }) => {
             s.push_str(&format!(" modelid={modelid} (0x{modelid:04X})"));
         }
@@ -2170,7 +2296,7 @@ fn parse_weather(rest: &str) -> SlashOutcome {
     let arg = rest.trim();
     if arg.is_empty() {
         return SlashOutcome::SystemMessage(
-            "/weather: usage `/weather <id|name>` — 0..=19, or names like \
+            "/weather: usage `/weather <id|name>` -- 0..=19, or names like \
              none, sunshine, clouds, fog, rain, snow, thunderstorms, sand_storm, \
              auroras, gloom, darkness (see vendor/server/data/enums/weather.yaml)"
                 .into(),
@@ -2389,7 +2515,7 @@ fn parse_renderscale(rest: &str) -> SlashOutcome {
                 SlashOutcome::SetRenderScale(Some(v))
             } else {
                 SlashOutcome::SystemMessage(format!(
-                    "/renderscale: {:.0}% out of range (25–200%)",
+                    "/renderscale: {:.0}% out of range (25-200%)",
                     v * 100.0
                 ))
             }
@@ -2732,7 +2858,7 @@ fn parse_sub_area(rest: &str, self_pos: WireVec3) -> SlashOutcome {
             Some(id) => SubAreaOp::Load(id),
             None => {
                 return SlashOutcome::SystemMessage(format!(
-                    "/subarea: bad sub-area id `{arg}` — usage `/subarea [<sub_area_id>|here]`"
+                    "/subarea: bad sub-area id `{arg}` -- usage `/subarea [<sub_area_id>|here]`"
                 ))
             }
         },
@@ -2773,13 +2899,13 @@ fn parse_keybinds(rest: &str) -> SlashOutcome {
         "preset" => match Preset::from_slug(arg) {
             Some(preset) => SlashOutcome::ApplyKeybinds(KeybindUpdate::Preset(preset)),
             None => SlashOutcome::SystemMessage(format!(
-                "/keybinds: unknown preset `{arg}` — try compact1, compact2, or standard"
+                "/keybinds: unknown preset `{arg}` -- try compact1, compact2, or standard"
             )),
         },
         "list" => SlashOutcome::ApplyKeybinds(KeybindUpdate::List),
         "reset" => SlashOutcome::ApplyKeybinds(KeybindUpdate::Reset),
         other => SlashOutcome::SystemMessage(format!(
-            "/keybinds: unknown verb `{other}` — try preset, list, or reset"
+            "/keybinds: unknown verb `{other}` -- try preset, list, or reset"
         )),
     }
 }
@@ -3421,7 +3547,6 @@ mod tests {
             other => panic!("expected SetSitStance(Toggle), got {other:?}"),
         }
 
-        // /kneel is the canned emote (id 3) — no longer a /sit alias.
         let (id, ..) = expect_emote(parse_slash_t(
             "/kneel",
             &empty_entities(),
@@ -3651,7 +3776,7 @@ mod tests {
         }
 
         // 0x1CE is the Lower Jeuno food-shop interior in
-        // research/xi-tools/docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
+        // research/xi-tools/docs/zone/subareas.md "Worked example -- Lower Jeuno (`ROM/1/41`, zone 245)".
         for s in ["//subarea 462", "//subarea 0x1CE", "//subareas 0x1ce"] {
             match parse_slash_t(s, &empty_entities(), pos, None, None) {
                 SlashOutcome::SubArea {
@@ -4113,6 +4238,217 @@ mod tests {
         }
     }
 
+    fn parse_slash_as(
+        buffer: &str,
+        entities: &[WireEntity],
+        current_target: Option<u32>,
+        self_char_id: Option<u32>,
+        party: &[kuluu_snapshot::PartyMember],
+    ) -> SlashOutcome {
+        parse_slash(
+            buffer,
+            &test_surface(),
+            entities,
+            origin(),
+            current_target,
+            None,
+            self_char_id,
+            party,
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        )
+    }
+
+    fn party_member(id: u32, act_index: u16, party_no: u8) -> kuluu_snapshot::PartyMember {
+        kuluu_snapshot::PartyMember {
+            id,
+            act_index,
+            name: None,
+            hp: 0,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 0,
+            main_job_lv: 0,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no,
+            in_mog_house: false,
+        }
+    }
+
+    fn ability_action(out: SlashOutcome) -> (u32, u32, u16) {
+        match out {
+            SlashOutcome::Command(AgentCommand::Action {
+                target_id,
+                target_index,
+                kind: ActionKind::JobAbility { ability_id },
+            }) => (ability_id, target_id, target_index),
+            other => panic!("expected JobAbility, got {other:?}"),
+        }
+    }
+
+    /// The form retail macros are written in, and the one a player types.
+    #[test]
+    fn job_ability_takes_a_quoted_name_and_the_self_token() {
+        let flee = u32::from(ffxi_vocab::ability_names::id_for("Flee").expect("Flee present"));
+        let entities = vec![ent(9, "Me", EntityKind::Pc, 0.0, 0.0)];
+        let (ability_id, target_id, target_index) = ability_action(parse_slash_as(
+            "/ja \"Flee\" <me>",
+            &entities,
+            None,
+            Some(9),
+            &[],
+        ));
+        assert_eq!((ability_id, target_id), (flee, 9));
+        assert_eq!(target_index, entities[0].act_index);
+        assert_eq!(
+            ability_action(parse_slash_as("/ja Flee", &entities, None, Some(9), &[])).0,
+            flee
+        );
+    }
+
+    /// A multi-word name only survives the split inside quotes.
+    #[test]
+    fn action_names_with_spaces_need_their_quotes() {
+        let entities = vec![ent(9, "Me", EntityKind::Pc, 0.0, 0.0)];
+        let strikes = u32::from(
+            ffxi_vocab::ability_names::id_for("Mighty Strikes").expect("Mighty Strikes present"),
+        );
+        assert_eq!(
+            ability_action(parse_slash_as(
+                "/ja \"Mighty Strikes\"",
+                &entities,
+                None,
+                Some(9),
+                &[]
+            ))
+            .0,
+            strikes
+        );
+        assert!(matches!(
+            parse_slash_as("/ja Mighty Strikes", &entities, None, Some(9), &[]),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    /// A self-only ability needs no target argument, as in retail and as the
+    /// menus already dispatch it.
+    #[test]
+    fn a_self_only_ability_targets_self_without_a_token() {
+        let entities = vec![ent(9, "Me", EntityKind::Pc, 0.0, 0.0)];
+        let flee = ffxi_vocab::ability_names::id_for("Flee").expect("Flee present");
+        assert!(
+            ffxi_vocab::valid_target::ability(flee).is_some_and(|f| f.is_self_only()),
+            "Flee is the self-only case this test rests on"
+        );
+        let (_, target_id, _) =
+            ability_action(parse_slash_as("/ja Flee", &entities, None, Some(9), &[]));
+        assert_eq!(target_id, 9);
+    }
+
+    #[test]
+    fn party_and_alliance_tokens_index_one_slot_space() {
+        let party = vec![
+            party_member(1, 10, 0),
+            party_member(2, 20, 0),
+            party_member(3, 30, 1),
+            party_member(4, 40, 2),
+        ];
+        let cure = u32::from(ffxi_vocab::spell_names::id_for("Cure").expect("Cure present"));
+        for (token, want) in [("<p1>", (2, 20)), ("<a10>", (3, 30)), ("<a20>", (4, 40))] {
+            match parse_slash_as(
+                &format!("/ma \"Cure\" {token}"),
+                &empty_entities(),
+                None,
+                None,
+                &party,
+            ) {
+                SlashOutcome::Command(AgentCommand::Action {
+                    target_id,
+                    target_index,
+                    kind: ActionKind::CastMagic { spell_id, .. },
+                }) => {
+                    assert_eq!(spell_id, cure);
+                    assert_eq!((target_id, target_index), want, "{token}");
+                }
+                other => panic!("{token}: expected CastMagic, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            parse_slash_as("/ma Cure <p5>", &empty_entities(), None, None, &party),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    /// A token the client has but Kuluu cannot answer yet must not read as a
+    /// typo, and neither may silently target something else.
+    #[test]
+    fn unresolved_and_unknown_target_tokens_report_differently() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        let unresolved =
+            match parse_slash_as("/ws \"Fast Blade\" <bt>", &entities, Some(7), None, &[]) {
+                SlashOutcome::SystemMessage(m) => m,
+                other => panic!("expected a message, got {other:?}"),
+            };
+        assert!(unresolved.contains("not supported yet"), "{unresolved}");
+        let unknown =
+            match parse_slash_as("/ws \"Fast Blade\" <nope>", &entities, Some(7), None, &[]) {
+                SlashOutcome::SystemMessage(m) => m,
+                other => panic!("expected a message, got {other:?}"),
+            };
+        assert!(unknown.contains("unknown target token"), "{unknown}");
+    }
+
+    #[test]
+    fn weaponskill_takes_a_name_and_the_current_target_token() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        let fast_blade = u32::from(
+            ffxi_vocab::weapon_skill_names::id_for("Fast Blade").expect("Fast Blade present"),
+        );
+        match parse_slash_as("/ws \"Fast Blade\" <t>", &entities, Some(7), None, &[]) {
+            SlashOutcome::Command(AgentCommand::Action {
+                target_id,
+                kind: ActionKind::Weaponskill { skill_id },
+                ..
+            }) => {
+                assert_eq!(skill_id, fast_blade);
+                assert_eq!(target_id, 7);
+            }
+            other => panic!("expected Weaponskill, got {other:?}"),
+        }
+        // A monster-only TP move shares no name space with the command.
+        assert!(matches!(
+            parse_slash_as("/ws \"Uppercut\" <t>", &entities, Some(7), None, &[]),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    /// The ground-target triple still lands after a target given as a token
+    /// rather than as the raw id/index pair.
+    #[test]
+    fn ground_target_coords_follow_whatever_form_the_target_took() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        for slash in ["/ma Cure <t> 1 2 3", "/ma Cure 7 0 1 2 3"] {
+            match parse_slash_as(slash, &entities, Some(7), None, &[]) {
+                SlashOutcome::Command(AgentCommand::Action {
+                    kind:
+                        ActionKind::CastMagic {
+                            pos_x,
+                            pos_y,
+                            pos_z,
+                            ..
+                        },
+                    ..
+                }) => assert_eq!((pos_x, pos_y, pos_z), (1.0, 2.0, 3.0), "{slash}"),
+                other => panic!("{slash}: expected CastMagic, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn useitem_basic() {
         match parse_slash_t("/item 0 4 4112", &empty_entities(), origin(), None, None) {
@@ -4253,22 +4589,11 @@ mod tests {
     }
     #[test]
     fn help_command_returns_multiline_listing() {
-        for slash in ["/help", "/?"] {
+        for slash in ["/help", "/?", "/h"] {
             let out = parse_slash_t(slash, &empty_entities(), origin(), None, None);
             match out {
                 SlashOutcome::SystemMessage(s) => {
-                    assert!(
-                        s.contains("Slash command reference"),
-                        "{slash} missing header"
-                    );
-
-                    for (category, _) in COMMANDS {
-                        assert!(
-                            s.contains(category),
-                            "{slash} output missing category `{category}`"
-                        );
-                    }
-
+                    assert!(s.starts_with("=== Retail commands"), "{slash}: {s}");
                     assert!(s.contains("/follow"), "{slash} missing /follow");
                     assert!(s.contains("/help"), "{slash} missing /help self-reference");
                 }
@@ -4278,15 +4603,111 @@ mod tests {
     }
 
     #[test]
-    fn help_listing_fits_in_local_toast_cap() {
-        let lines = render_help(&test_surface()).split('\n').count();
-        let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
-        assert!(
-            lines <= cap,
-            "/help renders {lines} lines but the chat buffer retains only {cap}; \
-             the top {} lines would be evicted unreadable",
-            lines.saturating_sub(cap),
+    fn between_them_the_two_listings_name_every_category() {
+        let surface = test_surface();
+        let both = format!(
+            "{}\n{}",
+            render_help(&surface, Surface::Retail),
+            render_help(&surface, Surface::Extension)
         );
+        for (category, _) in COMMANDS {
+            assert!(both.contains(category), "no listing names `{category}`");
+        }
+    }
+
+    #[test]
+    fn help_listing_fits_in_local_toast_cap() {
+        let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
+        for (which, typed) in [(Surface::Retail, "/?"), (Surface::Extension, "//?")] {
+            let lines = render_help(&test_surface(), which).split('\n').count();
+            assert!(
+                lines <= cap,
+                "`{typed}` renders {lines} lines but the chat buffer retains only {cap}; \
+                 the top {} lines would be evicted unreadable",
+                lines.saturating_sub(cap),
+            );
+        }
+    }
+
+    #[test]
+    fn retail_help_lists_no_extension_command_and_points_at_the_other_surface() {
+        let text = render_help(&test_surface(), Surface::Retail);
+        assert!(
+            !text.contains(EXTENSION_PREFIX.to_string().as_str()) || text.contains("//?"),
+            "the only // in the retail listing is the hint"
+        );
+        for line in text.split('\n').filter(|l| l.starts_with("  ")) {
+            assert!(
+                !line.trim_start().starts_with(EXTENSION_PREFIX),
+                "retail listing named an extension command: {line}"
+            );
+        }
+        assert!(text.contains("/attack"), "retail listing names its own");
+        assert!(
+            text.ends_with(&format!("{EXTENSION_PREFIX}{}", EXTENSION_HELP_NAMES[0])),
+            "the last line points at the extension help: {text}"
+        );
+    }
+
+    #[test]
+    fn extension_help_lists_no_retail_command() {
+        let text = render_help(&test_surface(), Surface::Extension);
+        for line in text.split('\n').filter(|l| l.starts_with("  ")) {
+            assert!(
+                line.trim_start().starts_with(EXTENSION_PREFIX),
+                "extension listing named a retail command: {line}"
+            );
+        }
+        assert!(text.contains("//exit"));
+        assert!(text.contains("//minimap"));
+    }
+
+    #[test]
+    fn a_disabled_set_drops_out_of_the_listing_but_help_stays() {
+        let mut surface = test_surface();
+        surface.enabled.set_enabled(CommandSet::Dev, false);
+        let text = render_help(&surface, Surface::Extension);
+        assert!(!text.contains("//pathto"), "dev is off: {text}");
+        assert!(text.contains("//?"), "help lists itself whatever is off");
+    }
+
+    #[test]
+    fn extension_help_answers_with_its_own_set_switched_off() {
+        let mut surface = test_surface();
+        surface.enabled.set_enabled(CommandSet::Core, false);
+        let out = parse_slash(
+            "//?",
+            &surface,
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+            None,
+            &[],
+            kuluu_render::fishing_spot::FishingGate::Ready,
+        );
+        match out {
+            SlashOutcome::SystemMessage(s) => {
+                assert!(s.starts_with("=== Kuluu commands"), "{s}")
+            }
+            other => panic!("//? did not answer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_is_an_extension_command_and_quits() {
+        assert!(matches!(
+            parse_slash_t("//exit", &empty_entities(), origin(), None, None),
+            SlashOutcome::Quit
+        ));
+        // Retail has no /exit, so the single-slash form is a miss with a hint.
+        match parse_slash_t("/exit", &empty_entities(), origin(), None, None) {
+            SlashOutcome::SystemMessage(s) => assert!(
+                s.contains(&format!("{EXTENSION_PREFIX}exit")),
+                "expected a did-you-mean: {s}"
+            ),
+            other => panic!("/exit answered: {other:?}"),
+        }
     }
 
     #[test]
@@ -4518,7 +4939,7 @@ mod tests {
             None,
         ));
         assert_eq!(mode, mode::MOTION);
-        assert_eq!(tid, None, "no selection → untargeted");
+        assert_eq!(tid, None, "no selection -> untargeted");
 
         assert!(matches!(
             parse_slash_t("/wave sideways", &[], WireVec3::default(), None, None),
@@ -4551,7 +4972,7 @@ mod tests {
             None,
         ));
         assert_eq!(id, emote::JOB);
-        assert_eq!(param, emote::JOB_PARAM_BASE, "WAR(1) → 0x1F");
+        assert_eq!(param, emote::JOB_PARAM_BASE, "WAR(1) -> 0x1F");
         let (_, _, param, ..) = expect_emote(parse_slash_t(
             "/jobemote RUN",
             &[],
@@ -4559,7 +4980,7 @@ mod tests {
             None,
             None,
         ));
-        assert_eq!(param, emote::JOB_PARAM_BASE + 21, "RUN(22) → 0x34");
+        assert_eq!(param, emote::JOB_PARAM_BASE + 21, "RUN(22) -> 0x34");
         assert!(matches!(
             parse_slash_t("/jobemote xyz", &[], WireVec3::default(), None, None),
             SlashOutcome::SystemMessage(_)
@@ -4592,7 +5013,7 @@ mod tests {
     }
 
     /// The emote fallback runs after the COMMANDS lookup, so an alias equal to
-    /// a scraped emote name would silently shadow the emote — forbid it
+    /// a scraped emote name would silently shadow the emote -- forbid it
     /// (Bell/Job keep dedicated commands with required args).
     #[test]
     fn no_alias_shadows_a_scraped_emote_name() {

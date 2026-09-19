@@ -1091,18 +1091,25 @@ impl MmbLodThresholds {
     }
 }
 
-/// XiArea.cpp XiArea::GetAnotherSomething — `GetAnotherSomething(false)`, the per-zone scale retail
-/// multiplies `FarThresholdSquared` by, is 1.0 before the registry graphics-config
-/// draw-distance multipliers this client does not model.
-pub const ZONE_LOD_FAR_SCALE: f32 = 1.0;
+/// RegistryConfig.cpp InitStaticVars — the landscape draw-distance multiplier
+/// XiArea::GetAnotherSomething returns starts at 1.0 and no registry entry in
+/// RegTable ever overrides it, so an unpatched client draws at exactly the
+/// authored distances; third-party launchers scale this value in memory.
+pub const RETAIL_DRAW_DISTANCE_SCALE: f32 = 1.0;
 
-/// ZoneRenderer.cpp ZoneRenderer::RenderChunk, :1057-1064, :1071-1079 — the authored Lod far
+/// ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — the authored Lod far
 /// distance doubles as the draw-distance cull, but only for chunks flagged
 /// [`MmbPlacement::uses_lod_rendering`]; every other chunk is culled by the global
 /// draw distance instead, which is why the placements authored with `lod_far == 0`
-/// do not vanish.
-pub fn beyond_lod_far_cull(camera_dist_sq: f32, thresholds: MmbLodThresholds) -> bool {
-    camera_dist_sq > ZONE_LOD_FAR_SCALE * thresholds.far_sq
+/// do not vanish. `draw_scale` is the unsquared multiplier retail applies to the
+/// squared threshold (`field_39428 * FarThresholdSquared`), so a doubled setting
+/// only reaches sqrt(2) times as far.
+pub fn beyond_lod_far_cull(
+    camera_dist_sq: f32,
+    thresholds: MmbLodThresholds,
+    draw_scale: f32,
+) -> bool {
+    camera_dist_sq > draw_scale * thresholds.far_sq
 }
 
 /// ZoneRenderer.cpp `InitializeMeshLOD` — a placement whose mesh name ends in
@@ -2598,12 +2605,30 @@ mod tests {
         p.special_effects = SPECIAL_EFFECTS_LOD_RENDERING;
         assert!(p.uses_lod_rendering());
         let t = p.lod_thresholds();
-        assert!(beyond_lod_far_cull(0.1, t));
-        assert!(!beyond_lod_far_cull(0.0, t));
+        assert!(beyond_lod_far_cull(0.1, t, RETAIL_DRAW_DISTANCE_SCALE));
+        assert!(!beyond_lod_far_cull(0.0, t, RETAIL_DRAW_DISTANCE_SCALE));
 
         let near_prop = lod_placement(10.0, 100.0, 40.0).lod_thresholds();
-        assert!(!beyond_lod_far_cull(1_600.0, near_prop));
-        assert!(beyond_lod_far_cull(1_600.1, near_prop));
+        assert!(!beyond_lod_far_cull(
+            1_600.0,
+            near_prop,
+            RETAIL_DRAW_DISTANCE_SCALE
+        ));
+        assert!(beyond_lod_far_cull(
+            1_600.1,
+            near_prop,
+            RETAIL_DRAW_DISTANCE_SCALE
+        ));
+    }
+
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 scales the *squared* threshold, so a
+    // doubled multiplier moves the cull out by sqrt(2), not 2.
+    #[test]
+    fn the_draw_scale_multiplies_the_squared_far_threshold() {
+        let t = lod_placement(10.0, 100.0, 40.0).lod_thresholds();
+        assert!(!beyond_lod_far_cull(3_200.0, t, 2.0));
+        assert!(beyond_lod_far_cull(3_200.1, t, 2.0));
+        assert!(beyond_lod_far_cull(800.1, t, 0.5));
     }
 
     fn names(list: &[&str]) -> Vec<String> {

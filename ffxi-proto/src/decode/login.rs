@@ -825,10 +825,10 @@ mod server_logout_tests {
         let mut buf = vec![0u8; ServerLogout::SIZE];
         buf[0..4].copy_from_slice(&2u32.to_le_bytes());
         buf[4..8].copy_from_slice(&0x6F00_A8C0u32.to_le_bytes());
-        buf[8..12].copy_from_slice(&54230u32.to_le_bytes());
+        buf[8..12].copy_from_slice(&u32::from(crate::map::MAP_PORT).to_le_bytes());
         let l = ServerLogout::decode(&buf).unwrap();
         assert!(l.is_zone_change());
-        assert_eq!(l.new_server_port, 54230);
+        assert_eq!(l.new_server_port, crate::map::MAP_PORT);
         assert_eq!(l.new_server_ip, 0x6F00_A8C0);
     }
 }

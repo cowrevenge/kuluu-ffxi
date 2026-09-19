@@ -78,16 +78,39 @@ const COMMAND_PREFIX: u8 = b'/';
 /// stretch of unrelated `.data` that happens to hold one slash-led string.
 const COMMAND_TABLE_MIN_RUN: usize = 8;
 
+/// The motion-emote family. Nothing reads `CommandFlags::Flag4` in
+/// research/XIClient, so this is a distributional decode and
+/// `real_dll_emote_flag_partitions_the_table` is its whole justification.
+const COMMAND_FLAG_EMOTE: u16 = 0x0004;
+/// research/XIClient/src/XIClient/source/Game/Commands/CommandManager.cpp
+/// CommandManager::CommandCalc suppresses the chat echo for any line starting
+/// with a slash, then re-prints the expanded line when this bit is set.
+const COMMAND_FLAG_ECHO_INPUT: u16 = 0x2000;
+
 /// One row of the client's slash-command table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCommand {
     /// The word after the slash; the row stores it with the leading `/`.
     pub name: String,
     pub id: u16,
-    /// Undecoded. Commands that behave alike share a value — every emote
-    /// carries one, every chat channel another — so it is carried for a later
-    /// caller rather than interpreted here.
+    /// A packed command class in the low byte, not independent predicates.
+    /// Only the bits with an accessor below are decoded; read the raw word for
+    /// the rest rather than expecting a name for them.
     pub flags: u16,
+}
+
+impl ClientCommand {
+    /// A motion emote: `/wave`, `/dance2`, `/bell`. All 48 share one grammar,
+    /// an optional `motion`/`text` keyword and an optional target.
+    pub fn is_emote(&self) -> bool {
+        self.flags & COMMAND_FLAG_EMOTE != 0
+    }
+
+    /// The client re-prints the typed line into the chat log before running the
+    /// command. Only `/?` does.
+    pub fn echoes_input(&self) -> bool {
+        self.flags & COMMAND_FLAG_ECHO_INPUT != 0
+    }
 }
 
 /// The client's slash-command table in row order.
@@ -1120,6 +1143,120 @@ mod tests {
                 .all(|b| b.is_ascii_graphic() && !b.is_ascii_uppercase())),
             "every stored name is lowercase ASCII, so a lowercasing parser loses nothing"
         );
+    }
+
+    /// The complement of [`COMMAND_FLAG_EMOTE`]; every row carries one or the
+    /// other, which is the whole evidence for what the emote bit means.
+    const COMMAND_FLAG_STATEMENT: u16 = 0x0001;
+
+    /// Gated on an install (self-skips). Carries the decode of
+    /// [`COMMAND_FLAG_EMOTE`], which no reconstructed client code reads: the
+    /// bit is trusted because it partitions the table against
+    /// `COMMAND_FLAG_STATEMENT` and its side is exactly the emotes. A client
+    /// build where that stops holding must fail loudly rather than mislabel.
+    #[test]
+    fn real_dll_emote_flag_partitions_the_table() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        for entry in table.entries() {
+            assert_ne!(
+                entry.flags & COMMAND_FLAG_EMOTE != 0,
+                entry.flags & COMMAND_FLAG_STATEMENT != 0,
+                "/{} carries both or neither class bit (flags 0x{:04x})",
+                entry.name,
+                entry.flags,
+            );
+        }
+        for word in ["wave", "bow", "dance2", "toss", "bell", "jobemote", "aim"] {
+            let id = table.id_for(word).unwrap_or_else(|| panic!("/{word}"));
+            let entry = table.entries().iter().find(|c| c.id == id).unwrap();
+            assert!(entry.is_emote(), "/{word} is a motion emote");
+        }
+        for word in ["emote", "say", "magic", "equip", "logout"] {
+            let id = table.id_for(word).unwrap_or_else(|| panic!("/{word}"));
+            let entry = table.entries().iter().find(|c| c.id == id).unwrap();
+            assert!(!entry.is_emote(), "/{word} is not a motion emote");
+        }
+        let echoes: Vec<&str> = table
+            .entries()
+            .iter()
+            .filter(|c| c.echoes_input())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(echoes, ["?"], "only /? re-prints its own line");
+    }
+
+    /// Gated on an install (self-skips). What makes the low byte a class field
+    /// rather than independent predicates, held as asserts so a client build
+    /// that breaks the structure says so instead of being quietly mis-read.
+    #[test]
+    fn real_dll_flag_bits_are_a_packed_class_not_predicates() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        let carriers = |bit: u16| -> Vec<&str> {
+            table
+                .ids()
+                .filter_map(|id| table.entries().iter().find(|c| c.id == id))
+                .filter(|c| c.flags & bit != 0)
+                .map(|c| c.name.as_str())
+                .collect()
+        };
+        let disjoint = |a: u16, b: u16| carriers(a).iter().all(|n| !carriers(b).contains(n));
+        let subset_of = |a: u16, b: u16| carriers(a).iter().all(|n| carriers(b).contains(n));
+
+        const SUBTARGET_GUARD: u16 = 0x0002;
+        const NAME_ARG: u16 = 0x0008;
+        const MENU: u16 = 0x0010;
+        const SETTING: u16 = 0x0020;
+        const CLASS_HIGH: u16 = 0x0040;
+        const FREE_TEXT: u16 = 0x0080;
+
+        assert!(disjoint(COMMAND_FLAG_EMOTE, COMMAND_FLAG_STATEMENT));
+        assert_eq!(
+            carriers(COMMAND_FLAG_EMOTE).len() + carriers(COMMAND_FLAG_STATEMENT).len(),
+            table.ids().count(),
+            "the two class bits are exhaustive as well as exclusive"
+        );
+        assert!(disjoint(MENU, SETTING));
+        for bit in [SUBTARGET_GUARD, COMMAND_FLAG_EMOTE, NAME_ARG, FREE_TEXT] {
+            assert!(
+                subset_of(bit, CLASS_HIGH),
+                "0x{bit:04x} is not a subset of 0x{CLASS_HIGH:04x}"
+            );
+        }
+        assert!(subset_of(NAME_ARG, MENU));
+        for bit in [0x0200u16, 0x0400, 0x0800, 0x1000, 0x4000, 0x8000] {
+            assert!(
+                carriers(bit).is_empty(),
+                "0x{bit:04x} is unused across the table"
+            );
+        }
+    }
+
+    /// Gated on an install (self-skips). The flags word is a property of the
+    /// command, not of the typed name: no id's alias rows disagree. A caller
+    /// may therefore read flags off any row of a group.
+    #[test]
+    fn real_dll_aliases_of_one_command_agree_on_flags() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        for id in table.ids() {
+            let mut rows = table.entries().iter().filter(|c| c.id == id);
+            let first = rows.next().expect("an id came from a row");
+            for other in rows {
+                assert_eq!(
+                    first.flags, other.flags,
+                    "/{} and /{} share id 0x{id:04x} but not flags",
+                    first.name, other.name,
+                );
+            }
+        }
     }
 
     /// Gated on an install (self-skips). Alias groupings a name-keyed table

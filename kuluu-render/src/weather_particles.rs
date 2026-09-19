@@ -5,7 +5,6 @@ use ffxi_dat::chunk::ChunkNode;
 use ffxi_dat::particle_gen::{AttachType, ParticleGeneratorDef};
 use ffxi_dat::weather::WeatherTypeId;
 use ffxi_dat::ChunkKind;
-use ffxi_dat::DatRoot;
 use kuluu_snapshot::Vec3 as WireVec3;
 
 use crate::particle_sim::{spawn_zone_particle_generator, ParticleSimulator, ZoneGeneratorOptions};
@@ -110,6 +109,7 @@ fn sync_weather_particles(
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     // Debug gate (Debug menu Weather row): while off, despawn any live
     // precipitation generators and drop the load key so re-enabling rebuilds
@@ -140,14 +140,14 @@ fn sync_weather_particles(
         commands.entity(e).try_despawn();
     }
 
-    let Some(bytes) = file_id
-        .zip(DatRoot::from_env_or_default().ok())
-        .and_then(|(id, root)| {
-            root.resolve(id)
-                .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
-        })
-    else {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
+    let Some(bytes) = file_id.and_then(|id| {
+        root.resolve(id)
+            .ok()
+            .and_then(|loc| std::fs::read(loc.path_under(root)).ok())
+    }) else {
         return;
     };
 
@@ -251,7 +251,7 @@ pub(crate) mod tests {
     const LA_THEINE_ZONE_DAT: u32 = 202;
 
     pub(crate) fn zone_dat(file_id: u32) -> Option<Vec<u8>> {
-        let root = DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
     }
@@ -399,7 +399,7 @@ pub(crate) mod tests {
             }
         }
 
-        if DatRoot::from_env_or_default().is_err() {
+        if ffxi_dat::archive::open_test_install().is_none() {
             return;
         }
         let mut checked = 0;
@@ -441,7 +441,7 @@ pub(crate) mod tests {
     // hand-authored placeholder would leave that weather with no visible precipitation at all.
     #[test]
     fn real_dat_every_precipitation_tag_ships_generators() {
-        let Ok(root) = DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let mut found: Vec<WeatherTypeId> = Vec::new();

@@ -33,7 +33,7 @@ pub use auto_enter::auto_enter_cs_system;
 
 mod shop;
 use shop::handle_shop_key;
-pub use shop::shop_mode_sync_system;
+pub use shop::{shop_mode_sync_system, shop_mouse_activate_system};
 
 mod map_screen;
 
@@ -45,6 +45,27 @@ use slash_apply::apply_slash_outcome;
 
 mod target_action;
 use target_action::{confirm_target_action_at_cursor, handle_target_action_key, handle_world_key};
+
+/// The one key map for every amount the game asks for — auction price, shop and
+/// bazaar quantity, delivery quantity and gil. Up/Down step the active digit,
+/// Left/Right move the column. Taking the whole amount is the All column at the
+/// left end of that walk, not a separate key: retail draws it as a column
+/// (.agents/skills/retail-observe/references/auction-house.md "Price Set").
+fn spinner_nav(
+    spinner: &mut kuluu_render::hud::digit_spinner::DigitSpinner,
+    key: &Key,
+    bindings: &Bindings,
+) {
+    if bindings.matches_logical(Action::NavUp, key) {
+        spinner.up();
+    } else if bindings.matches_logical(Action::NavDown, key) {
+        spinner.down();
+    } else if bindings.matches_logical(Action::NavLeft, key) {
+        spinner.left();
+    } else if bindings.matches_logical(Action::NavRight, key) {
+        spinner.right();
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct CaptureMode {
@@ -644,9 +665,9 @@ pub fn dialog_mode_sync_system(
     let dialog = state.snapshot.dialog.as_ref();
     match (&*mode, dialog.is_some()) {
         (InputMode::World, true) => *mode = InputMode::Dialog(DialogCursor::default()),
-        (InputMode::Dialog(_), false) => {
+        (InputMode::Dialog(c), false) => {
+            cursors.closed(c.cursor);
             *mode = InputMode::World;
-            cursors.closed();
         }
         _ => {}
     }
@@ -671,6 +692,11 @@ pub struct DialogCursors {
     seen: std::collections::HashMap<u64, u32>,
 }
 
+/// Rows remembered across closes before the map is dropped. The memory is a
+/// convenience; a session's server-driven event frames are unbounded and this
+/// map is a `Local` that outlives every one of them.
+const CURSOR_MEMORY_FRAMES: usize = 64;
+
 impl DialogCursors {
     /// Files `cursor` under the frame being left and returns the row the newly
     /// shown `frame` opens on — `None` while the frame is unchanged.
@@ -686,9 +712,16 @@ impl DialogCursors {
         Some(self.seen.get(&frame).copied().unwrap_or(first_row))
     }
 
-    fn closed(&mut self) {
-        self.open = None;
-        self.seen.clear();
+    /// `seen` outlives the close: retail reopens the Mog Menu on the row it was
+    /// left on (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md,
+    /// "How the menu opens").
+    fn closed(&mut self, cursor: u32) {
+        if let Some(left) = self.open.take() {
+            if self.seen.len() >= CURSOR_MEMORY_FRAMES && !self.seen.contains_key(&left) {
+                self.seen.clear();
+            }
+            self.seen.insert(left, cursor);
+        }
     }
 }
 
@@ -720,60 +753,17 @@ fn handle_trade_key(
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
     scene_state: &mut SceneState,
 ) -> Option<InputMode> {
-    use kuluu_render::hud::trade::{self, TradeFocus, TradeSelector};
+    use kuluu_render::hud::trade::{self, TradeFocus};
 
-    if let Some(selector) = trade_state.selector.clone() {
-        match selector {
-            TradeSelector::Gil { .. } => {
-                if bindings.matches_logical(Action::NavConfirm, key) {
-                    trade::gil_confirm(trade_state);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavCancel, key) {
-                    trade_state.selector = None;
-                    return None;
-                }
-
-                if matches!(key, Key::Tab) {
-                    trade::gil_fill_max(trade_state);
-                    return None;
-                }
-
-                if let Key::Character(s) = key {
-                    for c in s.chars() {
-                        trade::gil_push_digit(trade_state, c);
-                    }
-                }
-                return None;
-            }
-            TradeSelector::Stack { .. } => {
-                if bindings.matches_logical(Action::NavConfirm, key) {
-                    trade::stack_confirm(trade_state);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavCancel, key) {
-                    trade_state.selector = None;
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavUp, key) {
-                    trade::stack_adjust(trade_state, 1);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavDown, key) {
-                    trade::stack_adjust(trade_state, -1);
-                    return None;
-                }
-                if bindings.matches_logical(Action::NavRight, key) {
-                    if let Some(TradeSelector::Stack { value, max, .. }) =
-                        trade_state.selector.as_mut()
-                    {
-                        *value = *max;
-                    }
-                    return None;
-                }
-                return None;
-            }
+    if let Some(spinner) = trade_state.selector.as_mut() {
+        if bindings.matches_logical(Action::NavConfirm, key) {
+            trade::gil_confirm(trade_state);
+        } else if bindings.matches_logical(Action::NavCancel, key) {
+            trade_state.selector = None;
+        } else {
+            spinner_nav(spinner, key, bindings);
         }
+        return None;
     }
 
     if bindings.matches_logical(Action::NavUp, key) {
@@ -1999,8 +1989,10 @@ fn handle_dialog_key(
         {
             return None;
         }
-        // Reconcile via the session snapshot; clearing here flickers multi-frame events.
-        let _ = cmd_tx.try_send(AgentCommand::EndEvent);
+        // Reconcile via the session snapshot; clearing here flickers multi-frame
+        // events. The session decides whether this pops a client-local menu
+        // level or ends the interaction, because only it knows the depth.
+        let _ = cmd_tx.try_send(AgentCommand::EndEventBack);
         return None;
     }
     None
@@ -2492,15 +2484,26 @@ mod dialog_cursor_tests {
         assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 2, NO_GRID), None);
     }
 
-    /// Closing the dialog forgets everything: the next conversation starts
-    /// fresh rather than reopening on a stale row.
+    /// Retail reopens a menu on the row it was left on, including across a
+    /// close (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md,
+    /// "How the menu opens").
     #[test]
-    fn closing_the_dialog_clears_the_memory() {
+    fn the_row_a_menu_was_left_on_survives_a_close() {
         let mut cursors = DialogCursors::default();
         cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
         cursors.switch(Some(DELIVERY_SUBMENU), 3, NO_GRID);
-        cursors.closed();
-        assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID), Some(0));
+        cursors.closed(1);
+        assert_eq!(
+            cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID),
+            Some(1),
+            "the row the panel was closed on"
+        );
+        cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
+        assert_eq!(
+            cursors.switch(Some(MOG_ROOT), 0, NO_GRID),
+            None,
+            "already showing"
+        );
     }
 
     /// A grid frame opens on its first cell, not row 0.
@@ -2741,7 +2744,7 @@ mod dialog_esc_gate_tests {
         .is_none());
 
         let sent = drain(&mut cmd_rx);
-        assert_eq!(sent, vec![AgentCommand::EndEvent]);
+        assert_eq!(sent, vec![AgentCommand::EndEventBack]);
     }
 }
 

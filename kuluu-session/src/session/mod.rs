@@ -137,14 +137,31 @@ struct ShopSession {
     /// `sendMenu`), so it names the vendor the SHOP_OPEN belongs to.
     last_talk_target: u32,
 
-    /// `(item_no, quantity)` of the SHOP_SELL_REQ awaiting an appraisal. LSB's
-    /// 0x03D leaves `Count` at 0
-    /// (vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp), so the reply's
-    /// quantity comes from here.
-    pending_sell: Option<(u16, u32)>,
+    pending_sell: Option<PendingShopAppraisal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingShopAppraisal {
+    item_no: u16,
+    quantity: u32,
+    item_index: u8,
 }
 
 impl ShopSession {
+    fn retire_appraisals(&mut self) {
+        self.pending_sell = None;
+        if let Some(open) = self.open.as_mut() {
+            open.pending_sale = None;
+        }
+    }
+
+    // vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp GP_SERV_COMMAND_SHOP_SELL
+    // echoes only the slot and unit price; quantity belongs to the latest request.
+    fn appraisal_request(&self, item_index: u8) -> Option<PendingShopAppraisal> {
+        self.pending_sell
+            .filter(|request| request.item_index == item_index)
+    }
+
     fn close(&mut self, event_tx: &broadcast::Sender<AgentEvent>) {
         self.pending_sell = None;
         if self.open.take().is_some() {
@@ -192,6 +209,10 @@ pub struct Config {
 
     pub initial_state: Option<InitialState>,
 
+    /// A session the PlayOnline Viewer handed off; when set, no auth server is
+    /// contacted and `user`/`password` only label the session.
+    pub playonline_session: Option<crate::auth_client::AuthSession>,
+
     pub user_driven_events: bool,
 
     pub dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
@@ -222,11 +243,15 @@ pub async fn run(
         }
         None => {
             emit_stage(&event_tx, Stage::Authenticating);
-            auth.ensure_account(&cfg.user, &cfg.password).await.ok();
-            let auth_session = auth
-                .login(&cfg.user, &cfg.password)
-                .await
-                .context("auth login")?;
+            let auth_session = match cfg.playonline_session.clone() {
+                Some(session) => session,
+                None => {
+                    auth.ensure_account(&cfg.user, &cfg.password).await.ok();
+                    auth.login(&cfg.user, &cfg.password)
+                        .await
+                        .context("auth login")?
+                }
+            };
 
             emit_stage(&event_tx, Stage::LobbyHandshake);
             let lobby = LobbyClient::new(cfg.server.clone(), cfg.data_port, cfg.view_port);
@@ -912,6 +937,14 @@ fn special_wire_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
 }
 
+/// Whether an inventory packet's lock byte means the slot is committed to something in flight —
+/// an item use, a synth, a trade offer — and so cannot be picked. Not the same question as
+/// `lock_flg != 0`: an equipped or bazaar-priced slot is permanently locked and still selectable
+/// (vendor/server/src/map/packets/s2c/0x020_item_attr.cpp lockFlagFor).
+fn slot_unselectable(lock_flg: u8) -> bool {
+    lock_flg == decode::lock_flg::NO_SELECT
+}
+
 fn handle_sub_packet(
     sub: &framing::SubPacket<'_>,
     event_tx: &broadcast::Sender<AgentEvent>,
@@ -1515,10 +1548,11 @@ fn handle_sub_packet(
         }
         s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
-                let (item_no, count) = match shop.pending_sell.take() {
-                    Some((item_no, qty)) => (item_no, if count == 0 { qty } else { count }),
-                    None => (0, count),
+                let Some(request) = shop.appraisal_request(item_index) else {
+                    return;
                 };
+                let item_no = request.item_no;
+                let count = if count == 0 { request.quantity } else { count };
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
                     item_index,
@@ -2117,6 +2151,7 @@ fn handle_sub_packet(
                             item_no: l.item_no,
                             quantity: l.quantity,
                             locked: l.lock_flg != 0,
+                            unselectable: slot_unselectable(l.lock_flg),
 
                             price: 0,
                             charges_remaining: None,
@@ -2158,6 +2193,7 @@ fn handle_sub_packet(
                             item_no: a.item_no,
                             quantity: a.quantity,
                             locked: a.lock_flg != 0,
+                            unselectable: slot_unselectable(a.lock_flg),
                             price: a.price,
                             charges_remaining: ci.map(|c| c.charges),
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),
@@ -2414,7 +2450,7 @@ async fn begin_server_event(
     let outcome = dialog_session.begin(trigger);
     let cues = dialog_session.take_cues();
     // Syncs the up→down edge detector for this event's first frame.
-    if dialog_session.take_message_closed() {
+    if dialog_session.take_frame_closed() {
         let _ = event_tx.send(AgentEvent::DialogDismissed);
     }
     // A choreography-only script runs to completion inside `begin`, so its
@@ -2803,7 +2839,18 @@ async fn keepalive_loop(
                      Some(AgentCommand::SetFps { max }) => {
                          let _ = event_tx.send(AgentEvent::SetFps { max });
                      }
-                     Some(AgentCommand::EndEvent) => {
+                     Some(AgentCommand::EndEventBack) if local_menu.active() => {
+                        match local_menu.pop() {
+                            Some(dialog) => {
+                                let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                            }
+                            None => {
+                                local_menu.clear();
+                                let _ = event_tx.send(AgentEvent::EventEnded);
+                            }
+                        }
+                    }
+                     Some(AgentCommand::EndEvent | AgentCommand::EndEventBack) => {
                         // Local menus first: dismissing one never involves the server.
                         if local_menu.active() {
                             local_menu.clear();
@@ -2821,7 +2868,7 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
-                            if dialog_session.take_message_closed() {
+                            if dialog_session.take_frame_closed() {
                                 let _ = event_tx.send(AgentEvent::DialogDismissed);
                             }
                             match advance {
@@ -2946,10 +2993,12 @@ async fn keepalive_loop(
                                     });
                                 }
                                 crate::local_menu::Advance::DeliveryOpen { box_no } => {
-                                    // Cutover: the dedicated screen (gated on the
-                                    // snapshot's delivery_box) now owns the UI, so
-                                    // open non-menu-driven — no legacy DialogState
-                                    // grid re-render on settle.
+                                    // The dedicated screen (gated on the snapshot's
+                                    // delivery_box) takes the display; the menu
+                                    // levels beneath it stay so PostClose lands back
+                                    // on the Receive/Send submenu rather than the
+                                    // world.
+                                    local_menu.suspend();
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                     let op = dbox.request_open(box_no, false);
                                     send_pbx(map, &op, &mut sub_seq, server_last_seq, &event_tx).await;
@@ -3007,7 +3056,7 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
-                            if dialog_session.take_message_closed() {
+                            if dialog_session.take_frame_closed() {
                                 let _ = event_tx.send(AgentEvent::DialogDismissed);
                             }
                             match advance {
@@ -3493,10 +3542,7 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellCancel) => {
-                        shop_session.pending_sell = None;
-                        if let Some(open) = shop_session.open.as_mut() {
-                            open.pending_sale = None;
-                        }
+                        shop_session.retire_appraisals();
                         shop_session.publish(&event_tx);
                     }
                     Some(AgentCommand::CloseShop) => {
@@ -3507,7 +3553,13 @@ async fn keepalive_loop(
                         item_no,
                         item_index,
                     }) => {
-                        shop_session.pending_sell = Some((item_no, qty));
+                        shop_session.retire_appraisals();
+                        shop_session.pending_sell = Some(PendingShopAppraisal {
+                            item_no,
+                            quantity: qty,
+                            item_index,
+                        });
+                        shop_session.publish(&event_tx);
                         let payload =
                             build_subpacket_shop_sell_req(sub_seq, qty, item_no, item_index);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3522,16 +3574,40 @@ async fn keepalive_loop(
                         }
                     }
                     Some(AgentCommand::ShopSellConfirm) => {
+                        // SHOP_SELL_SET is validated against the *immediately*
+                        // preceding c2s packet — `m_LastPacketType`, stamped per
+                        // accepted packet in vendor/server/src/map/packet_system.cpp
+                        // ValidatedPacketHandler — so the 200ms tick's position
+                        // update between the appraisal and the confirm is enough
+                        // to get the sale refused. Retail re-sends the appraisal
+                        // every time for exactly this reason ("Even if the client
+                        // has already price checked an item in the same menu, it
+                        // will send both packets every time" — research/XiPackets
+                        // client 0x0085), so both ride one datagram, whose header
+                        // carries the last subpacket's sync.
+                        let Some(sale) = shop_session
+                            .open
+                            .as_ref()
+                            .and_then(|open| open.pending_sale.clone())
+                        else {
+                            tracing::warn!("sell confirm with no appraisal pending");
+                            continue;
+                        };
+                        let mut payload = build_subpacket_shop_sell_req(
+                            sub_seq,
+                            sale.count,
+                            sale.item_no,
+                            sale.item_index,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        payload.extend_from_slice(&build_subpacket_shop_sell_set(sub_seq));
+                        sub_seq = sub_seq.wrapping_add(1);
                         // The server answers a completed sale with MESSAGE +
                         // ITEM_SAME rather than another 0x03D
                         // (vendor/server/src/map/packets/c2s/0x085_shop_sell_set.cpp
                         // process), so the appraisal is retired here.
-                        if let Some(open) = shop_session.open.as_mut() {
-                            open.pending_sale = None;
-                        }
+                        shop_session.retire_appraisals();
                         shop_session.publish(&event_tx);
-                        let payload = build_subpacket_shop_sell_set(sub_seq);
-                        sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
                             .await
@@ -4254,7 +4330,7 @@ async fn keepalive_loop(
                     for cue in cues {
                         cutscene.push(cue, &event_tx);
                     }
-                    if dialog_session.take_message_closed() {
+                    if dialog_session.take_frame_closed() {
                         let _ = event_tx.send(AgentEvent::DialogDismissed);
                     }
                     match advance {
@@ -4747,14 +4823,17 @@ async fn keepalive_loop(
                                             )
                                             .await;
                                         }
-                                        if out.settled && dbox.menu_driven() {
-                                            let dialog = match dbox.open() {
-                                                Some(box_no) => local_menu
-                                                    .open_delivery_box(box_no, dbox.slots()),
-                                                None => local_menu.open_delivery_submenu(),
-                                            };
-                                            let _ = event_tx
-                                                .send(AgentEvent::EventDialog { dialog });
+                                        // A PostClose with an open already in
+                                        // flight is the in-window Receive/Send
+                                        // switch, not the player leaving.
+                                        if out.settled
+                                            && dbox.open().is_none()
+                                            && !dbox.reopening()
+                                        {
+                                            if let Some(dialog) = local_menu.resume() {
+                                                let _ = event_tx
+                                                    .send(AgentEvent::EventDialog { dialog });
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -4882,7 +4961,7 @@ async fn keepalive_loop(
                                 for cue in dialog_session.take_cues() {
                                     cutscene.push(cue, &event_tx);
                                 }
-                                if dialog_session.take_message_closed() {
+                                if dialog_session.take_frame_closed() {
                                     let _ = event_tx.send(AgentEvent::DialogDismissed);
                                 }
                                 match advance {
@@ -5277,6 +5356,13 @@ fn emit_zone_message_chat(
     use crate::event_dialog::FishingChat;
     match decoded {
         Ok(msg) => {
+            tracing::debug!(
+                zone = zone_id,
+                index = msg.message_index,
+                opcode,
+                nums = ?msg.nums,
+                "zone message"
+            );
             // Fishing lines resolve against the DAT-located fishing block,
             // reconciling server/install client-era skew; anything else takes
             // the direct lookup.
@@ -5289,7 +5375,7 @@ fn emit_zone_message_chat(
                     // dev stack and era-matched servers.
                     FishingChat::Unresolved => (None, hooked_fish_size(zone_id, msg.message_index)),
                     FishingChat::NotFishing => (
-                        dialog_session.zone_chat_text(zone_id, msg.message_index as usize),
+                        dialog_session.zone_chat_text(zone_id, msg.message_index, &msg.nums),
                         hooked_fish_size(zone_id, msg.message_index),
                     ),
                 };
@@ -5479,7 +5565,7 @@ fn decode_battle_message(
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
     is_029: bool,
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
 ) -> Vec<ChatLine> {
     if data.len() < 24 {
         return Vec::new();
@@ -5738,7 +5824,7 @@ fn decode_battle2_action(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
 ) -> Vec<ChatLine> {
     let mut out: Vec<ChatLine> = Vec::new();
 
@@ -5832,7 +5918,7 @@ fn is_start_category(cmd_no: u8) -> bool {
 }
 
 fn build_battle2_line(
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5902,7 +5988,7 @@ const MES_PARAM_SPIKES_VALUE: usize = 3;
 /// The install's own wording for a battle message, or `None` when there is no
 /// readable table or the entry needs a control code the composer cannot render.
 fn compose_mes_basic(
-    mes_basic: Option<&MesBasicDat>,
+    mes_basic: Option<&MesBasicTables>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5911,12 +5997,18 @@ fn compose_mes_basic(
     numbers: [i64; sysmes::PARAM_SLOTS],
     sender: &str,
 ) -> Option<Vec<ChatLine>> {
-    let table = mes_basic?;
+    let tables = mes_basic?;
+    let table = &tables.dat;
     let index = message_num as usize;
     let refs = table.resource_refs(index);
     let resolved: Vec<String> = refs
         .iter()
         .map(|r| mes_basic_resource_name(r.kind, numbers[r.slot] as u32))
+        .collect();
+    let item_slots = table.item_refs(index);
+    let item_names: Vec<String> = item_slots
+        .iter()
+        .map(|&slot| tables.item_log_name(numbers.get(slot).copied().unwrap_or(0) as u16))
         .collect();
     let mut params = sysmes::SysMesParams {
         numbers,
@@ -5929,6 +6021,11 @@ fn compose_mes_basic(
     };
     for (r, name) in refs.iter().zip(&resolved) {
         params.names[r.slot] = Some(name);
+    }
+    for (&slot, name) in item_slots.iter().zip(&item_names) {
+        if let Some(param) = params.items.get_mut(slot) {
+            *param = Some(name);
+        }
     }
     let line = table.message(index, &params)?;
     Some(
@@ -5975,9 +6072,41 @@ fn mes_basic_resource_name(kind: sysmes::MesBasicResource, id: u32) -> String {
 
 /// Lazily opens the basic-message table, once, and remembers a miss so an
 /// install without one costs a single attempt rather than one per battle line.
+/// The install's battle-message table plus the item table its inline item
+/// tags name from. Item names come from the item DAT because retail prints the
+/// chat-log form ("hatchling shield"), not the scraped display name.
+pub(crate) struct MesBasicTables {
+    dat: MesBasicDat,
+    items: Option<ffxi_dat::item_dat::ItemTable>,
+}
+
+impl MesBasicTables {
+    pub(crate) fn open(root: &ffxi_dat::DatRoot) -> Option<Self> {
+        Some(Self {
+            dat: MesBasicDat::open(root)?,
+            items: Some(ffxi_dat::item_dat::ItemTable::open_from_root(root)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_dat(dat: MesBasicDat) -> Self {
+        Self { dat, items: None }
+    }
+
+    fn item_log_name(&self, item_id: u16) -> String {
+        self.items
+            .as_ref()
+            .and_then(|t| t.lookup(item_id))
+            .map(|i| i.log_name)
+            .filter(|n| !n.is_empty())
+            .or_else(|| ffxi_vocab::item_names::lookup(item_id).map(str::to_string))
+            .unwrap_or_else(|| format!("item #{item_id}"))
+    }
+}
+
 struct MesBasicResolver {
     root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
-    table: Option<Option<MesBasicDat>>,
+    table: Option<Option<MesBasicTables>>,
 }
 
 impl MesBasicResolver {
@@ -5985,11 +6114,11 @@ impl MesBasicResolver {
         Self { root, table: None }
     }
 
-    fn table(&mut self) -> Option<&MesBasicDat> {
+    fn table(&mut self) -> Option<&MesBasicTables> {
         let root = self.root.as_ref();
         self.table
             .get_or_insert_with(|| {
-                let loaded = root.and_then(|r| MesBasicDat::open(r));
+                let loaded = root.and_then(|r| MesBasicTables::open(r));
                 if loaded.is_none() {
                     tracing::info!(
                         "basic-message DAT (ROM/27/72) unavailable - battle lines fall back to the scraped msg_basic wording"

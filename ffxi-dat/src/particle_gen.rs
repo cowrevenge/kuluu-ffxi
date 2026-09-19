@@ -2138,8 +2138,7 @@ mod tests {
     // go quietly empty again.
     #[test]
     fn real_dat_west_ronfaure_celestial_generators() {
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
-            eprintln!("skipping: no DAT root");
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(201) else {
@@ -3842,7 +3841,7 @@ mod tests {
     #[test]
     fn real_dat_poison_generators_attach_to_target() {
         const POISON_EFFECT_FILE_ID: u32 = 3020;
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(POISON_EFFECT_FILE_ID) else {
@@ -3907,7 +3906,7 @@ mod tests {
     const LA_THEINE_ZONE_DAT: u32 = 202;
 
     fn real_zone_dat(file_id: u32) -> Option<Vec<u8>> {
-        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let root = crate::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
     }
@@ -4155,7 +4154,7 @@ mod tests {
     fn real_dat_sound_generator_census() {
         const MIN_SOUND_GENERATORS: usize = 5800;
         const MIN_PLACED: usize = 5700;
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let mut seen = std::collections::HashSet::new();

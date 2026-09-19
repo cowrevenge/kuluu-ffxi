@@ -24,8 +24,8 @@ client, and none has ever entered this repository's git history.
 To run the renderer you must supply your own **legitimately obtained** retail
 install (HorizonXI, a PlayOnline install, etc.). Kuluu reads those DAT files
 from your local disk at runtime; it never bundles, hosts, uploads, or
-redistributes them. The directory they live in (`vendor/game-files/`) is
-git-ignored. See the README's "Getting the game files" section.
+redistributes them. They live in your user data directory (`kuluu/installs/`),
+outside the repository. See the README's "Getting the game files" section.
 
 ### Build-time derived constants are not game content
 
@@ -114,13 +114,20 @@ If you are a rights-holder for either project and would prefer a different
 arrangement, please reach out (see §8) and we will adjust or remove the
 reference promptly.
 
-## 7. Not for the retail service
+## 7. Terms of service are the player's responsibility
 
-Kuluu is built to connect to **community-run FFXI-protocol servers**
-(LandSandBoat, Phoenix). It makes no attempt to honor the retail service's
-anti-cheat or Terms of Service and must not be pointed at the official servers.
-Each community server has its own rules — read and follow them before you log
-in.
+Kuluu is an interoperable client. It speaks the FFXI wire protocol as the
+retail client does, and it can be pointed at any server that speaks it:
+community-run servers (LandSandBoat, Phoenix) or, where a player already holds
+an account, the official service through the PlayOnline Viewer they own.
+
+Connecting with a third-party client may breach the terms of service of the
+server you connect to. Square Enix's FINAL FANTASY XI User Agreement and
+PlayOnline terms prohibit third-party programs, and many community servers
+have rules of their own. Kuluu does not bypass, patch, or inject into any
+Square Enix program, and it ships no server address. Read the rules of the
+server you intend to use before you log in; any consequence to your account
+is yours alone.
 
 ## 8. Takedown / contact
 

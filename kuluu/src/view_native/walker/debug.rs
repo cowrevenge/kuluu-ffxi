@@ -399,6 +399,7 @@ pub fn update_stair_debug_snapshot_system(
     scene: Res<kuluu_render::snapshot::SceneState>,
     mut zone_cache: ResMut<StairDebugZoneCache>,
     mut snap: ResMut<StairDebugSnapshot>,
+    dat_root: Res<crate::view_native::DatRootRes>,
 ) {
     if !panels.stair_debug {
         return;
@@ -415,7 +416,7 @@ pub fn update_stair_debug_snapshot_system(
             .to_string();
         zone_cache.dat_path = match (
             kuluu_render::snapshot::effective_zone_file_id(snap_ref),
-            ffxi_dat::DatRoot::from_env_or_default().ok(),
+            dat_root.0.as_deref(),
         ) {
             (Some(fid), Some(root)) => root
                 .resolve(fid)

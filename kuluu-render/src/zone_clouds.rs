@@ -390,10 +390,9 @@ fn cloud_material(texture: Option<Handle<Image>>, fog_enabled: bool) -> FfxiZone
     .with_sort_depth_bias(crate::skybox::SKY_SORT_DEPTH_CLOUDS)
 }
 
-fn read_zone_dat(file_id: u32) -> Option<Vec<u8>> {
-    let root = DatRoot::from_env_or_default().ok()?;
+fn read_zone_dat(root: &DatRoot, file_id: u32) -> Option<Vec<u8>> {
     let location = root.resolve(file_id).ok()?;
-    fs::read(location.path_under(&root)).ok()
+    fs::read(location.path_under(root)).ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,7 +405,11 @@ fn rebuild_zone_clouds(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<FfxiZoneMaterial>>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let file_id = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     // No weather yet is not weather id 0 — id 0 is a real row (`fine`). Resolve the
     // unknown case to the same container retail falls back to instead of indexing
@@ -421,7 +424,7 @@ fn rebuild_zone_clouds(
     // canopy up instead of swapping the sky for nothing (kuluu-grbo). The key still
     // latches: every failure here is deterministic for this file id, and re-probing
     // reloads every VTABLE/FTABLE (DatRoot::open) on each frame that it stays broken.
-    let loaded = file_id.and_then(read_zone_dat);
+    let loaded = file_id.and_then(|f| read_zone_dat(root, f));
     if file_id.is_some() && loaded.is_none() {
         warn!(
             ?file_id,
@@ -599,7 +602,11 @@ fn rebuild_zone_stars(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let file_id = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     let want = weather_type_id_or_default(current_weather.0.map(|w| w as u16));
     let key = file_id.map(|f| (f, want));
@@ -614,7 +621,7 @@ fn rebuild_zone_stars(
     let Some(file_id) = file_id else {
         return;
     };
-    let Some(bytes) = read_zone_dat(file_id) else {
+    let Some(bytes) = read_zone_dat(root, file_id) else {
         return;
     };
 

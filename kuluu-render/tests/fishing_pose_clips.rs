@@ -21,7 +21,7 @@ const PHASES: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
 const ACTION_ANIM_PROBE_OFFSETS: std::ops::Range<u16> = 0..8;
 
 fn install() -> Option<DatRoot> {
-    DatRoot::from_env_or_default().ok()
+    ffxi_dat::archive::open_test_install()
 }
 
 fn fishing_dir(root: &DatRoot, race: u8) -> Option<ResourceDir> {

@@ -143,6 +143,7 @@ fn spawn_backdrop_camera(
         .spawn((
             BackdropCamera,
             BackdropScoped,
+            kuluu_render::weather::ZoneViewCamera,
             Camera3d::default(),
             Camera {
                 order: -2,

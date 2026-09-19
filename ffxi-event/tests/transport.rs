@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ffxi_dat::{event_dat::EventDat, DatRoot};
+use ffxi_dat::event_dat::EventDat;
 use ffxi_event::vm::scene::{EventPosition, SceneAction};
 use ffxi_event::{EventVm, StepResult};
 
@@ -13,7 +13,7 @@ const TICK_SECONDS: f32 = 0.2;
 const MAX_STEPS: usize = 1000;
 
 fn dat(zone: u16) -> Option<Arc<EventDat>> {
-    let root = DatRoot::from_env_or_default().ok()?;
+    let root = ffxi_dat::archive::open_test_install()?;
     let loc = root
         .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
         .ok()?;
@@ -137,7 +137,9 @@ fn retail_airship_exit_waits_for_both_acks_then_finishes_through_runner() {
         eprintln!("SKIP: retail DAT unavailable");
         return;
     };
-    let root = DatRoot::from_env_or_default().unwrap();
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
     let strings_id = ffxi_dat::zone_dat::string_dat_file_id(PORT_JEUNO);
     let strings = StringDat::parse(
         &std::fs::read(root.resolve(strings_id).unwrap().path_under(&root)).unwrap(),

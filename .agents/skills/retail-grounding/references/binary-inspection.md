@@ -5,8 +5,10 @@ layout. It is not a requirement to disassemble every vanilla change.
 
 ## Locate the relevant build and data
 
-The usual install is `vendor/game-files/SquareEnix/FINAL FANTASY XI/`, or the
-user's `FFXI_DAT_PATH`. Inspect only the needed paths; that installation can
+Installs live in the user's registry, never in the checkout: `cargo run -q -p
+kuluu -- install list` names each one with its KNOWN_CLIENTS row, and `cargo
+run -q -p kuluu -- install path NAME` prints the DAT root to inspect (the
+`FFXiMain.dll` beside `VTABLE.DAT`). Inspect only the needed paths; that installation can
 also contain account configuration and logs unrelated to the investigation.
 `FFXiMain.dll` contains client logic and lookup tables. Resolve model DAT IDs
 through the installation's VTABLE/FTABLE and existing `ffxi-dat` readers rather

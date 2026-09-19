@@ -20,7 +20,7 @@ const WORDMARK: &str = "KULUU";
 /// re-entered after logout, so neither an `OnEnter` upload nor a per-spawn
 /// decode fits. A `PreStartup` system is too late - `bevy_state` runs the
 /// initial `StateTransition` there too, so `OnEnter(Login)` can beat it.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub(super) struct BrandMark(Option<Handle<Image>>);
 
 fn decode_emblem() -> Result<Image, TextureError> {

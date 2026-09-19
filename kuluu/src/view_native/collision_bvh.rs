@@ -410,12 +410,11 @@ mod bvh_tests {
     /// Jeuno spot with a roof slab beside it. Skips without a retail DAT.
     #[test]
     fn zone_bvh_ray_cast_agrees_with_brute_force() {
-        if std::env::var("FFXI_DAT_PATH").is_err() {
-            eprintln!("FFXI_DAT_PATH unset; skipping");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-        let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
+        let (submeshes, instances) = load_mzb_placed(&root, 345, None).expect("load DAT 345");
         let geom = build_collision_geometry(&submeshes, &instances, Some(345));
         // Same entry point the system uses, so the two can't drift.
         let tris = geom.camera_triangles();
@@ -459,12 +458,11 @@ mod bvh_tests {
     /// applied after `CollisionBvh::build` reorders, shows up here.
     #[test]
     fn zone_camera_bvh_drops_the_skip_set() {
-        if std::env::var("FFXI_DAT_PATH").is_err() {
-            eprintln!("FFXI_DAT_PATH unset; skipping");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-        let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
+        let (submeshes, instances) = load_mzb_placed(&root, 345, None).expect("load DAT 345");
         let geom = build_collision_geometry(&submeshes, &instances, Some(345));
 
         let skipped = geom.camera_skip.iter().filter(|s| **s).count();

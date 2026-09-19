@@ -248,6 +248,7 @@ pub fn run(args: ModelViewerArgs) -> Result<()> {
              Set FFXI_DAT_PATH or run `kuluu --require-dat model-viewer` to fail fast."
         );
     }
+    app.insert_resource(kuluu_render::dat_root::SharedDatRoot(dat_root.clone()));
     app.insert_resource(ViewerMainDll(dat_root.as_deref().and_then(|root| {
         kuluu_render::scheduler_runtime::main_dll_for_root(root.root())
     })));
@@ -335,6 +336,7 @@ fn spawn_static_scene(
 }
 
 fn do_rebake(
+    root: &ffxi_dat::DatRoot,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -385,7 +387,7 @@ fn do_rebake(
         ViewerMode::Pc => {
             let skel = pc_race_to_skel(dll, pc.race)?;
             if let Some(dll) = dll {
-                dispatch_pc_parts(dll, pc, skel, npc_loads);
+                dispatch_pc_parts(root, dll, pc, skel, npc_loads);
             } else {
                 warn!(
                     race = pc.race,
@@ -396,7 +398,7 @@ fn do_rebake(
         }
         ViewerMode::Npc => {
             let dat_id = npc_dat_id(npc.model_id);
-            let chunks = enumerate_vos2_chunks(dat_id);
+            let chunks = enumerate_vos2_chunks(root, dat_id);
             if chunks.is_empty() {
                 warn!(
                     model_id = npc.model_id,
@@ -416,7 +418,7 @@ fn do_rebake(
         }
     };
 
-    refresh_clip_list(clip_list, skel_file_id);
+    refresh_clip_list(root, clip_list, skel_file_id);
 
     Some(parent)
 }
@@ -424,13 +426,14 @@ fn do_rebake(
 /// Every PC part the form names, each dispatched as VOS2 chunk loads against
 /// the preview entity.
 fn dispatch_pc_parts(
+    root: &ffxi_dat::DatRoot,
     dll: &ffxi_dat::main_dll::MainDll,
     pc: &PcForm,
     skel: u32,
     npc_loads: &mut MessageWriter<LoadVos2Request>,
 ) {
     let mut dispatch_dat = |file_id: u32| {
-        let chunks = enumerate_vos2_chunks(file_id);
+        let chunks = enumerate_vos2_chunks(root, file_id);
         if chunks.is_empty() {
             return;
         }
@@ -469,13 +472,13 @@ fn pc_race_to_skel(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) -> Optio
     kuluu_render::dat_vos2::skeleton_file_id_for_race(dll, race)
 }
 
-fn refresh_clip_list(list: &mut ClipList, skel_file_id: Option<u32>) {
+fn refresh_clip_list(root: &ffxi_dat::DatRoot, list: &mut ClipList, skel_file_id: Option<u32>) {
     let Some(skel) = skel_file_id else {
         list.names.clear();
         list.index = 0;
         return;
     };
-    let new_names: Vec<String> = enumerate_clips_for_skel(skel)
+    let new_names: Vec<String> = enumerate_clips_for_skel(root, skel)
         .into_iter()
         .map(|(name, _)| name)
         .collect();
@@ -513,7 +516,11 @@ fn debounced_rebake(
     npc: Res<NpcForm>,
     q_existing: Query<Entity, With<PreviewParent>>,
     dll: Res<ViewerMainDll>,
+    root: Res<kuluu_render::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = root.0.as_deref() else {
+        return;
+    };
     let should_bake = if state.initial_bake_pending {
         true
     } else if let Some(t) = state.pending_since {
@@ -529,6 +536,7 @@ fn debounced_rebake(
 
     let existing = q_existing.iter().next();
     do_rebake(
+        root,
         &mut commands,
         &mut meshes,
         &mut materials,

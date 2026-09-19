@@ -124,6 +124,18 @@ pub fn plain_marker(name: &str) -> String {
     format!("{{{name}}}")
 }
 
+/// The markers whose `:param` indexes the message-parameter bank a TALKNUM
+/// packet carries in `num[]`. [`MARKER_CHOCOBO_NAME`] is excluded because its
+/// parameter selects a *name* the packet carries as a string, and
+/// [`MARKER_AUTO`] / [`MARKER_SET_COLOR`] because their byte is a formatting
+/// kind, not a parameter index.
+const NUM_PARAM_MARKERS: [&str; 4] = [MARKER_NUM, MARKER_CHOICE, MARKER_ITEM, MARKER_KEY_ITEM];
+
+/// Highest message-parameter index [`StringDat::param_slots`] reports; the
+/// widest TALKNUM body carries `num1[4]` + `num2[8]`
+/// (`ffxi_proto::decode::TalkNumWork2`).
+pub const MAX_PARAM_SLOT: u32 = 31;
+
 // Emote chat-text control sequences, observed in the emote DialogTable
 // (ROM/27/70.DAT, byte-identical on horizonxi-2023 and retail-2026-09; see
 // [`EmoteTextDat`]). Each line wraps its slots
@@ -390,6 +402,17 @@ impl StringDat {
         self.entries.get(index).map(|b| decode_dialog_text(b))
     }
 
+    /// Which message parameters entry `index` substitutes, as a bitmask over
+    /// `num[]` slots (bit N = `{Num:N}` / `{Item:N}` / `{KeyItem:N}` /
+    /// `{Choice:N}`). Slots past [`MAX_PARAM_SLOT`] are dropped.
+    ///
+    /// This is the entry's *shape*: it identifies which line a TALKNUM message
+    /// is addressing independently of the dialog index, which the server and an
+    /// installed DAT of another client era number differently.
+    pub fn param_slots(&self, index: usize) -> Option<u32> {
+        Some(param_slots_of(&self.text(index)?))
+    }
+
     /// Decode entry `index` as a selection menu: text before the `CC_SELECTION`
     /// marker is the prompt, text after it (split on `CC_NEWLINE`) the options.
     /// `None` if the entry has no Selection marker — i.e. plain speech, not a menu.
@@ -405,6 +428,29 @@ impl StringDat {
             .collect();
         Some((prompt, options))
     }
+}
+
+/// The `num[]` slots `text` substitutes. Reads the rendered markers rather than
+/// the raw control codes so it can never disagree with what the line prints.
+fn param_slots_of(text: &str) -> u32 {
+    let mut mask = 0u32;
+    for tail in text.split('{').skip(1) {
+        let Some(body) = tail.split('}').next() else {
+            continue;
+        };
+        let Some((name, param)) = body.split_once(':') else {
+            continue;
+        };
+        if !NUM_PARAM_MARKERS.contains(&name) {
+            continue;
+        }
+        if let Ok(slot) = param.parse::<u32>() {
+            if slot <= MAX_PARAM_SLOT {
+                mask |= 1 << slot;
+            }
+        }
+    }
+    mask
 }
 
 fn rd_u32(buf: &[u8], at: usize) -> u32 {
@@ -628,6 +674,39 @@ mod tests {
             text.starts_with("The fortress city"),
             "position bytes leaked into the narration line: {text:?}"
         );
+    }
+
+    #[test]
+    fn param_slots_reports_the_num_bank_an_entry_reads() {
+        // "You obtain {Num:1} {Item:0}!", whose shape is what tells it apart
+        // from the parameterless lines it shares a block with.
+        let obtain = [b'x', CC_NUM, 1, b' ', CC_ITEM, 0, b'!'];
+        let dat = StringDat::parse(&synth(&[&obtain])).expect("parse");
+        assert_eq!(dat.param_slots(0), Some(0b11));
+
+        let key_item = StringDat::parse(&synth(&[&[CC_KEY_ITEM, 2]])).expect("parse");
+        assert_eq!(key_item.param_slots(0), Some(0b100));
+        let choice = StringDat::parse(&synth(&[&[CC_CHOICE, 3]])).expect("parse");
+        assert_eq!(choice.param_slots(0), Some(0b1000));
+
+        assert_eq!(dat.param_slots(1), None, "out of range");
+    }
+
+    #[test]
+    fn param_slots_ignores_markers_that_do_not_read_the_num_bank() {
+        // {Auto:N} is a formatting kind and {SetColor:N} a colour index; the
+        // chocobo name comes from the packet's string field, not num[].
+        let entry = [
+            CC_AUTO,
+            0x31,
+            CC_SET_COLOR,
+            1,
+            CC_CHOCOBO_NAME,
+            2,
+            CC_PLAYER_NAME,
+        ];
+        let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
+        assert_eq!(dat.param_slots(0), Some(0));
     }
 
     #[test]

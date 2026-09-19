@@ -10,15 +10,35 @@ The stack is five docker containers under colima:
 | `server-map-1` | map (UDP + Blowfish) | 54230/udp |
 | `server-database-1` | MariaDB (`xidb`) | 3306 |
 
-## Bring-up
+## Bring-up and tear-down
+
+`scripts/lsb-stack.sh` owns the lifecycle — use it rather than hand-driving
+colima and docker:
 
 ```bash
-colima status || colima start
-docker ps -a --format '{{.Names}} {{.Status}}' | grep server-
-docker start server-map-1 server-world-1        # often Exited (255) after VM sleep
-docker logs server-map-1 -f                     # wait for "The map-server is ready to work"
-nc -z 127.0.0.1 54231                           # auth listener up
+scripts/lsb-stack.sh up        # colima + containers, waits for map-server ready
+scripts/lsb-stack.sh status    # VM, container states, idle-teardown countdown
+scripts/lsb-stack.sh down      # stop the containers and the colima VM
 ```
+
+`down` takes the VM down too — stopping only the containers leaves colima
+holding its whole CPU/memory allocation, which is the cost worth reclaiming.
+The price is a ~20-30s VM boot on the next `up` instead of a bare
+`docker start`.
+
+**Stop the stack when you're done verifying.** `up` arms an idle reaper that
+tears it down after 30 minutes (`LSB_STACK_IDLE_SECS`) with no client
+attached, and the Stop hook `.agents/hooks/stop.d/45-stack.sh` tears it down
+when a session settles — but both are backstops, not a reason to leave it up.
+Neither fires while a `kuluu`/`kuluu-mcp` process is alive, so a session you
+are still driving is never pulled out from under you. `LSB_STACK_AUTOSTOP=off`
+disables the hook; `scripts/lsb-stack.sh touch` pushes the idle deadline out
+for long work the process check can't see.
+
+What `up` does, if you need to drive it by hand: `colima start`, then
+`docker start` the five containers (often `Exited (255)` after VM sleep), wait
+for `The map-server is ready to work` in `docker logs server-map-1`, then
+confirm the auth listener with `nc -z 127.0.0.1 54231`.
 
 DB access for fixtures/inspection:
 

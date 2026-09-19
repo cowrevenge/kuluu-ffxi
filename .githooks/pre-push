@@ -40,6 +40,11 @@ if ! scripts/checks.sh comments; then
   exit 1
 fi
 
+if ! scripts/checks.sh literals; then
+  echo "pre-push: ✗ literals — a value that already has a named const was re-typed; import the const (or 'git push --no-verify' to bypass)" >&2
+  exit 1
+fi
+
 if ! scripts/checks.sh fmt; then
   echo "pre-push: ✗ formatting — run 'cargo fmt --all' (or 'git push --no-verify' to bypass)" >&2
   exit 1

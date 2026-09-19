@@ -41,7 +41,7 @@ session_lines=$(comm -23 \
 ledger_exists "$SESSION_ID" || exit 0
 session_lines=$(comm -12 \
   <(printf '%s\n' "$session_lines" \
-      | sed -E 's/^.{3}//; s/^"(.*)"$/\1/; s/.* -> //' | sort -u) \
+      | porcelain_paths | sort -u) \
   <(ledger_read "$SESSION_ID") \
   | grep -v '^$' || true)
 [ -z "$session_lines" ] && exit 0
@@ -57,5 +57,16 @@ sig=$( { printf '%s\n' "$session_lines"; git -C "$CWD" diff HEAD 2>/dev/null; } 
   | shasum -a 256 | cut -d' ' -f1)
 sig_changed claude-commit-nudge "$sig" || exit 0
 
-fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this session wrote %s file(s) that are still uncommitted:\n%s\n\nThese are files THIS session wrote (recorded per tool call), so they are yours to commit. Group them into one or more coherent, uncontroversial commits with clear messages. Stage scoped by path: `git add <path>`. A file here may still hold another session edits interleaved with yours — if the diff shows hunks you did not write, stage only your own (`git add -p`), never `-A`. The commit(s) your ONLY output. If mid-flight, just stop. Never narrate this checkpoint. Quiet until the work changes.' \
-  "$file_count" "$shown")"
+# Paths that changed inside a Bash command's window with too little evidence
+# to attribute get withheld from the ledger, so the list above can be short by
+# a file the session really did write. Naming the log is what makes that
+# visible instead of silent.
+suspect_note=""
+suspect_file=$(suspect_path "$SESSION_ID")
+if [ -s "$suspect_file" ]; then
+  suspect_note=$(printf ' %s path(s) changed during this session commands without enough evidence to credit them and are NOT listed above; if any is yours, see %s.' \
+    "$(cut -f1 "$suspect_file" | sort -u | grep -c . || true)" "$suspect_file")
+fi
+
+fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this session wrote %s file(s) that are still uncommitted:\n%s\n\nThese are files THIS session wrote (recorded per tool call), so they are yours to commit. Group them into one or more coherent, uncontroversial commits with clear messages. Stage scoped by path: `git add <path>`. A file here may still hold another session edits interleaved with yours — if the diff shows hunks you did not write, stage only your own (`git add -p`), never `-A`. A whole file that is not yours at all: drop it from this session ledger with `.agents/hooks/session-edits-forget.sh --session %s <path>`.%s The commit(s) your ONLY output. If mid-flight, just stop. Never narrate this checkpoint. Quiet until the work changes.' \
+  "$file_count" "$shown" "$SESSION_ID" "$suspect_note")"

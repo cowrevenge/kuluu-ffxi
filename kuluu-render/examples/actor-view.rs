@@ -122,9 +122,16 @@ fn spawn_subject(
     mut images: ResMut<Assets<Image>>,
     subject: Res<Subject>,
 ) {
+    let root = match ffxi_dat::DatRoot::from_env_or_default() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("no FFXI install: {e}");
+            return;
+        }
+    };
     let loaded = match &*subject {
-        Subject::Npc(id) => load_npc(*id),
-        Subject::Pc(race, equip) => load_pc(*race, false, equip, None, None, None),
+        Subject::Npc(id) => load_npc(&root, *id),
+        Subject::Pc(race, equip) => load_pc(&root, *race, false, equip, None, None, None),
     };
     match loaded {
         Ok(loaded) => {

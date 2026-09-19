@@ -211,8 +211,7 @@ pub(crate) struct RelayListen(
 #[derive(Resource, Default, Clone)]
 pub(crate) struct AgentListen(pub Option<String>);
 
-#[derive(Resource, Default, Clone)]
-pub(crate) struct DatRootRes(pub Option<std::sync::Arc<ffxi_dat::DatRoot>>);
+pub(crate) use kuluu_render::dat_root::SharedDatRoot as DatRootRes;
 
 /// Lets `insert_dat_roots` serve both the startup path (an `App` builder) and
 /// the launcher reload path (`Commands`), so the DAT-root list exists once.
@@ -279,6 +278,24 @@ pub(crate) fn insert_dat_roots(
 #[cfg(unix)]
 #[derive(Resource, Clone)]
 pub(crate) struct AgentPaused(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// Window-lifetime agent socket: the listener is spawned on the first connect
+/// and each subsequent connect swaps in the new session's channels through
+/// this sender (`None` while sitting at the launcher).
+#[cfg(unix)]
+#[derive(Resource)]
+pub(crate) struct AgentSessionSwap(
+    pub tokio::sync::watch::Sender<Option<kuluu_session::agent_socket::SessionChannels>>,
+);
+
+#[cfg(unix)]
+fn clear_agent_session_on_exit(agent_swap: Option<Res<AgentSessionSwap>>) {
+    if let Some(swap) = agent_swap {
+        if swap.0.send(None).is_err() {
+            tracing::debug!("agent socket listener already gone");
+        }
+    }
+}
 
 /// Focus-less GUI driving (kuluu-0pof): shared with the agent socket decoder so
 /// remote `debug_drive`/`debug_heights` commands reach the Bevy input path.
@@ -581,6 +598,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         OnExit(AppPhase::InGame),
         |mut e: ResMut<kuluu_render::WorldPickingEnabled>| e.0 = false,
     );
+    #[cfg(unix)]
+    app.add_systems(OnExit(AppPhase::InGame), clear_agent_session_on_exit);
 
     app.add_systems(
         OnEnter(AppPhase::InGame),
@@ -657,6 +676,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             drain_weather_particles,
             drain_cutscene_state,
             kuluu_render::hud::death_prompt::drain_death_prompt_selection,
+            kuluu_render::hud::item_detail::drain_auto_sorted_inventory,
             key_items::drain_key_items_viewed,
         ),
     );
@@ -750,6 +770,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::auction_mode_sync_system,
             text_input::event_map_sync_system,
             text_input::shop_mode_sync_system,
+            text_input::shop_mouse_activate_system,
             input::handle_input_system,
             text_input::text_input_system,
             text_input::auto_enter_cs_system,
@@ -940,7 +961,10 @@ fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
 
 fn despawn_ingame_entities(
     mut commands: Commands,
-    q: Query<Entity, With<InGameEntity>>,
+    (q, mut shop): (
+        Query<Entity, With<InGameEntity>>,
+        ResMut<kuluu_render::hud::shop::ShopScreenState>,
+    ),
     mut scene: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
     mut tracked: ResMut<TrackedEntities>,
@@ -976,6 +1000,7 @@ fn despawn_ingame_entities(
         count += 1;
     }
 
+    shop.reset();
     tracked.by_id.clear();
     // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
     // arrays and `cell_index` must go together, or a stale cell index will hand
@@ -1393,6 +1418,7 @@ mod zone_teardown_tests {
     fn world_with_teardown_resources() -> World {
         let mut world = World::new();
         world.init_resource::<super::SceneState>();
+        world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();
@@ -1503,6 +1529,7 @@ fn bridge_connecting(
     ports: Res<SessionPorts>,
     relay: Res<RelayListen>,
     #[cfg(unix)] agent: Res<AgentListen>,
+    #[cfg(unix)] mut agent_swap: Option<ResMut<AgentSessionSwap>>,
     dat_root_res: Res<DatRootRes>,
     mut next_phase: ResMut<NextState<AppPhase>>,
     mut err: ResMut<LoginErrorMsg>,
@@ -1513,6 +1540,11 @@ fn bridge_connecting(
         return;
     };
 
+    let playonline_session = selection
+        .initial_state
+        .auth
+        .is_playonline()
+        .then(|| selection.initial_state.auth.clone());
     let cfg = kuluu_session::session::Config {
         server: server.server.clone(),
         map_host_override: ports.map_host_override.clone(),
@@ -1523,6 +1555,7 @@ fn bridge_connecting(
         password: selection.password,
         char_selection: kuluu_session::session::CharSelection::Id(selection.char_id),
         initial_state: Some(selection.initial_state),
+        playonline_session,
 
         user_driven_events: true,
         dat_root: dat_root_res.0.clone(),
@@ -1590,27 +1623,34 @@ fn bridge_connecting(
 
     #[cfg(unix)]
     if let Some(arg) = agent.0.clone() {
-        let listen = kuluu_session::agent_socket::resolve_listen(&arg);
-        let cmd_tx_agent = cmd_tx.clone();
-        let event_tx_agent = event_tx.clone();
         let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
         commands.insert_resource(crate::view_native::AgentPaused(pause.clone()));
-        let pause_for_socket = pause;
-        let debug_ctrl_socket = debug_ctrl.clone();
-        runtime.0.spawn(async move {
-            if let Err(err) = kuluu_session::agent_socket::serve(
-                listen,
-                cmd_tx_agent,
-                event_tx_agent,
-                Some(pause_for_socket),
-                Some(debug_ctrl_socket),
-            )
-            .await
-            {
-                tracing::warn!(error = %err, "agent socket listener exited");
+        let channels = kuluu_session::agent_socket::SessionChannels {
+            cmd_tx: cmd_tx.clone(),
+            event_tx: event_tx.clone(),
+            pause: Some(pause),
+            debug_ctrl: Some(debug_ctrl.clone()),
+        };
+        match agent_swap.as_mut() {
+            // Relogin in the same window: hand the live socket the new session.
+            Some(swap) => {
+                if swap.0.send(Some(channels)).is_err() {
+                    tracing::warn!("agent socket listener gone; new session not served");
+                }
             }
-        });
+            None => {
+                let listen = kuluu_session::agent_socket::resolve_listen(&arg);
+                let (swap_tx, swap_rx) = tokio::sync::watch::channel(Some(channels));
+                commands.insert_resource(AgentSessionSwap(swap_tx));
+                runtime.0.spawn(async move {
+                    if let Err(err) =
+                        kuluu_session::agent_socket::serve_dynamic(listen, swap_rx).await
+                    {
+                        tracing::warn!(error = %err, "agent socket listener exited");
+                    }
+                });
+            }
+        }
     }
 
     commands.insert_resource(NativeSource::new(

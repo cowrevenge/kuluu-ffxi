@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bevy::prelude::*;
-use kuluu_session::auth_client::AuthClient;
+use kuluu_session::auth_client::{AuthClient, AuthSession};
 use kuluu_session::lobby_client::{LobbyClient, LobbyHandle, MapHandoff};
 use kuluu_session::session::InitialState;
 use tokio::sync::oneshot;
@@ -81,28 +81,48 @@ pub(super) fn spawn_auth_task(
     let (tx, rx) = oneshot::channel();
     let auth: Arc<AuthClient> = clients.auth.clone();
     let lobby: Arc<LobbyClient> = clients.lobby.clone();
+    let uses_auth_server = clients.uses_auth_server;
     let user = form.user.clone();
     let pass = form.pass.clone();
 
     runtime.0.spawn(async move {
-        let res = run_auth_then_open(&auth, &lobby, &user, &pass).await;
+        let res = run_auth_then_open(&auth, &lobby, uses_auth_server, &user, &pass).await;
         let _ = tx.send(res);
     });
 
     commands.insert_resource(AuthInFlightChan { rx });
 }
 
+/// A PlayOnline profile has no auth server to talk to, so the session comes
+/// from the handoff file instead of from a username and password.
+async fn obtain_session(
+    auth: &AuthClient,
+    uses_auth_server: bool,
+    user: &str,
+    pass: &str,
+) -> Result<AuthSession> {
+    if !uses_auth_server {
+        return kuluu_session::playonline::session_from_env()?.ok_or_else(|| {
+            anyhow!(
+                "this server expects a PlayOnline session; set {} to the handoff file",
+                kuluu_session::playonline::SESSION_FILE_ENV
+            )
+        });
+    }
+    auth.login(user, pass)
+        .await
+        .map_err(|e| anyhow!("login: {e}"))
+}
+
 async fn run_auth_then_open(
     auth: &AuthClient,
     lobby: &LobbyClient,
+    uses_auth_server: bool,
     user: &str,
     pass: &str,
 ) -> Result<AuthOk> {
     tracing::debug!(user, "auth task: logging in");
-    let session = auth
-        .login(user, pass)
-        .await
-        .map_err(|e| anyhow!("login: {e}"))?;
+    let session = obtain_session(auth, uses_auth_server, user, pass).await?;
     tracing::debug!("auth task: login succeeded, opening lobby");
     let handle = lobby
         .open(&session)
@@ -267,10 +287,12 @@ pub(super) fn spawn_connect_task(
             let (tx, rx) = oneshot::channel();
             let auth: Arc<AuthClient> = clients.auth.clone();
             let lobby: Arc<LobbyClient> = clients.lobby.clone();
+            let uses_auth_server = clients.uses_auth_server;
             let user = creds.user.clone();
             let pass = creds.pass.clone();
             runtime.0.spawn(async move {
-                let res = reopen_and_select(&auth, &lobby, &user, &pass, &slot).await;
+                let res =
+                    reopen_and_select(&auth, &lobby, uses_auth_server, &user, &pass, &slot).await;
                 let _ = tx.send(res);
             });
             commands.insert_resource(ConnectInFlightChan { rx });
@@ -304,14 +326,17 @@ async fn select_with_existing_handle(
 async fn reopen_and_select(
     auth: &AuthClient,
     lobby: &LobbyClient,
+    uses_auth_server: bool,
     user: &str,
     pass: &str,
     slot: &kuluu_session::lobby_client::CharSlot,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
-    let session = auth.login(user, pass).await.map_err(|e| ConnectErr {
-        msg: format!("re-login: {e}"),
-        return_to: LoginErrorReturn::Login,
-    })?;
+    let session = obtain_session(auth, uses_auth_server, user, pass)
+        .await
+        .map_err(|e| ConnectErr {
+            msg: format!("re-login: {e}"),
+            return_to: LoginErrorReturn::Login,
+        })?;
     let handle = lobby.open(&session).await.map_err(|e| ConnectErr {
         msg: format!("reopening lobby: {e}"),
         return_to: LoginErrorReturn::CharList,

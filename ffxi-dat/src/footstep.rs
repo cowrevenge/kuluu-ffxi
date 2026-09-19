@@ -157,7 +157,7 @@ mod tests {
     // produce, or the encoding is wrong somewhere.
     #[test]
     fn real_dat_every_shipped_entry_is_reachable_from_the_composition() {
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let reachable: std::collections::HashSet<[u8; 4]> = (TERRAIN_MIN..=TERRAIN_MAX)
@@ -200,7 +200,7 @@ mod tests {
     // The two tables are the walk/run split, not duplicates.
     #[test]
     fn real_dat_walk_and_run_differ() {
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let differs = crate::zone_dat::ZONE_DAT_TABLE

@@ -42,8 +42,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The literals stage diffs against the merge-base with origin/main.
+          fetch-depth: 0
       - run: scripts/checks.sh harness
       - run: scripts/checks.sh comments
+      - run: scripts/checks.sh literals
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

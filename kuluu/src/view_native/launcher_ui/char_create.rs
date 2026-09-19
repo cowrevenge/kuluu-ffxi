@@ -6,7 +6,9 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ValueChange};
 
-use super::common::{hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb};
+use super::common::{
+    hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb, DefaultFocusTarget,
+};
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
 
@@ -211,7 +213,7 @@ pub(super) fn spawn_ui(
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new("Create"), ThemedText)),
                     ))
                     .observe(
@@ -368,7 +370,7 @@ pub(super) fn spawn_error_ui(mut commands: Commands, err: Res<CharCreateError>) 
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new("Try again"), ThemedText)),
                     ))
                     .observe(

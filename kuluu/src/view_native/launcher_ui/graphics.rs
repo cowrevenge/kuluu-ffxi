@@ -13,7 +13,8 @@ use kuluu_render::graphics_settings::{
 use kuluu_render::{GraphicsField, GraphicsSettings};
 
 use super::common::{
-    hint, panel_node_capped, row, screen_root, spawn_breadcrumb, title, Crumb, ScrollRegion,
+    hint, panel_node_capped, row, screen_root, spawn_breadcrumb, title, Crumb, DefaultFocusTarget,
+    ScrollRegion,
 };
 use super::{LauncherState, ServerInfo};
 
@@ -110,6 +111,7 @@ pub(super) fn spawn_ui(
 ) {
     let open = advanced.0;
     let dlss_open = dlss_open.0;
+    let focus_field = first_focusable_field(GRAPHICS_SECTIONS, &settings);
     commands
         .spawn((GraphicsRoot, screen_root()))
         .with_children(|root| {
@@ -166,6 +168,7 @@ pub(super) fn spawn_ui(
                                                 RowGroup::Main,
                                                 open,
                                                 dlss_open,
+                                                Some(field) == focus_field,
                                             );
                                         }
                                     }
@@ -207,6 +210,7 @@ pub(super) fn spawn_ui(
                                             RowGroup::Advanced,
                                             open,
                                             dlss_open,
+                                            false,
                                         );
                                     }
 
@@ -251,6 +255,7 @@ pub(super) fn spawn_ui(
                                             RowGroup::Dlss,
                                             open,
                                             dlss_open,
+                                            false,
                                         );
                                     }
 
@@ -398,7 +403,25 @@ fn section_has_visible_row(section: &GraphicsSection, settings: &GraphicsSetting
     section
         .fields
         .iter()
-        .any(|f| !f.is_advanced() && (settings.dlss_supported || *f != GraphicsField::Dlss))
+        .any(|f| main_row_visible(*f, settings))
+}
+
+fn main_row_visible(field: GraphicsField, settings: &GraphicsSettings) -> bool {
+    !field.is_advanced() && (settings.dlss_supported || field != GraphicsField::Dlss)
+}
+
+/// Where the pad's focus ring lands when the screen opens: the first stepper
+/// the player can actually see, so a pad reaches the list without first
+/// walking past the trailing buttons.
+fn first_focusable_field(
+    sections: &[GraphicsSection],
+    settings: &GraphicsSettings,
+) -> Option<GraphicsField> {
+    sections
+        .iter()
+        .flat_map(|s| s.fields.iter())
+        .copied()
+        .find(|f| main_row_visible(*f, settings))
 }
 
 fn spawn_field_row(
@@ -408,6 +431,7 @@ fn spawn_field_row(
     group: RowGroup,
     advanced_open: bool,
     dlss_open: bool,
+    default_focus: bool,
 ) {
     let value_color = Color::srgb(0.92, 0.92, 0.95);
     // The main "DLSS" on/off row and the whole DLSS-configuration block are absent
@@ -457,12 +481,15 @@ fn spawn_field_row(
             ThemedText,
         ));
 
-        rowc.spawn(button_bundle(
+        let mut dec = rowc.spawn(button_bundle(
             ButtonBundleProps::default(),
             (),
             Spawn((Text::new("<"), ThemedText)),
-        ))
-        .observe(
+        ));
+        if default_focus {
+            dec.insert(DefaultFocusTarget);
+        }
+        dec.observe(
             move |_ev: On<Activate>, mut settings: ResMut<GraphicsSettings>| {
                 settings.cycle(field, -1);
             },
@@ -617,6 +644,7 @@ pub(super) fn spawn_config_ui(
     settings: Res<GraphicsSettings>,
     server: Res<ServerInfo>,
 ) {
+    let focus_field = first_focusable_field(CONFIG_SECTIONS, &settings);
     commands
         .spawn((GraphicsRoot, screen_root()))
         .with_children(|root| {
@@ -630,7 +658,15 @@ pub(super) fn spawn_config_ui(
                     for section in CONFIG_SECTIONS {
                         panel.spawn(section_header(section.header));
                         for &field in section.fields {
-                            spawn_field_row(panel, field, &settings, RowGroup::Main, false, false);
+                            spawn_field_row(
+                                panel,
+                                field,
+                                &settings,
+                                RowGroup::Main,
+                                false,
+                                false,
+                                Some(field) == focus_field,
+                            );
                         }
                     }
                     panel

@@ -8,7 +8,6 @@ use ffxi_dat::chunk::ChunkNode;
 use ffxi_dat::particle_gen::{AttachType, SoundGeneratorDef};
 use ffxi_dat::sep::Sep;
 use ffxi_dat::weather::WeatherTypeId;
-use ffxi_dat::DatRoot;
 use kuluu_snapshot::Vec3 as WireVec3;
 
 use crate::audio::{
@@ -242,7 +241,11 @@ fn sync_zone_sfx(
     zone_weather: Res<crate::weather::ZoneWeather>,
     mut store: ResMut<ZoneSfx>,
     mut commands: Commands,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     let file_id = effective_zone_file_id(&scene_state.snapshot);
     let weather = zone_weather
         .active_weather_type()
@@ -268,14 +271,11 @@ fn sync_zone_sfx(
         store.weather_key = Some((file_id, weather));
     }
 
-    let Some(bytes) = file_id
-        .zip(DatRoot::from_env_or_default().ok())
-        .and_then(|(id, root)| {
-            root.resolve(id)
-                .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
-        })
-    else {
+    let Some(bytes) = file_id.and_then(|id| {
+        root.resolve(id)
+            .ok()
+            .and_then(|loc| std::fs::read(loc.path_under(root)).ok())
+    }) else {
         return;
     };
 
@@ -442,7 +442,7 @@ mod tests {
     const RULUDE_GARDENS_ZONE_DAT: u32 = 101;
 
     fn zone_dat(file_id: u32) -> Option<Vec<u8>> {
-        let root = DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
     }
@@ -666,8 +666,7 @@ mod tests {
     #[test]
     fn real_dat_every_sub_ten_frame_one_shot_is_a_singleton() {
         const MIN_TIMED_PERIOD_FRAMES: f32 = 10.0;
-        let Ok(root) = DatRoot::from_env_or_default() else {
-            eprintln!("skipping: no FFXI install");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let mut seen = std::collections::HashSet::new();
@@ -711,14 +710,16 @@ mod tests {
         const WEST_RONFAURE: u16 = 100;
         const LA_THEINE: u16 = 102;
 
-        if DatRoot::from_env_or_default().is_err() {
-            eprintln!("skipping: no FFXI install");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let mut app = App::new();
         app.init_resource::<SceneState>()
             .init_resource::<crate::weather::ZoneWeather>()
             .init_resource::<ZoneSfx>()
+            .insert_resource(crate::dat_root::SharedDatRoot(Some(std::sync::Arc::new(
+                root,
+            ))))
             .add_systems(Update, sync_zone_sfx);
 
         let mut enter = |zone: u16| {

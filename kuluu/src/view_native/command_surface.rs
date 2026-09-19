@@ -17,6 +17,9 @@ pub const EXTENSION_PREFIX: &str = "//";
 pub const OWNER_SEPARATOR: char = ':';
 /// The owner first-party commands register under.
 pub const FIRST_PARTY_OWNER: &str = "kuluu";
+/// The extension surface's own help. Exempt from [`EnabledSets`] because it is
+/// how a player finds out which sets exist and which are off.
+pub const EXTENSION_HELP_NAMES: &[&str] = &["?", "help"];
 
 /// Which surface a command belongs to, and therefore how it is typed and
 /// whether it can be switched off.

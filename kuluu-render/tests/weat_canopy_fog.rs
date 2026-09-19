@@ -4,14 +4,14 @@
 use ffxi_dat::chunk::{walk_tree, ChunkNode};
 use ffxi_dat::generator::Generator;
 use ffxi_dat::weather::collect_weather_records;
-use ffxi_dat::{ChunkKind, DatRoot};
+use ffxi_dat::ChunkKind;
 use kuluu_render::zone_clouds::CLOUD_MIN_RIM;
 
 /// The two outdoor zone DATs the sky work was measured against: `f_la` and `f_or`.
 const ZONE_DATS: [u32; 2] = [202, 209];
 
 fn zone_bytes(file_id: u32) -> Option<Vec<u8>> {
-    let root = DatRoot::from_env_or_default().ok()?;
+    let root = ffxi_dat::archive::open_test_install()?;
     let location = root.resolve(file_id).ok()?;
     std::fs::read(location.path_under(&root)).ok()
 }

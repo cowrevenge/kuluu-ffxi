@@ -16,14 +16,11 @@ const REPRO_FLOOR_BEVY_Y: f32 = 9.2785;
 const WEDGED_SEED_WIRE_Z: f32 = 0.0;
 
 fn ronfaure_collision() -> Option<MzbCollisionGeometry> {
-    if std::env::var("FFXI_DAT_PATH").is_err() {
-        eprintln!("FFXI_DAT_PATH unset; skipping");
-        return None;
-    }
+    let root = ffxi_dat::archive::open_test_install()?;
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let file_id = ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(REPRO_ZONE), None)
         .expect("zone 100 -> mzb file id");
-    let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load zone 100 MZB");
+    let (submeshes, instances) = load_mzb_placed(&root, file_id, None).expect("load zone 100 MZB");
     Some(MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,

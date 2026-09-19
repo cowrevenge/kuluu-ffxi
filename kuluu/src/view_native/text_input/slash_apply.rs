@@ -89,6 +89,12 @@ pub(super) fn apply_slash_outcome(
             target.id = id;
         }
         SlashOutcome::Quit => {
+            // Both ride the one command channel and the session transmits
+            // before it reads again, so the server learns we are leaving
+            // rather than seeing a dropped link.
+            let _ = cmd_tx.try_send(AgentCommand::ReqLogout {
+                kind: kuluu_session::state::ReqLogoutKind::ShutdownOn,
+            });
             let _ = cmd_tx.try_send(AgentCommand::Disconnect);
             exit.write_default();
             crate::view_native::exit_watchdog::arm();
@@ -543,11 +549,15 @@ pub(super) fn apply_slash_outcome(
                     None => vec![format!("/actordiag: entity {id} not in the snapshot")],
                     Some(e) => match &e.look {
                         None => vec![format!("/actordiag: entity {id} carries no look data")],
-                        Some(look) => kuluu_render::actor_diag::report(
-                            id,
-                            e.name.as_deref().unwrap_or("?"),
-                            look,
-                        ),
+                        Some(look) => match slash_writers.dat_root.0.as_deref() {
+                            Some(root) => kuluu_render::actor_diag::report(
+                                root,
+                                id,
+                                e.name.as_deref().unwrap_or("?"),
+                                look,
+                            ),
+                            None => vec!["/actordiag: no DAT install loaded".to_string()],
+                        },
                     },
                 },
             };
@@ -723,7 +733,13 @@ pub(super) fn apply_slash_outcome(
             );
         }
         SlashOutcome::SubArea { op, self_pos } => {
-            apply_sub_area(op, self_pos, scene_state, &mut slash_writers.set_sub_area);
+            apply_sub_area(
+                op,
+                self_pos,
+                scene_state,
+                slash_writers.dat_root.0.as_deref(),
+                &mut slash_writers.set_sub_area,
+            );
         }
         SlashOutcome::ApplyKeybinds(update) => {
             apply_keybind_update(update, bindings, keybinds_state, scene_state);
@@ -799,8 +815,13 @@ fn apply_sub_area(
     op: SubAreaOp,
     self_pos: kuluu_snapshot::Vec3,
     scene_state: &mut SceneState,
+    root: Option<&ffxi_dat::DatRoot>,
     set_sub_area: &mut MessageWriter<kuluu_render::sub_area_activation::SetSubArea>,
 ) {
+    let Some(root) = root else {
+        push_system_chat_line(scene_state, "/subarea: no DAT install loaded".into());
+        return;
+    };
     let Some(zone_file_id) = kuluu_render::snapshot::effective_zone_file_id(&scene_state.snapshot)
     else {
         push_system_chat_line(
@@ -809,7 +830,7 @@ fn apply_sub_area(
         );
         return;
     };
-    let subs = match kuluu_render::dat_mzb::zone_sub_areas(zone_file_id) {
+    let subs = match kuluu_render::dat_mzb::zone_sub_areas(root, zone_file_id) {
         Ok(s) => s,
         Err(e) => {
             push_system_chat_line(scene_state, format!("/subarea: {e}"));

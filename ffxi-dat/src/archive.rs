@@ -3,78 +3,30 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use ffxi_proto::login::expansion_display;
+
 use crate::client_profile::ClientProfile;
 use crate::ftable::{FTable, SubPath, FTABLE_BYTES_PER_FILE_ID};
 use crate::vtable::VTable;
 use crate::{DatError, Result};
 
-/// XIClient's LoadFileTables stops at INDEX_ROM_MAX, which is 13
-/// (research/XIClient/src/XIClient/include/Constants/Values.h); POLUtils
-/// DoFullFileScan (vendor/POLUtils/MassExtractor/Program.cs) probes up to
-/// ROM19, and so does this crate so a newer install than that client still
-/// resolves.
+/// research/XIClient/src/XIClient/include/Constants/Values.h INDEX_ROM_MAX:
+/// the last ROM index LoadFileTables probes for, and so the last one with a
+/// defined excode_client bit.
+const RETAIL_INDEX_ROM_MAX: u8 = 13;
+
+/// POLUtils DoFullFileScan (vendor/POLUtils/MassExtractor/Program.cs) probes
+/// past [`RETAIL_INDEX_ROM_MAX`] to ROM19, and so does this crate, so a newer
+/// install than that client still resolves.
 const MAX_ROM_INDEX: u8 = 19;
+
+/// The base install's own tables, the ones with no ROM index in their name.
+pub const BASE_ROM_INDEX: u8 = 1;
 
 pub const DAT_PATH_ENV: &str = "FFXI_DAT_PATH";
 
-pub const DEFAULT_INSTALL_DIR: &str = "vendor/game-files/SquareEnix/FINAL FANTASY XI";
-
-/// Named installs live side by side here so one checkout can target several
-/// client generations; `cargo xtask ffxi-client link --target <name>` wires them.
-pub const TARGETS_DIR: &str = "vendor/game-files/targets";
-
-/// Selects a named install under [`TARGETS_DIR`]. `FFXI_DAT_PATH` wins when
-/// both are set, so an explicit path is never silently redirected.
-pub const CLIENT_TARGET_ENV: &str = "FFXI_CLIENT_TARGET";
-
+/// The DAT root's path inside an install directory.
 pub const INSTALL_SUBDIR: &str = "SquareEnix/FINAL FANTASY XI";
-
-pub fn target_install_dir(targets_dir: &Path, name: &str) -> PathBuf {
-    targets_dir.join(name).join(INSTALL_SUBDIR)
-}
-
-fn is_install(dir: &Path) -> bool {
-    dir.join("VTABLE.DAT").exists()
-}
-
-/// Workspace-relative paths are tried against the cwd first; cargo runs each
-/// test binary with cwd set to its own package root, so the workspace root
-/// resolved from this crate's manifest dir is the fallback (absent in a
-/// shipped binary, which is why cwd is still tried first).
-fn workspace_bases() -> Vec<PathBuf> {
-    let mut bases = Vec::new();
-    if let Ok(cwd) = env::current_dir() {
-        bases.push(cwd);
-    }
-    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-        bases.push(root.to_path_buf());
-    }
-    bases
-}
-
-/// The checkout's [`TARGETS_DIR`], if the checkout is reachable.
-pub fn workspace_targets_dir() -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| b.join(TARGETS_DIR))
-        .find(|p| p.is_dir())
-}
-
-/// The named checkout target, if it holds an install.
-pub fn workspace_target(name: &str) -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| target_install_dir(&b.join(TARGETS_DIR), name))
-        .find(|p| is_install(p))
-}
-
-/// The checkout's [`DEFAULT_INSTALL_DIR`], if it holds an install.
-pub fn workspace_default() -> Option<PathBuf> {
-    workspace_bases()
-        .into_iter()
-        .map(|b| b.join(DEFAULT_INSTALL_DIR))
-        .find(|p| is_install(p))
-}
 
 /// Overlay roots searched before the base install, in order, separated by the
 /// platform path separator. A startup override; see [`discover_overlays`] for
@@ -96,9 +48,9 @@ const PIVOT_INI: &str = "config/pivot/pivot.ini";
 const PIVOT_DAT_DIR: &str = "polplugins/DATs";
 
 /// The game directory holding Pivot's config and overlays, given a DAT root of
-/// `<game>/SquareEnix/FINAL FANTASY XI`. A root that is itself a symlink (the
-/// checkout default pointing into a named target) is followed first, since
-/// the config sits beside the real tree, not the link.
+/// `<game>/SquareEnix/FINAL FANTASY XI`. A root that is itself a symlink (an
+/// install registered by link) is followed first, since the config sits
+/// beside the real tree, not the link.
 fn game_dir(install_root: &Path) -> Option<PathBuf> {
     let real = match std::fs::read_link(install_root) {
         Ok(target) => install_root
@@ -116,8 +68,8 @@ fn game_dir(install_root: &Path) -> Option<PathBuf> {
 /// Pivot indexes them `0=`, `1=`, … and we search in that order, first match
 /// wins. That precedence is NOT confirmed against Pivot's source (none is
 /// vendored) and the shipped `pivotSettingsHolder.ini` comment contradicts its
-/// own entries; it is unobservable on the horizonxi-2023 target
-/// (vendor/game-files/targets/hxi), where no two overlays claim the same path.
+/// own entries; it is unobservable on the horizonxi-2023 install, where no two
+/// overlays claim the same path.
 fn parse_pivot_ini(ini: &str) -> (Option<PathBuf>, Vec<String>) {
     let mut root_path = None;
     let mut entries: Vec<(u32, String)> = Vec::new();
@@ -294,11 +246,24 @@ pub struct DatRoot {
     /// (which would re-read every VTABLE/FTABLE) or replacing the `Arc` at every
     /// holder. A read per DAT open is nothing against the file I/O that follows.
     overlays: RwLock<Vec<PathBuf>>,
+    /// Held while this root is open so an updater refuses to rewrite it;
+    /// `None` on a root that cannot take one (read-only media), which only
+    /// loses the refusal.
+    _lock: Option<crate::install::lock::SharedLock>,
 }
 
 impl DatRoot {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
+        let lock = match crate::install::lock::shared(&root) {
+            Ok(lock) => Some(lock),
+            Err(e) if e.is_held() => {
+                return Err(DatError::NoInstall {
+                    reason: format!("{} is being updated: {e}", root.display()),
+                })
+            }
+            Err(_) => None,
+        };
         let mut apps: Vec<AppTables> = Vec::new();
         let mut skipped = Vec::new();
 
@@ -341,6 +306,7 @@ impl DatRoot {
             apps,
             skipped,
             overlays,
+            _lock: lock,
         };
         root.profile = ClientProfile::probe_in(&root);
         Ok(root)
@@ -393,24 +359,13 @@ impl DatRoot {
         Self::open(PathBuf::from(root))
     }
 
-    /// `FFXI_DAT_PATH`, else the checkout target named by `FFXI_CLIENT_TARGET`,
-    /// else the checkout default. Product-side sources (the launcher's saved
-    /// choice, the per-user client directory) are settled into `FFXI_DAT_PATH`
-    /// by kuluu before this runs.
+    /// The install [`crate::install::resolve`] names: `FFXI_DAT_PATH`, else
+    /// the registry's `default` pointer.
     pub fn from_env_or_default() -> Result<Self> {
-        if let Some(root) = env::var_os(DAT_PATH_ENV) {
-            return Self::open(PathBuf::from(root));
-        }
-        if let Some(name) = env::var_os(CLIENT_TARGET_ENV) {
-            let name = name.to_string_lossy();
-            return match workspace_target(&name) {
-                Some(p) => Self::open(p),
-                None => Err(DatError::TargetMissing {
-                    name: name.into_owned(),
-                }),
-            };
-        }
-        Self::open(workspace_default().ok_or(DatError::EnvMissing)?)
+        let resolved = crate::install::resolve().map_err(|u| DatError::NoInstall {
+            reason: u.to_string(),
+        })?;
+        Self::open(resolved.path)
     }
 
     pub fn root(&self) -> &Path {
@@ -426,6 +381,13 @@ impl DatRoot {
             .iter()
             .map(|a| (a.rom_dir.clone(), a.vtable.len(), a.ftable.len()))
             .collect()
+    }
+
+    /// The C2S 0x26 excode_client this install's ROM inventory describes.
+    /// research/XiPackets/lobby/C2S_0x0026_RequestLobbyLogin.md excode_client.
+    pub fn excode_client(&self) -> u16 {
+        let present: Vec<u8> = self.apps.iter().map(|a| a.rom_index).collect();
+        excode_client_from_rom_indices(&present)
     }
 
     /// ROMs whose tables were rejected at open; empty on a well-formed install.
@@ -458,59 +420,168 @@ impl DatRoot {
 }
 
 /// Test-support entry point, `pub` only so real-DAT guards in sibling crates can
-/// share it. Opens `FFXI_DAT_PATH` if set and usable, else the checkout target
-/// named by `FFXI_CLIENT_TARGET`, else the default install resolved relative to
-/// the crate (works regardless of the test CWD, unlike
-/// [`DatRoot::from_env_or_default`]'s relative path). `None` — with a printed
-/// reason, so a vacuous pass is never mistaken for a real one — when no install
-/// is present.
+/// share it. Opens the install [`crate::install::resolve`] names; `None` with a
+/// printed reason, so a vacuous pass is never mistaken for a real one, when
+/// nothing resolves or the install does not open. A set but unusable
+/// `FFXI_DAT_PATH` is a skip that says so, never a fallthrough to another
+/// install.
 #[doc(hidden)]
 pub fn open_test_install() -> Option<DatRoot> {
-    match DatRoot::from_env() {
-        Ok(root) => return Some(root),
-        Err(DatError::EnvMissing) => {}
-        // A stale FFXI_DAT_PATH in a shell must not turn every real-DAT test into a silent
-        // skip, so say so and still try the vendored install.
-        Err(e) => eprintln!(
-            "real-DAT guard: {DAT_PATH_ENV} unusable ({e}); trying the vendored install instead"
-        ),
-    }
-    if let Some(name) = env::var_os(CLIENT_TARGET_ENV) {
-        let name = name.to_string_lossy();
-        match workspace_target(&name).map(DatRoot::open) {
-            Some(Ok(root)) => return Some(root),
-            Some(Err(e)) => eprintln!(
-                "real-DAT guard: {CLIENT_TARGET_ENV}={name} unusable ({e}); trying the vendored install instead"
-            ),
-            None => eprintln!(
-                "real-DAT guard: {CLIENT_TARGET_ENV}={name} names no install under {TARGETS_DIR}; trying the vendored install instead"
-            ),
+    let resolved = match crate::install::resolve() {
+        Ok(r) => r,
+        Err(u) => {
+            eprintln!("SKIP (real-DAT guard): {u}");
+            return None;
         }
-    }
-    let default = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(DEFAULT_INSTALL_DIR);
-    if !default.join("VTABLE.DAT").exists() {
-        eprintln!(
-            "SKIP (real-DAT guard): no retail install — {DAT_PATH_ENV} unset and {} has no VTABLE.DAT",
-            default.display()
-        );
-        return None;
-    }
-    match DatRoot::open(&default) {
+    };
+    match DatRoot::open(&resolved.path) {
         Ok(root) => Some(root),
         Err(e) => {
             eprintln!(
-                "SKIP (real-DAT guard): {} is not a usable install: {e}",
-                default.display()
+                "SKIP (real-DAT guard): {} ({}) is not a usable install: {e}",
+                resolved.path.display(),
+                resolved.source
             );
             None
         }
     }
 }
 
+/// One row of retail's ROM-presence-to-expansion fold.
+///
+/// research/XIClient/src/XIClient/source/System/FileIO/FileIOVirtualFileSystem.cpp
+/// FileIOVirtualFileSystem::LoadFileTables computes `bit` arithmetically --
+/// `1 << (rom_index - 1)` below ROM9 and `1 << (rom_index + 2)` from ROM9 up --
+/// and gates the three add-on ROMs on Rise of the Zilart already being folded
+/// in. The shifts are spelled out as the names
+/// vendor/server/src/login/login_helpers.h EXPANSION_DISPLAY gives those same
+/// bits, and the gate as `requires`, so the rule reads as content rather than
+/// as arithmetic.
+struct RomExpansion {
+    rom_index: u8,
+    bit: u16,
+    requires: Option<u16>,
+}
+
+/// In LoadFileTables fold order, so each `requires` gate sees the bits a
+/// lower ROM contributed; rom_expansion_bits_match_the_retail_shift_arithmetic
+/// pins the shape.
+const ROM_EXPANSION_BITS: &[RomExpansion] = &[
+    RomExpansion {
+        rom_index: 2,
+        bit: expansion_display::RISE_OF_ZILART,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 3,
+        bit: expansion_display::CHAINS_OF_PROMATHIA,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 4,
+        bit: expansion_display::TREASURES_OF_AHT_URGHAN,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 5,
+        bit: expansion_display::WINGS_OF_THE_GODDESS,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 6,
+        bit: expansion_display::A_CRYSTALLINE_PROPHECY,
+        requires: Some(expansion_display::RISE_OF_ZILART),
+    },
+    RomExpansion {
+        rom_index: 7,
+        bit: expansion_display::A_MOOGLE_KUPOD_ETAT,
+        requires: Some(expansion_display::RISE_OF_ZILART),
+    },
+    RomExpansion {
+        rom_index: 8,
+        bit: expansion_display::A_SHANTOTTO_ASCENSION,
+        requires: Some(expansion_display::RISE_OF_ZILART),
+    },
+    RomExpansion {
+        rom_index: 9,
+        bit: expansion_display::SEEKERS_OF_ADOULIN,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 10,
+        bit: expansion_display::UNUSED_EXPANSION_1,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 11,
+        bit: expansion_display::UNUSED_EXPANSION_2,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 12,
+        bit: expansion_display::UNUSED_EXPANSION_3,
+        requires: None,
+    },
+    RomExpansion {
+        rom_index: 13,
+        bit: expansion_display::UNUSED_EXPANSION_4,
+        requires: None,
+    },
+];
+
+/// The three Abyssea add-ons ship no ROM of their own; LoadFileTables turns
+/// them on together once the fold holds both Rise of the Zilart and Wings of
+/// the Goddess.
+const ABYSSEA_BITS: u16 = expansion_display::VISIONS_OF_ABYSSEA
+    | expansion_display::SCARS_OF_ABYSSEA
+    | expansion_display::HEROES_OF_ABYSSEA;
+const ABYSSEA_REQUIRES: u16 =
+    expansion_display::RISE_OF_ZILART | expansion_display::WINGS_OF_THE_GODDESS;
+
+/// The C2S 0x26 excode_client the ROM inventory `present` describes.
+///
+/// Driven by [`ROM_EXPANSION_BITS`] rather than by the caller's order, so an
+/// unsorted inventory cannot break the add-on ROMs' Rise-of-the-Zilart gate.
+/// BASE_GAME is unconditional because
+/// research/XIClient/src/XIClient/source/Network/Lobby/LoginStateMachine.cpp
+/// LoginStateMachine::HandleLogin sends `1 | ClientExpansions`, whatever the
+/// fold produced.
+fn excode_client_from_rom_indices(present: &[u8]) -> u16 {
+    let mut mask = expansion_display::BASE_GAME;
+    for entry in ROM_EXPANSION_BITS {
+        if !present.contains(&entry.rom_index) {
+            continue;
+        }
+        if entry.requires.is_some_and(|req| mask & req != req) {
+            continue;
+        }
+        mask |= entry.bit;
+    }
+    if mask & ABYSSEA_REQUIRES == ABYSSEA_REQUIRES {
+        mask |= ABYSSEA_BITS;
+    }
+    mask
+}
+
+/// The excode_client for the install at `root`, or `None` when `root` holds no
+/// base FTABLE.DAT and so is not an install at all (LoadFileTables fails there
+/// too, before it folds a single bit).
+///
+/// Gated on the same thing retail gates on, each expansion FTABLE existing,
+/// which is weaker than the table-size validation [`DatRoot::open`] applies;
+/// [`DatRoot::excode_client`] is the same fold over that validated inventory.
+pub fn excode_client_at(root: &Path) -> Option<u16> {
+    if !appid_paths(root, BASE_ROM_INDEX).2.exists() {
+        return None;
+    }
+    let present: Vec<u8> = (BASE_ROM_INDEX + 1..=RETAIL_INDEX_ROM_MAX)
+        .filter(|i| appid_paths(root, *i).2.exists())
+        .collect();
+    Some(excode_client_from_rom_indices(&present))
+}
+
 fn appid_paths(root: &Path, i: u8) -> (String, PathBuf, PathBuf) {
-    if i == 1 {
+    if i == BASE_ROM_INDEX {
         (
             "ROM".to_string(),
             root.join("VTABLE.DAT"),
@@ -553,6 +624,215 @@ mod tests {
         }
         let root = DatRoot::open(dir.path()).unwrap();
         (dir, root)
+    }
+
+    /// Empty FTABLEs at the paths retail probes; the fold tests existence only.
+    fn synth_rom_ftables(rom_indices: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for i in rom_indices {
+            let (_rom_dir, _vt_path, ft_path) = appid_paths(dir.path(), *i);
+            if let Some(parent) = ft_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&ft_path, []).unwrap();
+        }
+        dir
+    }
+
+    fn excode_of(rom_indices: &[u8]) -> u16 {
+        let dir = synth_rom_ftables(rom_indices);
+        excode_client_at(dir.path()).unwrap()
+    }
+
+    /// The rows are spelled out so they can carry the LSB names, but retail
+    /// derives them: `1 << (rom_index - 1)` below ROM9, `1 << (rom_index + 2)`
+    /// from ROM9 up, the three add-on ROMs gated on Rise of the Zilart
+    /// (research/XIClient/src/XIClient/source/System/FileIO/FileIOVirtualFileSystem.cpp
+    /// LoadFileTables). Without this, a mistyped row is a wrong mask on a
+    /// retail lobby and every other test here agrees with it.
+    #[test]
+    fn rom_expansion_bits_match_the_retail_shift_arithmetic() {
+        const FIRST_HIGH_ROM_INDEX: u8 = 9;
+        const LOW_ROM_SHIFT_BACK: u8 = 1;
+        const HIGH_ROM_SHIFT_FORWARD: u8 = 2;
+        const FIRST_ADDON_ROM_INDEX: u8 = 6;
+        const LAST_ADDON_ROM_INDEX: u8 = 8;
+
+        let mut expected_index = BASE_ROM_INDEX + 1;
+        let mut named = expansion_display::BASE_GAME | ABYSSEA_BITS;
+        for entry in ROM_EXPANSION_BITS {
+            assert_eq!(
+                entry.rom_index, expected_index,
+                "the table skips a ROM index retail probes"
+            );
+            expected_index += 1;
+            let shift = if entry.rom_index < FIRST_HIGH_ROM_INDEX {
+                entry.rom_index - LOW_ROM_SHIFT_BACK
+            } else {
+                entry.rom_index + HIGH_ROM_SHIFT_FORWARD
+            };
+            assert_eq!(entry.bit, 1u16 << shift, "ROM{}", entry.rom_index);
+            let gated = (FIRST_ADDON_ROM_INDEX..=LAST_ADDON_ROM_INDEX).contains(&entry.rom_index);
+            assert_eq!(
+                entry.requires,
+                gated.then_some(expansion_display::RISE_OF_ZILART),
+                "ROM{}",
+                entry.rom_index
+            );
+            assert_eq!(named & entry.bit, 0, "ROM{} re-uses a bit", entry.rom_index);
+            named |= entry.bit;
+        }
+        assert_eq!(
+            expected_index,
+            RETAIL_INDEX_ROM_MAX + 1,
+            "the table stops before retail's probe does"
+        );
+        assert_eq!(
+            named & expansion_display::ALL_KNOWN,
+            expansion_display::ALL_KNOWN,
+            "the fold can never produce every expansion LSB names"
+        );
+    }
+
+    #[test]
+    fn excode_client_is_base_only_without_an_expansion_rom() {
+        assert_eq!(
+            excode_of(&[BASE_ROM_INDEX]),
+            expansion_display::BASE_GAME,
+            "HandleLogin forces BASE_GAME on and no ROM contributes it"
+        );
+    }
+
+    #[test]
+    fn expansion_roms_set_their_own_bit_and_bundle_abyssea() {
+        assert_eq!(
+            excode_of(&[BASE_ROM_INDEX, 2, 3, 4, 5]),
+            expansion_display::BASE_GAME
+                | expansion_display::RISE_OF_ZILART
+                | expansion_display::CHAINS_OF_PROMATHIA
+                | expansion_display::TREASURES_OF_AHT_URGHAN
+                | expansion_display::WINGS_OF_THE_GODDESS
+                | expansion_display::VISIONS_OF_ABYSSEA
+                | expansion_display::SCARS_OF_ABYSSEA
+                | expansion_display::HEROES_OF_ABYSSEA
+        );
+        assert_eq!(
+            excode_of(&[BASE_ROM_INDEX, 2]) & ABYSSEA_BITS,
+            0,
+            "Abyssea needs Wings of the Goddess as well"
+        );
+        assert_eq!(
+            excode_of(&[BASE_ROM_INDEX, 9]),
+            expansion_display::BASE_GAME | expansion_display::SEEKERS_OF_ADOULIN
+        );
+    }
+
+    #[test]
+    fn addon_roms_need_rise_of_zilart_to_count() {
+        let addons = expansion_display::A_CRYSTALLINE_PROPHECY
+            | expansion_display::A_MOOGLE_KUPOD_ETAT
+            | expansion_display::A_SHANTOTTO_ASCENSION;
+        assert_eq!(excode_of(&[BASE_ROM_INDEX, 6, 7, 8]) & addons, 0);
+        assert_eq!(excode_of(&[BASE_ROM_INDEX, 2, 6, 7, 8]) & addons, addons);
+        assert_eq!(
+            excode_of(&[8, 7, 6, 2, BASE_ROM_INDEX]) & addons,
+            addons,
+            "the gate must not depend on the caller's order"
+        );
+    }
+
+    // ROM directories as shipped by the registered installs: retail stops at
+    // ROM9, horizonxi-2023 adds ROM10, a bit LSB has no name for.
+    #[test]
+    fn known_client_rom_shapes_map_to_their_expansion_masks() {
+        let retail_shape: Vec<u8> = (BASE_ROM_INDEX..=9).collect();
+        let mut horizon_shape = retail_shape.clone();
+        horizon_shape.push(10);
+        for (row, shape, expected) in [
+            (
+                "retail-2019-base",
+                &retail_shape,
+                expansion_display::ALL_KNOWN,
+            ),
+            (
+                "retail-2026-09",
+                &retail_shape,
+                expansion_display::ALL_KNOWN,
+            ),
+            (
+                "horizonxi-2023",
+                &horizon_shape,
+                expansion_display::ALL_KNOWN | expansion_display::UNUSED_EXPANSION_1,
+            ),
+        ] {
+            assert!(
+                crate::client_profile::KNOWN_CLIENTS
+                    .iter()
+                    .any(|k| k.name == row),
+                "{row} is not a KNOWN_CLIENTS row"
+            );
+            assert_eq!(excode_of(shape), expected, "{row}");
+        }
+    }
+
+    #[test]
+    fn rom_indices_past_the_retail_probe_are_ignored() {
+        assert_eq!(
+            excode_of(&[BASE_ROM_INDEX, 14, MAX_ROM_INDEX]),
+            expansion_display::BASE_GAME
+        );
+    }
+
+    #[test]
+    fn dat_root_inventory_and_the_path_probe_agree() {
+        let (tmp, root) = synth_root(&[
+            SynthApp {
+                rom_index: BASE_ROM_INDEX,
+                vtable: vec![0, 1],
+                ftable_words: vec![0x0000, 0x0080],
+            },
+            SynthApp {
+                rom_index: 2,
+                vtable: vec![0, 2],
+                ftable_words: vec![0x0000, 0x0100],
+            },
+            SynthApp {
+                rom_index: 5,
+                vtable: vec![0, 5],
+                ftable_words: vec![0x0000, 0x0180],
+            },
+        ]);
+        assert_eq!(
+            root.excode_client(),
+            expansion_display::BASE_GAME
+                | expansion_display::RISE_OF_ZILART
+                | expansion_display::WINGS_OF_THE_GODDESS
+                | ABYSSEA_BITS
+        );
+        assert_eq!(Some(root.excode_client()), excode_client_at(tmp.path()));
+    }
+
+    #[test]
+    fn excode_client_at_is_none_without_a_base_ftable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(excode_client_at(dir.path()), None);
+        assert_eq!(excode_client_at(&dir.path().join("ROM2")), None);
+    }
+
+    #[test]
+    fn installed_rom_inventory_covers_every_known_expansion() {
+        let Some(root) = open_test_install() else {
+            return;
+        };
+        let derived = root.excode_client();
+        assert_eq!(
+            derived & expansion_display::ALL_KNOWN,
+            expansion_display::ALL_KNOWN,
+            "{}: {derived:#06x}",
+            root.root().display()
+        );
+        assert_eq!(excode_client_at(root.root()), Some(derived));
+        eprintln!("{}: excode_client {derived:#06x}", root.root().display());
     }
 
     // Ids 1 and 2 are claimed by the base ROM; ROM2 re-claims id 1 and ROM3

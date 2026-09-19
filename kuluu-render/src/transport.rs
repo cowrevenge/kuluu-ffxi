@@ -36,9 +36,8 @@ struct TransportAsset {
     paths: HashMap<[u8; 4], Spline>,
 }
 
-fn load_transport(file_id: u32) -> Option<TransportAsset> {
-    let root = DatRoot::from_env_or_default().ok()?;
-    let bytes = std::fs::read(root.resolve(file_id).ok()?.path_under(&root)).ok()?;
+fn load_transport(root: &DatRoot, file_id: u32) -> Option<TransportAsset> {
+    let bytes = std::fs::read(root.resolve(file_id).ok()?.path_under(root)).ok()?;
     let mut asset = TransportAsset {
         meshes: Vec::new(),
         routines: Vec::new(),
@@ -69,7 +68,11 @@ fn load_transport_models(
     candidates: Query<(Entity, &WorldEntity), (Without<TransportAsset>, Without<LoadingTransport>)>,
     mut loading: Query<(Entity, &WorldEntity, &mut LoadingTransport)>,
     mut models: MessageWriter<LoadMmbRequest>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
+    let Some(root) = dat_root.get() else {
+        return;
+    };
     for (entity, world) in &candidates {
         let Some(record) = entities.get(world.id) else {
             continue;
@@ -87,7 +90,10 @@ fn load_transport_models(
         };
         commands.entity(entity).insert(LoadingTransport {
             file_id,
-            task: AsyncComputeTaskPool::get().spawn(async move { load_transport(file_id) }),
+            task: {
+                let root = root.clone();
+                AsyncComputeTaskPool::get().spawn(async move { load_transport(&root, file_id) })
+            },
         });
     }
     for (entity, world, mut pending) in &mut loading {
@@ -560,13 +566,13 @@ mod tests {
 
     #[test]
     fn installed_ferry_has_a_walkable_ship_and_separate_backdrop() {
-        if ffxi_dat::DatRoot::from_env_or_default().is_err() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         const FERRY_ZONE_FILE: u32 = 328;
         let (submeshes, instances) =
-            crate::dat_mzb::load_mzb_placed(FERRY_ZONE_FILE, None).unwrap();
+            crate::dat_mzb::load_mzb_placed(&root, FERRY_ZONE_FILE, None).unwrap();
         let geometry =
             crate::dat_mzb::build_collision_geometry(&submeshes, &instances, Some(FERRY_ZONE_FILE));
         let mut collision = crate::dat_mzb::MzbCollisionGeometry::default();
@@ -575,7 +581,8 @@ mod tests {
             .ground_nearest(Vec2::new(0.15, -3.25), 2.1)
             .expect("ship deck at LSB zone-in position");
         assert!((floor - 2.1).abs() < 0.1, "floor={floor}");
-        let build = crate::dat_mzb::build_zone_mmb_spawns(FERRY_ZONE_FILE, None, None).unwrap();
+        let build =
+            crate::dat_mzb::build_zone_mmb_spawns(&root, FERRY_ZONE_FILE, None, None).unwrap();
         assert!(!build.voyage_routes.is_empty());
         assert!(build.spawns.iter().any(|s| s.voyage_backdrop));
         assert!(build

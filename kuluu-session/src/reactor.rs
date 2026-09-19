@@ -209,9 +209,12 @@ pub struct Reactor {
 
     dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
 
-    mh_rect_cache: Option<(u16, Vec<ffxi_dat::zone_interaction::ZoneInteraction>)>,
+    zoneline_rect_cache: Option<(u16, Vec<ffxi_dat::zone_interaction::ZoneInteraction>)>,
 
     zoneline_trigger_latched: Option<u32>,
+
+    /// Previous tick's position, the start of the swept-segment trigger test.
+    zoneline_prev_pos: Option<Vec3>,
 
     needs_zone_seed: bool,
 
@@ -244,8 +247,9 @@ impl Reactor {
             party_low_hp_latched: HashMap::new(),
             nav_cache: None,
             dat_root: None,
-            mh_rect_cache: None,
+            zoneline_rect_cache: None,
             zoneline_trigger_latched: None,
+            zoneline_prev_pos: None,
             needs_zone_seed: false,
             reactor_override: None,
             target_locked: automates_player_input,
@@ -771,61 +775,34 @@ impl Reactor {
 
     fn check_zoneline_trigger(&mut self) -> Option<AgentCommand> {
         let zone_id = self.state.zone_id?;
+        let player = self.self_pos();
+        // Retail's CheckZoneLine sweeps last frame's committed telemetry
+        // position to this frame's; a zone-in has no such predecessor (the old
+        // zone's coords would sweep across the whole map), so it degenerates to
+        // a point test for one tick.
+        let prev = if self.needs_zone_seed {
+            player
+        } else {
+            self.zoneline_prev_pos.unwrap_or(player)
+        };
+        self.zoneline_prev_pos = Some(player);
+
         // In the MH the zone id stays the city's: town zonelines would misfire
         // against origin-space coords; exit is menu-driven (zmrq) only.
         if self.in_mog_house() {
             self.zoneline_trigger_latched = None;
             return None;
         }
-        let player = self.self_pos();
-        let lines = kuluu_nav::zone_lines_for(zone_id);
 
-        for line in lines {
-            let dx = player.x - line.from_pos[0];
-            let dy = player.y - line.from_pos[1];
-            let ground_dist = (dx * dx + dy * dy).sqrt();
-            if ground_dist <= 5.0 {
-                tracing::debug!(
-                    line_id = line.line_id,
-                    to_zone = line.to_zone,
-                    player_xy = format!("({:.2},{:.2})", player.x, player.y),
-                    trigger_xy = format!("({:.2},{:.2})", line.from_pos[0], line.from_pos[1]),
-                    scale_x = line.scale_x,
-                    scale_z = line.scale_z,
-                    rotation = format!("{:.3}", line.rotation),
-                    ground_dist = format!("{:.2}", ground_dist),
-                    inside = is_inside_trigger_box(player, line),
-                    "near zoneline trigger",
-                );
-            }
-        }
-        // Scraped MH rows carry the town-side to_scale (thin enough to step
-        // over at run speed); prefer the DAT trigger OBB when available.
-        let mh_rects: &[ffxi_dat::zone_interaction::ZoneInteraction] =
-            if lines.iter().any(kuluu_nav::zonelines::is_mog_house_entry) {
-                self.ensure_mh_rects_loaded(zone_id)
-            } else {
-                &[]
-            };
-        let inside = lines
-            .iter()
-            .find(|line| {
-                if kuluu_nav::zonelines::is_mog_house_entry(line) {
-                    if let Some(rect) = mh_rects.iter().find(|r| r.rect_id() == line.line_id) {
-                        return is_inside_dat_obb(player, rect);
-                    }
-                }
-                is_inside_trigger_box(player, line)
-            })
-            .map(|line| line.line_id);
+        let crossed = self.crossed_zoneline(zone_id, prev, player);
         if self.needs_zone_seed {
-            self.zoneline_trigger_latched = inside;
+            self.zoneline_trigger_latched = crossed;
             self.needs_zone_seed = false;
             return None;
         }
         let was = self.zoneline_trigger_latched;
-        self.zoneline_trigger_latched = inside;
-        match (was, inside) {
+        self.zoneline_trigger_latched = crossed;
+        match (was, crossed) {
             (None, Some(line_id)) => Some(AgentCommand::RequestZoneChange { line_id }),
 
             (Some(prev), Some(line_id)) if prev != line_id => {
@@ -836,18 +813,40 @@ impl Reactor {
         }
     }
 
-    /// Per-zone lazy cache of the DAT MH trigger rects, loaded the same way
-    /// [`Self::ensure_nav_loaded`] loads nav data. Empty when no DAT root is
+    /// The zone line a `prev` → `cur` step trips, if any. The retail DAT's RID
+    /// rects are the authority; the LSB scrape is only consulted when no install
+    /// is configured, and then only as a point test, since its boxes have no
+    /// vertical extent to sweep through.
+    fn crossed_zoneline(&mut self, zone_id: u16, prev: Vec3, cur: Vec3) -> Option<u32> {
+        let rects = self.ensure_zoneline_rects_loaded(zone_id);
+        if !rects.is_empty() {
+            let (from, to) = (to_native(prev), to_native(cur));
+            return rects
+                .iter()
+                .find(|r: &&ffxi_dat::zone_interaction::ZoneInteraction| r.crossed_by(from, to))
+                .map(|r| r.rect_id());
+        }
+        kuluu_nav::zone_lines_for(zone_id)
+            .iter()
+            .find(|line| is_inside_lsb_trigger_box(cur, line))
+            .map(|line| line.line_id)
+    }
+
+    /// Per-zone lazy cache of the DAT zone-line trigger rects, loaded the same
+    /// way [`Self::ensure_nav_loaded`] loads nav data. Empty when no DAT root is
     /// configured (callers fall back to the LSB-scraped box).
-    fn ensure_mh_rects_loaded(
+    fn ensure_zoneline_rects_loaded(
         &mut self,
         zone_id: u16,
     ) -> &[ffxi_dat::zone_interaction::ZoneInteraction] {
-        let cached = matches!(&self.mh_rect_cache, Some((z, _)) if *z == zone_id);
+        let cached = matches!(&self.zoneline_rect_cache, Some((z, _)) if *z == zone_id);
         if !cached {
-            self.mh_rect_cache = Some((zone_id, load_mh_rects(self.dat_root.as_deref(), zone_id)));
+            self.zoneline_rect_cache = Some((
+                zone_id,
+                load_zoneline_rects(self.dat_root.as_deref(), zone_id),
+            ));
         }
-        self.mh_rect_cache
+        self.zoneline_rect_cache
             .as_ref()
             .map(|(_, rects)| rects.as_slice())
             .unwrap_or(&[])
@@ -1073,7 +1072,11 @@ impl Reactor {
     }
 }
 
-fn load_mh_rects(
+/// Every zone-line trigger the zone DAT declares: retail's own volumes, which
+/// `RidManager::InitZonelines` (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp
+/// RidManager::InitZonelines) selects the same way — `z`-prefixed with a
+/// non-zero dest fourcc.
+fn load_zoneline_rects(
     root: Option<&ffxi_dat::DatRoot>,
     zone_id: u16,
 ) -> Vec<ffxi_dat::zone_interaction::ZoneInteraction> {
@@ -1091,52 +1094,44 @@ fn load_mh_rects(
     };
     match ffxi_dat::zone_interaction::from_dat(&bytes) {
         Ok(all) => {
-            let rects: Vec<_> = all.into_iter().filter(|i| i.is_mog_house_line()).collect();
+            let rects: Vec<_> = all.into_iter().filter(|i| i.is_zone_line()).collect();
             for r in &rects {
                 if r.orientation[0] != 0.0 || r.orientation[2] != 0.0 {
                     tracing::warn!(
                         zone_id,
                         rect_id = r.rect_id(),
                         orientation = ?r.orientation,
-                        "MH rect has non-yaw Euler angles; is_inside_dat_obb tests the wrong volume"
+                        "zone-line rect has non-yaw Euler angles; the trigger volume is yaw-only"
                     );
                 }
             }
             tracing::debug!(
                 zone_id,
                 count = rects.len(),
-                "MH trigger rects loaded from DAT"
+                "zone-line trigger rects loaded from DAT"
             );
             rects
         }
         Err(e) => {
-            tracing::warn!(zone_id, error = %e, "RID parse failed; MH triggers fall back to the LSB scrape");
+            tracing::warn!(zone_id, error = %e, "RID parse failed; zone-line triggers fall back to the LSB scrape");
             Vec::new()
         }
     }
 }
 
-/// Faithful DAT trigger-box test in FFXI-native zone space. State `Vec3` axes are
-/// (x, ground z, vertical y) — the GP_SERV_POS_HEAD wire order — while RID rects
-/// are native (x, y, z) with y vertical and vertically centered. Applies yaw only
-/// (`orientation[1]`): every observed zmr*/zms* rect has zero X/Z Euler, so this
-/// is the X=Z=0 reduction of XIM's box-to-world ZYX matrix (column-major, local =
-/// Rᵀ·(p − center); research/xim/src/jsMain/kotlin/xim/poc/CollisionShapes.kt:
-/// 242-247 + xim/math/Matrix4f.kt rotateZYXInPlace) — a counterexample warns at rect-load.
-/// Inside iff |local| ≤ size/2 per axis.
-fn is_inside_dat_obb(player: Vec3, rect: &ffxi_dat::zone_interaction::ZoneInteraction) -> bool {
-    let dx = player.x - rect.position[0];
-    let dz = player.y - rect.position[2];
-    let dv = player.z - rect.position[1];
-    let (sin_y, cos_y) = rect.orientation[1].sin_cos();
-    let local_x = dx * cos_y - dz * sin_y;
-    let local_z = dx * sin_y + dz * cos_y;
-    local_x.abs() <= rect.size[0] / 2.0
-        && local_z.abs() <= rect.size[2] / 2.0
-        && dv.abs() <= rect.size[1] / 2.0
+/// State `Vec3` axes are (x, ground z, vertical y) — the GP_SERV_POS_HEAD wire
+/// order — while RID rects are FFXI-native (x, y, z) with y vertical.
+fn to_native(p: Vec3) -> [f32; 3] {
+    [p.x, p.z, p.y]
 }
 
-fn is_inside_trigger_box(player: Vec3, line: &kuluu_nav::ZoneLine) -> bool {
+/// The LSB-scraped fallback box, used only when no retail install is configured.
+/// It is not the volume retail tests: `zone.yaml`'s `at[3]` is the arrival facing
+/// at the destination rather than the rect's yaw, and its 2-component `scale`
+/// undersizes the real gate and carries no vertical extent at all. See
+/// .agents/skills/retail-observe/references/2026-09-18-zone-line-crossing.md
+/// "What LSB's zonelines table is worth".
+fn is_inside_lsb_trigger_box(player: Vec3, line: &kuluu_nav::ZoneLine) -> bool {
     let dx = player.x - line.from_pos[0];
     let dy = player.y - line.from_pos[1];
     let cos_r = line.rotation.cos();

@@ -1,13 +1,19 @@
 //! Gil presentation shared by the session's chat lines and the HUD, so the two
 //! cannot drift apart.
 
+/// Digits per group, and the separator written between groups. Exported so a
+/// caller laying an amount out digit by digit (the HUD's spinner row) groups it
+/// the same way this function does.
+pub const GROUP_SIZE: usize = 3;
+pub const GROUP_SEPARATOR: char = ',';
+
 /// Retail writes gil with thousands separators everywhere it shows an amount.
 pub fn group_digits(value: u32) -> String {
     let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let mut out = String::with_capacity(digits.len() + digits.len() / GROUP_SIZE);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
+        if i > 0 && (digits.len() - i).is_multiple_of(GROUP_SIZE) {
+            out.push(GROUP_SEPARATOR);
         }
         out.push(c);
     }

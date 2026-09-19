@@ -4,7 +4,7 @@ use bevy::feathers::theme::ThemedText;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::input_focus::tab_navigation::TabIndex;
-use bevy::input_focus::{FocusCause, InputFocus};
+use bevy::input_focus::{FocusCause, InputFocus, InputFocusVisible};
 use bevy::prelude::*;
 use bevy::ui::{Checked, ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, ValueChange};
@@ -13,14 +13,16 @@ use crate::launcher_store::{self, keyring_account_key, KEYRING_SERVICE};
 use crate::secret_store::SecretStore;
 
 use super::brand::{spawn_brand_mark, BrandMark};
+use super::client_era_check::{ClientEraStatus, EraVerdict};
 use super::common::{
-    chip_group, hint, panel_node, row, screen_root, spawn_breadcrumb,
+    chip_group, hint, panel_node, pick_directional, row, screen_root, spawn_breadcrumb,
     spawn_settings_close_titlebar, Crumb, DefaultFocusTarget, ScrollRegion,
 };
+use super::server_edit::ver_lock_label;
 use super::server_version_check::{ServerVersionStatus, VersionViolation};
 use super::{
-    Credentials, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField, LoginForm, ServerInfo,
-    ServerSelectForm,
+    Credentials, DatSetupReturn, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField,
+    LoginForm, ServerEditForm, ServerInfo, ServerSelectForm,
 };
 use crate::view_native::widgets::text_field::{text_field, TextField, TextFieldSubmitted};
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
@@ -48,9 +50,18 @@ pub(super) fn spawn_login_ui(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
 ) {
-    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
+    build_login_ui(
+        &mut commands,
+        &server,
+        &form,
+        &server_form,
+        &version,
+        &era,
+        &mark,
+    );
 }
 
 pub(super) fn rebuild_login_ui_system(
@@ -61,6 +72,7 @@ pub(super) fn rebuild_login_ui_system(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
 ) {
     if !dirty.0 {
@@ -70,16 +82,29 @@ pub(super) fn rebuild_login_ui_system(
     for e in existing.iter() {
         commands.entity(e).despawn();
     }
-    build_login_ui(&mut commands, &server, &form, &server_form, &version, &mark);
+    build_login_ui(
+        &mut commands,
+        &server,
+        &form,
+        &server_form,
+        &version,
+        &era,
+        &mark,
+    );
 }
 
 pub(super) fn mark_dirty_on_version_change(
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mut dirty: ResMut<LoginUiDirty>,
 ) {
-    if version.is_changed() {
+    if version.is_changed() || era.is_changed() {
         dirty.0 = true;
     }
+}
+
+fn login_blocked(version: &ServerVersionStatus, era: &ClientEraStatus) -> bool {
+    version.violation == VersionViolation::BelowMinimum || era.blocks_login()
 }
 
 fn build_login_ui(
@@ -88,6 +113,7 @@ fn build_login_ui(
     form: &LoginForm,
     server_form: &ServerSelectForm,
     version: &ServerVersionStatus,
+    era: &ClientEraStatus,
     mark: &BrandMark,
 ) {
     let user_initial = form.user.clone();
@@ -108,6 +134,7 @@ fn build_login_ui(
                 );
 
                 spawn_version_banner(panel, version);
+                spawn_client_era_banner(panel, era);
 
                 spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
 
@@ -134,7 +161,7 @@ fn build_login_ui(
                     },
                 );
 
-                let blocked = version.violation == VersionViolation::BelowMinimum;
+                let blocked = login_blocked(version, era);
 
                 panel.spawn(row()).with_children(|r| {
                     if !blocked {
@@ -163,6 +190,7 @@ fn build_login_ui(
                         (),
                         Spawn((Text::new("Create account"), ThemedText)),
                     ))
+                    .insert_if(DefaultFocusTarget, || blocked)
                     .observe(
                         |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
                             next.set(LauncherState::CreateAccount);
@@ -335,10 +363,10 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
         VersionViolation::BelowRecommended => {
             let rec = version.recommended.clone().unwrap_or_default();
             (
-                Color::srgb(0.55, 0.45, 0.10),
-                Color::srgb(1.0, 0.85, 0.30),
+                BANNER_WARN_BORDER,
+                BANNER_WARN_TEXT,
                 format!(
-                    "This server recommends client {rec}; you are on {}. Some features may not work.",
+                    "This server recommends Kuluu {rec}; you are running Kuluu {}. Some features may not work.",
                     version.current
                 ),
             )
@@ -346,10 +374,10 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
         VersionViolation::BelowMinimum => {
             let min = version.minimum.clone().unwrap_or_default();
             (
-                Color::srgb(0.55, 0.15, 0.15),
-                Color::srgb(1.0, 0.40, 0.40),
+                BANNER_BLOCK_BORDER,
+                BANNER_BLOCK_TEXT,
                 format!(
-                    "This server requires client {min}; you are on {}. Update before logging in.",
+                    "This server requires Kuluu {min}; you are running Kuluu {}. Update before logging in.",
                     version.current
                 ),
             )
@@ -379,6 +407,134 @@ fn spawn_version_banner(panel: &mut ChildSpawnerCommands, version: &ServerVersio
                 TextColor(text_color),
                 ThemedText,
             ));
+        });
+}
+
+const BANNER_WARN_BORDER: Color = Color::srgb(0.55, 0.45, 0.10);
+const BANNER_WARN_TEXT: Color = Color::srgb(1.0, 0.85, 0.30);
+const BANNER_BLOCK_BORDER: Color = Color::srgb(0.55, 0.15, 0.15);
+const BANNER_BLOCK_TEXT: Color = Color::srgb(1.0, 0.40, 0.40);
+
+/// Worded around the FINAL FANTASY XI install so it cannot be read as the
+/// Kuluu app-version banner above it.
+fn client_era_message(era: &ClientEraStatus) -> Option<String> {
+    let lock = era.lock.map(ver_lock_label).unwrap_or("not enforced");
+    let install = format!(
+        "the selected install '{}' is era {}",
+        era.install_name(),
+        era.install_stamp()
+    );
+    let mut msg = match era.verdict {
+        EraVerdict::Unchecked | EraVerdict::Ok => return None,
+        EraVerdict::Refused => format!(
+            "This server admits FINAL FANTASY XI clients from era {} ({lock}); {install} and \
+             its lobby would refuse it.",
+            era.expected
+        ),
+        EraVerdict::Warn if era.install_stamp() == "unknown" => format!(
+            "The patch stamp of the selected install '{}' could not be read; this server \
+             admits FINAL FANTASY XI clients from era {} ({lock}).",
+            era.install_name(),
+            era.expected
+        ),
+        EraVerdict::Warn if !era.configured => format!(
+            "This server entry does not record which FINAL FANTASY XI client era it admits; \
+             {install}. Current LandSandBoat servers expect {} ({lock}).",
+            era.expected
+        ),
+        EraVerdict::Warn if era.preferred_mismatch().is_none() => format!(
+            "This server admits FINAL FANTASY XI clients from era {} ({lock}); {install}. Zone \
+             text and cast timing may come from the wrong era.",
+            era.expected
+        ),
+        EraVerdict::Warn => String::new(),
+    };
+    if let Some(preferred) = era.preferred_mismatch() {
+        if !msg.is_empty() {
+            msg.push(' ');
+        }
+        msg.push_str(&format!(
+            "This entry prefers the '{preferred}' install; '{}' is selected.",
+            era.install_name()
+        ));
+    }
+    Some(msg)
+}
+
+fn spawn_client_era_banner(panel: &mut ChildSpawnerCommands, era: &ClientEraStatus) {
+    let Some(msg) = client_era_message(era) else {
+        return;
+    };
+    let (border, text_color) = if era.blocks_login() {
+        (BANNER_BLOCK_BORDER, BANNER_BLOCK_TEXT)
+    } else {
+        (BANNER_WARN_BORDER, BANNER_WARN_TEXT)
+    };
+    let server_name = era.server_name.clone();
+    panel
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BorderColor::all(border),
+        ))
+        .with_children(|bar| {
+            bar.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Text::new(msg),
+                TextFont {
+                    font_size: 13.0.into(),
+                    ..default()
+                },
+                TextColor(text_color),
+                ThemedText,
+            ));
+            bar.spawn(row()).with_children(|r| {
+                r.spawn(button_bundle(
+                    ButtonBundleProps::default(),
+                    (),
+                    Spawn((Text::new("Choose install..."), ThemedText)),
+                ))
+                .observe(
+                    |_ev: On<Activate>,
+                     mut ret: ResMut<DatSetupReturn>,
+                     mut next: ResMut<NextState<LauncherState>>| {
+                        ret.0 = Some(LauncherState::Login);
+                        next.set(LauncherState::DatSetup);
+                    },
+                );
+                if let Some(name) = server_name {
+                    r.spawn(button_bundle(
+                        ButtonBundleProps::default(),
+                        (),
+                        Spawn((Text::new("Edit server..."), ThemedText)),
+                    ))
+                    .observe(
+                        move |_ev: On<Activate>,
+                              mut form: ResMut<ServerEditForm>,
+                              mut next: ResMut<NextState<LauncherState>>| {
+                            let store = launcher_store::load();
+                            let Some(idx) = store.servers.iter().position(|p| p.name == name)
+                            else {
+                                return;
+                            };
+                            *form = ServerEditForm::from_profile(&store.servers[idx]);
+                            form.editing_index = Some(idx);
+                            form.show_advanced = true;
+                            next.set(LauncherState::ServerEdit);
+                        },
+                    );
+                }
+            });
         });
 }
 
@@ -437,8 +593,9 @@ fn spawn_field(
                 move |_ev: On<TextFieldSubmitted>,
                       form: Res<LoginForm>,
                       version: Res<ServerVersionStatus>,
+                      era: Res<ClientEraStatus>,
                       mut next: ResMut<NextState<LauncherState>>| {
-                    if version.violation == VersionViolation::BelowMinimum {
+                    if login_blocked(&version, &era) {
                         return;
                     }
                     if !form.user.is_empty() && !form.pass.is_empty() {
@@ -457,8 +614,9 @@ pub(super) fn despawn_login_ui(mut commands: Commands, q: Query<Entity, With<Log
 
 pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
-    mut form: ResMut<LoginForm>,
+    form: Res<LoginForm>,
     version: Res<ServerVersionStatus>,
+    era: Res<ClientEraStatus>,
     mut next: ResMut<NextState<LauncherState>>,
 ) {
     for ev in events.read() {
@@ -466,9 +624,12 @@ pub(super) fn keyboard_input_system(
             continue;
         }
         match ev.logical_key {
+            // Back, not a credential wipe: the pad's Cancel lands here too and
+            // needs a back action. `LoginForm` survives the transition, so
+            // nothing typed is lost.
             Key::Escape => {
-                form.user.clear();
-                form.pass.clear();
+                next.set(LauncherState::ServerSelect);
+                return;
             }
             // Real keyboard Enter: submits whenever BOTH fields are filled,
             // regardless of which widget (if any) holds UI focus. The
@@ -476,7 +637,7 @@ pub(super) fn keyboard_input_system(
             // and stays silent when the other side is still empty - that was
             // the "pressing enter does nothing" dead end.
             Key::Enter
-                if version.violation != VersionViolation::BelowMinimum
+                if !login_blocked(&version, &era)
                     && !form.user.is_empty()
                     && !form.pass.is_empty() =>
             {
@@ -488,27 +649,6 @@ pub(super) fn keyboard_input_system(
     }
 }
 
-/// Initial keyboard focus for this screen: land on the `DefaultFocusTarget`
-/// widget once per spawned instance. The blue outline then starts on "Log in"
-/// instead of nowhere, so a bare Enter activates it right away (in addition to
-/// the global both-fields-filled handler). Tab can move away freely - we never
-/// steal focus back until a new screen instance appears (rebuild or re-entry).
-pub(super) fn focus_default_target_system(
-    mut input_focus: ResMut<InputFocus>,
-    mut last: Local<Option<Entity>>,
-    q: Query<Entity, With<DefaultFocusTarget>>,
-) {
-    let Some(target) = q.iter().next() else {
-        *last = None;
-        return;
-    };
-    if *last == Some(target) {
-        return;
-    }
-    input_focus.set(target, FocusCause::Navigated);
-    *last = Some(target);
-}
-
 /// Arrow-key navigation for the login form: move the blue focus outline between
 /// tabbable widgets (saved-account chips, fields, remember checkbox, buttons)
 /// in visual order, wrapping at the edges. While a text field holds focus,
@@ -516,6 +656,7 @@ pub(super) fn focus_default_target_system(
 pub(super) fn arrow_nav_system(
     mut events: MessageReader<KeyboardInput>,
     mut input_focus: ResMut<InputFocus>,
+    mut visible: ResMut<InputFocusVisible>,
     q_tabs: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<TabIndex>>,
     q_fields: Query<(), With<TextField>>,
 ) {
@@ -543,50 +684,13 @@ pub(super) fn arrow_nav_system(
             .iter()
             .map(|(e, cn, gt)| (gt.affine().translation + cn.size * 0.5, e))
             .collect();
-        if cands.is_empty() {
+        let centers: Vec<Vec2> = cands.iter().map(|(p, _)| *p).collect();
+        let current = cur.and_then(|c| cands.iter().position(|(_, e)| *e == c));
+        let Some(i) = pick_directional(&centers, current, dir) else {
             continue;
-        }
-
-        let cur_pos = match cur.and_then(|c| cands.iter().find(|(_, e)| *e == c)) {
-            Some(c) => c.0,
-            // Focus is on the window/panel (nothing selected): anchor to the
-            // group's center so any arrow lands on a sensible first element.
-            None => cands.iter().map(|(p, _)| *p).sum::<Vec2>() / cands.len() as f32,
         };
-
-        const CROSS_W: f32 = 2.5; // perpendicular misalignment is heavily penalized
-        let mut best_forward: Option<(f32, Entity)> = None;
-        let mut best_wrap: Option<(f32, f32, Entity)> = None; // (along, cross)
-        for (p, e) in &cands {
-            if cur.is_some_and(|ce| *e == ce) {
-                continue;
-            }
-            let d = *p - cur_pos;
-            let along = d.dot(dir);
-            let cross = (d.x * dir.y - d.y * dir.x).abs();
-            if along > 0.25 {
-                // Ahead of us: nearest in direction wins.
-                let score = along + cross * CROSS_W;
-                if best_forward.is_none_or(|(s, _)| score < s) {
-                    best_forward = Some((score, *e));
-                }
-            } else if along < 0.0 {
-                // Behind us: wrap candidate. Farthest behind on this axis wins
-                // (top edge + Up jumps to the far row), misaligned loses.
-                if best_wrap.is_none_or(|(a, c, _)| (along, cross) < (a, c)) {
-                    best_wrap = Some((along, cross, *e));
-                }
-            }
-        }
-
-        let target = match best_forward
-            .map(|(_, e)| e)
-            .or(best_wrap.map(|(_, _, e)| e))
-        {
-            Some(e) => e,
-            None => continue,
-        };
-        input_focus.set(target, FocusCause::Navigated);
+        input_focus.set(cands[i].1, FocusCause::Navigated);
+        visible.0 = true;
     }
 }
 
@@ -635,7 +739,7 @@ pub(super) fn spawn_error_ui(
                             variant: ButtonVariant::Primary,
                             ..default()
                         },
-                        (),
+                        DefaultFocusTarget,
                         Spawn((Text::new(back_label), ThemedText)),
                     ))
                     .observe(

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::agent_codec;
 use crate::state::{AgentCommand, AgentEvent};
@@ -39,12 +39,40 @@ pub struct ResolvedListen {
     pub pidfile: Option<PathBuf>,
 }
 
+/// Channels of the session the socket currently serves. Swapping the value
+/// mid-listen drops connected peers, so an agent reconnecting after a relogin
+/// in the same window lands on the live session instead of the dead one.
+#[derive(Clone)]
+pub struct SessionChannels {
+    pub cmd_tx: mpsc::Sender<AgentCommand>,
+    pub event_tx: broadcast::Sender<AgentEvent>,
+    pub pause: Option<Arc<AtomicBool>>,
+    pub debug_ctrl: Option<crate::debug_control::SharedDebugControl>,
+}
+
 pub async fn serve(
     listen: ResolvedListen,
     cmd_tx: mpsc::Sender<AgentCommand>,
     event_tx: broadcast::Sender<AgentEvent>,
     pause: Option<Arc<AtomicBool>>,
     debug_ctrl: Option<crate::debug_control::SharedDebugControl>,
+) -> Result<()> {
+    let (sessions_tx, sessions_rx) = watch::channel(Some(SessionChannels {
+        cmd_tx,
+        event_tx,
+        pause,
+        debug_ctrl,
+    }));
+    let _keep_sender_alive = sessions_tx;
+    serve_dynamic(listen, sessions_rx).await
+}
+
+/// Like `serve`, but the session behind the socket can be swapped (or cleared
+/// with `None`, e.g. while the window sits at the launcher) by sending on the
+/// watch channel. The listener itself is bound once for the life of the task.
+pub async fn serve_dynamic(
+    listen: ResolvedListen,
+    mut sessions: watch::Receiver<Option<SessionChannels>>,
 ) -> Result<()> {
     let ResolvedListen { sock, pidfile } = listen;
 
@@ -95,19 +123,42 @@ pub async fn serve(
                 continue;
             }
         };
-        tracing::info!("agent socket peer connected");
         let (reader, writer) = stream.into_split();
-        let cmd_tx = cmd_tx.clone();
-        let event_rx = event_tx.subscribe();
-        let pause = pause.clone();
-        let debug_ctrl = debug_ctrl.clone();
+        // borrow_and_update: the per-peer receiver clone below must only fire
+        // on the NEXT swap, not re-fire on the one that brought us here.
+        let Some(channels) = sessions.borrow_and_update().clone() else {
+            let mut writer = writer;
+            let ev = AgentEvent::Error {
+                message: "no active session (window is at the launcher)".into(),
+            };
+            let _ = agent_codec::emit_event(&mut writer, &ev).await;
+            continue;
+        };
+        tracing::info!("agent socket peer connected");
+        let event_rx = channels.event_tx.subscribe();
+        let mut swap = sessions.clone();
 
-        if let Err(err) =
-            agent_codec::run(reader, writer, cmd_tx, event_rx, pause, debug_ctrl).await
-        {
-            tracing::debug!(error = %err, "agent socket peer ended with error");
-        } else {
-            tracing::info!("agent socket peer disconnected");
+        let codec = agent_codec::run(
+            reader,
+            writer,
+            channels.cmd_tx,
+            event_rx,
+            channels.pause,
+            channels.debug_ctrl,
+        );
+        tokio::select! {
+            result = codec => {
+                if let Err(err) = result {
+                    tracing::debug!(error = %err, "agent socket peer ended with error");
+                } else {
+                    tracing::info!("agent socket peer disconnected");
+                }
+            }
+            changed = swap.changed() => {
+                if changed.is_ok() {
+                    tracing::info!("agent socket session swapped; dropping peer");
+                }
+            }
         }
     }
 }
@@ -230,6 +281,105 @@ mod tests {
         UnixStream::connect(&sock)
             .await
             .expect("connect after re-bind");
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn swapped_session_drops_peers_and_serves_new_session() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let sock = temp_path("swap", "sock");
+        let (cmd_tx_a, mut cmd_rx_a) = mpsc::channel::<AgentCommand>(8);
+        let (event_tx_a, _keep_a) = broadcast::channel::<AgentEvent>(8);
+        let (cmd_tx_b, mut cmd_rx_b) = mpsc::channel::<AgentCommand>(8);
+        let (event_tx_b, _keep_b) = broadcast::channel::<AgentEvent>(8);
+
+        let channels = |cmd_tx, event_tx| {
+            Some(SessionChannels {
+                cmd_tx,
+                event_tx,
+                pause: None,
+                debug_ctrl: None,
+            })
+        };
+        let (swap_tx, swap_rx) = watch::channel(channels(cmd_tx_a, event_tx_a));
+        let listen = ResolvedListen {
+            sock: sock.clone(),
+            pidfile: None,
+        };
+        let _serve = tokio::spawn(serve_dynamic(listen, swap_rx));
+
+        for _ in 0..100 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            sock.exists(),
+            "serve_dynamic never bound {}",
+            sock.display()
+        );
+
+        let cancel_line = serde_json::to_string(&AgentCommand::Cancel).unwrap() + "\n";
+
+        let peer_a = UnixStream::connect(&sock)
+            .await
+            .expect("connect to session A");
+        let (mut peer_a_reader, mut peer_a_writer) = peer_a.into_split();
+        peer_a_writer
+            .write_all(cancel_line.as_bytes())
+            .await
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), cmd_rx_a.recv())
+            .await
+            .expect("session A cmd timeout")
+            .expect("session A cmd closed");
+        assert!(matches!(got, AgentCommand::Cancel));
+
+        swap_tx
+            .send(channels(cmd_tx_b, event_tx_b))
+            .expect("swap to session B");
+
+        let mut byte = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), peer_a_reader.read(&mut byte))
+            .await
+            .expect("pre-swap peer never saw EOF")
+            .expect("pre-swap peer read error");
+        assert_eq!(n, 0, "pre-swap peer must be dropped on session swap");
+
+        let peer_b = UnixStream::connect(&sock)
+            .await
+            .expect("connect after swap");
+        let (_reader_b, mut writer_b) = peer_b.into_split();
+        writer_b.write_all(cancel_line.as_bytes()).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(1), cmd_rx_b.recv())
+            .await
+            .expect("session B cmd timeout")
+            .expect("session B cmd closed");
+        assert!(matches!(got, AgentCommand::Cancel));
+
+        swap_tx.send(None).expect("clear session");
+        let peer_none = UnixStream::connect(&sock)
+            .await
+            .expect("connect with no active session");
+        let (reader_none, _writer_none) = peer_none.into_split();
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            BufReader::new(reader_none).read_line(&mut line),
+        )
+        .await
+        .expect("no-session error event timeout")
+        .expect("no-session read error");
+        let ev: AgentEvent = serde_json::from_str(line.trim()).expect("decode error event");
+        match ev {
+            AgentEvent::Error { message } => {
+                assert!(message.contains("no active session"), "got: {message}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
         let _ = std::fs::remove_file(&sock);
     }
 

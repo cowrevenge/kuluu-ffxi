@@ -32,6 +32,14 @@ sentence beats a paragraph that will rot.
   elided path (`research/XIClient/.../Foo.cpp`). If the evidence lives
   outside the repo, first land it as a dated record under
   `.agents/skills/retail-observe/references/` and cite that.
+- Never cite a bead id. A bead tracks work in flight; it closes, and the
+  comment is then a pointer to nothing. Either the reason belongs in the
+  comment, tersely, or it belongs only in the bead.
+  - bad: `// read the raw word for the rest (kuluu-ja9g.13 says which)`
+  - good: `// Only the bits with an accessor are decoded; read the raw word
+    for the rest.`
+  - A test name is a good pointer where a bead id is not: it exists in the
+    tree and fails when it stops being true.
 - A retail-binary citation is scoped to a build in the same comment block,
   and says RVA or VA: bad `FFXiMain.dll (2026-09-09 install) VA 0x100FA0F7`;
   good `FFXiMain.dll horizonxi-2023 RVA 0xFA0F7 / retail-2026-09 RVA

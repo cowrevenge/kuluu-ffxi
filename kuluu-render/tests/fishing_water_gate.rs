@@ -28,15 +28,11 @@ const CARPENTERS_AREAS: &[(&str, f32, f32, f32)] = &[
 ];
 
 fn zone() -> Option<MzbCollisionGeometry> {
-    if std::env::var("FFXI_DAT_PATH").is_err() && ffxi_dat::DatRoot::from_env_or_default().is_err()
-    {
-        eprintln!("no FFXI install; skipping");
-        return None;
-    }
+    let root = ffxi_dat::archive::open_test_install()?;
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let file_id =
         ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(ZONE_CARPENTERS_LANDING), None)?;
-    let (submeshes, instances) = load_mzb_placed(file_id, None).ok()?;
+    let (submeshes, instances) = load_mzb_placed(&root, file_id, None).ok()?;
     Some(MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,

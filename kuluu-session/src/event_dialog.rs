@@ -166,9 +166,12 @@ pub struct DialogSession {
         (ActorLookup, u32, std::time::Instant, std::time::Duration),
     >,
     /// Whether a frame was displayed before the last step, so
-    /// [`take_message_closed`](Self::take_message_closed) fires exactly once per
+    /// [`take_frame_closed`](Self::take_frame_closed) fires exactly once per
     /// up→down transition instead of on every tick parked after it.
-    message_was_up: bool,
+    frame_was_up: bool,
+    /// Per-zone dialog-numbering skew between the server and this install,
+    /// learned from the messages themselves.
+    skew: std::collections::HashMap<u16, ZoneTextSkew>,
 }
 
 impl DialogSession {
@@ -190,7 +193,8 @@ impl DialogSession {
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
             pending_motion_holds: std::collections::HashMap::new(),
-            message_was_up: false,
+            frame_was_up: false,
+            skew: std::collections::HashMap::new(),
         }
     }
 
@@ -426,10 +430,10 @@ impl DialogSession {
     /// box hides until the next message opcode reopens it; a plain
     /// `Advance::Waiting` cannot signal this because ticks parked while a frame
     /// is up report Waiting too.
-    pub fn take_message_closed(&mut self) -> bool {
-        let up = self.runner.as_ref().is_some_and(|r| r.message_awaiting());
-        let closed = self.message_was_up && !up;
-        self.message_was_up = up;
+    pub fn take_frame_closed(&mut self) -> bool {
+        let up = self.runner.as_ref().is_some_and(|r| r.frame_displayed());
+        let closed = self.frame_was_up && !up;
+        self.frame_was_up = up;
         closed
     }
 
@@ -564,7 +568,7 @@ impl DialogSession {
     fn finish(&mut self) {
         self.runner = None;
         self.active = None;
-        self.message_was_up = false;
+        self.frame_was_up = false;
         self.pending_motion_holds.clear();
     }
 
@@ -625,13 +629,33 @@ impl DialogSession {
         self.strings.as_ref()?.text(index)
     }
 
-    /// [`Self::zone_text`] restricted to printable lines. An entry carrying a
-    /// Selection control code is a menu — prompt plus options — which retail
-    /// drives through the event VM; a menu entry is never a chat line, and
-    /// returning `None` keeps the caller's placeholder.
-    pub fn zone_chat_text(&mut self, zone: u16, index: usize) -> Option<String> {
+    /// [`Self::zone_text`] restricted to printable lines, reconciling the
+    /// client-era skew between the server's dialog numbering and this install's
+    /// ([`ZoneTextSkew`]). An entry carrying a Selection control code is a menu
+    /// — prompt plus options — which retail drives through the event VM; a menu
+    /// entry is never a chat line, and returning `None` keeps the caller's
+    /// placeholder.
+    pub fn zone_chat_text(&mut self, zone: u16, mes_num: u16, nums: &[i32]) -> Option<String> {
         self.ensure_strings(zone);
         let dat = self.strings.as_ref()?;
+        let shape = |index: usize| dat.menu(index).is_none().then(|| dat.param_slots(index))?;
+        let skew = self.skew.entry(zone).or_default();
+        let index = match resolve_shaped_index(&shape, skew, mes_num, supplied_param_slots(nums)) {
+            Some((index, delta)) => {
+                if delta != 0 {
+                    tracing::debug!(
+                        zone,
+                        mes_num,
+                        delta,
+                        "server dialog numbering is skewed from this install's; \
+                         resolved by parameter shape"
+                    );
+                }
+                skew.record(delta, mes_num);
+                index
+            }
+            None => apply_skew(mes_num, skew.settled().unwrap_or(0))?,
+        };
         if dat.menu(index).is_some() {
             tracing::warn!(
                 zone,
@@ -1060,6 +1084,96 @@ enum ServerBase {
 /// origin/base at 30260904_1 matches retail-2026-09 exactly); an older LSB
 /// fork sat 26 from horizonxi-2023.
 pub const MAX_ERA_SKEW: u16 = 96;
+
+/// How far this install's dialog numbering sits from the numbering the server
+/// speaks, learned per zone from the messages themselves.
+///
+/// A TALKNUM `MesNum` indexes the *server's* client era, and an install built
+/// for another era holds the same line at another index: HorizonXI numbers
+/// `ITEM_OBTAINED` 6391 in the Jeuno/Bastok zones, the horizonxi-2023 DATs
+/// number it 6390 and retail-2026-09 6395, so LSB's stacked-item message
+/// (`ITEM_OBTAINED + 9`, vendor/server/scripts/globals/npc_util.lua giveItem)
+/// printed the neighbouring line on both. Anchoring on the vendored LSB pin
+/// cannot fix that — the pin is a third era. The message carries its own
+/// evidence instead: the `num[]` slots the server filled have to be the slots
+/// the entry substitutes, so the delta is whatever lands on an entry the
+/// parameters fit.
+#[derive(Debug, Default)]
+struct ZoneTextSkew {
+    /// The distinct `MesNum`s that resolved at each delta.
+    votes: std::collections::HashMap<i32, std::collections::HashSet<u16>>,
+}
+
+/// How far from the wire index to look for the line the parameters fit.
+/// Bounds the search to the skews installs actually show: 1 entry on
+/// horizonxi-2023 and 4 on retail-2026-09 for the shared system-message block,
+/// 13 between the vendored LSB pin and horizonxi-2023 for the fishing block.
+const MAX_TEXT_SKEW: i32 = 16;
+
+/// Distinct messages that must agree before a delta is trusted for a message
+/// whose parameters cannot pick a line out on their own. One agreement is a
+/// coincidence away from a same-shaped neighbour; two is the block moving.
+const SETTLED_SKEW_VOTES: usize = 2;
+
+impl ZoneTextSkew {
+    fn record(&mut self, delta: i32, mes_num: u16) {
+        self.votes.entry(delta).or_default().insert(mes_num);
+    }
+
+    /// The zone's delta once enough distinct messages agree on it, for lines
+    /// whose parameters do not narrow the candidates. `None` while the
+    /// evidence is thin or split, which leaves the wire index standing.
+    fn settled(&self) -> Option<i32> {
+        let mut ranked: Vec<(usize, i32)> = self
+            .votes
+            .iter()
+            .map(|(&delta, ids)| (ids.len(), delta))
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+        let (best, delta) = ranked.first().copied()?;
+        let runner_up = ranked.get(1).map(|&(n, _)| n).unwrap_or(0);
+        (best >= SETTLED_SKEW_VOTES && best > runner_up).then_some(delta)
+    }
+}
+
+/// The `num[]` slots the server filled, as the bitmask [`StringDat::param_slots`]
+/// reports for an entry. A slot left zero carries no evidence — LSB passes the
+/// unused tail of `messageSpecial` as zeroes — so it reads as unfilled.
+fn supplied_param_slots(nums: &[i32]) -> u32 {
+    let mut mask = 0u32;
+    for (slot, &value) in nums.iter().enumerate() {
+        let slot = slot as u32;
+        if value != 0 && slot <= ffxi_dat::dmsg::MAX_PARAM_SLOT {
+            mask |= 1 << slot;
+        }
+    }
+    mask
+}
+
+fn apply_skew(mes_num: u16, delta: i32) -> Option<usize> {
+    usize::try_from(i64::from(mes_num) + i64::from(delta)).ok()
+}
+
+/// The entry `mes_num` means in this install: the nearest one whose parameter
+/// shape is exactly what the packet filled. `shape` reports an entry's
+/// [`StringDat::param_slots`], `None` for one out of range or carrying a menu.
+/// The delta the zone has already settled on is tried first, then the wire
+/// index, then outward — so an era-matched install never moves and a skewed one
+/// moves the same way twice. Pure, so the search is testable without a DAT.
+fn resolve_shaped_index(
+    shape: &dyn Fn(usize) -> Option<u32>,
+    skew: &ZoneTextSkew,
+    mes_num: u16,
+    supplied: u32,
+) -> Option<(usize, i32)> {
+    let fits = |delta: i32| -> Option<(usize, i32)> {
+        let index = apply_skew(mes_num, delta)?;
+        (shape(index)? == supplied).then_some((index, delta))
+    };
+    skew.settled()
+        .and_then(fits)
+        .or_else(|| (0..=MAX_TEXT_SKEW).find_map(|d| fits(-d).or_else(|| fits(d))))
+}
 
 /// Locate the fishing block in an installed dialog DAT by its landmark lines,
 /// returning the block's base — the index LSB calls FISHING_MESSAGE_OFFSET.
@@ -1852,6 +1966,152 @@ fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
 }
 
 #[cfg(test)]
+mod zone_text_skew_tests {
+    use super::*;
+
+    const NONE: u32 = 0;
+    const ITEM: u32 = 1 << 0;
+    const ITEM_AND_COUNT: u32 = (1 << 0) | (1 << 1);
+
+    /// The shared system-message block as the two installs in hand lay it out,
+    /// as `(first index, parameter shape per entry)`. Read off the dialog DATs
+    /// with `cargo run -p ffxi-dat --example dat-zone-string-grep -- "" 245`;
+    /// both hold the same lines in the same order, retail-2026-09 five entries
+    /// further along than horizonxi-2023 because the newer client inserted
+    /// "cannot obtain" lines ahead of them.
+    const HORIZONXI_2023_BLOCK: (usize, &[u32]) = (
+        6390,
+        &[
+            ITEM,           // Obtained: {Item:0}.
+            ITEM,           // Obtained {Num:0} gil.{Auto:49}
+            ITEM,           // Obtained {Num:0} gil.
+            ITEM,           // Obtained key item: {KeyItem:0}.
+            ITEM,           // Lost key item: {KeyItem:0}.
+            NONE,           // You do not have enough gil.{Auto:49}
+            ITEM_AND_COUNT, // You obtain {Num:1} {Item:0}!{Auto:49}
+            NONE,           // You do not have enough gil.
+            NONE,           // A party member has an NPC called up.
+            ITEM_AND_COUNT, // You obtain {Num:1} {Item:0}!{Auto:49}
+            NONE,           // You find the hoofprint of a gigantic warhorse...
+            ITEM,           // You set the {KeyItem:0} in the warhorse hoofprint.
+            ITEM,           // The {Item:0} is returned to you.
+            ITEM_AND_COUNT, // The {Num:1} {Item:0} are returned to you.
+        ],
+    );
+    const RETAIL_2026_09_BLOCK: (usize, &[u32]) = (6395, HORIZONXI_2023_BLOCK.1);
+
+    /// HorizonXI's `ITEM_OBTAINED`, recovered from the wire: LSB's `giveItem`
+    /// sends `ITEM_OBTAINED + 9` for a stack
+    /// (vendor/server/scripts/globals/npc_util.lua), and using a hatchling
+    /// shield for a stack of sairui-ran put 6400 on the wire.
+    const HORIZONXI_STACKED_ITEM_MESNUM: u16 = 6400;
+
+    fn shape_of(block: (usize, &'static [u32])) -> impl Fn(usize) -> Option<u32> {
+        let (base, shapes) = block;
+        move |index: usize| shapes.get(index.checked_sub(base)?).copied()
+    }
+
+    /// Both installs printed a neighbouring line for the same message because
+    /// HorizonXI numbers the block from a third era; the parameters the server
+    /// filled name the line either way.
+    #[test]
+    fn a_stacked_item_message_resolves_on_an_install_of_either_era() {
+        for (era, block, want_index, want_delta) in [
+            ("horizonxi-2023", HORIZONXI_2023_BLOCK, 6399, -1),
+            ("retail-2026-09", RETAIL_2026_09_BLOCK, 6401, 1),
+        ] {
+            let got = resolve_shaped_index(
+                &shape_of(block),
+                &ZoneTextSkew::default(),
+                HORIZONXI_STACKED_ITEM_MESNUM,
+                ITEM_AND_COUNT,
+            );
+            assert_eq!(got, Some((want_index, want_delta)), "{era}");
+        }
+    }
+
+    #[test]
+    fn an_era_matched_install_keeps_the_wire_index() {
+        // The same message on an install that numbers the block the way the
+        // server does: the entry under the wire index already fits.
+        let matched: (usize, &[u32]) = (6391, HORIZONXI_2023_BLOCK.1);
+        assert_eq!(
+            resolve_shaped_index(
+                &shape_of(matched),
+                &ZoneTextSkew::default(),
+                HORIZONXI_STACKED_ITEM_MESNUM,
+                ITEM_AND_COUNT,
+            ),
+            Some((HORIZONXI_STACKED_ITEM_MESNUM as usize, 0))
+        );
+    }
+
+    #[test]
+    fn a_settled_delta_wins_over_a_nearer_same_shaped_entry() {
+        // ITEM_OBTAINED itself: 6391 on the wire fits both the install's
+        // "Obtained: {Item:0}." at 6390 and its "Obtained {Num:0} gil." at
+        // 6391, and the nearer one is the wrong line. The delta the zone has
+        // already proven breaks the tie.
+        let obtained: u16 = 6391;
+        let mut skew = ZoneTextSkew::default();
+        assert_eq!(
+            resolve_shaped_index(&shape_of(HORIZONXI_2023_BLOCK), &skew, obtained, ITEM),
+            Some((6391, 0)),
+            "with no evidence the wire index stands"
+        );
+
+        skew.record(-1, HORIZONXI_STACKED_ITEM_MESNUM);
+        skew.record(-1, 6402);
+        assert_eq!(
+            resolve_shaped_index(&shape_of(HORIZONXI_2023_BLOCK), &skew, obtained, ITEM),
+            Some((6390, -1))
+        );
+    }
+
+    #[test]
+    fn a_delta_settles_only_once_distinct_messages_agree() {
+        let mut skew = ZoneTextSkew::default();
+        assert_eq!(skew.settled(), None);
+        skew.record(-1, 6400);
+        assert_eq!(skew.settled(), None, "one message is not evidence");
+        skew.record(-1, 6400);
+        assert_eq!(
+            skew.settled(),
+            None,
+            "the same message repeated is not either"
+        );
+        skew.record(-1, 6402);
+        assert_eq!(skew.settled(), Some(-1));
+        skew.record(-5, 6410);
+        skew.record(-5, 6411);
+        assert_eq!(skew.settled(), None, "a split vote settles nothing");
+    }
+
+    #[test]
+    fn a_message_no_entry_fits_leaves_the_wire_index_standing() {
+        // Nothing in range reads three parameters, so there is no line to
+        // prefer and the caller falls back to the index the server sent.
+        assert_eq!(
+            resolve_shaped_index(
+                &shape_of(HORIZONXI_2023_BLOCK),
+                &ZoneTextSkew::default(),
+                HORIZONXI_STACKED_ITEM_MESNUM,
+                ITEM_AND_COUNT | (1 << 2),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_filled_num_slots_count_as_evidence() {
+        // LSB pads messageSpecial's unused parameters with zeroes.
+        assert_eq!(supplied_param_slots(&[4386, 8, 0, 0]), ITEM_AND_COUNT);
+        assert_eq!(supplied_param_slots(&[4386, 0, 0, 0]), ITEM);
+        assert_eq!(supplied_param_slots(&[]), NONE);
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
@@ -2269,7 +2529,7 @@ pub(crate) mod tests {
             panic!("the program produced no first frame");
         };
         assert!(
-            !session.take_message_closed(),
+            !session.take_frame_closed(),
             "no close before any dismissal"
         );
 
@@ -2280,7 +2540,7 @@ pub(crate) mod tests {
                 panic!("parked tick should wait");
             };
             assert!(
-                !session.take_message_closed(),
+                !session.take_frame_closed(),
                 "frame still up, nothing closed"
             );
         }
@@ -2289,17 +2549,89 @@ pub(crate) mod tests {
         let Advance::Waiting = session.advance(None) else {
             panic!("dismissal should park on the hold");
         };
-        assert!(
-            session.take_message_closed(),
-            "the dismissal must fire once"
-        );
+        assert!(session.take_frame_closed(), "the dismissal must fire once");
 
         // Further ticks parked after it: no re-fire.
         for _ in 0..3 {
             let Advance::Waiting = session.tick(1.0 / 60.0) else {
                 panic!("parked tick should wait");
             };
-            assert!(!session.take_message_closed(), "no re-fire while parked");
+            assert!(!session.take_frame_closed(), "no re-fire while parked");
+        }
+    }
+
+    /// The menu half of the same rule: answering a choice frame closes it, so the box must
+    /// hide exactly as a dismissed message does. Before this, only MESWAIT frames raised the
+    /// flag the detector reads, so an answered menu produced no up→down edge and stayed on
+    /// screen for the rest of the event — the chocobo rental's "Do you wish to rent a
+    /// chocobo?" sat over the whole rental cutscene.
+    #[test]
+    fn answering_a_menu_closes_its_frame() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            // refs[0] is the string index; refs[1] a long WAIT so the post-answer hold
+            // outlives every tick this test runs.
+            references: vec![900, 60 * 100],
+            event_data: vec![
+                0x24, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, // QUERY refs[0], default 0
+                0x25, // QUERYWAIT
+                0x1C, 0x01, 0x80, // WAIT refs[1] (timed hold after the answer)
+                0x21, // END
+            ],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 54,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+
+        let Begin::Frame(_menu) = session.begin(trigger) else {
+            panic!("the program produced no menu frame");
+        };
+        assert!(!session.take_frame_closed(), "no close before any answer");
+
+        // Parked on the QUERYWAIT with the menu still displayed.
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(
+                !session.take_frame_closed(),
+                "menu still up, nothing closed"
+            );
+        }
+
+        // The answer closes the menu and parks on the timed WAIT — exactly one fire.
+        let Advance::Waiting = session.advance(Some(0)) else {
+            panic!("the answer should park on the hold");
+        };
+        assert!(
+            session.take_frame_closed(),
+            "answering the menu must close its frame"
+        );
+
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(!session.take_frame_closed(), "no re-fire while parked");
         }
     }
 

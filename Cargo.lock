@@ -3231,6 +3231,7 @@ name = "ffxi-audio"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "ffxi-dat",
  "hound",
  "lsb-scrape",
  "thiserror 2.0.20",
@@ -3241,6 +3242,7 @@ name = "ffxi-dat"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "ffxi-proto",
  "lsb-scrape",
  "rayon",
@@ -4410,6 +4412,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "ffxi-dat",
+ "ffxi-proto",
  "kuluu-session",
  "rmcp",
  "schemars",
@@ -4475,6 +4478,7 @@ dependencies = [
  "ffxi-proto",
  "ffxi-vocab",
  "futures-util",
+ "hex",
  "kuluu-nav",
  "kuluu-snapshot",
  "mac_address",
@@ -8659,9 +8663,6 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 [[package]]
 name = "xtask"
 version = "0.7.0"
-dependencies = [
- "ffxi-install",
-]
 
 [[package]]
 name = "yazi"

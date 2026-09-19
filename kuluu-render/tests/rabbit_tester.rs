@@ -194,7 +194,9 @@ fn build_app() -> App {
     // shared root the host wires; without one here Bevy auto-inserts the default None and the
     // global dir lands empty, so S6c/S6d's ldam precondition can never hold. Wire it from the
     // same test install load_npc/load_pc use.
-    app.insert_resource(ActionDatRoot(install().map(Arc::new)));
+    let root = install().map(Arc::new);
+    app.insert_resource(ActionDatRoot(root.clone()));
+    app.insert_resource(kuluu_render::ffxi_actor_render::ActorDatRoot(root));
     app.init_resource::<Time>();
     // The plugin's particle systems take asset stores as ResMut; a bare app has none of them.
     app.init_resource::<bevy::asset::Assets<bevy::prelude::Mesh>>();
@@ -323,8 +325,8 @@ fn spawn_actor(
 /// None only when there is no retail install (the guard prints its skip); a model that exists
 /// but fails to load is a failure, not a skip.
 fn load_model(file: u32) -> Option<LoadedActor> {
-    install()?;
-    Some(load_npc(file).unwrap_or_else(|e| panic!("model DAT {file} failed to load: {e:?}")))
+    let root = install()?;
+    Some(load_npc(&root, file).unwrap_or_else(|e| panic!("model DAT {file} failed to load: {e:?}")))
 }
 
 fn load_rarab() -> Option<LoadedActor> {
@@ -349,13 +351,14 @@ const IMPACT_FRAME_MIN: u32 = 24;
 /// HumeM skeleton with a main-hand weapon: the armed-race base whose motion DAT ships ati0..2
 /// but no bti0/cti0/dti0 (the D6 fallback case).
 fn load_humem() -> Option<LoadedActor> {
-    install()?;
+    let root = install()?;
     let mut equipment = vec![HUME_M_MAIN_WEAPON_FILE];
     equipment.extend(
         (1u16..=5)
             .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
     );
     match load_pc(
+        &root,
         1,
         false,
         &equipment,

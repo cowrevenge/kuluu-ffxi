@@ -126,8 +126,10 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "fog_step_count") {
         s.fog_step_count = x;
     }
-    if let Some(x) = take(&v, "view_distance") {
-        s.view_distance = x;
+    if let Some(x) = take::<f32>(&v, "draw_distance_scale") {
+        if x.is_finite() && x > 0.0 {
+            s.draw_distance_scale = x;
+        }
     }
     if let Some(x) = take(&v, "vsync") {
         s.vsync = x;

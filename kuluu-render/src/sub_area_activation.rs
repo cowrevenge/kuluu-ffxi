@@ -368,10 +368,13 @@ mod doorway_tests {
         /// off the one ordering declaration production registers
         /// ([`crate::dat_mmb::zone_load_dispatch_systems`]), and with the main
         /// block reduced to the shell placeholder the interior stands in for.
-        fn streaming() -> Self {
+        fn streaming() -> Option<Self> {
+            let root = std::sync::Arc::new(ffxi_dat::archive::open_test_install()?);
             AsyncComputeTaskPool::get_or_init(TaskPool::default);
             let mut d = Self::bare();
             d.app
+                .insert_resource(crate::dat_root::SharedDatRoot(Some(root.clone())))
+                .insert_resource(crate::ffxi_actor_render::ActorDatRoot(Some(root)))
                 .add_message::<ToastEvent>()
                 .add_message::<LoadMmbRequest>()
                 .add_message::<LoadActorRequest>()
@@ -397,7 +400,7 @@ mod doorway_tests {
                 .world_mut()
                 .resource_mut::<MzbCollisionGeometry>()
                 .set_block(ZONE_SLOT_MAIN, shell_placeholder_block());
-            d
+            Some(d)
         }
 
         fn bare() -> Self {
@@ -602,7 +605,9 @@ mod doorway_tests {
     /// snap.
     #[test]
     fn the_interior_load_is_in_flight_the_frame_the_shell_stops_colliding() {
-        let mut d = Doorway::streaming();
+        let Some(mut d) = Doorway::streaming() else {
+            return;
+        };
         assert_eq!(
             d.ground_at(INTERIOR_COLUMN, SHELL_FLOOR_Y),
             Some(SHELL_FLOOR_Y),

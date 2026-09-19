@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use crate::equip_slot::EquipmentIndex;
 use crate::hud::equipment_screen::EQUIP_GRID;
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
-use crate::hud::item_grid::spawn_item_cell;
+use crate::hud::item_grid::{spawn_item_cell, CellOverlay};
 use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
 use crate::snapshot::SceneState;
 
@@ -145,7 +145,7 @@ pub(crate) fn spawn_check_view(mut commands: Commands, mut images: ResMut<Assets
                                     CheckCellFrame(slot),
                                     CheckIcon(IconSlot::Cell(slot)),
                                     CheckText(CheckRole::CellLabel(slot)),
-                                    slot.abbr(),
+                                    CellOverlay::Name(slot.abbr()),
                                     placeholder.clone(),
                                 );
                             }

@@ -134,7 +134,7 @@ where
     Ok(())
 }
 
-async fn emit_event<W>(writer: &mut W, event: &AgentEvent) -> Result<()>
+pub(crate) async fn emit_event<W>(writer: &mut W, event: &AgentEvent) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {

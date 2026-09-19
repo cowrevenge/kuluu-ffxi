@@ -9,6 +9,16 @@ pub const KEYRING_SERVICE: &str = "kuluu";
 pub enum AuthFlavorKind {
     Json,
     Binary,
+    /// No auth server: the lobby is opened with a session the PlayOnline
+    /// Viewer produced (kuluu_session::playonline). Not offered by the
+    /// server editor until the viewer handoff exists.
+    PlayOnline,
+}
+
+impl AuthFlavorKind {
+    pub fn uses_auth_server(self) -> bool {
+        !matches!(self, AuthFlavorKind::PlayOnline)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -25,6 +35,87 @@ pub struct ServerProfile {
 
     #[serde(default)]
     pub version_check_url: Option<String>,
+
+    /// The patch stamp the server's lobby admits (login.CLIENT_VER); unset
+    /// means the vendored LSB pin, ffxi_proto::login::LSB_CLIENT_VER.
+    #[serde(default)]
+    pub client_ver: Option<String>,
+
+    /// login.VER_LOCK as ffxi_proto::login::VerLock::from_setting reads it;
+    /// unset means ffxi_proto::login::LSB_DEFAULT_VER_LOCK.
+    #[serde(default)]
+    pub ver_lock: Option<u8>,
+
+    /// An ffxi_client::Install name this server should be played from.
+    #[serde(default)]
+    pub preferred_client: Option<String>,
+}
+
+pub const HORIZONXI_HOST: &str = "play.horizonxi.com";
+/// HorizonXI's launcher ships a 2.0.0 xiloader; the JSON auth flavor is what
+/// its server answers.
+pub const HORIZONXI_XILOADER_VERSION: &str = "2.0.0";
+const HORIZONXI_KNOWN_CLIENT: &str = "horizonxi-2023";
+pub const LOCALHOST: &str = "127.0.0.1";
+
+pub struct ServerTemplate {
+    pub label: &'static str,
+    pub profile: ServerProfile,
+}
+
+pub fn server_templates() -> Vec<ServerTemplate> {
+    let horizonxi_patch = ffxi_dat::client_profile::KNOWN_CLIENTS
+        .iter()
+        .find(|k| k.name == HORIZONXI_KNOWN_CLIENT)
+        .and_then(|k| k.patch_version)
+        .map(str::to_string);
+    vec![
+        ServerTemplate {
+            label: "HorizonXI",
+            profile: ServerProfile {
+                xiloader_version: Some(HORIZONXI_XILOADER_VERSION.to_string()),
+                client_ver: horizonxi_patch,
+                ..ServerProfile::lsb_defaults("HorizonXI", HORIZONXI_HOST)
+            },
+        },
+        ServerTemplate {
+            label: "Local LandSandBoat",
+            profile: ServerProfile::lsb_defaults("local", LOCALHOST),
+        },
+    ]
+}
+
+impl ServerProfile {
+    pub fn lsb_defaults(name: &str, host: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            host: host.to_string(),
+            auth_port: ffxi_proto::login::LOGIN_AUTH_PORT,
+            data_port: ffxi_proto::login::LOGIN_DATA_PORT,
+            view_port: ffxi_proto::login::LOGIN_VIEW_PORT,
+            flavor: AuthFlavorKind::Json,
+            xiloader_version: None,
+            version_check_url: None,
+            client_ver: None,
+            ver_lock: None,
+            preferred_client: None,
+        }
+    }
+
+    pub fn expected_client_ver(&self) -> &str {
+        self.client_ver
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(ffxi_proto::login::LSB_CLIENT_VER)
+    }
+
+    pub fn ver_lock(&self) -> ffxi_proto::login::VerLock {
+        ffxi_proto::login::VerLock::from_setting(
+            self.ver_lock
+                .unwrap_or(ffxi_proto::login::LSB_DEFAULT_VER_LOCK),
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -244,6 +335,10 @@ mod tests {
         assert_eq!(j, "\"json\"");
         let b = serde_json::to_string(&AuthFlavorKind::Binary).unwrap();
         assert_eq!(b, "\"binary\"");
+        let p = serde_json::to_string(&AuthFlavorKind::PlayOnline).unwrap();
+        assert_eq!(p, "\"playonline\"");
+        assert!(AuthFlavorKind::Json.uses_auth_server());
+        assert!(!AuthFlavorKind::PlayOnline.uses_auth_server());
     }
 
     #[test]
@@ -302,16 +397,64 @@ mod tests {
     }
 
     fn profile(name: &str, host: &str) -> ServerProfile {
-        ServerProfile {
-            name: name.into(),
-            host: host.into(),
-            auth_port: 54231,
-            data_port: 54230,
-            view_port: 54001,
-            flavor: AuthFlavorKind::Json,
-            xiloader_version: None,
-            version_check_url: None,
-        }
+        ServerProfile::lsb_defaults(name, host)
+    }
+
+    #[test]
+    fn templates_carry_the_horizonxi_client_era_and_lsb_ports() {
+        let templates = server_templates();
+        let hxi = templates
+            .iter()
+            .find(|t| t.label == "HorizonXI")
+            .expect("HorizonXI template");
+        assert_eq!(hxi.profile.host, HORIZONXI_HOST);
+        assert_eq!(
+            hxi.profile.xiloader_version.as_deref(),
+            Some(HORIZONXI_XILOADER_VERSION)
+        );
+        assert_eq!(hxi.profile.client_ver.as_deref(), Some("30230905_0"));
+        assert_eq!(hxi.profile.auth_port, ffxi_proto::login::LOGIN_AUTH_PORT);
+        let local = templates
+            .iter()
+            .find(|t| t.label == "Local LandSandBoat")
+            .expect("local template");
+        assert_eq!(local.profile.host, LOCALHOST);
+        assert_eq!(local.profile.client_ver, None);
+        assert_eq!(
+            local.profile.expected_client_ver(),
+            ffxi_proto::login::LSB_CLIENT_VER
+        );
+    }
+
+    #[test]
+    fn profile_without_era_fields_parses_and_falls_back_to_the_lsb_pin() {
+        let j = format!(
+            r#"{{"name":"local","host":"127.0.0.1","auth_port":{},
+            "data_port":{},"view_port":{},"flavor":"json"}}"#,
+            ffxi_proto::login::LOGIN_AUTH_PORT,
+            ffxi_proto::login::LOGIN_DATA_PORT,
+            ffxi_proto::login::LOGIN_VIEW_PORT
+        );
+        let p: ServerProfile = serde_json::from_str(&j).unwrap();
+        assert_eq!(p.client_ver, None);
+        assert_eq!(p.ver_lock, None);
+        assert_eq!(p.preferred_client, None);
+        assert_eq!(p.expected_client_ver(), ffxi_proto::login::LSB_CLIENT_VER);
+        assert_eq!(
+            p.ver_lock(),
+            ffxi_proto::login::VerLock::from_setting(ffxi_proto::login::LSB_DEFAULT_VER_LOCK)
+        );
+    }
+
+    #[test]
+    fn blank_client_ver_counts_as_unset() {
+        let mut p = profile("local", "127.0.0.1");
+        p.client_ver = Some("   ".into());
+        assert_eq!(p.expected_client_ver(), ffxi_proto::login::LSB_CLIENT_VER);
+        p.client_ver = Some("30230905_0".into());
+        assert_eq!(p.expected_client_ver(), "30230905_0");
+        p.ver_lock = Some(1);
+        assert_eq!(p.ver_lock(), ffxi_proto::login::VerLock::Exact);
     }
 
     #[test]

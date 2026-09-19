@@ -1422,13 +1422,7 @@ const ZONE230_KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
 const ZONE230: u16 = 230;
 
 fn test_dat_root() -> Option<ffxi_dat::DatRoot> {
-    if let Ok(root) = ffxi_dat::DatRoot::from_env() {
-        return Some(root);
-    }
-    let default = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-    ffxi_dat::DatRoot::open(default).ok()
+    ffxi_dat::archive::open_test_install()
 }
 
 /// Full 0x02A chat composition against the retail DAT: the zone string's
@@ -1715,7 +1709,10 @@ fn ferry_fishing_chat_replays_reported_catches_with_installed_dat() {
     const NUM1_START: usize = 12;
     const STRING1_START: usize = 28;
     const MESNUM_START: usize = 6;
-    let root = std::sync::Arc::new(ffxi_dat::DatRoot::from_env_or_default().unwrap());
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
+        return;
+    };
+    let root = std::sync::Arc::new(root);
     let mut dialog = crate::event_dialog::DialogSession::new(Some(root), "Observer".into());
     let (tx, mut rx) = broadcast::channel(16);
     for (item, name) in [(4451i32, "Silver Shark"), (5128, "Cone Calamary")] {
@@ -2456,6 +2453,7 @@ fn a_job_ability_line_is_composed_from_the_installed_table() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     // Boost is ability 39 (vendor/server/sql/abilities.sql), whose message1 is
     // the elided UsesJobAbility line.
     const BOOST: u32 = 39;
@@ -2500,6 +2498,7 @@ fn a_two_clause_entry_becomes_two_chat_lines() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     const BOOST: u32 = 39;
     const DAMAGE: u32 = 42;
     let mut numbers = [0i64; sysmes::PARAM_SLOTS];
@@ -2535,6 +2534,7 @@ fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
         eprintln!("skipping: install has no basic-message table");
         return;
     };
+    let table = MesBasicTables::from_dat(table);
     const BOOST: u32 = 39;
     assert!(
         ffxi_vocab::msg_basic::lookup(116).is_none(),
@@ -2557,6 +2557,54 @@ fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
     assert_eq!(lines.len(), 2, "got: {lines:?}");
     assert_eq!(lines[0].text, "Daisy uses Boost.");
     assert_eq!(lines[1].text, "Daisy's attacks are enhanced.");
+}
+
+/// vendor/server/src/map/enums/action/category.h ActionCategory ItemFinish.
+const ITEM_FINISH_CATEGORY: u8 = 5;
+
+/// LSB sends an item's finish line as MsgBasic::ItemUse with the item id in the
+/// target's param, the packet's value slot (vendor/server/src/map/ai/states/item_state.cpp
+/// CItemState::Update); the install's entry reads that slot and names the item
+/// through the item DAT's chat-log spelling. Self-skips without game files.
+#[test]
+fn an_item_use_line_names_the_item_from_the_item_dat() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(tables) = MesBasicTables::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    // vendor/server/sql/item_basic.sql hatchling_shield.
+    const HATCHLING_SHIELD: u32 = 28652;
+    // vendor/server/src/map/enums/msg_basic.h MsgBasic ItemUse.
+    const ITEM_USE: u16 = 28;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = HATCHLING_SHIELD as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = HATCHLING_SHIELD as i64;
+    let lines = super::build_battle2_line(
+        Some(&tables),
+        ITEM_USE,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        HATCHLING_SHIELD,
+        HATCHLING_SHIELD,
+        ITEM_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses a hatchling shield.");
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|s| s.kind == ChatSpanKind::Item && s.text == "hatchling shield"),
+        "the item name is its own span: {:?}",
+        lines[0].spans
+    );
 }
 
 /// vendor/server/src/map/enums/action/category.h ActionCategory AbilityFinish.
@@ -3516,11 +3564,20 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
 /// a multi-packet stock and the window's lifetime are exercised the way the
 /// wire delivers them rather than through the decoders alone.
 fn shop_session_events(packets: &[(u16, Vec<u8>)]) -> (ShopSession, Vec<AgentEvent>) {
+    shop_session_events_from(
+        ShopSession {
+            last_talk_target: 0x0100_0007,
+            ..Default::default()
+        },
+        packets,
+    )
+}
+
+fn shop_session_events_from(
+    mut shop: ShopSession,
+    packets: &[(u16, Vec<u8>)],
+) -> (ShopSession, Vec<AgentEvent>) {
     let (tx, mut rx) = broadcast::channel(64);
-    let mut shop = ShopSession {
-        last_talk_target: 0x0100_0007,
-        ..Default::default()
-    };
     for (opcode, body) in packets {
         handle_sub_packet(
             &framing::SubPacket {
@@ -4503,6 +4560,7 @@ fn fixture_config() -> Config {
         password: String::new(),
         char_selection: CharSelection::Id(FIXTURE_PLAYER),
         initial_state: None,
+        playonline_session: None,
         user_driven_events: true,
         dat_root: None,
     }
@@ -4641,6 +4699,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
+        auth_code: crate::auth_client::LobbyAuthCode::NONE,
     };
     let bootstrap = fixture_bootstrap();
     let (commands, mut command_rx) = mpsc::channel(1);
@@ -4805,6 +4864,7 @@ async fn enterzone_in_gameok_reply() {
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
+        auth_code: crate::auth_client::LobbyAuthCode::NONE,
     };
     let bootstrap = fixture_bootstrap();
     let (events, _event_rx) = broadcast::channel(256);
@@ -4992,4 +5052,93 @@ fn chat_packet_resolves_autotranslate_from_the_install() {
         matches!(events.as_slice(), [AgentEvent::ChatLine { line }] if line.text == expected),
         "{events:?}"
     );
+}
+
+#[test]
+fn shop_appraisals_use_the_latest_slot_and_quantity() {
+    let mut shop = ShopSession::default();
+    let request = |quantity, item_index| PendingShopAppraisal {
+        item_no: 4096,
+        quantity,
+        item_index,
+    };
+    shop.pending_sell = Some(request(1, 1));
+    shop.pending_sell = Some(request(12, 1));
+    assert_eq!(shop.appraisal_request(1).unwrap().quantity, 12);
+    assert_eq!(shop.appraisal_request(1).unwrap().quantity, 12);
+    shop.retire_appraisals();
+    assert!(shop.appraisal_request(1).is_none());
+    shop.pending_sell = Some(request(10, 2));
+    assert!(shop.appraisal_request(1).is_none());
+    let second = shop.appraisal_request(2).unwrap();
+    assert_eq!((second.item_index, second.quantity), (2, 10));
+}
+
+#[test]
+fn shop_missing_appraisals_do_not_block_later_requests() {
+    let mut shop = ShopSession::default();
+    for item_index in [1, 1, 2] {
+        shop.retire_appraisals();
+        shop.pending_sell = Some(PendingShopAppraisal {
+            item_no: 4096,
+            quantity: 1,
+            item_index,
+        });
+        assert_eq!(
+            shop.appraisal_request(item_index).unwrap().item_index,
+            item_index
+        );
+    }
+}
+
+#[test]
+fn shop_raw_appraisal_ignores_other_slots_and_survives_duplicate_unit_quotes() {
+    let body = |slot| {
+        let mut packet = vec![0; 12];
+        packet[..4].copy_from_slice(&20u32.to_le_bytes());
+        packet[4] = slot;
+        packet
+    };
+    let (shop, events) = shop_session_events_from(
+        ShopSession {
+            open: Some(ShopState::default()),
+            pending_sell: Some(PendingShopAppraisal {
+                item_no: 4096,
+                quantity: 10,
+                item_index: 2,
+            }),
+            ..Default::default()
+        },
+        &[
+            (ffxi_proto::map::s2c::SHOP_SELL, body(1)),
+            (ffxi_proto::map::s2c::SHOP_SELL, body(2)),
+            (ffxi_proto::map::s2c::SHOP_SELL, body(2)),
+        ],
+    );
+    let quotes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ShopSellAppraisal {
+                item_index, count, ..
+            } => Some((*item_index, *count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quotes, vec![(2, 10), (2, 10)]);
+    let sale = shop.open.unwrap().pending_sale.unwrap();
+    assert_eq!((sale.item_index, sale.count), (2, 10));
+}
+
+/// An equipped enchanted item is already permanently locked — 0x020's lockFlagFor answers NoDrop
+/// for anything equipped — so a plain "is it locked" read cannot tell a use in flight from a
+/// shield sitting on the arm. Only the NoSelect flag marks the slot as spoken for.
+#[test]
+fn only_the_no_select_flag_marks_a_slot_an_action_owns() {
+    const NO_SELECT: u8 = ffxi_proto::decode::lock_flg::NO_SELECT;
+    assert!(slot_unselectable(NO_SELECT));
+    for other in 0..=u8::MAX {
+        if other != NO_SELECT {
+            assert!(!slot_unselectable(other), "lock flag {other:#04X}");
+        }
+    }
 }

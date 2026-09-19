@@ -22,6 +22,7 @@ pub mod dat_d3m;
 pub mod dat_mmb;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_mzb;
+pub mod dat_root;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;

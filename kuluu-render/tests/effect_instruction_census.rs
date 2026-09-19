@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use ffxi_dat::main_dll::MainDll;
 use ffxi_dat::particle_gen::{GeneratorOpcodeOutcome, GeneratorSection};
 use ffxi_dat::scheduler::{is_structural_opcode, StageKind, STAGE_WORDS_RANGE};
-use ffxi_dat::DatRoot;
 use kuluu_render::look_resolver::PC_LOOK_RACES;
 use kuluu_render::scheduler_runtime::{action_dat_file_id, parse_action_bytes_reporting};
 
@@ -164,8 +163,7 @@ fn build_corpus(dll: &MainDll) -> Corpus {
 
 #[test]
 fn effect_dat_instruction_census() {
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        eprintln!("effect census: no FFXI install (FFXI_DAT_PATH unset/invalid); skipping");
+    let Some(root) = ffxi_dat::archive::open_test_install() else {
         return;
     };
     let Ok(dll) = MainDll::load(root.root()) else {

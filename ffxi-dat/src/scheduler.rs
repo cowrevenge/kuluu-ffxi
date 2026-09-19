@@ -1201,7 +1201,7 @@ mod tests {
         const GLOBAL_EFFECT_DIR_FILE: u32 = 0;
         const BLOCKING_LINK_OPCODE: u8 = 0x3C;
 
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let read = |id: u32| -> Option<Vec<u8>> {
@@ -1275,7 +1275,7 @@ mod tests {
     fn real_dat_global_mdam_routine_is_a_damage_callback() {
         const GLOBAL_EFFECT_DIR_FILE: u32 = 0;
 
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(GLOBAL_EFFECT_DIR_FILE) else {
@@ -2175,11 +2175,16 @@ mod tests {
     #[test]
     fn real_dat_non_positional_only_effects_are_no_longer_silent() {
         const SILENT_WITHOUT_4A_60: [u32; 8] = [3108, 3109, 3110, 3115, 3116, 3117, 3118, 3119];
-        let Some(_) = schedulers_in_file(0) else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
+        let schedulers_in = |file_id: u32| -> Option<Vec<Scheduler>> {
+            let loc = root.resolve(file_id).ok()?;
+            let bytes = std::fs::read(loc.path_under(&root)).ok()?;
+            Some(crate::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
+        };
         for file_id in SILENT_WITHOUT_4A_60 {
-            let Some(scheds) = schedulers_in_file(file_id) else {
+            let Some(scheds) = schedulers_in(file_id) else {
                 continue;
             };
             let kinds: Vec<StageKind> = scheds
@@ -2207,7 +2212,7 @@ mod tests {
     }
 
     fn schedulers_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
-        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let root = crate::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(crate::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
@@ -2298,7 +2303,7 @@ mod vehicle_contract_tests {
     // scan's dominant rule.
     #[test]
     fn zone_scene_resolves_in_the_zones_own_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let file =
@@ -2316,7 +2321,7 @@ mod vehicle_contract_tests {
     // runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
     #[test]
     fn zone_scene_resolves_sealions_den_lwon_in_its_own_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let file =
@@ -2331,7 +2336,7 @@ mod vehicle_contract_tests {
     // per-key counter.
     #[test]
     fn zone_scene_lookups_are_memoized_and_cleared() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let key = *b"zz99";
@@ -2362,7 +2367,7 @@ mod vehicle_contract_tests {
     // Fountain (170)'s model DAT: a ZONE_SCENE_PARTNERS instance/entrance pair.
     #[test]
     fn zone_scene_falls_back_to_the_partner_zone_model_dat() {
-        let Some(root) = DatRoot::from_env_or_default().ok() else {
+        let Some(root) = crate::archive::open_test_install() else {
             return;
         };
         let own =

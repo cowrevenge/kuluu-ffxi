@@ -43,7 +43,7 @@ pub fn grid_move(slot: u8, dx: i32, dy: i32) -> u8 {
 
 const DETAIL_ROWS: usize = 10;
 const STORAGE_ROWS: usize = 16;
-use crate::hud::item_grid::spawn_item_cell;
+use crate::hud::item_grid::{spawn_item_cell, CellOverlay};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EquipRole {
@@ -249,7 +249,7 @@ fn spawn_cell(p: &mut ChildSpawnerCommands, slot: EquipmentIndex, placeholder: H
         EquipCellFrame(slot),
         EquipIcon(IconSlot::Cell(slot)),
         EquipText(EquipRole::CellLabel(slot)),
-        slot.abbr(),
+        CellOverlay::Name(slot.abbr()),
         placeholder,
     );
 }

@@ -22,6 +22,7 @@ pub mod item_grid;
 pub mod item_meta;
 pub mod item_screen;
 pub mod item_ui;
+pub mod list_view;
 #[cfg(feature = "enhanced-shutdown-counter")]
 pub mod logout_countdown;
 // Depends on `crate::minimap`, which is itself gated off wasm (lib.rs).
@@ -40,7 +41,6 @@ pub mod stair_debug;
 pub mod party_frame;
 pub mod self_fishing;
 pub mod shop;
-pub mod spinner;
 pub mod stage_bar;
 pub mod status_panel;
 pub mod status_ribbon;
@@ -272,6 +272,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<item_dat_root::ItemDatRoot>();
         app.init_resource::<item_dat_root::ItemIconCache>();
         app.init_resource::<item_detail::SortOptions>();
+        app.init_resource::<item_detail::AutoSortedInventory>();
         app.init_resource::<item_detail::ItemMenuFocus>();
         app.init_resource::<item_screen::ItemScreenContainer>();
         app.init_resource::<item_screen::ItemListViewport>();
@@ -297,6 +298,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<delivery::DeliveryInventory>();
 
         app.init_resource::<shop::ShopScreenState>();
+        app.add_message::<shop::ShopRowActivated>();
         app.init_resource::<auction::AuctionScreenState>();
         app.init_resource::<auction::AuctionSellInventory>();
         app.init_resource::<auction::AuctionEventCursor>();
@@ -339,7 +341,15 @@ impl Plugin for HudPlugin {
                 dialog::update_dialog_panel_system,
                 dialog::update_dialog_grid_system,
                 dialog::update_dialog_options_system,
-                shop::update_shop_panel_system,
+                (
+                    shop::record_shop_appraisals,
+                    shop::update_shop_panel_system,
+                    shop::update_shop_scrollbar,
+                    shop::shop_mouse_hover_system,
+                    shop::shop_mouse_click_system,
+                    shop::shop_wheel_scroll_system,
+                )
+                    .chain(),
                 (
                     compass::update_compass,
                     compass::update_compass_art,
@@ -407,6 +417,7 @@ impl Plugin for HudPlugin {
                 trade::update_trade_window,
                 check_view::update_check_view,
                 bazaar_view::update_bazaar_view,
+                bazaar_view::update_bazaar_scrollbar.after(bazaar_view::update_bazaar_view),
                 status_panel::update_status_panel,
                 equipment_screen::update_equipment_screen.after(menu::refresh_dynamic_menu_rows),
                 delivery::rebuild_delivery_inventory,
@@ -478,6 +489,7 @@ impl Plugin for HudPlugin {
                 item_screen::item_row_mouse_hover_system,
                 item_screen::item_row_mouse_click_system,
                 item_screen::sort_option_mouse_system,
+                item_detail::auto_consolidate_inventory_system,
                 item_screen::bag_tab_mouse_system,
                 dialog::dialog_mouse_hover_system,
                 dialog::dialog_mouse_click_system,

@@ -447,7 +447,7 @@ pub enum GraphicsField {
     BloomIntensity,
     VolumetricFog,
     FogStepCount,
-    ViewDistance,
+    DrawDistanceScale,
     VSync,
     FrameRateCap,
     Fov,
@@ -511,7 +511,7 @@ impl GraphicsField {
             GraphicsField::BloomIntensity => "Bloom",
             GraphicsField::VolumetricFog => "Volumetric Fog",
             GraphicsField::FogStepCount => "Fog Quality",
-            GraphicsField::ViewDistance => "View Distance",
+            GraphicsField::DrawDistanceScale => "Draw Distance",
             GraphicsField::VSync => "VSync",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
@@ -683,7 +683,10 @@ pub struct GraphicsSettings {
     // tier; the toggle stays as an opt-in embellishment.
     pub volumetric_fog: bool,
     pub fog_step_count: u32,
-    pub view_distance: f32,
+    /// Multiplier on each zone's authored draw distance and fog range, the value
+    /// retail's XiArea::GetAnotherSomething holds at 1.0 (dat_mzb.rs
+    /// zone_draw_distance, weather.rs zone_distance_fog).
+    pub draw_distance_scale: f32,
     pub vsync: bool,
     /// 0 disables the cap (framepace Auto); RETAIL_FPS-adjacent slots otherwise.
     #[serde(default)]
@@ -848,7 +851,14 @@ const SHADOW_MAX_DISTANCE_SLOTS: &[f32] = &[100.0, 200.0, 300.0, 700.0, 1100.0];
 const BLOOM_SLOTS: &[f32] = &[0.0, 0.04, 0.08, 0.12, 0.16];
 const FOG_STEP_SLOTS: &[u32] = &[32, 64, 96, 128];
 
-const VIEW_DISTANCE_SLOTS: &[f32] = &[200.0, 500.0, 700.0, 1100.0, 2300.0, 6100.0];
+const DRAW_DISTANCE_SCALE_SLOTS: &[f32] = &[
+    0.5,
+    0.75,
+    ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
+    1.25,
+    1.5,
+    2.0,
+];
 const FOV_SLOTS: &[f32] = &[
     50.0,
     55.0,
@@ -957,7 +967,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
                 fog_step_count: 32,
-                view_distance: 200.0,
+                draw_distance_scale: 0.5,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1002,7 +1012,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
                 fog_step_count: 32,
-                view_distance: 500.0,
+                draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1047,7 +1057,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.04,
                 volumetric_fog: false,
                 fog_step_count: 64,
-                view_distance: 700.0,
+                draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1092,7 +1102,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
                 fog_step_count: 64,
-                view_distance: 1100.0,
+                draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1141,7 +1151,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.12,
                 volumetric_fog: true,
                 fog_step_count: 96,
-                view_distance: 2300.0,
+                draw_distance_scale: 1.5,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1187,7 +1197,7 @@ impl GraphicsSettings {
                 bloom_intensity: 0.16,
                 volumetric_fog: true,
                 fog_step_count: 128,
-                view_distance: 6100.0,
+                draw_distance_scale: 2.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
@@ -1263,7 +1273,13 @@ impl GraphicsSettings {
             }
             GraphicsField::VolumetricFog => self.toggle_label(field, self.volumetric_fog),
             GraphicsField::FogStepCount => format!("{}", self.fog_step_count),
-            GraphicsField::ViewDistance => format!("{:.0}m", self.view_distance),
+            GraphicsField::DrawDistanceScale => {
+                if self.draw_distance_scale == ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE {
+                    format!("{:.2}x (vanilla)", self.draw_distance_scale)
+                } else {
+                    format!("{:.2}x", self.draw_distance_scale)
+                }
+            }
             GraphicsField::VSync => self.toggle_label(field, self.vsync),
             GraphicsField::Fullscreen => self.toggle_label(field, self.fullscreen),
             GraphicsField::Windowed => self.toggle_label(field, self.windowed_fullscreen),
@@ -1492,8 +1508,9 @@ impl GraphicsSettings {
                 self.fog_step_count = cycle_slot_u32(self.fog_step_count, FOG_STEP_SLOTS, delta);
                 self.preset = QualityPreset::Custom;
             }
-            GraphicsField::ViewDistance => {
-                self.view_distance = cycle_slot_f32(self.view_distance, VIEW_DISTANCE_SLOTS, delta);
+            GraphicsField::DrawDistanceScale => {
+                self.draw_distance_scale =
+                    cycle_slot_f32(self.draw_distance_scale, DRAW_DISTANCE_SCALE_SLOTS, delta);
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::VSync => {
@@ -1875,7 +1892,10 @@ pub const GRAPHICS_SECTIONS: &[GraphicsSection] = &[
     },
     GraphicsSection {
         header: "World",
-        fields: &[GraphicsField::ViewDistance, GraphicsField::TextureFiltering],
+        fields: &[
+            GraphicsField::DrawDistanceScale,
+            GraphicsField::TextureFiltering,
+        ],
     },
     GraphicsSection {
         header: "Lighting",
@@ -2277,7 +2297,7 @@ pub fn apply_projection_system(
 ) {
     for mut proj in q_cam.iter_mut() {
         if let Projection::Perspective(p) = proj.as_mut() {
-            p.far = crate::skybox::camera_far(settings.view_distance);
+            p.far = crate::skybox::CAMERA_FAR;
             p.fov = settings.fov_deg.to_radians();
         }
     }
@@ -2566,7 +2586,7 @@ mod tests {
                 "{preset:?}"
             );
             assert!(m.shadow_max_distance <= s.shadow_max_distance, "{preset:?}");
-            assert!(m.view_distance <= s.view_distance, "{preset:?}");
+            assert!(m.draw_distance_scale <= s.draw_distance_scale, "{preset:?}");
             assert!(m.fog_step_count <= s.fog_step_count, "{preset:?}");
             assert!(m.model_light_count <= s.model_light_count, "{preset:?}");
         }
@@ -2601,9 +2621,9 @@ mod tests {
                 .iter()
                 .any(|x| (x - s.bloom_intensity).abs() < 1e-3));
             assert!(FOG_STEP_SLOTS.contains(&s.fog_step_count));
-            assert!(VIEW_DISTANCE_SLOTS
+            assert!(DRAW_DISTANCE_SCALE_SLOTS
                 .iter()
-                .any(|x| (x - s.view_distance).abs() < 1e-3));
+                .any(|x| (x - s.draw_distance_scale).abs() < 1e-3));
             assert!(FOV_SLOTS.iter().any(|x| (x - s.fov_deg).abs() < 1e-3));
             assert!(AA_SLOTS.contains(&s.anti_aliasing));
             assert!(TEXTURE_FILTERING_CYCLE.contains(&s.texture_filtering));

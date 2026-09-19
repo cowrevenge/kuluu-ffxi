@@ -58,7 +58,7 @@ session_dirty=$(comm -12 \
   <(comm -23 \
       <(printf '%s\n' "$current" | sort -u) \
       <(sort -u "$snap.porcelain" 2>/dev/null) \
-    | sed -E 's/^.{3}//; s/^"(.*)"$/\1/; s/.* -> //' | sort -u) \
+    | porcelain_paths | sort -u) \
   <(ledger_read "$SESSION_ID") || true)
 
 changed=$(printf '%s\n' "$session_dirty" \

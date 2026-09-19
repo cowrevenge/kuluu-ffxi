@@ -35,6 +35,7 @@ kuluu-session = { path = "../kuluu-session", features = ["relay"] }
 # network-facing MCP crate is allowed — see
 # `~/.claude/projects/.../memory/ffxi_agpl_containment.md`.
 ffxi-dat = { path = "../ffxi-dat" }
+ffxi-proto = { path = "../ffxi-proto" }
 
 anyhow.workspace = true
 rmcp.workspace = true

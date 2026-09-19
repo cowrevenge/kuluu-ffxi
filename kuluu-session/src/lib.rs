@@ -18,6 +18,7 @@ pub mod local_menu;
 pub mod lobby_client;
 pub mod map_client;
 pub mod net_health;
+pub mod playonline;
 pub mod reactor;
 pub mod scene;
 pub mod search_client;

@@ -199,8 +199,12 @@ pub fn dispatch_look_driven_models(
     mut commands: Commands,
     settings: Res<GraphicsSettings>,
     dll: Option<Res<ActionMainDll>>,
+    dat_root: Res<crate::dat_root::SharedDatRoot>,
 ) {
     let Some(zone_id) = state.snapshot.zone_id else {
+        return;
+    };
+    let Some(root) = dat_root.get() else {
         return;
     };
     // LookComp is only ever written on a dirty frame (sync_entity_looks_system
@@ -346,7 +350,7 @@ pub fn dispatch_look_driven_models(
         // Monster/beastmen models nest the skinned mesh under a "mode" subdir
         // (research/xim NpcModel.getMeshResources), so the gate must recurse
         // like load_npc's collect_skel_meshes — not just scan top-level chunks.
-        if !crate::dat_vos2::dat_has_skinned_mesh(dat_id) {
+        if !crate::dat_vos2::dat_has_skinned_mesh(root, dat_id) {
             warn!(
                 "actor dispatch (npc): no skinned mesh at dat_id={} for modelid={} \
                  (entity_id={}) — spawns as a nameplate with no body",

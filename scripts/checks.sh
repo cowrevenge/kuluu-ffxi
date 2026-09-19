@@ -107,12 +107,41 @@ run_style() {
     echo "checks:   domain layer. Move Enhanced behavior into a kuluu-* crate behind an opt-in." >&2
     return 1
   fi
+
+  # One install per process: the shared Arc<DatRoot> that insert_dat_roots
+  # wires is the only root library code reads. A fresh
+  # DatRoot::from_env_or_default() therefore belongs to a process entry point
+  # (main.rs, src/bin, examples), tests go through archive::open_test_install,
+  # and FFXI_DAT_PATH is read in ffxi_dat::install alone. The launcher_ui
+  # sites allowed here re-seat the root from the settings screen and leave
+  # with the relaunch-to-switch change.
+  local root_open_allow='^(ffxi-dat/src/archive\.rs|[^/]+/src/main\.rs|[^/]+/src/bin/|[^/]+/examples/|kuluu/src/view_native/launcher_ui/(dat_setup|settings|mod|client_era_check)\.rs)'
+  local hits
+  hits=$(git ls-files -z -- '*.rs' | xargs -0 grep -In 'from_env_or_default()' \
+    | grep -Ev "$root_open_allow" || true)
+  if [[ -n "$hits" ]]; then
+    echo "checks: style — DatRoot::from_env_or_default() outside a process entry point:" >&2
+    echo "$hits" >&2
+    echo "checks:   library code takes the wired root (kuluu_render::dat_root::SharedDatRoot);" >&2
+    echo "checks:   tests use ffxi_dat::archive::open_test_install()" >&2
+    return 1
+  fi
+  local env_read_allow='^(ffxi-dat/src/install\.rs|ffxi-dat/src/archive\.rs|kuluu-session/tests/install_conformance\.rs)'
+  hits=$(git ls-files -z -- '*.rs' | xargs -0 grep -InE 'env::var(_os)?\(\s*("FFXI_DAT_PATH"|(ffxi_dat::)?(archive::)?DAT_PATH_ENV)' \
+    | grep -Ev "$env_read_allow" || true)
+  if [[ -n "$hits" ]]; then
+    echo "checks: style — FFXI_DAT_PATH read outside ffxi_dat::install:" >&2
+    echo "$hits" >&2
+    echo "checks:   resolve through ffxi_dat::install::resolve() or take the wired root" >&2
+    return 1
+  fi
 }
 
 run_harness() {
   # Invariants of the `.agents/` canonical + harness-adapter split
   # (.agents/AGENTS.md holds the mechanism→wiring table this enforces).
-  # Pure shell, no cargo — runs first in pre-push because it costs ~nothing.
+  # Pure shell, no cargo — runs first in pre-push. Only the hook attribution
+  # suite at the end costs real time, and that is a couple of seconds.
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
@@ -273,6 +302,22 @@ run_harness() {
     bad=1
   fi
 
+  # 8. The Bash edit-ledger attribution hooks decide which paths a session is
+  #    told to commit, and a misattribution demands work from the wrong agent.
+  #    Their suite is hand-written and tool-discovered by nothing, so run it
+  #    here or it rots.
+  local hook_tests=".agents/hooks/tests/session-edits-bash-attribution.test.sh"
+  if [[ ! -f "$hook_tests" ]]; then
+    echo "checks: harness — missing $hook_tests" >&2
+    echo "checks:   the Bash edit-ledger hooks ship with this suite; a deleted or renamed" >&2
+    echo "checks:   suite must fail here, not turn the rule green" >&2
+    bad=1
+  elif ! check_output=$(bash "$hook_tests" 2>&1); then
+    echo "checks: harness — session-edit attribution hooks are broken:" >&2
+    echo "$check_output" >&2
+    bad=1
+  fi
+
   # Cargo records path overrides that no longer match the resolved dependency
   # graph here. Fail before an engine upgrade can silently bypass a required
   # vendor fix while leaving its [patch.crates-io] declaration in place.
@@ -367,7 +412,6 @@ run_comments() {
     local path root
     path=$(printf '%s' "$tok" | sed -E 's/[.,;:)]+$//; s#/$##')
     case "$path" in
-      vendor/game-files*) continue ;;
       vendor/*|research/*)
         root=$(printf '%s' "$path" | cut -d/ -f1-2)
         [ -d "$root" ] && [ -n "$(ls -A "$root" 2>/dev/null)" ] || continue ;;
@@ -444,6 +488,32 @@ run_comments() {
   return $bad
 }
 
+run_literals() {
+  # A meaningful integer literal (>= 1000, not a power of two or round number)
+  # that some const in the same crate or a dependency already names must be
+  # imported, not re-typed - tests and fixtures included. Scoped like the
+  # comments advisory so the gate judges new lines, not historical debt:
+  #   LITERALS_DIFF=staged   staged hunks (pre-commit)
+  #   LITERALS_DIFF=tree     the whole tree (the debt list)
+  #   default                lines added since the merge-base with origin/main
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "checks: literals - skipped (no python3)"
+    return 0
+  fi
+  case "${LITERALS_DIFF:-}" in
+    staged) python3 scripts/literal-reuse.py --staged ;;
+    tree) python3 scripts/literal-reuse.py ;;
+    *)
+      local base
+      base=${COMMENTS_BASE:-$(git merge-base HEAD origin/main 2>/dev/null || true)}
+      if [ -z "$base" ]; then
+        echo "checks: literals - skipped (no merge-base with origin/main)"
+        return 0
+      fi
+      python3 scripts/literal-reuse.py --base "$base" ;;
+  esac
+}
+
 run_contracts() {
   # Two entry points because the ferry/bootstrap contracts block on their own
   # current-thread runtime and must run outside an active tokio context; both
@@ -499,25 +569,30 @@ run_test() {
 }
 
 run_install() {
-  # Retail-DAT conformance against every client install on disk: each checkout
-  # target plus FFXI_DAT_PATH when it names a different one. CI has no game
+  # Retail-DAT conformance against every registered install (the registry
+  # ffxi_dat::install owns, listed by its example so the convention has one
+  # source) plus FFXI_DAT_PATH when it names a different one. CI has no game
   # assets, so an empty root list skips rather than fails. Per root the
-  # overlay/target env is cleared so the suites read exactly that install.
-  # env(1) would bypass the cargo guard function above, hence the subshell.
-  local roots=() root rp seen='|'
-  for root in vendor/game-files/targets/*/SquareEnix/"FINAL FANTASY XI" "${FFXI_DAT_PATH:-}"; do
+  # overlay env is cleared so the suites read exactly that install. env(1)
+  # would bypass the cargo guard function above, hence the subshell.
+  local roots=() root rp seen='|' registered
+  registered=$(cargo run -q -p ffxi-dat --example dat-installs -- --roots 2>/dev/null || true)
+  while IFS= read -r root || [ -n "$root" ]; do
     [ -n "$root" ] && [ -f "$root/VTABLE.DAT" ] || continue
     rp=$(cd "$root" && pwd -P)
     case "$seen" in *"|$rp|"*) continue ;; esac
     seen+="$rp|"
     roots+=("$rp")
-  done
+  done <<EOF
+$registered
+${FFXI_DAT_PATH:-}
+EOF
   if [ ${#roots[@]} -eq 0 ]; then
-    echo "checks: install — no client install under vendor/game-files/targets/ or FFXI_DAT_PATH; skipping"
+    echo "checks: install — no registered install (kuluu install list) and no FFXI_DAT_PATH; skipping"
     return 0
   fi
   install_cargo() { # $1=install root, rest=cargo args
-    ( unset FFXI_DAT_OVERLAYS FFXI_CLIENT_TARGET; export FFXI_DAT_PATH="$1"; shift; cargo "$@" )
+    ( unset FFXI_DAT_OVERLAYS; export FFXI_DAT_PATH="$1"; shift; cargo "$@" )
   }
   for root in ${roots[@]+"${roots[@]}"}; do
     echo "checks: install — $root"
@@ -679,6 +754,7 @@ for stage in "$@"; do
     clippy) echo "checks: clippy"; run_clippy ;;
     style)  echo "checks: style";  run_style ;;
     comments) echo "checks: comments"; run_comments ;;
+    literals) echo "checks: literals"; run_literals ;;
     harness) echo "checks: harness"; run_harness ;;
     contracts) echo "checks: contracts"; run_contracts ;;
     install) echo "checks: install"; run_install ;;

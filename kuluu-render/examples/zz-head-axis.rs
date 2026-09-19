@@ -25,13 +25,15 @@ fn nearest_axis(v: Vec3) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let root = ffxi_dat::DatRoot::from_env_or_default()
+        .expect("an FFXI install (kuluu install use NAME, or FFXI_DAT_PATH)");
     let loaded = if args.get(1).map(|s| s == "npc").unwrap_or(false) {
         let id: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2056);
         println!("(npc {id})");
-        load_npc(id).expect("load_npc failed")
+        load_npc(&root, id).expect("load_npc failed")
     } else {
         let race: u8 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-        load_pc(race, false, &[], None, None, None).expect("load_pc failed")
+        load_pc(&root, race, false, &[], None, None, None).expect("load_pc failed")
     };
     let skel = &loaded.skeleton;
 

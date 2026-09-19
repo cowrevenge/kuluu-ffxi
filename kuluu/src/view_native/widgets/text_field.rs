@@ -1,3 +1,4 @@
+use bevy::feathers::focus::FocusIndicator;
 use bevy::feathers::theme::ThemeBackgroundColor;
 use bevy::feathers::tokens;
 use bevy::input::keyboard::{Key, KeyCode, KeyboardInput};
@@ -19,6 +20,11 @@ pub struct TextField {
 
     pub submit_on_enter: bool,
 }
+
+/// Set only by the gamepad path (`LauncherFocusMode::TextEntry`); a keyboard
+/// types into any focused field regardless.
+#[derive(Component)]
+pub struct TextEntryActive;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TextFieldDisplay {
@@ -61,10 +67,23 @@ pub fn text_field(props: TextFieldProps) -> impl Bundle {
             border_radius: BorderRadius::all(Val::Px(3.0)),
             ..default()
         },
-        BorderColor::all(Color::srgb(0.25, 0.25, 0.28)),
+        BorderColor::all(FIELD_BORDER_IDLE),
         ThemeBackgroundColor(tokens::BUTTON_BG),
         TabIndex(0),
+        FocusIndicator,
     )
+}
+
+const FIELD_BORDER_IDLE: Color = Color::srgb(0.25, 0.25, 0.28);
+const FIELD_BORDER_FOCUSED: Color = Color::srgb(0.36, 0.62, 1.0);
+const FIELD_BORDER_EDITING: Color = Color::srgb(0.30, 0.90, 0.72);
+
+fn border_color_for(focused: bool, editing: bool) -> Color {
+    match (focused, editing) {
+        (true, true) => FIELD_BORDER_EDITING,
+        (true, false) => FIELD_BORDER_FOCUSED,
+        _ => FIELD_BORDER_IDLE,
+    }
 }
 
 pub struct TextFieldPlugin;
@@ -266,16 +285,11 @@ fn sync_display(
 
 fn sync_focus_border(
     focus: Option<Res<InputFocus>>,
-    mut q: Query<(Entity, &mut BorderColor), With<TextField>>,
+    mut q: Query<(Entity, &mut BorderColor, Has<TextEntryActive>), With<TextField>>,
 ) {
     let focused = focus.and_then(|f| f.get());
-    for (e, mut bc) in q.iter_mut() {
-        let target = if Some(e) == focused {
-            Color::srgb(0.36, 0.62, 1.0)
-        } else {
-            Color::srgb(0.25, 0.25, 0.28)
-        };
-        *bc = BorderColor::all(target);
+    for (e, mut bc, editing) in q.iter_mut() {
+        *bc = BorderColor::all(border_color_for(Some(e) == focused, editing));
     }
 }
 
@@ -296,4 +310,20 @@ fn next_grapheme(s: &str, cursor: usize) -> usize {
     }
     let c = s[cursor..].chars().next().unwrap();
     cursor + c.len_utf8()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn border_color_distinguishes_idle_focused_and_editing() {
+        let idle = border_color_for(false, false);
+        let focused = border_color_for(true, false);
+        let editing = border_color_for(true, true);
+        assert_ne!(idle, focused);
+        assert_ne!(focused, editing);
+        assert_ne!(idle, editing);
+        assert_eq!(border_color_for(false, true), idle);
+    }
 }

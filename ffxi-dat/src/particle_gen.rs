@@ -556,6 +556,13 @@ pub struct ParticleGeneratorDef {
     // Parsed but not applied until the child-generator path lands.
     pub parent_velocity: Option<f32>,
 
+    // sec2 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] — the sibling
+    // generator chunk emitted as a child of each particle of this one (research/xim
+    // ParticleInitializers.kt ChildGeneratorSetup; the sec2 0x53 block is the same shape).
+    // Parsed but not applied until the child-generator runtime lands (the sec3 0x25/0x33
+    // child updaters).
+    pub child_generator: Option<[u8; 4]>,
+
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
@@ -783,6 +790,7 @@ impl ParticleGeneratorDef {
         let mut oscillation = false;
         let mut parent_position_copy = false;
         let mut parent_velocity = None;
+        let mut child_generator = None;
         let mut oscillation_accel_z = None;
         let mut oscillation_accel_x = None;
         let mut oscillation_accel_y = None;
@@ -1088,6 +1096,12 @@ impl ParticleGeneratorDef {
                 0x46 if payload + 4 <= body.len() => {
                     parent_velocity = Some(f32_le(body, payload));
                 }
+                // 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] — the
+                // sibling generator emitted as a child of each particle
+                // (research/xim ParticleInitializers.kt ChildGeneratorSetup).
+                0x44 if payload + 8 <= body.len() => {
+                    child_generator = track_id(body, payload + 4);
+                }
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1347,6 +1361,7 @@ impl ParticleGeneratorDef {
             oscillation,
             parent_position_copy,
             parent_velocity,
+            child_generator,
             oscillation_accel_z,
             oscillation_accel_x,
             oscillation_accel_y,
@@ -2471,6 +2486,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.parent_velocity, None);
+    }
+
+    // 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] (research/xim
+    // ParticleInitializers.kt ChildGeneratorSetup). Shipped census: 1009 sec2 0x44 blocks
+    // in the parser-accepted corpus, 1041 in the raw probe walk.
+    #[test]
+    fn child_generator_setup_reads_the_child_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x44, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'0']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.child_generator, Some(*b"kid0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.child_generator, None);
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the

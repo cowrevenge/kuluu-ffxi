@@ -2209,6 +2209,7 @@ mod tests {
             oscillation: false,
             parent_position_copy: false,
             parent_velocity: None,
+            child_generator: None,
             oscillation_accel_z: None,
             oscillation_accel_x: None,
             oscillation_accel_y: None,

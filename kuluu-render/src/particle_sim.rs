@@ -2054,6 +2054,7 @@ mod tests {
             alpha_track: None,
             color_r_track: None,
             color_g_track: None,
+            color_b_track: None,
             day_of_week_color: None,
             moon_phase_color: None,
             uv_scroll: [0.0, 0.0],

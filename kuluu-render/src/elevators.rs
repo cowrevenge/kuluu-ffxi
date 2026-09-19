@@ -509,13 +509,7 @@ mod tests {
         // is carried; the landing above an empty shaft is not.
         let four_cc = u32::from_le_bytes(SHAFT);
         let mut lifts = ZoneElevators::default();
-        lifts.shafts.insert(
-            four_cc,
-            Shaft {
-                rect,
-                dir,
-            },
-        );
+        lifts.shafts.insert(four_cc, Shaft { rect, dir });
         assert_eq!(
             lifts.ride_height([-56.0, -12.0, LOWER_FLOOR_Y]),
             None,

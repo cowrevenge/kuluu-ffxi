@@ -740,6 +740,13 @@ pub struct ParticleGeneratorDef {
     // 0x50/0x51/0x52 are the Velocity x/y/z KeyFrameValueSetup). Parsed but not applied:
     // the engine does not model a per-frame velocity track, the I18 precedent.
     pub velocity_y_track: Option<[u8; 4]>,
+
+    // sec2 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape bound
+    // to the specular element's rotation x (research/xim ParticleGeneratorParser.kt —
+    // 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but not
+    // applied: the engine does not model the specular element's rotation, the I18
+    // precedent.
+    pub specular_rot_x_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -902,6 +909,7 @@ impl ParticleGeneratorDef {
         let mut parent_tex_coord = false;
         let mut point_list_position = None;
         let mut velocity_y_track = None;
+        let mut specular_rot_x_track = None;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1294,6 +1302,11 @@ impl ParticleGeneratorDef {
                 0x51 if payload + 8 <= body.len() => {
                     velocity_y_track = track_id(body, payload + 4);
                 }
+                // 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape
+                // (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x59 if payload + 8 <= body.len() => {
+                    specular_rot_x_track = track_id(body, payload + 4);
+                }
                 // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
                 // shape bound to the element's velocity dampener
                 // (research/xim ParticleGeneratorParser.kt sec2Handler).
@@ -1604,6 +1617,7 @@ impl ParticleGeneratorDef {
             parent_tex_coord,
             point_list_position,
             velocity_y_track,
+            specular_rot_x_track,
         }))
     }
 
@@ -2823,6 +2837,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.velocity_y_track, None);
+    }
+
+    // 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape (research/xim
+    // ParticleGeneratorParser.kt sec2Handler). Shipped census: 235 sec2 0x59 blocks in the
+    // parser-accepted corpus.
+    #[test]
+    fn specular_rot_x_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(
+            0x59,
+            4,
+            &[0, 0, 0, 0, b's', b'r', b'x', b'0', 0, 0, 0, 0],
+        ));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.specular_rot_x_track, Some(*b"srx0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.specular_rot_x_track, None);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

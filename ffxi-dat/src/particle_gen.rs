@@ -356,6 +356,11 @@ pub struct ParticleGeneratorDef {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x08 normalizes field_54 minus the
     // position captured at element spawn, i.e. the offsets the earlier blocks added).
     pub relative_velocity: Option<f32>,
+    // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
+    // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
+    // RotationVarianceInitializer — the retail decompile's ElemGenerate default is
+    // XICLIENT_CODE_MISSING, so xim's mapping is the available evidence).
+    pub rotation_variance: Option<[f32; 3]>,
     pub init_rotation: [f32; 3],
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
@@ -558,6 +563,7 @@ impl ParticleGeneratorDef {
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
         let mut relative_velocity = None;
+        let mut rotation_variance = None;
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
         let mut scale_y_track = None;
@@ -668,6 +674,13 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                0x0A if payload + 12 <= body.len() => {
+                    rotation_variance = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
                 }
                 0x0B if payload + 12 <= body.len() => {
                     rotation_velocity = Some([
@@ -910,6 +923,7 @@ impl ParticleGeneratorDef {
             init_velocity,
             velocity_variance,
             relative_velocity,
+            rotation_variance,
             init_rotation,
             blend,
             blend_byte,
@@ -1666,6 +1680,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.relative_velocity, None);
+    }
+
+    // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random
+    // rotation added to the 0x09 base per particle (research/xim ParticleInitializers.kt
+    // RotationVarianceInitializer). Shipped census: 27736 blocks, all size_words=4, payloads
+    // are radian angles (±π, ±π/2, …); 2423 all-zero.
+    #[test]
+    fn rotation_variance_reads_the_three_axis_bounds() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut base: Vec<u8> = Vec::new();
+        for f in [0.1f32, 0.2, 0.3] {
+            base.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x09, 4, &base));
+        let mut var: Vec<u8> = Vec::new();
+        for f in [0.05f32, 0.1, 0.15] {
+            var.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x0A, 4, &var));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.init_rotation, [0.1, 0.2, 0.3]);
+        assert_eq!(def.rotation_variance, Some([0.05, 0.1, 0.15]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.rotation_variance, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

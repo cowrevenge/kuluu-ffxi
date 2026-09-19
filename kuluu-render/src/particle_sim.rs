@@ -1045,6 +1045,16 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             vel += pos_local.normalize() * speed;
         }
     }
+    // 0x0A RotationVarianceInitializer: a uniform [-v, v] draw per axis on top of the 0x09
+    // base rotation (research/xim ParticleInitializers.kt RotationVarianceInitializer).
+    let mut rotation = Vec3::from_array(g.def.init_rotation);
+    if let Some(var) = g.def.rotation_variance {
+        rotation += Vec3::new(
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[0],
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[1],
+            (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
+        );
+    }
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
@@ -1053,7 +1063,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         life_frames: life_frames.max(1.0),
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
         scale: Vec2::new(g.def.init_scale[0], g.def.init_scale[1]),
-        rotation: Vec3::from_array(g.def.init_rotation),
+        rotation,
     });
 }
 
@@ -1884,6 +1894,7 @@ mod tests {
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
             relative_velocity: None,
+            rotation_variance: None,
             init_rotation: [0.0; 3],
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
             blend_byte: 0x48,
@@ -3344,6 +3355,51 @@ mod tests {
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);
         assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
+    }
+
+    // 0x0A RotationVarianceInitializer: each particle's rotation draws a uniform
+    // [-v, v] offset per axis on top of the 0x09 base (research/xim
+    // ParticleInitializers.kt RotationVarianceInitializer).
+    #[test]
+    fn rotation_variance_spreads_each_axis_around_the_base() {
+        let mut d = def(10.0, 1.0, 1);
+        d.init_rotation = [0.1, 0.2, 0.3];
+        d.rotation_variance = Some([0.05, 0.1, 0.15]);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 3.0);
+        assert_eq!(g.particles.len(), 3);
+        // The sample is in [-1, 1), so each axis lands in [base − v, base + v]; the
+        // epsilon covers one f32 rounding of the sum.
+        let bounds = [
+            (0.1f32 - 0.05f32, 0.1f32 + 0.05f32),
+            (0.2f32 - 0.1f32, 0.2f32 + 0.1f32),
+            (0.3f32 - 0.15f32, 0.3f32 + 0.15f32),
+        ];
+        for p in &g.particles {
+            let r = p.rotation;
+            assert!(
+                (bounds[0].0 - 1e-6..=bounds[0].1 + 1e-6).contains(&r.x)
+                    && (bounds[1].0 - 1e-6..=bounds[1].1 + 1e-6).contains(&r.y)
+                    && (bounds[2].0 - 1e-6..=bounds[2].1 + 1e-6).contains(&r.z),
+                "each axis inside base ± bound: {r:?}"
+            );
+        }
+        assert!(
+            g.particles
+                .windows(2)
+                .any(|w| w[0].rotation != w[1].rotation),
+            "the variance is a per-particle draw, not a constant"
+        );
+    }
+
+    #[test]
+    fn rotation_without_variance_is_exactly_the_base() {
+        let mut d = def(0.0, 1.0, 1);
+        d.init_rotation = [0.1, 0.2, 0.3];
+        let mut g = live(d, 30.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles[0].rotation, Vec3::from_array([0.1, 0.2, 0.3]));
     }
 
     #[test]

@@ -1064,6 +1064,17 @@ pub fn dispatch_movement_system(
         autorun.phantom_forward = false;
     }
 
+    // Retail's only character-yaw rate is the autorun steer: with autorun
+    // engaged, CharacterMovementX rotates the stored run direction 2 degrees
+    // per movement tick and the body faces it, the camera untouched
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+    // ControllableActor::HandleThirdPersonControl, is_auto_running branch).
+    // A/D keeps the camera-relative carve instead: it reproduces the observed
+    // retail behavior — the body turn plus the lazy camera swing — as measured
+    // from video (HorizonXI 2026-07-20), and the stored-vector steer would
+    // retune the carve circle and the camera follow, which need in-game
+    // verification and the numpad-character key layout (kuluu-t820) before
+    // they are worth taking.
     // Retail autorun is steerable: A/D carve the run without cancelling it.
     // Held strafe or Q/E rotate cancels after a short grace.
     let any_strafe = bindings.pressed(Action::StrafeLeft, keys)

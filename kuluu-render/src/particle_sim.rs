@@ -2253,6 +2253,7 @@ mod tests {
             batching_setup: false,
             parent_tex_coord: false,
             point_list_position: None,
+            velocity_y_track: None,
         }
     }
 

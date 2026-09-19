@@ -3285,6 +3285,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffxi-pol"
+version = "0.7.0"
+dependencies = [
+ "hex",
+ "md-5",
+ "num-bigint",
+ "num-integer",
+ "rand 0.10.1",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ffxi-proto"
 version = "0.7.0"
 dependencies = [

@@ -2085,6 +2085,7 @@ mod tests {
             emit_cull: None,
             association: None,
             foot_mark: false,
+            oscillation: false,
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,

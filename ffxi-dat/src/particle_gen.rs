@@ -538,6 +538,12 @@ pub struct ParticleGeneratorDef {
     // updateAssociatedFacing footMarkEffect branches).
     pub foot_mark: bool,
 
+    // sec2 0x3D OscillationSetup: a no-payload marker allocating the particle's oscillation
+    // state (research/xim ParticleInitializers.kt OscillationSetup — NoDataParticleInitializer,
+    // apply is particle.allocate(allocationOffset, OscillationParams())); the 0x3E/0x3F/0x40
+    // acceleration setups write it and the section-3 0x29/0x2A/0x2B appliers integrate it.
+    pub oscillation: bool,
+
     // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
     // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
@@ -633,6 +639,7 @@ const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
 const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
+const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
 const SEC4_OFFSET: usize = 0x7C;
@@ -728,6 +735,7 @@ impl ParticleGeneratorDef {
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
         let mut foot_mark = false;
+        let mut oscillation = false;
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -1009,6 +1017,9 @@ impl ParticleGeneratorDef {
                 // generator (research/xim Particle.kt updateAssociatedPosition /
                 // updateAssociatedFacing footMarkEffect branches).
                 SEC2_OPCODE_FOOT_MARK => foot_mark = true,
+                // 0x3D OscillationSetup: no payload — the marker that allocates the particle's
+                // oscillation state (research/xim ParticleInitializers.kt OscillationSetup).
+                SEC2_OPCODE_OSCILLATION_SETUP => oscillation = true,
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
@@ -1224,6 +1235,7 @@ impl ParticleGeneratorDef {
             emit_cull,
             association,
             foot_mark,
+            oscillation,
             rotation_velocity,
             rotation_velocity_variance,
             rotation_updater,
@@ -1914,6 +1926,48 @@ mod tests {
             }),
             "0x8E must report decoded: {outcomes:?}"
         );
+    }
+
+    // 0x3D OscillationSetup is a no-payload marker (research/xim ParticleInitializers.kt
+    // OscillationSetup); the shipped census is 441 blocks, all size_words=1, and every one
+    // precedes its 0x3E/0x40 acceleration setup in the section-2 stream.
+    #[test]
+    fn oscillation_setup_sets_the_flag_without_payload() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
+        let vel: [f32; 3] = [1.0, 2.0, 3.0];
+        let mut vel_bytes = Vec::new();
+        for f in vel {
+            vel_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x02, 4, &vel_bytes));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(def.oscillation, "0x3D must set the oscillation flag");
+        assert_eq!(
+            def.init_velocity, vel,
+            "the no-payload block must not desync the stream"
+        );
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Initializers
+                    && *op == SEC2_OPCODE_OSCILLATION_SETUP
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "0x3D must report decoded: {outcomes:?}"
+        );
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.oscillation);
     }
 
     // 0x03 VelocityVarianceSetup: the three floats are the per-axis bounds of the random

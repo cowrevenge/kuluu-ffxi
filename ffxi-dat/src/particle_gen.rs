@@ -648,6 +648,12 @@ pub struct ParticleGeneratorDef {
     // the engine has no haze/distortion pass yet; the sec3 0x24 ProgressValueUpdater
     // animates the same value over life.
     pub haze_offset_x: Option<f32>,
+
+    // sec2 0x47 ParentRotateConfig: a no-payload marker — the child particle copies its
+    // parent's rotation (research/xim ParticleInitializers.kt ParentRotateConfig; apply is
+    // a no-op without a parent). Parsed but not applied until the child-generator path
+    // lands (the sec2 0x44 ChildGeneratorSetup).
+    pub parent_rotate: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -802,6 +808,7 @@ impl ParticleGeneratorDef {
         let mut specular_rot_y_track = None;
         let mut camera_shake_track = None;
         let mut haze_offset_x = None;
+        let mut parent_rotate = false;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1135,6 +1142,10 @@ impl ParticleGeneratorDef {
                 0x44 if payload + 8 <= body.len() => {
                     child_generator = track_id(body, payload + 4);
                 }
+                // 0x47 ParentRotateConfig: no payload — the marker that makes a child
+                // particle copy its parent's rotation (research/xim
+                // ParticleInitializers.kt ParentRotateConfig).
+                0x47 => parent_rotate = true,
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1413,6 +1424,7 @@ impl ParticleGeneratorDef {
             specular_rot_y_track,
             camera_shake_track,
             haze_offset_x,
+            parent_rotate,
         }))
     }
 
@@ -2505,6 +2517,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.haze_offset_x, None);
+    }
+
+    // 0x47 ParentRotateConfig: a no-payload marker (research/xim
+    // ParticleInitializers.kt ParentRotateConfig). Shipped census: 543 sec2 0x47 blocks in
+    // the parser-accepted corpus.
+    #[test]
+    fn parent_rotate_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x47, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_rotate);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_rotate);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

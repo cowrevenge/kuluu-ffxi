@@ -2240,6 +2240,7 @@ mod tests {
             specular_rot_y_track: None,
             camera_shake_track: None,
             haze_offset_x: None,
+            parent_rotate: false,
         }
     }
 

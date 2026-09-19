@@ -1074,6 +1074,13 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         }
         None => Vec3::ZERO,
     };
+    // 0x11 SingleScaleVarianceInitializer: one [0, v) draw shared by every scale axis, on top
+    // of the 0x0F base (research/xim ParticleInitializers.kt — scale += posRand(v); retail's
+    // ElemGenerate case 0x11 adds a single ufrand to x, y and z).
+    let mut scale = Vec2::new(g.def.init_scale[0], g.def.init_scale[1]);
+    if let Some(v) = g.def.single_scale_variance {
+        scale += Vec2::splat(next_unit(&mut g.emit_rng) * v);
+    }
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
@@ -1081,7 +1088,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
-        scale: Vec2::new(g.def.init_scale[0], g.def.init_scale[1]),
+        scale,
         rotation,
         spin,
     });
@@ -1910,6 +1917,7 @@ mod tests {
             attach_joint_target: 0,
             attach_source_oriented: false,
             init_scale: [0.1, 0.1, 1.0],
+            single_scale_variance: None,
             init_color: [0.2, 0.2, 0.6, 0.5],
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
@@ -2845,6 +2853,33 @@ mod tests {
         for p in &g.particles {
             assert_eq!(p.rotation, Vec3::ZERO, "no rotation updater, no spin");
         }
+    }
+
+    // 0x11 SingleScaleVarianceInitializer: every emitted particle draws one [0, v) offset
+    // shared by the scale axes, on top of the 0x0F base (research/xim ParticleInitializers.kt
+    // — scale += posRand(v); retail's ElemGenerate case 0x11 adds a single ufrand to x, y, z).
+    #[test]
+    fn single_scale_variance_spreads_the_scale_per_particle() {
+        let mut d = def(120.0, 1.0, 8);
+        d.single_scale_variance = Some(0.05);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 8, "one burst of eight");
+        let mut scales = Vec::new();
+        for p in &g.particles {
+            scales.push(p.scale.x);
+            // base 0.1 plus a [0, 0.05) draw.
+            assert!(
+                (0.1f32..=0.15f32 + 1e-6).contains(&p.scale.x),
+                "scale out of band: {}",
+                p.scale.x
+            );
+            assert_eq!(p.scale.x, p.scale.y, "one draw feeds both axes");
+        }
+        assert!(
+            scales.windows(2).any(|w| w[0] != w[1]),
+            "the variance must differ between particles: {scales:?}"
+        );
     }
 
     // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator keeps its element past

@@ -344,6 +344,11 @@ pub struct ParticleGeneratorDef {
     pub attach_source_oriented: bool,
 
     pub init_scale: [f32; 3],
+
+    // sec2 0x11 SingleScaleVarianceInitializer: one ufrand(payload) draw shared by every scale
+    // axis, per particle (research/xim ParticleInitializers.kt — scale += posRand(v);
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x11 — a single ufrand added to x, y, z).
+    pub single_scale_variance: Option<f32>,
     pub init_color: [f32; 4],
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
@@ -565,6 +570,7 @@ impl ParticleGeneratorDef {
         let mut position_variance = None;
         let mut is_particle = false;
         let mut init_scale = [1.0f32; 3];
+        let mut single_scale_variance = None;
         let mut init_color = [1.0f32; 4];
         let mut init_velocity = [0.0f32; 3];
         let mut velocity_variance = None;
@@ -709,6 +715,9 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                0x11 if payload + 4 <= body.len() => {
+                    single_scale_variance = Some(f32_le(body, payload));
                 }
                 0x55 if payload + 36 <= body.len() => {
                     specular = Some(SpecularParams {
@@ -933,6 +942,7 @@ impl ParticleGeneratorDef {
             attach_joint_target,
             attach_source_oriented,
             init_scale,
+            single_scale_variance,
             init_color,
             init_velocity,
             velocity_variance,
@@ -1754,6 +1764,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.rotation_velocity_variance, None);
+    }
+
+    // 0x11 SingleScaleVarianceInitializer: one float, the ufrand bound shared by every scale
+    // axis per particle (research/xim ParticleInitializers.kt — scale += posRand(v)).
+    #[test]
+    fn single_scale_variance_reads_the_single_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut base: Vec<u8> = Vec::new();
+        for f in [0.1f32, 0.2, 0.3] {
+            base.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x0F, 4, &base));
+        sec2.extend(op(0x11, 2, &0.05f32.to_le_bytes()));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.init_scale, [0.1, 0.2, 0.3]);
+        assert_eq!(def.single_scale_variance, Some(0.05));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.single_scale_variance, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

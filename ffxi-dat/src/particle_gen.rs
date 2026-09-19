@@ -1541,6 +1541,11 @@ impl ParticleGeneratorDef {
                     // precedent), so the blocks arm nothing and only consume (the U1/U2
                     // precedent).
                     0x36 | 0x37 | 0x3B => {}
+                    // research/xim ParticleUpdaters.kt ColorTransformApplier: no payload —
+                    // color += (transform shr 7) × (0.5 × dt) per frame. The engine does
+                    // not model the color transform's application (the I14 0x19 precedent),
+                    // so the block arms nothing and only consumes (the U1/U2 precedent).
+                    0x0B => {}
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
                     // frame. The engine has no velocityRotation, so parse-only.
@@ -3519,6 +3524,39 @@ mod tests {
                 "sec3 {op:02X} must report decoded: {outcomes:?}"
             );
         }
+    }
+
+    // sec3 0x0B ColorTransformApplier: no payload — color += (transform shr 7) × (0.5 × dt)
+    // per frame; the engine does not model the color transform's application (research/xim
+    // ParticleUpdaters.kt ColorTransformApplier; the I14 0x19 precedent). Shipped census:
+    // 66990 blocks, all size_words=1.
+    #[test]
+    fn color_transform_applier_consumes_the_block_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x0B, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            outcomes.iter().any(|(s, o, outcome)| {
+                *s == GeneratorSection::Updaters
+                    && *o == 0x0B
+                    && *outcome == GeneratorOpcodeOutcome::Decoded
+            }),
+            "sec3 0x0B must report decoded: {outcomes:?}"
+        );
     }
 
     // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id, expect32

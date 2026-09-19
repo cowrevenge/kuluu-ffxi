@@ -2207,6 +2207,7 @@ mod tests {
             association: None,
             foot_mark: false,
             oscillation: false,
+            parent_position_copy: false,
             oscillation_accel_z: None,
             oscillation_accel_x: None,
             oscillation_accel_y: None,

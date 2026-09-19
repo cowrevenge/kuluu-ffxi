@@ -544,6 +544,12 @@ pub struct ParticleGeneratorDef {
     // acceleration setups write it and the section-3 0x29/0x2A/0x2B appliers integrate it.
     pub oscillation: bool,
 
+    // sec2 0x45 ParentPositionCopyConfig: a no-payload marker — the particle's associated
+    // position copies its parent's (research/xim ParticleInitializers.kt
+    // ParentPositionCopyConfig; apply is a no-op without a parent). Parsed but not applied
+    // until the child-generator path lands (the sec2 0x44 ChildGeneratorSetup).
+    pub parent_position_copy: bool,
+
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
@@ -769,6 +775,7 @@ impl ParticleGeneratorDef {
         let mut camera_shake_track = None;
         let mut foot_mark = false;
         let mut oscillation = false;
+        let mut parent_position_copy = false;
         let mut oscillation_accel_z = None;
         let mut oscillation_accel_x = None;
         let mut oscillation_accel_y = None;
@@ -1064,6 +1071,10 @@ impl ParticleGeneratorDef {
                 // 0x3D OscillationSetup: no payload — the marker that allocates the particle's
                 // oscillation state (research/xim ParticleInitializers.kt OscillationSetup).
                 SEC2_OPCODE_OSCILLATION_SETUP => oscillation = true,
+                // 0x45 ParentPositionCopyConfig: no payload — the marker that makes a child
+                // particle copy its parent's position (research/xim
+                // ParticleInitializers.kt ParentPositionCopyConfig).
+                0x45 => parent_position_copy = true,
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1321,6 +1332,7 @@ impl ParticleGeneratorDef {
             association,
             foot_mark,
             oscillation,
+            parent_position_copy,
             oscillation_accel_z,
             oscillation_accel_x,
             oscillation_accel_y,
@@ -2406,6 +2418,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.camera_shake_track, None);
+    }
+
+    // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim
+    // ParticleInitializers.kt ParentPositionCopyConfig). Shipped census: 9698 sec2 0x45
+    // blocks, all size_words=1; 1189 generators carry it, 164 of them referenced as a
+    // child by a sec2 0x44 link in the corpus.
+    #[test]
+    fn parent_position_copy_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x45, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_position_copy);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_position_copy);
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the

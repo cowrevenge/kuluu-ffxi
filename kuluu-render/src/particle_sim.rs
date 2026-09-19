@@ -397,6 +397,10 @@ struct Particle {
     // rotation updater is off (research/xim ParticleUpdaters.kt RotationUpdater — the
     // rotation transform's velocity, which holds the 0x0B + 0x0C sum, is what it integrates).
     spin: Vec3,
+    // Armed by the sec2 0x3B block: the orientation step flips the rotation y
+    // (research/xim Particle.kt — negateRotationY multiplies rotation.y by −1 in the
+    // particle transform, set by IncrementalRotationApplier even for an all-zero payload).
+    negate_rotation_y: bool,
 }
 
 // research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a source joint naming
@@ -856,7 +860,12 @@ fn particle_orientation(def: &ParticleGeneratorDef) -> Option<Quat> {
 // The live orientation of a fixed-orientation particle: its 0x09 seed plus whatever the spin
 // has added, in the same Euler order `particle_orientation` seeds with.
 fn particle_rotation(p: &Particle) -> Quat {
-    Quat::from_euler(EulerRot::XYZ, p.rotation.x, p.rotation.y, p.rotation.z)
+    let y = if p.negate_rotation_y {
+        -p.rotation.y
+    } else {
+        p.rotation.y
+    };
+    Quat::from_euler(EulerRot::XYZ, p.rotation.x, y, p.rotation.z)
 }
 
 // Distinct per generator so two emitters sharing a def do not spawn identical particle clouds;
@@ -1129,6 +1138,18 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
         );
     }
+    // 0x3B IncrementalRotationApplier: the increment × the element's index into this
+    // generator's emission, on top of the base rotation, plus the render-time y-flip
+    // (research/xim ParticleInitializers.kt IncrementalRotationApplier — rotation +=
+    // incr × (1 + the particles emitted before this one); xim verifies the y-flip fires
+    // even for an all-zero payload). The counter above already counts this element, so
+    // its value is exactly xim's multiplier.
+    let mut negate_rotation_y = false;
+    if let Some(incr) = g.def.incremental_rotation {
+        let m = g.elements_emitted as f32;
+        rotation += Vec3::new(incr[0] * m, incr[1] * m, incr[2] * m);
+        negate_rotation_y = true;
+    }
     // 0x0C VelocityVarianceSetup (rotation): a uniform [-v, v] draw per axis on top of the
     // 0x0B spin rate, per particle (research/xim ParticleInitializers.kt
     // VelocityVarianceSetup — the allocationOffset binds it to the rotation transform; retail's
@@ -1194,6 +1215,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         scale_vel,
         rotation,
         spin,
+        negate_rotation_y,
     });
 }
 
@@ -2040,6 +2062,7 @@ mod tests {
             reverse_displacement: None,
             rotation_variance: None,
             init_rotation: [0.0; 3],
+            incremental_rotation: None,
             blend: ffxi_dat::particle_gen::ParticleBlend::Additive,
             blend_byte: 0x48,
             ignore_texture_alpha: false,
@@ -2916,6 +2939,7 @@ mod tests {
                 scale_vel: Vec2::ZERO,
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
+                negate_rotation_y: false,
             });
             g
         }
@@ -3275,6 +3299,7 @@ mod tests {
                 scale_vel: Vec2::ZERO,
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
+                negate_rotation_y: false,
             });
             g
         }
@@ -3838,6 +3863,29 @@ mod tests {
         assert_eq!(g.particles[0].pos, Vec3::from_array([0.0, 0.5, 0.0]));
     }
 
+    // 0x3B IncrementalRotationApplier: element N's rotation gains the increment × (N + 1) on
+    // top of the 0x09 base, and its orientation step flips the rotation y (research/xim
+    // ParticleInitializers.kt IncrementalRotationApplier). Shipped census: 19903 blocks, all
+    // size_words=4, payloads are radian angles, 1389 all-zero.
+    #[test]
+    fn incremental_rotation_scales_with_the_element_index_and_flips_y() {
+        let mut d = def(10.0, 1.0, 1);
+        d.init_rotation = [0.0, 0.05, 0.0];
+        d.incremental_rotation = Some([0.0, 0.1, 0.0]);
+        let mut g = live(d, 30.0);
+        advance(&mut g, 3.0);
+        assert_eq!(g.particles.len(), 3);
+        for (i, p) in g.particles.iter().enumerate() {
+            let y = 0.05 + 0.1 * (i + 1) as f32;
+            assert_eq!(p.rotation, Vec3::new(0.0, y, 0.0));
+            assert!(p.negate_rotation_y);
+            assert_eq!(
+                particle_rotation(p),
+                Quat::from_euler(EulerRot::XYZ, 0.0, -y, 0.0)
+            );
+        }
+    }
+
     // 0x0A RotationVarianceInitializer: each particle's rotation draws a uniform
     // [-v, v] offset per axis on top of the 0x09 base (research/xim
     // ParticleInitializers.kt RotationVarianceInitializer).
@@ -3913,6 +3961,7 @@ mod tests {
             scale_vel: Vec2::ZERO,
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
+            negate_rotation_y: false,
         });
         g
     }
@@ -4591,6 +4640,7 @@ mod tests {
             scale_vel: Vec2::ZERO,
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
+            negate_rotation_y: false,
         };
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];

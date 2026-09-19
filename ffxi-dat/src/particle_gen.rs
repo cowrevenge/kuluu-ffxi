@@ -438,6 +438,13 @@ pub struct ParticleGeneratorDef {
     // XICLIENT_CODE_MISSING, so xim's mapping is the available evidence).
     pub rotation_variance: Option<[f32; 3]>,
     pub init_rotation: [f32; 3],
+    // sec2 0x3B IncrementalRotationApplier: the per-axis increment added to the 0x09 base
+    // rotation, scaled by one plus the particles emitted before this one (research/xim
+    // ParticleInitializers.kt IncrementalRotationApplier — rotation += incr × (1 +
+    // totalParticlesEmitted); its apply also arms the render-time rotation-y negation, even
+    // for an all-zero payload. The retail decompile's ElemGenerate has no 0x3B case, so xim
+    // is the available evidence, the I6 precedent).
+    pub incremental_rotation: Option<[f32; 3]>,
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
     // `blend` because the TEXTUREFACTOR-alpha promotion is keyed on byte 0x44 exactly.
@@ -695,6 +702,7 @@ impl ParticleGeneratorDef {
         let mut reverse_displacement = None;
         let mut rotation_variance = None;
         let mut init_rotation = [0.0f32; 3];
+        let mut incremental_rotation = None;
         let mut scale_x_track = None;
         let mut scale_y_track = None;
         let mut scale_z_track = None;
@@ -856,6 +864,15 @@ impl ParticleGeneratorDef {
                 }
                 0x0C if payload + 12 <= body.len() => {
                     rotation_velocity_variance = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
+                }
+                // 0x3B IncrementalRotationApplier: three floats, the per-axis increment
+                // (research/xim ParticleInitializers.kt IncrementalRotationApplier).
+                0x3B if payload + 12 <= body.len() => {
+                    incremental_rotation = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
@@ -1181,6 +1198,7 @@ impl ParticleGeneratorDef {
             reverse_displacement,
             rotation_variance,
             init_rotation,
+            incremental_rotation,
             blend,
             blend_byte,
             ignore_texture_alpha,
@@ -2090,6 +2108,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.color_b_track, None);
+    }
+
+    // 0x3B IncrementalRotationApplier: three floats, the per-axis rotation increment
+    // (research/xim ParticleInitializers.kt IncrementalRotationApplier). Shipped census:
+    // 19903 blocks, all size_words=4, payloads are radian angles, 1389 all-zero.
+    #[test]
+    fn incremental_rotation_reads_the_three_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x3B, 4, &{
+            let mut p = Vec::new();
+            p.extend_from_slice(&0.1f32.to_le_bytes());
+            p.extend_from_slice(&(-0.2f32).to_le_bytes());
+            p.extend_from_slice(&0.3f32.to_le_bytes());
+            p
+        }));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.incremental_rotation, Some([0.1, -0.2, 0.3]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.incremental_rotation, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

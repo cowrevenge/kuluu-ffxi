@@ -45,7 +45,8 @@ pub const MOG_HOUSE_PREFIX_CLASSIC: &str = "zmr";
 pub const MOG_HOUSE_PREFIX_WOTG: &str = "zms";
 
 /// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp)
-/// puts in the hit-check array; every other class it drops.
+/// keeps for `m`/`M`-prefixed source fourccs; a rect whose source fourcc does
+/// not start with `m`/`M` enters the hit-check array in every class.
 pub const RECT_CLASS_HIT_CHECKED: u32 = 0;
 
 /// One 64-byte RID entry: an oriented trigger box in FFXI-native zone space
@@ -54,12 +55,13 @@ pub const RECT_CLASS_HIT_CHECKED: u32 = 0;
 pub struct ZoneInteraction {
     /// OBB center.
     pub position: [f32; 3],
-    /// Which record class the entry belongs to; `0` is the hit-checked one.
-    /// `RidManager::Add`
+    /// Which record class the entry belongs to. `RidManager::Add`
     /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::Add)
-    /// puts only the class-0 rects in the array the per-frame checks walk, and in
-    /// the shipped DATs the non-zero classes are coarse sub-map regions (boxes of
-    /// 200-1400 units whose ids resolve to Img chunks), not trigger volumes.
+    /// walks every rect into the array the per-frame checks walk whose source
+    /// fourcc does not start with `m`/`M`, and for `m`/`M` rects keeps only
+    /// class 0 — so in the shipped DATs the non-zero classes are the `m`-rects,
+    /// coarse sub-map regions (boxes of 200-1400 units whose ids resolve to
+    /// Img chunks), not trigger volumes.
     pub rect_class: u32,
     /// Euler radians, applied ZYX. Component 0 is always `0.0`: those bytes are
     /// [`ZoneInteraction::rect_class`], and retail rotates the box by
@@ -110,7 +112,8 @@ impl ZoneInteraction {
     /// A trigger volume that latches a sub-area. `RidManager::InitSubModels`
     /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::InitSubModels)
     /// keeps the `m`-prefixed rects whose dest fourcc is non-zero, and
-    /// `RidManager::Add` hit-checks only [`RECT_CLASS_HIT_CHECKED`].
+    /// `RidManager::Add` hit-checks the `m`-rects only in class
+    /// [`RECT_CLASS_HIT_CHECKED`].
     pub fn is_sub_area_trigger(&self) -> bool {
         self.is_sub_area() && self.dest_id.is_some() && self.rect_class == RECT_CLASS_HIT_CHECKED
     }

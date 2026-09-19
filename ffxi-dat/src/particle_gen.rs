@@ -258,7 +258,8 @@ impl PositionVariance {
 
 /// sec2 0x1F SphericalPositionVarianceFull: a spherical spawn spread whose ring azimuth is
 /// either a random draw or one of a fixed number of evenly spaced steps; the ring can be
-/// tilted and, with the camera flag, authored in the camera's frame.
+/// tilted and, with the camera flag, authored in the camera's frame (CYyGenerator.cpp
+/// CYyGenerator::ElemGenerate case 0x1F).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SphericalPositionVarianceFull {
     pub radius_variance: f32,
@@ -269,7 +270,8 @@ pub struct SphericalPositionVarianceFull {
     pub tilt: f32,
     pub tilt_variance: f32,
     pub camera_oriented: bool,
-    // 0 = random azimuth draw; k = k evenly spaced azimuth steps.
+    // 0 = random azimuth draw; k = k evenly spaced azimuth steps (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x1F).
     pub azimuth_steps: u32,
 }
 
@@ -848,6 +850,10 @@ const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
 const SEC3_OPCODE_SPRITE_SHEET_FRAME: u8 = 0x0D;
 const SEC3_OPCODE_NO_OP: u8 = 0x0E;
 const SEC3_OPCODE_ALPHA_UPDATER: u8 = 0x1B;
+const SEC3_OPCODE_COLOR_TRANSFORM_APPLIER: u8 = 0x0B;
+const SEC3_OPCODE_DAMPENING_FACTOR: u8 = 0x44;
+const SEC3_OPCODE_VELOCITY_ROTATION_UPDATER: u8 = 0x2F;
+const SEC3_OPCODE_POINT_LIST_POSITION: u8 = 0x34;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
 const SEC4_OPCODE_EMIT_CHILD: u8 = 0x01;
@@ -1056,7 +1062,8 @@ impl ParticleGeneratorDef {
                     relative_velocity = Some(f32_le(body, payload));
                 }
                 // 0x1F SphericalPositionVarianceFull: nine floats, the camera flag u32, and the
-                // azimuth-step u16 (0 = random azimuth, otherwise one higher than the steps).
+                // azimuth-step u16 (0 = random azimuth, otherwise one higher than the steps;
+                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1F).
                 0x1F if payload + 42 <= body.len() => {
                     spherical_full = Some(SphericalPositionVarianceFull {
                         radius_variance: f32_le(body, payload),
@@ -1242,7 +1249,8 @@ impl ParticleGeneratorDef {
                     ]);
                 }
                 // 0x19 ColorTransformSetup: four i16s, parsed only (the application is
-                // unknown — see the `color_transform` field).
+                // unknown — see the `color_transform` field; CYyGenerator.cpp ElemGenerate
+                // has no 0x19 case).
                 0x19 if payload + 8 <= body.len() => {
                     color_transform = Some([
                         i16::from_le_bytes([body[payload], body[payload + 1]]),
@@ -1508,7 +1516,7 @@ impl ParticleGeneratorDef {
                     // dampening-factor ProgressValueUpdater: no payload, it samples the
                     // sec2 0x69 track. The engine does not model the velocity dampener,
                     // so the block arms nothing and only consumes (the U1/U2 precedent).
-                    0x44 => {}
+                    SEC3_OPCODE_DAMPENING_FACTOR => {}
                     // research/xim ParticleUpdaters.kt ColorTransformModifier: four i16s —
                     // the per-frame rate on the sec2 0x19 color transform. The engine does
                     // not model the color transform's application (the I14 0x19 precedent),
@@ -1546,7 +1554,7 @@ impl ParticleGeneratorDef {
                     // color += (transform shr 7) × (0.5 × dt) per frame. The engine does
                     // not model the color transform's application (the I14 0x19 precedent),
                     // so the block arms nothing and only consumes (the U1/U2 precedent).
-                    0x0B => {}
+                    SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x25/0x33 —
                     // ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload, they
                     // emit/update the sec2 0x44/0x53 child generator per particle. The
@@ -1558,13 +1566,13 @@ impl ParticleGeneratorDef {
                     // rotation into the velocity rotation. The engine has no
                     // velocityRotation (the U8 0x26 precedent), so the block arms nothing
                     // and only consumes (the U1/U2 precedent).
-                    0x2F => {}
+                    SEC3_OPCODE_VELOCITY_ROTATION_UPDATER => {}
                     // research/xim ParticleUpdaters.kt PointListPositionUpdater: no
                     // payload — samples the sec2 0x54 point-list spline at the particle's
                     // progress and copies it to the position. The engine has no point-list
                     // spline runtime (the I45 0x54 precedent), so the block arms nothing
                     // and only consumes (the U1/U2 precedent).
-                    0x34 => {}
+                    SEC3_OPCODE_POINT_LIST_POSITION => {}
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
                     // frame. The engine has no velocityRotation, so parse-only.
@@ -2072,6 +2080,9 @@ pub(crate) mod test_support {
         body
     }
 
+    /// The four zero bytes that terminate section 2's opcode walk.
+    pub(crate) const SEC2_TERMINATOR: [u8; 4] = [0u8; 4];
+
     pub(crate) fn op(opcode: u8, size_words: u8, payload: &[u8]) -> Vec<u8> {
         let mut v = vec![opcode, size_words, 0, 0];
         v.extend_from_slice(payload);
@@ -2090,7 +2101,7 @@ pub(crate) mod test_support {
         let mut sec2 = op(0x01, 12, &[]);
         sec2[4 + 29] = LINKED_DATA_STATIC_MESH;
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]);
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_at = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
 
@@ -2175,7 +2186,7 @@ mod tests {
         let mut setup = op(0x01, 12, &[]);
         setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let mut sec3 = op(0x27, 2, &(-0.015f32).to_le_bytes());
@@ -2203,13 +2214,15 @@ mod tests {
 
     // sec3 0x06/0x09 VelocityAccelerator: xim maps all three of 0x03/0x06/0x09 to the same
     // updater and retail's ElemIdle adds each payload × dt to the same velocity allocation,
-    // so the payloads sum (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09).
+    // so the payloads sum (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09). Without
+    // the 0x03 base the two payloads still sum from nothing: the base is an initial value,
+    // not a gate.
     #[test]
     fn velocity_accelerators_06_09_sum_into_the_03_accel() {
         let mut setup = op(0x01, 12, &[]);
         setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let vec3 = |x: f32, y: f32, z: f32| -> [u8; 12] {
@@ -2227,9 +2240,8 @@ mod tests {
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.accel, Some([0.0078125, -0.015625, 0.0]));
 
-        // Without the 0x03 base the two payloads still sum from nothing.
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let mut sec3 = op(0x06, 4, &vec3(0.0, 0.015625, 0.0));
@@ -2274,7 +2286,7 @@ mod tests {
 
         // In section 3 they decode.
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]);
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_at = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
         let mut sec3 = op(0x45, 1, &[]);
@@ -2304,7 +2316,7 @@ mod tests {
             sec2.extend(op(opcode, 4, &p));
         }
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]);
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_at = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
         // Arm red and blue only: an unarmed channel keeps its track but must not be applied.
@@ -2495,7 +2507,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(SEC3_OPCODE_SPRITE_SHEET_FRAME, 1, &[]));
@@ -2530,7 +2542,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(SEC3_OPCODE_NO_OP, 1, &[]));
@@ -2564,7 +2576,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(SEC3_OPCODE_POSITION, 1, &[]));
@@ -2588,7 +2600,7 @@ mod tests {
 
         // Without the block the flag stays off and the walk still terminates cleanly.
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
@@ -2609,7 +2621,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(SEC3_OPCODE_ALPHA_UPDATER, 1, &[]));
@@ -2800,7 +2812,7 @@ mod tests {
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         sec2.extend(op(0x3E, 3, &p));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let mut ap = Vec::new();
@@ -2838,7 +2850,7 @@ mod tests {
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         sec2.extend(op(0x40, 3, &p));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let mut ap = Vec::new();
@@ -2876,7 +2888,7 @@ mod tests {
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         sec2.extend(op(0x3F, 3, &p));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         let mut ap = Vec::new();
@@ -3074,7 +3086,7 @@ mod tests {
         };
 
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x5F, 4, &vec3(2.0, 8.0, 0.001)));
@@ -3086,7 +3098,7 @@ mod tests {
         payload[0..4].copy_from_slice(&2.0f32.to_le_bytes());
         payload[4..8].copy_from_slice(&8.0f32.to_le_bytes());
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x5F, 3, &payload));
@@ -3363,7 +3375,7 @@ mod tests {
         payload[0..4].copy_from_slice(&0.9f32.to_le_bytes());
         payload[4..8].copy_from_slice(&0.25f32.to_le_bytes());
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x2C, 3, &payload));
@@ -3386,7 +3398,7 @@ mod tests {
         payload[4..8].copy_from_slice(&(-0.2f32).to_le_bytes());
         payload[8..12].copy_from_slice(&0.3f32.to_le_bytes());
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x26, 4, &payload));
@@ -3408,10 +3420,10 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
-        body.extend_from_slice(&op(0x44, 1, &[]));
+        body.extend_from_slice(&op(SEC3_OPCODE_DAMPENING_FACTOR, 1, &[]));
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
@@ -3424,7 +3436,7 @@ mod tests {
         assert!(
             outcomes.iter().any(|(s, op, o)| {
                 *s == GeneratorSection::Updaters
-                    && *op == 0x44
+                    && *op == SEC3_OPCODE_DAMPENING_FACTOR
                     && *o == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x44 must report decoded: {outcomes:?}"
@@ -3443,7 +3455,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x15, 1, &[]));
@@ -3481,7 +3493,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x18, 1, &[]));
@@ -3519,7 +3531,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x36, 1, &[]));
@@ -3556,10 +3568,10 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
-        body.extend_from_slice(&op(0x0B, 1, &[]));
+        body.extend_from_slice(&op(SEC3_OPCODE_COLOR_TRANSFORM_APPLIER, 1, &[]));
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
@@ -3571,7 +3583,7 @@ mod tests {
         assert!(
             outcomes.iter().any(|(s, o, outcome)| {
                 *s == GeneratorSection::Updaters
-                    && *o == 0x0B
+                    && *o == SEC3_OPCODE_COLOR_TRANSFORM_APPLIER
                     && *outcome == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x0B must report decoded: {outcomes:?}"
@@ -3590,7 +3602,7 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x25, 1, &[]));
@@ -3626,10 +3638,10 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
-        body.extend_from_slice(&op(0x2F, 1, &[]));
+        body.extend_from_slice(&op(SEC3_OPCODE_VELOCITY_ROTATION_UPDATER, 1, &[]));
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
@@ -3641,7 +3653,7 @@ mod tests {
         assert!(
             outcomes.iter().any(|(s, o, outcome)| {
                 *s == GeneratorSection::Updaters
-                    && *o == 0x2F
+                    && *o == SEC3_OPCODE_VELOCITY_ROTATION_UPDATER
                     && *outcome == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x2F must report decoded: {outcomes:?}"
@@ -3660,10 +3672,10 @@ mod tests {
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
-        body.extend_from_slice(&op(0x34, 1, &[]));
+        body.extend_from_slice(&op(SEC3_OPCODE_POINT_LIST_POSITION, 1, &[]));
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
@@ -3675,7 +3687,7 @@ mod tests {
         assert!(
             outcomes.iter().any(|(s, o, outcome)| {
                 *s == GeneratorSection::Updaters
-                    && *o == 0x34
+                    && *o == SEC3_OPCODE_POINT_LIST_POSITION
                     && *outcome == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x34 must report decoded: {outcomes:?}"
@@ -4271,7 +4283,7 @@ mod tests {
             payload.extend_from_slice(&v.to_le_bytes());
         }
         let mut body = build(&setup, 1, 1);
-        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x0C, 3, &payload));
@@ -4295,7 +4307,7 @@ mod tests {
 
     // Appends a section stream after the body and points the section word at it.
     fn with_section(mut body: Vec<u8>, offset_word: usize, stream: &[u8]) -> Vec<u8> {
-        body.extend_from_slice(&[0u8; 4]);
+        body.extend_from_slice(&SEC2_TERMINATOR);
         let at = body.len();
         body[offset_word..offset_word + 4].copy_from_slice(&((at + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(stream);
@@ -4368,7 +4380,11 @@ mod tests {
         let body = with_section(
             build(&mesh_setup(), 120, 0x1400),
             0x7C,
-            &op(0x01, 3, &[0, 0, 0, 0, b'c', b'h', b'i', b'1']),
+            &op(
+                SEC4_OPCODE_EMIT_CHILD,
+                3,
+                &[0, 0, 0, 0, b'c', b'h', b'i', b'1'],
+            ),
         );
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
         let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
@@ -4379,7 +4395,7 @@ mod tests {
         assert!(!def.relife_on_expiry);
         assert!(outcomes.iter().any(|(s, o, r)| {
             *s == GeneratorSection::ElementDie
-                && *o == 0x01
+                && *o == SEC4_OPCODE_EMIT_CHILD
                 && *r == GeneratorOpcodeOutcome::Decoded
         }));
     }

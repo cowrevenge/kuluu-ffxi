@@ -4422,7 +4422,8 @@ mod tests {
     }
 
     // 0x2E is the movement twin of 0x59: same interval rules, a different lock. A routine that
-    // animates-lock only must never withhold movement, and the two intervals may end apart.
+    // animates-lock only must never withhold movement, and the two intervals may end apart
+    // (research/xim EffectRoutineInstance.kt lockMovement).
     #[test]
     fn movement_lock_interval_is_independent_of_the_animation_lock() {
         let lock_stage = |frame: u32, kind: StageKind, raw: u8, dur: u16| -> TimedStage {

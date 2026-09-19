@@ -4094,7 +4094,8 @@ mod tests {
 
     // sec3 0x02 PositionUpdater off: the velocity still exists (the 0x03/0x06/0x09 accelerators
     // keep charging it) but the position never steps, retail's ElemIdle behavior for the 8
-    // shipped generators that carry a base velocity without the block.
+    // shipped generators that carry a base velocity without the block (CYyGenerator.cpp
+    // CYyGenerator::ElemIdle).
     #[test]
     fn position_updater_off_holds_the_particle_at_its_spawn() {
         let mut d = def(10.0, 1.0, 1);

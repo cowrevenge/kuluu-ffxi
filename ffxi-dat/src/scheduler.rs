@@ -344,6 +344,11 @@ pub enum StageKind {
     /// handleSpellEffect).
     SpellEffect,
 
+    /// 0x01 - StartRoutineMarker: argument-less; retail's handler is a no-op
+    /// (research/xim EffectRoutineInstance.kt handleEffect: StartRoutineMarker ->
+    /// EffectResult.noop()), so the stage only marks the routine's start on the timeline.
+    StartRoutineMarker,
+
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
     /// and `init` stops `ini1` this way.
@@ -484,6 +489,9 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt parseSection2 - SpellEffect: the +8 u32 is
             // the spell animation index, not a DatId.
             SPELL_EFFECT_OPCODE => Self::SpellEffect,
+            // research/xim EffectRoutineParser.kt parseSection2 - StartRoutineMarker:
+            // argument-less; retail's handler is a no-op.
+            START_ROUTINE_MARKER_OPCODE => Self::StartRoutineMarker,
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -1792,10 +1800,14 @@ mod tests {
             .collect();
         grouped.sort();
         assert_eq!(grouped, vec![*b"atk1", *b"atk2", *b"atk3", *b"atk4"]);
+        // The routine opens with an unconditional 0x01 marker whose retail handler is a
+        // no-op, so the inert stages are the unknowns plus that marker.
         assert!(
-            vatk.stages
-                .iter()
-                .all(|t| t.stage.random_group.is_some() || t.stage.kind == StageKind::Unknown),
+            vatk.stages.iter().all(|t| {
+                t.stage.random_group.is_some()
+                    || t.stage.kind == StageKind::Unknown
+                    || t.stage.kind == StageKind::StartRoutineMarker
+            }),
             "every sound in vatk is an alternative, not an unconditional stage"
         );
     }
@@ -1883,6 +1895,11 @@ mod tests {
             ),
             (JOINT_SNAPSHOT_OPCODE, 3, StageKind::JointSnapshot),
             (SPELL_EFFECT_OPCODE, 3, StageKind::SpellEffect),
+            (
+                START_ROUTINE_MARKER_OPCODE,
+                2,
+                StageKind::StartRoutineMarker,
+            ),
             (PARTICLE_DAMPEN_OPCODE, 4, StageKind::ParticleDampen),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),

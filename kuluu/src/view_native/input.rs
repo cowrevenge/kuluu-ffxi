@@ -1961,6 +1961,9 @@ pub fn tab_cycle_invalidate_system(
 pub struct CameraAutoRecenter {
     pub forward_held_since: Option<Instant>,
 
+    /// A camera pan or yaw input holds the recenter off; any movement input
+    /// releases it. Retail's hold-off is a displacement count, not a key flag
+    /// — see [`AUTO_RECENTER_RATE`].
     pub manual_override: bool,
 }
 
@@ -1971,10 +1974,22 @@ pub struct CameraAutoRecenter {
 // held (plain W/S), the camera snaps behind faster (play-testing feedback).
 const CARVE_FOLLOW_RATE: f32 = 0.55;
 
+/// Retail's chase recenter is a single law (research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp
+/// CameraManager::UpdatePlayerFollowingCamera, the FS_CONFIG_145 branch): per tick the eye is
+/// pulled 2.5 percent of the way to the point directly behind the actor, only
+/// while that point sits 8-60 degrees from the eye, and only after a
+/// displacement hold-off — the actor moving 0.5 yalm from where the manual pan
+/// began, four such ticks — instead of a held-key flag. This exponential is
+/// the video-measured stand-in for that pull.
 const AUTO_RECENTER_RATE: f32 = 2.5;
 
-/// Retail plants the chase camera when the character deliberately runs toward
-/// it (unlocked S / about-face): the follow must not swing around to the
+/// Retail's window engages at 60 degrees off-centre; this one at 2.0 rad
+/// (~115 degrees) because our A/D carve is body-led — the body turns and the
+/// camera chases — where retail's turn keys are camera-led and the body
+/// follows the camera (kuluu-8mu2, kuluu-t820). A carve past 60 degrees would
+/// stall under retail's window until the carve matches that model. Retail
+/// plants the chase camera when the character deliberately runs toward it
+/// (unlocked S / about-face): the follow must not swing around to the
 /// character's back mid-run. A/D carves sit near ±π/2 and must still follow,
 /// so the hold only engages past this threshold.
 const RECENTER_HOLD_RAD: f32 = 2.0;

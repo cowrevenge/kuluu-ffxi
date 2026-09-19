@@ -481,6 +481,7 @@ impl EmitCull {
 
 const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
 const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
+const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
@@ -690,6 +691,11 @@ impl ParticleGeneratorDef {
                 0x60..=0x63 if payload + 8 <= body.len() => {
                     tod_color_tracks[(opcode - 0x60) as usize] = track_id(body, payload + 4);
                 }
+                // 0x1D SpriteSheetInitializer: retail derives the flipbook's per-frame interval
+                // from the frame count inside the CMoD3a resource, not the DAT (research/XIClient
+                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1D), so the payload word is
+                // never read and no state is set.
+                SEC2_OPCODE_SPRITE_SHEET_INIT if payload + 4 <= body.len() => {}
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
@@ -1490,6 +1496,44 @@ mod tests {
         assert_eq!(def.mesh_kind, ParticleMeshKind::SpriteSheet);
         assert_eq!(def.mesh_id, *b"fir ");
         assert_eq!(def.max_life_frames, 24.0);
+    }
+
+    // 0x1D SpriteSheetInitializer: retail sets the flipbook interval from the CMoD3a resource's
+    // frame count, not the DAT (research/XIClient CYyGenerator.cpp CYyGenerator::ElemGenerate
+    // case 0x1D), so the block carries no state — the parse must keep the stream aligned for
+    // the blocks after it.
+    #[test]
+    fn sprite_sheet_initializer_consumes_the_block_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let mut sec2 = setup;
+        sec2.extend(op(SEC2_OPCODE_SPRITE_SHEET_INIT, 2, &0u32.to_le_bytes()));
+        let vel: [f32; 3] = [1.0, 2.0, 3.0];
+        let mut vel_bytes = Vec::new();
+        for f in vel {
+            vel_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x02, 4, &vel_bytes));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            def.init_velocity, vel,
+            "the 0x1D block must not desync the stream"
+        );
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Initializers
+                    && *op == SEC2_OPCODE_SPRITE_SHEET_INIT
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "0x1D must report decoded: {outcomes:?}"
+        );
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

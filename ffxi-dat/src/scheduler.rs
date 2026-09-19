@@ -271,6 +271,11 @@ pub enum StageKind {
     /// not lock.
     AnimationLock,
 
+    /// 0x2E - MovementLock for `duration_frames` frames of the routine clock (research/xim
+    /// EffectRoutineParser.kt parseSection2 MovementLockEffect): the actor's movement is
+    /// withheld for the interval, the pose is untouched - facing is the separate 0x2F lock.
+    MovementLock,
+
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
     /// and `init` stops `ini1` this way.
@@ -391,6 +396,8 @@ impl StageKind {
             // ActionTimer1 animation lock, refcounted across overlapping routines. The first
             // form carries a zero dword after delay/duration; the magic form is argument-less.
             ANIMATION_LOCK_OPCODE | ANIMATION_LOCK_MAGIC_OPCODE => Self::AnimationLock,
+            // research/xim EffectRoutineParser.kt parseSection2 - MovementLockEffect, argument-less.
+            MOVEMENT_LOCK_OPCODE => Self::MovementLock,
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -1758,6 +1765,7 @@ mod tests {
     fn mob_routine_opcodes_map_to_their_kinds() {
         for (opcode, words, kind) in [
             (ANIMATION_LOCK_MAGIC_OPCODE, 2, StageKind::AnimationLock),
+            (MOVEMENT_LOCK_OPCODE, 2, StageKind::MovementLock),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),
             (

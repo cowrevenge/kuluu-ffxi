@@ -14,7 +14,7 @@ pub struct StanceParams<'w> {
 }
 
 #[derive(SystemParam)]
-pub struct MoveEnvParams<'w> {
+pub struct MoveEnvParams<'w, 's> {
     // Player movement grounds height on the retail MZB zone collision (the real
     // .dat floor, which has the stairs). The coarse LSB Recast navmesh is a
     // mob-pathing mesh that flattens stairs, so it is NOT used here — only for
@@ -36,6 +36,12 @@ pub struct MoveEnvParams<'w> {
     // Stair-capture drive channel (FFXI_STAIR_DRIVE): forward/strafe holds plus
     // a Q/E-style turn axis for the external driver. None unless wired at connect.
     pub stair_drive: Option<Res<'w, StairDriveHandle>>,
+    // The self entity's active effect routines, for the 0x2E MovementLock gate:
+    // a live lock interval zeros the local player's movement input this tick
+    // (research/xim EffectRoutineInstance.kt lockMovement - the movement
+    // controller returns zero velocity).
+    pub tracked: Res<'w, kuluu_render::scene::TrackedEntities>,
+    pub scheds: Query<'w, 's, &'static kuluu_render::scheduler_runtime::ActiveSchedulers>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1147,7 +1153,22 @@ pub fn dispatch_movement_system(
     let turn_rate = ROTATE_KEY_RATE_RAD_PER_SEC * (resolved.rotate_dir as f32 + fp_rotate);
     let (player_rotate_u8, heading_delta_units) =
         advance_heading_turn(&mut turn_accum.units, turn_rate, time.delta_secs());
-    let steer_in_chase = !first_person && !locked && (pf != 0.0 || ps != 0.0);
+    // research/xim EffectRoutineInstance.kt lockMovement: while the active routine's 0x2E
+    // MovementLock interval is live, the movement controller returns zero velocity - the
+    // local player's movement input is withheld for those ticks. Facing (Q/E) is the
+    // separate 0x2F lock, so rotation keeps running.
+    let self_movement_locked = state
+        .snapshot
+        .self_char_id
+        .and_then(|id| env.tracked.by_id.get(&id).copied())
+        .and_then(|ent| env.scheds.get(ent).ok())
+        .is_some_and(|scheds| scheds.movement_locked_now());
+    if self_movement_locked {
+        forward = 0;
+        strafe = 0;
+    }
+    let steer_in_chase =
+        (!first_person && !locked && (pf != 0.0 || ps != 0.0)) && !self_movement_locked;
     // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
     // the latch only holds the run direction against the passive
     // auto-recenter, not against the player actively steering the camera.
@@ -2116,6 +2137,7 @@ mod tests {
             .init_resource::<kuluu_render::combat_stance::RestStance>()
             .init_resource::<kuluu_render::combat_stance::WalkMode>()
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
+            .init_resource::<kuluu_render::scene::TrackedEntities>()
             .init_resource::<super::super::walker::debug::FieldDebug>()
             .add_systems(
                 Update,

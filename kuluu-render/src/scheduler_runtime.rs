@@ -249,6 +249,17 @@ impl ActiveScheduler {
         })
     }
 
+    /// The MovementLock twin of [`Self::locks_at`]: true while a 0x2E interval covers `frame`.
+    /// research/xim EffectRoutineInstance.kt lockMovement - the movement controller returns
+    /// zero velocity for the interval; the pose and the facing (0x2F) are separate locks.
+    pub fn movement_locks_at(&self, frame: u32) -> bool {
+        self.stages.iter().any(|t| {
+            t.stage.kind == StageKind::MovementLock
+                && t.frame <= frame
+                && frame < t.frame + t.stage.duration_frames as u32
+        })
+    }
+
     /// The routine timeline ends when its last stage ends, not when it starts: a trailing
     /// AnimationLock must keep the routine alive for its whole `duration_frames`.
     pub fn last_frame(&self) -> u32 {
@@ -299,6 +310,15 @@ impl ActiveSchedulers {
     /// test itself (ActionTimer1 reached 2 and 3 when a hit reaction overlapped a swing).
     pub fn is_locked_now(&self) -> bool {
         self.routines.iter().any(|r| r.locks_at(r.current_frame()))
+    }
+
+    /// True while any entry's MovementLock interval covers its own current frame: the local
+    /// player's movement input is withheld for those ticks (research/xim EffectRoutineInstance.kt
+    /// lockMovement).
+    pub fn movement_locked_now(&self) -> bool {
+        self.routines
+            .iter()
+            .any(|r| r.movement_locks_at(r.current_frame()))
     }
 
     /// StopRoutine: drop every entry named `name`. xim stops each matching sequence on the
@@ -4309,6 +4329,62 @@ mod tests {
                 r.elapsed = frame as f32 / ROUTINE_FPS;
             }
             assert_eq!(probe.is_locked_now(), locked, "frame {frame}");
+        }
+    }
+
+    // 0x2E is the movement twin of 0x59: same interval rules, a different lock. A routine that
+    // animates-lock only must never withhold movement, and the two intervals may end apart.
+    #[test]
+    fn movement_lock_interval_is_independent_of_the_animation_lock() {
+        let lock_stage = |frame: u32, kind: StageKind, raw: u8, dur: u16| -> TimedStage {
+            let mut t = stage(frame, kind, raw, *b"    ");
+            t.stage.duration_frames = dur;
+            t
+        };
+        let cast = ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"cate",
+            vec![
+                lock_stage(0, StageKind::AnimationLock, 0x59, 60),
+                lock_stage(4, StageKind::MovementLock, 0x2E, 50),
+            ],
+        ));
+
+        assert!(cast.locks_at(10), "the animation lock holds from frame 0");
+        assert!(
+            !cast.movement_locks_at(2),
+            "the movement lock starts on its own frame"
+        );
+        assert!(cast.movement_locks_at(4));
+        assert!(cast.movement_locks_at(53));
+        assert!(
+            !cast.movement_locks_at(54),
+            "the movement interval is half-open at the end"
+        );
+        assert!(
+            cast.locks_at(54),
+            "the animation lock outlives the movement lock"
+        );
+
+        let anim_only = ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"ini1",
+            vec![lock_stage(0, StageKind::AnimationLock, 0x07, 30)],
+        ));
+        assert!(
+            !anim_only.movement_locks_at(10),
+            "an animation-only routine never withholds movement"
+        );
+
+        let mut both = ActiveSchedulers::one(cast);
+        both.push(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"damg",
+            vec![lock_stage(50, StageKind::MovementLock, 0x2E, 20)],
+        )));
+        for (frame, locked) in [(10u32, true), (53, true), (55, true), (70, false)] {
+            let mut probe = both.clone();
+            for r in &mut probe.routines {
+                r.elapsed = frame as f32 / ROUTINE_FPS;
+            }
+            assert_eq!(probe.movement_locked_now(), locked, "frame {frame}");
         }
     }
 

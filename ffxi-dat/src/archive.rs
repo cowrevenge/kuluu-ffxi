@@ -1097,9 +1097,8 @@ mod tests {
         assert_eq!(served_bytes(&root), b"base-lower");
     }
 
-    /// The shape XI-Pivot actually ships, from the horizonxi-2023 target
-    /// (vendor/game-files/targets/hxi) — including the Windows `root_path` that
-    /// cannot resolve off Windows.
+    /// The shape XI-Pivot actually ships for the horizonxi-2023 client profile
+    /// — including the Windows `root_path` that cannot resolve off Windows.
     const REAL_PIVOT_INI: &str = "\
 [settings]
 root_path=C:\\Program Files (x86)\\HorizonXI\\HorizonXI\\Game\\polplugins\\DATs

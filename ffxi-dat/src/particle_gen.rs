@@ -681,6 +681,10 @@ pub struct ParticleGeneratorDef {
     // (research/XIClient CYyGenerator.cpp ElemGenerate), so the id is kept for
     // reconstruction only.
     pub fixed_point_position_variance: Option<[u8; 4]>,
+    // sec2 0x4F: the twin of 0x4E — xim maps both opcodes to the same class
+    // (research/xim ParticleGeneratorParser.kt sec2Handler); a second slot so a
+    // generator carrying both keeps both ids.
+    pub fixed_point_position_variance_2: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -840,6 +844,7 @@ impl ParticleGeneratorDef {
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
         let mut fixed_point_position_variance = None;
+        let mut fixed_point_position_variance_2 = None;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1198,6 +1203,11 @@ impl ParticleGeneratorDef {
                 0x4E if payload + 12 <= body.len() => {
                     fixed_point_position_variance = track_id(body, payload + 4);
                 }
+                // 0x4F: the twin of 0x4E — xim maps both to the same class
+                // (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x4F if payload + 12 <= body.len() => {
+                    fixed_point_position_variance_2 = track_id(body, payload + 4);
+                }
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1481,6 +1491,7 @@ impl ParticleGeneratorDef {
             parent_scale,
             velocity_dampener_track,
             fixed_point_position_variance,
+            fixed_point_position_variance_2,
         }))
     }
 
@@ -2671,6 +2682,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.fixed_point_position_variance, None);
+    }
+
+    // 0x4F FixedPointPositionVarianceSetup: the twin of 0x4E — xim maps both opcodes to
+    // the same class (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped
+    // census: 442 sec2 0x4F blocks in the parser-accepted corpus.
+    #[test]
+    fn fixed_point_position_variance_twin_reads_the_point_list_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut payload = [0u8; 12];
+        payload[4..8].copy_from_slice(b"pts1");
+        payload[8..12].copy_from_slice(&0u32.to_le_bytes());
+        sec2.extend(op(0x4F, 4, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.fixed_point_position_variance_2, Some(*b"pts1"));
+        assert_eq!(def.fixed_point_position_variance, None);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.fixed_point_position_variance_2, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

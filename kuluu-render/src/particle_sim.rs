@@ -2245,6 +2245,7 @@ mod tests {
             parent_scale: false,
             velocity_dampener_track: None,
             fixed_point_position_variance: None,
+            fixed_point_position_variance_2: None,
         }
     }
 

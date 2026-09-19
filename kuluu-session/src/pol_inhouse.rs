@@ -141,7 +141,6 @@ fn login_blocking(_creds: &Credentials) -> Result<crate::auth_client::AuthSessio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::net::TcpListener;
     use std::thread;
 

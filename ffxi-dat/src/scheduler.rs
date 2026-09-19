@@ -54,6 +54,10 @@ const DISPLAY_DEAD_OPCODE: u8 = 0x78;
 // stage, no DatId.
 const SET_MODEL_VISIBILITY_OPCODE: u8 = 0x75;
 const SET_MODEL_VISIBILITY_PAYLOAD_LEN: usize = 16;
+// research/xim EffectRoutineParser.kt parseSection2 0x22 JointSnapshotEffect: the u32 after
+// delay/duration is consumed and unused; the handler only sets the context's joint-snapshot
+// flag (EffectRoutineInstance.kt handleJointSnapshotEffect applyJointSnapshot(true)).
+const JOINT_SNAPSHOT_OPCODE: u8 = 0x22;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -309,6 +313,12 @@ pub enum StageKind {
     /// applyJointSnapshot(true)).
     ActorPositionSnapshot,
 
+    /// 0x22 - JointSnapshot: the u32 after delay/duration is consumed and unused in retail
+    /// (research/xim EffectRoutineParser.kt parseSection2); the handler only sets the
+    /// context's joint-snapshot flag (research/xim EffectRoutineInstance.kt
+    /// handleJointSnapshotEffect: applyJointSnapshot(true)).
+    JointSnapshot,
+
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
     /// and `init` stops `ini1` this way.
@@ -439,6 +449,9 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt parseSection2 - ActorPositionSnapshotEffect,
             // argument-less.
             ACTOR_POSITION_SNAPSHOT_OPCODE => Self::ActorPositionSnapshot,
+            // research/xim EffectRoutineParser.kt parseSection2 - JointSnapshotEffect: the +8
+            // u32 is consumed and unused, so it is not a DatId.
+            JOINT_SNAPSHOT_OPCODE => Self::JointSnapshot,
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -632,6 +645,7 @@ impl Scheduler {
                         StageKind::FlinchOnCaster
                             | StageKind::FlinchOnTarget
                             | StageKind::Knockback
+                            | StageKind::JointSnapshot
                     );
                 let id = match payload {
                     Some(bytes) if !non_id_payload => bytes,
@@ -1828,6 +1842,7 @@ mod tests {
                 2,
                 StageKind::ActorPositionSnapshot,
             ),
+            (JOINT_SNAPSHOT_OPCODE, 3, StageKind::JointSnapshot),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),
             (

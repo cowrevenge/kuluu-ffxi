@@ -1558,6 +1558,12 @@ impl ParticleGeneratorDef {
                     // velocityRotation (the U8 0x26 precedent), so the block arms nothing
                     // and only consumes (the U1/U2 precedent).
                     0x2F => {}
+                    // research/xim ParticleUpdaters.kt PointListPositionUpdater: no
+                    // payload — samples the sec2 0x54 point-list spline at the particle's
+                    // progress and copies it to the position. The engine has no point-list
+                    // spline runtime (the I45 0x54 precedent), so the block arms nothing
+                    // and only consumes (the U1/U2 precedent).
+                    0x34 => {}
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
                     // frame. The engine has no velocityRotation, so parse-only.
@@ -3638,6 +3644,40 @@ mod tests {
                     && *outcome == GeneratorOpcodeOutcome::Decoded
             }),
             "sec3 0x2F must report decoded: {outcomes:?}"
+        );
+    }
+
+    // sec3 0x34 PointListPositionUpdater: no payload — samples the sec2 0x54 point-list
+    // spline at the particle's progress and copies it to the position; the engine has no
+    // point-list spline runtime (research/xim ParticleUpdaters.kt
+    // PointListPositionUpdater; the I45 0x54 precedent). Shipped census: 292 blocks, all
+    // size_words=1, paired 1:1 with the sec2 0x54 setup (same 22 files).
+    #[test]
+    fn point_list_position_updater_consumes_the_block_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x34, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            outcomes.iter().any(|(s, o, outcome)| {
+                *s == GeneratorSection::Updaters
+                    && *o == 0x34
+                    && *outcome == GeneratorOpcodeOutcome::Decoded
+            }),
+            "sec3 0x34 must report decoded: {outcomes:?}"
         );
     }
 

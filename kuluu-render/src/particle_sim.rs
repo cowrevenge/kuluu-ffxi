@@ -4483,6 +4483,7 @@ mod tests {
                 actor_fade: None,
                 idle_transition_time: None,
                 flinch_duration: None,
+                model_visibility: None,
             },
         }
     }

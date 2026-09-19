@@ -375,6 +375,7 @@ mod tests {
                 actor_fade: None,
                 idle_transition_time: None,
                 flinch_duration: None,
+                model_visibility: None,
                 delay_frames: 0,
                 duration_frames: 60,
                 id,

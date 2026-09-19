@@ -11,7 +11,7 @@ use crate::scene::BakedActor;
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
-use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
+use ffxi_dat::scheduler::{ModelVisibility, Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_event::vm::scene::{EVENT_COORD_UNITS, EVENT_HEADING_UNITS, EVENT_SPEED_SCALE};
@@ -260,6 +260,24 @@ impl ActiveScheduler {
         })
     }
 
+    /// The 0x75 SetModelVisibility overrides live at `frame`
+    /// (`stage.frame <= frame < stage.frame + duration_frames`), in timeline order. The render
+    /// layer folds them into the actor's hidden-slot set (research/xim EffectRoutineInstance.kt
+    /// handleSetModelVisibilityRoutine: each stage sets one model slot's visibility for the
+    /// stage's duration).
+    pub fn for_each_visibility_override_at(&self, frame: u32, mut f: impl FnMut(&ModelVisibility)) {
+        for t in &self.stages {
+            if t.stage.kind == StageKind::SetModelVisibility
+                && t.frame <= frame
+                && frame < t.frame + t.stage.duration_frames as u32
+            {
+                if let Some(mv) = t.stage.model_visibility {
+                    f(&mv);
+                }
+            }
+        }
+    }
+
     /// The routine timeline ends when its last stage ends, not when it starts: a trailing
     /// AnimationLock must keep the routine alive for its whole `duration_frames`.
     pub fn last_frame(&self) -> u32 {
@@ -319,6 +337,28 @@ impl ActiveSchedulers {
         self.routines
             .iter()
             .any(|r| r.movement_locks_at(r.current_frame()))
+    }
+
+    /// The hidden model-slot set this entity's running routines produce at their own current
+    /// frame: the ranged slot (2) starts hidden - retail's default (research/xim ActorModel.kt
+    /// getHiddenSlotIds: "Ranged is hidden by default") - then each routine's active 0x75
+    /// overrides apply in queue order, the last one on a slot winning. An override with
+    /// `if_engaged` only applies while the actor is engaged (research/xim ActorModel.kt
+    /// getHiddenSlotIds ifEngaged gate); slots outside 0..5 are ignored (research/xim
+    /// ActorModel.kt getHiddenModelSlots).
+    pub fn hidden_model_slots_now(&self, engaged: bool) -> [bool; 5] {
+        let mut hidden = [false, false, true, false, false];
+        for r in &self.routines {
+            r.for_each_visibility_override_at(r.current_frame(), |mv| {
+                if mv.if_engaged && !engaged {
+                    return;
+                }
+                if (mv.slot as usize) < hidden.len() {
+                    hidden[mv.slot as usize] = mv.hidden;
+                }
+            });
+        }
+        hidden
     }
 
     /// StopRoutine: drop every entry named `name`. xim stops each matching sequence on the
@@ -4012,6 +4052,7 @@ mod tests {
                 actor_fade: None,
                 idle_transition_time: None,
                 flinch_duration: None,
+                model_visibility: None,
             },
         }
     }
@@ -4386,6 +4427,86 @@ mod tests {
             }
             assert_eq!(probe.movement_locked_now(), locked, "frame {frame}");
         }
+    }
+
+    // 0x75 SetModelVisibility: the hidden-slot set starts ranged-only (slot 2) - retail's
+    // default (research/xim ActorModel.kt getHiddenSlotIds) - and each active stage sets its
+    // slot for the interval, the later stage winning while both are live.
+    #[test]
+    fn hidden_model_slots_fold_the_ranged_default_with_the_active_overrides() {
+        let vis_stage =
+            |frame: u32, hidden: bool, slot: u16, if_engaged: bool, dur: u16| -> TimedStage {
+                let mut t = stage(frame, StageKind::SetModelVisibility, 0x75, *b"    ");
+                t.stage.duration_frames = dur;
+                t.stage.model_visibility = Some(ModelVisibility {
+                    hidden,
+                    slot,
+                    if_engaged,
+                });
+                t
+            };
+
+        // No override: the ranged slot stays hidden, the others visible.
+        let idle = ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"ini1",
+            vec![stage(0, StageKind::AnimationLock, 0x59, *b"    ")],
+        )));
+        assert_eq!(
+            idle.hidden_model_slots_now(false),
+            [false, false, true, false, false]
+        );
+
+        // Main hides on frame 0, re-shows on frame 10: the later stage wins while both are
+        // live, and the interval is half-open at the end.
+        let cast = ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"cate",
+            vec![
+                vis_stage(0, true, 0, false, 30),
+                vis_stage(10, false, 0, false, 30),
+            ],
+        )));
+        for (frame, main_hidden) in [(0u32, true), (10, false), (30, false), (39, false)] {
+            let mut probe = cast.clone();
+            for r in &mut probe.routines {
+                r.elapsed = frame as f32 / ROUTINE_FPS;
+            }
+            assert_eq!(
+                probe.hidden_model_slots_now(false),
+                [main_hidden, false, true, false, false],
+                "frame {frame}"
+            );
+        }
+
+        // An ifEngaged override applies only to an engaged actor (research/xim ActorModel.kt
+        // getHiddenSlotIds ifEngaged gate).
+        let engaged_only = ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"atkr",
+            vec![vis_stage(0, false, 2, true, 60)], // show ranged while engaged
+        )));
+        assert_eq!(
+            engaged_only.hidden_model_slots_now(false),
+            [false, false, true, false, false]
+        );
+        assert_eq!(
+            engaged_only.hidden_model_slots_now(true),
+            [false, false, false, false, false]
+        );
+
+        // Across routines, queue order decides: the later routine's override on the same slot
+        // wins.
+        let mut both = ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"cate",
+            vec![vis_stage(0, true, 1, false, 60)],
+        )));
+        both.push(ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"damg",
+            vec![vis_stage(0, false, 1, false, 60)],
+        )));
+        assert_eq!(
+            both.hidden_model_slots_now(false),
+            [false, false, true, false, false],
+            "the later routine re-shows sub"
+        );
     }
 
     // A routine's timeline ends when its last stage ends: a trailing AnimationLock longer than

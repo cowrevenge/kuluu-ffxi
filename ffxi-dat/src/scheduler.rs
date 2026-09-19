@@ -49,6 +49,11 @@ const KNOCKBACK_OPCODE: u8 = 0x5E;
 const KNOCKBACK_ALT_OPCODE: u8 = 0xBF;
 const STOP_ROUTINE_OPCODE: u8 = 0x5F;
 const DISPLAY_DEAD_OPCODE: u8 = 0x78;
+// research/xim EffectRoutineParser.kt parseSection2 0x75 SetModelVisibilityRoutine: the payload
+// after delay/duration is hidden (u32 == 1), slot (u16), ifEngaged (u16 == 1) - a 4-dword
+// stage, no DatId.
+const SET_MODEL_VISIBILITY_OPCODE: u8 = 0x75;
+const SET_MODEL_VISIBILITY_PAYLOAD_LEN: usize = 16;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -159,6 +164,17 @@ pub struct ModelTransform {
     pub subchunk: u32,
 }
 
+/// 0x75 SetModelVisibility payload (research/xim EffectRoutineParser.kt parseSection2):
+/// show or hide one model slot of the actor for the stage's duration. Slot 2 is the
+/// weapon slot, hidden by default in retail (research/xim ActorModel.kt getHiddenSlotIds);
+/// `if_engaged` limits the override to engaged actors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelVisibility {
+    pub hidden: bool,
+    pub slot: u16,
+    pub if_engaged: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchedulerStage {
     pub kind: StageKind,
@@ -206,6 +222,11 @@ pub struct SchedulerStage {
     // Retail plays the dfi?/dfm? flinch clip with transition in/out of
     // animationDuration/2 frames each (EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance).
     pub flinch_duration: Option<f32>,
+
+    // `Some` exactly for `SetModelVisibility`, whose payload (hidden u32, slot u16, ifEngaged
+    // u16) occupies the dwords the generic decoder reads `id` from (research/xim
+    // EffectRoutineParser.kt parseSection2); `id` is `NO_STAGE_ID` there.
+    pub model_visibility: Option<ModelVisibility>,
 
     // research/xim EffectRoutineParser.kt parseSection2,553-559 — stages between a 0x3D and its 0x3E
     // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
@@ -275,6 +296,11 @@ pub enum StageKind {
     /// EffectRoutineParser.kt parseSection2 MovementLockEffect): the actor's movement is
     /// withheld for the interval, the pose is untouched - facing is the separate 0x2F lock.
     MovementLock,
+
+    /// 0x75 - SetModelVisibility: show or hide one model slot of the actor for the stage's
+    /// duration (research/xim EffectRoutineParser.kt parseSection2 SetModelVisibilityRoutine);
+    /// the payload is [`SchedulerStage::model_visibility`].
+    SetModelVisibility,
 
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
@@ -398,6 +424,11 @@ impl StageKind {
             ANIMATION_LOCK_OPCODE | ANIMATION_LOCK_MAGIC_OPCODE => Self::AnimationLock,
             // research/xim EffectRoutineParser.kt parseSection2 - MovementLockEffect, argument-less.
             MOVEMENT_LOCK_OPCODE => Self::MovementLock,
+            // research/xim EffectRoutineParser.kt parseSection2 - SetModelVisibilityRoutine:
+            // hidden u32, slot u16, ifEngaged u16 after delay/duration; no DatId.
+            SET_MODEL_VISIBILITY_OPCODE if length_words * 4 >= SET_MODEL_VISIBILITY_PAYLOAD_LEN => {
+                Self::SetModelVisibility
+            }
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -557,6 +588,15 @@ impl Scheduler {
                 let idle_transition_time = payload
                     .filter(|_| kind == StageKind::TransitionToIdle)
                     .map(f32::from_le_bytes);
+                // research/xim EffectRoutineParser.kt parseSection2 0x75 - the payload is
+                // hidden u32, slot u16, ifEngaged u16 straight after delay/duration.
+                let model_visibility = (kind == StageKind::SetModelVisibility
+                    && stage_bytes >= SET_MODEL_VISIBILITY_PAYLOAD_LEN)
+                    .then(|| ModelVisibility {
+                        hidden: read_u32(ID_OFFSET) == 1,
+                        slot: read_u16(ID_OFFSET + 4),
+                        if_engaged: read_u16(ID_OFFSET + 6) == 1,
+                    });
                 // Flinch animationDuration sits at +24, past the id slot - read it straight off
                 // the stage bytes when the full 9-dword payload is present.
                 let flinch_duration =
@@ -576,6 +616,7 @@ impl Scheduler {
                     || screen_color.is_some()
                     || actor_fade.is_some()
                     || idle_transition_time.is_some()
+                    || model_visibility.is_some()
                     || matches!(
                         kind,
                         StageKind::FlinchOnCaster
@@ -623,6 +664,7 @@ impl Scheduler {
                         actor_fade,
                         idle_transition_time,
                         flinch_duration,
+                        model_visibility,
                         random_group: open_group,
                         local_dir,
                     },
@@ -1766,6 +1808,11 @@ mod tests {
         for (opcode, words, kind) in [
             (ANIMATION_LOCK_MAGIC_OPCODE, 2, StageKind::AnimationLock),
             (MOVEMENT_LOCK_OPCODE, 2, StageKind::MovementLock),
+            (
+                SET_MODEL_VISIBILITY_OPCODE,
+                4,
+                StageKind::SetModelVisibility,
+            ),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),
             (
@@ -1788,6 +1835,30 @@ mod tests {
                 "opcode {opcode:#x}"
             );
         }
+    }
+
+    // The 0x75 payload is hidden u32, slot u16, ifEngaged u16 (research/xim
+    // EffectRoutineParser.kt parseSection2), so its id slot must not surface as a DatId.
+    #[test]
+    fn set_model_visibility_payload_is_not_a_datid() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(SET_MODEL_VISIBILITY_OPCODE, 4, 0, 0));
+        body.extend_from_slice(&1u32.to_le_bytes()); // hidden
+        body.extend_from_slice(&2u16.to_le_bytes()); // slot
+        body.extend_from_slice(&1u16.to_le_bytes()); // ifEngaged
+
+        let s = Scheduler::parse(*b"splg", &body).unwrap();
+        let stage = &s.stages[0].stage;
+        assert_eq!(stage.kind, StageKind::SetModelVisibility);
+        assert_eq!(
+            stage.model_visibility,
+            Some(ModelVisibility {
+                hidden: true,
+                slot: 2,
+                if_engaged: true
+            })
+        );
+        assert_eq!(stage.id, NO_STAGE_ID);
     }
 
     // The flinch and knockback payloads are floats/ints from +8 on (research/xim

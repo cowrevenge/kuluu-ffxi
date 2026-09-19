@@ -435,6 +435,12 @@ pub struct ParticleGeneratorDef {
     // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
     // research/xim ParticleGeneratorParser.kt sec3Handler RotationUpdater), so read [`Self::spin`].
     pub rotation_velocity: Option<[f32; 3]>,
+
+    // sec2 0x0C VelocityVarianceSetup (rotation): per-particle uniform [-v, v] draw added to each
+    // axis of the 0x0B spin rate (research/xim ParticleInitializers.kt — the allocationOffset
+    // binds it to the rotation transform; CYyGenerator.cpp CYyGenerator::ElemGenerate shares one
+    // frand-add body across 0x03/0x0C/0x13).
+    pub rotation_velocity_variance: Option<[f32; 3]>,
     pub rotation_updater: bool,
 
     // Section 4 (body[0x7C]) opcode 0x05, CYyGenerator.cpp CYyGenerator::ElemDie case 5 — an expiring
@@ -578,6 +584,7 @@ impl ParticleGeneratorDef {
         let mut tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS] =
             [None; TOD_COLOR_CHANNELS];
         let mut rotation_velocity = None;
+        let mut rotation_velocity_variance = None;
         let mut specular = None;
         let mut specular_element = false;
         let mut foot_mark = false;
@@ -684,6 +691,13 @@ impl ParticleGeneratorDef {
                 }
                 0x0B if payload + 12 <= body.len() => {
                     rotation_velocity = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
+                }
+                0x0C if payload + 12 <= body.len() => {
+                    rotation_velocity_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
@@ -946,6 +960,7 @@ impl ParticleGeneratorDef {
             association,
             foot_mark,
             rotation_velocity,
+            rotation_velocity_variance,
             rotation_updater,
             relife_on_expiry,
             specular_element,
@@ -1710,6 +1725,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.rotation_variance, None);
+    }
+
+    // 0x0C VelocityVarianceSetup (rotation): three floats, the per-axis bounds of the random
+    // spin added to the 0x0B rate per particle (research/xim ParticleInitializers.kt — the
+    // allocationOffset binds it to the rotation transform).
+    #[test]
+    fn rotation_velocity_variance_reads_the_three_axis_bounds() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut rate: Vec<u8> = Vec::new();
+        for f in [0.0f32, 0.01, 0.0] {
+            rate.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x0B, 4, &rate));
+        let mut var: Vec<u8> = Vec::new();
+        for f in [0.0f32, 0.005, 0.0] {
+            var.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x0C, 4, &var));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.rotation_velocity, Some([0.0, 0.01, 0.0]));
+        assert_eq!(def.rotation_velocity_variance, Some([0.0, 0.005, 0.0]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.rotation_velocity_variance, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

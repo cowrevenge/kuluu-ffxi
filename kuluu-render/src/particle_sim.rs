@@ -373,6 +373,10 @@ struct Particle {
     // Euler radians, seeded from the generator's 0x09 rotation and turned by its spin
     // (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05 integrates the 0x0B rate per frame).
     rotation: Vec3,
+    // The 0x0B spin rate plus this particle's 0x0C variance draw; zero when the generator's
+    // rotation updater is off (research/xim ParticleUpdaters.kt RotationUpdater — the
+    // rotation transform's velocity, which holds the 0x0B + 0x0C sum, is what it integrates).
+    spin: Vec3,
 }
 
 // research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a source joint naming
@@ -970,16 +974,13 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .def
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
-    let spin = g.def.spin().map(|r| Vec3::from_array(r) * frames);
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
         }
         p.pos += p.vel * frames;
-        if let Some(r) = spin {
-            p.rotation += r;
-        }
+        p.rotation += p.spin * frames;
     }
     reap_expired(g);
 
@@ -1055,6 +1056,24 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
         );
     }
+    // 0x0C VelocityVarianceSetup (rotation): a uniform [-v, v] draw per axis on top of the
+    // 0x0B spin rate, per particle (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup — the allocationOffset binds it to the rotation transform; retail's
+    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity).
+    let spin = match g.def.spin() {
+        Some(base) => {
+            let mut spin = Vec3::from_array(base);
+            if let Some(var) = g.def.rotation_velocity_variance {
+                spin += Vec3::new(
+                    (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[0],
+                    (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[1],
+                    (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
+                );
+            }
+            spin
+        }
+        None => Vec3::ZERO,
+    };
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
@@ -1064,6 +1083,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
         scale: Vec2::new(g.def.init_scale[0], g.def.init_scale[1]),
         rotation,
+        spin,
     });
 }
 
@@ -1914,6 +1934,7 @@ mod tests {
             association: None,
             foot_mark: false,
             rotation_velocity: None,
+            rotation_velocity_variance: None,
             rotation_updater: false,
             relife_on_expiry: false,
             specular_element: false,
@@ -2663,6 +2684,7 @@ mod tests {
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
                 rotation: Vec3::ZERO,
+                spin: Vec3::ZERO,
             });
             g
         }
@@ -2782,6 +2804,49 @@ mod tests {
         assert_eq!(g.particles[0].rotation, Vec3::new(0.0, 0.5, 0.0));
     }
 
+    // 0x0C VelocityVarianceSetup (rotation): every emitted particle draws a uniform [-v, v]
+    // offset per axis on top of the 0x0B spin rate (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup — the allocationOffset binds it to the rotation transform; retail's
+    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity).
+    #[test]
+    fn rotation_velocity_variance_spreads_the_spin_per_particle() {
+        let mut d = def(120.0, 1.0, 8);
+        d.camera_billboard = false;
+        d.rotation_velocity = Some([0.0, 0.01, 0.0]);
+        d.rotation_velocity_variance = Some([0.0, 0.005, 0.0]);
+        d.rotation_updater = true;
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 8, "one burst of eight");
+        // Hold the burst: the spin window must age only the original eight, not the
+        // re-emissions a 10-frame tick would otherwise add behind them.
+        g.stopped = true;
+        advance(&mut g, 10.0);
+        let mut yaws = Vec::new();
+        for p in &g.particles {
+            let yaw = p.rotation.y;
+            yaws.push(yaw);
+            // 10 frames at 0.01 +/- 0.005 per frame: [0.05, 0.15).
+            assert!(
+                (0.05f32 - 1e-6..=0.15f32 + 1e-6).contains(&yaw),
+                "spin out of band: {yaw}"
+            );
+        }
+        assert!(
+            yaws.windows(2).any(|w| w[0] != w[1]),
+            "the variance must differ between particles: {yaws:?}"
+        );
+
+        let mut no_updater = d;
+        no_updater.rotation_updater = false;
+        let mut g = live(no_updater, 1000.0);
+        advance(&mut g, 1.0);
+        advance(&mut g, 10.0);
+        for p in &g.particles {
+            assert_eq!(p.rotation, Vec3::ZERO, "no rotation updater, no spin");
+        }
+    }
+
     // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator keeps its element past
     // its life, so the spin accumulated over the first cycle survives into the next instead of
     // snapping back to the seed with a fresh particle.
@@ -2885,6 +2950,7 @@ mod tests {
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
                 rotation: Vec3::ZERO,
+                spin: Vec3::ZERO,
             });
             g
         }
@@ -3429,6 +3495,7 @@ mod tests {
             rgb: Vec3::from_slice(&g.def.init_color[..3]),
             scale: Vec2::ONE,
             rotation: Vec3::ZERO,
+            spin: Vec3::ZERO,
         });
         g
     }
@@ -4104,6 +4171,7 @@ mod tests {
             rgb: Vec3::ONE,
             scale: Vec2::splat(0.1),
             rotation: Vec3::ZERO,
+            spin: Vec3::ZERO,
         };
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];

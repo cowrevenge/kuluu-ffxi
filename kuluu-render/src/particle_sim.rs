@@ -2050,6 +2050,7 @@ mod tests {
             depth_write: false,
             scale_x_track: None,
             scale_y_track: None,
+            scale_z_track: None,
             alpha_track: None,
             day_of_week_color: None,
             moon_phase_color: None,

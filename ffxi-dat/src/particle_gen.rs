@@ -471,6 +471,11 @@ pub struct ParticleGeneratorDef {
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
     pub scale_x_track: Option<[u8; 4]>,
     pub scale_y_track: Option<[u8; 4]>,
+    // sec2 0x29 KeyFrameValueSetup (scale.z): retail captures field_EC.z, the element's
+    // scale z, as the track's initial value (CYyGenerator.cpp CYyGenerator::ElemGenerate
+    // case 0x29 — same shape as 0x27/0x28). Parsed but not applied: the engine's 2D sprite
+    // has no z axis (the 0x10/0x11 z-bound precedent).
+    pub scale_z_track: Option<[u8; 4]>,
     pub alpha_track: Option<[u8; 4]>,
 
     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
@@ -673,6 +678,7 @@ impl ParticleGeneratorDef {
         let mut init_rotation = [0.0f32; 3];
         let mut scale_x_track = None;
         let mut scale_y_track = None;
+        let mut scale_z_track = None;
         let mut alpha_track = None;
         let mut blend = ParticleBlend::Additive;
         let mut blend_byte = 0u8;
@@ -925,6 +931,7 @@ impl ParticleGeneratorDef {
                 // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
+                0x29 if payload + 8 <= body.len() => scale_z_track = track_id(body, payload + 4),
                 0x2D if payload + 8 <= body.len() => alpha_track = track_id(body, payload + 4),
                 // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are the same
                 // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
@@ -1146,6 +1153,7 @@ impl ParticleGeneratorDef {
             depth_write,
             scale_x_track,
             scale_y_track,
+            scale_z_track,
             alpha_track,
             day_of_week_color,
             moon_phase_color,
@@ -1942,6 +1950,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.reverse_displacement, None);
+    }
+
+    // 0x29 KeyFrameValueSetup (scale.z): the same block shape as 0x27/0x28 — in-memory
+    // pointer, keyframe DAT id, cycle/interpolation config
+    // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x29). Shipped census: 3684
+    // blocks, all size_words=4, first payload word always zero, config always single-cycle.
+    #[test]
+    fn scale_z_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x29, 4, &[0, 0, 0, 0, b'k', b'1', b'z', b'0']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.scale_z_track, Some(*b"k1z0"));
+        assert_eq!(def.scale_x_track, None);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.scale_z_track, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

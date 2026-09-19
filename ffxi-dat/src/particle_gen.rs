@@ -850,6 +850,7 @@ const SEC3_OPCODE_NO_OP: u8 = 0x0E;
 const SEC3_OPCODE_ALPHA_UPDATER: u8 = 0x1B;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
+const SEC4_OPCODE_EMIT_CHILD: u8 = 0x01;
 
 impl ParticleGeneratorDef {
     pub fn parse(body: &[u8]) -> Result<Option<Self>> {
@@ -1686,12 +1687,12 @@ impl ParticleGeneratorDef {
                 if opcode == OPCODE_END || size_words == 0 {
                     break;
                 }
+                // 0x01 is the child-emitter block (research/xim ParticleExpirationHandlers.kt
+                // EmitChildHandler: [expectZero32, child generator DAT id]); retail's ElemDie has
+                // no case for it and the engine has no child-particle path, so decode-only.
+                let decoded = opcode == SEC4_OPCODE_RELIFE || opcode == SEC4_OPCODE_EMIT_CHILD;
                 relife_on_expiry |= opcode == SEC4_OPCODE_RELIFE;
-                blocks.push((
-                    GeneratorSection::ElementDie,
-                    opcode,
-                    opcode == SEC4_OPCODE_RELIFE,
-                ));
+                blocks.push((GeneratorSection::ElementDie, opcode, decoded));
                 cursor += size_words * 4;
             }
         }
@@ -4357,6 +4358,30 @@ mod tests {
                 .unwrap()
                 .relife_on_expiry
         );
+    }
+
+    // research/xim ParticleExpirationHandlers.kt EmitChildHandler — section-4 0x01 carries
+    // [expectZero32, child generator DAT id]; retail's ElemDie has no case for it and the engine
+    // has no child-particle path, so the block is decode-only.
+    #[test]
+    fn section_4_emit_child_opcode_is_read() {
+        let body = with_section(
+            build(&mesh_setup(), 120, 0x1400),
+            0x7C,
+            &op(0x01, 3, &[0, 0, 0, 0, b'c', b'h', b'i', b'1']),
+        );
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(!def.relife_on_expiry);
+        assert!(outcomes.iter().any(|(s, o, r)| {
+            *s == GeneratorSection::ElementDie
+                && *o == 0x01
+                && *r == GeneratorOpcodeOutcome::Decoded
+        }));
     }
 
     // `bnd0`'s StandardSetup dword is 0x01010000: the high u16 carries the specular selector.

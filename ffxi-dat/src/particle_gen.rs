@@ -551,6 +551,13 @@ pub struct ParticleGeneratorDef {
     // record is kept alongside so the reconstruction has its inputs.
     pub specular_element: bool,
     pub specular: Option<SpecularParams>,
+    // sec2 0x5A KeyFrameValueSetup (specular rotation.y): a keyframe track on the specular
+    // element's rotation y (research/xim ParticleGeneratorParser.kt — 0x59/0x5A/0x5B are the
+    // Specular Rotation x/y/z KeyFrameValueSetup; retail's keyframe pre-load pass references
+    // the same blocks as Keyframe resources). Parsed but not applied: the engine does not
+    // model the specular element's rotation (the 0x55 record is kept for reconstruction
+    // inputs only).
+    pub specular_rot_y_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -696,6 +703,7 @@ impl ParticleGeneratorDef {
         let mut scale_updater = false;
         let mut specular = None;
         let mut specular_element = false;
+        let mut specular_rot_y_track = None;
         let mut foot_mark = false;
 
         while cursor + 4 <= body.len() {
@@ -882,6 +890,12 @@ impl ParticleGeneratorDef {
                         ],
                         flags: u32_le(body, payload + 32),
                     });
+                }
+                // 0x5A KeyFrameValueSetup (specular rotation.y): the 0x27/0x28/0x29 track
+                // shape bound to the specular element's rotation y
+                // (research/xim ParticleGeneratorParser.kt).
+                0x5A if payload + 8 <= body.len() => {
+                    specular_rot_y_track = track_id(body, payload + 4);
                 }
                 0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
                 // 0x41 RelativeVelocityVarianceSetup: one float, the bound of the random
@@ -1173,6 +1187,7 @@ impl ParticleGeneratorDef {
             relife_on_expiry,
             specular_element,
             specular,
+            specular_rot_y_track,
         }))
     }
 
@@ -1971,6 +1986,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.scale_z_track, None);
+    }
+
+    // 0x5A KeyFrameValueSetup (specular rotation.y): the 0x27/0x28/0x29 track shape bound to
+    // the specular element's rotation y (research/xim ParticleGeneratorParser.kt). Shipped
+    // census: 719 blocks, all size_words=4, first payload word always zero, 719/719 behind
+    // a 0x55 SpecularParams record in the same generator.
+    #[test]
+    fn specular_rot_y_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x5A, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'y']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.specular_rot_y_track, Some(*b"n0ry"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.specular_rot_y_track, None);
     }
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random

@@ -2067,6 +2067,7 @@ mod tests {
             relife_on_expiry: false,
             specular_element: false,
             specular: None,
+            specular_rot_y_track: None,
         }
     }
 

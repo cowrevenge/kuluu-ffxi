@@ -31,6 +31,15 @@ const CONTROL_FLOW_BLOCK_CLOSE: u8 = 0x6A;
 const CONTROL_FLOW_CONDITION: u8 = 0x6B;
 const ANIMATION_LOCK_OPCODE: u8 = 0x07;
 const ANIMATION_LOCK_MAGIC_OPCODE: u8 = 0x59;
+// research/xim EffectRoutineParser.kt parseSection2 — the argument-less stages: StartRoutineMarker,
+// ActorPositionSnapshotEffect, MovementLockEffect, FacingLockEffect, and the two
+// ToggleBroadcastEffect arms.
+const START_ROUTINE_MARKER_OPCODE: u8 = 0x01;
+const ACTOR_POSITION_SNAPSHOT_OPCODE: u8 = 0x15;
+const MOVEMENT_LOCK_OPCODE: u8 = 0x2E;
+const FACING_LOCK_OPCODE: u8 = 0x2F;
+const TOGGLE_BROADCAST_ON_OPCODE: u8 = 0x31;
+const TOGGLE_BROADCAST_OFF_OPCODE: u8 = 0x32;
 const FLINCH_CASTER_OPCODE: u8 = 0x21;
 const FLINCH_TARGET_OPCODE: u8 = 0x25;
 const TRANSITION_TO_IDLE_OPCODE: u8 = 0x28;
@@ -327,6 +336,23 @@ pub const fn is_control_flow_opcode(raw_type: u8) -> bool {
     )
 }
 
+// Opcodes whose stage carries only delay/duration — two dwords, no id/payload dword after them.
+// research/xim EffectRoutineParser.kt parseSection2: each of these arms reads nothing past
+// delay/duration, so the id-dword gate must not require the +8 slot for them. The id-carrying
+// AnimationLock form is not listed: it reads a zero dword, so its stage is three dwords.
+pub const fn argless_stage_opcode(raw_type: u8) -> bool {
+    matches!(
+        raw_type,
+        START_ROUTINE_MARKER_OPCODE
+            | ACTOR_POSITION_SNAPSHOT_OPCODE
+            | MOVEMENT_LOCK_OPCODE
+            | FACING_LOCK_OPCODE
+            | TOGGLE_BROADCAST_ON_OPCODE
+            | TOGGLE_BROADCAST_OFF_OPCODE
+            | ANIMATION_LOCK_MAGIC_OPCODE
+    )
+}
+
 // The shortest stage `from_stage` can be asked about, and the longest the length field can
 // express: sweeping this range is how a consumer discovers the handled opcode set without
 // restating the match arms.
@@ -486,7 +512,10 @@ impl Scheduler {
                 };
                 let duration = read_u16(DURATION_OFFSET);
                 let has_id = stage_bytes >= STAGE_WITH_ID_LEN;
-                let kind = if has_id {
+                // Argument-less opcodes are complete at two dwords; every other opcode needs the
+                // +8 id/payload dword present to map, so a short stage of an id opcode stays
+                // Unknown rather than misreading a neighbour's bytes as its id.
+                let kind = if has_id || argless_stage_opcode(raw_type) {
                     StageKind::from_stage(raw_type, length_words)
                 } else {
                     StageKind::Unknown
@@ -1793,6 +1822,26 @@ mod tests {
         let st = s.stages[0].stage;
         assert_eq!(st.kind, StageKind::TransitionToIdle);
         assert_eq!(st.idle_transition_time, Some(1.5));
+        assert_eq!(st.id, NO_STAGE_ID);
+    }
+
+    // research/xim EffectRoutineParser.kt parseSection2 — the magic lock form is two dwords total, so
+    // it must map without the +8 id dword (bead kuluu-3y30: the blanket gate read every shipped
+    // two-dword lock stage as Unknown).
+    #[test]
+    fn magic_animation_lock_maps_at_two_dwords() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            ANIMATION_LOCK_MAGIC_OPCODE,
+            ARGLESS_STAGE_WORDS,
+            0,
+            112,
+        ));
+
+        let s = Scheduler::parse(*b"waso", &body).unwrap();
+        let st = s.stages[0].stage;
+        assert_eq!(st.kind, StageKind::AnimationLock);
+        assert_eq!(st.duration_frames, 112);
         assert_eq!(st.id, NO_STAGE_ID);
     }
 

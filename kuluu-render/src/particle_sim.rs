@@ -2255,6 +2255,7 @@ mod tests {
             point_list_position: None,
             velocity_y_track: None,
             specular_rot_x_track: None,
+            specular_color_g_track: None,
         }
     }
 

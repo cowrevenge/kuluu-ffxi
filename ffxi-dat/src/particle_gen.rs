@@ -747,6 +747,13 @@ pub struct ParticleGeneratorDef {
     // applied: the engine does not model the specular element's rotation, the I18
     // precedent.
     pub specular_rot_x_track: Option<[u8; 4]>,
+
+    // sec2 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track shape
+    // bound to the specular element's color green (research/xim
+    // ParticleGeneratorParser.kt — 0x5C..0x5F are the Specular Color r/g/b/a
+    // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
+    // specular element's color, the I18 precedent.
+    pub specular_color_g_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -910,6 +917,7 @@ impl ParticleGeneratorDef {
         let mut point_list_position = None;
         let mut velocity_y_track = None;
         let mut specular_rot_x_track = None;
+        let mut specular_color_g_track = None;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1307,6 +1315,11 @@ impl ParticleGeneratorDef {
                 0x59 if payload + 8 <= body.len() => {
                     specular_rot_x_track = track_id(body, payload + 4);
                 }
+                // 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track
+                // shape (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x5D if payload + 8 <= body.len() => {
+                    specular_color_g_track = track_id(body, payload + 4);
+                }
                 // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
                 // shape bound to the element's velocity dampener
                 // (research/xim ParticleGeneratorParser.kt sec2Handler).
@@ -1618,6 +1631,7 @@ impl ParticleGeneratorDef {
             point_list_position,
             velocity_y_track,
             specular_rot_x_track,
+            specular_color_g_track,
         }))
     }
 
@@ -2860,6 +2874,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.specular_rot_x_track, None);
+    }
+
+    // 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track shape
+    // (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 14 sec2 0x5D
+    // blocks in the parser-accepted corpus.
+    #[test]
+    fn specular_color_g_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(
+            0x5D,
+            4,
+            &[0, 0, 0, 0, b's', b'c', b'g', b'0', 0, 0, 0, 0],
+        ));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.specular_color_g_track, Some(*b"scg0"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.specular_color_g_track, None);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

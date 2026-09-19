@@ -370,6 +370,14 @@ struct Particle {
     life_frames: f32,
     rgb: Vec3,
     scale: Vec2,
+    // The spawn-time scale: the scale keyframe track seeds its opening segment from the
+    // particle's initial value, captured once (research/xim ParticleUpdaters.kt
+    // ProgressValueUpdater — initialValueOverride is set only while null), so it must not
+    // drift with the 0x12 growth.
+    scale_seed: Vec2,
+    // The 0x12 scale rate (x/y); zero while the generator's sec3 0x08 scale updater is off
+    // (research/xim ParticleUpdaters.kt ScaleUpdater is the only integrator).
+    scale_vel: Vec2,
     // Euler radians, seeded from the generator's 0x09 rotation and turned by its spin
     // (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05 integrates the 0x0B rate per frame).
     rotation: Vec3,
@@ -980,6 +988,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
             p.vel += a;
         }
         p.pos += p.vel * frames;
+        p.scale += p.scale_vel * frames;
         p.rotation += p.spin * frames;
     }
     reap_expired(g);
@@ -1081,6 +1090,14 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     if let Some(v) = g.def.single_scale_variance {
         scale += Vec2::splat(next_unit(&mut g.emit_rng) * v);
     }
+    // 0x12 ScaleVelocitySetup: the per-frame growth the sec3 0x08 ScaleUpdater integrates
+    // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames); zero while the
+    // updater is off, so a rate without it stays inert.
+    let scale_vel = g
+        .def
+        .scale_rate()
+        .map(|r| Vec2::new(r[0], r[1]))
+        .unwrap_or_default();
     g.particles.push(Particle {
         pos,
         spawn_origin: g.origin,
@@ -1089,6 +1106,8 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         life_frames: life_frames.max(1.0),
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
         scale,
+        scale_seed: scale,
+        scale_vel,
         rotation,
         spin,
     });
@@ -1321,12 +1340,12 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     let sx = g
         .scale_x
         .as_ref()
-        .map(|t| t.sample_from(progress, Some(p.scale.x)))
+        .map(|t| t.sample_from(progress, Some(p.scale_seed.x)))
         .unwrap_or(p.scale.x);
     let sy = g
         .scale_y
         .as_ref()
-        .map(|t| t.sample_from(progress, Some(p.scale.y)))
+        .map(|t| t.sample_from(progress, Some(p.scale_seed.y)))
         .unwrap_or(p.scale.y);
     // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp HandleOne
     // initializes field_F8 from opcode 0x16; persistent effects retain its authored alpha.
@@ -1944,6 +1963,8 @@ mod tests {
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,
+            scale_velocity: None,
+            scale_updater: false,
             relife_on_expiry: false,
             specular_element: false,
             specular: None,
@@ -2691,6 +2712,8 @@ mod tests {
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
+                scale_seed: Vec2::ONE,
+                scale_vel: Vec2::ZERO,
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
             });
@@ -2882,6 +2905,38 @@ mod tests {
         );
     }
 
+    // 0x12 ScaleVelocitySetup: the sec3 0x08 ScaleUpdater adds the per-axis rate every frame
+    // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames); a rate without
+    // the updater stays inert, and the track seed keeps the spawn-time scale.
+    #[test]
+    fn scale_velocity_grows_the_scale_per_frame() {
+        let mut d = def(120.0, 1.0, 8);
+        d.scale_velocity = Some([0.0, 0.01, 0.0]);
+        d.scale_updater = true;
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 8, "one burst of eight");
+        // Hold the burst: the growth window must age only the original eight, not the
+        // re-emissions a 10-frame tick would otherwise add behind them.
+        g.stopped = true;
+        advance(&mut g, 10.0);
+        for p in &g.particles {
+            assert_eq!(p.scale.x, 0.1, "no x rate, no x growth");
+            let sy = p.scale.y;
+            assert!((sy - 0.2).abs() < 1e-5, "10 frames at 0.01: {sy}");
+            assert_eq!(p.scale_seed, Vec2::new(0.1, 0.1), "the seed stays at spawn");
+        }
+
+        let mut no_updater = d;
+        no_updater.scale_updater = false;
+        let mut g = live(no_updater, 1000.0);
+        advance(&mut g, 1.0);
+        advance(&mut g, 10.0);
+        for p in &g.particles {
+            assert_eq!(p.scale, Vec2::new(0.1, 0.1), "no scale updater, no growth");
+        }
+    }
+
     // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator keeps its element past
     // its life, so the spin accumulated over the first cycle survives into the next instead of
     // snapping back to the seed with a fresh particle.
@@ -2984,6 +3039,8 @@ mod tests {
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
+                scale_seed: Vec2::ONE,
+                scale_vel: Vec2::ZERO,
                 rotation: Vec3::ZERO,
                 spin: Vec3::ZERO,
             });
@@ -3529,6 +3586,8 @@ mod tests {
             life_frames: 1.0,
             rgb: Vec3::from_slice(&g.def.init_color[..3]),
             scale: Vec2::ONE,
+            scale_seed: Vec2::ONE,
+            scale_vel: Vec2::ZERO,
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
         });
@@ -4205,6 +4264,8 @@ mod tests {
             life_frames: 4.0,
             rgb: Vec3::ONE,
             scale: Vec2::splat(0.1),
+            scale_seed: Vec2::splat(0.1),
+            scale_vel: Vec2::ZERO,
             rotation: Vec3::ZERO,
             spin: Vec3::ZERO,
         };

@@ -448,6 +448,14 @@ pub struct ParticleGeneratorDef {
     pub rotation_velocity_variance: Option<[f32; 3]>,
     pub rotation_updater: bool,
 
+    // sec2 0x12 ScaleVelocitySetup: scale units per 60 Hz frame on each axis. Retail's
+    // ElemGenerate shares the 0x0B/0x12 case (a 12-byte memcpy into the scale transform's
+    // velocity at the allocation offset); only the sec3 0x08 ScaleUpdater integrates it
+    // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames), so read
+    // [`Self::scale_rate`].
+    pub scale_velocity: Option<[f32; 3]>,
+    pub scale_updater: bool,
+
     // Section 4 (body[0x7C]) opcode 0x05, CYyGenerator.cpp CYyGenerator::ElemDie case 5 — an expiring
     // element gets its life reset instead of dying, keeping its position, rotation and UV state.
     // Every idle Home Point layer authors it; without it the crystal would snap back to its
@@ -516,6 +524,7 @@ const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
+const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
 
@@ -591,6 +600,8 @@ impl ParticleGeneratorDef {
             [None; TOD_COLOR_CHANNELS];
         let mut rotation_velocity = None;
         let mut rotation_velocity_variance = None;
+        let mut scale_velocity = None;
+        let mut scale_updater = false;
         let mut specular = None;
         let mut specular_element = false;
         let mut foot_mark = false;
@@ -719,6 +730,13 @@ impl ParticleGeneratorDef {
                 0x11 if payload + 4 <= body.len() => {
                     single_scale_variance = Some(f32_le(body, payload));
                 }
+                0x12 if payload + 12 <= body.len() => {
+                    scale_velocity = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
+                }
                 0x55 if payload + 36 <= body.len() => {
                     specular = Some(SpecularParams {
                         vector: [
@@ -820,6 +838,7 @@ impl ParticleGeneratorDef {
                 let mut decoded = true;
                 match opcode {
                     SEC3_OPCODE_ROTATION_UPDATER => rotation_updater = true,
+                    SEC3_OPCODE_SCALE_UPDATER => scale_updater = true,
                     0x27 if payload + 4 <= body.len() => uv_scroll[0] = f32_le(body, payload),
                     0x28 if payload + 4 <= body.len() => uv_scroll[1] = f32_le(body, payload),
                     0x03 if payload + 12 <= body.len() => {
@@ -972,6 +991,8 @@ impl ParticleGeneratorDef {
             rotation_velocity,
             rotation_velocity_variance,
             rotation_updater,
+            scale_velocity,
+            scale_updater,
             relife_on_expiry,
             specular_element,
             specular,
@@ -982,6 +1003,13 @@ impl ParticleGeneratorDef {
     // updater never turns (research/xi-tools/docs/fx/effects.md "What MOVES an effect").
     pub fn spin(&self) -> Option<[f32; 3]> {
         self.rotation_velocity.filter(|_| self.rotation_updater)
+    }
+
+    // The per-frame scale rate the element actually changes: a 0x12 rate with no sec3 0x08
+    // updater is never integrated (research/xim ParticleUpdaters.kt ScaleUpdater is the only
+    // consumer of the scale transform's velocity).
+    pub fn scale_rate(&self) -> Option<[f32; 3]> {
+        self.scale_velocity.filter(|_| self.scale_updater)
     }
 
     pub fn is_singleton(&self) -> bool {
@@ -1788,6 +1816,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.single_scale_variance, None);
+    }
+
+    // 0x12 ScaleVelocitySetup: three floats, the per-frame scale rate per axis; only the sec3
+    // 0x08 ScaleUpdater integrates it (research/xim ParticleUpdaters.kt — scale += velocity ×
+    // elapsedFrames; retail's ElemGenerate shares the 0x0B/0x12 memcpy case).
+    #[test]
+    fn scale_velocity_reads_the_three_axis_rate() {
+        let mut sec2 = mesh_setup();
+        sec2.extend(op(0x12, 4, &vec3_payload([0.0, 0.01, 0.0])));
+        let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rate_only.scale_velocity, Some([0.0, 0.01, 0.0]));
+        assert!(!rate_only.scale_updater);
+        assert_eq!(rate_only.scale_rate(), None);
+
+        let body = with_section(build(&sec2, 120, 0x1400), 0x78, &op(0x08, 1, &[]));
+        let growing = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(growing.scale_updater);
+        assert_eq!(growing.scale_rate(), Some([0.0, 0.01, 0.0]));
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

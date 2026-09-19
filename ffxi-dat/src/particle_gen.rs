@@ -611,6 +611,12 @@ pub struct ParticleGeneratorDef {
     pub scale_velocity: Option<[f32; 3]>,
     pub scale_updater: bool,
 
+    // sec2 0x13 VelocityVarianceSetup (scale): a per-particle uniform [-v, v] draw added to
+    // each axis of the 0x12 scale velocity (research/xim ParticleInitializers.kt
+    // VelocityVarianceSetup — the allocationOffset binds it to the scale transform; retail's
+    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity).
+    pub scale_velocity_variance: Option<[f32; 3]>,
+
     // Section 4 (body[0x7C]) opcode 0x05, CYyGenerator.cpp CYyGenerator::ElemDie case 5 — an expiring
     // element gets its life reset instead of dying, keeping its position, rotation and UV state.
     // Every idle Home Point layer authors it; without it the crystal would snap back to its
@@ -782,6 +788,7 @@ impl ParticleGeneratorDef {
         let mut rotation_velocity_variance = None;
         let mut scale_velocity = None;
         let mut scale_updater = false;
+        let mut scale_velocity_variance = None;
         let mut specular = None;
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
@@ -930,6 +937,17 @@ impl ParticleGeneratorDef {
                 }
                 0x0C if payload + 12 <= body.len() => {
                     rotation_velocity_variance = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
+                }
+                // 0x13 VelocityVarianceSetup (scale): three floats, the per-axis variance
+                // bound on the 0x12 scale velocity
+                // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the
+                // allocationOffset binds it to the scale transform).
+                0x13 if payload + 12 <= body.len() => {
+                    scale_velocity_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
@@ -1373,6 +1391,7 @@ impl ParticleGeneratorDef {
             rotation_updater,
             scale_velocity,
             scale_updater,
+            scale_velocity_variance,
             relife_on_expiry,
             specular_element,
             specular,
@@ -2757,6 +2776,24 @@ mod tests {
         let growing = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(growing.scale_updater);
         assert_eq!(growing.scale_rate(), Some([0.0, 0.01, 0.0]));
+    }
+
+    // 0x13 VelocityVarianceSetup (scale): three floats, the per-axis variance bound on the
+    // 0x12 scale velocity (research/xim ParticleInitializers.kt VelocityVarianceSetup — the
+    // allocationOffset binds it to the scale transform; retail's shared 0x03/0x0C/0x13 case
+    // adds frand(bounds) to the transform's velocity).
+    #[test]
+    fn scale_velocity_variance_reads_the_three_floats() {
+        let mut sec2 = mesh_setup();
+        sec2.extend(op(0x13, 4, &vec3_payload([0.0, 0.005, 0.0])));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert_eq!(def.scale_velocity_variance, Some([0.0, 0.005, 0.0]));
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.scale_velocity_variance, None);
     }
 
     // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the

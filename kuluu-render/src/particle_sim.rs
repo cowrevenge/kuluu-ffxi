@@ -1286,11 +1286,23 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // 0x12 ScaleVelocitySetup: the per-frame growth the sec3 0x08 ScaleUpdater integrates
     // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames); zero while the
     // updater is off, so a rate without it stays inert.
-    let scale_vel = g
-        .def
-        .scale_rate()
-        .map(|r| Vec2::new(r[0], r[1]))
-        .unwrap_or_default();
+    // 0x13 VelocityVarianceSetup (scale): a uniform [-v, v] draw per axis on top of the
+    // 0x12 rate (research/xim ParticleInitializers.kt VelocityVarianceSetup — the
+    // allocationOffset binds it to the scale transform; retail's shared 0x03/0x0C/0x13 case
+    // adds frand(bounds) to the transform's velocity). The draw lands on the same transform
+    // velocity the sec3 0x08 ScaleUpdater integrates, so it is inert without the updater,
+    // the 0x0C precedent; the z bound has no axis on the engine's 2D sprite, the 0x10
+    // precedent.
+    let mut scale_vel = Vec2::ZERO;
+    if let Some(rate) = g.def.scale_rate() {
+        scale_vel = Vec2::new(rate[0], rate[1]);
+        if let Some(var) = g.def.scale_velocity_variance {
+            scale_vel += Vec2::new(
+                (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[0],
+                (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[1],
+            );
+        }
+    }
     // 0x17 ColorVarianceSetup: each rgb channel gains its bound times one [0, 1) draw, on top
     // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup — the shipped
     // alpha byte is always 0 and the engine's alpha comes from the 0x16 base / alpha track).
@@ -2221,6 +2233,7 @@ mod tests {
             rotation_updater: false,
             scale_velocity: None,
             scale_updater: false,
+            scale_velocity_variance: None,
             relife_on_expiry: false,
             specular_element: false,
             specular: None,
@@ -3233,6 +3246,49 @@ mod tests {
         advance(&mut g, 10.0);
         for p in &g.particles {
             assert_eq!(p.rotation, Vec3::ZERO, "no rotation updater, no spin");
+        }
+    }
+
+    // 0x13 VelocityVarianceSetup (scale): every emitted particle draws a uniform [-v, v]
+    // offset per axis on top of the 0x12 scale velocity (research/xim
+    // ParticleInitializers.kt VelocityVarianceSetup — the allocationOffset binds it to the
+    // scale transform; retail's shared 0x03/0x0C/0x13 case adds frand(bounds) to the
+    // transform's velocity).
+    #[test]
+    fn scale_velocity_variance_spreads_the_rate_per_particle() {
+        let mut d = def(120.0, 1.0, 8);
+        d.scale_velocity = Some([0.0, 0.01, 0.0]);
+        d.scale_velocity_variance = Some([0.0, 0.005, 0.0]);
+        d.scale_updater = true;
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 8, "one burst of eight");
+        // Hold the burst: the scale window must age only the original eight, not the
+        // re-emissions a 10-frame tick would otherwise add behind them.
+        g.stopped = true;
+        advance(&mut g, 10.0);
+        let mut scales = Vec::new();
+        for p in &g.particles {
+            scales.push(p.scale.y);
+            // base 0.1 plus 10 frames at 0.01 +/- 0.005 per frame: [0.15, 0.25).
+            assert!(
+                (0.15f32 - 1e-6..=0.25f32 + 1e-6).contains(&p.scale.y),
+                "scale out of band: {}",
+                p.scale.y
+            );
+        }
+        assert!(
+            scales.windows(2).any(|w| w[0] != w[1]),
+            "the variance must differ between particles: {scales:?}"
+        );
+
+        let mut no_updater = d;
+        no_updater.scale_updater = false;
+        let mut g = live(no_updater, 1000.0);
+        advance(&mut g, 1.0);
+        advance(&mut g, 10.0);
+        for p in &g.particles {
+            assert_eq!(p.scale.y, 0.1, "no scale updater, no growth");
         }
     }
 

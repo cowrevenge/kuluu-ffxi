@@ -409,6 +409,12 @@ pub struct ParticleGeneratorDef {
     // sec1Handler AssociationUpdater.
     pub association: Option<AssociationFollow>,
 
+    // sec2 0x8E FootMarkEffectSetup (research/xim ParticleInitializers.kt): a no-payload marker.
+    // The particle snaps to the actor's position + joint and facing on the spawn frame, then
+    // stops following the generator (research/xim Particle.kt updateAssociatedPosition /
+    // updateAssociatedFacing footMarkEffect branches).
+    pub foot_mark: bool,
+
     // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
     // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
@@ -482,6 +488,7 @@ impl EmitCull {
 const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
 const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
+const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
@@ -555,6 +562,7 @@ impl ParticleGeneratorDef {
         let mut rotation_velocity = None;
         let mut specular = None;
         let mut specular_element = false;
+        let mut foot_mark = false;
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -696,6 +704,11 @@ impl ParticleGeneratorDef {
                 // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1D), so the payload word is
                 // never read and no state is set.
                 SEC2_OPCODE_SPRITE_SHEET_INIT if payload + 4 <= body.len() => {}
+                // 0x8E FootMarkEffectSetup: no payload — the particle snaps to the actor's
+                // position + joint and facing on the spawn frame, then stops following the
+                // generator (research/xim Particle.kt updateAssociatedPosition /
+                // updateAssociatedFacing footMarkEffect branches).
+                SEC2_OPCODE_FOOT_MARK => foot_mark = true,
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
@@ -893,6 +906,7 @@ impl ParticleGeneratorDef {
             accel,
             emit_cull,
             association,
+            foot_mark,
             rotation_velocity,
             rotation_updater,
             relife_on_expiry,
@@ -1533,6 +1547,44 @@ mod tests {
                     && *o == GeneratorOpcodeOutcome::Decoded
             }),
             "0x1D must report decoded: {outcomes:?}"
+        );
+    }
+
+    // 0x8E FootMarkEffectSetup is a no-payload marker block (research/xim
+    // ParticleInitializers.kt FootMarkEffectSetup); the shipped fmrk generator carries it as a
+    // one-dword block between its sprite-sheet initializer and the end of section 2.
+    #[test]
+    fn foot_mark_setup_sets_the_flag_without_payload() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let mut sec2 = setup;
+        sec2.extend(op(SEC2_OPCODE_FOOT_MARK, 1, &[]));
+        let vel: [f32; 3] = [1.0, 2.0, 3.0];
+        let mut vel_bytes = Vec::new();
+        for f in vel {
+            vel_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        sec2.extend(op(0x02, 4, &vel_bytes));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert!(def.foot_mark, "0x8E must set the foot-mark flag");
+        assert_eq!(
+            def.init_velocity, vel,
+            "the no-payload block must not desync the stream"
+        );
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Initializers
+                    && *op == SEC2_OPCODE_FOOT_MARK
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "0x8E must report decoded: {outcomes:?}"
         );
     }
 

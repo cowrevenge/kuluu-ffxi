@@ -1875,6 +1875,7 @@ mod tests {
             accel: None,
             emit_cull: None,
             association: None,
+            foot_mark: false,
             rotation_velocity: None,
             rotation_updater: false,
             relife_on_expiry: false,

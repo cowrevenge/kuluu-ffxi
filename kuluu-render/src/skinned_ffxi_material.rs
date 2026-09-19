@@ -1520,7 +1520,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(modified, handles.iter().map(Handle::id).collect());
+        assert_eq!(
+            modified,
+            handles
+                .iter()
+                .map(Handle::id)
+                .collect::<std::collections::HashSet<_>>()
+        );
         app.update();
         assert!(app
             .world_mut()

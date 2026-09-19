@@ -16,6 +16,7 @@ pub mod goal_store;
 pub mod local_menu;
 
 pub mod lobby_client;
+pub mod lobby_wire;
 pub mod map_client;
 pub mod net_health;
 pub mod playonline;

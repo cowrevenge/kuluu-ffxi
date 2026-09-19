@@ -10,14 +10,21 @@ pub enum AuthFlavorKind {
     Json,
     Binary,
     /// No auth server: the lobby is opened with a session the PlayOnline
-    /// Viewer produced (kuluu_session::playonline). Not offered by the
-    /// server editor until the viewer handoff exists.
+    /// Viewer produced (kuluu_session::playonline).
     PlayOnline,
 }
 
 impl AuthFlavorKind {
     pub fn uses_auth_server(self) -> bool {
         !matches!(self, AuthFlavorKind::PlayOnline)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AuthFlavorKind::Json => "JSON",
+            AuthFlavorKind::Binary => "Binary",
+            AuthFlavorKind::PlayOnline => "PlayOnline",
+        }
     }
 }
 
@@ -49,6 +56,15 @@ pub struct ServerProfile {
     /// An ffxi_client::Install name this server should be played from.
     #[serde(default)]
     pub preferred_client: Option<String>,
+
+    /// PlayOnline flavor only: the session file to read; unset means
+    /// kuluu_session::playonline::default_session_file.
+    #[serde(default)]
+    pub pol_session_file: Option<PathBuf>,
+
+    /// The player has read this profile's third-party-client terms notice.
+    #[serde(default)]
+    pub terms_acknowledged: bool,
 }
 
 pub const HORIZONXI_HOST: &str = "play.horizonxi.com";
@@ -82,6 +98,10 @@ pub fn server_templates() -> Vec<ServerTemplate> {
             label: "Local LandSandBoat",
             profile: ServerProfile::lsb_defaults("local", LOCALHOST),
         },
+        ServerTemplate {
+            label: "PlayOnline",
+            profile: ServerProfile::playonline_defaults("PlayOnline", ""),
+        },
     ]
 }
 
@@ -99,7 +119,22 @@ impl ServerProfile {
             client_ver: None,
             ver_lock: None,
             preferred_client: None,
+            pol_session_file: None,
+            terms_acknowledged: false,
         }
+    }
+
+    /// A lobby reached through a PlayOnline session: retail's port map, which
+    /// LSB mirrors, and no server address of ours.
+    pub fn playonline_defaults(name: &str, host: &str) -> Self {
+        Self {
+            flavor: AuthFlavorKind::PlayOnline,
+            ..Self::lsb_defaults(name, host)
+        }
+    }
+
+    pub fn is_playonline(&self) -> bool {
+        self.flavor == AuthFlavorKind::PlayOnline
     }
 
     pub fn expected_client_ver(&self) -> &str {
@@ -424,6 +459,35 @@ mod tests {
             local.profile.expected_client_ver(),
             ffxi_proto::login::LSB_CLIENT_VER
         );
+        let pol = templates
+            .iter()
+            .find(|t| t.label == "PlayOnline")
+            .expect("PlayOnline template");
+        assert!(pol.profile.is_playonline());
+        assert!(!pol.profile.flavor.uses_auth_server());
+        assert_eq!(pol.profile.host, "", "Kuluu ships no server address");
+        assert_eq!(pol.profile.view_port, ffxi_proto::login::LOGIN_VIEW_PORT);
+        assert_eq!(pol.profile.data_port, ffxi_proto::login::LOGIN_DATA_PORT);
+        assert_eq!(pol.profile.pol_session_file, None);
+        assert!(!pol.profile.terms_acknowledged);
+    }
+
+    #[test]
+    fn a_playonline_profile_round_trips_its_session_file_and_terms_flag() {
+        let profile = ServerProfile {
+            pol_session_file: Some(PathBuf::from("C:/sessions/pol.json")),
+            terms_acknowledged: true,
+            ..ServerProfile::playonline_defaults("retail", "lobby.example")
+        };
+        let text = serde_json::to_string(&profile).unwrap();
+        assert!(text.contains("\"playonline\""), "{text}");
+        let back: ServerProfile = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            back.pol_session_file.as_deref(),
+            Some(std::path::Path::new("C:/sessions/pol.json"))
+        );
+        assert!(back.terms_acknowledged);
+        assert_eq!(back.flavor.label(), "PlayOnline");
     }
 
     #[test]

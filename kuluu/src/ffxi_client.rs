@@ -938,6 +938,8 @@ mod era_tests {
             client_ver: client_ver.map(str::to_string),
             ver_lock,
             preferred_client: None,
+            pol_session_file: None,
+            terms_acknowledged: false,
         }
     }
 

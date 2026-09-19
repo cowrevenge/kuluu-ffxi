@@ -16,6 +16,7 @@ use super::common::{
 };
 use crate::view_native::widgets::text_field::text_field;
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
+use kuluu_session::playonline;
 
 use super::{LauncherState, ServerEditField, ServerEditForm, ServerInfo};
 
@@ -219,9 +220,17 @@ fn spawn_advanced_fields(panel: &mut ChildSpawnerCommands, form: &ServerEditForm
 
     panel.spawn(hint("Auth flavor:"));
     panel.spawn(row()).with_children(|r| {
-        spawn_flavor_button(r, "JSON", AuthFlavorKind::Json, form.flavor);
-        spawn_flavor_button(r, "Binary", AuthFlavorKind::Binary, form.flavor);
+        for kind in [
+            AuthFlavorKind::Json,
+            AuthFlavorKind::Binary,
+            AuthFlavorKind::PlayOnline,
+        ] {
+            spawn_flavor_button(r, kind.label(), kind, form.flavor);
+        }
     });
+    if form.flavor == AuthFlavorKind::PlayOnline {
+        spawn_playonline_fields(panel, form);
+    }
     spawn_field(
         panel,
         "Loader version",
@@ -273,6 +282,26 @@ fn spawn_advanced_fields(panel: &mut ChildSpawnerCommands, form: &ServerEditForm
     });
 }
 
+const POL_SESSION_HINTS: [&str; 3] = [
+    "The PlayOnline Viewer you own signs in; Kuluu reads the session it",
+    "produced from this file and opens the lobby with it. No auth server.",
+    "Third-party clients may breach the server's terms; the account risk is yours.",
+];
+
+fn spawn_playonline_fields(panel: &mut ChildSpawnerCommands, form: &ServerEditForm) {
+    let default_path = playonline::expected_session_path(None);
+    spawn_field(
+        panel,
+        "Session file",
+        &form.pol_session_file,
+        &default_path.display().to_string(),
+        ServerEditField::PolSessionFile,
+    );
+    for line in POL_SESSION_HINTS {
+        panel.spawn(hint(line));
+    }
+}
+
 fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
     if form.name.is_empty() || form.host.is_empty() {
         return;
@@ -280,7 +309,8 @@ fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
     let auth_port = form.auth_port.parse().unwrap_or(0);
     let data_port = form.data_port.parse().unwrap_or(0);
     let view_port = form.view_port.parse().unwrap_or(0);
-    if auth_port == 0 || data_port == 0 || view_port == 0 {
+    let auth_port_missing = auth_port == 0 && form.flavor.uses_auth_server();
+    if auth_port_missing || data_port == 0 || view_port == 0 {
         return;
     }
     let xiloader_version = {
@@ -307,6 +337,19 @@ fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
             Some(trimmed.to_string())
         }
     };
+    let pol_session_file = {
+        let trimmed = form.pol_session_file.trim();
+        if trimmed.is_empty() || form.flavor != AuthFlavorKind::PlayOnline {
+            None
+        } else {
+            Some(std::path::PathBuf::from(trimmed))
+        }
+    };
+    let mut store = launcher_store::load();
+    let terms_acknowledged = form
+        .editing_index
+        .and_then(|idx| store.servers.get(idx))
+        .is_some_and(|existing| existing.terms_acknowledged);
     let profile = ServerProfile {
         name: form.name.clone(),
         host: form.host.clone(),
@@ -319,8 +362,9 @@ fn save_form(form: &ServerEditForm, next: &mut NextState<LauncherState>) {
         client_ver,
         ver_lock: form.ver_lock,
         preferred_client: form.preferred_client.clone(),
+        pol_session_file,
+        terms_acknowledged,
     };
-    let mut store = launcher_store::load();
     match form.editing_index {
         Some(idx) if idx < store.servers.len() => store.servers[idx] = profile,
         _ => store.servers.push(profile),
@@ -404,6 +448,9 @@ fn spawn_field(
                     ServerEditField::ClientVer => {
                         form.client_ver = ev.value.clone();
                     }
+                    ServerEditField::PolSessionFile => {
+                        form.pol_session_file = ev.value.clone();
+                    }
                     ServerEditField::Flavor
                     | ServerEditField::VerLock
                     | ServerEditField::PreferredClient => {}
@@ -432,9 +479,16 @@ fn spawn_flavor_button(
             FlavorButton(kind),
             Spawn((Text::new(label.to_string()), ThemedText)),
         ),))
-        .observe(move |_ev: On<Activate>, mut form: ResMut<ServerEditForm>| {
-            form.flavor = kind;
-        });
+        .observe(
+            move |_ev: On<Activate>,
+                  mut form: ResMut<ServerEditForm>,
+                  mut dirty: ResMut<ServerEditUiDirty>| {
+                if form.flavor != kind {
+                    form.flavor = kind;
+                    dirty.0 = true;
+                }
+            },
+        );
 }
 
 fn spawn_ver_lock_button(

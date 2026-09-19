@@ -4670,9 +4670,15 @@ mod cull_tests {
     #[test]
     fn cull_respects_server_invisible_entities() {
         let mut app = App::new();
-        app.init_resource::<DrawDistance>()
-            .init_resource::<EntityTable>()
-            .add_systems(Update, cull_entities_by_distance);
+        // The test's 100 m marker must stay out of range regardless of where
+        // the retail fallback default lands.
+        const TEST_MOB_CULL_DISTANCE: f32 = 50.0;
+        app.insert_resource(DrawDistance {
+            mob: TEST_MOB_CULL_DISTANCE,
+            ..Default::default()
+        })
+        .init_resource::<EntityTable>()
+        .add_systems(Update, cull_entities_by_distance);
 
         // Self at origin; cull needs exactly one IsSelf.
         app.world_mut().spawn((

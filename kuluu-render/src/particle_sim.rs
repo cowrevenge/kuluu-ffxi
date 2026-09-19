@@ -2253,6 +2253,7 @@ mod tests {
             parent_color: false,
             parent_scale: false,
             velocity_dampener_track: None,
+            velocity_dampener: None,
             fixed_point_position_variance: None,
             fixed_point_position_variance_2: None,
             child_generator_2: None,

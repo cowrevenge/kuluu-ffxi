@@ -688,6 +688,11 @@ pub struct ParticleGeneratorDef {
     // Keyframe resources). Parsed but not applied: the engine does not model the velocity
     // dampener.
     pub velocity_dampener_track: Option<[u8; 4]>,
+    // sec3 0x2C VelocityDampener: [dampen, unk] — velocity ×= dampeningFactor^dt, the
+    // factor coming from the sec2 0x69 track when present, else dampen (research/xim
+    // ParticleUpdaters.kt VelocityDampener). The engine does not model the velocity
+    // dampener (the I35 0x69 precedent), so parse-only.
+    pub velocity_dampener: Option<[f32; 2]>,
 
     // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
     // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
@@ -1411,6 +1416,7 @@ impl ParticleGeneratorDef {
         let mut rotation_updater = false;
         let mut position_updater = false;
         let mut camera_shake = None;
+        let mut velocity_dampener = None;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -1476,6 +1482,19 @@ impl ParticleGeneratorDef {
                         ];
                         accel = Some(accel.map_or(v, |a| [a[0] + v[0], a[1] + v[1], a[2] + v[2]]));
                     }
+                    // research/xim ParticleUpdaters.kt VelocityDampener: two floats
+                    // [dampen, unk] — velocity ×= dampeningFactor^dt, the factor coming
+                    // from the sec2 0x69 track when present. The engine does not model
+                    // the velocity dampener (the I35 0x69 precedent), so parse-only.
+                    0x2C if payload + 8 <= body.len() => {
+                        velocity_dampener =
+                            Some([f32_le(body, payload), f32_le(body, payload + 4)]);
+                    }
+                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x44 — the
+                    // dampening-factor ProgressValueUpdater: no payload, it samples the
+                    // sec2 0x69 track. The engine does not model the velocity dampener,
+                    // so the block arms nothing and only consumes (the U1/U2 precedent).
+                    0x44 => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — these
                     // carry no payload; they mark which 0x60..0x63 track drives its channel.
                     0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
@@ -1688,6 +1707,7 @@ impl ParticleGeneratorDef {
             parent_color,
             parent_scale,
             velocity_dampener_track,
+            velocity_dampener,
             fixed_point_position_variance,
             fixed_point_position_variance_2,
             child_generator_2,
@@ -3248,6 +3268,62 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.velocity_dampener_track, None);
+    }
+
+    // sec3 0x2C VelocityDampener: two floats [dampen, unk] (research/xim
+    // ParticleUpdaters.kt VelocityDampener). Shipped census: 51845 blocks, all
+    // size_words=3.
+    #[test]
+    fn velocity_dampener_reads_the_two_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = [0u8; 8];
+        payload[0..4].copy_from_slice(&0.9f32.to_le_bytes());
+        payload[4..8].copy_from_slice(&0.25f32.to_le_bytes());
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x2C, 3, &payload));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.velocity_dampener, Some([0.9, 0.25]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.velocity_dampener, None);
+    }
+
+    // sec3 0x44 dampening-factor ProgressValueUpdater: no payload, it samples the sec2 0x69
+    // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44). Shipped census: 14
+    // blocks, all size_words=1, every one behind a sec2 0x69.
+    #[test]
+    fn dampening_factor_updater_consumes_the_block_without_state() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x44, 1, &[]));
+        body.extend_from_slice(&op(OPCODE_END, 0, &[]));
+
+        let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+            outcomes.push((s, op, o));
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(def.velocity_dampener, None);
+        assert!(
+            outcomes.iter().any(|(s, op, o)| {
+                *s == GeneratorSection::Updaters
+                    && *op == 0x44
+                    && *o == GeneratorOpcodeOutcome::Decoded
+            }),
+            "sec3 0x44 must report decoded: {outcomes:?}"
+        );
     }
 
     // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id, expect32

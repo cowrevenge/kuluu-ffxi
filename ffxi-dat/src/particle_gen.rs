@@ -660,6 +660,12 @@ pub struct ParticleGeneratorDef {
     // no-op without a parent). Parsed but not applied until the child-generator path
     // lands (the sec2 0x44 ChildGeneratorSetup).
     pub parent_color: bool,
+
+    // sec2 0x49 ParentScaleConfig: a no-payload marker — the child particle copies its
+    // parent's scale (research/xim ParticleInitializers.kt ParentScaleConfig; apply is a
+    // no-op without a parent). Parsed but not applied until the child-generator path
+    // lands (the sec2 0x44 ChildGeneratorSetup).
+    pub parent_scale: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -816,6 +822,7 @@ impl ParticleGeneratorDef {
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
         let mut parent_color = false;
+        let mut parent_scale = false;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1157,6 +1164,10 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's color (research/xim
                 // ParticleInitializers.kt ParentColorConfig).
                 0x48 => parent_color = true,
+                // 0x49 ParentScaleConfig: no payload — the marker that makes a child
+                // particle copy its parent's scale (research/xim
+                // ParticleInitializers.kt ParentScaleConfig).
+                0x49 => parent_scale = true,
                 // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
                 // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
                 0x40 if payload + 8 <= body.len() => {
@@ -1437,6 +1448,7 @@ impl ParticleGeneratorDef {
             haze_offset_x,
             parent_rotate,
             parent_color,
+            parent_scale,
         }))
     }
 
@@ -2567,6 +2579,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_color);
+    }
+
+    // 0x49 ParentScaleConfig: a no-payload marker (research/xim
+    // ParticleInitializers.kt ParentScaleConfig). Shipped census: 141 sec2 0x49 blocks in
+    // the parser-accepted corpus.
+    #[test]
+    fn parent_scale_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x49, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_scale);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_scale);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

@@ -391,6 +391,11 @@ pub struct ParticleGeneratorDef {
     // axis, per particle (research/xim ParticleInitializers.kt — scale += posRand(v);
     // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x11 — a single ufrand added to x, y, z).
     pub single_scale_variance: Option<f32>,
+    // sec2 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound added to the
+    // 0x0F base scale per particle (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10 —
+    // field_EC.x/y/z += ufrand(payload); research/xim ParticleInitializers.kt
+    // ScaleVarianceInitializer — scale += variance * posRand(1f) per axis).
+    pub scale_variance: Option<[f32; 3]>,
     pub init_color: [f32; 4],
     // sec2 0x17 ColorVarianceSetup: four bytes (R,G,B,A) / 255 — the per-channel bound of the
     // upward color draw added to the 0x16 base per particle (research/xim
@@ -649,6 +654,7 @@ impl ParticleGeneratorDef {
         let mut is_particle = false;
         let mut init_scale = [1.0f32; 3];
         let mut single_scale_variance = None;
+        let mut scale_variance = None;
         let mut init_color = [1.0f32; 4];
         let mut color_variance = None;
         let mut color_transform = None;
@@ -825,6 +831,15 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                // 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound
+                // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10).
+                0x10 if payload + 12 <= body.len() => {
+                    scale_variance = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
                 }
                 0x11 if payload + 4 <= body.len() => {
                     single_scale_variance = Some(f32_le(body, payload));
@@ -1098,6 +1113,7 @@ impl ParticleGeneratorDef {
             attach_source_oriented,
             init_scale,
             single_scale_variance,
+            scale_variance,
             init_color,
             color_variance,
             color_transform,
@@ -1976,6 +1992,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.single_scale_variance, None);
+    }
+
+    // 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound added to the 0x0F
+    // base scale per particle (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10 —
+    // field_EC.x/y/z += ufrand(payload)). Shipped census: 2669 blocks, all size_words=4,
+    // [0, 2] per axis, every one behind a 0x0F base scale.
+    #[test]
+    fn scale_variance_reads_the_three_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = Vec::new();
+        for f in [0.5f32, 0.25, 0.125] {
+            payload.extend_from_slice(&f.to_le_bytes());
+        }
+        setup.extend(op(0x10, 4, &payload));
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.scale_variance, Some([0.5, 0.25, 0.125]));
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.scale_variance, None);
     }
 
     // 0x1F SphericalPositionVarianceFull: nine floats, the camera flag u32, and the

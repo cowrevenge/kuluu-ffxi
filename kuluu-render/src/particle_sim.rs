@@ -1146,6 +1146,15 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     if let Some(v) = g.def.single_scale_variance {
         scale += Vec2::splat(next_unit(&mut g.emit_rng) * v);
     }
+    // 0x10 ScaleVarianceInitializer: a per-axis [0, v) draw on top of the 0x0F base; the z
+    // bound has no axis on the engine's 2D sprite (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x10 — field_EC.x/y/z += ufrand(payload)).
+    if let Some(var) = g.def.scale_variance {
+        scale += Vec2::new(
+            next_unit(&mut g.emit_rng) * var[0],
+            next_unit(&mut g.emit_rng) * var[1],
+        );
+    }
     // 0x12 ScaleVelocitySetup: the per-frame growth the sec3 0x08 ScaleUpdater integrates
     // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames); zero while the
     // updater is off, so a rate without it stays inert.
@@ -2012,6 +2021,7 @@ mod tests {
             attach_source_oriented: false,
             init_scale: [0.1, 0.1, 1.0],
             single_scale_variance: None,
+            scale_variance: None,
             init_color: [0.2, 0.2, 0.6, 0.5],
             color_variance: None,
             color_transform: None,
@@ -3078,6 +3088,38 @@ mod tests {
         assert!(
             scales.windows(2).any(|w| w[0] != w[1]),
             "the variance must differ between particles: {scales:?}"
+        );
+    }
+
+    // 0x10 ScaleVarianceInitializer: each scale axis draws its own [0, v) offset on top of
+    // the 0x0F base, so the axes decorrelate (CYyGenerator.cpp
+    // CYyGenerator::ElemGenerate case 0x10 — field_EC.x/y/z += ufrand(payload)).
+    #[test]
+    fn scale_variance_spreads_each_axis_independently() {
+        let mut d = def(120.0, 1.0, 16);
+        d.scale_variance = Some([0.2, 0.1, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 16, "one burst of sixteen");
+        for p in &g.particles {
+            // base 0.1 plus a per-axis [0, v) draw.
+            assert!(
+                (0.1f32..=0.3f32 + 1e-6).contains(&p.scale.x),
+                "x scale out of band: {}",
+                p.scale.x
+            );
+            assert!(
+                (0.1f32..=0.2f32 + 1e-6).contains(&p.scale.y),
+                "y scale out of band: {}",
+                p.scale.y
+            );
+        }
+        // The x bound is twice the y bound, so sixteen draws must decorrelate the axes.
+        assert!(
+            g.particles
+                .iter()
+                .any(|p| (p.scale.x - 0.1) / 0.2 != (p.scale.y - 0.1) / 0.1),
+            "the axis draws must be independent"
         );
     }
 

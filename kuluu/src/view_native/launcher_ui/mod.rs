@@ -281,6 +281,11 @@ pub(crate) struct LoginForm {
     pub focus: LoginField,
 
     pub remember_password: bool,
+
+    /// A PlayOnline profile signing in without the Viewer, running the
+    /// in-house account handshake rather than reading a session file.
+    /// Experimental: the handshake is not yet complete end to end.
+    pub pol_in_house: bool,
 }
 
 #[allow(dead_code)]

@@ -336,7 +336,10 @@ fn spawn_playonline_sign_in(
             ))
             .insert(DefaultFocusTarget)
             .observe(
-                |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
+                |_ev: On<Activate>,
+                 mut form: ResMut<LoginForm>,
+                 mut next: ResMut<NextState<LauncherState>>| {
+                    form.pol_in_house = false;
                     next.set(LauncherState::AuthInFlight);
                 },
             );
@@ -351,7 +354,46 @@ fn spawn_playonline_sign_in(
             dirty.0 = true;
         });
     });
+
+    if acknowledged && !blocked {
+        spawn_playonline_in_house(panel);
+    }
 }
+
+/// The in-house sign-in: sign in to a PlayOnline account without the Viewer.
+/// The account handshake is reimplemented from static research; running it
+/// contacts Square Enix with the player's own account, and it is not yet
+/// complete end to end, so it is offered separately from the session-file
+/// path and labelled experimental.
+fn spawn_playonline_in_house(panel: &mut ChildSpawnerCommands) {
+    for line in POL_IN_HOUSE_NOTICE {
+        panel.spawn(hint(line));
+    }
+    spawn_field(panel, "Member name", false, "", LoginField::User);
+    spawn_field(panel, "Password", true, "", LoginField::Password);
+    panel.spawn(row()).with_children(|r| {
+        r.spawn(button_bundle(
+            ButtonBundleProps::default(),
+            (),
+            Spawn((Text::new("In-house sign in (experimental)"), ThemedText)),
+        ))
+        .observe(
+            |_ev: On<Activate>,
+             mut form: ResMut<LoginForm>,
+             mut next: ResMut<NextState<LauncherState>>| {
+                if !form.user.is_empty() && !form.pass.is_empty() {
+                    form.pol_in_house = true;
+                    next.set(LauncherState::AuthInFlight);
+                }
+            },
+        );
+    });
+}
+
+const POL_IN_HOUSE_NOTICE: [&str; 2] = [
+    "Experimental: sign in to a PlayOnline account without the Viewer. This",
+    "contacts Square Enix with your own account and is not yet complete.",
+];
 
 fn spawn_saved_accounts_row(
     panel: &mut ChildSpawnerCommands,

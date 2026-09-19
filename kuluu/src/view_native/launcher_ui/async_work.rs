@@ -84,9 +84,10 @@ pub(super) fn spawn_auth_task(
     let source = clients.session_source.clone();
     let user = form.user.clone();
     let pass = form.pass.clone();
+    let in_house = form.pol_in_house;
 
     runtime.0.spawn(async move {
-        let res = run_auth_then_open(&auth, &lobby, &source, &user, &pass).await;
+        let res = run_auth_then_open(&auth, &lobby, &source, in_house, &user, &pass).await;
         let _ = tx.send(res);
     });
 
@@ -98,6 +99,7 @@ pub(super) fn spawn_auth_task(
 async fn obtain_session(
     auth: &AuthClient,
     source: &SessionSource,
+    in_house: bool,
     user: &str,
     pass: &str,
 ) -> Result<AuthSession> {
@@ -106,6 +108,13 @@ async fn obtain_session(
             .login(user, pass)
             .await
             .map_err(|e| anyhow!("login: {e}")),
+        SessionSource::PlayOnline { .. } if in_house => {
+            let creds = kuluu_session::pol_inhouse::Credentials {
+                member: user.to_string(),
+                password: pass.to_string(),
+            };
+            kuluu_session::pol_inhouse::login(String::new(), String::new(), creds).await
+        }
         SessionSource::PlayOnline { session_file } => {
             let located = kuluu_session::playonline::locate(session_file.as_deref())?;
             located.map(|l| l.session).ok_or_else(|| {
@@ -124,11 +133,12 @@ async fn run_auth_then_open(
     auth: &AuthClient,
     lobby: &LobbyClient,
     source: &SessionSource,
+    in_house: bool,
     user: &str,
     pass: &str,
 ) -> Result<AuthOk> {
     tracing::debug!(user, "auth task: logging in");
-    let session = obtain_session(auth, source, user, pass).await?;
+    let session = obtain_session(auth, source, in_house, user, pass).await?;
     tracing::debug!("auth task: login succeeded, opening lobby");
     let handle = lobby
         .open(&session)
@@ -338,7 +348,7 @@ async fn reopen_and_select(
     pass: &str,
     slot: &kuluu_session::lobby_client::CharSlot,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
-    let session = obtain_session(auth, source, user, pass)
+    let session = obtain_session(auth, source, false, user, pass)
         .await
         .map_err(|e| ConnectErr {
             msg: format!("re-login: {e}"),

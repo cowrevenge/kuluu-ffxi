@@ -21,11 +21,22 @@ use crate::rsa::{KeyPair, SESSION_KEY_BYTES};
 
 /// A bidirectional byte channel. The chat service is line-oriented and its
 /// stream cipher passes CR and LF through in the clear, so a reader can frame
-/// on the newline whether or not the cipher is engaged.
+/// on the newline whether or not the cipher is engaged. The profile service is
+/// fixed-frame, so it reads exact counts.
 pub trait ByteChannel {
     fn write_all(&mut self, buf: &[u8]) -> Result<()>;
     /// Read up to and including the next `\n`.
     fn read_line(&mut self) -> Result<Vec<u8>>;
+    /// Read exactly `n` bytes.
+    fn read_exact(&mut self, n: usize) -> Result<Vec<u8>>;
+}
+
+/// Opens a byte channel to a named host and port. The chat and profile
+/// services are separate connections on separate ports, so the login
+/// orchestration takes a connector rather than a single channel. No host is
+/// built in; the caller supplies it.
+pub trait Connector {
+    fn connect(&mut self, host: &str, port: u16) -> Result<Box<dyn ByteChannel>>;
 }
 
 /// numeric 300, which carries the RSA-encrypted session key.
@@ -193,6 +204,9 @@ mod tests {
                 .outbound
                 .pop_front()
                 .ok_or_else(|| Error::protocol("mock server has nothing to send"))
+        }
+        fn read_exact(&mut self, _n: usize) -> Result<Vec<u8>> {
+            Err(Error::protocol("the chat mock is line-oriented"))
         }
     }
 

@@ -18,6 +18,7 @@ ffxi-nav-recast = { path = "../ffxi-nav-recast" }
 ffxi-dat = { path = "../ffxi-dat" }
 ffxi-event = { path = "../ffxi-event" }
 kuluu-snapshot = { path = "../kuluu-snapshot" }
+ffxi-pol = { path = "../ffxi-pol" }
 
 anyhow.workspace = true
 # Binary xiloader auth (e.g. HorizonXI's hxiloader v1.3) embeds the local
@@ -32,6 +33,7 @@ thiserror = "2"
 # stores). Wraps the OS APIs and applies the XDG basedir spec.
 dirs = "7"
 hex.workspace = true
+rand = "0.10"
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

@@ -12,6 +12,7 @@
 //!     zeroed IV (the RFC 1321 reference `MD5Final` zeroes the context);
 //!   - the self-encryption pass encrypts the constant zero block each time
 //!     rather than chaining the previous output.
+//!
 //! `PolBlowfish::schedule`, `encrypt_block`, and `stream` cite the polcore
 //! routine each reproduces.
 

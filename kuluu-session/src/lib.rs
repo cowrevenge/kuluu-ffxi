@@ -20,6 +20,7 @@ pub mod lobby_wire;
 pub mod map_client;
 pub mod net_health;
 pub mod playonline;
+pub mod pol_inhouse;
 pub mod reactor;
 pub mod scene;
 pub mod search_client;

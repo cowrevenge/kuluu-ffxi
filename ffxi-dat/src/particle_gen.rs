@@ -692,6 +692,12 @@ pub struct ParticleGeneratorDef {
     // but not applied until the child-generator runtime lands (the sec3 0x25/0x33 child
     // updaters).
     pub child_generator_2: Option<[u8; 4]>,
+
+    // sec2 0x5B KeyFrameValueSetup (specular rotation.z): the 0x27/0x28/0x29 track shape
+    // bound to the specular element's rotation z (research/xim ParticleGeneratorParser.kt
+    // — 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but
+    // not applied: the engine does not model the specular element's rotation.
+    pub specular_rot_z_track: Option<[u8; 4]>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -844,6 +850,7 @@ impl ParticleGeneratorDef {
         let mut specular = None;
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
+        let mut specular_rot_z_track = None;
         let mut camera_shake_track = None;
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
@@ -1072,6 +1079,12 @@ impl ParticleGeneratorDef {
                 // (research/xim ParticleGeneratorParser.kt).
                 0x5A if payload + 8 <= body.len() => {
                     specular_rot_y_track = track_id(body, payload + 4);
+                }
+                // 0x5B KeyFrameValueSetup (specular rotation.z): the 0x5A shape bound to
+                // the specular element's rotation z (research/xim
+                // ParticleGeneratorParser.kt).
+                0x5B if payload + 8 <= body.len() => {
+                    specular_rot_z_track = track_id(body, payload + 4);
                 }
                 // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32,
                 // unk1 f32, unk2 u32] — the DAT id of the keyframe track the section-3
@@ -1506,6 +1519,7 @@ impl ParticleGeneratorDef {
             fixed_point_position_variance,
             fixed_point_position_variance_2,
             child_generator_2,
+            specular_rot_z_track,
         }))
     }
 
@@ -2739,6 +2753,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.child_generator_2, None);
+    }
+
+    // 0x5B KeyFrameValueSetup (specular rotation.z): the 0x5A shape bound to the specular
+    // element's rotation z (research/xim ParticleGeneratorParser.kt). Shipped census: 214
+    // sec2 0x5B blocks in the parser-accepted corpus.
+    #[test]
+    fn specular_rot_z_track_reads_the_keyframe_id() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x5B, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'z']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.specular_rot_z_track, Some(*b"n0rz"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.specular_rot_z_track, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

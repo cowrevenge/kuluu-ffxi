@@ -19,6 +19,7 @@ mod server_version_check;
 mod settings;
 mod updater;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::launcher_store::{AuthFlavorKind, ServerProfile};
@@ -51,7 +52,7 @@ pub(crate) fn apply_server_profile(commands: &mut Commands, profile: &ServerProf
     commands.insert_resource(LauncherClients {
         auth,
         lobby,
-        uses_auth_server: profile.flavor.uses_auth_server(),
+        session_source: SessionSource::for_profile(profile),
     });
     commands.insert_resource(ServerInfo {
         server: profile.host.clone(),
@@ -297,6 +298,7 @@ pub(crate) enum ServerEditField {
     ClientVer,
     VerLock,
     PreferredClient,
+    PolSessionFile,
 }
 
 #[allow(dead_code)]
@@ -308,7 +310,8 @@ impl ServerEditField {
             Self::AuthPort => Self::DataPort,
             Self::DataPort => Self::ViewPort,
             Self::ViewPort => Self::Flavor,
-            Self::Flavor => Self::XiloaderVersion,
+            Self::Flavor => Self::PolSessionFile,
+            Self::PolSessionFile => Self::XiloaderVersion,
             Self::XiloaderVersion => Self::VersionCheckUrl,
             Self::VersionCheckUrl => Self::ClientVer,
             Self::ClientVer => Self::VerLock,
@@ -340,6 +343,7 @@ pub(crate) struct ServerEditForm {
     pub client_ver: String,
     pub ver_lock: Option<u8>,
     pub preferred_client: Option<String>,
+    pub pol_session_file: String,
     pub show_advanced: bool,
     #[allow(dead_code)]
     pub focus: ServerEditField,
@@ -376,6 +380,11 @@ impl ServerEditForm {
             client_ver: p.client_ver.clone().unwrap_or_default(),
             ver_lock: p.ver_lock,
             preferred_client: p.preferred_client.clone(),
+            pol_session_file: p
+                .pol_session_file
+                .as_ref()
+                .map(|f| f.display().to_string())
+                .unwrap_or_default(),
             show_advanced,
             focus: ServerEditField::default(),
             editing_index: None,
@@ -498,14 +507,34 @@ impl ServerInfo {
     }
 }
 
+/// Where the lobby session for the current profile comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionSource {
+    AuthServer,
+    /// The PlayOnline Viewer's session, read from the file the profile names
+    /// or from kuluu_session::playonline::default_session_file.
+    PlayOnline {
+        session_file: Option<PathBuf>,
+    },
+}
+
+impl SessionSource {
+    pub fn for_profile(profile: &ServerProfile) -> Self {
+        if profile.is_playonline() {
+            Self::PlayOnline {
+                session_file: profile.pol_session_file.clone(),
+            }
+        } else {
+            Self::AuthServer
+        }
+    }
+}
+
 #[derive(Resource, Clone)]
 pub(crate) struct LauncherClients {
     pub auth: Arc<AuthClient>,
     pub lobby: Arc<LobbyClient>,
-
-    /// False for a PlayOnline profile, whose session comes from the viewer
-    /// rather than from an auth exchange this client performs.
-    pub uses_auth_server: bool,
+    pub session_source: SessionSource,
 }
 
 #[derive(Default)]
@@ -614,7 +643,7 @@ pub(crate) fn register(
         .insert_resource(LauncherClients {
             auth,
             lobby,
-            uses_auth_server: true,
+            session_source: SessionSource::AuthServer,
         })
         .insert_resource(OpenedLobby::default())
         .insert_resource(Credentials::default())
@@ -1332,6 +1361,18 @@ mod tests {
         .insert_resource(CharListData::default())
         .insert_resource(DefaultCharName::default())
         .insert_resource(Credentials::default())
+        .insert_resource(LauncherClients {
+            auth: Arc::new(AuthClient::new(
+                "127.0.0.1",
+                ffxi_proto::login::LOGIN_AUTH_PORT,
+            )),
+            lobby: Arc::new(LobbyClient::new(
+                "127.0.0.1",
+                ffxi_proto::login::LOGIN_DATA_PORT,
+                ffxi_proto::login::LOGIN_VIEW_PORT,
+            )),
+            session_source: SessionSource::AuthServer,
+        })
         .init_resource::<InputFocus>();
         app
     }

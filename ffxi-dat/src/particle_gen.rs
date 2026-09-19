@@ -705,6 +705,13 @@ pub struct ParticleGeneratorDef {
     // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
     // specular element's color.
     pub specular_color_a_track: Option<[u8; 4]>,
+
+    // sec2 0x79 ParentRotateConfig: a no-payload marker — xim maps 0x79 to the same
+    // class as 0x47 (research/xim ParticleGeneratorParser.kt sec2Handler, comment
+    // "How does it differ from 0x47?"); a second slot so a generator carrying both
+    // keeps both. Parsed but not applied until the child-generator path lands (the
+    // sec2 0x44 ChildGeneratorSetup).
+    pub parent_rotate_2: bool,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -862,6 +869,7 @@ impl ParticleGeneratorDef {
         let mut camera_shake_track = None;
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
+        let mut parent_rotate_2 = false;
         let mut parent_color = false;
         let mut parent_scale = false;
         let mut velocity_dampener_track = None;
@@ -1222,6 +1230,9 @@ impl ParticleGeneratorDef {
                 // particle copy its parent's rotation (research/xim
                 // ParticleInitializers.kt ParentRotateConfig).
                 0x47 => parent_rotate = true,
+                // 0x79 ParentRotateConfig: the 0x47 marker — xim maps both opcodes to
+                // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
+                0x79 => parent_rotate_2 = true,
                 // 0x48 ParentColorConfig: no payload — the marker that makes a child
                 // particle copy its parent's color (research/xim
                 // ParticleInitializers.kt ParentColorConfig).
@@ -1535,6 +1546,7 @@ impl ParticleGeneratorDef {
             child_generator_2,
             specular_rot_z_track,
             specular_color_a_track,
+            parent_rotate_2,
         }))
     }
 
@@ -2646,6 +2658,26 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!plain.parent_rotate);
+    }
+
+    // 0x79 ParentRotateConfig: the 0x47 marker — xim maps both opcodes to the same
+    // class (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 15
+    // sec2 0x79 blocks in the parser-accepted corpus.
+    #[test]
+    fn parent_rotate_twin_is_a_no_payload_marker() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x79, 1, &[]));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.parent_rotate_2);
+        assert!(!def.parent_rotate);
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.parent_rotate_2);
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim

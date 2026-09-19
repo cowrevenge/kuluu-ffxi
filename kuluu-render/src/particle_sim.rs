@@ -2249,6 +2249,7 @@ mod tests {
             child_generator_2: None,
             specular_rot_z_track: None,
             specular_color_a_track: None,
+            parent_rotate_2: false,
         }
     }
 

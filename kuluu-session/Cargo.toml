@@ -33,7 +33,6 @@ thiserror = "2"
 # stores). Wraps the OS APIs and applies the XDG basedir spec.
 dirs = "7"
 hex.workspace = true
-rand = "0.10"
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

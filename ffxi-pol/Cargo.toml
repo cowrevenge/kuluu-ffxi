@@ -10,7 +10,7 @@ hex.workspace = true
 md-5.workspace = true
 num-bigint.workspace = true
 num-integer.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["std_rng"] }
 sha1.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }

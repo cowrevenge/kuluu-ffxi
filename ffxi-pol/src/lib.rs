@@ -10,6 +10,7 @@
 //! `.agents/skills/retail-observe/references/` name the build behind each one.
 //! No host is built in: the caller names the service it is talking to.
 
+pub mod authcode;
 pub mod chat;
 pub mod crypto;
 pub mod error;

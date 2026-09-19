@@ -564,6 +564,9 @@ pub struct ParticleGeneratorDef {
     // payload1, payload2 has no effect (research/xim ParticleUpdaters.kt OscillationApplier).
     // The acceleration is parsed but never moves a particle without it.
     pub oscillation_applier_x: Option<[f32; 3]>,
+    // sec3 0x2B OscillationApplier (Z): the Z-axis twin of 0x29 (research/xim
+    // ParticleUpdaters.kt OscillationApplier), the integrator for the 0x40 acceleration.
+    pub oscillation_applier_z: Option<[f32; 3]>,
 
     // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
@@ -1090,6 +1093,7 @@ impl ParticleGeneratorDef {
         let mut uv_scroll = [0.0f32; 2];
         let mut accel = None;
         let mut oscillation_applier_x = None;
+        let mut oscillation_applier_z = None;
         let mut day_of_week_color = None;
         let mut moon_phase_color = None;
         let mut moon_phase_sprite = false;
@@ -1120,6 +1124,13 @@ impl ParticleGeneratorDef {
                     // 180f / payload0, baseOffset = payload1, payload2 has no effect.
                     0x29 if payload + 12 <= body.len() => {
                         oscillation_applier_x = Some([
+                            f32_le(body, payload),
+                            f32_le(body, payload + 4),
+                            f32_le(body, payload + 8),
+                        ]);
+                    }
+                    0x2B if payload + 12 <= body.len() => {
+                        oscillation_applier_z = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
                             f32_le(body, payload + 8),
@@ -1289,6 +1300,7 @@ impl ParticleGeneratorDef {
             oscillation_accel_x,
             oscillation_accel_y,
             oscillation_applier_x,
+            oscillation_applier_z,
             rotation_velocity,
             rotation_velocity_variance,
             rotation_updater,
@@ -2132,6 +2144,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.oscillation_applier_x, None);
+    }
+
+    // 0x2B OscillationApplier (Z): the Z-axis twin of 0x29 on the section-3 stream (research/xim
+    // ParticleUpdaters.kt OscillationApplier), the integrator for the sec2 0x40 acceleration.
+    // Shipped census: 347 blocks, all size_words=4, every one in a generator carrying the 0x3D
+    // marker.
+    #[test]
+    fn oscillation_applier_z_reads_the_three_floats() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut p = Vec::new();
+        p.extend_from_slice(&0.9f32.to_le_bytes());
+        p.extend_from_slice(&0.5f32.to_le_bytes());
+        let mut sec2 = setup.clone();
+        sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
+        sec2.extend(op(0x40, 3, &p));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        let mut ap = Vec::new();
+        ap.extend_from_slice(&3.0f32.to_le_bytes());
+        ap.extend_from_slice(&1.0f32.to_le_bytes());
+        ap.extend_from_slice(&0.0f32.to_le_bytes());
+        body.extend_from_slice(&op(0x2B, 4, &ap));
+
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.oscillation);
+        assert_eq!(def.oscillation_applier_z, Some([3.0, 1.0, 0.0]));
+
+        // The same block on the section-2 stream is a KeyFrameValueSetup (color.g track),
+        // not an applier.
+        let mut wrong = setup.clone();
+        wrong.extend(op(0x2B, 4, &ap));
+        let plain = ParticleGeneratorDef::parse(&build(&wrong, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.oscillation_applier_z, None);
     }
 
     // 0x03 VelocityVarianceSetup: the three floats are the per-axis bounds of the random

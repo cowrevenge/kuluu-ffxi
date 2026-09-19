@@ -1029,26 +1029,29 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .def
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
-    let osc_applier = g.def.oscillation_applier_x;
+    let osc_applier_x = g.def.oscillation_applier_x;
+    let osc_applier_z = g.def.oscillation_applier_z;
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
         }
         p.pos += p.vel * frames;
-        // sec3 0x29 OscillationApplier (X): after the base position step, add the
-        // amplitude change over the tick (research/xim ParticleUpdaters.kt
+        // sec3 0x29/0x2B OscillationApplier (X/Z): after the base position step, add the
+        // amplitude change over the tick per active axis (research/xim ParticleUpdaters.kt
         // OscillationApplier — particle.position += direction × delta).
-        if let (Some(applier), Some(osc)) = (osc_applier, p.osc.as_mut()) {
-            p.pos += oscillation_delta(
-                applier,
-                0,
-                osc,
-                p.rel_vel,
-                p.age_frames - frames,
-                p.age_frames,
-                g.actor_local,
-            );
+        for (axis, applier) in [(0, osc_applier_x), (2, osc_applier_z)] {
+            if let (Some(applier), Some(osc)) = (applier, p.osc.as_mut()) {
+                p.pos += oscillation_delta(
+                    applier,
+                    axis,
+                    osc,
+                    p.rel_vel,
+                    p.age_frames - frames,
+                    p.age_frames,
+                    g.actor_local,
+                );
+            }
         }
         p.scale += p.scale_vel * frames;
         p.rotation += p.spin * frames;
@@ -2207,6 +2210,7 @@ mod tests {
             oscillation_accel_x: None,
             oscillation_accel_y: None,
             oscillation_applier_x: None,
+            oscillation_applier_z: None,
             rotation_velocity: None,
             rotation_velocity_variance: None,
             rotation_updater: false,
@@ -3427,6 +3431,31 @@ mod tests {
         }
         let x_full = g.particles[0].pos.x;
         assert!(x_full.abs() < 1e-2, "full-period return: {x_full}");
+    }
+
+    // sec3 0x2B OscillationApplier (Z): the z position sways with the amplitude curve. The
+    // default generator is world-space, so the FFXI +Z unit hat lands on Bevy −Z through the
+    // (x, −y, −z) basis — the peak is negative.
+    #[test]
+    fn oscillation_applier_z_oscillates_the_position() {
+        let mut d = def(1000.0, 1.0, 1);
+        d.oscillation = true;
+        d.oscillation_accel_z = Some([0.5, 0.0]);
+        d.oscillation_applier_z = Some([2.0, 0.0, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1, "one particle");
+        g.stopped = true;
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let z_peak = g.particles[0].pos.z;
+        assert!((z_peak + 22.5).abs() < 1e-2, "half-period peak: {z_peak}");
+        for _ in 0..90 {
+            advance(&mut g, 1.0);
+        }
+        let z_full = g.particles[0].pos.z;
+        assert!(z_full.abs() < 1e-2, "full-period return: {z_full}");
     }
 
     // The 0x3E acceleration without the sec3 0x29 applier is parsed but never moves the

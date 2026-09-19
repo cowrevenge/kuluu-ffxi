@@ -2195,6 +2195,7 @@ mod tests {
             init_color: [0.2, 0.2, 0.6, 0.5],
             color_variance: None,
             color_transform: None,
+            color_transform_modifier: None,
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
             relative_velocity: None,

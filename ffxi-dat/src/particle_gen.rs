@@ -409,6 +409,12 @@ pub struct ParticleGeneratorDef {
     // (research/xim ParticleInitializers.kt ColorTransformSetup — particle.allocate only), so
     // the application is unknown and the shipped alpha is always 0.
     pub color_transform: Option<[i16; 4]>,
+    // sec3 0x0C ColorTransformModifier: four i16s [r, g, b, a] — the per-frame rate on the
+    // sec2 0x19 color transform over the particle's life (research/xim
+    // ParticleUpdaters.kt ColorTransformModifier — colorTransform += floor(modifier ×
+    // frames/30) per frame). The engine does not model the color transform's application
+    // (the I14 0x19 precedent), so parse-only.
+    pub color_transform_modifier: Option<[i16; 4]>,
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
     // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
@@ -1423,6 +1429,7 @@ impl ParticleGeneratorDef {
         let mut camera_shake = None;
         let mut velocity_dampener = None;
         let mut velocity_rotator = None;
+        let mut color_transform_modifier = None;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -1501,6 +1508,18 @@ impl ParticleGeneratorDef {
                     // sec2 0x69 track. The engine does not model the velocity dampener,
                     // so the block arms nothing and only consumes (the U1/U2 precedent).
                     0x44 => {}
+                    // research/xim ParticleUpdaters.kt ColorTransformModifier: four i16s —
+                    // the per-frame rate on the sec2 0x19 color transform. The engine does
+                    // not model the color transform's application (the I14 0x19 precedent),
+                    // so parse-only.
+                    0x0C if payload + 8 <= body.len() => {
+                        color_transform_modifier = Some([
+                            i16::from_le_bytes([body[payload], body[payload + 1]]),
+                            i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
+                            i16::from_le_bytes([body[payload + 4], body[payload + 5]]),
+                            i16::from_le_bytes([body[payload + 6], body[payload + 7]]),
+                        ]);
+                    }
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
                     // frame. The engine has no velocityRotation, so parse-only.
@@ -1662,6 +1681,7 @@ impl ParticleGeneratorDef {
             init_color,
             color_variance,
             color_transform,
+            color_transform_modifier,
             init_velocity,
             velocity_variance,
             relative_velocity,
@@ -3941,6 +3961,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.color_transform, None);
+    }
+
+    // sec3 0x0C ColorTransformModifier: four i16s, the per-frame rate on the sec2 0x19
+    // color transform (research/xim ParticleUpdaters.kt ColorTransformModifier). Shipped
+    // census: 2379 blocks, all size_words=3.
+    #[test]
+    fn color_transform_modifier_reads_the_four_i16s() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut payload = Vec::new();
+        for v in [1i16, -2, 3, 0] {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x0C, 3, &payload));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.color_transform_modifier, Some([1, -2, 3, 0]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_transform_modifier, None);
     }
 
     fn mesh_setup() -> Vec<u8> {

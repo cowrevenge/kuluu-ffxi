@@ -640,6 +640,14 @@ pub struct ParticleGeneratorDef {
     // particle's progress (research/xim ParticleInitializers.kt CameraShakeSetup). Parsed
     // but not applied until the section-3 updater lands.
     pub camera_shake_track: Option<[u8; 4]>,
+
+    // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
+    // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
+    // offsets the previous-frame transform by (research/xim ParticleInitializers.kt
+    // HazeOffsetInitializer; GLDrawer.kt previousFrameTransform). Parsed but not applied:
+    // the engine has no haze/distortion pass yet; the sec3 0x24 ProgressValueUpdater
+    // animates the same value over life.
+    pub haze_offset_x: Option<f32>,
 }
 
 // sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
@@ -793,6 +801,7 @@ impl ParticleGeneratorDef {
         let mut specular_element = false;
         let mut specular_rot_y_track = None;
         let mut camera_shake_track = None;
+        let mut haze_offset_x = None;
         let mut foot_mark = false;
         let mut oscillation = false;
         let mut parent_position_copy = false;
@@ -1020,6 +1029,12 @@ impl ParticleGeneratorDef {
                 // block is consumed; only the track id is kept.
                 0x82 if payload + 8 <= body.len() => {
                     camera_shake_track = track_id(body, payload + 4);
+                }
+                // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim
+                // applies only the second float, as particle.hazeOffset.x (research/xim
+                // ParticleInitializers.kt HazeOffsetInitializer).
+                0x32 if payload + 8 <= body.len() => {
+                    haze_offset_x = Some(f32_le(body, payload + 4));
                 }
                 0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
                 // 0x41 RelativeVelocityVarianceSetup: one float, the bound of the random
@@ -1397,6 +1412,7 @@ impl ParticleGeneratorDef {
             specular,
             specular_rot_y_track,
             camera_shake_track,
+            haze_offset_x,
         }))
     }
 
@@ -2466,6 +2482,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.camera_shake_track, None);
+    }
+
+    // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the
+    // second float, as particle.hazeOffset.x (research/xim ParticleInitializers.kt
+    // HazeOffsetInitializer). Shipped census: 1150 sec2 0x32 blocks in the parser-accepted
+    // corpus.
+    #[test]
+    fn haze_offset_reads_the_second_float() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup.clone();
+        let mut payload = [0u8; 8];
+        payload[0..4].copy_from_slice(&0.5f32.to_le_bytes());
+        payload[4..8].copy_from_slice(&1.25f32.to_le_bytes());
+        sec2.extend(op(0x32, 3, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.haze_offset_x, Some(1.25));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.haze_offset_x, None);
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim

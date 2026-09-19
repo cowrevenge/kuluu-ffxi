@@ -310,6 +310,11 @@ impl ZoneDoors {
         self.platform_heights.remove(&four_cc);
     }
 
+    /// Whether `four_cc` is a lift platform group with a known height.
+    pub fn is_platform(&self, four_cc: u32) -> bool {
+        self.platform_heights.contains_key(&four_cc)
+    }
+
     /// The pose a leaf renders with: its swing, plus the lift height override for
     /// a platform group, which replaces the placement's authored height outright
     /// the way XIM's ZoneDrawer writes the actor's y over the object's.

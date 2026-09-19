@@ -11,6 +11,13 @@
 //! (a closed drawbridge). Any swing displacement means open or mid-swing and
 //! the leaf drops out of the set.
 //!
+//! Lift platforms: an `@` group's leaves are baked the same way at the pose
+//! `crate::elevators` gives them, so the platform is the floor under a rider at
+//! whatever height it has reached, out to the mesh's own edge. The RID box is
+//! only the carry region and stops short of the doorway, where the zone's
+//! static collision has no floor of its own: the platform mesh is what bridges
+//! the platform to the landing.
+//!
 //! Mobs: horizontal circles in xz from the model AABB's wider ground-plane
 //! half-extent, with the old body-block rules: dead entities (wire 0x0E hp 0)
 //! never block, `EntityKind::Other` never blocks, undrawn actors never block,
@@ -228,15 +235,20 @@ pub fn rebuild_obstacles_system(
         {
             continue;
         }
-        if doors_res.dir(leaf.four_cc).is_none() {
+        let platform = doors_res.is_platform(leaf.four_cc);
+        if !platform && doors_res.dir(leaf.four_cc).is_none() {
             continue; // not a door-routine group: MZB-only
         }
-        let pose = doors_res.pose(leaf.key());
-        let closed = pose.rotation == Vec3::ZERO && pose.translation == Vec3::ZERO;
-        if !closed {
-            continue; // open or mid-swing: passable this tick
-        }
-        let xform = leaf.posed_transform(DoorPose::default());
+        let xform = if platform {
+            leaf.posed_transform(doors_res.leaf_pose(leaf))
+        } else {
+            let pose = doors_res.pose(leaf.key());
+            let closed = pose.rotation == Vec3::ZERO && pose.translation == Vec3::ZERO;
+            if !closed {
+                continue; // open or mid-swing: passable this tick
+            }
+            leaf.posed_transform(DoorPose::default())
+        };
         let mut tris: Vec<([Vec3; 3], Vec3)> = Vec::new();
         for child in kids.iter() {
             let Ok(m3) = mesh_children.get(child) else {
@@ -509,6 +521,74 @@ mod tests {
         let set = app.world().resource::<ObstacleSet>();
         assert_eq!(set.mobs.len(), 1);
         assert_eq!(set.mobs[0].id, 9);
+    }
+
+    /// A lift platform is solid at the height the lift module gave it, not at
+    /// its authored one: the rider stands on the mesh wherever it has climbed to.
+    #[test]
+    fn lift_platform_is_a_floor_at_its_current_height() {
+        use kuluu_render::zone_doors::ZoneDoorLeaf;
+        const SHAFT: [u8; 4] = *b"@6l0";
+        const AUTHORED_FFXI_Y: f32 = 1.97;
+        const RAISED_FFXI_Y: f32 = -9.98;
+        let placement = ffxi_dat::mzb::MmbPlacement {
+            id: [0; 16],
+            trans: [-56.0, AUTHORED_FFXI_Y, 12.0],
+            rot: [0.0; 3],
+            scale: [1.0; 3],
+            block_id: u32::from_le_bytes(SHAFT),
+            lod_near: 0.0,
+            lod_mid: 0.0,
+            lod_far: 0.0,
+            special_effects: 0,
+            area_resource_id: 0,
+            sub_area_link: 0,
+            light_references: [0; ffxi_dat::mzb::LIGHT_REFERENCE_COUNT],
+        };
+        let mut app = App::new();
+        app.insert_resource(ZoneDoors::default())
+            .init_resource::<SceneState>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<ObstacleSet>()
+            .add_systems(Update, rebuild_obstacles_system);
+        let slab = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(6.0, 0.2, 6.0)));
+        app.world_mut()
+            .spawn(ZoneDoorLeaf::new(0, &placement))
+            .with_children(|p| {
+                p.spawn(Mesh3d(slab));
+            });
+
+        app.update();
+        assert!(
+            app.world().resource::<ObstacleSet>().doors.is_empty(),
+            "no lift height known: the group is not a door and stays MZB-only"
+        );
+
+        let four_cc = u32::from_le_bytes(SHAFT);
+        for ffxi_y in [AUTHORED_FFXI_Y, RAISED_FFXI_Y] {
+            app.world_mut()
+                .resource_mut::<ZoneDoors>()
+                .set_platform_height(four_cc, ffxi_y);
+            app.update();
+            let set = app.world().resource::<ObstacleSet>();
+            assert_eq!(set.doors.len(), 1);
+            let top = set.doors[0].max.y;
+            let expected = -ffxi_y + 0.1;
+            assert!(
+                (top - expected).abs() < 1e-3,
+                "platform top {top} for lift height {ffxi_y}, expected {expected}"
+            );
+            assert!(
+                (set.doors[0].max.x + 53.0).abs() < 1e-3
+                    && (set.doors[0].min.x + 59.0).abs() < 1e-3,
+                "the mesh footprint, not the RID box, is the floor: {:?}..{:?}",
+                set.doors[0].min,
+                set.doors[0].max
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,14 @@
 //! `mv10` routines and the tag of the RID box that states its two floor heights
 //! (research/xim/src/jsMain/kotlin/xim/poc/Actor.kt updateElevatorDisplay,
 //! ZoneDrawer.kt, Scene.kt checkElevatorInteraction).
+//!
+//! The platform entity is bound to its shaft by position, not by the FourCC the
+//! 0x0E name block carries. A lift NPC stands at the centre of its RID box, and
+//! the server's label can name the other shaft: LSB's Metalworks data tags the
+//! platform inside the DAT's `@6l1` box `@6l0` and vice versa
+//! (vendor/server/data/zones/metalworks/npcs.yaml against zone DAT 337), so a
+//! label-bound platform follows the other shaft's leg, which runs in the
+//! opposite phase. The label only decides when no box contains the entity.
 
 use std::collections::HashMap;
 
@@ -93,6 +101,17 @@ impl ZoneElevators {
 
     pub fn shaft(&self, four_cc: u32) -> Option<&Shaft> {
         self.shafts.get(&four_cc)
+    }
+
+    /// The shaft a platform entity drives: the one whose RID box holds the
+    /// entity's wire position, else the one its wire FourCC names. `wire` is
+    /// (x, y, z) as the position packets carry them, z the vertical.
+    pub fn shaft_for(&self, wire: [f32; 3], labelled: Option<u32>) -> Option<u32> {
+        let native = [wire[0], wire[2], wire[1]];
+        self.shafts
+            .iter()
+            .find_map(|(four_cc, shaft)| shaft.rect.contains(native).then_some(*four_cc))
+            .or_else(|| labelled.filter(|cc| self.shafts.contains_key(cc)))
     }
 
     pub fn insert_shaft(&mut self, shaft: Shaft) {
@@ -283,11 +302,14 @@ pub fn drive_elevators(
     for wire in &scene_state.snapshot.entities {
         let Some(EntityLook::Transport {
             size: MODEL_ELEVATOR,
-            model_id: Some(four_cc),
+            model_id,
             animation_start,
             travel_secs,
         }) = wire.look
         else {
+            continue;
+        };
+        let Some(four_cc) = lifts.shaft_for([wire.pos.x, wire.pos.y, wire.pos.z], model_id) else {
             continue;
         };
         let Some(shaft) = lifts.shafts.get(&four_cc) else {
@@ -490,7 +512,7 @@ mod tests {
         lifts.shafts.insert(
             four_cc,
             Shaft {
-                rect: rect.clone(),
+                rect,
                 dir,
             },
         );
@@ -535,6 +557,41 @@ mod tests {
             None,
             "left behind at the floor"
         );
+
+        // Binding: the box holding the platform entity names its shaft; the wire
+        // FourCC only decides for an entity standing in no box.
+        const OTHER_SHAFT: [u8; 4] = *b"@6l1";
+        let other_cc = u32::from_le_bytes(OTHER_SHAFT);
+        let mut other = shaft_rect();
+        other.position[2] = -other.position[2];
+        other.source_id = ffxi_dat::datid::DatId(OTHER_SHAFT);
+        lifts.insert_shaft(Shaft {
+            rect: other,
+            dir: ShaftDir::default(),
+        });
+        let centre_of =
+            |rect: &ZoneInteraction| [rect.position[0], rect.position[2], rect.position[1]];
+        assert_eq!(
+            lifts.shaft_for(centre_of(&rect), Some(other_cc)),
+            Some(four_cc),
+            "an entity labelled for the other shaft drives the one it stands in"
+        );
+        assert_eq!(
+            lifts.shaft_for(centre_of(&rect), None),
+            Some(four_cc),
+            "no label needed inside a box"
+        );
+        assert_eq!(
+            lifts.shaft_for([0.0, 0.0, 0.0], Some(other_cc)),
+            Some(other_cc),
+            "outside every box the label decides"
+        );
+        assert_eq!(
+            lifts.shaft_for([0.0, 0.0, 0.0], Some(u32::from_le_bytes(*b"@zzz"))),
+            None,
+            "a label naming no shaft binds nothing"
+        );
+        assert_eq!(lifts.shaft_for([0.0, 0.0, 0.0], None), None);
     }
 
     #[test]
@@ -561,5 +618,18 @@ mod tests {
             assert_eq!(shaft.dir.travel_secs(&ROUTINE_DOWN), Some(8.0));
             assert!(shaft.rect.elevator_top_y < shaft.rect.elevator_bottom_y);
         }
+        // LSB's two Metalworks platform NPCs (vendor/server/data/zones/metalworks/npcs.yaml
+        // @6l0 at (-56.006, -13.1, 12.014), @6l1 at (-55.978, -13.1, -12.02)) each stand
+        // in the box the DAT gives the other name.
+        let lsb_6l0 = [-56.006, 12.014, -13.1];
+        let lsb_6l1 = [-55.978, -12.02, -13.1];
+        assert_eq!(
+            lifts.shaft_for(lsb_6l0, Some(u32::from_le_bytes(*b"@6l0"))),
+            Some(u32::from_le_bytes(*b"@6l1"))
+        );
+        assert_eq!(
+            lifts.shaft_for(lsb_6l1, Some(u32::from_le_bytes(*b"@6l1"))),
+            Some(u32::from_le_bytes(*b"@6l0"))
+        );
     }
 }

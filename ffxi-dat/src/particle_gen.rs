@@ -649,6 +649,12 @@ pub struct ParticleGeneratorDef {
     // particle's progress (research/xim ParticleInitializers.kt CameraShakeSetup). Parsed
     // but not applied until the section-3 updater lands.
     pub camera_shake_track: Option<[u8; 4]>,
+    // sec3 0x5F CameraShakeUpdater: near, far, and — only in the 4-word form — shakeFactor
+    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch). The
+    // runtime application (sampling the sec2 0x82 track at the particle's progress with the
+    // distance falloff × 1000×progress×distance×shakeFactor capped at 0.33, then
+    // camera.applyShake) is unmodeled, so parse-only (the I26 0x82 precedent).
+    pub camera_shake: Option<[f32; 3]>,
 
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
     // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
@@ -1404,6 +1410,7 @@ impl ParticleGeneratorDef {
         let mut moon_phase_sprite = false;
         let mut rotation_updater = false;
         let mut position_updater = false;
+        let mut camera_shake = None;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -1502,6 +1509,21 @@ impl ParticleGeneratorDef {
                     0x4F if payload + 4 + 4 * MOON_PHASES <= body.len() => {
                         moon_phase_color =
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
+                    }
+                    // research/xim ParticleUpdaters.kt CameraShakeUpdater: near, far, and
+                    // shakeFactor only in the 4-word form (the opCodeSize == 4 branch; the
+                    // shipped census is 1451 four-word blocks, 8 three-word).
+                    0x5F if payload + 8 <= body.len() => {
+                        let shake_factor = if size_words == 4 && payload + 12 <= body.len() {
+                            f32_le(body, payload + 8)
+                        } else {
+                            0.0
+                        };
+                        camera_shake = Some([
+                            f32_le(body, payload),
+                            f32_le(body, payload + 4),
+                            shake_factor,
+                        ]);
                     }
                     _ => decoded = false,
                 }
@@ -1660,6 +1682,7 @@ impl ParticleGeneratorDef {
             specular,
             specular_rot_y_track,
             camera_shake_track,
+            camera_shake,
             haze_offset_x,
             parent_rotate,
             parent_color,
@@ -2931,6 +2954,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.camera_shake_track, None);
+    }
+
+    // sec3 0x5F CameraShakeUpdater: near, far, and shakeFactor only in the 4-word form
+    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch; the
+    // shipped census is 1451 four-word blocks, 8 three-word, every one behind a sec2 0x82).
+    #[test]
+    fn camera_shake_updater_reads_the_payload_shape() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let vec3 = |x: f32, y: f32, z: f32| -> [u8; 12] {
+            let mut p = [0u8; 12];
+            p[0..4].copy_from_slice(&x.to_le_bytes());
+            p[4..8].copy_from_slice(&y.to_le_bytes());
+            p[8..12].copy_from_slice(&z.to_le_bytes());
+            p
+        };
+
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x5F, 4, &vec3(2.0, 8.0, 0.001)));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.camera_shake, Some([2.0, 8.0, 0.001]));
+
+        // The 3-word form keeps the shake factor at zero.
+        let mut payload = [0u8; 8];
+        payload[0..4].copy_from_slice(&2.0f32.to_le_bytes());
+        payload[4..8].copy_from_slice(&8.0f32.to_le_bytes());
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]); // terminate section 2
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(&op(0x5F, 3, &payload));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.camera_shake, Some([2.0, 8.0, 0.0]));
+
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.camera_shake, None);
     }
 
     // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the

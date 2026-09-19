@@ -2247,6 +2247,7 @@ mod tests {
             specular: None,
             specular_rot_y_track: None,
             camera_shake_track: None,
+            camera_shake: None,
             haze_offset_x: None,
             parent_rotate: false,
             parent_color: false,

@@ -3503,6 +3503,44 @@ pub fn dispatch_particle_dampen_stages(
     }
 }
 
+// 0x19 SpellEffect: the spell animation index resolves to the effect DAT at the spell
+// file-table offset plus the index; its `main` routine runs on the actor as a child
+// sequence (research/xim EffectRoutineInstance.kt handleSpellEffect). The shipped DATs
+// carry it only in the summon deploy/pop routines, which no trigger fires yet.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_spell_effect_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    q_id: Query<&crate::components::WorldEntity>,
+    q_target: Query<&ActionTarget>,
+    mut cache: ResMut<ActionDatCache>,
+) {
+    for ev in events.read() {
+        let Some(spell_index) = ev.stage.stage.spell_effect else {
+            continue;
+        };
+        let Some(world) = q_id.get(ev.actor).ok() else {
+            continue;
+        };
+        let target_id = q_target
+            .get(ev.actor)
+            .ok()
+            .and_then(|t| t.0)
+            .and_then(|target| q_id.get(target).ok())
+            .map(|world| world.id)
+            .unwrap_or(0);
+        cache.defer(
+            ffxi_vocab::action_anim::SPELL_FILE_TABLE_OFFSET + spell_index,
+            PendingActionDispatch::Routine {
+                actor_id: world.id,
+                target_id,
+                routine: *b"main",
+                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                cutscene_actor: None,
+            },
+        );
+    }
+}
+
 pub const EMOTE_ROUTINES_PER_FILE: u16 = 8;
 
 const SALUTE_NATION_MAX: u16 = 2;
@@ -3752,6 +3790,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     crate::particle_sim::spawn_particle_generators,
                     dispatch_stop_particle_stages,
                     dispatch_particle_dampen_stages,
+                    dispatch_spell_effect_stages,
                     crate::particle_sim::stop_generators_for_despawned_owners,
                     crate::particle_sim::tick_particle_simulator,
                     crate::particle_sim::sync_particle_meshes,
@@ -4069,6 +4108,7 @@ mod tests {
                 idle_transition_time: None,
                 flinch_duration: None,
                 model_visibility: None,
+                spell_effect: None,
             },
         }
     }

@@ -4533,6 +4533,7 @@ mod tests {
                 idle_transition_time: None,
                 flinch_duration: None,
                 model_visibility: None,
+                spell_effect: None,
             },
         }
     }

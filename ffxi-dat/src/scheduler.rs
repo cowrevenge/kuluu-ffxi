@@ -61,6 +61,11 @@ const JOINT_SNAPSHOT_OPCODE: u8 = 0x22;
 // research/xim EffectRoutineParser.kt parseSection2 0x1E ParticleDampenRoutine: genRef
 // (DatId) + zero32 after delay/duration - a 4-dword stage.
 const PARTICLE_DAMPEN_OPCODE: u8 = 0x1E;
+// research/xim EffectRoutineParser.kt parseSection2 0x19 SpellEffect: the u32 after
+// delay/duration is the spell animation index, not a DatId - the handler resolves the
+// spell file-table offset plus the index to the effect DAT and runs its `main` routine
+// on the actor (EffectRoutineInstance.kt handleSpellEffect).
+const SPELL_EFFECT_OPCODE: u8 = 0x19;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -235,6 +240,11 @@ pub struct SchedulerStage {
     // EffectRoutineParser.kt parseSection2); `id` is `NO_STAGE_ID` there.
     pub model_visibility: Option<ModelVisibility>,
 
+    // `Some` exactly for `SpellEffect`: the +8 dword is the spell animation index, not a
+    // DatId (research/xim EffectRoutineParser.kt parseSection2 0x19); `id` is
+    // `NO_STAGE_ID` there.
+    pub spell_effect: Option<u32>,
+
     // research/xim EffectRoutineParser.kt parseSection2,553-559 — stages between a 0x3D and its 0x3E
     // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
     // one of them per activation (`vatk`'s four atk1..atk4 grunts). Members of the same block
@@ -327,6 +337,12 @@ pub enum StageKind {
     /// context's joint-snapshot flag (research/xim EffectRoutineInstance.kt
     /// handleJointSnapshotEffect: applyJointSnapshot(true)).
     JointSnapshot,
+
+    /// 0x19 - SpellEffect: `spell_effect` is the spell animation index; the handler loads
+    /// the effect DAT at the spell file-table offset plus the index and runs its `main`
+    /// routine on the actor as a child sequence (research/xim EffectRoutineInstance.kt
+    /// handleSpellEffect).
+    SpellEffect,
 
     /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
     /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
@@ -465,6 +481,9 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt parseSection2 - JointSnapshotEffect: the +8
             // u32 is consumed and unused, so it is not a DatId.
             JOINT_SNAPSHOT_OPCODE => Self::JointSnapshot,
+            // research/xim EffectRoutineParser.kt parseSection2 - SpellEffect: the +8 u32 is
+            // the spell animation index, not a DatId.
+            SPELL_EFFECT_OPCODE => Self::SpellEffect,
             // research/xim EffectRoutineParser.kt parseSection2 - FlinchRoutine (SE `GetDamageDirId`
             // picks the dfi/dbi/dfm/dbm front/back clip by hit direction).
             FLINCH_CASTER_OPCODE => Self::FlinchOnCaster,
@@ -633,6 +652,11 @@ impl Scheduler {
                         slot: read_u16(ID_OFFSET + 4),
                         if_engaged: read_u16(ID_OFFSET + 6) == 1,
                     });
+                // research/xim EffectRoutineParser.kt parseSection2 0x19 - the +8 dword is
+                // the spell animation index, not a DatId.
+                let spell_effect = payload
+                    .filter(|_| kind == StageKind::SpellEffect)
+                    .map(u32::from_le_bytes);
                 // Flinch animationDuration sits at +24, past the id slot - read it straight off
                 // the stage bytes when the full 9-dword payload is present.
                 let flinch_duration =
@@ -659,6 +683,7 @@ impl Scheduler {
                             | StageKind::FlinchOnTarget
                             | StageKind::Knockback
                             | StageKind::JointSnapshot
+                            | StageKind::SpellEffect
                     );
                 let id = match payload {
                     Some(bytes) if !non_id_payload => bytes,
@@ -702,6 +727,7 @@ impl Scheduler {
                         idle_transition_time,
                         flinch_duration,
                         model_visibility,
+                        spell_effect,
                         random_group: open_group,
                         local_dir,
                     },
@@ -1856,6 +1882,7 @@ mod tests {
                 StageKind::ActorPositionSnapshot,
             ),
             (JOINT_SNAPSHOT_OPCODE, 3, StageKind::JointSnapshot),
+            (SPELL_EFFECT_OPCODE, 3, StageKind::SpellEffect),
             (PARTICLE_DAMPEN_OPCODE, 4, StageKind::ParticleDampen),
             (FLINCH_CASTER_OPCODE, 3, StageKind::FlinchOnCaster),
             (FLINCH_TARGET_OPCODE, 3, StageKind::FlinchOnTarget),
@@ -1902,6 +1929,21 @@ mod tests {
                 if_engaged: true
             })
         );
+        assert_eq!(stage.id, NO_STAGE_ID);
+    }
+
+    // The 0x19 payload is the spell animation index (research/xim EffectRoutineParser.kt
+    // parseSection2), so its id slot must not surface as a DatId.
+    #[test]
+    fn spell_effect_payload_is_not_a_datid() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(SPELL_EFFECT_OPCODE, 3, 0, 0));
+        body.extend_from_slice(&617u32.to_le_bytes()); // spell index
+
+        let s = Scheduler::parse(*b"sdep", &body).unwrap();
+        let stage = &s.stages[0].stage;
+        assert_eq!(stage.kind, StageKind::SpellEffect);
+        assert_eq!(stage.spell_effect, Some(617));
         assert_eq!(stage.id, NO_STAGE_ID);
     }
 

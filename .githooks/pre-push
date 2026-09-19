@@ -72,7 +72,7 @@ if ! scripts/checks.sh fmt; then
   exit 1
 fi
 
-if ! scripts/checks.sh contracts; then
+if ! checks_retry_contention contracts; then
   echo "pre-push: state contracts failed" >&2
   exit 1
 fi

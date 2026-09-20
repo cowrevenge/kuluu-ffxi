@@ -235,6 +235,11 @@ impl DatRootSink for Commands<'_, '_> {
 /// must be re-inserted when the launcher changes the DAT path or that consumer
 /// silently keeps rendering from the previous root (kuluu-1tr2, kuluu-051).
 /// Adding a new `*DatRoot` means adding one line here and nowhere else.
+///
+/// Two consumers re-arm latched loads instead of re-opening them: the map
+/// DLL latch (map calibration and the Change Map catalog) and the command
+/// surface, whose slash-command list is the install's answer — a server
+/// shipping a patched client renames or drops commands.
 pub(crate) fn insert_dat_roots(
     sink: &mut impl DatRootSink,
     dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
@@ -264,11 +269,7 @@ pub(crate) fn insert_dat_roots(
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
-    // Same latch on the map DLL: without this the map calibration and the
-    // Change Map catalog keep answering from the previous install (kuluu-u8p1).
     sink.put(kuluu_render::minimap::retail::MapCalibration::default());
-    // Which slash commands exist is the new install's answer, not the previous
-    // one's: a server shipping a patched client renames or drops them.
     sink.put(command_surface::CommandSurface::from_dat_root(
         dat_root.as_deref(),
     ));
@@ -324,6 +325,24 @@ pub struct NativeRunArgs {
     pub mute: bool,
 }
 
+/// Builds and runs the native app.
+///
+/// The DLSS project-id resource is inserted before DefaultPlugins: Bevy's
+/// DefaultPlugins add DlssInitPlugin themselves under `dlss` (ahead of
+/// RenderPlugin, whose build consumes its raw-Vulkan callbacks), but it
+/// panics without the project id resource. Runtime support is reported via
+/// DlssSuperResolutionSupported, which kuluu-render's availability probe
+/// folds into the graphics menu.
+///
+/// System order: `recover_self_ground_system` runs right after
+/// `dispatch_movement_system` so it sees this tick's held height before the
+/// render smoother follows prediction, breaking a persistent wire-z wedge.
+/// `auto_attack_retarget_system` queues behind the input chain: on the frame
+/// auto_clear drops a dead target, `dispatch_target_change_system` has
+/// already queued the deselect command, and the auto-retarget must land
+/// after it or the deselect undoes the switch. The cutscene camera route
+/// runs after `resolve_camera` so its transform and focal writes win any
+/// same-frame collision push while the cutscene owns the operator camera.
 pub fn run(args: NativeRunArgs) -> Result<()> {
     let NativeRunArgs {
         server,
@@ -383,11 +402,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // Before DefaultPlugins so these pools win get_or_init and TaskPoolPlugin's
     // create_default_pools no-ops (kuluu-3q8t).
     qos::init_task_pools_with_qos();
-    // Bevy's DefaultPlugins add DlssInitPlugin themselves under `dlss` (ahead
-    // of RenderPlugin, whose build consumes its raw-Vulkan callbacks), but it
-    // panics without the project id resource — so insert that first. Runtime
-    // support is reported via DlssSuperResolutionSupported, which kuluu-render's
-    // availability probe folds into the graphics menu.
     #[cfg(feature = "dlss")]
     app.insert_resource(kuluu_render::graphics::dlss::project_id());
     let mut plugins = DefaultPlugins.set(WindowPlugin {
@@ -800,12 +814,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         FixedUpdate,
         (
             input::dispatch_movement_system,
-            // Breaks a persistent wire-z wedge (kuluu-mo4q): runs right after
-            // dispatch so it sees this tick's held height, before the render
-            // smoother follows prediction.
             input::recover_self_ground_system,
             input::apply_self_prediction_system,
-            // FFXI_STAIR_CAPTURE: one JSON position line per tick (no-op unless set).
             input::stair_capture_system,
         )
             .chain()
@@ -817,10 +827,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         input::reset_interaction_flags_on_zone_change.run_if(in_state(AppPhase::InGame)),
     );
 
-    // After the input chain: on the frame auto_clear drops a dead target,
-    // dispatch_target_change_system has already queued the deselect 0x01A(0);
-    // the auto-retarget must queue behind it, or the deselect lands second
-    // and undoes the switch.
     app.add_systems(
         Update,
         auto_target::auto_attack_retarget_system
@@ -858,8 +864,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame)),
     );
 
-    // The cutscene's camera route owns the operator camera while it runs: after resolve_camera,
-    // so its transform and focal writes win any same-frame collision push.
     app.add_systems(
         Update,
         kuluu_render::cutscene_camera::advance_cutscene_camera_task
@@ -1133,6 +1137,11 @@ fn drain_weather_particles(
     weather_particles.clear();
 }
 
+/// Disconnect watcher: returns the app to the launcher once the wire reports
+/// Disconnected. A Clean logout re-arms the character-list resume. A
+/// Shutdown (/shutdown) still runs the state transition so the OnExit(InGame)
+/// teardown fires, then the AppExit the winit loop observes after this frame
+/// ends the process.
 fn return_to_launcher_on_disconnect(
     mut commands: Commands,
     scene: Option<Res<SceneState>>,
@@ -1163,9 +1172,6 @@ fn return_to_launcher_on_disconnect(
         DisconnectKind::Clean => {
             commands.insert_resource(ResumeCharListAfterLogout);
         }
-        // /shutdown closes the client: the state transition still runs so the
-        // OnExit(InGame) teardown fires, then the AppExit the winit loop
-        // observes after this frame ends the process.
         DisconnectKind::Shutdown => {
             exit.write_default();
         }
@@ -1175,10 +1181,10 @@ fn return_to_launcher_on_disconnect(
     next_phase.set(AppPhase::Launcher);
 }
 
-// `insert_dat_roots` is the one place a consumer's root is wired; a consumer that is missing
-// from it silently keeps reading whatever it opened for itself (kuluu-1tr2, kuluu-051). The
-// scheduler runtime's root is the load-bearing case: without it every action/emote DAT read
-// falls back to re-opening the install per cache miss.
+/// `insert_dat_roots` is the one place a consumer's root is wired; a consumer that is missing
+/// from it silently keeps reading whatever it opened for itself (kuluu-1tr2, kuluu-051). The
+/// scheduler runtime's root is the load-bearing case: without it every action/emote DAT read
+/// falls back to re-opening the install per cache miss.
 #[cfg(test)]
 mod dat_root_wiring_tests {
     use super::{insert_dat_roots, DatRootRes};
@@ -1271,11 +1277,11 @@ mod disconnect_tests {
         );
     }
 
+    /// The /shutdown flavor must classify as Shutdown, distinct from Clean:
+    /// the watcher closes the client on Shutdown and resumes the character
+    /// list only on Clean.
     #[test]
     fn server_shutdown_classified_shutdown() {
-        // The /shutdown flavor must classify as Shutdown, distinct from Clean:
-        // the watcher closes the client on Shutdown and resumes the character
-        // list only on Clean.
         assert_eq!(
             classify_disconnect_reason("server shutdown state=1"),
             DisconnectKind::Shutdown
@@ -1521,6 +1527,13 @@ mod zone_teardown_tests {
     }
 }
 
+/// Spawns the session for the launcher's pending selection and hands the
+/// window to the in-game phase. The debug-control handle and the
+/// stair-capture drive channel are inserted whether or not their listeners
+/// run, so the focus-less GUI driving and the input path can depend on them
+/// with no socket or env var present. Viewer screenshot commands land on the
+/// shared debug-control handle, not the session. A relogin in the same
+/// window hands the live agent socket the new session's channels.
 fn bridge_connecting(
     mut commands: Commands,
     mut pending: ResMut<PendingConnect>,
@@ -1572,9 +1585,6 @@ fn bridge_connecting(
     } = spawn_session_with_reactor(cfg, ReactorConfig::player());
     let event_rx = event_tx.subscribe();
 
-    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
-    // requests into this handle; GUI systems read it. Always present so input
-    // systems can depend on it even when no socket is listening.
     let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
     commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
@@ -1583,7 +1593,6 @@ fn bridge_connecting(
         let state_rx_relay = state_rx.clone();
         let event_tx_relay = event_tx.clone();
         let cmd_tx_relay = cmd_tx.clone();
-        // Viewer Screenshot commands land on the shared handle, not the session.
         let debug_ctrl_relay = Some(debug_ctrl.clone());
         runtime.0.spawn(async move {
             if let Err(err) = kuluu_session::relay::serve(
@@ -1602,8 +1611,6 @@ fn bridge_connecting(
     #[cfg(not(feature = "relay"))]
     let _ = relay;
 
-    // Stair-capture drive channel (FFXI_STAIR_DRIVE): always present so the input
-    // path can depend on it; only listens when the env var names an address.
     let stair_drive = std::sync::Arc::new(std::sync::Mutex::new(
         crate::view_native::input::StairDrive::default(),
     ));
@@ -1632,7 +1639,6 @@ fn bridge_connecting(
             debug_ctrl: Some(debug_ctrl.clone()),
         };
         match agent_swap.as_mut() {
-            // Relogin in the same window: hand the live socket the new session.
             Some(swap) => {
                 if swap.0.send(Some(channels)).is_err() {
                     tracing::warn!("agent socket listener gone; new session not served");

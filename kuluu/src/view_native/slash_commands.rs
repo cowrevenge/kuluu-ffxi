@@ -880,14 +880,14 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 names: &["renderscale", "rscale"],
                 set: CommandSet::Dev,
                 usage: "[25-200 | 0.25-2.0]",
-                summary: "3D render scale: <100% renders the world at lower res and upscales (perf); >100% supersamples. HUD stays native. Bare `//renderscale` reports it.",
+                summary: "3D render scale: <100% renders the world at lower res and upscales (perf); >100% supersamples. HUD stays native. Bare `\u{002F}\u{002F}renderscale` reports it.",
                 handler: |c| parse_renderscale(c.rest),
             },
             Command {
                 names: &["lights", "lanterns"],
                 set: CommandSet::Dev,
                 usage: "[on|off | shadowed N | flicker on|off]",
-                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `//lights` lists state",
+                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `\u{002F}\u{002F}lights` lists state",
                 handler: |c| parse_lights(c.rest),
             },
         ],
@@ -895,7 +895,9 @@ const COMMANDS: &[(&str, &[Command])] = &[
 ];
 
 /// The two surfaces list separately: `/?` answers about the client the player
-/// installed, and says where the rest lives.
+/// installed, and says where the rest lives. Retail entries also list their
+/// other spellings, which come from the install's table: a retail command's
+/// other spellings are the install's answer, not ours.
 fn render_help(surface: &CommandSurface, which: Surface) -> String {
     let mut out = String::from(match which {
         Surface::Retail => "=== Retail commands ===",
@@ -923,8 +925,6 @@ fn render_help(surface: &CommandSurface, which: Surface) -> String {
                 if !entry.set.is_retail() {
                     continue;
                 }
-                // A retail command's other spellings are the install's answer,
-                // not ours, so they are listed from its table.
                 for alias in surface.alias_group(name).into_iter().filter(|a| a != name) {
                     out.push_str(" | /");
                     out.push_str(alias);
@@ -1179,6 +1179,10 @@ pub enum KeybindUpdate {
     List,
 }
 
+/// Parses a typed slash command and runs it. Retail dispatches on the
+/// command id, so a handler is reached by the long form whichever alias was
+/// typed; with no table the typed word stands in, which still reaches every
+/// long form.
 pub fn parse_slash(
     buffer: &str,
     surface: &CommandSurface,
@@ -1194,9 +1198,6 @@ pub fn parse_slash(
         return SlashOutcome::SystemMessage("empty command".into());
     };
 
-    // Retail dispatches on the command id, so a handler is reached by the long
-    // form whichever alias was typed. With no table the typed word stands in,
-    // which still reaches every long form.
     let word = match typed.surface {
         Surface::Retail => surface.canonical(&typed.word).to_owned(),
         Surface::Extension => typed.word.clone(),
@@ -1863,8 +1864,8 @@ fn parse_weaponskill(ctx: &SlashCtx) -> SlashOutcome {
     })
 }
 
-/// `/ra [target]` -- ranged attack (c2s action 0x10). Takes no id, only a target
-/// (defaults to the current target).
+/// `/ra [target]` -- ranged attack (the Shoot action). Takes no id, only a
+/// target (defaults to the current target).
 fn parse_ranged_attack(ctx: &SlashCtx) -> SlashOutcome {
     let args = split_command_args(ctx.rest);
     let ((target_id, target_index), _) = match resolve_command_target(&args, ctx) {
@@ -2177,6 +2178,8 @@ fn render_debug_nearby(
     out
 }
 
+/// Renders one wire entity for /debug. `n/a` means no General-block update
+/// has carried the name-visibility byte yet (it rides UPDATE_HP).
 fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -> String {
     let ent: Option<&WireEntity> = if let Ok(id) = arg.parse::<u32>() {
         entities.iter().find(|e| e.id == id).or_else(|| {
@@ -2250,7 +2253,6 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
         Some(EntityLook::Door { size, .. }) => s.push_str(&format!(" door size={size}")),
         Some(EntityLook::Transport { size, .. }) => s.push_str(&format!(" transport size={size}")),
     }
-    // n/a = no General-block update has carried the byte yet (it rides UPDATE_HP).
     let namevis = e
         .name_vis
         .map_or_else(|| "n/a".to_string(), |v| v.to_string());
@@ -3059,10 +3061,10 @@ mod tests {
     #[test]
     fn debug_chat_command_controls_its_own_visibility() {
         for (command, expected) in [
-            ("//debugchat", None),
-            ("//debugchat toggle", None),
-            ("//debugchat on", Some(true)),
-            ("//debugchat off", Some(false)),
+            ("\u{002F}\u{002F}debugchat", None),
+            ("\u{002F}\u{002F}debugchat toggle", None),
+            ("\u{002F}\u{002F}debugchat on", Some(true)),
+            ("\u{002F}\u{002F}debugchat off", Some(false)),
         ] {
             assert!(matches!(
                 parse_slash_t(command, &empty_entities(), origin(), None, None),
@@ -3071,7 +3073,7 @@ mod tests {
         }
         assert!(matches!(
             parse_slash_t(
-                "//debugchat invalid",
+                "\u{002F}\u{002F}debugchat invalid",
                 &empty_entities(),
                 origin(),
                 None,
@@ -3278,7 +3280,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn widescan_requests_list() {
-        for slash in ["//widescan", "//wscan"] {
+        for slash in ["\u{002F}\u{002F}widescan", "\u{002F}\u{002F}wscan"] {
             assert!(
                 matches!(
                     parse_slash_t(slash, &empty_entities(), origin(), None, None),
@@ -3289,8 +3291,8 @@ mod tests {
         }
     }
 
-    // The Widescan variant only exists under debug_assertions (the /widescan
-    // command is dev-only), so this guard compiles in the same profile.
+    /// The Widescan variant only exists under debug_assertions (the /widescan
+    /// command is dev-only), so this guard compiles in the same profile.
     #[cfg(debug_assertions)]
     #[test]
     fn ws_alias_stays_weaponskill() {
@@ -3376,7 +3378,13 @@ mod tests {
             ent(202, "NearMob", EntityKind::Mob, 2.0, 0.0),
             ent(303, "FarNpc", EntityKind::Npc, 50.0, 50.0),
         ];
-        let out = parse_slash_t("//debug", &entities, origin(), Some(202), None);
+        let out = parse_slash_t(
+            "\u{002F}\u{002F}debug",
+            &entities,
+            origin(),
+            Some(202),
+            None,
+        );
         match out {
             SlashOutcome::SystemMessage(s) => {
                 assert!(s.contains("target:"), "no target line: {s}");
@@ -3396,7 +3404,13 @@ mod tests {
         let mut e = ent(202, "Goblin", EntityKind::Mob, 3.0, 4.0);
         e.hp_pct = Some(42);
         let entities = vec![e];
-        let out = parse_slash_t("//debug Goblin", &entities, origin(), None, None);
+        let out = parse_slash_t(
+            "\u{002F}\u{002F}debug Goblin",
+            &entities,
+            origin(),
+            None,
+            None,
+        );
         match out {
             SlashOutcome::SystemMessage(s) => {
                 assert!(s.contains("Goblin"), "name missing: {s}");
@@ -3411,9 +3425,21 @@ mod tests {
 
     #[test]
     fn debug_heights_subcommand_still_works() {
-        let out = parse_slash_t("//debug heights", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t(
+            "\u{002F}\u{002F}debug heights",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        );
         assert!(matches!(out, SlashOutcome::DebugHeights));
-        let out = parse_slash_t("//dbg h", &empty_entities(), origin(), None, None);
+        let out = parse_slash_t(
+            "\u{002F}\u{002F}dbg h",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        );
         assert!(matches!(out, SlashOutcome::DebugHeights));
     }
 
@@ -3617,7 +3643,13 @@ mod tests {
             y: -7.0,
             z: 3.25,
         };
-        match parse_slash_t("//load_mmb 115 18", &empty_entities(), pos, None, None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}load_mmb 115 18",
+            &empty_entities(),
+            pos,
+            None,
+            None,
+        ) {
             SlashOutcome::LoadMmb {
                 file_id,
                 chunk_idx,
@@ -3636,7 +3668,7 @@ mod tests {
     #[test]
     fn load_mmb_on_parses_entity_id() {
         match parse_slash_t(
-            "//load_mmb_on 1234 115 18",
+            "\u{002F}\u{002F}load_mmb_on 1234 115 18",
             &empty_entities(),
             origin(),
             None,
@@ -3657,7 +3689,7 @@ mod tests {
 
         assert!(matches!(
             parse_slash_t(
-                "//loadmmbon 99 7 0",
+                "\u{002F}\u{002F}loadmmbon 99 7 0",
                 &empty_entities(),
                 origin(),
                 None,
@@ -3911,7 +3943,7 @@ mod tests {
     #[test]
     fn warp_numeric_three_args_emits_move() {
         match parse_slash_t(
-            "//warp 1.5 2 -3.25",
+            "\u{002F}\u{002F}warp 1.5 2 -3.25",
             &empty_entities(),
             origin(),
             None,
@@ -3930,7 +3962,13 @@ mod tests {
     fn warp_two_arg_form_uses_self_z() {
         let mut self_pos = origin();
         self_pos.z = -42.0;
-        match parse_slash_t("//warp 1 2", &empty_entities(), self_pos, None, None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}warp 1 2",
+            &empty_entities(),
+            self_pos,
+            None,
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Move { x, y, z, .. }) => {
                 assert_eq!((x, y, z), (1.0, 2.0, -42.0));
             }
@@ -3944,7 +3982,13 @@ mod tests {
         let mut me = ent(1, "Me", EntityKind::Pc, self_pos.x, self_pos.y);
         me.pos.z = self_pos.z;
         me.heading = 64;
-        match parse_slash_t("//warp 100 200 5", &[me], self_pos, None, None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}warp 100 200 5",
+            &[me],
+            self_pos,
+            None,
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Move { heading, .. }) => {
                 assert_eq!(heading, 64);
             }
@@ -3955,7 +3999,13 @@ mod tests {
     #[test]
     fn warp_target_form_emits_move_to_target() {
         let entity = ent(42, "Mob", EntityKind::Mob, 11.0, 22.0);
-        match parse_slash_t("//warp target", &[entity], origin(), Some(42), None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}warp target",
+            &[entity],
+            origin(),
+            Some(42),
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Move { x, y, .. }) => {
                 assert_eq!((x, y), (11.0, 22.0));
             }
@@ -3966,7 +4016,7 @@ mod tests {
     #[test]
     fn warp_fuzzy_entity_match() {
         let entity = ent(42, "Bob", EntityKind::Pc, 7.0, 8.0);
-        match parse_slash_t("//warp bo", &[entity], origin(), None, None) {
+        match parse_slash_t("\u{002F}\u{002F}warp bo", &[entity], origin(), None, None) {
             SlashOutcome::Command(AgentCommand::Move { x, y, .. }) => {
                 assert_eq!((x, y), (7.0, 8.0));
             }
@@ -3976,7 +4026,7 @@ mod tests {
 
     #[test]
     fn warp_rejects_empty_and_unmatched() {
-        for s in ["//warp", "//warp nosuchname"] {
+        for s in ["\u{002F}\u{002F}warp", "\u{002F}\u{002F}warp nosuchname"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),
@@ -3990,7 +4040,13 @@ mod tests {
     #[test]
     fn cancel_emits_cancel_command() {
         assert!(matches!(
-            parse_slash_t("//cancel", &empty_entities(), origin(), None, None),
+            parse_slash_t(
+                "\u{002F}\u{002F}cancel",
+                &empty_entities(),
+                origin(),
+                None,
+                None
+            ),
             SlashOutcome::Command(AgentCommand::Cancel)
         ));
     }
@@ -4138,7 +4194,13 @@ mod tests {
     #[test]
     fn raw_attack_preserves_direct_action() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("//raw attack", &entities, origin(), Some(7), None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}raw attack",
+            &entities,
+            origin(),
+            Some(7),
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Action {
                 kind, target_id, ..
             }) => {
@@ -4152,7 +4214,13 @@ mod tests {
     #[test]
     fn raw_attackoff_preserves_direct_action() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("//raw attackoff", &entities, origin(), Some(7), None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}raw attackoff",
+            &entities,
+            origin(),
+            Some(7),
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::Action { kind, .. }) => {
                 assert!(matches!(kind, ActionKind::AttackOff));
             }
@@ -4403,6 +4471,8 @@ mod tests {
         assert!(unknown.contains("unknown target token"), "{unknown}");
     }
 
+    /// /ws takes a skill name and the current-target token. A monster-only TP
+    /// move shares no name space with the command, so it reports as unknown.
     #[test]
     fn weaponskill_takes_a_name_and_the_current_target_token() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
@@ -4420,7 +4490,6 @@ mod tests {
             }
             other => panic!("expected Weaponskill, got {other:?}"),
         }
-        // A monster-only TP move shares no name space with the command.
         assert!(matches!(
             parse_slash_as("/ws \"Uppercut\" <t>", &entities, Some(7), None, &[]),
             SlashOutcome::SystemMessage(_)
@@ -4468,7 +4537,12 @@ mod tests {
 
     #[test]
     fn endevent_aliases_dispatch_end_event() {
-        for input in ["//endevent", "//endevt", "//clearevent", "//clearevt"] {
+        for input in [
+            "\u{002F}\u{002F}endevent",
+            "\u{002F}\u{002F}endevt",
+            "\u{002F}\u{002F}clearevent",
+            "\u{002F}\u{002F}clearevt",
+        ] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::Command(AgentCommand::EndEvent) => {}
                 other => panic!("input {input:?}: expected EndEvent, got {other:?}"),
@@ -4479,7 +4553,7 @@ mod tests {
     #[test]
     fn endcutscene_no_arg_returns_none() {
         match parse_slash_t(
-            "//endcutscene",
+            "\u{002F}\u{002F}endcutscene",
             &empty_entities(),
             origin(),
             None,
@@ -4493,7 +4567,7 @@ mod tests {
     #[test]
     fn endcutscene_with_explicit_csid_overrides_zone_lookup() {
         match parse_slash_t(
-            "//endcutscene 7",
+            "\u{002F}\u{002F}endcutscene 7",
             &empty_entities(),
             origin(),
             None,
@@ -4507,7 +4581,7 @@ mod tests {
     #[test]
     fn endcutscene_bad_csid_errors() {
         match parse_slash_t(
-            "//endcutscene abc",
+            "\u{002F}\u{002F}endcutscene abc",
             &empty_entities(),
             origin(),
             None,
@@ -4519,7 +4593,12 @@ mod tests {
     }
     #[test]
     fn endcutscene_aliases_all_work() {
-        for input in ["//endcutscene", "//endcs", "//skipcutscene", "//skipcs"] {
+        for input in [
+            "\u{002F}\u{002F}endcutscene",
+            "\u{002F}\u{002F}endcs",
+            "\u{002F}\u{002F}skipcutscene",
+            "\u{002F}\u{002F}skipcs",
+        ] {
             match parse_slash_t(input, &empty_entities(), origin(), None, Some(231)) {
                 SlashOutcome::EndCutscene { event_num } => assert_eq!(event_num, None),
                 other => panic!("input {input:?}: expected EndCutscene, got {other:?}"),
@@ -4529,7 +4608,13 @@ mod tests {
     #[test]
     fn snapshot_is_direct() {
         assert!(matches!(
-            parse_slash_t("//snapshot", &empty_entities(), origin(), None, None),
+            parse_slash_t(
+                "\u{002F}\u{002F}snapshot",
+                &empty_entities(),
+                origin(),
+                None,
+                None
+            ),
             SlashOutcome::Command(AgentCommand::Snapshot)
         ));
     }
@@ -4557,7 +4642,13 @@ mod tests {
 
     #[test]
     fn zonechange_parses_line_id() {
-        match parse_slash_t("//zonechange 42", &empty_entities(), origin(), None, None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}zonechange 42",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        ) {
             SlashOutcome::Command(AgentCommand::RequestZoneChange { line_id }) => {
                 assert_eq!(line_id, 42);
             }
@@ -4567,11 +4658,11 @@ mod tests {
     #[test]
     fn agent_pause_resume_status_parse() {
         for (input, expected) in &[
-            ("//agent pause", AgentControlOp::Pause),
-            ("//agent resume", AgentControlOp::Resume),
-            ("//agent unpause", AgentControlOp::Resume),
-            ("//agent status", AgentControlOp::Status),
-            ("//agent", AgentControlOp::Status),
+            ("\u{002F}\u{002F}agent pause", AgentControlOp::Pause),
+            ("\u{002F}\u{002F}agent resume", AgentControlOp::Resume),
+            ("\u{002F}\u{002F}agent unpause", AgentControlOp::Resume),
+            ("\u{002F}\u{002F}agent status", AgentControlOp::Status),
+            ("\u{002F}\u{002F}agent", AgentControlOp::Status),
         ] {
             match parse_slash_t(input, &empty_entities(), origin(), None, None) {
                 SlashOutcome::AgentControl(op) => assert_eq!(&op, expected, "input: {input}"),
@@ -4582,7 +4673,13 @@ mod tests {
 
     #[test]
     fn agent_unknown_subcommand_is_system_message() {
-        match parse_slash_t("//agent wat", &empty_entities(), origin(), None, None) {
+        match parse_slash_t(
+            "\u{002F}\u{002F}agent wat",
+            &empty_entities(),
+            origin(),
+            None,
+            None,
+        ) {
             SlashOutcome::SystemMessage(s) => assert!(s.contains("wat")),
             other => panic!("expected SystemMessage, got {other:?}"),
         }
@@ -4618,7 +4715,10 @@ mod tests {
     #[test]
     fn help_listing_fits_in_local_toast_cap() {
         let cap = kuluu_render::snapshot::LOCAL_TOAST_CAP;
-        for (which, typed) in [(Surface::Retail, "/?"), (Surface::Extension, "//?")] {
+        for (which, typed) in [
+            (Surface::Retail, "/?"),
+            (Surface::Extension, "\u{002F}\u{002F}?"),
+        ] {
             let lines = render_help(&test_surface(), which).split('\n').count();
             assert!(
                 lines <= cap,
@@ -4633,8 +4733,9 @@ mod tests {
     fn retail_help_lists_no_extension_command_and_points_at_the_other_surface() {
         let text = render_help(&test_surface(), Surface::Retail);
         assert!(
-            !text.contains(EXTENSION_PREFIX.to_string().as_str()) || text.contains("//?"),
-            "the only // in the retail listing is the hint"
+            !text.contains(EXTENSION_PREFIX.to_string().as_str())
+                || text.contains("\u{002F}\u{002F}?"),
+            "the only \u{002F}\u{002F} in the retail listing is the hint"
         );
         for line in text.split('\n').filter(|l| l.starts_with("  ")) {
             assert!(
@@ -4658,8 +4759,8 @@ mod tests {
                 "extension listing named a retail command: {line}"
             );
         }
-        assert!(text.contains("//exit"));
-        assert!(text.contains("//minimap"));
+        assert!(text.contains("\u{002F}\u{002F}exit"));
+        assert!(text.contains("\u{002F}\u{002F}minimap"));
     }
 
     #[test]
@@ -4667,8 +4768,14 @@ mod tests {
         let mut surface = test_surface();
         surface.enabled.set_enabled(CommandSet::Dev, false);
         let text = render_help(&surface, Surface::Extension);
-        assert!(!text.contains("//pathto"), "dev is off: {text}");
-        assert!(text.contains("//?"), "help lists itself whatever is off");
+        assert!(
+            !text.contains("\u{002F}\u{002F}pathto"),
+            "dev is off: {text}"
+        );
+        assert!(
+            text.contains("\u{002F}\u{002F}?"),
+            "help lists itself whatever is off"
+        );
     }
 
     #[test]
@@ -4676,7 +4783,7 @@ mod tests {
         let mut surface = test_surface();
         surface.enabled.set_enabled(CommandSet::Core, false);
         let out = parse_slash(
-            "//?",
+            "\u{002F}\u{002F}?",
             &surface,
             &empty_entities(),
             origin(),
@@ -4690,17 +4797,24 @@ mod tests {
             SlashOutcome::SystemMessage(s) => {
                 assert!(s.starts_with("=== Kuluu commands"), "{s}")
             }
-            other => panic!("//? did not answer: {other:?}"),
+            other => panic!("\u{002F}\u{002F}? did not answer: {other:?}"),
         }
     }
 
+    /// The doubled-slash exit quits; retail has no single-slash exit, so that
+    /// form is a miss with a hint.
     #[test]
     fn exit_is_an_extension_command_and_quits() {
         assert!(matches!(
-            parse_slash_t("//exit", &empty_entities(), origin(), None, None),
+            parse_slash_t(
+                "\u{002F}\u{002F}exit",
+                &empty_entities(),
+                origin(),
+                None,
+                None
+            ),
             SlashOutcome::Quit
         ));
-        // Retail has no /exit, so the single-slash form is a miss with a hint.
         match parse_slash_t("/exit", &empty_entities(), origin(), None, None) {
             SlashOutcome::SystemMessage(s) => assert!(
                 s.contains(&format!("{EXTENSION_PREFIX}exit")),
@@ -4730,7 +4844,11 @@ mod tests {
 
     /// The prefix split is the whole point: a Kuluu command must not answer on
     /// the retail slash, and a retail command must not answer on the doubled
-    /// one.
+    /// one. An emote is a retail command of its own, reached through the
+    /// scraped table rather than through COMMANDS, so it is skipped. A word
+    /// may name one command on each surface (magic casts as retail does while
+    /// its doubled form opens the menu retail has no command for) — neither is
+    /// "wrong", so those are skipped too.
     #[test]
     fn a_name_answers_only_on_its_own_surface() {
         for (_, cmds) in COMMANDS {
@@ -4741,16 +4859,11 @@ mod tests {
                     } else {
                         format!("/{name}")
                     };
-                    // An emote is a retail command of its own, reached through
-                    // the scraped table rather than through COMMANDS.
                     if !cmd.set.is_retail()
                         && ffxi_vocab::emote_names::id_for_command(name).is_some()
                     {
                         continue;
                     }
-                    // A word may name one command on each surface -- /magic
-                    // casts as retail does, //magic opens the menu retail has
-                    // no command for -- and then neither is "wrong".
                     if commands()
                         .any(|o| o.set.is_retail() != cmd.set.is_retail() && o.names.contains(name))
                     {
@@ -4774,7 +4887,10 @@ mod tests {
     fn a_moved_command_says_where_it_went() {
         match parse_slash_t("/pathto target", &empty_entities(), origin(), None, None) {
             SlashOutcome::SystemMessage(s) => {
-                assert!(s.contains("//pathto"), "no forwarding hint: {s}");
+                assert!(
+                    s.contains("\u{002F}\u{002F}pathto"),
+                    "no forwarding hint: {s}"
+                );
             }
             other => panic!("expected the moved-command hint, got {other:?}"),
         }
@@ -4840,8 +4956,9 @@ mod tests {
         }
     }
 
-    /// With no table, long forms still answer -- the degradation that keeps an
-    /// unrecognised build usable instead of dark.
+    /// With no table, long forms still answer -- the degradation that keeps
+    /// an unrecognised build usable instead of dark; an alias does not,
+    /// which is the cost of the missing table.
     #[test]
     fn long_forms_answer_without_an_install_table() {
         let bare = CommandSurface::default();
@@ -4862,7 +4979,6 @@ mod tests {
             matches!(out, SlashOutcome::Command(AgentCommand::Engage { .. })),
             "{out:?}"
         );
-        // ...and an alias does not, which is the cost of the missing table.
         let aliased = parse_slash(
             "/a",
             &bare,
@@ -4885,7 +5001,7 @@ mod tests {
         let mut surface = test_surface();
         surface.enabled.set_enabled(CommandSet::Dev, false);
         let out = parse_slash(
-            "//noclip",
+            "\u{002F}\u{002F}noclip",
             &surface,
             &empty_entities(),
             origin(),
@@ -5118,7 +5234,7 @@ mod tests {
 
     /// Unique per surface. The same word may name a retail command and a Kuluu
     /// one -- `/emote` sends free-form text as retail does, `//emote` plays a
-    /// named one -- but never two on the same surface.
+    /// named one -- but not two on the same surface.
 
     #[test]
     fn every_agent_command_on_the_chat_surface_reaches_its_handler() {
@@ -5133,10 +5249,12 @@ mod tests {
             ("/attack", |c| {
                 matches!(c, AgentCommand::Engage { target_id: 42 })
             }),
-            ("//pathto 1 2 3", |c| {
+            ("\u{002F}\u{002F}pathto 1 2 3", |c| {
                 matches!(c, AgentCommand::PathTo { .. })
             }),
-            ("//cancel", |c| matches!(c, AgentCommand::Cancel)),
+            ("\u{002F}\u{002F}cancel", |c| {
+                matches!(c, AgentCommand::Cancel)
+            }),
             ("/bank 60 12345", |c| {
                 matches!(
                     c,
@@ -5153,10 +5271,12 @@ mod tests {
                 matches!(c, AgentCommand::Chat { kind: 4, .. })
             }),
             ("/tell Bob hi", |c| matches!(c, AgentCommand::Tell { .. })),
-            ("//zonechange 42", |c| {
+            ("\u{002F}\u{002F}zonechange 42", |c| {
                 matches!(c, AgentCommand::RequestZoneChange { line_id: 42 })
             }),
-            ("//snapshot", |c| matches!(c, AgentCommand::Snapshot)),
+            ("\u{002F}\u{002F}snapshot", |c| {
+                matches!(c, AgentCommand::Snapshot)
+            }),
             ("/magic 1", |c| {
                 matches!(
                     c,
@@ -5230,7 +5350,9 @@ mod tests {
     }
 
     /// A Retail entry must name a command this client actually has, or Kuluu
-    /// has invented a name and called it vanilla.
+    /// has invented a name and called it vanilla. The stand-in table carries
+    /// only what the suite exercises; the install-gated check is in ffxi-dat,
+    /// so names the stand-in lacks are skipped.
     #[test]
     fn every_retail_name_is_a_canonical_in_the_install_table() {
         let surface = test_surface();
@@ -5238,8 +5360,6 @@ mod tests {
             for cmd in cmds.iter().filter(|c| c.set.is_retail()) {
                 for name in cmd.names {
                     let Some(id) = surface.id_for(name) else {
-                        // The stand-in table carries only what the suite
-                        // exercises; the install-gated check is in ffxi-dat.
                         continue;
                     };
                     assert_eq!(

@@ -100,6 +100,10 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
 
 const EQUIP_SLOT_INDEX_MAX: u8 = (kuluu_render::equip_slot::EquipmentIndex::ALL.len() - 1) as u8;
 
+/// Confirm the entry under the cursor. Retail lists Use for every item and
+/// refuses an unusable or cooling-down one silently: no sub-target cursor, no
+/// chat line, the submenu stays put. The item drop confirm unwinds both the
+/// confirm and the Item submenu back to the list on either answer.
 pub(super) fn confirm_menu_at_cursor(
     bindings: &mut Bindings,
     stack: &mut MenuStack,
@@ -130,8 +134,6 @@ pub(super) fn confirm_menu_at_cursor(
         if label == kuluu_render::hud::menu::DEBUG_VOLUME {
             return None;
         }
-        // Retail+ section rows live in GraphicsSettings (persisted), not
-        // HudPanels — handle them before the panel toggles.
         if handle_retail_plus_row(label, graphics, scene_state) {
             return None;
         }
@@ -253,9 +255,6 @@ pub(super) fn confirm_menu_at_cursor(
                 }
                 return None;
             }
-            // Retail lists Use for every item and refuses an unusable or
-            // cooling-down one silently: no sub-target cursor, no chat line,
-            // the submenu stays put (kuluu-5ndh capture).
             if let A::UseItem {
                 container, index, ..
             } = action
@@ -341,7 +340,6 @@ pub(super) fn confirm_menu_at_cursor(
                 push_system_chat_line(scene_state, format!("[menu] drop dropped: {e}"));
             }
         }
-        // Either answer unwinds the confirm and the Item submenu back to the list.
         stack.pop();
         stack.pop();
         return None;
@@ -399,7 +397,11 @@ fn activate_current_time(
 /// `toggle_debug_panel`. The live toggles flip GraphicsSettings fields, so
 /// `persist_graphics_on_change` writes graphics.json automatically. Mob HP
 /// Under / Job Display only exist in enhanced builds (their rows are absent
-/// from DEBUG_ENTRIES without their feature).
+/// from DEBUG_ENTRIES without their feature). The section-chrome rows
+/// (separator + label) carry no state and answer with no banner. The DLSS
+/// row reads N/A and its toggle is inert when this build can't run DLSS at
+/// all (no dlss feature, or no RTX/Vulkan/DLLs), so the persisted gate does
+/// not flip.
 fn handle_retail_plus_row(
     label: &str,
     graphics: &mut kuluu_render::GraphicsSettings,
@@ -411,11 +413,8 @@ fn handle_retail_plus_row(
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU};
     match label {
-        // Section chrome: no state, no banner.
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
         RETAIL_DLSS_MENU => {
-            // This build can't run DLSS at all (no dlss feature, or no RTX/Vulkan/DLLs):
-            // the row reads N/A and the toggle is inert - don't flip a persisted gate.
             if !graphics.dlss_supported {
                 push_system_chat_line(
                     scene_state,
@@ -466,6 +465,9 @@ fn handle_retail_plus_row(
     }
 }
 
+/// Flip a Debug-menu toggle and report it. The weather/fog rows report the
+/// feature's live state, so they invert the off flags: Weather [on] = weather
+/// effects applied.
 fn toggle_debug_panel(
     label: &str,
     hud_panels: &mut kuluu_render::hud::HudPanels,
@@ -515,8 +517,6 @@ fn toggle_debug_panel(
             hud_panels.auto_enter_cs = !hud_panels.auto_enter_cs;
             hud_panels.auto_enter_cs
         }
-        // The rows report the feature's live state, so they invert the "off"
-        // flags: Weather [on] = weather effects applied.
         DEBUG_WEATHER => {
             hud_panels.weather_off = !hud_panels.weather_off;
             !hud_panels.weather_off
@@ -576,6 +576,10 @@ fn toggle_debug_panel(
     );
 }
 
+/// Route one keypress in the open menu. In the sort pane, any key the pane
+/// does not own maps to SortPaneKey::Other so it can't leak into list
+/// navigation. Commands > Items opens on the inventory; only the Mog Menu
+/// storage rows open the window on another bag.
 pub(super) fn handle_menu_key(
     key: &Key,
     key_code: KeyCode,
@@ -715,7 +719,6 @@ pub(super) fn handle_menu_key(
                 {
                     SortPaneKey::Exit
                 } else {
-                    // Swallow any other key so it can't leak into list navigation.
                     SortPaneKey::Other
                 };
                 match sort_pane_key(item_menu_focus, sort_options, pane_key) {
@@ -887,8 +890,6 @@ pub(super) fn handle_menu_key(
             target_id,
             self_pos,
         );
-        // Commands > Items always opens on the inventory; only the Mog Menu
-        // storage rows open the window on another bag.
         if kind == MenuKind::Root && stack.current().is_some_and(|l| l.kind == MenuKind::Items) {
             item_bag.0 = ffxi_proto::map::container::LOC_INVENTORY;
         }
@@ -1021,6 +1022,8 @@ mod menu_key_tests {
         world
     }
 
+    /// Row 0 of Config is the "Interface" section header, so the cursor
+    /// settles onto the first selectable row below it.
     #[test]
     fn config_keys_cycle_radar_and_open_controls_without_changing_bindings() {
         use kuluu_render::graphics_settings::config_rows;
@@ -1031,8 +1034,6 @@ mod menu_key_tests {
         let mut world = marker_world();
         let mut stack = MenuStack::root();
         stack.push(MenuKind::Config);
-        // Row 0 is the "Interface" section header; the cursor settles onto the
-        // first selectable row below it.
         let minimap_slot = settle_cursor(MenuKind::Config, false, 0, true);
         stack.current_mut().unwrap().cursor = minimap_slot;
         for (key, code, expected) in [

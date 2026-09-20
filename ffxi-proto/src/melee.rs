@@ -317,8 +317,9 @@ mod tests {
         assert_eq!(MeleeResult::from_wire(0, 5, 0, 0, 0), None);
     }
 
-    // The outcome bits are validated against the pinned enums: hitDistortion is a 2-bit field and
-    // knockback a 3-bit one on the wire, so out-of-range values cannot round-trip.
+    /// The outcome bits are validated against the pinned enums: hitDistortion is
+    /// a 2-bit field and knockback a 3-bit one on the wire, so out-of-range
+    /// values cannot round-trip.
     #[test]
     fn outcome_bits_roundtrip() {
         let r = MeleeResult::from_wire(0, 1, 2, 3, 2).expect("in-range bits");
@@ -329,8 +330,8 @@ mod tests {
         assert_eq!(r.knockback, KnockbackLevel::Level2);
     }
 
-    // from_wire(to_wire(x)) == x for a table of non-zero outcomes: the lossless property the
-    // snapshot contract relies on.
+    /// from_wire(to_wire(x)) == x for a table of non-zero outcomes: the lossless
+    /// property the snapshot contract relies on.
     #[test]
     fn melee_result_to_wire_is_lossless() {
         let cases = [
@@ -347,16 +348,16 @@ mod tests {
         }
     }
 
-    // The outcome bits ride through unvalidated: the bit reader already bounds them to their
-    // field widths (info 5, hitDistortion 2, knockback 3).
+    /// The outcome bits ride through unvalidated: the bit reader already bounds
+    /// them to their field widths (info 5, hitDistortion 2, knockback 3).
+    /// recordDamage sets hitDistortion from the damage share alone: Heavy without
+    /// the flag is not a crit, and a crit can land Light.
     #[test]
     fn outcome_bits_roundtrip_and_flags() {
         let o = ResultOutcome::from_wire(INFO_CRITICAL_HIT, 3, 2);
         assert_eq!(o.to_wire(), (INFO_CRITICAL_HIT, 3, 2));
         assert!(o.is_critical());
         assert!(!o.defeated());
-        // recordDamage sets hitDistortion from the damage share alone: Heavy without the flag
-        // is not a crit, and a crit can land Light.
         assert!(!ResultOutcome::from_wire(0, 3, 0).is_critical());
         assert!(ResultOutcome::from_wire(INFO_CRITICAL_HIT, 1, 0).is_critical());
         assert!(ResultOutcome::from_wire(INFO_DEFEATED, 0, 0).defeated());

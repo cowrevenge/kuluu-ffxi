@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bevy::prelude::*;
-use kuluu_session::auth_client::AuthClient;
+use kuluu_session::auth_client::{AuthClient, AuthFlavor};
 use kuluu_session::lobby_client::{LobbyClient, LobbyHandle, MapHandoff};
 use kuluu_session::session::InitialState;
 use tokio::sync::oneshot;
@@ -77,15 +77,18 @@ pub(super) fn spawn_auth_task(
 ) {
     creds.user = form.user.clone();
     creds.pass = form.pass.clone();
+    creds.pol_id = form.pol_id.clone();
+    creds.pol_pass = form.pol_pass.clone();
 
     let (tx, rx) = oneshot::channel();
     let auth: Arc<AuthClient> = clients.auth.clone();
     let lobby: Arc<LobbyClient> = clients.lobby.clone();
     let user = form.user.clone();
     let pass = form.pass.clone();
+    let pol = (form.pol_id.clone(), form.pol_pass.clone());
 
     runtime.0.spawn(async move {
-        let res = run_auth_then_open(&auth, &lobby, &user, &pass).await;
+        let res = run_auth_then_open(&auth, &lobby, &user, &pass, &pol).await;
         let _ = tx.send(res);
     });
 
@@ -97,10 +100,10 @@ async fn run_auth_then_open(
     lobby: &LobbyClient,
     user: &str,
     pass: &str,
+    pol: &(String, String),
 ) -> Result<AuthOk> {
     tracing::debug!(user, "auth task: logging in");
-    let session = auth
-        .login(user, pass)
+    let session = authenticate(auth, user, pass, pol)
         .await
         .map_err(|e| anyhow!("login: {e}"))?;
     tracing::debug!("auth task: login succeeded, opening lobby");
@@ -271,8 +274,9 @@ pub(super) fn spawn_connect_task(
             let lobby: Arc<LobbyClient> = clients.lobby.clone();
             let user = creds.user.clone();
             let pass = creds.pass.clone();
+            let pol = (creds.pol_id.clone(), creds.pol_pass.clone());
             runtime.0.spawn(async move {
-                let res = reopen_and_select(&auth, &lobby, &user, &pass, &slot).await;
+                let res = reopen_and_select(&auth, &lobby, &user, &pass, &pol, &slot).await;
                 let _ = tx.send(res);
             });
             commands.insert_resource(ConnectInFlightChan { rx });
@@ -303,17 +307,42 @@ async fn select_with_existing_handle(
     })
 }
 
+/// A PlayOnline profile authenticates two identities, so its sign-in takes a
+/// path `login` has no room for.
+async fn authenticate(
+    auth: &AuthClient,
+    user: &str,
+    pass: &str,
+    pol: &(String, String),
+) -> anyhow::Result<kuluu_session::auth_client::AuthSession> {
+    if auth.flavor == AuthFlavor::PlayOnline {
+        return auth
+            .login_playonline(kuluu_session::pol_inhouse::Credentials {
+                playonline_id: pol.0.clone(),
+                playonline_password: pol.1.clone(),
+                square_enix_id: user.to_string(),
+                square_enix_password: pass.to_string(),
+                otp: None,
+            })
+            .await;
+    }
+    auth.login(user, pass).await
+}
+
 async fn reopen_and_select(
     auth: &AuthClient,
     lobby: &LobbyClient,
     user: &str,
     pass: &str,
+    pol: &(String, String),
     slot: &kuluu_session::lobby_client::CharSlot,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
-    let session = auth.login(user, pass).await.map_err(|e| ConnectErr {
-        msg: format!("re-login: {e}"),
-        return_to: LoginErrorReturn::Login,
-    })?;
+    let session = authenticate(auth, user, pass, pol)
+        .await
+        .map_err(|e| ConnectErr {
+            msg: format!("re-login: {e}"),
+            return_to: LoginErrorReturn::Login,
+        })?;
     let handle = lobby.open(&session).await.map_err(|e| ConnectErr {
         msg: format!("reopening lobby: {e}"),
         return_to: LoginErrorReturn::CharList,

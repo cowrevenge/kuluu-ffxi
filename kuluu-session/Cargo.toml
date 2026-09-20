@@ -11,6 +11,7 @@ description = "The Tokio FFXI session runtime for LSB/Phoenix servers: superviso
 relay = ["dep:tokio-tungstenite", "dep:postcard", "dep:futures-util"]
 
 [dependencies]
+rand = { workspace = true, features = ["std_rng", "sys_rng"] }
 ffxi-proto = { path = "../ffxi-proto" }
 ffxi-vocab = { path = "../ffxi-vocab" }
 kuluu-nav = { path = "../kuluu-nav" }

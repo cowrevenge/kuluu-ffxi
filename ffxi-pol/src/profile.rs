@@ -53,8 +53,10 @@ impl Transaction {
 
 /// polcore `0x1001e5d0`: the member login, the first application transaction.
 pub const MEMBER_LOGIN: Transaction = Transaction::new(4, 7);
-/// polcore `0x10024170`... `0x100237f0`: fetch the account's content-id list.
-pub const CONTENT_ID_LIST: Transaction = Transaction::new(2, 3);
+/// polcore `0x100237f0`: fetch the friend and ignore lists. app.dll builds
+/// its friend records from the reply, so despite its position in the
+/// transaction catalogue this is a social feature, not part of a login.
+pub const FRIEND_LIST: Transaction = Transaction::new(2, 3);
 /// polcore `0x1001d490`: select the world / service context.
 pub const SELECT_SERVICE: Transaction = Transaction::new(4, 6);
 /// polcore `0x1001db90`: enter the community service; its 0x20-byte reply is

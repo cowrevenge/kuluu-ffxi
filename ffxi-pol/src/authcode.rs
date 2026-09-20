@@ -150,7 +150,8 @@ fn cipher_encrypt(data: &[u8]) -> (Vec<u8>, [u8; 8]) {
 /// The world select sends the head of this same buffer and its reply fills
 /// the rest, so `SelectReply::confirm` is what normally builds one.
 pub struct CommunityRequest {
-    /// polcore `0x1001d7e0`: the index of the account's content entry, not a
+    /// polcore `0x1001d7e0`: which of the account's content entries to play,
+    /// as the six-bit ordinal the Viewer shows as "Content ID-N". It is not a
     /// world number; the world is the service slot below.
     pub content_index: u8,
     pub service_available: bool,
@@ -173,7 +174,28 @@ pub const REQUEST_PAYLOAD_LEN: usize = 0x24;
 pub const SELECT_PAYLOAD_LEN: usize = 0x14;
 const REQUEST_CONST_FLAG: u8 = 1;
 
+/// polcore `0x1001d220`: the region the selection globals start at, before
+/// any world select has confirmed one.
+const REGION_DEFAULT: u16 = 1000;
+
 impl CommunityRequest {
+    /// What a client that has never selected anything asks with. polcore's
+    /// selection globals start with no content entry and no world, and its
+    /// request builder turns that into a zeroed entry and index; the cached
+    /// flag is clear because nothing has been confirmed yet.
+    pub fn initial() -> Self {
+        Self {
+            content_index: 0,
+            service_available: false,
+            service_index: 0,
+            context_unset: true,
+            region: REGION_DEFAULT,
+            world_index_plus1: 0,
+            service_flag: false,
+            cached: false,
+        }
+    }
+
     /// polcore `0x1001d7e0`: build the request payload.
     pub fn payload(&self) -> [u8; REQUEST_PAYLOAD_LEN] {
         let mut body = [0u8; REQUEST_PAYLOAD_LEN];
@@ -193,8 +215,8 @@ impl CommunityRequest {
 /// The world-select reply, which is 0x80 bytes of which the client reads the
 /// leading sixteen and one flag near the end.
 pub const SELECT_REPLY_LEN: usize = 0x80;
-/// polcore `0x1001cf50` and friends index content entries with a 6-bit field,
-/// so an index at or above this is not a content entry.
+/// A content entry is addressed by a six-bit ordinal, so an index at or above
+/// this is not one.
 const CONTENT_INDEX_LIMIT: u8 = 0x40;
 /// polcore `0x1001d220` initialises the world index to this when the reply
 /// names no world.

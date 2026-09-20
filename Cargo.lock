@@ -4511,6 +4511,7 @@ dependencies = [
  "mac_address",
  "mysql_async",
  "postcard",
+ "rand 0.10.1",
  "rustls",
  "rustls-pki-types",
  "serde",

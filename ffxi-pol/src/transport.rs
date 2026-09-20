@@ -309,9 +309,6 @@ pub enum ReplyShape {
     Counted { record_len: usize },
 }
 
-/// polcore `0x100237f0`: one record of the account's content-id list.
-pub const CONTENT_RECORD_LEN: usize = 0xA8;
-
 /// What the player supplies. An account carries two identities and the
 /// handshake uses both: the legacy PlayOnline pair authenticates the
 /// connection, and the Square Enix pair authenticates the member. The Viewer
@@ -345,9 +342,6 @@ pub struct LobbySession {
 /// this crate does not yet decode.
 pub struct LoginOutcome {
     pub session: LobbySession,
-    /// The account's content entries as received; their interior is not
-    /// decoded here, so choosing one is the caller's.
-    pub content_records: Vec<Vec<u8>>,
     /// The selection the world select confirmed, which is what the community
     /// request carried.
     pub selection: authcode::SelectReply,
@@ -358,11 +352,11 @@ pub struct LoginOutcome {
 ///
 /// The order is polcore's: agree the chat key, take the profile host from the
 /// routing the chat service assigns, then one connection per profile
-/// transaction -- member login, content-id list, world select, enter
-/// community -- and assemble the reply into the lobby values. `selection`
-/// carries the world and service the community request asks for; deciding it
-/// from the content-id list is the caller's, since the record interior is not
-/// decoded here.
+/// transaction -- member login, world select, enter community -- and assemble
+/// the reply into the lobby values. `selection` is what the world select asks
+/// for, and its reply is what the community request carries;
+/// `CommunityRequest::initial` asks the way a client that has never selected
+/// anything does.
 pub fn login(
     connector: &mut dyn Connector,
     rng: &mut dyn RandomBytes,
@@ -414,20 +408,6 @@ pub fn login(
         ReplyShape::None,
     )?;
 
-    let listed = open(connector)?.transact(
-        profile::CONTENT_ID_LIST,
-        id,
-        secret,
-        &[],
-        ReplyShape::Counted {
-            record_len: CONTENT_RECORD_LEN,
-        },
-    )?;
-    let content_records = listed
-        .chunks_exact(CONTENT_RECORD_LEN)
-        .map(<[u8]>::to_vec)
-        .collect();
-
     // The world select sends the head of the selection buffer and its reply
     // fills the rest in, so the community request is the confirmed selection
     // rather than the one that was asked for.
@@ -464,7 +444,6 @@ pub fn login(
 
     Ok(LoginOutcome {
         session: LobbySession { value, auth_code },
-        content_records,
         selection: authcode::SelectReply::parse(&world_select_reply)?,
         profile_host: host,
     })
@@ -509,7 +488,6 @@ mod tests {
 
     const MOCK_HOST_INDEX: u8 = 7;
     const MOCK_REGION: u16 = 0x0102;
-    const MOCK_CONTENT_RECORDS: usize = 2;
     const MOCK_TOKEN: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
     const MOCK_CLOCK: u32 = 0x5FED_C0DE;
     const MOCK_CLIENT_ADDR: [u8; 4] = [10, 0, 0, 9];
@@ -717,18 +695,6 @@ mod tests {
                     self.mock.borrow_mut().login_payload = payload;
                     self.reply(Vec::new());
                 }
-                profile::CONTENT_ID_LIST => {
-                    let mut body = vec![0u8; COUNT_PREAMBLE_LEN];
-                    body[0] = MOCK_CONTENT_RECORDS as u8;
-                    let mut records = Vec::new();
-                    for i in 0..MOCK_CONTENT_RECORDS {
-                        let mut rec = vec![0u8; CONTENT_RECORD_LEN];
-                        rec[0] = i as u8;
-                        records.extend_from_slice(&rec);
-                    }
-                    body.extend_from_slice(&profile::seal_body(&records));
-                    self.reply(body);
-                }
                 profile::SELECT_SERVICE => {
                     self.mock.borrow_mut().select_payload = payload;
                     let mut reply = [0u8; authcode::SELECT_REPLY_LEN];
@@ -847,17 +813,12 @@ mod tests {
                 format!("pp007.pol.com:{}", profile::PORT),
                 format!("pp007.pol.com:{}", profile::PORT),
                 format!("pp007.pol.com:{}", profile::PORT),
-                format!("pp007.pol.com:{}", profile::PORT),
             ]
         );
         assert_eq!(
             m.seen,
             vec![
                 (profile::MEMBER_LOGIN.category, profile::MEMBER_LOGIN.opcode),
-                (
-                    profile::CONTENT_ID_LIST.category,
-                    profile::CONTENT_ID_LIST.opcode
-                ),
                 (
                     profile::SELECT_SERVICE.category,
                     profile::SELECT_SERVICE.opcode
@@ -889,8 +850,6 @@ mod tests {
         assert_eq!(m.community_payload[0x12], MOCK_SERVICE_INDEX);
         assert_eq!(m.community_payload[0x16], MOCK_WORLD_INDEX + 1);
 
-        assert_eq!(outcome.content_records.len(), MOCK_CONTENT_RECORDS);
-        assert_eq!(outcome.content_records[1][0], 1);
         assert_eq!(outcome.selection.content_index, Some(MOCK_CONTENT_INDEX));
         assert_eq!(outcome.selection.world_index, MOCK_WORLD_INDEX);
         assert_eq!(outcome.profile_host, "pp007.pol.com");

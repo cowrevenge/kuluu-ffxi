@@ -338,16 +338,27 @@ impl AuthClient {
         }
     }
 
+    /// Sign in to a PlayOnline account. The flavor authenticates two
+    /// identities, which `login` has no room for.
+    pub async fn login_playonline(
+        &self,
+        creds: crate::pol_inhouse::Credentials,
+    ) -> Result<AuthSession> {
+        if self.flavor != AuthFlavor::PlayOnline {
+            bail!("this server does not use PlayOnline accounts");
+        }
+        crate::pol_inhouse::login(creds).await
+    }
+
     pub async fn login(&self, username: &str, password: &str) -> Result<AuthSession> {
         match self.flavor {
             AuthFlavor::Json => {}
             AuthFlavor::Binary => return self.login_binary(username, password).await,
             AuthFlavor::PlayOnline => {
-                let creds = crate::pol_inhouse::Credentials {
-                    member: username.to_string(),
-                    password: password.to_string(),
-                };
-                return crate::pol_inhouse::login(creds).await;
+                bail!(
+                    "a PlayOnline sign-in needs both the PlayOnline and the Square Enix \
+                     identity; call login_playonline"
+                )
             }
         }
         let payload = json!({

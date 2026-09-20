@@ -268,6 +268,8 @@ pub(crate) enum LoginField {
     #[default]
     User,
     Password,
+    PolId,
+    PolPassword,
 }
 
 #[derive(Resource, Default)]
@@ -277,6 +279,22 @@ pub(crate) struct LoginForm {
     pub focus: LoginField,
 
     pub remember_password: bool,
+
+    /// A PlayOnline account carries two identities and the account handshake
+    /// uses both, so `user`/`pass` hold the Square Enix pair and these hold
+    /// the PlayOnline pair. Both are empty for every other auth flavor.
+    pub pol_id: String,
+    pub pol_pass: String,
+}
+
+impl LoginForm {
+    /// Whether the form has everything the flavor's login needs.
+    pub fn is_complete(&self, playonline: bool) -> bool {
+        if self.user.is_empty() || self.pass.is_empty() {
+            return false;
+        }
+        !playonline || (!self.pol_id.is_empty() && !self.pol_pass.is_empty())
+    }
 }
 
 #[allow(dead_code)]
@@ -514,6 +532,9 @@ pub(crate) struct OpenedLobby(pub Mutex<OpenedLobbyInner>);
 pub(crate) struct Credentials {
     pub user: String,
     pub pass: String,
+    /// The PlayOnline identity, for the flavor that authenticates two.
+    pub pol_id: String,
+    pub pol_pass: String,
 }
 
 #[derive(Resource, Default)]

@@ -127,6 +127,8 @@ fn build_login_ui(
 ) {
     let user_initial = form.user.clone();
     let pass_initial = form.pass.clone();
+    let pol_id_initial = form.pol_id.clone();
+    let pol_pass_initial = form.pol_pass.clone();
     let remember = form.remember_password;
     let active_user = form.user.clone();
     let (server_key, accts) = saved_accounts_for(server_form, server);
@@ -154,33 +156,76 @@ fn build_login_ui(
                 {
                     spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
 
+                    if playonline {
+                        for line in POL_CREDENTIAL_HINTS {
+                            panel.spawn((Text::new(line), ThemedText));
+                        }
+                        spawn_field(
+                            panel,
+                            "PlayOnline ID",
+                            false,
+                            &pol_id_initial,
+                            LoginField::PolId,
+                            playonline,
+                        );
+                        spawn_field(
+                            panel,
+                            "PlayOnline password",
+                            true,
+                            &pol_pass_initial,
+                            LoginField::PolPassword,
+                            playonline,
+                        );
+                    }
+
                     let user_label = if playonline {
-                        "Member name"
+                        "Square Enix ID"
                     } else {
                         "Username"
                     };
-                    spawn_field(panel, user_label, false, &user_initial, LoginField::User);
-                    spawn_field(panel, "Password", true, &pass_initial, LoginField::Password);
-
-                    let mut cb = panel.spawn(checkbox_bundle(
-                        (),
-                        Spawn((Text::new("Remember password"), ThemedText)),
-                    ));
-                    if remember {
-                        cb.insert(Checked);
-                    }
-                    cb.observe(
-                        |ev: On<ValueChange<bool>>,
-                         mut form: ResMut<LoginForm>,
-                         mut commands: Commands| {
-                            form.remember_password = ev.value;
-                            if ev.value {
-                                commands.entity(ev.source).insert(Checked);
-                            } else {
-                                commands.entity(ev.source).remove::<Checked>();
-                            }
-                        },
+                    let pass_label = if playonline {
+                        "Square Enix password"
+                    } else {
+                        "Password"
+                    };
+                    spawn_field(
+                        panel,
+                        user_label,
+                        false,
+                        &user_initial,
+                        LoginField::User,
+                        playonline,
                     );
+                    spawn_field(
+                        panel,
+                        pass_label,
+                        true,
+                        &pass_initial,
+                        LoginField::Password,
+                        playonline,
+                    );
+
+                    if !playonline {
+                        let mut cb = panel.spawn(checkbox_bundle(
+                            (),
+                            Spawn((Text::new("Remember password"), ThemedText)),
+                        ));
+                        if remember {
+                            cb.insert(Checked);
+                        }
+                        cb.observe(
+                            |ev: On<ValueChange<bool>>,
+                             mut form: ResMut<LoginForm>,
+                             mut commands: Commands| {
+                                form.remember_password = ev.value;
+                                if ev.value {
+                                    commands.entity(ev.source).insert(Checked);
+                                } else {
+                                    commands.entity(ev.source).remove::<Checked>();
+                                }
+                            },
+                        );
+                    }
 
                     let blocked = login_blocked(version, era);
 
@@ -196,10 +241,10 @@ fn build_login_ui(
                         ))
                         .insert(DefaultFocusTarget)
                         .observe(
-                            |_ev: On<Activate>,
-                             form: Res<LoginForm>,
-                             mut next: ResMut<NextState<LauncherState>>| {
-                                if !form.user.is_empty() && !form.pass.is_empty() {
+                            move |_ev: On<Activate>,
+                                  form: Res<LoginForm>,
+                                  mut next: ResMut<NextState<LauncherState>>| {
+                                if form.is_complete(playonline) {
                                     next.set(LauncherState::AuthInFlight);
                                 }
                             },
@@ -236,6 +281,16 @@ fn build_login_ui(
             });
         });
 }
+
+/// The label column has to hold the longest of the PlayOnline field names.
+const FIELD_LABEL_WIDTH: f32 = 160.0;
+
+/// A PlayOnline account carries both identities and the handshake uses both,
+/// so the form says which is which in the Viewer's own words.
+const POL_CREDENTIAL_HINTS: [&str; 2] = [
+    "Sign in with both of the account's identities, as the PlayOnline Viewer",
+    "asks for them. A PlayOnline ID is four capitals then four digits.",
+];
 
 /// LEGAL.md section 7, said once per profile where the player signs in.
 const POL_TERMS_NOTICE: [&str; 3] = [
@@ -623,6 +678,7 @@ fn spawn_field(
     mask: bool,
     initial: &str,
     binding: LoginField,
+    playonline: bool,
 ) {
     parent
         .spawn(Node {
@@ -636,7 +692,7 @@ fn spawn_field(
         .with_children(|row| {
             row.spawn((
                 Node {
-                    width: Val::Px(110.0),
+                    width: Val::Px(FIELD_LABEL_WIDTH),
                     ..default()
                 },
                 Text::new(label.to_string()),
@@ -667,6 +723,8 @@ fn spawn_field(
                 move |ev: On<ValueChange<String>>, mut form: ResMut<LoginForm>| match binding {
                     LoginField::User => form.user = ev.value.clone(),
                     LoginField::Password => form.pass = ev.value.clone(),
+                    LoginField::PolId => form.pol_id = ev.value.clone(),
+                    LoginField::PolPassword => form.pol_pass = ev.value.clone(),
                 },
             )
             .observe(
@@ -678,7 +736,7 @@ fn spawn_field(
                     if login_blocked(&version, &era) {
                         return;
                     }
-                    if !form.user.is_empty() && !form.pass.is_empty() {
+                    if form.is_complete(playonline) {
                         next.set(LauncherState::AuthInFlight);
                     }
                 },

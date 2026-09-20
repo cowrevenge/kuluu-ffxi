@@ -1,5 +1,6 @@
 //! The PlayOnline host names the Viewer and the game carry, read from the
-//! binaries of a retail install. The profile host lives with its transaction
+//! binaries of a retail install. The profile host is not a constant: its
+//! index arrives on the chat connection, so it lives with its transaction
 //! layer in `crate::profile::host`.
 
 /// The FFXI lobby server the game resolves in its default connection mode.
@@ -8,19 +9,10 @@
 /// connection-mode global is 0; the other modes are development paths.
 pub const LOBBY_HOST: &str = "ffxi00.pol.com";
 
-/// app.dll 7ba99828: the member chat host template `pc%03d%s.pol.com`; the
-/// Viewer's application layer fills the index and the suffix.
-pub fn chat_host(index: u8, suffix: &str) -> String {
-    format!("pc{index:03}{suffix}.pol.com")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_chat_host_pads_the_index_to_three_digits() {
-        assert_eq!(chat_host(0, ""), "pc000.pol.com");
-        assert_eq!(chat_host(7, "x"), "pc007x.pol.com");
-    }
-}
+/// The chat service a member account signs in against. app.dll 7ba99828
+/// writes this literal into the chat-host field of every member record it
+/// creates (`0x101a2695`, `0x101ada50`, `0x101ae280`), and polcore's login
+/// driver resolves whatever that field holds. A record saved with another
+/// host overrides it, which is why the Viewer keeps the name in settings
+/// rather than in code.
+pub const CHAT_HOST: &str = "ci000.pol.com";

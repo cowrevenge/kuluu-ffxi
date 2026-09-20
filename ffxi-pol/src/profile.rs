@@ -1,11 +1,12 @@
 //! The profile service: fixed-size request/reply framing, the per-request
 //! authenticator, the member-id codec, and the member-login body.
 //!
-//! Read from polcore.dll build 73b1864b. A transaction is a 0x28-byte request
-//! and a 0x18-byte reply header, optionally followed by a checksummed body;
-//! everything after the plaintext connect handshake is enciphered with the
-//! Blowfish key the chat service agreed. The bodies here are pure functions of
-//! bytes; the transport that carries them is `crate::transport`.
+//! Read from polcore.dll build 73b1864b, and from app.dll build 7ba99828 for
+//! the credential the Viewer stages into it. A transaction is a 0x28-byte
+//! request and a 0x18-byte reply header, optionally followed by a checksummed
+//! body; everything after the plaintext connect handshake is enciphered with
+//! the Blowfish key the chat service agreed. The bodies here are pure
+//! functions of bytes; the transport that carries them is `crate::transport`.
 
 use md5::{Digest as _, Md5};
 use sha1::{Digest as _, Sha1};
@@ -85,10 +86,17 @@ pub fn id_decode(text: &[u8]) -> Result<u64> {
     Ok(value)
 }
 
-/// The profile host the session's own host index selects.
+/// polcore `0x1001e8d0`: the profile host an account's own host index selects.
+/// The index is not derivable from the member id: it is the 7-bit routing
+/// field the chat service assigns after registration, so it reaches this from
+/// `crate::chat::Routing`.
 pub fn host(host_index: u8) -> String {
-    format!("pp{:03}.pol.com", host_index & 0x7F)
+    format!("pp{:03}.pol.com", host_index & HOST_INDEX_MASK)
 }
+
+/// polcore `0x10019e20` takes the host index out of bits 9..15 of the packed
+/// identity's high dword, so it is seven bits wide.
+pub const HOST_INDEX_MASK: u8 = 0x7F;
 
 /// polcore `0x1001f5e0`: the per-request authenticator, `MD5(id8 || secret ||
 /// token)`. The token is a per-connection nonce from the handshake reply, so
@@ -188,17 +196,64 @@ pub fn declared_len(payload_len: usize) -> u32 {
     (payload_len + BODY_CHECKSUM_LEN) as u32
 }
 
+/// polcore `0x1001e4b0` wipes its stack copies with these widths right after
+/// the call, which is the binary's own statement of the argument sizes.
+pub const SECRET_LEN: usize = 20;
+pub const OTP_LEN: usize = 6;
+/// app.dll `0x1019ab29` appends this before the second digest.
+const SECRET_SALT: &[u8] = b"playonline";
+
 /// The account credential the member login proves possession of. The name is
-/// the PlayOnline id; `secret20` is the 20-byte value polcore stores without a
-/// terminator (its writer, in app.dll, was not traced, so its derivation from
-/// the typed password is unverified). `otp` is set only for a token account.
+/// the PlayOnline id; `secret20` is what `member_secret` derives from the
+/// typed password. `otp` is set only for a token account.
 pub struct MemberCredential {
     pub name: String,
-    pub secret20: [u8; 20],
-    pub otp: Option<[u8; 6]>,
+    pub secret20: [u8; SECRET_LEN],
+    pub otp: Option<[u8; OTP_LEN]>,
+}
+
+impl MemberCredential {
+    /// Build the credential the Viewer would stage from a typed password.
+    pub fn new(name: impl Into<String>, password: &str, otp: Option<[u8; OTP_LEN]>) -> Self {
+        Self {
+            name: name.into(),
+            secret20: member_secret(password),
+            otp,
+        }
+    }
+}
+
+/// app.dll `0x1019ab29`: the 20-byte secret the member login proves possession
+/// of, `SHA1(hex(SHA1(password)) || "playonline")` with the inner digest
+/// rendered as forty lowercase hex characters. The Viewer holds the password
+/// as UTF-16 and feeds the low byte of each code unit, so a character outside
+/// Latin-1 is truncated before it is hashed rather than encoded.
+pub fn member_secret(password: &str) -> [u8; SECRET_LEN] {
+    let mut inner = Sha1::new();
+    for unit in password.encode_utf16() {
+        inner.update([unit as u8]);
+    }
+    let first: [u8; SECRET_LEN] = inner.finalize().into();
+
+    let mut outer = Sha1::new();
+    outer.update(hex_lower(&first));
+    outer.update(SECRET_SALT);
+    outer.finalize().into()
+}
+
+fn hex_lower(bytes: &[u8; SECRET_LEN]) -> [u8; 2 * SECRET_LEN] {
+    let mut out = [0u8; 2 * SECRET_LEN];
+    for (i, b) in bytes.iter().enumerate() {
+        out[2 * i] = HEX_DIGITS[(b >> 4) as usize];
+        out[2 * i + 1] = HEX_DIGITS[(b & 0x0F) as usize];
+    }
+    out
 }
 
 const LOGIN_BODY_LEN: usize = 0x40;
+/// polcore `0x1001e760` rounds the stamp down to the minute so the client and
+/// the server agree on it without a clock exchange.
+const SECONDS_PER_MINUTE: u64 = 60;
 const LOGIN_NAME_MAX: usize = 16;
 const LOGIN_DIGEST_OFFSET: usize = 0x20;
 const LOGIN_OTP_OFFSET: usize = 0x12;
@@ -216,12 +271,8 @@ pub fn member_login_body(cred: &MemberCredential, unix_secs: u64) -> Result<[u8;
     body[0] = if cred.otp.is_some() { 2 } else { 1 };
     body[1..1 + name.len()].copy_from_slice(name);
 
-    let mut hex = [0u8; 40];
-    for (i, b) in cred.secret20.iter().enumerate() {
-        hex[2 * i] = HEX_DIGITS[(b >> 4) as usize];
-        hex[2 * i + 1] = HEX_DIGITS[(b & 0x0F) as usize];
-    }
-    let minute = unix_secs - unix_secs % 60;
+    let hex = hex_lower(&cred.secret20);
+    let minute = unix_secs - unix_secs % SECONDS_PER_MINUTE;
     let stamp = minute.to_string();
     let mut h = Sha1::new();
     h.update(hex);
@@ -295,6 +346,39 @@ mod tests {
     }
 
     #[test]
+    fn the_password_secret_is_two_sha1_passes_with_the_salt() {
+        // Self-derived from the static reading of app.dll 7ba99828, not
+        // captured from any live server.
+        assert_eq!(
+            hex::encode(member_secret("hunter2")),
+            "505b52b912143468cece9546d5118d9a20689222"
+        );
+        let want: [u8; SECRET_LEN] = {
+            let inner: [u8; SECRET_LEN] = Sha1::digest(b"hunter2").into();
+            let mut outer = Sha1::new();
+            outer.update(hex::encode(inner).as_bytes());
+            outer.update(SECRET_SALT);
+            outer.finalize().into()
+        };
+        assert_eq!(member_secret("hunter2"), want);
+    }
+
+    #[test]
+    fn the_password_secret_hashes_the_low_byte_of_each_code_unit() {
+        // The Viewer feeds UTF-16 code units one low byte at a time, so a
+        // character above U+00FF is truncated rather than encoded.
+        assert_eq!(member_secret("\u{100}"), member_secret("\u{0}"));
+        assert_ne!(member_secret("\u{e9}"), member_secret("e"));
+    }
+
+    #[test]
+    fn a_credential_from_a_password_carries_the_derived_secret() {
+        let cred = MemberCredential::new("TESTMEMBER", "hunter2", None);
+        assert_eq!(cred.secret20, member_secret("hunter2"));
+        assert!(cred.otp.is_none());
+    }
+
+    #[test]
     fn the_member_login_body_has_the_pinned_shape() {
         let cred = MemberCredential {
             name: "TESTMEMBER".to_string(),
@@ -309,7 +393,11 @@ mod tests {
         // SHA-1 over hex(20x 0x11) and the minute-floored timestamp.
         let mut h = Sha1::new();
         h.update(b"1111111111111111111111111111111111111111");
-        h.update((unix_secs - unix_secs % 60).to_string().as_bytes());
+        h.update(
+            (unix_secs - unix_secs % SECONDS_PER_MINUTE)
+                .to_string()
+                .as_bytes(),
+        );
         let want: [u8; 20] = h.finalize().into();
         assert_eq!(&body[0x20..0x34], &want);
     }

@@ -142,9 +142,10 @@ const B32_BITS: u32 = 5;
 const B32_MASK: u32 = (1 << B32_BITS) - 1;
 const BITS_PER_BYTE: u32 = 8;
 
-/// polcore `0x10007210`: decode a base32 field. Characters outside the
-/// alphabet end the run, which is how the client tolerates the four checksum
-/// characters a plaintext line still carries.
+/// polcore `0x10007210`: decode a base32 field. polcore maps every character
+/// through a reverse table and trims by length instead; this stops at the
+/// first character outside the alphabet, which is equivalent for every caller
+/// here because each one trims the line's checksum characters first.
 pub fn b32_decode(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() * B32_BITS as usize / BITS_PER_BYTE as usize);
     let mut acc = 0u32;
@@ -299,6 +300,126 @@ pub fn nick_token(identity: &[u8; MEMBER_ID_LEN], inputs: &TokenInputs) -> Strin
     record[TOKEN_SESSION_OFFSET..TOKEN_HOST_OFFSET].copy_from_slice(&inputs.session_digest);
     record[TOKEN_HOST_OFFSET..].copy_from_slice(&md5(&host)[..TOKEN_FIELD_LEN]);
     b64_encode(&record)
+}
+
+/// polcore `0x10015e80` state 5: the greeting's third field also base32-decodes
+/// to this many bytes, of which the client keeps every one.
+pub const GREETING_DECODED_LEN: usize = 0x18;
+/// polcore `0x100aa8d0`: POL's own address struct, `{u16 family; u16 port;
+/// u32 address}` in host order followed by twelve bytes no reader touches.
+pub const POL_ADDRESS_LEN: usize = 0x14;
+/// Every field of the decoded record is big-endian; polcore byteswaps each one
+/// as it interprets it.
+const GREETING_CLOCK: std::ops::Range<usize> = 0x00..0x04;
+const GREETING_ADDRESS: std::ops::Range<usize> = 0x04..0x08;
+const GREETING_REDIRECT: std::ops::Range<usize> = 0x08..0x0C;
+const GREETING_REDIRECT_PORT: std::ops::Range<usize> = 0x0C..0x0E;
+const GREETING_PORT: std::ops::Range<usize> = 0x14..0x16;
+const ADDRESS_FAMILY: u16 = 1;
+
+/// The greeting line the chat service opens with. The client hashes the third
+/// field's raw characters into the NICK digest and, separately, base32-decodes
+/// the same characters for the addresses below, so both forms are kept.
+#[derive(Clone, Debug)]
+pub struct Greeting {
+    pub challenge: Vec<u8>,
+    pub decoded: [u8; GREETING_DECODED_LEN],
+}
+
+impl Greeting {
+    /// polcore `0x10015e80`: take the challenge from field 3 of a plaintext
+    /// line, whose four checksum characters are still attached and which the
+    /// handler drops by length rather than by verifying them.
+    pub fn parse(field3: &[u8]) -> crate::Result<Self> {
+        let challenge = field3
+            .len()
+            .checked_sub(CHECKSUM_CHARS)
+            .map(|n| field3[..n].to_vec())
+            .ok_or_else(|| crate::Error::protocol("the chat greeting field is too short"))?;
+        let decoded = b32_decode(&challenge);
+        let decoded = decoded
+            .get(..GREETING_DECODED_LEN)
+            .and_then(|d| d.try_into().ok())
+            .ok_or_else(|| {
+                crate::Error::protocol("the chat greeting does not decode to 0x18 bytes")
+            })?;
+        Ok(Self { challenge, decoded })
+    }
+
+    /// polcore `0x10019b80`: the service's own clock, which the client adopts
+    /// as its epoch and which the authCode assembly digests. It is the only
+    /// reason the profile leg needs no clock of its own.
+    pub fn clock(&self) -> u32 {
+        u32::from_be_bytes(self.decoded[GREETING_CLOCK].try_into().unwrap())
+    }
+
+    /// A non-zero redirect makes the client reconnect once to that address,
+    /// on the port at `redirect_port` when that is set.
+    pub fn redirect(&self) -> u32 {
+        u32::from_be_bytes(self.decoded[GREETING_REDIRECT].try_into().unwrap())
+    }
+
+    pub fn redirect_port(&self) -> u16 {
+        u16::from_be_bytes(self.decoded[GREETING_REDIRECT_PORT].try_into().unwrap())
+    }
+
+    /// polcore `0x10015e80`: the client's own endpoint as the service reports
+    /// it, byteswapped into POL's host-order address struct. The profile
+    /// service's plaintext handshake announces the first eight bytes of this.
+    pub fn address(&self) -> [u8; POL_ADDRESS_LEN] {
+        let mut out = [0u8; POL_ADDRESS_LEN];
+        out[0x00..0x02].copy_from_slice(&ADDRESS_FAMILY.to_le_bytes());
+        let port = u16::from_be_bytes(self.decoded[GREETING_PORT].try_into().unwrap());
+        out[0x02..0x04].copy_from_slice(&port.to_le_bytes());
+        let address = u32::from_be_bytes(self.decoded[GREETING_ADDRESS].try_into().unwrap());
+        out[0x04..0x08].copy_from_slice(&address.to_le_bytes());
+        out
+    }
+}
+
+/// polcore `0x100a8258`: the struct a numeric 300 outside the key-agreement
+/// state carries, which is where the profile service's host number comes from.
+pub const ROUTING_LEN: usize = 0x18;
+const ROUTING_GROUP: usize = 4;
+const ROUTING_SWAPPED: usize = 2;
+const ROUTING_HOST_INDEX: usize = 0x02;
+const ROUTING_FLAGS: usize = 0x03;
+const ROUTING_REFUSAL: usize = 0x04;
+const ROUTING_REFUSED_BIT: u8 = 1;
+
+/// polcore `0x10015a00`: the struct is stored with the leading 16-bit word of
+/// every four-byte group byteswapped.
+pub fn routing_host_order(wire: &[u8; ROUTING_LEN]) -> [u8; ROUTING_LEN] {
+    let mut out = *wire;
+    for group in out.chunks_mut(ROUTING_GROUP) {
+        group[..ROUTING_SWAPPED].reverse();
+    }
+    out
+}
+
+/// What the client reads out of the routing struct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Routing {
+    /// polcore `0x10019dc0` writes this into bits 48..63 of the identity.
+    pub region: u16,
+    /// polcore `0x10019dc0` writes this into bits 41..47, and `0x1001e8d0`
+    /// formats it into the profile host name.
+    pub host_index: u8,
+    pub flags: u8,
+    /// polcore `0x10044a50` state 0x18 fails the login when this is set.
+    pub refused: bool,
+}
+
+impl Routing {
+    /// Read the fields polcore takes out of the host-order struct.
+    pub fn parse(host_order: &[u8; ROUTING_LEN]) -> Self {
+        Self {
+            region: u16::from_le_bytes(host_order[..ROUTING_SWAPPED].try_into().unwrap()),
+            host_index: host_order[ROUTING_HOST_INDEX],
+            flags: host_order[ROUTING_FLAGS],
+            refused: host_order[ROUTING_REFUSAL] & ROUTING_REFUSED_BIT != 0,
+        }
+    }
 }
 
 const USER_ARG0: &str = "x";

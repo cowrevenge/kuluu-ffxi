@@ -29,7 +29,9 @@ const REPLY_HEADER_LEN: usize = 0x18;
 /// polcore `0x1001f5e0`: request[0] on every application request.
 const REQUEST_MAGIC: u8 = 2;
 const DIGEST_LEN: usize = 16;
-const BODY_CHECKSUM_LEN: usize = 4;
+/// polcore `0x1001f970`: every body ends with a 4-byte checksum, and the
+/// declared length includes it.
+pub const BODY_CHECKSUM_LEN: usize = 4;
 /// Only 15 of the 16-byte secret slot are secret; byte 15 is always filler.
 pub const SECRET_MAX_LEN: usize = 0x0F;
 
@@ -250,7 +252,11 @@ fn hex_lower(bytes: &[u8; SECRET_LEN]) -> [u8; 2 * SECRET_LEN] {
     out
 }
 
+/// polcore `0x1001f4d0(ctx, 4, 7, 0x40)` declares 0x40 bytes, which includes
+/// the 4-byte trailer `seal_body` appends.
 const LOGIN_BODY_LEN: usize = 0x40;
+/// The payload the login declares, before its checksum.
+pub const LOGIN_PAYLOAD_LEN: usize = LOGIN_BODY_LEN - BODY_CHECKSUM_LEN;
 /// polcore `0x1001e760` rounds the stamp down to the minute so the client and
 /// the server agree on it without a clock exchange.
 const SECONDS_PER_MINUTE: u64 = 60;
@@ -258,16 +264,19 @@ const LOGIN_NAME_MAX: usize = 16;
 const LOGIN_DIGEST_OFFSET: usize = 0x20;
 const LOGIN_OTP_OFFSET: usize = 0x12;
 
-/// polcore `0x1001e760`: the 0x40-byte member-login body. Offset 0 is the mode
+/// polcore `0x1001e760`: the member-login payload. Offset 0 is the mode
 /// (1 id+password, 2 with a one-time password), offset 1 the NUL-terminated
 /// name, offset 0x20 a SHA-1 over the lowercase hex of the 20-byte secret
 /// concatenated with the minute-rounded unix time as decimal.
-pub fn member_login_body(cred: &MemberCredential, unix_secs: u64) -> Result<[u8; LOGIN_BODY_LEN]> {
+pub fn member_login_body(
+    cred: &MemberCredential,
+    unix_secs: u64,
+) -> Result<[u8; LOGIN_PAYLOAD_LEN]> {
     let name = cred.name.as_bytes();
     if name.len() >= LOGIN_NAME_MAX {
         return Err(Error::protocol("a member name is at most 15 characters"));
     }
-    let mut body = [0u8; LOGIN_BODY_LEN];
+    let mut body = [0u8; LOGIN_PAYLOAD_LEN];
     body[0] = if cred.otp.is_some() { 2 } else { 1 };
     body[1..1 + name.len()].copy_from_slice(name);
 
@@ -387,7 +396,7 @@ mod tests {
         };
         let unix_secs = 1_700_000_077u64;
         let body = member_login_body(&cred, unix_secs).unwrap();
-        assert_eq!(body.len(), LOGIN_BODY_LEN);
+        assert_eq!(declared_len(body.len()) as usize, LOGIN_BODY_LEN);
         assert_eq!(body[0], 1);
         assert_eq!(&body[1..11], b"TESTMEMBER");
         // SHA-1 over hex(20x 0x11) and the minute-floored timestamp.

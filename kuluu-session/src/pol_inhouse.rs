@@ -1,12 +1,12 @@
 //! In-house PlayOnline login: the TCP transport that carries the `ffxi-pol`
-//! account handshake, and the entry the launcher drives.
+//! account handshake, and the entry `AuthClient` drives for the PlayOnline
+//! auth flavor.
 //!
-//! This is the road that removes the Viewer dependency: instead of reading a
-//! session the Viewer produced, Kuluu performs the PlayOnline account
-//! handshake itself and receives the session Square Enix issues, the same way
-//! the Viewer does. The wire layers live in `ffxi-pol`, proven against a mock;
-//! this module is the socket that carries them and the credential the player
-//! supplies.
+//! Kuluu performs the PlayOnline account handshake itself and receives the
+//! session Square Enix issues, the same way the Viewer does; no Viewer process
+//! and no session file are involved. The wire layers live in `ffxi-pol`,
+//! proven against a mock; this module is the socket that carries them and the
+//! credential the player supplies.
 //!
 //! Running it contacts Square Enix's account servers with the player's own
 //! account, so it is the player's action on their own machine, never
@@ -111,18 +111,14 @@ impl Connector for TcpConnector {
 }
 
 /// Sign in to a PlayOnline account and produce a lobby session, without the
-/// Viewer. `chat_host` names the chat service and `profile_host` the profile
-/// service; both are the player's own account's hosts.
+/// Viewer. The chat and profile hosts are the ones the Viewer binaries carry
+/// (`ffxi_pol::hosts`, `ffxi_pol::profile::host`), so the caller names none.
 ///
 /// The handshake is not yet complete end to end: the profile community reply
 /// that yields the 64-byte authCode is the remaining reverse-engineering, so
 /// this reports that boundary rather than returning a session that would not
 /// open the lobby.
-pub async fn login(
-    _chat_host: String,
-    _profile_host: String,
-    creds: Credentials,
-) -> Result<crate::auth_client::AuthSession> {
+pub async fn login(creds: Credentials) -> Result<crate::auth_client::AuthSession> {
     tokio::task::spawn_blocking(move || login_blocking(&creds))
         .await
         .context("in-house PlayOnline login task")?

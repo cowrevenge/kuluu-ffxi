@@ -16,11 +16,13 @@ POL1-LZSS-packed on disk and unpacked for reading.
 
 Retail FFXI has no auth server of its own. The PlayOnline Viewer signs the
 account in over two services and hands the game a 16-byte value and a 64-byte
-authCode that the lobby validates. Kuluu's existing PlayOnline path reads a
-session a producer wrote to a file. This is the other road: Kuluu performs the
-account handshake itself, the same way the Viewer does, removing the Viewer
-dependency. It adds reach, not power: the player authenticates their own
-account against Square Enix, and someone without a paid account gains nothing.
+authCode that the lobby validates. Kuluu once read a session a producer wrote
+to a file beside the Viewer; that handoff is gone. Kuluu performs the account
+handshake itself, the same way the Viewer does: the PlayOnline auth flavor of
+`kuluu_session::auth_client` takes the member name and password and runs
+`kuluu_session::pol_inhouse`. It adds reach, not power: the player
+authenticates their own account against Square Enix, and someone without a
+paid account gains nothing.
 
 ## The two services
 
@@ -67,6 +69,23 @@ once that reply is in hand the assembly is entirely client-side over state the
 client already holds. This is the decisive fact: a faithful client that
 completes the real handshake can produce the lobby session without any Viewer
 process and without reading another process's memory.
+
+## The hosts
+
+Every host name is a literal in the binaries; nothing is configured by the
+player in the Viewer, and Kuluu's PlayOnline profile needs only the lobby.
+
+| Service | Host | Where it is read from |
+|---|---|---|
+| chat (IRC dialect) | `pc%03d%s.pol.com` | app.dll `7ba99828`; the index and suffix are filled by the Viewer's application layer, not yet traced. polcore itself carries only `gm000`/`gd000.pol.com` (GM chat) and stores the member chat host through a setter. |
+| profile | `pp%03d.pol.com`, port 51220 | polcore `0x10075430`; the index is bits 9..15 of the member identity's high dword. |
+| FFXI lobby | `ffxi00.pol.com`, ports 54230/54001 | FFXiMain.dll of the retail-2026-09 row (sha256 f2245d1c9d06e02c): the string at VA 0x10362044 is resolved from VA 0x100ed84d when the connection-mode global at VA 0x104ca430 is 0. Modes 1 and 2 are development paths (`ci000.pol.com` sits beside a `172.16.x` address and `c:\image\ffxi\serv`). |
+
+So a PlayOnline profile's Host is the FFXI lobby server, and `ffxi00.pol.com`
+is the game's own default for it (`ffxi_pol::hosts::LOBBY_HOST`); the auth
+port is unused because the account services replace the auth server. Whether
+the world-select reply (category 4, opcode 6, 0x80 bytes) carries a lobby
+address that would override this default was not decoded.
 
 ## The Viewer-to-game seam (for the COM posture)
 

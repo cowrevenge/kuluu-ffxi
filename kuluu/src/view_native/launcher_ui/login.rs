@@ -22,11 +22,11 @@ use super::server_edit::ver_lock_label;
 use super::server_version_check::{ServerVersionStatus, VersionViolation};
 use super::{
     Credentials, DatSetupReturn, LauncherClients, LauncherState, LoginErrorMsg, LoginErrorReturn,
-    LoginField, LoginForm, ServerEditForm, ServerInfo, ServerSelectForm, SessionSource,
+    LoginField, LoginForm, ServerEditForm, ServerInfo, ServerSelectForm,
 };
 use crate::view_native::widgets::text_field::{text_field, TextField, TextFieldSubmitted};
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
-use kuluu_session::playonline;
+use kuluu_session::auth_client::AuthFlavor;
 
 #[derive(Component)]
 pub(super) struct LoginUiRoot;
@@ -66,7 +66,7 @@ pub(super) fn spawn_login_ui(
         &version,
         &era,
         &mark,
-        &clients.session_source,
+        clients.auth.flavor,
     );
 }
 
@@ -97,7 +97,7 @@ pub(super) fn rebuild_login_ui_system(
         &version,
         &era,
         &mark,
-        &clients.session_source,
+        clients.auth.flavor,
     );
 }
 
@@ -123,13 +123,14 @@ fn build_login_ui(
     version: &ServerVersionStatus,
     era: &ClientEraStatus,
     mark: &BrandMark,
-    source: &SessionSource,
+    flavor: AuthFlavor,
 ) {
     let user_initial = form.user.clone();
     let pass_initial = form.pass.clone();
     let remember = form.remember_password;
     let active_user = form.user.clone();
     let (server_key, accts) = saved_accounts_for(server_form, server);
+    let playonline = flavor == AuthFlavor::PlayOnline;
 
     commands
         .spawn((LoginUiRoot, screen_root()))
@@ -145,17 +146,20 @@ fn build_login_ui(
                 spawn_version_banner(panel, version);
                 spawn_client_era_banner(panel, era);
 
-                if let SessionSource::PlayOnline { session_file } = source {
-                    spawn_playonline_sign_in(
-                        panel,
-                        server.profile_name.as_deref(),
-                        session_file.as_deref(),
-                        login_blocked(version, era),
-                    );
-                } else {
+                if playonline && !terms_acknowledged(server.profile_name.as_deref()) {
+                    spawn_terms_gate(panel, server.profile_name.as_deref());
+                    return;
+                }
+
+                {
                     spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
 
-                    spawn_field(panel, "Username", false, &user_initial, LoginField::User);
+                    let user_label = if playonline {
+                        "Member name"
+                    } else {
+                        "Username"
+                    };
+                    spawn_field(panel, user_label, false, &user_initial, LoginField::User);
                     spawn_field(panel, "Password", true, &pass_initial, LoginField::Password);
 
                     let mut cb = panel.spawn(checkbox_bundle(
@@ -200,6 +204,9 @@ fn build_login_ui(
                                 }
                             },
                         );
+                        }
+                        if playonline {
+                            return;
                         }
 
                         r.spawn(button_bundle(
@@ -260,143 +267,29 @@ fn acknowledge_terms(profile_name: Option<&str>) {
     }
 }
 
-fn describe_age(age: std::time::Duration) -> String {
-    let minutes = age.as_secs() / 60;
-    if minutes < 60 {
-        format!("{minutes} min")
-    } else if minutes < 60 * 24 {
-        format!("{} h", minutes / 60)
-    } else {
-        format!("{} d", minutes / (60 * 24))
+/// A profile that signs in to the official service shows the notice once;
+/// the sign-in form appears after the player has read it.
+fn spawn_terms_gate(panel: &mut ChildSpawnerCommands, profile_name: Option<&str>) {
+    for line in POL_TERMS_NOTICE {
+        panel.spawn(hint(line));
     }
-}
-
-/// A PlayOnline profile signs in with the viewer's session file, not a
-/// username and password: show what was found, the terms notice until the
-/// player has read it, and a Log in that opens the lobby with that session.
-fn spawn_playonline_sign_in(
-    panel: &mut ChildSpawnerCommands,
-    profile_name: Option<&str>,
-    session_file: Option<&std::path::Path>,
-    blocked: bool,
-) {
-    let located = playonline::locate(session_file);
-    let ready = matches!(located, Ok(Some(_)));
-    match &located {
-        Ok(Some(found)) => {
-            panel.spawn(hint(format!(
-                "PlayOnline session for account {} from {}",
-                found.session.account_id,
-                found.path.display()
-            )));
-            if let Some(age) = found.age(std::time::SystemTime::now()) {
-                panel.spawn(hint(format!("Issued {} ago.", describe_age(age))));
-            }
-        }
-        Ok(None) => {
-            panel.spawn(hint("No PlayOnline session found."));
-            panel.spawn(hint(format!(
-                "Sign in with the PlayOnline Viewer, then place the session at {}",
-                playonline::expected_session_path(session_file).display()
-            )));
-        }
-        Err(e) => {
-            panel.spawn(hint(format!("Session file: {e:#}")));
-        }
-    }
-
-    let acknowledged = terms_acknowledged(profile_name);
-    if !acknowledged {
-        for line in POL_TERMS_NOTICE {
-            panel.spawn(hint(line));
-        }
-    }
-
     let name = profile_name.map(str::to_string);
     panel.spawn(row()).with_children(|r| {
-        if !acknowledged {
-            r.spawn(button_bundle(
-                ButtonBundleProps {
-                    variant: ButtonVariant::Primary,
-                    ..default()
-                },
-                (),
-                Spawn((Text::new("I understand"), ThemedText)),
-            ))
-            .insert(DefaultFocusTarget)
-            .observe(move |_ev: On<Activate>, mut dirty: ResMut<LoginUiDirty>| {
-                acknowledge_terms(name.as_deref());
-                dirty.0 = true;
-            });
-        } else if ready && !blocked {
-            r.spawn(button_bundle(
-                ButtonBundleProps {
-                    variant: ButtonVariant::Primary,
-                    ..default()
-                },
-                (),
-                Spawn((Text::new("Log in"), ThemedText)),
-            ))
-            .insert(DefaultFocusTarget)
-            .observe(
-                |_ev: On<Activate>,
-                 mut form: ResMut<LoginForm>,
-                 mut next: ResMut<NextState<LauncherState>>| {
-                    form.pol_in_house = false;
-                    next.set(LauncherState::AuthInFlight);
-                },
-            );
-        }
         r.spawn(button_bundle(
-            ButtonBundleProps::default(),
+            ButtonBundleProps {
+                variant: ButtonVariant::Primary,
+                ..default()
+            },
             (),
-            Spawn((Text::new("Check again"), ThemedText)),
+            Spawn((Text::new("I understand"), ThemedText)),
         ))
-        .insert_if(DefaultFocusTarget, || acknowledged && !(ready && !blocked))
-        .observe(|_ev: On<Activate>, mut dirty: ResMut<LoginUiDirty>| {
+        .insert(DefaultFocusTarget)
+        .observe(move |_ev: On<Activate>, mut dirty: ResMut<LoginUiDirty>| {
+            acknowledge_terms(name.as_deref());
             dirty.0 = true;
         });
     });
-
-    if acknowledged && !blocked {
-        spawn_playonline_in_house(panel);
-    }
 }
-
-/// The in-house sign-in: sign in to a PlayOnline account without the Viewer.
-/// The account handshake is reimplemented from static research; running it
-/// contacts Square Enix with the player's own account, and it is not yet
-/// complete end to end, so it is offered separately from the session-file
-/// path and labelled experimental.
-fn spawn_playonline_in_house(panel: &mut ChildSpawnerCommands) {
-    for line in POL_IN_HOUSE_NOTICE {
-        panel.spawn(hint(line));
-    }
-    spawn_field(panel, "Member name", false, "", LoginField::User);
-    spawn_field(panel, "Password", true, "", LoginField::Password);
-    panel.spawn(row()).with_children(|r| {
-        r.spawn(button_bundle(
-            ButtonBundleProps::default(),
-            (),
-            Spawn((Text::new("In-house sign in (experimental)"), ThemedText)),
-        ))
-        .observe(
-            |_ev: On<Activate>,
-             mut form: ResMut<LoginForm>,
-             mut next: ResMut<NextState<LauncherState>>| {
-                if !form.user.is_empty() && !form.pass.is_empty() {
-                    form.pol_in_house = true;
-                    next.set(LauncherState::AuthInFlight);
-                }
-            },
-        );
-    });
-}
-
-const POL_IN_HOUSE_NOTICE: [&str; 2] = [
-    "Experimental: sign in to a PlayOnline account without the Viewer. This",
-    "contacts Square Enix with your own account and is not yet complete.",
-];
 
 fn spawn_saved_accounts_row(
     panel: &mut ChildSpawnerCommands,

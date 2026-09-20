@@ -4398,6 +4398,7 @@ dependencies = [
  "ffxi-dat",
  "ffxi-install",
  "ffxi-nav-recast",
+ "ffxi-pol",
  "ffxi-proto",
  "ffxi-vocab",
  "keyring",

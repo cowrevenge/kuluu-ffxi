@@ -585,6 +585,16 @@ pub(crate) struct DatSetupReturn(pub Option<LauncherState>);
 #[derive(Component)]
 pub(crate) struct LauncherCamera;
 
+/// Registers the launcher's screens, resources, and systems.
+///
+/// FFXI_KEY_DRIVE: synthetic-key injection listener (see view_native::key_drive).
+/// The queue is present so systems can depend on it; only listens when the env
+/// var names an address. Lets a remote driver operate launcher UI screens with
+/// no OS keystrokes and no window focus.
+///
+/// One pad-driven focus model for every launcher screen: the producer in
+/// `gamepad_input` writes `LauncherNav` earlier in the same `Update`, so the
+/// ring moves on the frame the pad was read.
 pub(crate) fn register(
     app: &mut App,
     server: &str,
@@ -637,10 +647,6 @@ pub(crate) fn register(
         .insert_resource(ChangePasswordForm::default())
         .insert_resource(DefaultCharName(defaults.char_name));
 
-    // FFXI_KEY_DRIVE: synthetic-key injection listener (see view_native::key_drive).
-    // The queue is always present so systems can depend on it; only listens when the
-    // env var names an address. Lets a remote driver operate launcher UI screens
-    // with no OS keystrokes and no window focus.
     let key_msgs: Arc<Mutex<Vec<super::key_drive::KeyMsg>>> = Arc::new(Mutex::new(Vec::new()));
     app.insert_resource(super::key_drive::KeyDriveQueue(key_msgs.clone()))
         .add_systems(PreUpdate, super::key_drive::key_drive_system);
@@ -668,9 +674,6 @@ pub(crate) fn register(
             .run_if(in_state(AppPhase::Launcher)),
     );
 
-    // One pad-driven focus model for every launcher screen: the producer in
-    // `gamepad_input` writes `LauncherNav` earlier in the same `Update`, so the
-    // ring moves on the frame the pad was read.
     app.add_message::<super::gamepad_input::LauncherNav>()
         .init_resource::<super::gamepad_input::LauncherNavRepeat>()
         .init_resource::<common::LauncherFocusMode>()

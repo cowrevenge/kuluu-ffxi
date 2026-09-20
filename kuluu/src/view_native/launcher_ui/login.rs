@@ -612,6 +612,15 @@ pub(super) fn despawn_login_ui(mut commands: Commands, q: Query<Entity, With<Log
     }
 }
 
+/// Login is the root of the launcher's back tree - the default startup state
+/// and the back target of every other screen - so Escape has nowhere to back
+/// out to. The pad's Cancel lands here too; at the root it cancels the form.
+/// A back hop to ServerSelect would loop: its Escape returns to Login.
+///
+/// Real keyboard Enter submits whenever BOTH fields are filled, regardless of
+/// which widget (if any) holds UI focus. The per-field TextFieldSubmitted path
+/// only fires for a FOCUSED field and stays silent when the other side is
+/// still empty - that was the "pressing enter does nothing" dead end.
 pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
     mut form: ResMut<LoginForm>,
@@ -624,21 +633,11 @@ pub(super) fn keyboard_input_system(
             continue;
         }
         match ev.logical_key {
-            // Login is the root of the launcher's back tree - the default
-            // startup state and the back target of every other screen - so
-            // Escape has nowhere to back out to. The pad's Cancel lands here
-            // too; at the root it cancels the form. A back hop to
-            // ServerSelect would loop: its Escape returns to Login.
             Key::Escape => {
                 form.user.clear();
                 form.pass.clear();
                 return;
             }
-            // Real keyboard Enter: submits whenever BOTH fields are filled,
-            // regardless of which widget (if any) holds UI focus. The
-            // per-field TextFieldSubmitted path only fires for a FOCUSED field
-            // and stays silent when the other side is still empty - that was
-            // the "pressing enter does nothing" dead end.
             Key::Enter
                 if !login_blocked(&version, &era)
                     && !form.user.is_empty()
@@ -655,7 +654,9 @@ pub(super) fn keyboard_input_system(
 /// Arrow-key navigation for the login form: move the blue focus outline between
 /// tabbable widgets (saved-account chips, fields, remember checkbox, buttons)
 /// in visual order, wrapping at the edges. While a text field holds focus,
-/// Left/Right stay with the caret; Up/Down still navigate.
+/// Left/Right stay with the caret, not the selection; Up/Down still navigate.
+/// The per-widget center estimate uses a uniform convention across all nodes;
+/// only relative positions matter for scoring.
 pub(super) fn arrow_nav_system(
     mut events: MessageReader<KeyboardInput>,
     mut input_focus: ResMut<InputFocus>,
@@ -676,13 +677,10 @@ pub(super) fn arrow_nav_system(
         };
 
         let cur = input_focus.get();
-        // Left/Right inside a focused field moves the caret, not the selection.
         if dir.x != 0.0 && cur.is_some_and(|e| q_fields.contains(e)) {
             continue;
         }
 
-        // Center estimate per tabbable widget (uniform convention across all
-        // nodes; only relative positions matter for scoring).
         let cands: Vec<(Vec2, Entity)> = q_tabs
             .iter()
             .map(|(e, cn, gt)| (gt.affine().translation + cn.size * 0.5, e))

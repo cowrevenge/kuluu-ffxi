@@ -448,6 +448,7 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             target_id,
             // The swing pair stays raw: the snapshot's `result` is basic-attack-only, and the
             // typed resolution rides in `outcome`.
+            // ffxi-proto/src/melee.rs
             result: result.map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
             animation,
             outcome: outcome.map(ffxi_proto::melee::ResultOutcome::to_wire),

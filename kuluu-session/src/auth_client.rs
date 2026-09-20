@@ -106,7 +106,7 @@ fn resolve_client_version_from(override_: Option<&str>, env: Option<&str>) -> [u
 
 /// The binary flavor's loader field is a fixed-width string with its own
 /// default, so only an explicit override or the env var moves it off
-/// auth_binary::DEFAULT_VERSION; the JSON default never leaks across.
+/// auth_binary::DEFAULT_VERSION; the JSON default does not leak across.
 pub fn resolve_binary_version(override_: Option<&str>) -> [u8; auth_binary::VERSION_FIELD_LEN] {
     resolve_binary_version_from(
         override_,

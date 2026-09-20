@@ -780,6 +780,7 @@ impl Reactor {
         // position to this frame's; a zone-in has no such predecessor (the old
         // zone's coords would sweep across the whole map), so it degenerates to
         // a point test for one tick.
+        // research/XiClient/src/XiClient/source/World/Actor/ActorTelemetry.cpp
         let prev = if self.needs_zone_seed {
             player
         } else {

@@ -145,14 +145,17 @@ pub struct LobbyClient {
     pub view_port: u16,
     /// versionCode for the 0x26; `None` resolves [`client_version_code`] at
     /// open time.
+    /// vendor/server/src/login/view_session.cpp
     pub version_code: Option<String>,
     /// excode_client for the 0x26; `None` resolves [`client_excode_client`] at
     /// open time.
+    /// vendor/server/src/login/view_session.cpp
     pub excode_client: Option<u16>,
 }
 
 /// S2C 0x05: the lobby admitted the client version; the bitmasks say which
 /// expansions the server serves and which account features are on.
+/// vendor/server/src/login/view_session.cpp
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LobbyKey {
     pub key: u32,
@@ -194,6 +197,7 @@ impl LobbyKey {
 /// install `ffxi_dat::install::resolve` names, else the vendored pin (a
 /// session with no install is not a client the lobby can judge, and the pin
 /// keeps a DAT-less agent session reachable).
+/// vendor/server/src/login/view_session.cpp
 pub fn client_version_code() -> String {
     if let Some(v) = std::env::var(CLIENT_VER_ENV)
         .ok()
@@ -271,8 +275,8 @@ impl LobbyHandle {
     }
 
     /// Caps word echoed by this lobby connection's char-list reply. Zero until
-    /// (and unless) the server stamps KULUU_CAP_KEY — never carried across
-    /// connections, so a server switch can't serve stale caps.
+    /// (and unless) the server stamps KULUU_CAP_KEY; the value does not carry
+    /// across connections, so a server switch can't serve stale caps.
     pub fn server_caps(&self) -> u32 {
         self.server_caps
     }
@@ -805,6 +809,7 @@ pub struct CharCreateSpec {
     /// 1 = skip the opening (new-character) cutscene. Carried in spare byte 58
     /// of the C2L 0x21 register packet; retail leaves that byte zero, which
     /// the server reads as "play it".
+    /// vendor/server/src/login/view_session.cpp
     pub skip_intro_cs: u8,
 }
 

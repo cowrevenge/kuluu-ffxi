@@ -337,8 +337,8 @@ fn login_emits_zone_in_weather_after_the_zone_change() {
 fn login_emits_the_homepoint_timer_after_the_zone_change_only_while_ko() {
     use ffxi_proto::decode::{dead_counter_seconds_until_homepoint, PosHead, ServerLogin};
 
-    // An arbitrary counter, converted by the decoder's own formula rather than a
-    // second copy of it here.
+    /// An arbitrary counter, converted by the decoder's own formula rather than a
+    /// second copy of it here.
     const DEAD_COUNTER: u32 = 129_600;
     const FULL_HP_PCT: u8 = 100;
     let remaining = dead_counter_seconds_until_homepoint(DEAD_COUNTER);
@@ -484,8 +484,8 @@ fn myroom_login_keeps_forced_origin_seed() {
 /// of yanking us into another zone's coordinate space ("same spot, different zone").
 #[test]
 fn far_carrier_snaps_in_steady_state_but_not_during_settle() {
-    let local = v(-15.0, -132.8, -4.2); // where we actually stand (Bastok)
-    let stale = v(579.5, -305.1, -1.9); // an old-zone coordinate (>10 yalms away)
+    let local = v(-15.0, -132.8, -4.2);
+    let stale = v(579.5, -305.1, -1.9);
 
     assert!(
         matches!(
@@ -502,8 +502,7 @@ fn far_carrier_snaps_in_steady_state_but_not_during_settle() {
         "settle window: a far (out-of-order) carrier keeps our local seed"
     );
 
-    // A close carrier is unaffected by the settle gate — it still keeps/rubber-bands.
-    let near = v(-14.0, -132.8, -4.2); // ~1 yalm away
+    let near = v(-14.0, -132.8, -4.2);
     assert!(
         matches!(
             reconcile_self_pos(local, near, true),
@@ -774,19 +773,19 @@ fn worm_body(send_flag: u8, status: u8, m_flags: u32, namevis: u8) -> Vec<u8> {
     // sub.data[0x2C..0x2E] (LSB 0x30, entity_update.cpp `ref<uint16>(0x30)`),
     // which classify_char_npc needs to see Some(0) = standard mob mesh.
     let mut b = vec![0u8; 48];
-    b[0..4].copy_from_slice(&1000u32.to_le_bytes()); // unique_no
-    b[4..6].copy_from_slice(&DYNAMIC_TARGID.to_le_bytes()); // act_index -> Mob classify
+    b[0..4].copy_from_slice(&1000u32.to_le_bytes());
+    b[4..6].copy_from_slice(&DYNAMIC_TARGID.to_le_bytes());
     b[6] = send_flag;
-    b[8..12].copy_from_slice(&1.5f32.to_le_bytes()); // x
-    b[12..16].copy_from_slice(&(-2.0f32).to_le_bytes()); // z
-    b[16..20].copy_from_slice(&0.0f32.to_le_bytes()); // y
-    b[24] = 5; // speed
-    b[26] = 100; // hpp
+    b[8..12].copy_from_slice(&1.5f32.to_le_bytes());
+    b[12..16].copy_from_slice(&(-2.0f32).to_le_bytes());
+    b[16..20].copy_from_slice(&0.0f32.to_le_bytes());
+    b[24] = 5;
+    b[26] = 100;
     b[28] = status;
     b[29..33].copy_from_slice(&m_flags.to_le_bytes());
     b[39] = namevis;
-    b[0x2C] = 0; // look size: standard mob mesh (classify -> Mob)
-    b[0x2D] = 0;
+    b[44] = 0;
+    b[45] = 0;
     b
 }
 
@@ -812,11 +811,11 @@ fn worm_entity(s: &crate::state::SessionState) -> &crate::state::Entity {
 /// The surfaced worm must be targetable again — this is the "stale targeting info" regression.
 #[test]
 fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
-    const FLAG_UNTARGETABLE: u32 = 0x800; // ENTITYFLAGS, baseentity.h
+    /// The untargetable bit of the m_flags word.
+    const FLAG_UNTARGETABLE: u32 = 2048;
 
     let mut s = crate::state::SessionState::default();
 
-    // 1. Spawn above ground (UPDATE_ALL_MOB): NORMAL, targetable.
     feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
     assert_eq!(worm_entity(&s).status, 0);
     assert!(
@@ -824,15 +823,12 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
         "spawned worm must be targetable"
     );
 
-    // 2. Dive: UPDATE_HP carries name hidden + untargetable; status is still NORMAL for 3 s.
     feed_worm(&mut s, &worm_body(0x04, 0, FLAG_UNTARGETABLE, 0x08));
     assert!(
         !crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
         "diving worm must be untargetable"
     );
 
-    // 3. Moving underground: the POS-only tick now carries status INVISIBLE(3); its flag bytes
-    // are zero-filled and must NOT clobber the preserved untargetable/namevis.
     feed_worm(&mut s, &worm_body(0x01, 3, 0, 0));
     assert_eq!(
         worm_entity(&s).status,
@@ -844,8 +840,6 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
         "underground worm must stay untargetable"
     );
 
-    // 4. Surface: one UPDATE_HP packet sets status=UPDATE(1) and clears the flag; name is still
-    // hidden for ~2 more seconds (HideName(false) carries no updatemask of its own).
     feed_worm(&mut s, &worm_body(0x04, 1, 0, 0x08));
     assert_eq!(worm_entity(&s).status, 1);
     assert!(
@@ -853,7 +847,6 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
         "surfaced worm must be targetable again (stale-info regression)"
     );
 
-    // 5. Surfaced and roaming: POS-only ticks keep status=UPDATE(1).
     feed_worm(&mut s, &worm_body(0x01, 1, 0, 0));
     assert!(
         crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
@@ -870,7 +863,6 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
 fn hp_update_packet_marks_entity_pending_with_new_hpp() {
     let mut s = crate::state::SessionState::default();
 
-    // 1. Spawn (UPDATE_ALL_MOB): full block, hpp=100.
     feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
     assert_eq!(worm_entity(&s).hp_pct, Some(100), "spawn carries hpp");
     let spawn_pos = worm_entity(&s).pos;
@@ -880,10 +872,8 @@ fn hp_update_packet_marks_entity_pending_with_new_hpp() {
         "spawn must be pending for the delta bridge"
     );
 
-    // 2. Damage tick: UPDATE_HP only (send_flag=0x04) with hpp=42; the position bytes are
-    //    stale and must not move the entity.
     let mut body = worm_body(0x04, 0, 0, 0);
-    body[26] = 42; // HPP (LSB 0x1E), written under UPDATE_HP
+    body[26] = 42;
     feed_worm(&mut s, &body);
     assert_eq!(
         worm_entity(&s).hp_pct,
@@ -901,7 +891,6 @@ fn hp_update_packet_marks_entity_pending_with_new_hpp() {
         "the HP change must reach the delta bridge as a pending upsert"
     );
 
-    // 3. A subsequent POS-only tick zero-fills HPP; the merge must preserve 42.
     feed_worm(&mut s, &worm_body(0x01, 0, 0, 0));
     assert_eq!(
         worm_entity(&s).hp_pct,
@@ -945,10 +934,10 @@ fn flush_inputs(user_driven: bool, watchdog_fires: bool, walked_away: bool) -> E
     }
 }
 
+/// The auto-release that would otherwise fire every tick in !user_driven
+/// must not drain the event whose pending tag is mid-transaction.
 #[test]
 fn a_tag_in_flight_holds_the_flush_even_in_agent_mode() {
-    // The auto-release that would otherwise fire every tick in !user_driven
-    // must not drain the event whose pending tag is mid-transaction.
     let flushes = |tag_in_flight: bool| {
         let mut pending = vec![PINNED_EVENT];
         flush_pending_event_end(
@@ -1128,17 +1117,17 @@ fn should_emit_pos_bypasses_rate_limit_on_heading_change() {
     ));
 }
 
+/// Pre-GAMEOK drain (break_on_idle=false): keep reading until the self
+/// position seed (CHAR_PC) lands. The s2c 0x00A LOGIN
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp) is tracked but is not
+/// a break condition — it rides a second datagram behind the zone-in burst
+/// and is processed opportunistically by the keepalive loop.
 #[test]
 fn flood_drain_waits_for_self_pos_seed() {
-    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the self
-    // position seed (CHAR_PC) lands. The s2c 0x00A LOGIN is tracked but is not
-    // a break condition — it rides a second datagram behind the zone-in burst
-    // and is processed opportunistically by the keepalive loop.
     assert!(
         !should_break_flood(false, false) && should_break_flood(false, true),
         "unseeded pre-GAMEOK drain must wait; a seeded one may break"
     );
-    // Quiescence drains (break_on_idle=true): stop on idle regardless of seed.
     assert!(
         should_break_flood(true, false) && should_break_flood(true, true),
         "quiescence drain breaks on idle unconditionally"
@@ -1194,7 +1183,6 @@ fn reconcile_self_pos_rubberband_between_2_and_10() {
 fn reconcile_self_pos_snap_above_10_yalms() {
     let local = v(0.0, 0.0, 0.0);
     let server = v(12.0, 5.0, 0.0);
-    // Steady state (refuse_snap=false): a far carrier snaps to the server.
     assert_eq!(
         reconcile_self_pos(local, server, false),
         SelfPosReconcile::Snap,
@@ -2650,8 +2638,6 @@ fn battle_rejection_ids_route_to_the_main_log() {
 
 #[test]
 fn battle_result_and_state_ids_stay_on_the_battle_tab() {
-    // Per-swing/per-cast results (1, 2, 3, 15) and one-shot state events
-    // (6, 8, 9, 38, 53, 97, 203, 253) keep the Battle tab.
     for id in [1u16, 2, 3, 6, 8, 9, 15, 38, 53, 97, 203, 253] {
         assert_eq!(
             battle_line_channel(id),
@@ -2661,10 +2647,10 @@ fn battle_result_and_state_ids_stay_on_the_battle_tab() {
     }
 }
 
+/// A rejection id with no msg_basic template would be dropped by
+/// template_for_id, hiding the refusal again; fail the build on scrape drift.
 #[test]
 fn battle_rejection_ids_all_resolve_in_the_scrape() {
-    // A rejection id with no msg_basic template would be dropped by
-    // template_for_id, hiding the refusal again; fail the build on scrape drift.
     for &id in BATTLE_REJECTION_IDS {
         assert!(
             ffxi_vocab::msg_basic::lookup(id).is_some(),
@@ -2913,6 +2899,7 @@ fn battle2_result_outcome_bits_roundtrip() {
     w.write(0, 32);
     w.write(0xBEEFu64, 32);
     w.write(1, 4);
+    // Bit layout per vendor/server/src/map/packets/s2c/0x028_battle2.cpp:
     w.write(0, 3); // resolution: Hit
     w.write(1, 2); // kind
     w.write(1, 12); // animation: LeftAttack
@@ -2962,7 +2949,6 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(h.action_kind, 4);
     assert_eq!(h.primary_target_id, Some(0xBEEF));
     assert_eq!(h.first_result, None);
-    // The outcome is read for every category even though the swing pair is gated off.
     assert_eq!(
         h.first_outcome,
         Some(ffxi_proto::melee::ResultOutcome {
@@ -2970,6 +2956,7 @@ fn battle2_non_basic_category_reports_no_melee_result() {
             hit_distortion: ffxi_proto::melee::HitDistortion::None.to_wire(),
             knockback: ffxi_proto::melee::KnockbackLevel::None.to_wire(),
         }),
+        "the outcome is read for every category even though the swing pair is gated off",
     );
 }
 
@@ -3557,9 +3544,11 @@ fn shop_list_decodes_rows_and_skips_zero_padding() {
     assert_eq!(page.rows.len(), 2);
     assert_eq!(page.rows[0].price, 100);
     assert_eq!(page.rows[0].item_no, 4096);
-    // The row's own ShopIndex byte (0 and 1 here) is ignored: the index is
-    // ShopItemOffsetIndex plus the row's position in the page.
-    assert_eq!(page.rows[0].shop_index, 5);
+    assert_eq!(
+        page.rows[0].shop_index,
+        5,
+        "the row's own ShopIndex byte is ignored: the index is ShopItemOffsetIndex plus the row's position in the page"
+    );
     assert_eq!(page.rows[1].item_no, 256);
     assert_eq!(page.rows[1].price, 99999);
     assert_eq!(page.rows[1].shop_index, 6);
@@ -3687,12 +3676,12 @@ fn a_two_page_shop_opens_once_and_lists_every_row() {
 }
 
 /// The shop table lives in GC_ZONE (research/XIClient GC_ZONE::gcShop), so
-/// crossing a zoneline takes the vendor and their stock with it.
+/// crossing a zoneline takes the vendor and their stock with it. The LOGIN
+/// is decoded far enough to reach the shop teardown; a zero body still
+/// names a zone.
 #[test]
 fn a_zone_change_closes_the_shop() {
     let mut login = vec![0u8; 0x100];
-    // GP_SERV_COMMAND_LOGIN is only decoded far enough here to reach the
-    // shop teardown; a zero body still names a zone.
     login[0..4].copy_from_slice(&1u32.to_le_bytes());
     let (shop, events) = shop_session_events(&[
         (ffxi_proto::map::s2c::SHOP_OPEN, shop_open_body(1)),
@@ -4004,7 +3993,7 @@ fn equip_inspect_packet_layout_matches_server_struct() {
 
 #[test]
 fn bazaar_packet_layouts_match_server_structs() {
-    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h).
+    // GP_CLI_COMMAND_BAZAAR_LIST (vendor/server/src/map/packets/c2s/0x105_bazaar_list.cpp).
     let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
     assert_eq!(list.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([list[0], list[1]]);
@@ -4027,7 +4016,7 @@ fn bazaar_packet_layouts_match_server_structs() {
     assert_eq!(u16::from_le_bytes([list[8], list[9]]), 42, "ActIndex LE");
     assert_eq!(&list[10..12], &[0u8; 2], "padding00");
 
-    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h).
+    // GP_CLI_COMMAND_BAZAAR_BUY (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp).
     let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
     assert_eq!(buy.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buy[0], buy[1]]);
@@ -4044,7 +4033,7 @@ fn bazaar_packet_layouts_match_server_structs() {
         "BuyNum LE"
     );
 
-    // GP_CLI_COMMAND_BAZAAR_EXIT (c2s/0x104_bazaar_exit.h) is header-only.
+    // GP_CLI_COMMAND_BAZAAR_EXIT (vendor/server/src/map/packets/c2s/0x104_bazaar_exit.cpp) is header-only.
     let exit = build_subpacket_bazaar_exit(0x0042);
     assert_eq!(exit.len(), 4, "header only");
     let hdr = u16::from_le_bytes([exit[0], exit[1]]);
@@ -4548,8 +4537,9 @@ fn fixture_packet(opcode: u16, body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A self 0x00A / 0x00D body: unique_no, send flags, and the three position
-/// floats in wire order (x, height, north).
+/// A self 0x00A / 0x00D body (vendor/server/src/map/packets/s2c/0x00a_login.cpp):
+/// unique_no, send flags, and the three position floats in wire order
+/// (x, height, north).
 fn login_fixture_body(player: u32, position: [f32; 3]) -> Vec<u8> {
     const LOGIN_BODY_LEN: usize = 48;
     const SEND_FLAGS: usize = 6;
@@ -4607,6 +4597,18 @@ enum BootstrapReply {
     DelayedSelfLogin,
 }
 
+/// Drives one bootstrap scenario against a fake map server. The bootstrap
+/// does not gate on the s2c 0x00A LOGIN (vendor/server/src/map/packets/s2c/0x00a_login.cpp);
+/// it is tracked for voyage timing and processed opportunistically, so a
+/// requested disconnect completes cleanly regardless of the scenario, and the
+/// fake server's cooperation drives its behavior, not the acceptance. The
+/// session claims InZone / blowfish-Accepted and seeds a position only when
+/// a self position seed lands, so acceptance is pinned by the saw_in_zone /
+/// saw_accepted / saw_seed assertions below. Both map clients bind an
+/// ephemeral local port so tests do not inherit the FFXI_MAP_LOCAL_PORT
+/// Docker/WSL2 DNAT pin, which would collide on the pinned port. Post-
+/// bootstrap packets (GROUP_LIST_REQ, CLISTATUS) are sent unconditionally, so
+/// every scenario sends more than the two bootstraps.
 async fn bootstrap_scenario(scenario: BootstrapReply) {
     use ffxi_proto::map::s2c;
     use std::sync::{
@@ -4623,16 +4625,10 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     const DELAYED_LOGIN: Duration = Duration::from_millis(900);
 
     let packet = fixture_packet;
-    // The fake server cooperates (sends valid stamped replies) only for the
-    // valid self-LOGIN scenarios. The bootstrap no longer gates on the LOGIN, so
-    // this drives the server's behavior, not the acceptance assertion.
     let server_cooperates = matches!(
         scenario,
         BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
     );
-    // The session claims InZone / blowfish-Accepted only once a self position
-    // seed has landed; the s2c 0x00A LOGIN is tracked but not gated. This is the
-    // new acceptance signal.
     let position_seeded = matches!(
         scenario,
         BootstrapReply::OtherLoginWithSelfPosition
@@ -4674,8 +4670,6 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                 assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
             }
             if count == 1 {
-                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
-                // Docker/WSL2 DNAT pin), or parallel scenarios collide on the pinned port.
                 peer = Some(
                     MapClient::connect_with_local(client, SEED, "0.0.0.0:0")
                         .await
@@ -4709,8 +4703,6 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             }
         }
     });
-    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2 DNAT
-    // pin), or parallel scenarios collide on the pinned port.
     let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
         .await
         .unwrap();
@@ -4747,10 +4739,6 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
         fake.await.unwrap_err().is_cancelled(),
         "fake map server panicked"
     );
-    // The bootstrap no longer hard-gates on the self LOGIN (it is tracked for
-    // voyage timing but processed opportunistically), so a requested disconnect
-    // always completes cleanly regardless of the scenario. Acceptance is pinned
-    // by saw_in_zone / saw_accepted below, not by the outcome.
     assert!(outcome.is_ok(), "{scenario:?}: {outcome:?}");
     let mut saw_in_zone = false;
     let mut saw_accepted = false;
@@ -4777,15 +4765,9 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             _ => {}
         }
     }
-    // The session claims InZone / blowfish-Accepted and seeds a position only
-    // when a self position seed lands; the s2c 0x00A LOGIN is tracked but not
-    // gated, so these track position_seeded, not server_cooperates.
     assert_eq!(saw_in_zone, position_seeded, "{scenario:?}");
     assert_eq!(saw_accepted, position_seeded, "{scenario:?}");
     assert_eq!(saw_seed, position_seeded, "{scenario:?}");
-    // Post-bootstrap packets (GROUP_LIST_REQ, CLISTATUS) are now sent
-    // unconditionally — the bootstrap no longer gates on the self LOGIN — so
-    // every scenario sends more than the two bootstraps.
     assert!(
         outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS,
         "{scenario:?}: post-bootstrap packets must follow the two bootstraps"
@@ -4806,6 +4788,9 @@ pub(super) fn bootstrap_enterzone_contract() {
 /// post-send drain consumes before the keepalive loop exists. The loop must
 /// still send exactly one 0x011 ZONE_TRANSITION and then 0x01A SendResRdy,
 /// the request LSB spawns the Mog House Moogle on (SpawnConditionalNPCs).
+/// Both map clients bind an ephemeral local port so the test does not inherit
+/// the FFXI_MAP_LOCAL_PORT Docker/WSL2 DNAT pin, which would make both sides
+/// of the loopback bind the same port.
 async fn enterzone_in_gameok_reply() {
     use ffxi_proto::map::{c2s, s2c};
     use std::sync::{Arc, Mutex};
@@ -4833,8 +4818,6 @@ async fn enterzone_in_gameok_reply() {
             let (size, client) = server.recv_from(&mut bytes).await.unwrap();
             count += 1;
             if count == 1 {
-                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
-                // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
                 let connected = MapClient::connect_with_local(client, FIXTURE_SEED, "0.0.0.0:0")
                     .await
                     .unwrap();
@@ -4874,8 +4857,6 @@ async fn enterzone_in_gameok_reply() {
             }
         }
     });
-    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
-    // Docker/WSL2 DNAT pin), or both sides of this loopback bind the same port.
     let mut map = MapClient::connect_with_local(address, FIXTURE_SEED, "0.0.0.0:0")
         .await
         .unwrap();
@@ -5013,6 +4994,9 @@ fn bag_capacity_line_is_devhud_only() {
     assert!(lines[0].text.is_ascii(), "{}", lines[0].text);
 }
 
+/// A frame with a speaker resolves to that entity's name; a speakerless frame
+/// gets a blank header (retail's no-speaker lines); an unresolvable index
+/// prints retail's missing-entity marker rather than guessing the trigger NPC.
 #[test]
 fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     let mut target_cache: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
@@ -5020,7 +5004,6 @@ fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     let mut name_cache: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     name_cache.insert(0x010E_60D5u32, "Curilla".to_string());
 
-    // A frame with a speaker resolves to that entity's name.
     let mut d = crate::state::DialogState {
         npc_name: None,
         speaker_index: Some(7),
@@ -5029,7 +5012,6 @@ fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
     assert_eq!(d.npc_name.as_deref(), Some("Curilla"));
 
-    // A speakerless frame gets a blank header (retail's no-speaker lines).
     let mut d = crate::state::DialogState {
         npc_name: None,
         speaker_index: None,
@@ -5038,8 +5020,6 @@ fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
     assert_eq!(d.npc_name.as_deref(), Some(""));
 
-    // An unresolvable index prints retail's missing-entity marker rather than
-    // guessing the trigger NPC.
     let mut d = crate::state::DialogState {
         npc_name: None,
         speaker_index: Some(99),
@@ -5148,8 +5128,9 @@ fn shop_raw_appraisal_ignores_other_slots_and_survives_duplicate_unit_quotes() {
     assert_eq!((sale.item_index, sale.count), (2, 10));
 }
 
-/// An equipped enchanted item is already permanently locked — 0x020's lockFlagFor answers NoDrop
-/// for anything equipped — so a plain "is it locked" read cannot tell a use in flight from a
+/// An equipped enchanted item is already permanently locked — 0x020's lockFlagFor
+/// (vendor/server/src/map/packets/s2c/0x020_item_attr.cpp) answers NoDrop for anything
+/// equipped — so a plain "is it locked" read cannot tell a use in flight from a
 /// shield sitting on the arm. Only the NoSelect flag marks the slot as spoken for.
 #[test]
 fn only_the_no_select_flag_marks_a_slot_an_action_owns() {

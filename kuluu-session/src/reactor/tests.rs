@@ -1669,12 +1669,12 @@ fn dat_rect_wide_axis_in_short_axis_out() {
     assert!(!rect.contains(to_native(far_above)));
 }
 
+/// The 200ms reactor tick is 40x retail's frame period, so a run-speed step
+/// can clear a 2-unit-deep trigger entirely. Retail sweeps the segment
+/// instead of sampling the endpoint, which is why this has to hit.
 #[test]
 fn dat_rect_sweep_catches_a_tick_that_steps_over_the_door() {
     let rect = zmr0_rect();
-    // The 200ms reactor tick is 40x retail's frame period, so a run-speed step
-    // can clear a 2-unit-deep trigger entirely. Retail sweeps the segment
-    // instead of sampling the endpoint, which is why this has to hit.
     let center = Vec3 {
         x: 164.933,
         y: 164.792,

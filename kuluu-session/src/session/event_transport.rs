@@ -90,6 +90,10 @@ pub(super) fn prepare(
     })
 }
 
+/// Fold one in-event sub-packet into the dialog: WPOS2 confirms or rejects
+/// a scripted position, EVENTUCOFF acknowledges or cancels, and the
+/// CHAR_PC/CHAR_NPC placement is the source for MOVE hold lengths when a
+/// scene walks its actors.
 pub(super) fn receive(
     dialog: &mut DialogSession,
     sub: &ffxi_proto::framing::SubPacket<'_>,
@@ -123,8 +127,6 @@ pub(super) fn receive(
                 }
             }
         }
-        // The server's placement of every entity, in event coordinates: the
-        // source for MOVE hold lengths when a scene walks its actors.
         map::s2c::CHAR_PC | map::s2c::CHAR_NPC => {
             if let Ok(head) = decode::PosHead::decode(sub.data) {
                 dialog.note_entity_position(
@@ -141,6 +143,7 @@ pub(super) fn receive(
                 );
                 // The 0x5B/0x66 gate's input: the entity Type byte this 0x0E's
                 // SubKind dispatch writes (decode::LookData::retail_type).
+                // research/XiEvents/OpCodes/0x005B.md
                 if let Some(t) = decode::LookData::retail_type(sub.opcode, sub.data) {
                     dialog.note_entity_type(head.unique_no, head.act_index, t);
                 }
@@ -227,8 +230,8 @@ mod tests {
     use super::contracts::NPC;
     use super::*;
 
-    // The fixture heading, in event units; the value coincides with
-    // ffxi-event's motion band edge, which is unrelated.
+    /// The fixture heading, in event units; the value coincides with
+    /// ffxi-event's motion band edge, which is unrelated.
     const HEADING_EVENT_UNITS_PINNED: i32 = 3072;
 
     #[test]

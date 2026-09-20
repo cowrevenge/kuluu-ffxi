@@ -1,6 +1,7 @@
 //! Retail has no auth server: the PlayOnline Viewer authenticates the account
 //! and hands the game an identifer and authCode, which the lobby validates in
 //! the 0x26. Until the viewer handoff is traced, the session comes from a file.
+//! vendor/server/src/login/view_session.cpp
 
 use std::path::Path;
 
@@ -67,7 +68,7 @@ pub fn session_from_file(path: &Path) -> Result<AuthSession> {
 }
 
 /// `None` when `KULUU_POL_SESSION` is unset; an error when it names a file that
-/// cannot be read as a session, so a typo never falls through to password auth.
+/// cannot be read as a session, so a typo does not fall through to password auth.
 pub fn session_from_env() -> Result<Option<AuthSession>> {
     match std::env::var_os(SESSION_FILE_ENV) {
         Some(path) if !path.is_empty() => session_from_file(Path::new(&path)).map(Some),

@@ -153,9 +153,9 @@ impl UiElementAtlas {
     }
 }
 
+/// DXT3 decoding preserves raw alpha; palette decoding already doubles it.
+/// Clamp after modulation so partially transparent vertices retain bright texels.
 fn modulate_dxt3_ui_alpha(sprite: &mut UiSprite, vertex_alpha: f32) {
-    // DXT3 decoding preserves raw alpha; palette decoding already doubles it.
-    // Clamp after modulation so partially transparent vertices retain bright texels.
     for pixel in sprite.rgba.chunks_exact_mut(4) {
         pixel[3] = (f32::from(pixel[3]) * vertex_alpha * UI_ALPHA_MODULATE_2X)
             .round()

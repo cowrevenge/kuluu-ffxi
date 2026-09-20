@@ -414,6 +414,10 @@ pub fn sync_zone_door_dirs(
 /// The first sighting is not a change: the byte is the door's *state*, so a door
 /// that is already open when it comes into view takes the on-arrival pose
 /// directly rather than swinging (and without its 0x0B sound).
+///
+/// The enqueue is insert-or-push like the other dispatchers: a door swing
+/// alongside another running routine on the same entity runs concurrently, and
+/// the push path leaves the first writer's ActionAssets alone.
 pub fn trigger_zone_doors(
     scene_state: Res<SceneState>,
     tracked: Res<TrackedEntities>,
@@ -489,9 +493,6 @@ pub fn trigger_zone_doors(
         let Some(active) = ActiveScheduler::from_main(&dir.routines, &routine) else {
             continue;
         };
-        // Insert-or-push like the other dispatchers: a door swing alongside another running
-        // routine on the same entity runs concurrently; the push path leaves the first writer's
-        // ActionAssets alone.
         crate::scheduler_runtime::enqueue_routine(&mut commands, entity, active);
         commands.entity(entity).try_insert_if_new(ActionAssets {
             seps: dir.seps.clone(),

@@ -65,6 +65,7 @@ pub enum SubTargetAction {
     },
     /// "Switch Target": pick a different mob; confirm asks the server to move
     /// the battle target and it becomes the main target when the 0x058 lands.
+    /// research/XiPackets/world/server/0x0058/README.md
     PickSub,
 }
 
@@ -86,9 +87,11 @@ pub struct SubTargetState {
     /// picker holds until the server's 0x058 commits it into the main target
     /// (or the wait lapses), so the target frame only swaps on the server's
     /// word. Cycling to another candidate cancels the wait.
+    /// research/XiPackets/world/server/0x0058/README.md
     pub pending_switch: Option<u32>,
 
     /// When `pending_switch` was armed; the wait lapses if no 0x058 lands.
+    /// research/XiPackets/world/server/0x0058/README.md
     pub pending_since: Option<std::time::Instant>,
 }
 
@@ -256,6 +259,7 @@ pub enum MenuKind {
 
     /// Yes/No step under the Item submenu's Drop row, cursor defaulting to No.
     /// Confirming sends c2s 0x028 ITEM_DUMP for the whole stack.
+    /// vendor/server/src/map/packets/c2s/0x028_item_dump.cpp
     ItemDropConfirm {
         container: u8,
         index: u8,

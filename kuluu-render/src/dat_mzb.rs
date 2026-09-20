@@ -238,7 +238,9 @@ pub struct MzbCollisionGeometry {
 impl MzbCollisionGeometry {
     /// Merged triangle soup of every loaded block (suppressed slot skipped),
     /// already in Bevy space, for mirroring the zone into an external physics
-    /// trimesh (avian3d bridge).
+    /// trimesh (avian3d bridge). Suppressed shell triangles are walk-through in
+    /// every MZB query; the physics mesh mirrors that or interiors get invisible
+    /// walls.
     pub fn trimesh_data(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut positions: Vec<Vec3> = Vec::new();
         let mut tris: Vec<[u32; 3]> = Vec::new();
@@ -249,8 +251,6 @@ impl MzbCollisionGeometry {
             let base = positions.len() as u32;
             positions.extend_from_slice(&block.positions);
             for (i, t) in block.indices.chunks_exact(3).enumerate() {
-                // Suppressed shell triangles are walk-through in every MZB query;
-                // the physics mesh must mirror that or interiors get invisible walls.
                 if block.is_suppressed(i) {
                     continue;
                 }
@@ -562,13 +562,14 @@ impl MzbCollisionGeometry {
     /// This is the player-movement entry point. `ground_nearest` is for placing
     /// an entity whose height is already known-good (other PCs, mobs, markers),
     /// where a reference Y far below the floor must still snap up.
+    ///
+    /// `STEP_UP_REACH_EPSILON` absorbs the ~1e-4-yalm f32 noise the column ray's
+    /// fixed high origin leaves in reported hit heights, so a riser sitting
+    /// exactly at the bound (a real stair step right at MAX_GROUND_STEP_UP) is
+    /// not coin-flipped out of reach.
     pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
         let mut best: Option<(u8, f32)> = None;
         self.for_each_hit_in_column(xz, |slot, _, hit_y, normal| {
-            // STEP_UP_REACH_EPSILON: the column ray's fixed high origin leaves
-            // ~1e-4-yalm f32 noise in reported hit heights, so a riser sitting
-            // EXACTLY at the bound (a real stair step right at MAX_GROUND_STEP_UP)
-            // must not be coin-flipped out of reach.
             if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise + STEP_UP_REACH_EPSILON {
                 return;
             }
@@ -1028,6 +1029,8 @@ pub struct MzbInstance {
     pub sub_area_link: u32,
 }
 
+/// A zero CollisionDataOffset is a legal state, not a degraded parse: the
+/// voyage scenery has none; the passenger hull occupies a separate MZB.
 pub fn load_mzb_placed(
     root: &DatRoot,
     file_id: u32,
@@ -1035,8 +1038,6 @@ pub fn load_mzb_placed(
 ) -> Result<(Vec<MzbSubMesh>, Vec<MzbInstance>), String> {
     let (header, plain, _chunks) = load_decrypted(root, file_id, chunk_idx)?;
 
-    // A zero CollisionDataOffset is a legal state, not a degraded parse: the
-    // voyage scenery has none; the passenger hull occupies a separate MZB.
     if !header.has_collision_data() {
         info!(
             "MZB {file_id}: no collision section (substructure type {}); zone has no static collision",
@@ -2371,6 +2372,9 @@ pub fn kick_load_mzb_tasks(
     }
 }
 
+/// Polls the in-flight MZB loads. The poll does not tick `LoadMzbInFlight`:
+/// `ZoneFloorGate::changed()` reads that resource's change tick as "a floor
+/// landed", so an idle poll would read as one.
 pub fn poll_load_mzb_tasks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -2389,8 +2393,6 @@ pub fn poll_load_mzb_tasks(
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
 
     let mut completed: Vec<(ZoneGeomKey, Vec<LoadMzbRequest>, LoadedZoneGeom)> = Vec::new();
-    // ZoneFloorGate::changed() reads this resource's change tick as "a floor
-    // landed", so an idle poll must not tick it.
     in_flight
         .bypass_change_detection()
         .tasks
@@ -3223,11 +3225,11 @@ pub fn auto_load_zone_geometry_system(
 
 /// Hard load-order gate for zone entry: true once the main-zone MZB load has
 /// COMPLETED — success, empty DAT, or parse failure all count, because a
-/// completion is what leaves [`LoadMzbInFlight`], and a zone whose floor never
-/// materializes must not hold its characters hostage behind the loading screen
-/// either. The loading overlay's `ready` reads this same pair of signals, so
-/// the gate opens exactly when that screen lifts. Zones without a DAT mapping
-/// have no floor to wait for and are ready by definition.
+/// completion is what leaves [`LoadMzbInFlight`], and a zone whose floor does
+/// not materialize must not hold its characters hostage behind the loading
+/// screen either. The loading overlay's `ready` reads this same pair of
+/// signals, so the gate opens exactly when that screen lifts. Zones without a
+/// DAT mapping have no floor to wait for and are ready by definition.
 pub fn main_zone_floor_ready(
     snapshot: &kuluu_snapshot::SceneSnapshot,
     last: &LastAutoLoadedZone,
@@ -3329,6 +3331,11 @@ pub fn cull_mzb_by_distance(
     }
 }
 
+/// Distance-culls the non-self entities. Cutscene-hidden models are owned by
+/// the running event's choreography and server-invisible models by
+/// sync_entities_system, so this pass leaves both untouched (the latter
+/// kind-agnostic on purpose); re-showing either would undo the owning system
+/// mid-scene or every frame.
 pub fn cull_entities_by_distance(
     draw: Res<DrawDistance>,
     table: Res<EntityTable>,
@@ -3350,16 +3357,12 @@ pub fn cull_entities_by_distance(
     let cull_sq = draw.mob * draw.mob;
 
     for (ent, ent_t, cutscene_hidden, mut vis) in ent_q.iter_mut() {
-        // Cutscene-hidden models are owned by the running event's choreography; keep them hidden
-        // while the marker is present so an in-range cull pass does not re-show them mid-scene.
         if cutscene_hidden.is_some() {
             if *vis != Visibility::Hidden {
                 *vis = Visibility::Hidden;
             }
             continue;
         }
-        // Server-invisible models are owned by sync_entities_system; resetting them to
-        // Inherited would re-show the model every frame. Kind-agnostic on purpose.
         if table.get(ent.id).is_some_and(|r| r.is_invisible()) {
             continue;
         }
@@ -3987,8 +3990,8 @@ mod lod_tests {
         }
     }
 
-    // No zone draw-distance cull at all, at retail's multiplier, so only the band
-    // logic under test decides.
+    /// No zone draw-distance cull at all, at retail's multiplier, so only the
+    /// band logic under test decides.
     const FAR_ZONE: ZoneChunkCull = ZoneChunkCull {
         draw_distance_sq: f32::INFINITY,
         draw_scale: mzb::RETAIL_DRAW_DISTANCE_SCALE,
@@ -4468,18 +4471,16 @@ mod real_dat_sub_area_tests {
     }
 }
 
-// ===================== MZB-native wall contact helpers (walker sweep source) =====================
-//
-// Geometry-side half of the player walker: `nearest_wall_contact` finds the
-// nearest wall-class triangle to a point; `point_tri_dist_sq` is its distance
-// primitive. The sweep that consumes them lives in kuluu::view_native::walker.
-
 impl MzbCollisionBlock {
     /// Nearest wall-class triangle (authored normal.y < FLOOR_NORMAL_MIN —
     /// retail's 45 degree floor/wall rule) within `r` of `center`, by full
     /// point-to-triangle distance. Suppressed shell triangles are walked past,
     /// same as every collision query. Returns `(dist_sq, normal)` for the
     /// walker sweep's slide re-projection.
+    ///
+    /// Geometry-side half of the player walker: `point_tri_dist_sq` is its
+    /// distance primitive; the sweep that consumes them lives in
+    /// kuluu::view_native::walker.
     pub fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
         let r2 = r * r;
         let mut best: Option<(f32, Vec3)> = None;
@@ -4667,11 +4668,13 @@ mod cull_tests {
     /// A server-invisible entity (status INVISIBLE) is hidden by sync_entities_system;
     /// distance-culling must not reset its Visibility back to Inherited every frame, or
     /// the model re-appears. Visible entities keep normal cull behavior.
+    ///
+    /// The default cull distance equals the out-of-range fixture's 100.0, which
+    /// would sit the control on the boundary, so it is pinned to 50.0; self is
+    /// at the origin because the cull needs exactly one IsSelf.
     #[test]
     fn cull_respects_server_invisible_entities() {
         let mut app = App::new();
-        // The default cull distance equals the out-of-range fixture's 100.0,
-        // which would sit the control on the boundary; pin it instead.
         app.insert_resource(DrawDistance {
             mob: 50.0,
             ..DrawDistance::default()
@@ -4679,7 +4682,6 @@ mod cull_tests {
         .init_resource::<EntityTable>()
         .add_systems(Update, cull_entities_by_distance);
 
-        // Self at origin; cull needs exactly one IsSelf.
         app.world_mut().spawn((
             IsSelf,
             GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),
@@ -4748,7 +4750,8 @@ mod cull_tests {
 
     /// A model hidden by a running cutscene's EVENT_HIDE cue carries the CutsceneHidden marker;
     /// an in-range cull pass must not reset its Visibility back to Inherited, or event 503's
-    /// knights re-appear mid-scene. Unmarked entities keep normal cull behavior.
+    /// knights re-appear mid-scene. Unmarked entities keep normal cull behavior. Self is at
+    /// the origin because the cull needs exactly one IsSelf.
     #[test]
     fn cull_respects_cutscene_hidden_entities() {
         let mut app = App::new();
@@ -4756,7 +4759,6 @@ mod cull_tests {
             .init_resource::<EntityTable>()
             .add_systems(Update, cull_entities_by_distance);
 
-        // Self at origin; cull needs exactly one IsSelf.
         app.world_mut().spawn((
             IsSelf,
             GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),

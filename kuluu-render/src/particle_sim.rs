@@ -315,19 +315,20 @@ struct LiveGenerator {
     // the generator's element counter (field_9C), advanced once per emitted element; it resets
     // with the generator (field_9C = 0 at resource load and routine start).
     elements_emitted: u32,
-    // The camera rotation at the last sync, for the 0x1F camera-oriented ring: the ring is
-    // authored in the camera's frame, so the offset is mapped camera->local before it lands
-    // in the generator's local space (retail multiplies the offset chain by the inverse of
-    // attach x view). One sync behind like `emit_culled`.
+    /// The camera rotation at the last sync, for the 0x1F camera-oriented ring: the ring is
+    /// authored in the camera's frame, so the offset is mapped camera->local before it lands
+    /// in the generator's local space (retail multiplies the offset chain by the inverse of
+    /// attach x view). One sync behind like `emit_culled`
+    /// (research/xim ParticleGeneratorParser.kt SphericalPositionVarianceFull).
     cam_view: Quat,
-    // The mesh entity's world rotation — the actor root's for actor-local generators, whose
-    // local frame is the actor's FFXI frame; identity otherwise.
+    /// The mesh entity's world rotation — the actor root's for actor-local generators, whose
+    /// local frame is the actor's FFXI frame; identity otherwise.
     actor_rot: Quat,
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
-    // `template_bound_radius`, resolved once at spawn: the unscaled radius of the widest
-    // template/flipbook frame, which `generator_bounds` scales per particle.
+    /// `template_bound_radius`, resolved once at spawn: the unscaled radius of the widest
+    /// template/flipbook frame, which `generator_bounds` scales per particle.
     bound_radius: f32,
 }
 
@@ -346,8 +347,8 @@ pub struct ZoneGeneratorOptions {
     // The generator chunk's byte offset in the zone DAT (element_sort.rs tie-break).
     pub dat_offset: usize,
     pub emit_scale: f32,
-    // Set only by the weat/<type>/ celestial set, whose sheets carry FFXI's stored 4-bit alpha
-    // dither at a fixed on-screen size: see `dat_d3m::decoded_sky_texture_to_image`.
+    /// Set only by the weat/<type>/ celestial set, whose sheets carry FFXI's stored 4-bit alpha
+    /// dither at a fixed on-screen size: see `dat_d3m.rs` decoded_sky_texture_to_image.
     pub resolve_alpha_dither: bool,
 }
 
@@ -460,25 +461,26 @@ fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
     }
 }
 
-// The pose an attach actor was last drawn in, plus the transform carrying its pose frame (FFXI
-// axes, -Y up) into Bevy world space.
+/// The pose an attach actor was last drawn in, plus the transform carrying its pose frame (FFXI
+/// axes, -Y up) into Bevy world space.
 struct AttachPose<'a> {
     pose: &'a [Mat4],
     skeleton: &'a ffxi_dat::skel::Skeleton,
     root: bevy::math::Affine3A,
 }
 
-// The entity a routine runs on and the actor root holding the posed skeleton are not the same
-// entity on the live path — ffxi_actor_render::spawn_live_actor parents the root under the wire
-// entity — while the offline harnesses run the routine on the root itself. Doors and any actor
-// whose model has not loaded have no pose at all.
-//
-// `Transform`, not `GlobalTransform`, for the same reason spawn_particle_generators reads it for
-// the origin (see scheduler_runtime::dispatch_sound_stages): the wire entity is a world root and a
-// frame-0 stage fires on the frame spawn_live_actor inserts the actor root, before PostUpdate has
-// propagated anything — a `GlobalTransform` read there is Ok-but-identity, which would strip the
-// FFXI->Bevy basis off the pose-frame offset and bury the effect under the actor's feet, mirrored.
-// The two local transforms are composed instead, so the basis comes from the root the pose is in.
+/// The entity a routine runs on and the actor root holding the posed skeleton are not the same
+/// entity on the live path — ffxi_actor_render.rs spawn_live_actor parents the root under the
+/// wire entity — while the offline harnesses run the routine on the root itself. Doors and any
+/// actor whose model has not loaded have no pose at all.
+///
+/// `Transform`, not `GlobalTransform`, for the same reason spawn_particle_generators reads it for
+/// the origin (see scheduler_runtime.rs dispatch_sound_stages): the wire entity is a world root
+/// and a frame-0 stage fires on the frame spawn_live_actor inserts the actor root, before
+/// PostUpdate has propagated anything — a `GlobalTransform` read there is Ok-but-identity, which
+/// would strip the FFXI->Bevy basis off the pose-frame offset and bury the effect under the
+/// actor's feet, mirrored. The two local transforms are composed instead, so the basis comes
+/// from the root the pose is in.
 fn attach_pose<'a>(
     entity: Entity,
     q_children: &Query<&Children>,
@@ -565,6 +567,16 @@ fn attached_origin(
     Some(origin_xf.translation + joint_offset + Vec3::Y * def.base_position[1])
 }
 
+/// Spawns the live generator entities for the scheduler's particle stages.
+///
+/// A cast routine's generators ship in the global effect dir, not the caster's own
+/// ActionAssets, and an actor-routine's (a model's `bind`) in the model DAT, so the def
+/// resolves against whichever tier actually holds it.
+///
+/// Spawned mesh entities opt out of frustum culling: the mesh is rebuilt in place every
+/// frame, but Bevy computes the frustum-culling Aabb once from the initially-empty mesh and
+/// does not recompute it, so the entity would be culled permanently. `sync_particle_meshes`
+/// owns the draw gate instead.
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<(&Transform, Option<&ActionAssets>)>,
@@ -586,9 +598,6 @@ pub fn spawn_particle_generators(
         let Ok((actor_xf, local_assets)) = q_actors.get(ev.actor) else {
             continue;
         };
-        // A cast routine's generators ship in the global effect dir, never in the caster's own
-        // ActionAssets, and an actor-routine's (a model's `bind`) in the model DAT, so the def
-        // resolves against whichever tier actually holds it.
         let actor_assets = q_children
             .get(ev.actor)
             .ok()
@@ -627,9 +636,6 @@ pub fn spawn_particle_generators(
                 MeshMaterial3d(mat),
                 Transform::IDENTITY,
                 Visibility::default(),
-                // The mesh is rebuilt in place every frame; Bevy computes a frustum-culling Aabb
-                // once from the initially-empty mesh and never recomputes it, so the entity would
-                // be culled forever. Opt out, and let `sync_particle_meshes` own the draw gate.
                 bevy::camera::visibility::NoFrustumCulling,
                 bevy::light::NotShadowCaster,
                 bevy::light::NotShadowReceiver,
@@ -787,6 +793,11 @@ pub fn spawn_actor_auto_run_particles(
 // generator embedded in the zone MZB DAT (Bastok Mines pump spray), placed in
 // world space rather than parented to an actor. `origin` is already mzb->bevy;
 // velocity/accel take the same basis so the spray arcs in Bevy space.
+//
+// `emit_culled` starts true when the def carries a camera-distance band
+// (research/xim EnvironmentManager zone-static Generator), so a zone-in does not
+// burst every out-of-band emitter once; the first sync settles the in-band ones
+// a frame later.
 pub fn spawn_zone_particle_generator(
     def: ParticleGeneratorDef,
     assets: &ActionAssets,
@@ -845,8 +856,6 @@ pub fn spawn_zone_particle_generator(
         origin_routine: None,
         stopped: false,
         camera_relative: opts.camera_relative,
-        // Starts culled so a zone-in does not burst every out-of-band emitter once; the first
-        // sync settles the in-band ones a frame later.
         emit_culled: def.emit_cull.is_some(),
         emit_scale: opts.emit_scale,
         emit_rng: emit_seed(entity),
@@ -909,6 +918,10 @@ pub fn stop_generators_for_despawned_owners(
 // updateAssociatedPosition - a hard copy; the follow-rate factor is parsed but unused
 // there). The spawn path computes the origin once, so without this a cast aura or hit
 // flash keeps emitting from where the actor stood when the stage fired.
+//
+// Only scheduled generators track: auto-run zone generators are parented to their
+// actor root and ride along, and the camera/celestial origins have their own
+// per-frame setters.
 pub fn track_attached_origins(
     q_xf: Query<&Transform>,
     q_children: Query<&Children>,
@@ -918,9 +931,6 @@ pub fn track_attached_origins(
 ) {
     use ffxi_dat::particle_gen::AttachType;
     for g in &mut sim.generators {
-        // Only scheduled generators track: auto-run zone generators are parented to their
-        // actor root and ride along, and the camera/celestial origins have their own
-        // per-frame setters.
         let Some(origin_routine) = g.origin_routine else {
             continue;
         };
@@ -1154,7 +1164,8 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // either way — without it every drop of a rain curtain spawns on one point.
 
     // The 0x08 relative velocity lives in the generator's local space (the space the 0x02
-    // base is scaled into by vel_basis), so its direction comes off the pre-basis offset.
+    // base is scaled into by vel_basis), so its direction comes off the pre-basis offset
+    // (research/xim ParticleInitializers.kt RelativeVelocitySetup).
     let mut pos_local = match g.def.position_variance {
         Some(v) => {
             let u = next_unit(&mut g.emit_rng);
@@ -1180,9 +1191,6 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         let tilt = sp.tilt + (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * sp.tilt_variance;
         let offset = Vec3::from_array(sp.offset(u, azimuth, tilt));
         pos_local += if sp.camera_oriented {
-            // The ring is authored in the camera's frame: map it camera->local before it
-            // lands in the generator's space (retail multiplies the offset chain by the
-            // inverse of attach x view).
             g.actor_rot.inverse() * g.cam_view * offset
         } else {
             offset
@@ -1394,6 +1402,14 @@ pub struct RebuildTrace {
     gated: u32,
 }
 
+/// Per-frame draw gate and mesh writer for the live generators.
+///
+/// A camera-pinned generator sits at the eye by construction, inside every band, so it
+/// skips the cull test. The frustum test keeps the near plane and drops the far plane
+/// (reverse-z infinite perspective), matching Bevy's own CPU-culling call shape.
+/// `built_key` is left alone while a generator is hidden: it stays the key of what is
+/// actually in the mesh asset, so the first drawable frame rebuilds to whatever the sim
+/// has reached.
 pub fn sync_particle_meshes(
     cam: Query<
         (&GlobalTransform, Option<&bevy::camera::primitives::Frustum>),
@@ -1412,7 +1428,8 @@ pub fn sync_particle_meshes(
     let frusta: Vec<&bevy::camera::primitives::Frustum> =
         cam.iter().filter_map(|(_, f)| f).collect();
     let (cam_rot, cam_pos) = (cam_xf.rotation(), cam_xf.translation());
-    // XiZone::GetDrawDistance, the band a 0x0A block with no authored maximum falls back to.
+    // XiZone.cpp XiZone::GetDrawDistance: the band a 0x0A block with no authored maximum
+    // falls back to.
     let zone_draw = draw
         .map(|d| d.world)
         .unwrap_or(crate::dat_mzb::RETAIL_FALLBACK_DRAW_DISTANCE);
@@ -1432,12 +1449,11 @@ pub fn sync_particle_meshes(
         };
         // The 0x1F camera-oriented ring resolves against the camera and the actor's world
         // rotation; sync runs after tick, so both reach emit() one frame behind like
-        // `emit_culled`.
+        // `emit_culled` (research/xim ParticleGeneratorParser.kt SphericalPositionVarianceFull).
         g.cam_view = cam_rot;
         if g.actor_local {
             g.actor_rot = entity_xf.rotation();
         }
-        // A camera-pinned generator sits at the eye by construction, inside every band.
         if let Some(cull) = g.def.emit_cull.filter(|_| !g.camera_relative) {
             let emitter = if g.actor_local {
                 entity_xf.transform_point(g.origin)
@@ -1494,8 +1510,6 @@ pub fn sync_particle_meshes(
         let drawable = g.camera_relative
             || frusta.is_empty()
             || generator_bounds(g, &clock).is_some_and(|b| {
-                // bevy_camera visibility check_visibility_cpu_culling's own call shape: the near
-                // plane culls, the far plane does not (reverse-z infinite perspective).
                 frusta
                     .iter()
                     .any(|f| f.intersects_obb(&b, &entity_xf.affine(), true, false))
@@ -1509,8 +1523,6 @@ pub fn sync_particle_meshes(
         }
         let view = CameraView { rot, pos: cam_pos };
         if drawable {
-            // `built_key` is left alone when hidden: it stays the key of what is actually in the
-            // mesh asset, so the first drawable frame rebuilds to whatever the sim has reached.
             let key = mesh_key(g, view, &clock);
             if needs_rebuild(&g.built_key, &key) {
                 if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
@@ -1804,12 +1816,14 @@ fn template_bound_radius(template: &SpriteTemplate, sprite_frames: &[SpriteTempl
         .fold(0.0f32, |acc, p| acc.max(p.length()))
 }
 
-// The live particle set's bounds in the frame `rebuild_mesh` writes positions in (entity-local for
-// an actor-local generator, Bevy world space otherwise), so the caller supplies the entity
-// transform. `None` when nothing is alive to draw.
-//
-// This over-approximates on purpose: a partially visible generator has to stay in, and the
-// per-particle radius folds in a scale the individual vertex may not use.
+/// The live particle set's bounds in the frame `rebuild_mesh` writes positions in
+/// (entity-local for an actor-local generator, Bevy world space otherwise), so the caller
+/// supplies the entity transform. `None` when nothing is alive to draw.
+///
+/// This over-approximates on purpose: a partially visible generator has to stay in, and the
+/// per-particle radius folds in a scale the individual vertex may not use. The z-scale
+/// follows `rebuild_mesh`: a flat screen billboard leaves its unused depth axis at 1.0,
+/// everything else scales by the untracked init z.
 fn generator_bounds(
     g: &LiveGenerator,
     clock: &CelestialClock,
@@ -1818,8 +1832,6 @@ fn generator_bounds(
         return None;
     }
     let axial = is_axial_camera_billboard(g);
-    // The same z-scale `rebuild_mesh` picks: a flat screen billboard leaves its unused depth
-    // axis at 1.0, everything else scales by the untracked init z.
     let sz = if g.orientation.is_some() || axial {
         g.def.init_scale[2]
     } else {
@@ -1901,13 +1913,14 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         // Fixed-orientation zone sheets carry raw FFXI-frame geometry; apply the
         // generator's FFXI->Bevy basis (the same flip on origin/velocity, matching
         // dat_mzb.rs to_bevy) so a falling water sheet hangs down into the basin
-        // instead of standing up above the emitter (kuluu-czc6). Actor-local generators
-        // integrate in the actor frame.
+        // instead of standing up above the emitter. Actor-local generators integrate in the
+        // actor frame, whose parent transform already carries the dat_mzb.rs to_bevy basis.
         let world_basis = (g.orientation.is_some() || axial) && !g.actor_local;
         // A screen billboard's template is DAT-frame geometry too (Y down: the campfire flame
         // `hi12` rises toward negative y). An actor-local generator inherits the FFXI->Bevy basis
         // from its parent transform; a world-space one folds it into the template before the
-        // view rotation, or the flame hangs below its wick.
+        // view rotation, or the flame hangs below its wick (the same flip dat_mzb.rs to_bevy
+        // applies to zone origins).
         let screen_basis = g.orientation.is_none() && !axial && !g.actor_local;
         let base = positions.len() as u32;
         for ((tp, uv), vertex) in tpl.positions.iter().zip(&tpl.uvs).zip(&tpl.colors) {
@@ -2353,9 +2366,9 @@ mod tests {
         );
     }
 
-    // The campfire flame `hi12` rises toward negative DAT y; a world-space screen billboard has
-    // to fold the FFXI->Bevy basis into that template itself, while an actor-local one leaves
-    // it to the parent transform.
+    /// The campfire flame `hi12` rises toward negative DAT y; a world-space screen billboard
+    /// has to fold the FFXI->Bevy basis into that template itself, while an actor-local one
+    /// leaves it to the parent transform.
     #[test]
     fn world_space_screen_billboard_folds_the_dat_basis_into_its_template() {
         fn built_vertex(actor_local: bool) -> [f32; 3] {
@@ -2456,8 +2469,8 @@ mod tests {
         );
     }
 
-    // The default `PerspectiveProjection` looks down -Z with a 1:1 aspect, so a generator at +Z
-    // is behind the camera and one far enough out on +X is past a side plane.
+    /// The default `PerspectiveProjection` looks down -Z with a 1:1 aspect, so a generator at
+    /// +Z is behind the camera and one far enough out on +X is past a side plane.
     fn frustum_camera(world: &mut World, xf: GlobalTransform) -> Entity {
         use bevy::camera::{CameraProjection, PerspectiveProjection};
         let frustum = PerspectiveProjection::default().compute_frustum(&xf);
@@ -2483,8 +2496,8 @@ mod tests {
             .expect("mesh positions")
     }
 
-    // A generator wired to a live mesh asset and mesh entity, with `frames` of emission already
-    // simulated so it has particles to bound.
+    /// A generator wired to a live mesh asset and mesh entity, with `frames` of emission
+    /// already simulated so it has particles to bound.
     fn gated_world(origin: Vec3, bound_radius: f32, frames: f32) -> (World, Handle<Mesh>, Entity) {
         let mut world = World::new();
         world.insert_resource(Time::<()>::default());
@@ -2562,8 +2575,6 @@ mod tests {
     fn partially_visible_generator_is_not_culled() {
         use bevy::ecs::system::RunSystemOnce;
 
-        // Past the +X side plane at 10 units of depth (half-width ~4.1 at the default 45-degree
-        // vertical fov and 1:1 aspect), so only the template radius can pull it back in.
         let edge = Vec3::new(6.0, 0.0, -10.0);
         for (bound_radius, want) in [(0.1, Visibility::Hidden), (4.0, Visibility::Inherited)] {
             let (mut world, _mesh, entity) = gated_world(edge, bound_radius, 1.0);
@@ -2572,7 +2583,7 @@ mod tests {
             assert_eq!(
                 *world.get::<Visibility>(entity).unwrap(),
                 want,
-                "radius {bound_radius}"
+                "edge sits past the +X side plane; only the template radius pulls it back in: {bound_radius}"
             );
         }
     }
@@ -2614,14 +2625,14 @@ mod tests {
         );
     }
 
-    // One colour on every template vertex, so a stage-chain expectation is a single number
-    // per particle instead of a gradient.
+    /// One colour on every template vertex, so a stage-chain expectation is a single number
+    /// per particle instead of a gradient.
     fn set_template_color(g: &mut LiveGenerator, rgba: Vec4) {
         g.template.colors = vec![rgba; g.template.positions.len()];
     }
 
-    // The colour a particle actually draws with: `particle_draw` now returns only the
-    // per-particle half, and the template's per-vertex half folds in at `vertex_color`.
+    /// The colour a particle actually draws with: `particle_draw` returns only the
+    /// per-particle half, and the template's per-vertex half folds in at `vertex_color`.
     fn drawn_color(g: &LiveGenerator, clock: &CelestialClock) -> Vec4 {
         let draw = particle_draw(g, &g.particles[0], clock);
         Vec4::from_array(vertex_color(g, &draw, g.template.colors[0]))
@@ -2760,7 +2771,6 @@ mod tests {
         let born = sim.generators[0].particles.len();
         assert!(born > 0);
 
-        // The camera walks 100 yalms.
         let moved = Vec3::new(100.0, 0.0, 0.0);
         sim.set_camera_relative_origins(moved);
         advance(&mut sim.generators[0], 10.0);
@@ -2886,8 +2896,8 @@ mod tests {
         }
     }
 
-    // The camera flag authors the ring in the camera's frame: the same flat ring that a
-    // non-oriented block puts on the x/z axes rides the camera's rotation instead.
+    /// The camera flag authors the ring in the camera's frame: the same flat ring that a
+    /// non-oriented block puts on the x/z axes rides the camera's rotation instead.
     #[test]
     fn spherical_full_camera_oriented_ring_follows_the_camera() {
         let ring = |camera_oriented: bool| {
@@ -3037,7 +3047,6 @@ mod tests {
                 D3mDrawPath::Mmb,
             );
             assert!((textured.x - rgb.x * 2.0).abs() < 1e-6);
-            // The forced ignore-texture-alpha table has no texture alpha to ignore here.
             let (_, forced) = d3m_stage_chain(
                 Vec3::splat(identity),
                 identity,
@@ -3204,7 +3213,8 @@ mod tests {
     }
 
     // The Home Point crystal `bnd0`: 0x0B (0, -0.0157, 0) with the sec3 0x05 updater turns the
-    // particle by that much every 60 Hz frame; the rate alone must not.
+    // particle by that much every 60 Hz frame; the rate alone must not
+    // (research/xim ParticleGeneratorParser.kt RotationUpdater).
     #[test]
     fn spin_integrates_only_with_the_rotation_updater() {
         const YAW_PER_FRAME: f32 = -0.0157;
@@ -3238,7 +3248,9 @@ mod tests {
     // 0x0C VelocityVarianceSetup (rotation): every emitted particle draws a uniform [-v, v]
     // offset per axis on top of the 0x0B spin rate (research/xim ParticleInitializers.kt
     // VelocityVarianceSetup — the allocationOffset binds it to the rotation transform; retail's
-    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity).
+    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity). The burst is
+    // held (stopped) so the 10-frame tick ages only the original eight, not the re-emissions it
+    // would otherwise add behind them.
     #[test]
     fn rotation_velocity_variance_spreads_the_spin_per_particle() {
         let mut d = def(120.0, 1.0, 8);
@@ -3249,15 +3261,12 @@ mod tests {
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 8, "one burst of eight");
-        // Hold the burst: the spin window must age only the original eight, not the
-        // re-emissions a 10-frame tick would otherwise add behind them.
         g.stopped = true;
         advance(&mut g, 10.0);
         let mut yaws = Vec::new();
         for p in &g.particles {
             let yaw = p.rotation.y;
             yaws.push(yaw);
-            // 10 frames at 0.01 +/- 0.005 per frame: [0.05, 0.15).
             assert!(
                 (0.05f32 - 1e-6..=0.15f32 + 1e-6).contains(&yaw),
                 "spin out of band: {yaw}"
@@ -3282,7 +3291,8 @@ mod tests {
     // offset per axis on top of the 0x12 scale velocity (research/xim
     // ParticleInitializers.kt VelocityVarianceSetup — the allocationOffset binds it to the
     // scale transform; retail's shared 0x03/0x0C/0x13 case adds frand(bounds) to the
-    // transform's velocity).
+    // transform's velocity). The burst is held (stopped) so the 10-frame tick ages only the
+    // original eight, not the re-emissions it would otherwise add behind them.
     #[test]
     fn scale_velocity_variance_spreads_the_rate_per_particle() {
         let mut d = def(120.0, 1.0, 8);
@@ -3292,14 +3302,11 @@ mod tests {
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 8, "one burst of eight");
-        // Hold the burst: the scale window must age only the original eight, not the
-        // re-emissions a 10-frame tick would otherwise add behind them.
         g.stopped = true;
         advance(&mut g, 10.0);
         let mut scales = Vec::new();
         for p in &g.particles {
             scales.push(p.scale.y);
-            // base 0.1 plus 10 frames at 0.01 +/- 0.005 per frame: [0.15, 0.25).
             assert!(
                 (0.15f32 - 1e-6..=0.25f32 + 1e-6).contains(&p.scale.y),
                 "scale out of band: {}",
@@ -3334,7 +3341,6 @@ mod tests {
         let mut scales = Vec::new();
         for p in &g.particles {
             scales.push(p.scale.x);
-            // base 0.1 plus a [0, 0.05) draw.
             assert!(
                 (0.1f32..=0.15f32 + 1e-6).contains(&p.scale.x),
                 "scale out of band: {}",
@@ -3359,7 +3365,6 @@ mod tests {
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 16, "one burst of sixteen");
         for p in &g.particles {
-            // base 0.1 plus a per-axis [0, v) draw.
             assert!(
                 (0.1f32..=0.3f32 + 1e-6).contains(&p.scale.x),
                 "x scale out of band: {}",
@@ -3371,7 +3376,6 @@ mod tests {
                 p.scale.y
             );
         }
-        // The x bound is twice the y bound, so sixteen draws must decorrelate the axes.
         assert!(
             g.particles
                 .iter()
@@ -3382,7 +3386,9 @@ mod tests {
 
     // 0x12 ScaleVelocitySetup: the sec3 0x08 ScaleUpdater adds the per-axis rate every frame
     // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames); a rate without
-    // the updater stays inert, and the track seed keeps the spawn-time scale.
+    // the updater stays inert, and the track seed keeps the spawn-time scale. The burst is
+    // held (stopped) so the 10-frame tick ages only the original eight, not the re-emissions it
+    // would otherwise add behind them.
     #[test]
     fn scale_velocity_grows_the_scale_per_frame() {
         let mut d = def(120.0, 1.0, 8);
@@ -3391,8 +3397,6 @@ mod tests {
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 8, "one burst of eight");
-        // Hold the burst: the growth window must age only the original eight, not the
-        // re-emissions a 10-frame tick would otherwise add behind them.
         g.stopped = true;
         advance(&mut g, 10.0);
         for p in &g.particles {
@@ -3453,7 +3457,8 @@ mod tests {
         );
     }
 
-    // A turning particle changes the built mesh, so the rebuild key has to follow its rotation.
+    /// A turning particle changes the built mesh, so the rebuild key has to follow its
+    /// rotation.
     #[test]
     fn rotation_changes_the_mesh_key() {
         let mut d = def(120.0, 1.0, 1);
@@ -3524,9 +3529,10 @@ mod tests {
         assert!(x_full.abs() < 1e-2, "full-period return: {x_full}");
     }
 
-    // sec3 0x2B OscillationApplier (Z): the z position sways with the amplitude curve. The
-    // default generator is world-space, so the FFXI +Z unit hat lands on Bevy −Z through the
-    // (x, −y, −z) basis — the peak is negative.
+    // sec3 0x2B OscillationApplier (Z): the z position sways with the amplitude curve
+    // (research/xim ParticleGeneratorParser.kt OscillationApplier). The default generator is
+    // world-space, so the FFXI +Z unit hat lands on Bevy −Z through the (x, −y, −z) basis —
+    // the peak is negative.
     #[test]
     fn oscillation_applier_z_oscillates_the_position() {
         let mut d = def(1000.0, 1.0, 1);
@@ -3549,10 +3555,11 @@ mod tests {
         assert!(z_full.abs() < 1e-2, "full-period return: {z_full}");
     }
 
-    // sec3 0x2A OscillationApplier (Y): the y position sways with the amplitude curve. The
-    // default generator is world-space, so the FFXI +Y unit hat lands on Bevy −Y through the
-    // (x, −y, −z) basis — the peak is negative. The base velocity is zeroed so its drift does
-    // not mix into the asserted axis.
+    // sec3 0x2A OscillationApplier (Y): the y position sways with the amplitude curve
+    // (research/xim ParticleGeneratorParser.kt OscillationApplier). The default generator is
+    // world-space, so the FFXI +Y unit hat lands on Bevy −Y through the (x, −y, −z) basis —
+    // the peak is negative. The base velocity is zeroed so its drift does not mix into the
+    // asserted axis.
     #[test]
     fn oscillation_applier_y_oscillates_the_position() {
         let mut d = def(1000.0, 1.0, 1);
@@ -3795,9 +3802,8 @@ mod tests {
         );
     }
 
-    // kuluu-czc6 assumed screen billboards needed no flip; the Selbina lantern showed
-    // otherwise (kuluu-3v98): the campfire ribbon hi12 rises toward DAT -y and hung below its
-    // wick, so a world-space screen billboard folds the same basis into its template.
+    /// The campfire ribbon hi12 rises toward DAT -y, so a world-space screen billboard folds
+    /// the FFXI->Bevy basis into its template, or the flame hangs below its wick.
     #[test]
     fn camera_billboard_sheet_flipped_into_the_bevy_frame() {
         let g = sheet_gen(None);
@@ -3923,7 +3929,8 @@ mod tests {
     }
 
     // Without the 0x11 updater the origin stays where the spawn path put it - retail's handler
-    // only runs for defs that carry the updater.
+    // only runs for defs that carry the updater (research/xim
+    // ParticleGeneratorParser.kt AssociationUpdater).
     #[test]
     fn generator_without_the_association_updater_keeps_its_spawn_origin() {
         use bevy::ecs::system::RunSystemOnce;
@@ -4123,7 +4130,6 @@ mod tests {
         });
         d.relative_velocity = Some(0.5);
         let mut g = live(d, 30.0);
-        // One frame: the lone particle is un-aged, so its position is exactly the spawn offset.
         advance(&mut g, 1.0);
         assert_eq!(g.particles.len(), 1);
         let p = &g.particles[0];
@@ -4135,7 +4141,8 @@ mod tests {
         );
     }
 
-    // With no spawn offset there is no direction, so 0x08 contributes nothing.
+    // With no spawn offset there is no direction, so 0x08 contributes nothing (research/xim
+    // ParticleInitializers.kt RelativeVelocitySetup).
     #[test]
     fn relative_velocity_without_a_spawn_offset_is_inert() {
         let mut d = def(0.0, 1.0, 1);
@@ -4206,7 +4213,7 @@ mod tests {
     }
 
     // With no spawn offset there is no direction, so 0x41 contributes nothing even with
-    // 0x08 present.
+    // 0x08 present (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
     #[test]
     fn relative_velocity_variance_without_a_spawn_offset_is_inert() {
         let mut d = def(0.0, 1.0, 1);
@@ -4271,8 +4278,6 @@ mod tests {
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
         assert_eq!(g.particles.len(), 3);
-        // The sample is in [-1, 1), so each axis lands in [base − v, base + v]; the
-        // epsilon covers one f32 rounding of the sum.
         let bounds = [
             (0.1f32 - 0.05f32, 0.1f32 + 0.05f32),
             (0.2f32 - 0.1f32, 0.2f32 + 0.1f32),
@@ -4284,7 +4289,7 @@ mod tests {
                 (bounds[0].0 - 1e-6..=bounds[0].1 + 1e-6).contains(&r.x)
                     && (bounds[1].0 - 1e-6..=bounds[1].1 + 1e-6).contains(&r.y)
                     && (bounds[2].0 - 1e-6..=bounds[2].1 + 1e-6).contains(&r.z),
-                "each axis inside base ± bound: {r:?}"
+                "each axis inside base ± bound (one f32 rounding of slack): {r:?}"
             );
         }
         assert!(
@@ -4750,7 +4755,7 @@ mod tests {
         // `kasa`'s 0x4F alpha lane as shipped, dumped byte-for-byte from f_ro.
         const HALO_PHASE_ALPHA_BYTE: [u8; ffxi_dat::particle_gen::MOON_PHASES] =
             [0, 0, 0, 0, 0, 60, 128, 60, 0, 0, 0, 0];
-        // DAT 210 kasa: initializer alpha 128/255 and weekday/phase modulation gain 160/255.
+        /// DAT 210 kasa: initializer alpha 128/255 and weekday/phase modulation gain 160/255.
         const HALO_CHAIN_GAIN: f32 = (128.0 / 255.0) * (160.0 / 255.0);
         const ALPHA_EPS: f32 = 1e-6;
 
@@ -4791,8 +4796,9 @@ mod tests {
     }
 
     // The alpha lattice a decoded-then-remapped DXT3 texture can sit on: the 4-bit plane holds
-    // multiples of 0x11, and `apply_ffxi_alpha_remap` doubles with saturation. Any other value
-    // is a neighbourhood mean, i.e. proof the undither ran.
+    // multiples of the dither step, and `apply_ffxi_alpha_remap` doubles with saturation
+    // (ffxi-dat/src/texture.rs DXT3_ALPHA_DITHER_STEP, ffxi_alpha_remap). Any other value is a
+    // neighbourhood mean, i.e. proof the undither ran.
     fn off_nibble_lattice(alpha: &[u8]) -> usize {
         use ffxi_dat::texture::{ffxi_alpha_remap, DXT3_ALPHA_DITHER_STEP};
 
@@ -4813,19 +4819,19 @@ mod tests {
             .collect()
     }
 
-    // The premise kuluu-d9wv rests on, read off the shipped f_ro DAT rather than assumed: the
-    // lunar halo sheet `kasa` is a DXT3 whose alpha is entirely the nibble 7/8 dithered-opaque
-    // pair (`dat-sky-alpha-histogram` on zone files 210/331), so the plain particle converter
-    // hands the GPU a 238/255 per-texel stipple and only the celestial converter averages it
-    // back to the authored half-step. Skips without a retail install.
+    // Read off the shipped f_ro DAT: the lunar halo sheet `kasa` is a DXT3 whose alpha is
+    // entirely the nibble 7/8 dithered-opaque pair (ffxi-dat/examples/dat-sky-alpha-histogram.rs
+    // on zone files 210/331), so the plain particle converter hands the GPU a 238/255
+    // per-texel stipple and only the celestial converter averages it back to the authored
+    // half-step. Skips without a retail install.
     #[test]
     fn zone_210_halo_sheet_is_dithered_and_only_the_celestial_converter_resolves_it() {
         const F_RO: u32 = 210;
         const HALO_TEX: [u8; 4] = *b"kasa";
         const DITHER_LO: u8 = 0x77;
         const DITHER_HI: u8 = 0x88;
-        // 0x80's recovered mean is 127.5, which no 8-bit alpha holds; the remap doubles that to
-        // a 254/255 split.
+        // 0x80's recovered mean is 127.5, which no 8-bit alpha holds; the remap doubles that
+        // to a 254/255 split (ffxi-dat/src/texture.rs apply_ffxi_alpha_remap).
         const RESOLVED_RESIDUAL_MAX: u8 = 1;
 
         let Some(bytes) = zone_bytes(F_RO) else {
@@ -5159,8 +5165,9 @@ mod tests {
 
         // ROM/0/28.DAT (file 100) carries 25 Imgs and every one of them is type byte 0x81; its
         // `smok` 0x21 sheet names `effect  smoke01 `, which only that 0x81 Img (offset 3389984)
-        // supplies. While extract_texture_tokens rejected 0x81 the sheet resolved no texture at
-        // all -- 105 of the install's 113 name-unresolvable sheets are this case.
+        // supplies. The 0x81 header is the compressed-format flag extract_texture_tokens reads
+        // (ffxi-dat/src/texture.rs FLG_FMT0_COMPRESSED); 105 of the install's 113
+        // name-unresolvable sheets are this case.
         #[test]
         fn real_dat_sprite_sheet_resolves_a_format0_texture() {
             const SMOKE_FILE_ID: u32 = 100;
@@ -5212,7 +5219,8 @@ mod tests {
         }
 
         // ROM/338/100.DAT declares the D3M `grw1` in both `geo0` and `run0`; `geo0/gl02` links
-        // it, and the two copies are a different width with a different texture.
+        // it, and the two copies are a different width with a different texture. The scoped
+        // lookup is scheduler_runtime.rs particle_def_scoped.
         #[test]
         fn real_dat_static_mesh_resolves_in_the_generators_own_directory() {
             const GEO_EFFECT_FILE_ID: u32 = 13259;
@@ -5262,7 +5270,8 @@ mod tests {
 
         // ROM/1/33.DAT declares the 0x21 sprite sheet `ligh` in `ligh`, `tour` and `fire`;
         // `ligh/lt05` links it, and the `fire` copy the flat map keeps is a different quad
-        // backed by a different texture.
+        // backed by a different texture. The scoped lookup is scheduler_runtime.rs
+        // particle_def_scoped.
         #[test]
         fn real_dat_sprite_sheet_resolves_in_the_generators_own_directory() {
             const LIGHT_EFFECT_FILE_ID: u32 = 333;
@@ -5552,7 +5561,7 @@ mod tests {
     }
 
     // ROM/27/82.DAT `hm_s`, the HumeM skeleton whose reaction routines the melee chain walks
-    // (kuluu-render::scheduler_runtime tests).
+    // (scheduler_runtime.rs tests).
     const HUME_M_SKELETON_FILE: u32 = 7072;
 
     fn retail_hume_m_skeleton() -> Option<ffxi_dat::skel::Skeleton> {
@@ -5565,8 +5574,9 @@ mod tests {
             .next()
     }
 
-    // The bead's retail dump of ROM/0/0.DAT (kuluu-w7xd, 2026-07-31): the melee hit sparks the
-    // `chit` chain reaches, each attaching to the victim at a nearest-joint selector.
+    // ROM/0/0.DAT as shipped (scheduler_runtime.rs parse_action_bytes,
+    // GLOBAL_EFFECT_DIR_FILE_ID): the melee hit sparks the `chit` chain reaches, each attaching
+    // to the victim at a nearest-joint selector.
     const HIT_SPARK_DIR: [u8; 4] = *b"hit1";
     const HIT_SPARK_JOINT_REFERENCE: u8 = 49;
     const HIT_SPARK_GENERATORS: [([u8; 4], ffxi_dat::particle_gen::AttachType); 4] = [
@@ -5589,7 +5599,7 @@ mod tests {
     }
 
     // Directory-scoped, because ROM/0/0.DAT defines `g010` several times over and only the `hit1`
-    // copy is the spark (kuluu-render::scheduler_runtime tests).
+    // copy is the spark (scheduler_runtime.rs tests).
     fn retail_hit_spark_defs() -> Option<Vec<([u8; 4], ParticleGeneratorDef)>> {
         let assets = retail_global_effect_assets()?;
         Some(
@@ -5605,9 +5615,10 @@ mod tests {
         )
     }
 
-    // The bead's premise, pinned against the install: every `hit1` spark generator attaches to the
-    // TARGET actor and names a nearest-joint selector there, so the spawn origin cannot be the
-    // victim's root transform alone.
+    // Pinned against the install: every `hit1` spark generator attaches to the TARGET actor and
+    // names a nearest-joint selector there (ffxi-dat/src/particle_gen.rs
+    // ParticleGeneratorDef attach fields), so the spawn origin cannot be the victim's root
+    // transform alone.
     #[test]
     fn real_dat_hit_sparks_name_a_target_joint_reference() {
         let Some(defs) = retail_hit_spark_defs() else {
@@ -5626,9 +5637,9 @@ mod tests {
         }
     }
 
-    // The coordinate-space half of the fix: the joint the def names is resolved in the actor's
-    // pose frame (FFXI axes, -Y up) and must arrive in Bevy world space, i.e. ABOVE the victim's
-    // feet and on the side the attacker stands on -- the whole point of kuluu-w7xd.
+    // The joint the def names is resolved in the actor's pose frame (FFXI axes, -Y up) and must
+    // arrive in Bevy world space (ffxi-actor/src/skeleton_instance.rs pose_world), i.e. ABOVE
+    // the victim's feet and on the side the attacker stands on.
     #[test]
     fn real_dat_hit_spark_offset_lands_on_the_struck_side_in_bevy_space() {
         let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
@@ -5643,11 +5654,10 @@ mod tests {
         );
         const VICTIM_WORLD: Vec3 = Vec3::new(30.0, 2.0, -14.0);
         const ATTACKER_REACH: f32 = 3.0;
-        // Read off the same install the pose came from rather than transcribed here -- the ring
-        // geometry itself is pinned by ffxi-actor's
-        // `real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring`. Pose space
-        // is -Y up, so the Bevy-space height is its negation; anything at or below 0 is the feet
-        // bug this bead is about.
+        // Read off the same install the pose came from; the ring geometry itself is pinned by
+        // ffxi-actor's `real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring`
+        // (ffxi-actor/src/skeleton_instance.rs). Pose space is -Y up, so the Bevy-space height is
+        // its negation; anything at or below 0 is the feet bug.
         let ring_height_above_root = -ffxi_actor::skeleton_instance::standard_joint_world_position(
             &pose,
             &skeleton,
@@ -5708,8 +5718,9 @@ mod tests {
             .spawn(Transform::from_translation(world))
             .id();
         app.world_mut().spawn((
-            // ffxi_actor_render::spawn_live_actor's actor root, verbatim: the FFXI->Bevy basis in
-            // the LOCAL transform and a default (identity) GlobalTransform until PostUpdate runs.
+            // ffxi_actor_render.rs spawn_live_actor's actor root, verbatim: the FFXI->Bevy basis
+            // in the LOCAL transform and a default (identity) GlobalTransform until PostUpdate
+            // runs.
             Transform::from_rotation(crate::ffxi_actor_render::ffxi_to_bevy_basis()),
             GlobalTransform::default(),
             crate::ffxi_actor_render::render_actor_for_test(skeleton.clone(), pose.to_vec()),
@@ -5787,11 +5798,12 @@ mod tests {
             .map(|g| g.origin)
     }
 
-    // The whole wiring, driven through the real system rather than through `attach_joint_offset`
-    // alone: the actor root carrying the pose is a CHILD of the wire entity the stage fires on and
-    // PostUpdate has propagated nothing on the frame it is inserted, so the child descent, the
-    // local-transform composition, the source/target side of the selector and the `+ joint_offset`
-    // at the spawn site all have to hold for the spark to leave the victim's feet.
+    /// The whole wiring, driven through the real system rather than through
+    /// `attach_joint_offset` alone: the actor root carrying the pose is a CHILD of the wire
+    /// entity the stage fires on and PostUpdate has propagated nothing on the frame it is
+    /// inserted, so the child descent, the local-transform composition, the source/target side
+    /// of the selector and the `+ joint_offset` at the spawn site all have to hold for the
+    /// spark to leave the victim's feet.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn real_dat_hit_spark_spawns_on_the_victims_ring_not_its_root() {
@@ -5856,9 +5868,9 @@ mod tests {
         }
     }
 
-    // With no second actor the selector has nothing to measure against, and with no posed skeleton
-    // (a door, or a model still loading) there is no joint at all: both must fall back to the plain
-    // root origin rather than throwing the effect somewhere arbitrary.
+    /// With no second actor the selector has nothing to measure against, and with no posed
+    /// skeleton (a door, or a model still loading) there is no joint at all: both must fall
+    /// back to the plain root origin rather than throwing the effect somewhere arbitrary.
     #[test]
     fn attach_joint_offset_falls_back_to_the_root() {
         let Some(skeleton) = retail_hume_m_skeleton() else {

@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use crate::authcode;
+use crate::authcode::{self, SELECT_PAYLOAD_LEN};
 use crate::chat::{self, Greeting, Routing, POL_ADDRESS_LEN, ROUTING_LEN};
 use crate::crypto::{PolBlowfish, StreamReset};
 use crate::error::{Error, Result};
@@ -311,8 +311,6 @@ pub enum ReplyShape {
 
 /// polcore `0x100237f0`: one record of the account's content-id list.
 pub const CONTENT_RECORD_LEN: usize = 0xA8;
-/// polcore `0x1001d490` sends only the head of the shared selection buffer.
-pub const SELECT_PAYLOAD_LEN: usize = 0x14;
 
 /// What the player supplies. An account carries two identities and the
 /// handshake uses both: the legacy PlayOnline pair authenticates the
@@ -347,8 +345,12 @@ pub struct LobbySession {
 /// this crate does not yet decode.
 pub struct LoginOutcome {
     pub session: LobbySession,
+    /// The account's content entries as received; their interior is not
+    /// decoded here, so choosing one is the caller's.
     pub content_records: Vec<Vec<u8>>,
-    pub world_select_reply: Vec<u8>,
+    /// The selection the world select confirmed, which is what the community
+    /// request carried.
+    pub selection: authcode::SelectReply,
     pub profile_host: String,
 }
 
@@ -426,20 +428,24 @@ pub fn login(
         .map(<[u8]>::to_vec)
         .collect();
 
-    let request = selection.payload();
+    // The world select sends the head of the selection buffer and its reply
+    // fills the rest in, so the community request is the confirmed selection
+    // rather than the one that was asked for.
+    let requested = selection.payload();
     let world_select_reply = open(connector)?.transact(
         profile::SELECT_SERVICE,
         id,
         secret,
-        &request[..SELECT_PAYLOAD_LEN],
+        &requested[..SELECT_PAYLOAD_LEN],
         ReplyShape::Declared,
     )?;
+    let confirmed = authcode::SelectReply::parse(&world_select_reply)?.confirm(selection);
 
     let community = open(connector)?.transact(
         profile::ENTER_COMMUNITY,
         id,
         secret,
-        &request,
+        &confirmed.payload(),
         ReplyShape::Declared,
     )?;
     if community.len() < authcode::VALUE_LEN {
@@ -459,7 +465,7 @@ pub fn login(
     Ok(LoginOutcome {
         session: LobbySession { value, auth_code },
         content_records,
-        world_select_reply,
+        selection: authcode::SelectReply::parse(&world_select_reply)?,
         profile_host: host,
     })
 }
@@ -508,6 +514,9 @@ mod tests {
     const MOCK_CLOCK: u32 = 0x5FED_C0DE;
     const MOCK_CLIENT_ADDR: [u8; 4] = [10, 0, 0, 9];
     const MOCK_CLIENT_PORT: u16 = 0x9A5B;
+    const MOCK_CONTENT_INDEX: u8 = 0x1C;
+    const MOCK_SERVICE_INDEX: u8 = 3;
+    const MOCK_WORLD_INDEX: u8 = 4;
 
     // An in-process PlayOnline that speaks enough of both services to carry
     // the whole handshake. It exercises the client's path end to end; it is
@@ -722,7 +731,14 @@ mod tests {
                 }
                 profile::SELECT_SERVICE => {
                     self.mock.borrow_mut().select_payload = payload;
-                    self.reply(profile::seal_body(&[0x5Au8; 0x7C]));
+                    let mut reply = [0u8; authcode::SELECT_REPLY_LEN];
+                    reply[0x00] = MOCK_CONTENT_INDEX;
+                    reply[0x01] = 1;
+                    reply[0x02] = MOCK_SERVICE_INDEX;
+                    reply[0x03] = 1;
+                    reply[0x04..0x06].copy_from_slice(&MOCK_REGION.to_le_bytes());
+                    reply[0x06] = MOCK_WORLD_INDEX + 1;
+                    self.reply(profile::seal_body(&reply));
                 }
                 profile::ENTER_COMMUNITY => {
                     let reply = self.mock.borrow().community_reply;
@@ -802,13 +818,13 @@ mod tests {
         let mut connector = MockConnector(Rc::clone(&mock));
         let mut rng = SeqRng(0x1234_5678);
         let selection = authcode::CommunityRequest {
-            world_id: 3,
+            content_index: 3,
             service_available: true,
             service_index: 1,
-            context_default: false,
+            context_unset: false,
             region: MOCK_REGION,
             world_index_plus1: 4,
-            flag_d8: false,
+            service_flag: false,
             cached: true,
         };
 
@@ -866,11 +882,17 @@ mod tests {
         // The world select sends the head of the same buffer the community
         // request sends in full.
         assert_eq!(m.select_payload, selection.payload()[..SELECT_PAYLOAD_LEN]);
-        assert_eq!(m.community_payload, selection.payload());
+        // The community request carries what the world select confirmed, not
+        // what was asked for: a different content entry and world index.
+        assert_ne!(m.community_payload, selection.payload());
+        assert_eq!(m.community_payload[0x10], MOCK_CONTENT_INDEX);
+        assert_eq!(m.community_payload[0x12], MOCK_SERVICE_INDEX);
+        assert_eq!(m.community_payload[0x16], MOCK_WORLD_INDEX + 1);
 
         assert_eq!(outcome.content_records.len(), MOCK_CONTENT_RECORDS);
         assert_eq!(outcome.content_records[1][0], 1);
-        assert_eq!(outcome.world_select_reply.len(), 0x7C);
+        assert_eq!(outcome.selection.content_index, Some(MOCK_CONTENT_INDEX));
+        assert_eq!(outcome.selection.world_index, MOCK_WORLD_INDEX);
         assert_eq!(outcome.profile_host, "pp007.pol.com");
 
         let mut addr20 = [0u8; chat::POL_ADDRESS_LEN];

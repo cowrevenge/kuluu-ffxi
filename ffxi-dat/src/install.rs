@@ -186,7 +186,7 @@ fn env_path() -> Option<PathBuf> {
 }
 
 /// `env_path` (the shell's `FFXI_DAT_PATH`) else the `default` install in
-/// `dir`; a set-but-unusable value is an error, never a fallthrough.
+/// `dir`; a set-but-unusable value errors instead of falling through.
 pub fn resolve_in(dir: Option<&Path>, env_path: Option<PathBuf>) -> Result<Resolved, Unresolved> {
     if let Some(path) = env_path {
         if !install_detect::is_ffxi_root(&path) {
@@ -261,10 +261,6 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
 fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
     match std::os::windows::fs::symlink_dir(src, dst) {
         Ok(()) => Ok(()),
-        // A stock shell has no SeCreateSymbolicLinkPrivilege and Developer
-        // Mode off; a mount-point junction is the privilege-free directory
-        // link (`mklink /J`), and a registry link only ever binds two local
-        // roots, which is all a junction can target.
         Err(e) if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => junction_dir(src, dst),
         Err(e) => Err(io::Error::new(
             e.kind(),
@@ -275,16 +271,20 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
-// CreateSymbolicLink's refusal when the shell lacks SeCreateSymbolicLinkPrivilege
-// and Developer Mode is off.
+/// CreateSymbolicLink's refusal when the shell lacks SeCreateSymbolicLinkPrivilege
+/// and Developer Mode is off.
 #[cfg(windows)]
 const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 
-/// The junction is a mount-point reparse point; std only exposes true
-/// symlinks, which need the privilege above.
+/// CreateSymbolicLinkW flags: 0 is the mount point, the privilege-free directory link.
+#[cfg(windows)]
+const SYMLINK_MOUNT_POINT_FLAGS: u32 = 0;
+
+/// The junction is a mount-point reparse point: std only exposes true symlinks, which need
+/// the privilege above, and this tree's links only bind two local roots, which is all a
+/// junction can target.
 #[cfg(windows)]
 fn junction_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    // A junction's target must be an absolute local path.
     let target = src.canonicalize().map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -293,9 +293,6 @@ fn junction_dir(src: &Path, dst: &Path) -> io::Result<()> {
     })?;
     match create_mount_point(&target, dst).and_then(|()| link_exists(dst)) {
         Ok(()) => Ok(()),
-        // Machines that block the reparse-point APIs for unsigned processes
-        // report a privilege failure and create nothing; the system's own
-        // `mklink /J` still works there, so delegate to it.
         Err(e) => mklink_junction(&target, dst)
             .and_then(|()| link_exists(dst))
             .map_err(|mk| io::Error::new(mk.kind(), format!("junction link refused ({e}); {mk}"))),
@@ -325,16 +322,21 @@ fn create_mount_point(target: &Path, dst: &Path) -> io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    // Flags 0 is the mount point, the privilege-free directory link.
-    let ok = unsafe { CreateSymbolicLinkW(link.as_ptr(), target_wide.as_ptr(), 0) };
+    let ok = unsafe {
+        CreateSymbolicLinkW(
+            link.as_ptr(),
+            target_wide.as_ptr(),
+            SYMLINK_MOUNT_POINT_FLAGS,
+        )
+    };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-// A blocked machine can report success without creating anything, so the
-// reparse point has to exist before the link counts.
+/// A blocked machine can report success without creating anything, so the
+/// reparse point has to exist before the link counts.
 #[cfg(windows)]
 fn link_exists(dst: &Path) -> io::Result<()> {
     is_symlink(dst)
@@ -342,8 +344,8 @@ fn link_exists(dst: &Path) -> io::Result<()> {
         .ok_or_else(|| io::Error::other(format!("no link at {}", dst.display())))
 }
 
-// The system's own mount-point tool; on machines that block the reparse
-// APIs for unsigned processes it is the only way left.
+/// The system's own mount-point tool; on machines that block the reparse
+/// APIs for unsigned processes it is the only way left.
 #[cfg(windows)]
 fn mklink_junction(target: &Path, dst: &Path) -> io::Result<()> {
     let out = std::process::Command::new("cmd")

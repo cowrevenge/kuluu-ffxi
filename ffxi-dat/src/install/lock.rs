@@ -128,17 +128,21 @@ fn classify(path: PathBuf, file: &mut File, err: TryLockError) -> LockError {
     }
 }
 
-/// A reader's share of `root`; fails while an updater holds it exclusively.
-pub fn shared(root: &Path) -> Result<SharedLock, LockError> {
-    let (path, mut file) = open_lock_file(root)?;
-    // The note is written before the lock is taken: Windows refuses writes to
-    // a locked range even through the locking handle, so a post-lock write
-    // would leave the note empty and the refusal unnamed.
+/// The holder note is written before the lock is taken: Windows refuses writes to
+/// a locked range even through the locking handle, so a post-lock write would
+/// leave the note empty and the refusal unnamed.
+fn write_holder_note(file: &mut File) {
     let me = Holder::this_process();
     let _ = file
         .set_len(0)
         .and_then(|_| file.rewind())
         .and_then(|_| writeln!(file, "{} {}", me.pid, me.exe));
+}
+
+/// A reader's share of `root`; fails while an updater holds it exclusively.
+pub fn shared(root: &Path) -> Result<SharedLock, LockError> {
+    let (path, mut file) = open_lock_file(root)?;
+    write_holder_note(&mut file);
     if let Err(e) = file.try_lock_shared() {
         return Err(classify(path, &mut file, e));
     }

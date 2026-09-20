@@ -193,9 +193,9 @@ pub struct SchedulerStage {
 
     pub raw_type: u8,
 
-    // `unkCombo & STAGE_LENGTH_MASK`, the dword count the stage spans. `StageKind::from_stage` is
-    // length-conditional for several opcodes, so a consumer that wants to re-classify a stage
-    // needs the same length the parser used.
+    /// `unkCombo & STAGE_LENGTH_MASK`, the dword count the stage spans. `StageKind::from_stage`
+    /// is length-conditional for several opcodes, so a consumer that wants to re-classify a
+    /// stage needs the same length the parser used.
     pub stage_words: u8,
 
     pub delay_frames: u16,
@@ -354,7 +354,8 @@ pub enum StageKind {
     /// and `init` stops `ini1` this way.
     StopRoutine,
 
-    /// 0x21 (caster) / 0x25 (target) - flinch; SE `GetDamageDirId` picks the dfi/dbi/dfm/dbm
+    /// `FLINCH_CASTER_OPCODE` / `FLINCH_TARGET_OPCODE` - flinch (research/xim
+    /// EffectRoutineParser.kt parseFlinchEffect); SE `GetDamageDirId` picks the dfi/dbi/dfm/dbm
     /// front/back clip by hit direction.
     FlinchOnCaster,
     FlinchOnTarget,
@@ -431,9 +432,9 @@ pub const fn argless_stage_opcode(raw_type: u8) -> bool {
     )
 }
 
-// The shortest stage `from_stage` can be asked about, and the longest the length field can
-// express: sweeping this range is how a consumer discovers the handled opcode set without
-// restating the match arms.
+/// The shortest stage `from_stage` can be asked about, and the longest the length field can
+/// express: sweeping this range is how a consumer discovers the handled opcode set without
+/// restating the match arms.
 pub const STAGE_WORDS_RANGE: std::ops::RangeInclusive<usize> = 1..=STAGE_LENGTH_MASK as usize;
 
 impl StageKind {
@@ -665,8 +666,6 @@ impl Scheduler {
                 let spell_effect = payload
                     .filter(|_| kind == StageKind::SpellEffect)
                     .map(u32::from_le_bytes);
-                // Flinch animationDuration sits at +24, past the id slot - read it straight off
-                // the stage bytes when the full 9-dword payload is present.
                 let flinch_duration =
                     (matches!(kind, StageKind::FlinchOnCaster | StageKind::FlinchOnTarget)
                         && stage_bytes >= FLINCH_PAYLOAD_LEN)
@@ -811,46 +810,40 @@ pub struct SoundEvent {
     pub on_caster: bool,
 }
 
-/// The entrance/instance zone pairs whose 0x2D MAPSCHEDULOR keys resolve in the
-/// partner zone's model DAT rather than their own. Hand-built from one scan of
-/// the retail corpus, which turned up 27 "another zone's model DAT" pairs;
-/// retail's loader rule for the partner fallback is unknown, and these five are
-/// the observed clean instance/entrance cases.
-const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [
-    (242, 170), // Heavens' Tower -> Full Moon Fountain
-    (194, 192), // Outer Horutoto Ruins -> Inner Horutoto Ruins
-    (31, 34),   // Monarch's Linn -> Grand Palace of Hu'Xzoi
-    (32, 11),   // Sealion's Den -> Oldton Movalpolos
-    (32, 8),    // Sealion's Den -> Boneyard Gully
-];
+/// The entrance/instance zone pairs whose MAPSCHEDULOR scene keys resolve in
+/// the partner zone's model DAT rather than their own: (242, 170) Heavens'
+/// Tower -> Full Moon Fountain, (194, 192) Outer Horutoto Ruins -> Inner
+/// Horutoto Ruins, (31, 34) Monarch's Linn -> Grand Palace of Hu'Xzoi,
+/// (32, 11) Sealion's Den -> Oldton Movalpolos, (32, 8) Sealion's Den ->
+/// Boneyard Gully. Hand-built from one scan of the retail corpus, which turned
+/// up 27 "another zone's model DAT" pairs; retail's loader rule for the partner
+/// fallback is unknown, and these five are the observed clean instance/entrance
+/// cases.
+const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [(242, 170), (194, 192), (31, 34), (32, 11), (32, 8)];
 
-/// The handful of non-model files that carry 0x2D scene keys no per-zone slot
-/// owns: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu scene families
-/// (`sc11..sc41` / `kc51..kc54` / `kci1..kci4`). Hand-built from the same corpus
+/// The handful of non-model files that carry MAPSCHEDULOR scene keys no
+/// per-zone slot owns: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu
+/// scene families (`sc11..sc41` / `kc51..kc54` / `kci1..kci4`), file ids 641
+/// (ROM/3/48.DAT), 30705 (ROM/123/85.DAT), 57075 (ROM/213/92.DAT), 57082
+/// (ROM/216/12.DAT), 57204 (ROM/241/3.DAT). Hand-built from the same corpus
 /// scan; retail's loader rule for these is unknown. `zz-walk-errors` re-checks
 /// that all five walk clean.
-pub const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [
-    641,   // ROM/3/48.DAT
-    30705, // ROM/123/85.DAT
-    57075, // ROM/213/92.DAT
-    57082, // ROM/216/12.DAT
-    57204, // ROM/241/3.DAT
-];
+pub const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [641, 30705, 57075, 57082, 57204];
 
-/// Resolve the 0x2D MAPSCHEDULOR key to the DAT file that carries its routine,
-/// following retail's per-zone rule: the routine lives in the CURRENT zone's own
-/// model DAT (already loaded for rendering via
+/// Resolve a MAPSCHEDULOR key (the `ffxi_event::vm` scene opcode) to the DAT file
+/// that carries its routine, following retail's per-zone rule: the routine lives in the
+/// CURRENT zone's own model DAT (already loaded for rendering via
 /// [`zone_dat::zone_id_to_mzb_file_id`]); on a miss, the entrance/instance partner
 /// zone's model DAT; on a further miss, the non-model scene carriers. Returns the
 /// file id, or `None` when no candidate file carries the key. The host arms the
-/// 0x54 WAITMAPSCHEDULOR hold from the file the key resolved in; the renderer plays
+/// WAITMAPSCHEDULOR hold from the file the key resolved in; the renderer plays
 /// it from the same file.
 ///
 /// Memoized per process: the result is a pure function of the install's DATs,
 /// while deriving it costs up to eight full DAT reads plus parses per call (the
-/// zone's model DAT is a large MZB file) on every 0x2D cue. One install per
-/// process (the renderer and the session are separate processes, each with its
-/// own memo), so the memo keys on (zone, key) alone. An overlay swap changes
+/// zone's model DAT is a large MZB file) on every MAPSCHEDULOR cue. One install
+/// per process (the renderer and the session are separate processes, each with
+/// its own memo), so the memo keys on (zone, key) alone. An overlay swap changes
 /// which file a resolve reads, so [`DatRoot::set_overlays`] clears it.
 pub fn zone_scene_file_id(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
     let cache = ZONE_SCENE_CACHE
@@ -885,7 +878,7 @@ static ZONE_SCENE_CACHE: std::sync::LazyLock<std::sync::Mutex<ZoneSceneMemo>> =
 /// Drop the [`zone_scene_file_id`] memo: called from `DatRoot::set_overlays`,
 /// because the swap changes which file a later resolve reads. A lookup racing
 /// the swap may re-memoize a pre-swap result until the next swap; the memo
-/// holds only 0x2D answers, so the exposure is one stale zone-scene file id.
+/// holds only MAPSCHEDULOR answers, so the exposure is one stale zone-scene file id.
 pub(crate) fn clear_zone_scene_cache() {
     ZONE_SCENE_CACHE
         .lock()
@@ -959,6 +952,8 @@ const ROUTE_NAME_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const ROUTE_NAME_ZONE_MAX: u16 = 0xFF;
 /// A two-digit decimal index fits this bound.
 const ROUTE_NAME_INDEX_MAX: u8 = 99;
+/// The zone id's upper or lower hex digit.
+const ROUTE_NAME_NIBBLE: u16 = 0xF;
 
 /// The zone-coded camera route name in the title-screen scene DAT (ROM/0/23.DAT):
 /// `zone_id` as two lowercase hex digits followed by a two-digit decimal `index`
@@ -966,8 +961,8 @@ const ROUTE_NAME_INDEX_MAX: u8 = 99;
 pub fn zone_camera_route_name(zone_id: u16, index: u8) -> [u8; 4] {
     debug_assert!(zone_id <= ROUTE_NAME_ZONE_MAX && index <= ROUTE_NAME_INDEX_MAX);
     let mut name = [0u8; 4];
-    name[0] = ROUTE_NAME_HEX_DIGITS[(zone_id >> 4 & 0xF) as usize];
-    name[1] = ROUTE_NAME_HEX_DIGITS[(zone_id & 0xF) as usize];
+    name[0] = ROUTE_NAME_HEX_DIGITS[(zone_id >> 4 & ROUTE_NAME_NIBBLE) as usize];
+    name[1] = ROUTE_NAME_HEX_DIGITS[(zone_id & ROUTE_NAME_NIBBLE) as usize];
     name[2] = b'0' + index / 10;
     name[3] = b'0' + index % 10;
     name
@@ -1027,15 +1022,15 @@ mod tests {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
         for op in [FLINCH_CASTER_OPCODE, FLINCH_TARGET_OPCODE] {
             body.extend_from_slice(&[op, FLINCH_STAGE_WORDS, 0, 0]);
-            body.extend_from_slice(&2u16.to_le_bytes()); // +4 delay
-            body.extend_from_slice(&0u16.to_le_bytes()); // +6 duration
-            body.extend_from_slice(&1.0f32.to_le_bytes()); // +8
-            body.extend_from_slice(&1.0f32.to_le_bytes()); // +12
-            body.extend_from_slice(&2u32.to_le_bytes()); // +16
-            body.extend_from_slice(&1.0f32.to_le_bytes()); // +20
-            body.extend_from_slice(&10.0f32.to_le_bytes()); // +24 animationDuration
-            body.extend_from_slice(&0u32.to_le_bytes()); // +28
-            body.extend_from_slice(&0u32.to_le_bytes()); // +32
+            body.extend_from_slice(&2u16.to_le_bytes());
+            body.extend_from_slice(&0u16.to_le_bytes());
+            body.extend_from_slice(&1.0f32.to_le_bytes());
+            body.extend_from_slice(&1.0f32.to_le_bytes());
+            body.extend_from_slice(&2u32.to_le_bytes());
+            body.extend_from_slice(&1.0f32.to_le_bytes());
+            body.extend_from_slice(&10.0f32.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
         }
 
         let s = Scheduler::parse(*b"damg", &body).unwrap();
@@ -1047,20 +1042,19 @@ mod tests {
             let st = s.stages[i].stage;
             assert_eq!(st.kind, want_kind, "opcode of stage {i}");
             assert_eq!(st.flinch_duration, Some(10.0), "animationDuration at +24");
-            // The flinch payload's id slot is not a DatId (XIM reads no ref there).
             assert_eq!(&st.id, &[0; 4]);
         }
     }
 
-    // A flinch stage shorter than the full payload carries no animationDuration: the consumer
-    // must fall back to its default transitions rather than reading past the stage.
+    /// A flinch stage shorter than the full payload carries no animationDuration: the
+    /// consumer falls back to its default transitions rather than reading past the stage.
     #[test]
     fn short_flinch_stage_has_no_animation_duration() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
         body.extend_from_slice(&[FLINCH_CASTER_OPCODE, ARGLESS_STAGE_WORDS + 1, 0, 0]);
         body.extend_from_slice(&2u16.to_le_bytes());
         body.extend_from_slice(&0u16.to_le_bytes());
-        body.extend_from_slice(&[0u8; 4]); // +8 id slot - not a DatId for flinch
+        body.extend_from_slice(&[0u8; 4]);
 
         let s = Scheduler::parse(*b"damg", &body).unwrap();
         assert_eq!(s.stages[0].stage.kind, StageKind::FlinchOnCaster);
@@ -1931,9 +1925,9 @@ mod tests {
     fn set_model_visibility_payload_is_not_a_datid() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
         body.extend(timed_stage_bytes(SET_MODEL_VISIBILITY_OPCODE, 4, 0, 0));
-        body.extend_from_slice(&1u32.to_le_bytes()); // hidden
-        body.extend_from_slice(&2u16.to_le_bytes()); // slot
-        body.extend_from_slice(&1u16.to_le_bytes()); // ifEngaged
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&2u16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
 
         let s = Scheduler::parse(*b"splg", &body).unwrap();
         let stage = &s.stages[0].stage;
@@ -1955,7 +1949,7 @@ mod tests {
     fn spell_effect_payload_is_not_a_datid() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
         body.extend(timed_stage_bytes(SPELL_EFFECT_OPCODE, 3, 0, 0));
-        body.extend_from_slice(&617u32.to_le_bytes()); // spell index
+        body.extend_from_slice(&617u32.to_le_bytes());
 
         let s = Scheduler::parse(*b"sdep", &body).unwrap();
         let stage = &s.stages[0].stage;
@@ -1966,6 +1960,7 @@ mod tests {
 
     // The flinch and knockback payloads are floats/ints from +8 on (research/xim
     // EffectRoutineParser.kt parseSection2), so their id slot must not surface as a DatId.
+    // Knockback: u16 u16 f32 f32 u32.
     #[test]
     fn flinch_and_knockback_payloads_are_not_datids() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
@@ -1976,7 +1971,6 @@ mod tests {
             0,
         ));
         body.extend(std::iter::repeat_n(0u8, FLINCH_PAYLOAD_LEN));
-        // Knockback payload: u16 u16 f32 f32 u32.
         body.extend(timed_stage_bytes(
             KNOCKBACK_OPCODE,
             KNOCKBACK_STAGE_WORDS,
@@ -2286,11 +2280,11 @@ mod vehicle_contract_tests {
         assert_eq!(scheduler.stages[0].stage.follow_points, None);
     }
 
+    /// Anchors from the global scene file's census: ex1a plays the 1c* routes,
+    /// ex1b the 2c* routes, mov2 the c1* through c4* routes; each assert's zone id
+    /// is that route's hex prefix.
     #[test]
     fn zone_camera_route_name_spells_the_hex_zone_prefix_and_decimal_index() {
-        // Anchors from the global scene file's census: ex1a plays 1c* routes
-        // (zone 28 = 0x1C), ex1b plays 2c* (44 = 0x2C), mov2 plays c1* to c4*
-        // (zones 193 to 196).
         assert_eq!(zone_camera_route_name(0x1C, 1), *b"1c01");
         assert_eq!(zone_camera_route_name(0x2C, 14), *b"2c14");
         assert_eq!(zone_camera_route_name(0xC1, 7), *b"c107");
@@ -2298,9 +2292,9 @@ mod vehicle_contract_tests {
         assert_eq!(zone_camera_route_name(0, 0), *b"0000");
     }
 
-    // Retail-byte guard (skips without an install). The 0x2D keys of the Chamber of
-    // Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT): the corpus
-    // scan's dominant rule.
+    /// Retail-byte guard (skips without an install). The MAPSCHEDULOR keys of the
+    /// Chamber of Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT):
+    /// the corpus scan's dominant rule.
     #[test]
     fn zone_scene_resolves_in_the_zones_own_model_dat() {
         let Some(root) = crate::archive::open_test_install() else {
@@ -2317,8 +2311,8 @@ mod vehicle_contract_tests {
         }
     }
 
-    // Retail-byte guard (skips without an install). Sealion's Den (32) event 100
-    // runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
+    /// Retail-byte guard (skips without an install). Sealion's Den (32) event 100
+    /// runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
     #[test]
     fn zone_scene_resolves_sealions_den_lwon_in_its_own_model_dat() {
         let Some(root) = crate::archive::open_test_install() else {
@@ -2329,11 +2323,11 @@ mod vehicle_contract_tests {
         assert_eq!(zone_scene_file_id(&root, 32, *b"lwon"), Some(file));
     }
 
-    // Retail-byte guard (skips without an install). A repeated 0x2D lookup for the
-    // same (zone, key) is served from the memo instead of re-reading the zone's
-    // model DAT; an overlay-swap clear forces one re-resolve. The probe key is
-    // unique to this test so parallel tests resolving real keys cannot move the
-    // per-key counter.
+    /// Retail-byte guard (skips without an install). A repeated MAPSCHEDULOR lookup
+    /// for the same (zone, key) is served from the memo instead of re-reading the
+    /// zone's model DAT; an overlay-swap clear forces one re-resolve. The probe key
+    /// is unique to this test so parallel tests resolving real keys leave its
+    /// per-key counter alone.
     #[test]
     fn zone_scene_lookups_are_memoized_and_cleared() {
         let Some(root) = crate::archive::open_test_install() else {
@@ -2362,9 +2356,9 @@ mod vehicle_contract_tests {
         );
     }
 
-    // Retail-byte guard (skips without an install). Heavens' Tower (242) carries no
-    // `hshi` in its own model DAT; the key resolves in the partner zone Full Moon
-    // Fountain (170)'s model DAT: a ZONE_SCENE_PARTNERS instance/entrance pair.
+    /// Retail-byte guard (skips without an install). Heavens' Tower (242) carries no
+    /// `hshi` in its own model DAT; the key resolves in the partner zone Full Moon
+    /// Fountain (170)'s model DAT: a ZONE_SCENE_PARTNERS instance/entrance pair.
     #[test]
     fn zone_scene_falls_back_to_the_partner_zone_model_dat() {
         let Some(root) = crate::archive::open_test_install() else {

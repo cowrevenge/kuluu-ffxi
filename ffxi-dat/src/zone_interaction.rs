@@ -435,23 +435,23 @@ mod tests {
         ]
     }
 
+    /// 15 wide, 2 thick: the probes sit just inside each half-extent, then just outside it.
     #[test]
     fn local_axes_match_the_declared_extents() {
         let gate = sandoria_z6e0();
         let (wide, thin) = local_axes(&gate);
-        // 15 wide, 2 thick: just inside each half-extent, just outside it.
         assert!(gate.contains(offset(gate.position, wide, 7.4)));
         assert!(!gate.contains(offset(gate.position, wide, 7.6)));
         assert!(gate.contains(offset(gate.position, thin, 0.9)));
         assert!(!gate.contains(offset(gate.position, thin, 1.1)));
     }
 
+    /// 2.5 units either side of the center along the 2-unit-thick axis, so neither
+    /// endpoint is in the box and a point test sees nothing.
     #[test]
     fn sweep_catches_a_step_that_clears_the_gate_entirely() {
         let gate = sandoria_z6e0();
         let (_, thin) = local_axes(&gate);
-        // 2.5 units either side of the center along the 2-unit-thick axis, so
-        // neither endpoint is in the box and a point test sees nothing.
         let before = offset(gate.position, thin, 2.5);
         let after = offset(gate.position, thin, -2.5);
         assert!(!gate.contains(before));
@@ -472,12 +472,12 @@ mod tests {
         assert!(gate.crossed_by(gate.position, outside));
     }
 
+    /// Displaced past the gate's 15-unit width, then stepped across the thin axis the
+    /// same way the crossing test does.
     #[test]
     fn sweep_misses_a_step_that_walks_around_the_gate() {
         let gate = sandoria_z6e0();
         let (wide, thin) = local_axes(&gate);
-        // Displaced past the gate's 15-unit width, then stepped across the
-        // thin axis the same way the crossing test does.
         let beside = offset(gate.position, wide, 10.0);
         assert!(!gate.crossed_by(offset(beside, thin, 2.5), offset(beside, thin, -2.5)));
     }

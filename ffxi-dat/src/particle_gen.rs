@@ -18,13 +18,13 @@ use crate::{DatError, Result};
 /// The generator opcode streams a caller can be told about when a block is decoded by no arm.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 pub enum GeneratorSection {
-    /// Section 1 (body[0x70]) — generator-level per-frame updaters.
+    /// Section 1 — generator-level per-frame updaters.
     Setup,
-    /// Section 2 (body[0x74]) — particle initializers.
+    /// Section 2 — particle initializers.
     Initializers,
-    /// Section 3 (body[0x78]) — per-frame particle updaters.
+    /// Section 3 — per-frame particle updaters.
     Updaters,
-    /// Section 4 (body[0x7C]) — the element-die script.
+    /// Section 4 — the element-die script.
     ElementDie,
     /// `SoundGeneratorDef`'s section 2.
     SoundSetup,
@@ -42,9 +42,10 @@ pub enum GeneratorOpcodeOutcome {
 /// what it discards instead of inferring either from a missing visual.
 pub type GeneratorOpcodeSink<'a> = &'a mut dyn FnMut(GeneratorSection, u8, GeneratorOpcodeOutcome);
 
-// A generator chunk is offered to every def parser in turn and only one claims it, so a block is
-// only honestly this parse's business once the parse that saw it returns a def. Blocks are
-// buffered until then; a sound generator must not report its whole stream as particle initializers.
+/// A generator chunk is offered to every def parser in turn and only one claims it, so a block
+/// is only honestly this parse's business once the parse that saw it returns a def. Blocks are
+/// buffered until then; a sound generator must not report its whole stream as particle
+/// initializers.
 pub(crate) fn flush_blocks(sink: GeneratorOpcodeSink<'_>, blocks: &[(GeneratorSection, u8, bool)]) {
     for &(section, opcode, decoded) in blocks {
         sink(
@@ -1639,7 +1640,6 @@ impl ParticleGeneratorDef {
             }
         }
 
-        // Section 1 (body[0x70]) — generator-level per-frame updaters, the same block framing.
         let mut emit_cull = None;
         let mut association = None;
         let sec1_raw = u32_le(body, 0x70) as usize;
@@ -1683,7 +1683,6 @@ impl ParticleGeneratorDef {
             }
         }
 
-        // Section 4 (body[0x7C]) — the element-die script, the same block framing.
         let mut relife_on_expiry = false;
         let sec4_raw = u32_le(body, SEC4_OFFSET) as usize;
         if sec4_raw >= CHUNK_HEADER_LEN && sec4_raw - CHUNK_HEADER_LEN < body.len() {
@@ -2090,9 +2089,9 @@ pub(crate) mod test_support {
         v
     }
 
-    // A generator whose section-3 stream carries the celestial updaters: 0x45
-    // MoonPhaseSpriteSheetUpdater when `moon_phase_sprite`, then the 0x4E/0x4F color tables
-    // (each an expectZero32 followed by RGBA u8 quads).
+    /// A generator whose section-3 stream carries the celestial updaters: the moon-phase
+    /// sprite-sheet marker when `moon_phase_sprite`, then the day-of-week and moon-phase color
+    /// tables (each an expectZero32 followed by RGBA u8 quads).
     pub(crate) fn celestial_generator_body(
         moon_phase_sprite: bool,
         day_of_week: &[[u8; 4]; DAYS_OF_WEEK],
@@ -2126,6 +2125,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    /// The two non-visual LinkedDataType values (PointLight / Null): they reject the mesh.
+    const LINKED_DATA_POINT_LIGHT: u8 = 0x47;
+    const LINKED_DATA_NULL_PARTICLE: u8 = 0x57;
 
     #[test]
     fn parses_particle_generator_header_and_setup() {
@@ -2432,19 +2435,18 @@ mod tests {
     #[test]
     fn non_particle_setup_is_none() {
         let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = 0x47; // point light, not particle
+        setup[4 + 29] = LINKED_DATA_POINT_LIGHT;
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
 
-        // 0x57 Null particle type is likewise non-visual and rejected.
         let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = 0x57;
+        setup[4 + 29] = LINKED_DATA_NULL_PARTICLE;
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
     }
 
-    // Regression pin (Poison's venom cloud): a 0x0E SpriteSheet generator used to be dropped
-    // because only 0x0B was accepted. It must now parse to Some with mesh_kind == SpriteSheet.
+    /// Poison's venom cloud pin: a `LINKED_DATA_SPRITE_SHEET` generator parses to Some with
+    /// `mesh_kind == SpriteSheet`, not just the `LINKED_DATA_STATIC_MESH` kind.
     #[test]
     fn sprite_sheet_setup_parses_with_mesh_kind() {
         let mut setup = op(0x01, 12, &[]);
@@ -2598,7 +2600,6 @@ mod tests {
             "sec3 0x02 must report decoded: {outcomes:?}"
         );
 
-        // Without the block the flag stays off and the walk still terminates cleanly.
         let mut body = build(&sec2, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
@@ -2825,8 +2826,6 @@ mod tests {
         assert!(def.oscillation);
         assert_eq!(def.oscillation_applier_x, Some([2.0, 1.5, 0.25]));
 
-        // The same block on the section-2 stream is a KeyFrameValueSetup (scale.z track),
-        // not an applier.
         let mut wrong = setup.clone();
         wrong.extend(op(0x29, 4, &ap));
         let plain = ParticleGeneratorDef::parse(&build(&wrong, 1, 1))
@@ -2863,8 +2862,6 @@ mod tests {
         assert!(def.oscillation);
         assert_eq!(def.oscillation_applier_z, Some([3.0, 1.0, 0.0]));
 
-        // The same block on the section-2 stream is a KeyFrameValueSetup (color.g track),
-        // not an applier.
         let mut wrong = setup.clone();
         wrong.extend(op(0x2B, 4, &ap));
         let plain = ParticleGeneratorDef::parse(&build(&wrong, 1, 1))
@@ -2901,8 +2898,6 @@ mod tests {
         assert!(def.oscillation);
         assert_eq!(def.oscillation_applier_y, Some([4.0, 0.5, 0.0]));
 
-        // The same block on the section-2 stream is a KeyFrameValueSetup (color.r track),
-        // not an applier.
         let mut wrong = setup.clone();
         wrong.extend(op(0x2A, 4, &ap));
         let plain = ParticleGeneratorDef::parse(&build(&wrong, 1, 1))
@@ -3093,7 +3088,6 @@ mod tests {
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.camera_shake, Some([2.0, 8.0, 0.001]));
 
-        // The 3-word form keeps the shake factor at zero.
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&2.0f32.to_le_bytes());
         payload[4..8].copy_from_slice(&8.0f32.to_le_bytes());
@@ -4305,7 +4299,7 @@ mod tests {
         v.iter().flat_map(|f| f.to_le_bytes()).collect()
     }
 
-    // Appends a section stream after the body and points the section word at it.
+    /// Appends a section stream after the body and points the section word at it.
     fn with_section(mut body: Vec<u8>, offset_word: usize, stream: &[u8]) -> Vec<u8> {
         body.extend_from_slice(&SEC2_TERMINATOR);
         let at = body.len();
@@ -4400,7 +4394,7 @@ mod tests {
         }));
     }
 
-    // `bnd0`'s StandardSetup dword is 0x01010000: the high u16 carries the specular selector.
+    /// `bnd0`'s StandardSetup carries the specular selector in the high u16 of its setup dword.
     #[test]
     fn specular_selector_and_params_are_read() {
         let mut setup = mesh_setup();

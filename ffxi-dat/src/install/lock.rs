@@ -14,8 +14,9 @@ pub fn lock_path(root: &Path) -> PathBuf {
     root.join(LOCK_FILE)
 }
 
-/// The most recent reader's note about itself; the OS lock is what actually
-/// holds, this only makes the refusal message name someone.
+/// A reader's note about itself; the OS lock is what actually holds, this
+/// only makes the refusal message name someone. Several readers keep the
+/// first one's note, since a locked range refuses the later writers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holder {
     pub pid: u32,
@@ -130,14 +131,17 @@ fn classify(path: PathBuf, file: &mut File, err: TryLockError) -> LockError {
 /// A reader's share of `root`; fails while an updater holds it exclusively.
 pub fn shared(root: &Path) -> Result<SharedLock, LockError> {
     let (path, mut file) = open_lock_file(root)?;
-    if let Err(e) = file.try_lock_shared() {
-        return Err(classify(path, &mut file, e));
-    }
+    // The note is written before the lock is taken: Windows refuses writes to
+    // a locked range even through the locking handle, so a post-lock write
+    // would leave the note empty and the refusal unnamed.
     let me = Holder::this_process();
     let _ = file
         .set_len(0)
         .and_then(|_| file.rewind())
         .and_then(|_| writeln!(file, "{} {}", me.pid, me.exe));
+    if let Err(e) = file.try_lock_shared() {
+        return Err(classify(path, &mut file, e));
+    }
     Ok(SharedLock { _file: file })
 }
 

@@ -259,14 +259,107 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_dir(src, dst).map_err(|e| {
-        io::Error::new(
+    match std::os::windows::fs::symlink_dir(src, dst) {
+        Ok(()) => Ok(()),
+        // A stock shell has no SeCreateSymbolicLinkPrivilege and Developer
+        // Mode off; a mount-point junction is the privilege-free directory
+        // link (`mklink /J`), and a registry link only ever binds two local
+        // roots, which is all a junction can target.
+        Err(e) if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => junction_dir(src, dst),
+        Err(e) => Err(io::Error::new(
             e.kind(),
             format!(
                 "{e} (directory symlinks need Developer Mode or an elevated shell; link with copy instead)"
             ),
+        )),
+    }
+}
+
+// CreateSymbolicLink's refusal when the shell lacks SeCreateSymbolicLinkPrivilege
+// and Developer Mode is off.
+#[cfg(windows)]
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+/// The junction is a mount-point reparse point; std only exposes true
+/// symlinks, which need the privilege above.
+#[cfg(windows)]
+fn junction_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    // A junction's target must be an absolute local path.
+    let target = src.canonicalize().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("a junction needs an absolute target: {e}"),
         )
-    })
+    })?;
+    match create_mount_point(&target, dst).and_then(|()| link_exists(dst)) {
+        Ok(()) => Ok(()),
+        // Machines that block the reparse-point APIs for unsigned processes
+        // report a privilege failure and create nothing; the system's own
+        // `mklink /J` still works there, so delegate to it.
+        Err(e) => mklink_junction(&target, dst)
+            .and_then(|()| link_exists(dst))
+            .map_err(|mk| io::Error::new(mk.kind(), format!("junction link refused ({e}); {mk}"))),
+    }
+}
+
+#[cfg(windows)]
+fn create_mount_point(target: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateSymbolicLinkW(
+            symlink_file: *const u16,
+            target_file: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let link: Vec<u16> = dst
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let target_wide: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Flags 0 is the mount point, the privilege-free directory link.
+    let ok = unsafe { CreateSymbolicLinkW(link.as_ptr(), target_wide.as_ptr(), 0) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// A blocked machine can report success without creating anything, so the
+// reparse point has to exist before the link counts.
+#[cfg(windows)]
+fn link_exists(dst: &Path) -> io::Result<()> {
+    is_symlink(dst)
+        .then_some(())
+        .ok_or_else(|| io::Error::other(format!("no link at {}", dst.display())))
+}
+
+// The system's own mount-point tool; on machines that block the reparse
+// APIs for unsigned processes it is the only way left.
+#[cfg(windows)]
+fn mklink_junction(target: &Path, dst: &Path) -> io::Result<()> {
+    let out = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(dst)
+        .arg(target)
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("launching cmd for mklink: {e}")))?;
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "mklink /J exited with {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]

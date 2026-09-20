@@ -47,11 +47,14 @@ pub struct Install {
 }
 
 /// The directory above `SquareEnix/`, which is how a detected install is
-/// usually recognised (`HorizonXI`, `PlayOnline`, a bottle name).
+/// usually recognised (`HorizonXI`, `PlayOnline`, a bottle name). A root
+/// shallower than that (a bare folder, a bottle mount) takes its own name;
+/// a full path carries separators, which `valid_name` rejects.
 fn detected_name(root: &Path) -> String {
     root.parent()
         .and_then(Path::parent)
         .and_then(Path::file_name)
+        .or_else(|| root.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.display().to_string())
 }

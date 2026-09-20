@@ -4670,9 +4670,14 @@ mod cull_tests {
     #[test]
     fn cull_respects_server_invisible_entities() {
         let mut app = App::new();
-        app.init_resource::<DrawDistance>()
-            .init_resource::<EntityTable>()
-            .add_systems(Update, cull_entities_by_distance);
+        // The default cull distance equals the out-of-range fixture's 100.0,
+        // which would sit the control on the boundary; pin it instead.
+        app.insert_resource(DrawDistance {
+            mob: 50.0,
+            ..DrawDistance::default()
+        })
+        .init_resource::<EntityTable>()
+        .add_systems(Update, cull_entities_by_distance);
 
         // Self at origin; cull needs exactly one IsSelf.
         app.world_mut().spawn((

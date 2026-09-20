@@ -21,11 +21,12 @@ use super::common::{
 use super::server_edit::ver_lock_label;
 use super::server_version_check::{ServerVersionStatus, VersionViolation};
 use super::{
-    Credentials, DatSetupReturn, LauncherState, LoginErrorMsg, LoginErrorReturn, LoginField,
-    LoginForm, ServerEditForm, ServerInfo, ServerSelectForm,
+    Credentials, DatSetupReturn, LauncherClients, LauncherState, LoginErrorMsg, LoginErrorReturn,
+    LoginField, LoginForm, ServerEditForm, ServerInfo, ServerSelectForm, SessionSource,
 };
 use crate::view_native::widgets::text_field::{text_field, TextField, TextFieldSubmitted};
 use crate::view_native::widgets::{TextFieldDisplay, TextFieldProps};
+use kuluu_session::playonline;
 
 #[derive(Component)]
 pub(super) struct LoginUiRoot;
@@ -52,6 +53,7 @@ pub(super) fn spawn_login_ui(
     version: Res<ServerVersionStatus>,
     era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
+    clients: Res<LauncherClients>,
 ) {
     build_login_ui(
         &mut commands,
@@ -61,6 +63,7 @@ pub(super) fn spawn_login_ui(
         &version,
         &era,
         &mark,
+        &clients.session_source,
     );
 }
 
@@ -74,6 +77,7 @@ pub(super) fn rebuild_login_ui_system(
     version: Res<ServerVersionStatus>,
     era: Res<ClientEraStatus>,
     mark: Res<BrandMark>,
+    clients: Res<LauncherClients>,
 ) {
     if !dirty.0 {
         return;
@@ -90,6 +94,7 @@ pub(super) fn rebuild_login_ui_system(
         &version,
         &era,
         &mark,
+        &clients.session_source,
     );
 }
 
@@ -115,6 +120,7 @@ fn build_login_ui(
     version: &ServerVersionStatus,
     era: &ClientEraStatus,
     mark: &BrandMark,
+    source: &SessionSource,
 ) {
     let user_initial = form.user.clone();
     let pass_initial = form.pass.clone();
@@ -136,36 +142,44 @@ fn build_login_ui(
                 spawn_version_banner(panel, version);
                 spawn_client_era_banner(panel, era);
 
-                spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
+                if let SessionSource::PlayOnline { session_file } = source {
+                    spawn_playonline_sign_in(
+                        panel,
+                        server.profile_name.as_deref(),
+                        session_file.as_deref(),
+                        login_blocked(version, era),
+                    );
+                } else {
+                    spawn_saved_accounts_row(panel, &server_key, &active_user, &accts);
 
-                spawn_field(panel, "Username", false, &user_initial, LoginField::User);
-                spawn_field(panel, "Password", true, &pass_initial, LoginField::Password);
+                    spawn_field(panel, "Username", false, &user_initial, LoginField::User);
+                    spawn_field(panel, "Password", true, &pass_initial, LoginField::Password);
 
-                let mut cb = panel.spawn(checkbox_bundle(
-                    (),
-                    Spawn((Text::new("Remember password"), ThemedText)),
-                ));
-                if remember {
-                    cb.insert(Checked);
-                }
-                cb.observe(
-                    |ev: On<ValueChange<bool>>,
-                     mut form: ResMut<LoginForm>,
-                     mut commands: Commands| {
-                        form.remember_password = ev.value;
-                        if ev.value {
-                            commands.entity(ev.source).insert(Checked);
-                        } else {
-                            commands.entity(ev.source).remove::<Checked>();
-                        }
-                    },
-                );
+                    let mut cb = panel.spawn(checkbox_bundle(
+                        (),
+                        Spawn((Text::new("Remember password"), ThemedText)),
+                    ));
+                    if remember {
+                        cb.insert(Checked);
+                    }
+                    cb.observe(
+                        |ev: On<ValueChange<bool>>,
+                         mut form: ResMut<LoginForm>,
+                         mut commands: Commands| {
+                            form.remember_password = ev.value;
+                            if ev.value {
+                                commands.entity(ev.source).insert(Checked);
+                            } else {
+                                commands.entity(ev.source).remove::<Checked>();
+                            }
+                        },
+                    );
 
-                let blocked = login_blocked(version, era);
+                    let blocked = login_blocked(version, era);
 
-                panel.spawn(row()).with_children(|r| {
-                    if !blocked {
-                        r.spawn(button_bundle(
+                    panel.spawn(row()).with_children(|r| {
+                        if !blocked {
+                            r.spawn(button_bundle(
                             ButtonBundleProps {
                                 variant: ButtonVariant::Primary,
                                 ..default()
@@ -183,34 +197,203 @@ fn build_login_ui(
                                 }
                             },
                         );
-                    }
+                        }
 
-                    r.spawn(button_bundle(
-                        ButtonBundleProps::default(),
-                        (),
-                        Spawn((Text::new("Create account"), ThemedText)),
-                    ))
-                    .insert_if(DefaultFocusTarget, || blocked)
-                    .observe(
-                        |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
-                            next.set(LauncherState::CreateAccount);
-                        },
-                    );
+                        r.spawn(button_bundle(
+                            ButtonBundleProps::default(),
+                            (),
+                            Spawn((Text::new("Create account"), ThemedText)),
+                        ))
+                        .insert_if(DefaultFocusTarget, || blocked)
+                        .observe(
+                            |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
+                                next.set(LauncherState::CreateAccount);
+                            },
+                        );
 
-                    r.spawn(button_bundle(
-                        ButtonBundleProps::default(),
-                        (),
-                        Spawn((Text::new("Change password"), ThemedText)),
-                    ))
-                    .observe(
-                        |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
-                            next.set(LauncherState::ChangePassword);
-                        },
-                    );
-                });
+                        r.spawn(button_bundle(
+                            ButtonBundleProps::default(),
+                            (),
+                            Spawn((Text::new("Change password"), ThemedText)),
+                        ))
+                        .observe(
+                            |_ev: On<Activate>, mut next: ResMut<NextState<LauncherState>>| {
+                                next.set(LauncherState::ChangePassword);
+                            },
+                        );
+                    });
+                }
             });
         });
 }
+
+/// LEGAL.md section 7, said once per profile where the player signs in.
+const POL_TERMS_NOTICE: [&str; 3] = [
+    "Connecting with a third-party client may breach the terms of service of",
+    "the server you connect to. Kuluu does not patch or inject into any Square",
+    "Enix program; any consequence to your account is yours alone.",
+];
+
+fn terms_acknowledged(profile_name: Option<&str>) -> bool {
+    let Some(name) = profile_name else {
+        return false;
+    };
+    launcher_store::load()
+        .servers
+        .iter()
+        .any(|p| p.name == name && p.terms_acknowledged)
+}
+
+fn acknowledge_terms(profile_name: Option<&str>) {
+    let Some(name) = profile_name else {
+        return;
+    };
+    let mut store = launcher_store::load();
+    for profile in store.servers.iter_mut().filter(|p| p.name == name) {
+        profile.terms_acknowledged = true;
+    }
+    if let Err(e) = launcher_store::save(&store) {
+        tracing::warn!(error = %e, "launcher_store: save failed");
+    }
+}
+
+fn describe_age(age: std::time::Duration) -> String {
+    let minutes = age.as_secs() / 60;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else if minutes < 60 * 24 {
+        format!("{} h", minutes / 60)
+    } else {
+        format!("{} d", minutes / (60 * 24))
+    }
+}
+
+/// A PlayOnline profile signs in with the viewer's session file, not a
+/// username and password: show what was found, the terms notice until the
+/// player has read it, and a Log in that opens the lobby with that session.
+fn spawn_playonline_sign_in(
+    panel: &mut ChildSpawnerCommands,
+    profile_name: Option<&str>,
+    session_file: Option<&std::path::Path>,
+    blocked: bool,
+) {
+    let located = playonline::locate(session_file);
+    let ready = matches!(located, Ok(Some(_)));
+    match &located {
+        Ok(Some(found)) => {
+            panel.spawn(hint(format!(
+                "PlayOnline session for account {} from {}",
+                found.session.account_id,
+                found.path.display()
+            )));
+            if let Some(age) = found.age(std::time::SystemTime::now()) {
+                panel.spawn(hint(format!("Issued {} ago.", describe_age(age))));
+            }
+        }
+        Ok(None) => {
+            panel.spawn(hint("No PlayOnline session found."));
+            panel.spawn(hint(format!(
+                "Sign in with the PlayOnline Viewer, then place the session at {}",
+                playonline::expected_session_path(session_file).display()
+            )));
+        }
+        Err(e) => {
+            panel.spawn(hint(format!("Session file: {e:#}")));
+        }
+    }
+
+    let acknowledged = terms_acknowledged(profile_name);
+    if !acknowledged {
+        for line in POL_TERMS_NOTICE {
+            panel.spawn(hint(line));
+        }
+    }
+
+    let name = profile_name.map(str::to_string);
+    panel.spawn(row()).with_children(|r| {
+        if !acknowledged {
+            r.spawn(button_bundle(
+                ButtonBundleProps {
+                    variant: ButtonVariant::Primary,
+                    ..default()
+                },
+                (),
+                Spawn((Text::new("I understand"), ThemedText)),
+            ))
+            .insert(DefaultFocusTarget)
+            .observe(move |_ev: On<Activate>, mut dirty: ResMut<LoginUiDirty>| {
+                acknowledge_terms(name.as_deref());
+                dirty.0 = true;
+            });
+        } else if ready && !blocked {
+            r.spawn(button_bundle(
+                ButtonBundleProps {
+                    variant: ButtonVariant::Primary,
+                    ..default()
+                },
+                (),
+                Spawn((Text::new("Log in"), ThemedText)),
+            ))
+            .insert(DefaultFocusTarget)
+            .observe(
+                |_ev: On<Activate>,
+                 mut form: ResMut<LoginForm>,
+                 mut next: ResMut<NextState<LauncherState>>| {
+                    form.pol_in_house = false;
+                    next.set(LauncherState::AuthInFlight);
+                },
+            );
+        }
+        r.spawn(button_bundle(
+            ButtonBundleProps::default(),
+            (),
+            Spawn((Text::new("Check again"), ThemedText)),
+        ))
+        .insert_if(DefaultFocusTarget, || acknowledged && !(ready && !blocked))
+        .observe(|_ev: On<Activate>, mut dirty: ResMut<LoginUiDirty>| {
+            dirty.0 = true;
+        });
+    });
+
+    if acknowledged && !blocked {
+        spawn_playonline_in_house(panel);
+    }
+}
+
+/// The in-house sign-in: sign in to a PlayOnline account without the Viewer.
+/// The account handshake is reimplemented from static research; running it
+/// contacts Square Enix with the player's own account, and it is not yet
+/// complete end to end, so it is offered separately from the session-file
+/// path and labelled experimental.
+fn spawn_playonline_in_house(panel: &mut ChildSpawnerCommands) {
+    for line in POL_IN_HOUSE_NOTICE {
+        panel.spawn(hint(line));
+    }
+    spawn_field(panel, "Member name", false, "", LoginField::User);
+    spawn_field(panel, "Password", true, "", LoginField::Password);
+    panel.spawn(row()).with_children(|r| {
+        r.spawn(button_bundle(
+            ButtonBundleProps::default(),
+            (),
+            Spawn((Text::new("In-house sign in (experimental)"), ThemedText)),
+        ))
+        .observe(
+            |_ev: On<Activate>,
+             mut form: ResMut<LoginForm>,
+             mut next: ResMut<NextState<LauncherState>>| {
+                if !form.user.is_empty() && !form.pass.is_empty() {
+                    form.pol_in_house = true;
+                    next.set(LauncherState::AuthInFlight);
+                }
+            },
+        );
+    });
+}
+
+const POL_IN_HOUSE_NOTICE: [&str; 2] = [
+    "Experimental: sign in to a PlayOnline account without the Viewer. This",
+    "contacts Square Enix with your own account and is not yet complete.",
+];
 
 fn spawn_saved_accounts_row(
     panel: &mut ChildSpawnerCommands,

@@ -66,6 +66,7 @@ const PARTICLE_DAMPEN_OPCODE: u8 = 0x1E;
 // spell file-table offset plus the index to the effect DAT and runs its `main` routine
 // on the actor (EffectRoutineInstance.kt handleSpellEffect).
 const SPELL_EFFECT_OPCODE: u8 = 0x19;
+const ELEVATOR_TRAVEL_OPCODE: u8 = 0x1D;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -384,6 +385,14 @@ pub enum StageKind {
     /// resource up by the tag's four-char name and calls CameraResource::CreateCameraTask).
     CameraRoute,
 
+    /// 0x1D - a lift platform's travel between the two floor heights its zone-DAT
+    /// RID entry states, over `duration_frames`. The `@`-group routines
+    /// research/xim/src/jsMain/kotlin/xim/poc/Actor.kt updateElevatorDisplay names
+    /// (`mv01` up, `mv10` down, `mv00`/`mv11` settle) each carry exactly one;
+    /// in the shipped zone DATs its length is the lift's travel time (480 frames
+    /// for the Metalworks lifts, 720 for Pso'Xja's three tall shafts).
+    ElevatorTravel,
+
     Unknown,
 }
 
@@ -514,6 +523,7 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt parseSection2 - DisplayDeadRoutine: the actor is
             // dead from this stage on.
             DISPLAY_DEAD_OPCODE => Self::DisplayDead,
+            ELEVATOR_TRAVEL_OPCODE => Self::ElevatorTravel,
             // research/xim EffectRoutineParser.kt parseSection2 — LinkedEffectRoutine with
             // `blocking = true`: the same sub-routine call as 0x03, except the parent stalls
             // until the child finishes (EffectRoutineInstance.kt createChild `blockers += newSequences`).
@@ -616,9 +626,13 @@ impl Scheduler {
                 let has_id = stage_bytes >= STAGE_WITH_ID_LEN;
                 // Argument-less opcodes are complete at two dwords; every other opcode needs the
                 // +8 id/payload dword present to map, so a short stage of an id opcode stays
-                // Unknown rather than misreading a neighbour's bytes as its id.
+                // Unknown rather than misreading a neighbour's bytes as its id. The lift travel
+                // stage is the one other id-less opcode with a meaning of its own: eight bytes,
+                // delay and duration both the leg length.
                 let kind = if has_id || argless_stage_opcode(raw_type) {
                     StageKind::from_stage(raw_type, length_words)
+                } else if raw_type == ELEVATOR_TRAVEL_OPCODE {
+                    StageKind::ElevatorTravel
                 } else {
                     StageKind::Unknown
                 };
@@ -1118,6 +1132,18 @@ mod tests {
             assert_eq!(s.stages[0].stage.raw_type, op, "raw opcode is preserved");
             assert_eq!(&s.stages[0].stage.id, b"4063");
         }
+    }
+
+    #[test]
+    fn opcode_1d_is_the_lift_travel_stage() {
+        const TRAVEL_FRAMES: u16 = 480;
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend_from_slice(&[ELEVATOR_TRAVEL_OPCODE, 0x02, 0, 0]);
+        body.extend_from_slice(&TRAVEL_FRAMES.to_le_bytes());
+        body.extend_from_slice(&TRAVEL_FRAMES.to_le_bytes());
+        let s = Scheduler::parse(*b"mv01", &body).unwrap();
+        assert_eq!(s.stages[0].stage.kind, StageKind::ElevatorTravel);
+        assert_eq!(s.stages[0].stage.duration_frames, TRAVEL_FRAMES);
     }
 
     // Boost's effect DAT (ROM/16/0.DAT) plays its caster sound via opcode 0x0A with

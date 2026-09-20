@@ -395,6 +395,21 @@ input-driven bugs; use `debug_drive` for those.
 
 ## Gotchas
 
+- **LSB rejects the HorizonXI install's version code.** The default install may
+  be `hxi` (patch 30230905_0); the local LSB lobby answers its 0x26 with
+  loginErrors 331 (GAMES_DATA_HAS_BEEN_UPDATED) and the launcher shows
+  `auth failed`. Export `FFXI_DAT_PATH` to the retail install path
+  (`kuluu install path retail`) for the launch instead of changing the user's
+  default install.
+- **`debug_drive` is camera-relative, and the camera follows the heading a
+  socket `move` sets.** Which of forward/strafe walks along +x changes between
+  sessions and after every teleport. Probe with a 150 ms drive and read the
+  position delta before scripting a longer walk.
+- **Raw `{"cmd":"screenshot"}` from a launch.sh client is black until the
+  window has been raised once**; keep the position trace as the evidence and
+  take a single `capture.sh` frame (it raises the window) when a picture is
+  needed.
+
 - macOS: the Bevy/winit loop owns the OS main thread; the window opens on the
   user's desktop — tell them before spawning it.
 - Bevy's unfocused update mode is `reactive_low_power` at 60Hz, so a background

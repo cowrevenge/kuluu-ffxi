@@ -174,6 +174,7 @@ pub(super) fn ferry_packet_state_contract() {
                 size: SHIP_MODEL,
                 model_id: Some(SELECTOR_VALUE),
                 animation_start: Some(timestamp),
+                travel_secs: None,
             })
         );
         assert_eq!(ship.animation, animation);

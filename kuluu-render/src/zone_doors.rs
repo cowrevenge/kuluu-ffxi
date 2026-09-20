@@ -102,6 +102,11 @@ impl ZoneDoorLeaf {
         (self.four_cc, self.subchunk)
     }
 
+    /// The placement's authored translation, FFXI axes.
+    pub fn authored_translation(&self) -> Vec3 {
+        self.base_trans
+    }
+
     /// The leaf's world matrix under `pose`. [`DoorPose::default`] reproduces the
     /// matrix the placement spawned with, bit for bit.
     pub fn posed_transform(&self, pose: DoorPose) -> Mat4 {
@@ -253,6 +258,9 @@ pub struct ZoneDoors {
     source_file_id: Option<u32>,
     dirs: HashMap<u32, DoorDir>,
     leaves: HashMap<DoorLeafKey, LeafMotion>,
+    /// Absolute FFXI-space height a lift's `@` group currently sits at, keyed by
+    /// FourCC; `crate::elevators` owns the value, the leaf pass applies it.
+    platform_heights: HashMap<u32, f32>,
     collision_rects: Vec<ZoneInteraction>,
     load: Option<Task<DoorZoneData>>,
 }
@@ -294,6 +302,30 @@ impl ZoneDoors {
         self.leaves.get(&key).map(|m| m.pose).unwrap_or_default()
     }
 
+    pub fn set_platform_height(&mut self, four_cc: u32, y: f32) {
+        self.platform_heights.insert(four_cc, y);
+    }
+
+    pub fn clear_platform_height(&mut self, four_cc: u32) {
+        self.platform_heights.remove(&four_cc);
+    }
+
+    /// Whether `four_cc` is a lift platform group with a known height.
+    pub fn is_platform(&self, four_cc: u32) -> bool {
+        self.platform_heights.contains_key(&four_cc)
+    }
+
+    /// The pose a leaf renders with: its swing, plus the lift height override for
+    /// a platform group, which replaces the placement's authored height outright
+    /// the way XIM's ZoneDrawer writes the actor's y over the object's.
+    pub fn leaf_pose(&self, leaf: &ZoneDoorLeaf) -> DoorPose {
+        let mut pose = self.pose(leaf.key());
+        if let Some(&y) = self.platform_heights.get(&leaf.four_cc) {
+            pose.translation.y = y - leaf.authored_translation().y;
+        }
+        pose
+    }
+
     pub fn dir(&self, four_cc: u32) -> Option<&DoorDir> {
         self.dirs.get(&four_cc)
     }
@@ -306,6 +338,7 @@ impl ZoneDoors {
     fn clear_zone_state(&mut self) {
         self.dirs.clear();
         self.leaves.clear();
+        self.platform_heights.clear();
         self.collision_rects.clear();
         self.load = None;
     }
@@ -583,7 +616,7 @@ pub fn animate_zone_door_leaves(
         }
     }
     for (leaf, mut transform) in &mut q {
-        let posed = Transform::from_matrix(leaf.posed_transform(doors.pose(leaf.key())));
+        let posed = Transform::from_matrix(leaf.posed_transform(doors.leaf_pose(leaf)));
         if *transform != posed {
             *transform = posed;
         }
@@ -1103,7 +1136,8 @@ mod tests {
             door_four_cc(Some(&EntityLook::Transport {
                 size: 3,
                 model_id: None,
-                animation_start: None
+                animation_start: None,
+                travel_secs: None,
             })),
             None
         );

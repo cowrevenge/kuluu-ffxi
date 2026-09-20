@@ -255,7 +255,14 @@ pub fn update_dialog_grid_system(
         (&DialogGridIcon, &mut Node, &mut ImageNode),
         (Without<DialogGridBox>, Without<DialogGridCellFrame>),
     >,
-    mut label_q: Query<(&DialogGridLabel, &mut Text, &mut Node), Without<DialogGridIcon>>,
+    mut label_q: Query<
+        (&DialogGridLabel, &mut Text, &mut Node),
+        (
+            Without<DialogGridBox>,
+            Without<DialogGridCellFrame>,
+            Without<DialogGridIcon>,
+        ),
+    >,
 ) {
     if !state.is_changed() && !mode.is_changed() {
         return;
@@ -887,6 +894,62 @@ mod tests {
             assert!(row_displays(app.world_mut())
                 .iter()
                 .all(|d| *d == Display::None));
+        }
+
+        #[test]
+        fn grid_draw_runs_with_disjoint_node_queries() {
+            use kuluu_snapshot::{DialogGrid, DialogGridCell};
+
+            let mut app = app_with_panel();
+            app.world_mut().init_resource::<ItemDatRoot>();
+            app.world_mut().init_resource::<ItemIconCache>();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                let mut frame = d();
+                frame.grid = Some(DialogGrid {
+                    cols: 2,
+                    rows: 1,
+                    cells: vec![
+                        DialogGridCell {
+                            choice: Some(0),
+                            item_no: Some(4096),
+                            quantity: 3,
+                            sent: false,
+                        },
+                        DialogGridCell::default(),
+                    ],
+                });
+                state.snapshot.dialog = Some(frame);
+            }
+            // B0001: the box/frame/icon/label queries all take &mut Node, so the
+            // system only initializes if their filters keep them disjoint.
+            app.world_mut()
+                .run_system_once(update_dialog_grid_system)
+                .unwrap();
+
+            let box_node = app
+                .world_mut()
+                .query_filtered::<&Node, With<DialogGridBox>>()
+                .iter(app.world())
+                .next()
+                .expect("grid box spawned")
+                .clone();
+            assert_eq!(box_node.display, Display::Flex);
+            let want_cols = 2.0;
+            assert_eq!(
+                box_node.width,
+                Val::Px(want_cols * CELL_PX + (want_cols - 1.0) * CELL_GAP_PX)
+            );
+
+            let mut counts: Vec<String> = app
+                .world_mut()
+                .query_filtered::<(&DialogGridLabel, &Text), ()>()
+                .iter(app.world())
+                .filter(|(l, _)| l.index < 2)
+                .map(|(l, t)| format!("{}:{}", l.index, t.as_str()))
+                .collect();
+            counts.sort();
+            assert_eq!(counts, vec!["0:3".to_string(), "1:".to_string()]);
         }
     }
 }

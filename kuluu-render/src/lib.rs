@@ -39,6 +39,7 @@ pub mod fishing_spot;
 pub mod gpu_assets;
 pub mod graphics;
 pub use graphics::settings as graphics_settings;
+pub mod elevators;
 pub mod hud;
 pub mod hud_hide;
 pub mod input_mode;
@@ -233,7 +234,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_plugins(zone_particles::ZoneParticlesPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins(zone_doors::ZoneDoorsPlugin);
+        app.add_plugins((zone_doors::ZoneDoorsPlugin, elevators::ElevatorsPlugin));
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_sfx::ZoneSfxPlugin);

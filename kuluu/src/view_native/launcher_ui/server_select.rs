@@ -60,7 +60,11 @@ pub(super) fn spawn_ui(
                 }
 
                 for (idx, s) in servers.iter().enumerate() {
-                    let label = format!("{} - {}:{}", s.name, s.host, s.auth_port);
+                    let label = if s.is_playonline() {
+                        format!("{} - {} {}", s.name, s.host, s.flavor.label())
+                    } else {
+                        format!("{} - {}:{}", s.name, s.host, s.auth_port)
+                    };
                     let server_name = s.name.clone();
                     let variant = if idx == cursor_idx {
                         ButtonVariant::Primary

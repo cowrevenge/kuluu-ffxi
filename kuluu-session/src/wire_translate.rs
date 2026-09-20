@@ -698,10 +698,12 @@ pub fn look_to_wire(l: ffxi_proto::decode::LookData) -> wire::EntityLook {
             size,
             model_id,
             animation_start,
+            travel_secs,
         } => wire::EntityLook::Transport {
             size,
             model_id,
             animation_start,
+            travel_secs,
         },
     }
 }

@@ -138,6 +138,13 @@ impl ZoneInteraction {
         self.source_id.starts_with("f")
     }
 
+    /// A lift shaft: the box a rider is carried inside, whose
+    /// `elevator_bottom_y` / `elevator_top_y` are the platform's two floors
+    /// (research/xim DatResource.kt isElevatorId).
+    pub fn is_elevator(&self) -> bool {
+        self.source_id.starts_with("@")
+    }
+
     pub fn is_mog_house_line(&self) -> bool {
         self.is_zone_line()
             && (self.source_id.starts_with(MOG_HOUSE_PREFIX_CLASSIC)

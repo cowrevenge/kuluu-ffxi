@@ -4,13 +4,16 @@ description: >
   Observe and drive the real FFXI client to establish how retail behaves, on
   whatever host runs it (native Windows, Wine or a VM on macOS, Wine/Proton on
   Linux) and whatever server it talks to (a private server such as HorizonXI,
-  or a local LandSandBoat stack). Capture reference screenshots, send
-  keys/clicks, and compare against the Kuluu remake. Use this whenever the
-  question is "how does retail / the original client do this?", whenever asked
-  to capture retail reference footage or screenshots, to launch or drive the
-  retail client, or to compare the remake's rendering, HUD, menus, animation,
-  camera or input against the real game -- even when the request names no
-  platform and never says the word "retail".
+  or a local LandSandBoat stack). Use this whenever the answer depends on what
+  the original client actually does or shows: capturing reference screenshots
+  or footage, driving its menus, reading verbatim on-screen text such as a
+  help-bar or dialog string, checking whether a HUD element is really vanilla
+  or something this project invented, or comparing the remake's rendering, HUD,
+  menus, animation, camera or input against the real game -- even when the
+  request names no platform and never says the word "retail". Also use it for
+  the mechanics of doing that here: launching the client, pointing it at a
+  server, or whether the capture and drive tooling works on this host. Not for
+  driving the Kuluu remake itself, which is the verify skill.
 ---
 
 # Observing the retail client
@@ -237,7 +240,9 @@ Prefer `click-text '<regex>'` over raw coordinates for anything you located by
 reading a screenshot. It OCRs, clicks the matched text's centre, and fails loudly
 when the text is not there -- self-verifying, where a bare coordinate click
 silently lands on wallpaper. Permission classifiers also tend to accept it where
-they deny a blind coordinate click.
+they deny a blind coordinate click. Anchor the regex (`'^Accept'`, not
+`Accept`): it takes the first matching OCR line, and a dialog's body text
+usually contains the button's word before the button does.
 
 ## Reading captures
 

@@ -13,7 +13,7 @@ use super::{
     ChangePasswordForm, CharCreateError, CharCreateForm, CharListData, CreateAccountErrorMsg,
     CreateAccountForm, Credentials, LauncherClients, LauncherState, LoginErrorMsg,
     LoginErrorReturn, LoginForm, OpenedLobby, PendingConnect, RuntimeHandle, SelectedChar,
-    ServerSelectForm,
+    ServerSelectForm, SessionSource,
 };
 
 use crate::launcher_store::{self, keyring_account_key, SavedAccount, KEYRING_SERVICE};
@@ -81,12 +81,13 @@ pub(super) fn spawn_auth_task(
     let (tx, rx) = oneshot::channel();
     let auth: Arc<AuthClient> = clients.auth.clone();
     let lobby: Arc<LobbyClient> = clients.lobby.clone();
-    let uses_auth_server = clients.uses_auth_server;
+    let source = clients.session_source.clone();
     let user = form.user.clone();
     let pass = form.pass.clone();
+    let in_house = form.pol_in_house;
 
     runtime.0.spawn(async move {
-        let res = run_auth_then_open(&auth, &lobby, uses_auth_server, &user, &pass).await;
+        let res = run_auth_then_open(&auth, &lobby, &source, in_house, &user, &pass).await;
         let _ = tx.send(res);
     });
 
@@ -94,35 +95,50 @@ pub(super) fn spawn_auth_task(
 }
 
 /// A PlayOnline profile has no auth server to talk to, so the session comes
-/// from the handoff file instead of from a username and password.
+/// from the viewer's session file instead of from a username and password.
 async fn obtain_session(
     auth: &AuthClient,
-    uses_auth_server: bool,
+    source: &SessionSource,
+    in_house: bool,
     user: &str,
     pass: &str,
 ) -> Result<AuthSession> {
-    if !uses_auth_server {
-        return kuluu_session::playonline::session_from_env()?.ok_or_else(|| {
-            anyhow!(
-                "this server expects a PlayOnline session; set {} to the handoff file",
-                kuluu_session::playonline::SESSION_FILE_ENV
-            )
-        });
+    match source {
+        SessionSource::AuthServer => auth
+            .login(user, pass)
+            .await
+            .map_err(|e| anyhow!("login: {e}")),
+        SessionSource::PlayOnline { .. } if in_house => {
+            let creds = kuluu_session::pol_inhouse::Credentials {
+                member: user.to_string(),
+                password: pass.to_string(),
+            };
+            kuluu_session::pol_inhouse::login(String::new(), String::new(), creds).await
+        }
+        SessionSource::PlayOnline { session_file } => {
+            let located = kuluu_session::playonline::locate(session_file.as_deref())?;
+            located.map(|l| l.session).ok_or_else(|| {
+                anyhow!(
+                    "no PlayOnline session; sign in with the PlayOnline Viewer and place \
+                     the session at {}",
+                    kuluu_session::playonline::expected_session_path(session_file.as_deref())
+                        .display()
+                )
+            })
+        }
     }
-    auth.login(user, pass)
-        .await
-        .map_err(|e| anyhow!("login: {e}"))
 }
 
 async fn run_auth_then_open(
     auth: &AuthClient,
     lobby: &LobbyClient,
-    uses_auth_server: bool,
+    source: &SessionSource,
+    in_house: bool,
     user: &str,
     pass: &str,
 ) -> Result<AuthOk> {
     tracing::debug!(user, "auth task: logging in");
-    let session = obtain_session(auth, uses_auth_server, user, pass).await?;
+    let session = obtain_session(auth, source, in_house, user, pass).await?;
     tracing::debug!("auth task: login succeeded, opening lobby");
     let handle = lobby
         .open(&session)
@@ -169,7 +185,9 @@ pub(super) fn poll_auth_system(
                 .selected
                 .clone()
                 .unwrap_or_else(|| server_info.server.clone());
-            save_on_success(&server_name, &ok.user, &ok.pass, form.remember_password);
+            if !ok.user.is_empty() {
+                save_on_success(&server_name, &ok.user, &ok.pass, form.remember_password);
+            }
             creds.user = ok.user;
             creds.pass = ok.pass;
             commands.remove_resource::<AuthInFlightChan>();
@@ -287,12 +305,11 @@ pub(super) fn spawn_connect_task(
             let (tx, rx) = oneshot::channel();
             let auth: Arc<AuthClient> = clients.auth.clone();
             let lobby: Arc<LobbyClient> = clients.lobby.clone();
-            let uses_auth_server = clients.uses_auth_server;
+            let source = clients.session_source.clone();
             let user = creds.user.clone();
             let pass = creds.pass.clone();
             runtime.0.spawn(async move {
-                let res =
-                    reopen_and_select(&auth, &lobby, uses_auth_server, &user, &pass, &slot).await;
+                let res = reopen_and_select(&auth, &lobby, &source, &user, &pass, &slot).await;
                 let _ = tx.send(res);
             });
             commands.insert_resource(ConnectInFlightChan { rx });
@@ -326,12 +343,12 @@ async fn select_with_existing_handle(
 async fn reopen_and_select(
     auth: &AuthClient,
     lobby: &LobbyClient,
-    uses_auth_server: bool,
+    source: &SessionSource,
     user: &str,
     pass: &str,
     slot: &kuluu_session::lobby_client::CharSlot,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
-    let session = obtain_session(auth, uses_auth_server, user, pass)
+    let session = obtain_session(auth, source, false, user, pass)
         .await
         .map_err(|e| ConnectErr {
             msg: format!("re-login: {e}"),

@@ -25,6 +25,9 @@ pub struct MoveEnvParams<'w, 's> {
     /// closed door leaves (walls + floors) and mob circles. Bundled here — this
     /// fn sits at bevy's 16-param SystemParam ceiling.
     pub obstacles: Res<'w, super::walker::obstacles::ObstacleSet>,
+    /// Lift platforms: a rider's height follows the platform, not the floor
+    /// the walker's column probe finds under the shaft.
+    pub elevators: Res<'w, kuluu_render::elevators::ZoneElevators>,
     /// Debug noclip: when on, the wall clamp in dispatch_movement is bypassed
     /// (grounding stays on). Toggled from the Debug menu NoClip row or /noclip.
     pub hud_panels: Res<'w, kuluu_render::hud::HudPanels>,
@@ -1446,15 +1449,20 @@ pub fn dispatch_movement_system(
             speed_yps,
             &res,
         );
-        if (res.feet_z - basis_pos.z).abs() > 1e-3 {
+        let feet_z = ride_lift(
+            &env.elevators,
+            &mut locals.walker,
+            [basis_pos.x, basis_pos.y, res.feet_z],
+        );
+        if (feet_z - basis_pos.z).abs() > 1e-3 {
             let _ = cmd_tx.0.try_send(AgentCommand::Move {
                 x: basis_pos.x,
                 y: basis_pos.y,
-                z: res.feet_z,
+                z: feet_z,
                 heading: self_pos.heading,
             });
         }
-        prediction.pos = Vec3::new(basis_pos.x, basis_pos.y, res.feet_z);
+        prediction.pos = Vec3::new(basis_pos.x, basis_pos.y, feet_z);
         return;
     }
 
@@ -1619,7 +1627,11 @@ pub fn dispatch_movement_system(
 
     let final_x = basis_pos.x + res.dx;
     let final_y = basis_pos.y + res.dy;
-    let final_z = res.feet_z;
+    let final_z = ride_lift(
+        &env.elevators,
+        &mut locals.walker,
+        [final_x, final_y, res.feet_z],
+    );
 
     super::walker::debug::record_tick(
         &mut field_dbg,
@@ -1640,6 +1652,25 @@ pub fn dispatch_movement_system(
     });
 
     prediction.pos = Vec3::new(final_x, final_y, final_z);
+}
+
+/// A rider's feet sit on the lift platform, whatever the walker's column probe
+/// found under the shaft. Landing on the platform also ends any fall the probe
+/// started, so a descending platform is not integrated as a drop every tick
+/// (research/xim/src/jsMain/kotlin/xim/poc/Scene.kt checkElevatorInteraction
+/// snaps the rider's y to the platform actor's).
+fn ride_lift(
+    elevators: &kuluu_render::elevators::ZoneElevators,
+    walker: &mut super::walker::Walker,
+    wire: [f32; 3],
+) -> f32 {
+    match elevators.ride_height(wire) {
+        Some(platform_z) => {
+            walker.mode = super::walker::WalkMode::Stopped;
+            platform_z
+        }
+        None => wire[2],
+    }
 }
 
 /// How long the player must be under every floor in their column before the
@@ -1717,6 +1748,7 @@ pub(crate) fn recover_self_ground_system(
     cmd_tx: Res<CommandTx>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     mzb_in_flight: Res<kuluu_render::dat_mzb::LoadMzbInFlight>,
+    elevators: Res<kuluu_render::elevators::ZoneElevators>,
     mut tracker: Local<GroundRecoveryTracker>,
 ) {
     let self_pos = state.snapshot.self_pos;
@@ -1731,6 +1763,7 @@ pub(crate) fn recover_self_ground_system(
     let candidate = ground_recovery_candidate(
         &collision,
         &mzb_in_flight,
+        &elevators,
         state.snapshot.zone_id,
         self_id,
         reported_pos,
@@ -1786,6 +1819,7 @@ pub fn ground_recovery_command(
 fn ground_recovery_candidate(
     collision: &kuluu_render::dat_mzb::MzbCollisionGeometry,
     mzb_in_flight: &kuluu_render::dat_mzb::LoadMzbInFlight,
+    elevators: &kuluu_render::elevators::ZoneElevators,
     zone_id: Option<u16>,
     self_id: Option<u32>,
     pos: Vec3,
@@ -1793,6 +1827,11 @@ fn ground_recovery_candidate(
     let zone_id = zone_id?;
     let self_id = self_id?;
     if mzb_in_flight.any_pending() {
+        return None;
+    }
+    // A rider mid-shaft has no floor within reach by design: the platform is
+    // the floor, and it is not in the MZB collision set.
+    if elevators.ride_height([pos.x, pos.y, pos.z]).is_some() {
         return None;
     }
     let column = bevy::math::Vec2::new(pos.x, -pos.y);
@@ -2271,6 +2310,7 @@ mod tests {
             .init_resource::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
             .init_resource::<kuluu_render::dat_mzb::LoadMzbInFlight>()
             .init_resource::<super::super::walker::obstacles::ObstacleSet>()
+            .init_resource::<kuluu_render::elevators::ZoneElevators>()
             .init_resource::<kuluu_render::hud::HudPanels>()
             .init_resource::<kuluu_render::minimap::input::MinimapHoverGate>()
             .init_resource::<kuluu_render::MousePointer>()
@@ -2718,6 +2758,7 @@ mod tests {
         let candidate = ground_recovery_candidate(
             &collision,
             &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+            &kuluu_render::elevators::ZoneElevators::default(),
             Some(103),
             Some(7),
             WEDGE_POS,
@@ -2744,12 +2785,61 @@ mod tests {
             ground_recovery_candidate(
                 &collision,
                 &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+                &kuluu_render::elevators::ZoneElevators::default(),
                 Some(103),
                 Some(7),
                 Vec3::new(20.0, 0.0, 0.0),
             )
             .is_none(),
             "a diagnosis from the origin column must not select another column's floor"
+        );
+    }
+
+    /// A rider mid-shaft is above every floor in the column, which is the wedge
+    /// signature exactly; the platform under the feet is what makes it not one.
+    #[test]
+    fn recovery_leaves_a_lift_rider_on_the_platform() {
+        use ffxi_dat::zone_interaction::ZoneInteraction;
+        use kuluu_render::elevators::{Shaft, ShaftDir, ZoneElevators};
+        const SHAFT: [u8; 4] = *b"@6l0";
+        const PLATFORM_HEIGHT: f32 = 12.0;
+        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
+        let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
+        let mut lifts = ZoneElevators::default();
+        lifts.insert_shaft(Shaft {
+            rect: ZoneInteraction {
+                position: [0.0, 0.0, 0.0],
+                rect_class: 0,
+                orientation: [0.0; 3],
+                size: [4.0, 40.0, 4.0],
+                source_id: ffxi_dat::datid::DatId(SHAFT),
+                dest_id: None,
+                param: 0,
+                terrain_flags: 0,
+                map_id: 0,
+                elevator_bottom_y: 0.0,
+                elevator_top_y: -PLATFORM_HEIGHT,
+            },
+            dir: ShaftDir::default(),
+        });
+        // WEDGE_POS is a proven wedge: feet a body below the only floor.
+        let rider = WEDGE_POS;
+        assert!(
+            ground_recovery_candidate(&collision, &idle, &lifts, Some(103), Some(7), rider)
+                .is_some(),
+            "no platform under the feet: the wedge recovery still fires"
+        );
+        lifts.set_height(u32::from_le_bytes(SHAFT), rider.z);
+        assert!(
+            ground_recovery_candidate(&collision, &idle, &lifts, Some(103), Some(7), rider)
+                .is_none(),
+            "carried by the platform: not a wedge"
+        );
+        lifts.set_height(u32::from_le_bytes(SHAFT), -PLATFORM_HEIGHT);
+        assert!(
+            ground_recovery_candidate(&collision, &idle, &lifts, Some(103), Some(7), rider)
+                .is_some(),
+            "the platform at the far floor carries nobody here"
         );
     }
 
@@ -2766,8 +2856,14 @@ mod tests {
         // not the gate.
         let loading_ticks = (UNDER_FLOOR_RECOVERY_SECS * 4.0 / TICK) as u32;
         for _ in 0..loading_ticks {
-            let candidate =
-                ground_recovery_candidate(&collision, &loading, Some(103), Some(7), WEDGE_POS);
+            let candidate = ground_recovery_candidate(
+                &collision,
+                &loading,
+                &kuluu_render::elevators::ZoneElevators::default(),
+                Some(103),
+                Some(7),
+                WEDGE_POS,
+            );
             assert!(
                 candidate.is_none(),
                 "recovered onto the shell while the collision set was incomplete"
@@ -2777,8 +2873,14 @@ mod tests {
 
         let mut fired = None;
         for _ in 0..loading_ticks {
-            let candidate =
-                ground_recovery_candidate(&collision, &idle, Some(103), Some(7), WEDGE_POS);
+            let candidate = ground_recovery_candidate(
+                &collision,
+                &idle,
+                &kuluu_render::elevators::ZoneElevators::default(),
+                Some(103),
+                Some(7),
+                WEDGE_POS,
+            );
             if tracker.observe(candidate, TICK) {
                 fired = candidate;
                 break;
@@ -2804,6 +2906,7 @@ mod tests {
         let candidate = ground_recovery_candidate(
             &collision,
             &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+            &kuluu_render::elevators::ZoneElevators::default(),
             Some(103),
             Some(7),
             WEDGE_POS,
@@ -2876,11 +2979,24 @@ mod tests {
         let loading = one_load_in_flight();
         let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
         let mut tracker = GroundRecoveryTracker::default();
-        let candidate =
-            ground_recovery_candidate(&collision, &loading, Some(103), Some(7), WEDGE_POS);
+        let candidate = ground_recovery_candidate(
+            &collision,
+            &loading,
+            &kuluu_render::elevators::ZoneElevators::default(),
+            Some(103),
+            Some(7),
+            WEDGE_POS,
+        );
         assert!(candidate.is_none());
         assert!(!tracker.observe(candidate, UNDER_FLOOR_RECOVERY_SECS * 10.0));
-        let candidate = ground_recovery_candidate(&collision, &idle, Some(103), Some(7), WEDGE_POS);
+        let candidate = ground_recovery_candidate(
+            &collision,
+            &idle,
+            &kuluu_render::elevators::ZoneElevators::default(),
+            Some(103),
+            Some(7),
+            WEDGE_POS,
+        );
         assert!(
             !tracker.observe(candidate, UNDER_FLOOR_RECOVERY_SECS * 0.5),
             "gated time must not count toward the debounce"

@@ -18,6 +18,7 @@ ffxi-nav-recast = { path = "../ffxi-nav-recast" }
 ffxi-dat = { path = "../ffxi-dat" }
 ffxi-event = { path = "../ffxi-event" }
 kuluu-snapshot = { path = "../kuluu-snapshot" }
+ffxi-pol = { path = "../ffxi-pol" }
 
 anyhow.workspace = true
 # Binary xiloader auth (e.g. HorizonXI's hxiloader v1.3) embeds the local

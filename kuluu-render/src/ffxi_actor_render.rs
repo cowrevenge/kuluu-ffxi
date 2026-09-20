@@ -3238,7 +3238,7 @@ pub fn kick_load_actor_tasks(
     let stale: Vec<u32> = in_flight
         .owners
         .iter()
-        .filter(|(id, owner)| tracked.by_id.get(id) != Some(owner))
+        .filter(|&(id, owner)| tracked.by_id.get(id) != Some(owner))
         .map(|(&id, _)| id)
         .collect();
     for id in stale {

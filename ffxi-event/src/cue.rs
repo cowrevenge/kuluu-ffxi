@@ -34,7 +34,7 @@ const LOOKUP_EVENT_ENTITY: u32 = 0x7FFF_FFF8;
 /// A lookup with any high byte set is a literal entity server id, whose low bits
 /// are the target index (same doc, default handler).
 const LOOKUP_SERVER_ID_MASK: u32 = 0xFF << 24;
-const LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
+pub(crate) const LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
 
 impl ActorLookup {
     pub const LOCAL_PLAYER: Self = Self(LOOKUP_LOCAL_PLAYER_B);
@@ -65,7 +65,7 @@ impl ActorLookup {
             .then_some(self.0)
     }
 
-    /// Target index of the literal server id — `val & 0x3FF`.
+    /// Target index of the literal server id — its low 10 bits.
     pub fn target_index(self) -> Option<u16> {
         self.server_id()
             .map(|id| (id & LOOKUP_TARGET_INDEX_MASK) as u16)
@@ -133,7 +133,7 @@ const EVENT_MOTION_BASE_2: i32 = 56345;
 const EVENT_MOTION_BASE_3: i32 = 59739;
 const EVENT_MOTION_BASE_4: i32 = 66339;
 
-/// DAT id of the event motion resource a 0x5B operand names.
+/// DAT id of the event motion resource a LOADEXTSCHEDULER operand names.
 pub fn event_motion_dat_id(param: i32) -> u32 {
     let base = if param < EVENT_MOTION_BAND_1 {
         EVENT_MOTION_BASE_0
@@ -170,8 +170,8 @@ const TPC_PACKAGE_A_BASE_4: u32 = 0x18F5F;
 const TPC_PACKAGE_B_SET_BASE_4: u32 = 0x18FA5;
 const TPC_PACKAGE_B_CLEAR_BASE_4: u32 = 0x18FEB;
 
-/// The container file ids a 0x66 Tpc motion package names: A is attached
-/// with resource tag 1, B with tag 2.
+/// The container file ids a Tpc LOADEXTSCHEDULER package names: A is
+/// attached with resource tag 1, B with tag 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TpcMotionPackages {
     pub a: u32,
@@ -240,16 +240,16 @@ pub fn tpc_motion_packages(param: i32) -> Option<TpcMotionPackages> {
 /// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtSchedulerMotion {
-    /// 0x5B: the event motion resource a single DAT file id names.
+    /// LOADEXTSCHEDULER: the event motion resource a single DAT file id names.
     Event(u32),
-    /// 0x66 in range: container A (resource tag 1) and the two B candidates
-    /// (resource tag 2); the host picks between them from the actor's CIB
-    /// waist byte, which this VM does not carry.
+    /// The Tpc form in range: container A (resource tag 1) and the two B
+    /// candidates (resource tag 2); the host picks between them from the
+    /// actor's CIB waist byte, which this VM does not carry.
     Tpc(TpcMotionPackages),
 }
 
-/// The 0x5B "no action" key: retail loads the motion resource and skips
-/// SetAction when the key is zero or these bytes.
+/// The LOADEXTSCHEDULER "no action" key: retail loads the motion resource and
+/// skips SetAction when the key is zero or these bytes.
 pub const NO_ACTION_KEY: FourCc = *b"xxxx";
 
 /// One staging effect the running event asked for. Emitted in execution order.
@@ -323,8 +323,8 @@ pub enum EventCue {
     ActorMove {
         actor: ActorLookup,
         goal: EventPosition,
-        /// Raw 0x32 MainSpeed operand; the host scales it with
-        /// [`crate::vm::scene::EVENT_SPEED_SCALE`].
+        /// Raw MainSpeed operand of the trigger packet; the host scales it
+        /// with [`crate::vm::scene::EVENT_SPEED_SCALE`].
         speed: i32,
     },
     /// 0x37 on a non-player actor: set the event entity's position (teleport,
@@ -494,7 +494,7 @@ mod tests {
     const TPC_B_CLEAR_BASE_4_PINNED: u32 = 102379;
     // The fold offsets of FUNC_DatIdHelper stay literal here: the band-edge
     // tests only prove band selection while the offsets come from a second
-    // source.
+    // source (research/XiEvents/OpCodes/0x0045.md).
     const MID_BAND_OFFSET_PINNED: i32 = 25937;
     const HIGH_BAND_OFFSET_PINNED: i32 = 39643;
 
@@ -527,10 +527,10 @@ mod tests {
         assert_eq!(dat_id_helper(600), 600 + HIGH_BAND_OFFSET_PINNED);
     }
 
+    /// Each band edge lands on the next base exactly once; the value just
+    /// below an edge stays in the current band.
     #[test]
     fn event_motion_dat_id_picks_its_base_at_each_band_edge() {
-        // Each band edge lands on the next base exactly once; the value just
-        // below an edge stays in the current band.
         let band_4 = EVENT_MOTION_BAND_4_PINNED;
         assert_eq!(event_motion_dat_id(0), EVENT_MOTION_BASE_0_PINNED);
         assert_eq!(event_motion_dat_id(511), EVENT_MOTION_BASE_0_PINNED + 511);
@@ -546,10 +546,11 @@ mod tests {
         );
     }
 
+    /// Each band edge lands on the next base exactly once; the value just
+    /// below an edge stays in the current band; a negative operand is a huge
+    /// unsigned package, out of range.
     #[test]
     fn tpc_motion_packages_picks_its_base_at_each_band_edge() {
-        // Each band edge lands on the next base exactly once; the value just
-        // below an edge stays in the current band.
         assert_eq!(
             tpc_motion_packages(0),
             Some(TpcMotionPackages {
@@ -616,14 +617,13 @@ mod tests {
         );
         assert_eq!(tpc_motion_packages(0x118), None);
         assert_eq!(tpc_motion_packages(0x118 + 1), None);
-        // Negative operands are huge unsigned packages: out of range.
         assert_eq!(tpc_motion_packages(-1), None);
     }
 
+    /// Packages 20 (the Sandy opening scene) and 12, cross-checked against
+    /// the install's DATs: 32732 holds tlk0 + thk1, 32724 holds kka0.
     #[test]
     fn tpc_motion_packages_hits_the_retail_anchors() {
-        // Package 20 (the Sandy opening scene) and 12, cross-checked against
-        // the install's DATs: 32732 holds tlk0 + thk1, 32724 holds kka0.
         assert_eq!(
             tpc_motion_packages(20),
             Some(TpcMotionPackages {
@@ -673,7 +673,6 @@ mod tests {
         assert!(!ActorLookup::EVENT_ENTITY.is_local_player());
         assert_eq!(ActorLookup::EVENT_ENTITY.server_id(), None);
 
-        // The chocobo renter in Southern San d'Oria's rental cutscene.
         let npc = ActorLookup(0x010E_6032);
         assert_eq!(npc.server_id(), Some(0x010E_6032));
         assert_eq!(npc.target_index(), Some(0x032));
@@ -682,7 +681,6 @@ mod tests {
         // No high byte and not reserved: the default handler's fallback.
         assert!(ActorLookup(0x0000_0042).is_event_entity());
 
-        // The zone sentinel is neither an actor selector nor a server id.
         assert!(!ActorLookup::ZONE.is_local_player());
         assert!(!ActorLookup::ZONE.is_event_entity());
     }

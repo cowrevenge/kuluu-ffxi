@@ -48,7 +48,7 @@ use wgpu::{
 
 use super::dlss::KULUU_DLSS_PROJECT_ID;
 
-const NGX_FAIL_PLATFORM_ERROR: u32 = 0xBAD0_0002;
+const NGX_FAIL_PLATFORM_ERROR: u32 = kuluu_dlss_nr::FAIL_PLATFORM_ERROR;
 use super::settings::GraphicsSettings;
 use crate::camera::OperatorCamera;
 

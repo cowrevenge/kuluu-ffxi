@@ -23,14 +23,17 @@ pub struct ActorLookup(pub u32);
 /// Reserved lookup selectors: `…C0` local player, `…C1`–`…D1` party/alliance
 /// slots, `…F1`–`…F5` party members, `…F8` the event entity, `…F9`/`…F0` the
 /// local player again (research/XiEvents/Event VM Functions.md).
-const LOOKUP_RESERVED: std::ops::RangeInclusive<u32> = 0x7FFF_FFC0..=0x7FFF_FFF9;
+const LOOKUP_RESERVED: std::ops::RangeInclusive<u32> =
+    LOOKUP_LOCAL_PLAYER_A..=LOOKUP_LOCAL_PLAYER_C;
 const LOOKUP_LOCAL_PLAYER_A: u32 = 0x7FFF_FFC0;
-const LOOKUP_LOCAL_PLAYER_B: u32 = 0x7FFF_FFF0;
+/// The same marker the zone event DATs use for their master block, so the
+/// reserved-range member and the zone-block owner stay one value.
+const LOOKUP_LOCAL_PLAYER_B: u32 = ffxi_dat::event_dat::ZONE_PLAYER_ACTOR;
 const LOOKUP_LOCAL_PLAYER_C: u32 = 0x7FFF_FFF9;
 const LOOKUP_EVENT_ENTITY: u32 = 0x7FFF_FFF8;
 /// A lookup with any high byte set is a literal entity server id, whose low bits
 /// are the target index (same doc, default handler).
-const LOOKUP_SERVER_ID_MASK: u32 = 0xFF00_0000;
+const LOOKUP_SERVER_ID_MASK: u32 = 0xFF << 24;
 const LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
 
 impl ActorLookup {
@@ -489,6 +492,11 @@ mod tests {
     const TPC_A_BASE_4_PINNED: u32 = 102239;
     const TPC_B_SET_BASE_4_PINNED: u32 = 102309;
     const TPC_B_CLEAR_BASE_4_PINNED: u32 = 102379;
+    // The fold offsets of FUNC_DatIdHelper stay literal here: the band-edge
+    // tests only prove band selection while the offsets come from a second
+    // source.
+    const MID_BAND_OFFSET_PINNED: i32 = 25937;
+    const HIGH_BAND_OFFSET_PINNED: i32 = 39643;
 
     /// The fade pair's DAT id is the one the 0x45 base plus its authored work
     /// operand resolves to; both consts must keep agreeing.
@@ -514,9 +522,9 @@ mod tests {
     fn dat_id_helper_folds_at_its_two_band_edges() {
         assert_eq!(dat_id_helper(0), 0);
         assert_eq!(dat_id_helper(299), 299);
-        assert_eq!(dat_id_helper(300), 300 + 25937);
-        assert_eq!(dat_id_helper(599), 599 + 25937);
-        assert_eq!(dat_id_helper(600), 600 + 39643);
+        assert_eq!(dat_id_helper(300), 300 + MID_BAND_OFFSET_PINNED);
+        assert_eq!(dat_id_helper(599), 599 + MID_BAND_OFFSET_PINNED);
+        assert_eq!(dat_id_helper(600), 600 + HIGH_BAND_OFFSET_PINNED);
     }
 
     #[test]
@@ -658,8 +666,8 @@ mod tests {
     fn actor_lookup_separates_the_player_the_event_entity_and_server_ids() {
         assert!(ActorLookup::LOCAL_PLAYER.is_local_player());
         assert!(!ActorLookup::LOCAL_PLAYER.is_event_entity());
-        assert!(ActorLookup(0x7FFF_FFC0).is_local_player());
-        assert!(ActorLookup(0x7FFF_FFF9).is_local_player());
+        assert!(ActorLookup(LOOKUP_LOCAL_PLAYER_A).is_local_player());
+        assert!(ActorLookup(LOOKUP_LOCAL_PLAYER_C).is_local_player());
 
         assert!(ActorLookup::EVENT_ENTITY.is_event_entity());
         assert!(!ActorLookup::EVENT_ENTITY.is_local_player());

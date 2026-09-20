@@ -224,7 +224,12 @@ fn encode_scene_actions(
 
 #[cfg(test)]
 mod tests {
+    use super::contracts::NPC;
     use super::*;
+
+    // The fixture heading, in event units; the value coincides with
+    // ffxi-event's motion band edge, which is unrelated.
+    const HEADING_EVENT_UNITS_PINNED: i32 = 3072;
 
     #[test]
     fn event_coordinates_and_heading_roundtrip_through_session_axes() {
@@ -232,7 +237,7 @@ mod tests {
             x: 33_762,
             y: -2_558,
             z: -31_432,
-            heading: 3072,
+            heading: HEADING_EVENT_UNITS_PINNED,
         };
         let converted = session_position(authored, Position::default());
         assert!((converted.pos.x - 33.762).abs() < 0.001);
@@ -253,7 +258,7 @@ mod tests {
             heading: 192,
             ..Position::default()
         };
-        let packet = build_subpacket_event_position(19, (17_793_078, 54, 221), 248, 7, position);
+        let packet = build_subpacket_event_position(19, (NPC, 54, 221), 248, 7, position);
         assert_eq!(packet.len(), 32);
         assert_eq!(u16::from_le_bytes(packet[2..4].try_into().unwrap()), 19);
         for (offset, expected) in [
@@ -266,10 +271,7 @@ mod tests {
                 expected
             );
         }
-        assert_eq!(
-            u32::from_le_bytes(packet[16..20].try_into().unwrap()),
-            17_793_078
-        );
+        assert_eq!(u32::from_le_bytes(packet[16..20].try_into().unwrap()), NPC);
         assert_eq!(u32::from_le_bytes(packet[20..24].try_into().unwrap()), 7);
         assert_eq!(u16::from_le_bytes(packet[24..26].try_into().unwrap()), 248);
         assert_eq!(u16::from_le_bytes(packet[26..28].try_into().unwrap()), 221);
@@ -283,4 +285,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod contracts;
+pub(crate) mod contracts;

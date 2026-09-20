@@ -126,10 +126,10 @@ impl AttachType {
 // research/xim ParticleGeneratorParser.kt — attachFlags bit layout, then
 // additionalAttachFlags bit 0x0001 = attachSourceOriented.
 const ATTACH_TYPE_MASK: u16 = 0x000F;
-const ATTACH_JOINT0_MASK: u16 = 0x03F0;
-const ATTACH_JOINT0_SHIFT: u32 = 4;
-const ATTACH_JOINT1_MASK: u16 = 0xFC00;
-const ATTACH_JOINT1_SHIFT: u32 = 10;
+pub const ATTACH_JOINT0_MASK: u16 = 0x03F0;
+pub const ATTACH_JOINT0_SHIFT: u32 = 4;
+pub const ATTACH_JOINT1_MASK: u16 = 0xFC00;
+pub const ATTACH_JOINT1_SHIFT: u32 = 10;
 const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 
 // research/xim ParticleInitializers.kt — the StandardParticleSetup renderStateFlags u16

@@ -5,7 +5,9 @@ use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 use ffxi_proto::{decode::PosMode, framing, map};
 
 const PLAYER: u32 = 17_455_719;
-const NPC: u32 = 17_793_078;
+// The retail NPC these fixtures key off; other session tests name the same
+// actor, so the id is importable rather than re-typed.
+pub(crate) const NPC: u32 = 17_793_078;
 const INDEX: u16 = 54;
 const EVENT: u16 = 221;
 const ZONE: u16 = 248;
@@ -43,6 +45,9 @@ const OP_END: u8 = 0x21;
 const OP_REQUEST_WAIT: u8 = 0x29;
 const OP_POSITION: u8 = 0x47;
 const COMPARE_LESS: u8 = 4;
+// The position fixture's heading, in event units; the value coincides with
+// ffxi-event's motion band edge, which is unrelated.
+const HEADING_EVENT_UNITS_PINNED: u32 = 3072;
 const WORK_GIL: u16 = 0x1002;
 const WORK_FARE: u16 = 0x1003;
 const REFERENCE: u16 = 0x8000;
@@ -97,7 +102,12 @@ fn position_dat(child: bool) -> EventDat {
     program.extend([OP_POSITION, 1, OP_END]);
     let movement = block(
         program,
-        vec![33_762, (-31_432i32) as u32, (-2_558i32) as u32, 3072],
+        vec![
+            33_762,
+            (-31_432i32) as u32,
+            (-2_558i32) as u32,
+            HEADING_EVENT_UNITS_PINNED,
+        ],
     );
     if !child {
         return EventDat {

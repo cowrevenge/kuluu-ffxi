@@ -408,13 +408,18 @@ fn grap_list_decode_failure_is_logged() {
 fn decode_err_dedup_is_per_opcode() {
     // Opcodes chosen well outside the retail range so parallel tests that
     // exercise real decode paths cannot race on the same entries.
-    assert!(first_decode_err(0xFFFE), "first failure must pass the gate");
+    const DEDUP_OPCODE_A_PINNED: u16 = 0xFFFE;
+    const DEDUP_OPCODE_B_PINNED: u16 = 0xFFFD;
     assert!(
-        !first_decode_err(0xFFFE),
+        first_decode_err(DEDUP_OPCODE_A_PINNED),
+        "first failure must pass the gate"
+    );
+    assert!(
+        !first_decode_err(DEDUP_OPCODE_A_PINNED),
         "repeat failure for the same opcode must be deduped"
     );
     assert!(
-        first_decode_err(0xFFFD),
+        first_decode_err(DEDUP_OPCODE_B_PINNED),
         "dedup must be per-opcode, not global"
     );
 }
@@ -3637,6 +3642,10 @@ fn shop_list_body(offset: u16, last: bool, rows: &[(u16, u32)]) -> Vec<u8> {
 }
 
 /// vendor/server/src/map/lua/lua_base_entity.cpp sendMenu case 2 pushes
+// The third shop row's item number; the value coincides with the event-VM
+// work-gil const, which is unrelated.
+const SHOP_ITEM_THIRD_NO_PINNED: u16 = 4098;
+
 /// SHOP_OPEN then SHOP_LIST; vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp
 /// splits stock past 19 rows across pages, the last flagged 0x89.
 #[test]
@@ -3649,7 +3658,7 @@ fn a_two_page_shop_opens_once_and_lists_every_row() {
         ),
         (
             ffxi_proto::map::s2c::SHOP_LIST,
-            shop_list_body(2, true, &[(4098, 300)]),
+            shop_list_body(2, true, &[(SHOP_ITEM_THIRD_NO_PINNED, 300)]),
         ),
     ]);
 
@@ -3663,7 +3672,11 @@ fn a_two_page_shop_opens_once_and_lists_every_row() {
             .iter()
             .map(|i| (i.shop_index, i.item_no, i.price))
             .collect::<Vec<_>>(),
-        vec![(0, 4096, 100), (1, 4097, 200), (2, 4098, 300)]
+        vec![
+            (0, 4096, 100),
+            (1, 4097, 200),
+            (2, SHOP_ITEM_THIRD_NO_PINNED, 300),
+        ]
     );
 
     let updates = events
@@ -3714,7 +3727,10 @@ fn shop_pages_accumulate_at_their_offsets_instead_of_replacing() {
     let mut shop = ShopState::default();
     merge_shop_page(&mut shop, page(0, false, &[(4096, 100), (4097, 200)]));
     assert!(!shop.complete);
-    merge_shop_page(&mut shop, page(2, true, &[(4098, 300)]));
+    merge_shop_page(
+        &mut shop,
+        page(2, true, &[(SHOP_ITEM_THIRD_NO_PINNED, 300)]),
+    );
 
     assert!(shop.complete, "Flags 0x89 marks the final page");
     let listed: Vec<(u8, u16)> = shop
@@ -3722,7 +3738,10 @@ fn shop_pages_accumulate_at_their_offsets_instead_of_replacing() {
         .iter()
         .map(|i| (i.shop_index, i.item_no))
         .collect();
-    assert_eq!(listed, vec![(0, 4096), (1, 4097), (2, 4098)]);
+    assert_eq!(
+        listed,
+        vec![(0, 4096), (1, 4097), (2, SHOP_ITEM_THIRD_NO_PINNED),]
+    );
 }
 
 #[test]
@@ -4516,7 +4535,7 @@ pub(super) fn bootstrap_acceptance_contract() {
         });
 }
 
-const FIXTURE_PLAYER: u32 = 17_455_719;
+const FIXTURE_PLAYER_PINNED: u32 = 17_455_719;
 const FIXTURE_SEED: [u8; 20] = [0; 20];
 const FIXTURE_POSITION: [f32; 3] = [2.15, -2.1, 3.25];
 const BOOTSTRAP_DATAGRAMS: usize = 2;
@@ -4558,7 +4577,7 @@ fn fixture_config() -> Config {
         view_port: 0,
         user: "bootstrap-fixture".into(),
         password: String::new(),
-        char_selection: CharSelection::Id(FIXTURE_PLAYER),
+        char_selection: CharSelection::Id(FIXTURE_PLAYER_PINNED),
         initial_state: None,
         playonline_session: None,
         user_driven_events: true,
@@ -4568,7 +4587,7 @@ fn fixture_config() -> Config {
 
 fn fixture_bootstrap() -> BootstrapArgs<'static> {
     BootstrapArgs {
-        char_id: FIXTURE_PLAYER,
+        char_id: FIXTURE_PLAYER_PINNED,
         char_name: "Bootstrap",
         account_name: "bootstrap-fixture",
         ticket: [0; 16],
@@ -4596,7 +4615,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     };
     use std::time::Duration;
 
-    const PLAYER: u32 = FIXTURE_PLAYER;
+    const PLAYER: u32 = FIXTURE_PLAYER_PINNED;
     const SEED: [u8; 20] = FIXTURE_SEED;
     const POSITION: [f32; 3] = FIXTURE_POSITION;
     const EXPECTED_BOOTSTRAPS: usize = BOOTSTRAP_DATAGRAMS;
@@ -4796,7 +4815,7 @@ async fn enterzone_in_gameok_reply() {
 
     let login = fixture_packet(
         s2c::LOGIN,
-        &login_fixture_body(FIXTURE_PLAYER, FIXTURE_POSITION),
+        &login_fixture_body(FIXTURE_PLAYER_PINNED, FIXTURE_POSITION),
     );
     let enterzone = fixture_packet(s2c::ENTERZONE, &[0; 4]);
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

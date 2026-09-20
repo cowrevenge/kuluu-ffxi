@@ -401,7 +401,8 @@ fn seat_at_vantage(bvh: &CollisionBvh, flight: &mut BackdropFlight, cam: &mut Tr
 // splitmix64 finalizer (Steele et al., "Fast Splittable Pseudorandom Number
 // Generators") — deterministic vantage sequence, no RNG state to carry.
 fn vantage_hash(segment: u32, attempt: u32) -> u64 {
-    let mut z = ((segment as u64) << 32 | attempt as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = ((segment as u64) << 32 | attempt as u64)
+        .wrapping_add(kuluu_render::scheduler_runtime::SPLITMIX64_GOLDEN_RATIO);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

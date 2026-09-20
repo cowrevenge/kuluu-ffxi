@@ -482,7 +482,10 @@ mod tests {
     fn mount_dat_id_maps_the_block_and_rejects_the_chocobo_ids() {
         // Verified against the retail DAT 2026-08-04 by dumping each file's
         // skeleton chunk: the block is MOUNTTYPE-ordered from QUEST_RAPTOR.
-        assert_eq!(mount_dat_id(1), Some(0x0001_9131)); // MOUNT_QUEST_RAPTOR, "wyve"
+        // The base stays literal here: it is the dump's second source, not
+        // the resolver's own const.
+        const MOUNT_BLOCK_BASE_PINNED: u32 = 0x0001_9131;
+        assert_eq!(mount_dat_id(1), Some(MOUNT_BLOCK_BASE_PINNED)); // MOUNT_QUEST_RAPTOR, "wyve"
         assert_eq!(mount_dat_id(3), Some(0x0001_9133)); // MOUNT_TIGER, "tige"
         assert_eq!(mount_dat_id(17), Some(0x0001_9141)); // MOUNT_HIPPOGRYPH, "kiri"
 

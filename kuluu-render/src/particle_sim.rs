@@ -888,8 +888,8 @@ fn particle_rotation(p: &Particle) -> Quat {
 // Distinct per generator so two emitters sharing a def do not spawn identical particle clouds;
 // deterministic so a rebuilt zone/weather set replays the same spread.
 fn emit_seed(entity: Entity) -> u64 {
-    const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-    SEED ^ entity.to_bits().wrapping_mul(SEED)
+    let seed = crate::scheduler_runtime::SPLITMIX64_GOLDEN_RATIO;
+    seed ^ entity.to_bits().wrapping_mul(seed)
 }
 
 fn next_unit(state: &mut u64) -> f32 {

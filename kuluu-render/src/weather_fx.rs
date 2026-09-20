@@ -260,7 +260,7 @@ pub fn update_weather_modifier_system(
 
         if let Some((lo, hi)) = active.modifier.lightning {
             if lightning.rng == 0 {
-                lightning.rng = 0x9E3779B97F4A7C15;
+                lightning.rng = crate::scheduler_runtime::SPLITMIX64_GOLDEN_RATIO;
             }
             let r = lcg_next(&mut lightning.rng);
             lightning.time_to_next = lo + r * (hi - lo);

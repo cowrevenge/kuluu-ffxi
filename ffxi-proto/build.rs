@@ -118,9 +118,10 @@ fn main() -> Result<()> {
 
     let src = fs::read_to_string(LSB_BLOWFISH_CPP)
         .with_context(|| format!("reading {LSB_BLOWFISH_CPP}"))?;
+    let subkey_sig = format!("uint8 subkey[{SUBKEY_LEN}]");
     let start = src
-        .find("uint8 subkey[4168]")
-        .context("could not locate `uint8 subkey[4168]` in blowfish.cpp")?;
+        .find(&subkey_sig)
+        .with_context(|| format!("could not locate `{subkey_sig}` in blowfish.cpp"))?;
     let body_start = src[start..]
         .find('{')
         .context("could not locate opening `{` of subkey table")?

@@ -630,6 +630,12 @@ const DADA_IMPACT_MARKER: [u8; 4] = *b"dada";
 pub const LCG_MULTIPLIER: u64 = 6364136223846793005;
 pub const LCG_INCREMENT: u64 = 1442695040888963407;
 
+// splitmix64's increment (Steele et al., "Fast Splittable Pseudorandom Number
+// Generators"): the shared deterministic seed multiplier for the pseudo-random
+// spreads each system derives on its own (per-owner particle and sfx seeds,
+// lightning jitter, launcher vantage sequence).
+pub const SPLITMIX64_GOLDEN_RATIO: u64 = 0x9E37_79B9_7F4A_7C15;
+
 pub fn lcg_next(state: u64) -> u64 {
     state
         .wrapping_mul(LCG_MULTIPLIER)

@@ -2114,6 +2114,7 @@ mod zone_text_skew_tests {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::session::event_transport::contracts::NPC;
 
     /// A miniature fishing block: offsets relative to a base, mirroring the
     /// real layout's landmark lines.
@@ -2353,12 +2354,11 @@ pub(crate) mod tests {
     }
 
     /// Build a synthetic DialogTable from per-entry (already-plain) text
-    /// bytes. Mirrors ffxi_dat::dmsg's own test helper; the format constants
-    /// duplicate `StringDat::parse`'s (TEXT_XOR / OFFSET_XOR / MAGIC_BASE),
-    /// which are pub(crate) to ffxi-dat — ffxi-dat's tests pin the format.
+    /// bytes. Mirrors ffxi_dat::dmsg's own test helper; the offset XOR is
+    /// imported from the format's owner, the magic and text-xor values are
+    /// small enough to stay local.
     fn synth_dat(entries: &[&[u8]]) -> Vec<u8> {
         const STRING_DAT_MAGIC_BASE: u32 = 0x1000_0000;
-        const STRING_DAT_OFFSET_XOR: u32 = 0x8080_8080;
         const STRING_DAT_TEXT_XOR: u8 = 0x80;
         let count = entries.len();
         let table_size = 4 * count;
@@ -2372,7 +2372,7 @@ pub(crate) mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(STRING_DAT_MAGIC_BASE.wrapping_add(data_len)).to_le_bytes());
         for off in &offsets {
-            buf.extend_from_slice(&(off ^ STRING_DAT_OFFSET_XOR).to_le_bytes());
+            buf.extend_from_slice(&(off ^ ffxi_dat::dmsg::OFFSET_XOR).to_le_bytes());
         }
         for e in entries {
             buf.extend(e.iter().map(|b| b ^ STRING_DAT_TEXT_XOR));
@@ -2402,10 +2402,9 @@ pub(crate) mod tests {
 
     fn position_update_session() -> (DialogSession, EventTrigger) {
         const ZONE: u16 = 248;
-        const ACTOR: u32 = 17_793_078;
         const EVENT: u16 = 221;
         let block = ffxi_dat::event_dat::EventBlock {
-            actor: ACTOR,
+            actor: NPC,
             event_ids: vec![EVENT],
             event_offsets: vec![0],
             references: vec![33_762, (-31_432i32) as u32, (-2_558i32) as u32, 0],
@@ -2422,7 +2421,7 @@ pub(crate) mod tests {
         let trigger = EventTrigger {
             event_zone: ZONE,
             text_zone: ZONE,
-            unique_no: ACTOR,
+            unique_no: NPC,
             act_index: 54,
             event_id: EVENT,
             params: vec![],

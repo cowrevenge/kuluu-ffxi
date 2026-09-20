@@ -227,7 +227,7 @@ fn spawn_actor_auto_run_sounds(
     }
 }
 
-const SFX_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+const SFX_RNG_SEED: u64 = crate::scheduler_runtime::SPLITMIX64_GOLDEN_RATIO;
 const SFX_RNG_STRIDE: u64 = 0x0000_0100_0000_01B3;
 
 // The draw is the high word, so it spans the whole unit interval rather than the lower half.

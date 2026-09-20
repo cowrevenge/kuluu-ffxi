@@ -17,7 +17,10 @@
 //! in NA English dialog).
 
 const TEXT_XOR: u8 = 0x80;
-const OFFSET_XOR: u32 = 0x8080_8080;
+/// Offset entries in the DialogTable header are stored XORed with this value;
+/// exported so other crates' fixtures can synthesise a valid table without
+/// re-typing the format's value.
+pub const OFFSET_XOR: u32 = 0x8080_8080;
 const MAGIC_BASE: u32 = 0x1000_0000;
 
 // DialogTable control codes (POLUtils Things/DialogTableEntry.cs).

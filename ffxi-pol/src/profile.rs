@@ -208,8 +208,10 @@ pub const OTP_LEN: usize = 6;
 const SECRET_SALT: &[u8] = b"playonline";
 
 /// The account credential the member login proves possession of. The name is
-/// the PlayOnline id; `secret20` is what `member_secret` derives from the
-/// typed password. `otp` is set only for a token account.
+/// the Square Enix id, which the Viewer leaves empty for an account that has
+/// none; every request is bound to the member by its authenticator either
+/// way. `secret20` is what `member_secret` derives from the typed password,
+/// and `otp` is set only for a token account.
 pub struct MemberCredential {
     pub name: String,
     pub secret20: [u8; SECRET_LEN],
@@ -248,8 +250,8 @@ pub fn member_secret(password: &str) -> [u8; SECRET_LEN] {
 fn hex_lower(bytes: &[u8; SECRET_LEN]) -> [u8; 2 * SECRET_LEN] {
     let mut out = [0u8; 2 * SECRET_LEN];
     for (i, b) in bytes.iter().enumerate() {
-        out[2 * i] = HEX_DIGITS[(b >> 4) as usize];
-        out[2 * i + 1] = HEX_DIGITS[(b & 0x0F) as usize];
+        out[2 * i] = HEX_DIGITS[(b >> NIBBLE_BITS) as usize];
+        out[2 * i + 1] = HEX_DIGITS[(b & NIBBLE_MASK) as usize];
     }
     out
 }
@@ -262,7 +264,10 @@ pub const LOGIN_PAYLOAD_LEN: usize = LOGIN_BODY_LEN - BODY_CHECKSUM_LEN;
 /// polcore `0x1001e760` rounds the stamp down to the minute so the client and
 /// the server agree on it without a clock exchange.
 const SECONDS_PER_MINUTE: u64 = 60;
-const LOGIN_NAME_MAX: usize = 16;
+/// polcore `0x1001e760` copies the name while `i < 0x10`, into a body it has
+/// already zeroed, so sixteen characters fit with their terminator landing on
+/// the byte before the one-time password.
+pub const LOGIN_NAME_MAX: usize = 16;
 const LOGIN_DIGEST_OFFSET: usize = 0x20;
 const LOGIN_OTP_OFFSET: usize = 0x12;
 
@@ -275,8 +280,8 @@ pub fn member_login_body(
     unix_secs: u64,
 ) -> Result<[u8; LOGIN_PAYLOAD_LEN]> {
     let name = cred.name.as_bytes();
-    if name.len() >= LOGIN_NAME_MAX {
-        return Err(Error::protocol("a member name is at most 15 characters"));
+    if name.len() > LOGIN_NAME_MAX {
+        return Err(Error::protocol("a Square Enix ID is at most 16 characters"));
     }
     let mut body = [0u8; LOGIN_PAYLOAD_LEN];
     body[0] = if cred.otp.is_some() { 2 } else { 1 };
@@ -298,6 +303,8 @@ pub fn member_login_body(
 }
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const NIBBLE_MASK: u8 = 0x0F;
+const NIBBLE_BITS: u32 = 4;
 
 #[cfg(test)]
 mod tests {
@@ -354,6 +361,24 @@ mod tests {
         assert_eq!(reply.token, [0xDE, 0xAD, 0xBE, 0xEF]);
         buf[0x01] = 0x79;
         assert!(!parse_reply_header(&buf).unwrap().is_ok());
+    }
+
+    #[test]
+    fn the_login_body_takes_a_full_width_name_and_an_empty_one() {
+        let mut cred = MemberCredential::new("SIXTEENCHARSXYZ0", "hunter2", None);
+        assert_eq!(cred.name.len(), LOGIN_NAME_MAX);
+        let body = member_login_body(&cred, 0).unwrap();
+        assert_eq!(&body[1..1 + LOGIN_NAME_MAX], cred.name.as_bytes());
+        // The terminator lands on the byte before the one-time password.
+        assert_eq!(body[1 + LOGIN_NAME_MAX], 0);
+
+        cred.name.push('X');
+        assert!(member_login_body(&cred, 0).is_err());
+
+        // The Viewer allows an account with no Square Enix id at all.
+        cred.name.clear();
+        let body = member_login_body(&cred, 0).unwrap();
+        assert_eq!(&body[1..1 + LOGIN_NAME_MAX], &[0u8; LOGIN_NAME_MAX]);
     }
 
     #[test]

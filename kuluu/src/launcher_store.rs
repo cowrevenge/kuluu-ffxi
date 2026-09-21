@@ -154,6 +154,13 @@ pub struct SavedAccount {
     pub server_name: String,
     pub username: String,
     pub remember_password: bool,
+    /// The Square Enix id this account signs in with, for the flavor that
+    /// authenticates two identities. The account is keyed on its PlayOnline
+    /// id, which is the one that always exists, so this holds the other.
+    /// Empty for every other flavor, for an account with no Square Enix id,
+    /// and for a profile saved before the flavor existed.
+    #[serde(default)]
+    pub square_enix_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -244,6 +251,18 @@ pub struct LoginPrefill<'a> {
 pub fn keyring_account_key(server_name: &str, username: &str) -> String {
     format!("{server_name}:{username}")
 }
+
+/// The secret-store key the Square Enix password lives under. A PlayOnline
+/// sign-in holds two passwords: the account key carries the PlayOnline one,
+/// which every flavor has an equivalent of, and this carries the other.
+pub fn keyring_square_enix_key(server_name: &str, username: &str) -> String {
+    format!(
+        "{}{SQUARE_ENIX_KEY_SUFFIX}",
+        keyring_account_key(server_name, username)
+    )
+}
+
+const SQUARE_ENIX_KEY_SUFFIX: &str = ":square-enix";
 
 fn default_path() -> Option<PathBuf> {
     kuluu_session::config_dir::config_file("launcher.json").ok()
@@ -388,7 +407,25 @@ mod tests {
             server_name: server.into(),
             username: user.into(),
             remember_password: false,
+            square_enix_id: String::new(),
         }
+    }
+
+    #[test]
+    fn the_two_secret_keys_of_one_account_are_distinct() {
+        let account = keyring_account_key("Retail", "XAAA0000");
+        let sqex = keyring_square_enix_key("Retail", "XAAA0000");
+        assert_ne!(account, sqex);
+        assert!(sqex.starts_with(&account));
+    }
+
+    #[test]
+    fn an_account_saved_before_the_playonline_flavor_still_loads() {
+        let json = r#"{"server_name":"Retail","username":"someone","remember_password":true}"#;
+        let acct: SavedAccount = serde_json::from_str(json).unwrap();
+        assert_eq!(acct.username, "someone");
+        assert!(acct.remember_password);
+        assert!(acct.square_enix_id.is_empty());
     }
 
     #[test]

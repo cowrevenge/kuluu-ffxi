@@ -16,18 +16,40 @@ use super::{
     ServerSelectForm,
 };
 
-use crate::launcher_store::{self, keyring_account_key, SavedAccount, KEYRING_SERVICE};
+use crate::launcher_store::{
+    self, keyring_account_key, keyring_square_enix_key, SavedAccount, KEYRING_SERVICE,
+};
 use crate::secret_store::SecretStore;
 
-fn save_on_success(server_name: &str, username: &str, password: &str, remember: bool) {
+/// What a successful sign-in is worth keeping. `username` is the identity the
+/// account is keyed on, and for a PlayOnline account the Square Enix pair is
+/// the second one the handshake needs.
+struct Saveable<'a> {
+    username: &'a str,
+    password: &'a str,
+    square_enix_id: &'a str,
+    square_enix_password: &'a str,
+    remember: bool,
+}
+
+fn save_on_success(server_name: &str, acct: &Saveable) {
+    let username = acct.username;
     let key = keyring_account_key(server_name, username);
-    let remember_password = if remember {
-        SecretStore::set(KEYRING_SERVICE, &key, password)
+    let sqex_key = keyring_square_enix_key(server_name, username);
+    let remember_password = if acct.remember {
+        let stored = SecretStore::set(KEYRING_SERVICE, &key, acct.password);
+        if acct.square_enix_password.is_empty() {
+            SecretStore::delete(KEYRING_SERVICE, &sqex_key);
+        } else {
+            SecretStore::set(KEYRING_SERVICE, &sqex_key, acct.square_enix_password);
+        }
+        stored
     } else {
         SecretStore::delete(KEYRING_SERVICE, &key);
+        SecretStore::delete(KEYRING_SERVICE, &sqex_key);
         false
     };
-    if remember && !remember_password {
+    if acct.remember && !remember_password {
         tracing::warn!(
             server_name,
             username,
@@ -45,6 +67,7 @@ fn save_on_success(server_name: &str, username: &str, password: &str, remember: 
             server_name: server_name.to_string(),
             username: username.to_string(),
             remember_password,
+            square_enix_id: acct.square_enix_id.to_string(),
         },
     );
     store.last_used = Some((server_name.to_string(), username.to_string()));
@@ -58,6 +81,7 @@ struct AuthOk {
     auth: kuluu_session::auth_client::AuthSession,
     user: String,
     pass: String,
+    pol: (String, String),
 }
 
 #[derive(Resource)]
@@ -121,6 +145,7 @@ async fn run_auth_then_open(
         auth: session,
         user: user.to_string(),
         pass: pass.to_string(),
+        pol: pol.clone(),
     })
 }
 
@@ -135,6 +160,7 @@ pub(super) fn poll_auth_system(
     form: Res<LoginForm>,
     server_form: Res<ServerSelectForm>,
     server_info: Res<super::ServerInfo>,
+    clients: Res<LauncherClients>,
 ) {
     match chan.rx.try_recv() {
         Ok(Ok(ok)) => {
@@ -152,11 +178,28 @@ pub(super) fn poll_auth_system(
                 .selected
                 .clone()
                 .unwrap_or_else(|| server_info.server.clone());
-            if !ok.user.is_empty() {
-                save_on_success(&server_name, &ok.user, &ok.pass, form.remember_password);
+            let playonline = clients.auth.flavor == AuthFlavor::PlayOnline;
+            let (username, password) = if playonline {
+                (ok.pol.0.as_str(), ok.pol.1.as_str())
+            } else {
+                (ok.user.as_str(), ok.pass.as_str())
+            };
+            if !username.is_empty() {
+                save_on_success(
+                    &server_name,
+                    &Saveable {
+                        username,
+                        password,
+                        square_enix_id: if playonline { &ok.user } else { "" },
+                        square_enix_password: if playonline { &ok.pass } else { "" },
+                        remember: form.remember_password,
+                    },
+                );
             }
             creds.user = ok.user;
             creds.pass = ok.pass;
+            creds.pol_id = ok.pol.0;
+            creds.pol_pass = ok.pol.1;
             commands.remove_resource::<AuthInFlightChan>();
             next_state.set(LauncherState::CharList);
         }

@@ -280,20 +280,35 @@ pub(crate) struct LoginForm {
 
     pub remember_password: bool,
 
-    /// A PlayOnline account carries two identities and the account handshake
-    /// uses both, so `user`/`pass` hold the Square Enix pair and these hold
-    /// the PlayOnline pair. Both are empty for every other auth flavor.
+    /// A PlayOnline account carries two identities and the handshake uses
+    /// both, so `user`/`pass` hold the Square Enix pair and these hold the
+    /// PlayOnline pair. Both are empty for every other auth flavor.
     pub pol_id: String,
     pub pol_pass: String,
 }
 
 impl LoginForm {
-    /// Whether the form has everything the flavor's login needs.
+    /// Whether the form has everything the flavor's login needs. A PlayOnline
+    /// account's Square Enix id is optional, exactly as the Viewer treats it,
+    /// but both passwords and the PlayOnline id are not.
     pub fn is_complete(&self, playonline: bool) -> bool {
-        if self.user.is_empty() || self.pass.is_empty() {
+        if self.pass.is_empty() {
             return false;
         }
-        !playonline || (!self.pol_id.is_empty() && !self.pol_pass.is_empty())
+        if !playonline {
+            return !self.user.is_empty();
+        }
+        !self.pol_id.is_empty() && !self.pol_pass.is_empty()
+    }
+
+    /// The identifier a saved account is keyed on: whichever of the flavor's
+    /// identities always exists.
+    pub fn account_key(&self, playonline: bool) -> &str {
+        if playonline {
+            &self.pol_id
+        } else {
+            &self.user
+        }
     }
 }
 
@@ -1243,6 +1258,42 @@ fn direct_mode_charlist_autoselect(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_playonline_form_needs_both_identities_but_not_the_square_enix_id() {
+        let mut form = LoginForm {
+            user: String::new(),
+            pass: "sqexsecret".to_string(),
+            pol_id: "XAAA0000".to_string(),
+            pol_pass: "polsecret".to_string(),
+            ..default()
+        };
+        assert!(form.is_complete(true));
+        // The account is keyed on the identity that always exists.
+        assert_eq!(form.account_key(true), "XAAA0000");
+
+        form.pol_pass.clear();
+        assert!(!form.is_complete(true));
+        form.pol_pass = "polsecret".to_string();
+        form.pass.clear();
+        assert!(!form.is_complete(true));
+    }
+
+    #[test]
+    fn every_other_flavor_still_needs_its_username() {
+        let form = LoginForm {
+            user: "someone".to_string(),
+            pass: "secret".to_string(),
+            ..default()
+        };
+        assert!(form.is_complete(false));
+        assert_eq!(form.account_key(false), "someone");
+        assert!(!LoginForm {
+            pass: "secret".to_string(),
+            ..default()
+        }
+        .is_complete(false));
+    }
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::input_focus::InputFocus;

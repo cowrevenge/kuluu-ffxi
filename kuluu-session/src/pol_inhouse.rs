@@ -18,7 +18,7 @@ use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rand::SeedableRng as _;
 
 use ffxi_pol::transport::{ByteChannel, Connector};
@@ -32,6 +32,9 @@ pub struct Credentials {
     /// Eight characters, four capitals then four digits.
     pub playonline_id: String,
     pub playonline_password: String,
+    /// The login name chosen for the Square Enix account, at most sixteen
+    /// characters. The Viewer leaves it empty for an account that has none
+    /// and requires it only when a one-time password is in use.
     pub square_enix_id: String,
     pub square_enix_password: String,
     /// The six characters of a security token, for an account that uses one.
@@ -51,12 +54,40 @@ impl std::fmt::Debug for Credentials {
 }
 
 impl Credentials {
+    /// Check every width against the Viewer's own before any of it reaches a
+    /// socket, so a mistyped field is named here rather than surfacing as a
+    /// refusal from the account service.
     fn account(&self) -> Result<ffxi_pol::transport::Account> {
-        let playonline_id = self
-            .playonline_id
-            .as_bytes()
-            .try_into()
-            .map_err(|_| anyhow!("a PlayOnline ID is exactly eight characters"))?;
+        let playonline_id: [u8; ffxi_pol::profile::MEMBER_ID_LEN] =
+            self.playonline_id.as_bytes().try_into().map_err(|_| {
+                anyhow!(
+                    "a PlayOnline ID is exactly eight characters, four capitals then four digits"
+                )
+            })?;
+        if !playonline_id
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            bail!("a PlayOnline ID uses capital letters and digits only");
+        }
+        if self.playonline_password.is_empty() {
+            bail!("the PlayOnline password is required");
+        }
+        if self.playonline_password.len() > ffxi_pol::profile::SECRET_MAX_LEN {
+            bail!("a PlayOnline password is at most 15 characters");
+        }
+        if self.square_enix_id.len() > ffxi_pol::profile::LOGIN_NAME_MAX {
+            bail!(
+                "a Square Enix ID is at most 16 characters; it is the login name chosen \
+                 for the Square Enix account, not the email address it is reached at"
+            );
+        }
+        if self.square_enix_password.is_empty() {
+            bail!("the Square Enix password is required");
+        }
+        if self.otp.is_some() && self.square_enix_id.is_empty() {
+            bail!("an account using a one-time password must give its Square Enix ID");
+        }
         let otp = match &self.otp {
             None => None,
             Some(text) => Some(
@@ -209,9 +240,12 @@ mod tests {
         server.join().unwrap();
     }
 
+    // Placeholder credentials throughout: the id satisfies the format the
+    // Viewer validates (four capitals, four digits, first character a check
+    // letter over the rest) without being anyone's.
     fn creds() -> Credentials {
         Credentials {
-            playonline_id: "YBCA9726".to_string(),
+            playonline_id: "XAAA0000".to_string(),
             playonline_password: "polsecret".to_string(),
             square_enix_id: "TESTMEMBER".to_string(),
             square_enix_password: "sqexsecret".to_string(),
@@ -222,7 +256,7 @@ mod tests {
     #[test]
     fn credentials_never_print_a_password() {
         let shown = format!("{:?}", creds());
-        assert!(shown.contains("YBCA9726"));
+        assert!(shown.contains("XAAA0000"));
         assert!(shown.contains("TESTMEMBER"));
         for secret in ["polsecret", "sqexsecret", "123456"] {
             assert!(!shown.contains(secret), "{secret} leaked into {shown}");
@@ -232,16 +266,51 @@ mod tests {
     #[test]
     fn an_account_carries_both_identities_and_rejects_wrong_widths() {
         let account = creds().account().unwrap();
-        assert_eq!(&account.playonline_id, b"YBCA9726");
+        assert_eq!(&account.playonline_id, b"XAAA0000");
         assert_eq!(account.square_enix_id, "TESTMEMBER");
         assert_eq!(account.otp, Some(*b"123456"));
 
         let mut short = creds();
-        short.playonline_id = "YBCA972".to_string();
+        short.playonline_id = "XAAA000".to_string();
         assert!(short.account().is_err());
 
         let mut bad_otp = creds();
         bad_otp.otp = Some("12345".to_string());
         assert!(bad_otp.account().is_err());
+    }
+
+    #[test]
+    fn a_full_width_square_enix_id_is_accepted_and_an_email_is_refused() {
+        let mut long = creds();
+        long.square_enix_id = "SIXTEENCHARSXYZ0".to_string();
+        assert!(long.account().is_ok());
+
+        let mut email = creds();
+        email.square_enix_id = "someone@example.com".to_string();
+        let err = match email.account() {
+            Ok(_) => panic!("an email address should not pass as a Square Enix id"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("not the email address"), "{err}");
+    }
+
+    #[test]
+    fn a_square_enix_id_is_optional_unless_a_token_is_in_use() {
+        let mut no_id = creds();
+        no_id.square_enix_id.clear();
+        no_id.otp = None;
+        assert!(no_id.account().is_ok());
+
+        no_id.otp = Some("123456".to_string());
+        assert!(no_id.account().is_err());
+    }
+
+    #[test]
+    fn a_malformed_playonline_id_is_named_before_anything_is_sent() {
+        for bad in ["xaaa0000", "XAAA000", "XAAA-000"] {
+            let mut c = creds();
+            c.playonline_id = bad.to_string();
+            assert!(c.account().is_err(), "{bad} should not pass");
+        }
     }
 }

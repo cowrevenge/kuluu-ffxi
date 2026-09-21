@@ -50,6 +50,10 @@ pub(crate) fn apply_server_profile(commands: &mut Commands, profile: &ServerProf
         profile.view_port,
     ));
     commands.insert_resource(LauncherClients { auth, lobby });
+    // A lobby handle belongs to the server that opened it, so anything left
+    // over from the previous profile would be reused against a server that
+    // never issued it. Switching profiles drops it.
+    commands.insert_resource(OpenedLobby::default());
     commands.insert_resource(ServerInfo {
         server: profile.host.clone(),
         profile_name: Some(profile.name.clone()),
@@ -538,6 +542,13 @@ pub(crate) struct LauncherClients {
 pub(crate) struct OpenedLobbyInner {
     pub handle: Option<kuluu_session::lobby_client::LobbyHandle>,
     pub auth: Option<kuluu_session::auth_client::AuthSession>,
+}
+
+impl OpenedLobbyInner {
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.handle.is_none() && self.auth.is_none()
+    }
 }
 
 #[derive(Resource, Default)]
@@ -1258,6 +1269,48 @@ fn direct_mode_charlist_autoselect(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn switching_server_profiles_drops_the_lobby_opened_by_the_last_one() {
+        let mut app = App::new();
+        app.insert_resource(OpenedLobby::default());
+        app.world_mut()
+            .resource::<OpenedLobby>()
+            .0
+            .lock()
+            .unwrap()
+            .auth = Some(kuluu_session::auth_client::AuthSession {
+            account_id: 1,
+            session_hash: [7u8; kuluu_session::auth_client::SESSION_HASH_LEN],
+            auth_code: kuluu_session::auth_client::LobbyAuthCode::NONE,
+        });
+        assert!(!app
+            .world()
+            .resource::<OpenedLobby>()
+            .0
+            .lock()
+            .unwrap()
+            .is_empty());
+
+        let profile = crate::launcher_store::ServerProfile::playonline_defaults(
+            "PlayOnline",
+            ffxi_pol::hosts::LOBBY_HOST,
+        );
+        app.add_systems(Update, move |mut commands: Commands| {
+            apply_server_profile(&mut commands, &profile);
+        });
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<OpenedLobby>()
+                .0
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "a handle from the previous server survived the switch"
+        );
+    }
 
     #[test]
     fn a_playonline_form_needs_both_identities_but_not_the_square_enix_id() {

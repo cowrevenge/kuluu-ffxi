@@ -63,6 +63,9 @@ pub(crate) fn flush_blocks(sink: GeneratorOpcodeSink<'_>, blocks: &[(GeneratorSe
 const HEADER_LEN: usize = 0x80;
 const CHUNK_HEADER_LEN: usize = 0x10;
 const OPCODE_MASK: u32 = 0xFF;
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp Get11FC.
+const ALLOCATION_SHIFT: u32 = 13;
+const ALLOCATION_MASK: u32 = 0x3F;
 pub(crate) const OPCODE_END: u8 = 0x00;
 pub(crate) const OPCODE_STANDARD_SETUP: u8 = 0x01;
 pub(crate) const SIZE_WORDS_MASK: u8 = 0x1F;
@@ -536,10 +539,11 @@ pub struct ParticleGeneratorDef {
     // sectionHeader+offset-0x10 convention as the setup section). TextureCoordinateUpdater
     // 0x27/0x28 carry the per-frame UV-translate velocity that scrolls the sprite/sheet
     // texture (cascade/moat water). VelocityAccelerator 0x03/0x06/0x09 read a Vector3f at
-    // payload+0 and add it × dt to the same velocity allocation (CYyGenerator.cpp
-    // CYyGenerator::ElemIdle cases 0x06/0x09), so their payloads sum. [0,0]/None = static.
+    // payload+0 and target their own transform allocation. [0,0]/None = static.
     pub uv_scroll: [f32; 2],
     pub accel: Option<[f32; 3]>,
+    pub rotation_accel: Option<[f32; 3]>,
+    pub scale_accel: Option<[f32; 3]>,
 
     // Section 1 (body[0x70]) generator-level updater 0x0A, research/xim
     // ParticleGeneratorParser.kt sec1Handler GeneratorCullUpdater.
@@ -976,6 +980,9 @@ impl ParticleGeneratorDef {
         let mut color_variance = None;
         let mut color_transform = None;
         let mut init_velocity = [0.0f32; 3];
+        let mut position_allocation = None;
+        let mut rotation_allocation = None;
+        let mut scale_allocation = None;
         let mut velocity_variance = None;
         let mut relative_velocity = None;
         let mut relative_velocity_variance = None;
@@ -1087,6 +1094,7 @@ impl ParticleGeneratorDef {
                     max_life_frames = u16_le(body, payload + 30) as f32;
                 }
                 0x02 if payload + 12 <= body.len() => {
+                    position_allocation = Some((cfg >> ALLOCATION_SHIFT) & ALLOCATION_MASK);
                     init_velocity = [
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1162,6 +1170,7 @@ impl ParticleGeneratorDef {
                     ]);
                 }
                 0x0B if payload + 12 <= body.len() => {
+                    rotation_allocation = Some((cfg >> ALLOCATION_SHIFT) & ALLOCATION_MASK);
                     rotation_velocity = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1211,6 +1220,7 @@ impl ParticleGeneratorDef {
                     single_scale_variance = Some(f32_le(body, payload));
                 }
                 SEC2_OPCODE_SCALE_VELOCITY if payload + 12 <= body.len() => {
+                    scale_allocation = Some((cfg >> ALLOCATION_SHIFT) & ALLOCATION_MASK);
                     scale_velocity = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1466,6 +1476,8 @@ impl ParticleGeneratorDef {
         // scroll; 0x03 VelocityAccelerator gravity (Vector3f at payload+0).
         let mut uv_scroll = [0.0f32; 2];
         let mut accel = None;
+        let mut rotation_accel = None;
+        let mut scale_accel = None;
         let mut oscillation_applier_x = None;
         let mut oscillation_applier_z = None;
         let mut oscillation_applier_y = None;
@@ -1531,20 +1543,30 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    // research/xim ParticleGeneratorParser.kt sec3Handler: these map to the
-                    // same VelocityAccelerator as 0x03, ungated in retail's ElemIdle
-                    // (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09), so the
-                    // payloads sum.
+                    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp
+                    // CYyGenerator::ElemIdle uses Get11FC to address separate transform allocations.
                     SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_FIRST
                     | SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_LAST
                         if payload + 12 <= body.len() =>
                     {
-                        let v = [
-                            f32_le(body, payload),
-                            f32_le(body, payload + 4),
-                            f32_le(body, payload + 8),
-                        ];
-                        accel = Some(accel.map_or(v, |a| [a[0] + v[0], a[1] + v[1], a[2] + v[2]]));
+                        let allocation = Some((cfg >> ALLOCATION_SHIFT) & ALLOCATION_MASK);
+                        let target = if allocation == rotation_allocation {
+                            Some(&mut rotation_accel)
+                        } else if allocation == scale_allocation {
+                            Some(&mut scale_accel)
+                        } else if allocation == position_allocation {
+                            Some(&mut accel)
+                        } else {
+                            None
+                        };
+                        if let Some(target) = target {
+                            let value = target.get_or_insert([0.0; 3]);
+                            for (axis, value) in value.iter_mut().enumerate() {
+                                *value += f32_le(body, payload + axis * size_of::<f32>());
+                            }
+                        } else {
+                            decoded = false;
+                        }
                     }
                     // research/xim ParticleUpdaters.kt VelocityDampener: velocity is scaled
                     // by dampeningFactor^dt, the factor from
@@ -1798,6 +1820,8 @@ impl ParticleGeneratorDef {
             moon_phase_sprite,
             uv_scroll,
             accel,
+            rotation_accel,
+            scale_accel,
             emit_cull,
             association,
             foot_mark,
@@ -2259,14 +2283,18 @@ mod tests {
         assert_eq!(def.accel, Some([0.0, -0.02, 0.0]), "0x03 -> accel");
     }
 
-    // sec3 0x06/0x09 VelocityAccelerator: xim maps all three of 0x03/0x06/0x09 to the same
-    // updater and retail's ElemIdle adds each payload × dt to the same velocity allocation,
-    // so the payloads sum (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09). Without
-    // the 0x03 base the two payloads still sum from nothing: the base is an initial value,
-    // not a gate.
     #[test]
-    fn velocity_accelerators_06_09_sum_into_the_03_accel() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+    fn velocity_accelerators_keep_their_transform_channels() {
+        let allocated = |opcode, slot: u32, payload: &[u8]| {
+            let mut block = op(opcode, 4, payload);
+            let cfg = u32_le(&block, 0) | (slot << ALLOCATION_SHIFT);
+            block[..4].copy_from_slice(&cfg.to_le_bytes());
+            block
+        };
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        setup.extend(allocated(0x02, 1, &[0; 12]));
+        setup.extend(allocated(0x0B, 2, &[0; 12]));
+        setup.extend(allocated(SEC2_OPCODE_SCALE_VELOCITY, 3, &[0; 12]));
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
@@ -2279,22 +2307,29 @@ mod tests {
             p
         };
         let mut sec3 = op(0x03, 4, &vec3(0.0, -0.03125, 0.0));
-        sec3.extend(op(0x06, 4, &vec3(0.0, 0.015625, 0.0)));
-        sec3.extend(op(0x09, 4, &vec3(0.0078125, 0.0, 0.0)));
+        sec3.extend(allocated(0x06, 2, &vec3(0.0, 0.015625, 0.0)));
+        sec3.extend(allocated(0x09, 3, &vec3(0.0078125, 0.0, 0.0)));
         body.extend_from_slice(&sec3);
 
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.accel, Some([0.0078125, -0.015625, 0.0]));
+        assert_eq!(def.accel, Some([0.0, -0.03125, 0.0]));
+        assert_eq!(def.rotation_accel, Some([0.0, 0.015625, 0.0]));
+        assert_eq!(def.scale_accel, Some([0.0078125, 0.0, 0.0]));
 
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
-        let mut sec3 = op(0x06, 4, &vec3(0.0, 0.015625, 0.0));
-        sec3.extend(op(0x09, 4, &vec3(0.0078125, 0.0, 0.0)));
+        let mut sec3 = allocated(0x06, 2, &vec3(0.0, 0.015625, 0.0));
+        sec3.extend(allocated(0x09, 3, &vec3(0.0078125, 0.0, 0.0)));
         body.extend_from_slice(&sec3);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.accel, Some([0.0078125, 0.015625, 0.0]));
+        assert_eq!(def.accel, None);
+        assert_eq!(def.rotation_accel, Some([0.0, 0.015625, 0.0]));
+        assert_eq!(def.scale_accel, Some([0.0078125, 0.0, 0.0]));
+        body.extend(allocated(0x06, 3, &vec3(0.0078125, 0.0, 0.0)));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.scale_accel, Some([0.015625, 0.0, 0.0]));
     }
 
     // The celestial opcodes live in the section-3 updater stream (body[0x78]), NOT the

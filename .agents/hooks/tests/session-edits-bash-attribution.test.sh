@@ -21,6 +21,11 @@ CASE=""
 
 fail() { printf 'FAIL - %s: %s\n' "$CASE" "$1"; FAILURES=$((FAILURES + 1)); }
 
+# Git hooks export repository selectors that would redirect fixture commands into the caller.
+while IFS= read -r git_local_var; do
+  unset "$git_local_var"
+done < <(git rev-parse --local-env-vars)
+
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT

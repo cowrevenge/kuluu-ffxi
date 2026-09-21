@@ -2145,9 +2145,9 @@ pub fn recenter_follow_allowed(yaw_diff: f32) -> bool {
 
 /// Retail stops the pull once the eye is within this dot product of the
 /// behind-the-actor direction (UpdatePlayerFollowingCamera again, the
-/// `> 0.5 && < 0.99` engagement window), about eight degrees. An exponential
-/// follow only asymptotes, so we spend that dead band closing the remainder
-/// in one step instead of resting at an arbitrary point inside it.
+/// `> 0.5 && < 0.99` engagement window), about eight degrees: inside the
+/// window the follow holds the yaw where it is, it does not snap the
+/// remainder.
 const RETAIL_CHASE_RECENTER_SETTLED_DOT: f32 = 0.99;
 
 /// Returns the camera yaw after one follow step and whether it still has
@@ -2158,7 +2158,7 @@ pub fn recenter_yaw_step(yaw: f32, target_yaw: f32, rate: f32, dt: f32) -> (f32,
         return (yaw, false);
     }
     if diff.cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT {
-        return (target_yaw, false);
+        return (yaw, false);
     }
     let alpha = 1.0 - (-rate * dt).exp();
     (yaw + diff * alpha, true)
@@ -2216,7 +2216,14 @@ pub fn camera_polish_system(
         recenter.settling = true;
     }
 
+    // Locked on, the camera is the lock look-at's (damp_lock_camera in
+    // dispatch_movement_system); a second yaw writer here made the two
+    // alternate every frame while strafing.
+    if lock_on.is_active() {
+        recenter.settling = false;
+    }
     if (movement_input || recenter.settling)
+        && !lock_on.is_active()
         && !yaw_input
         && !drag_active
         && !recenter.manual_override
@@ -4034,10 +4041,12 @@ mod tests {
         let mut ticks = 0u32;
         let settled = loop {
             let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
-            assert!(
-                (next - target).abs() < (yaw - target).abs(),
-                "the follow stalled at {yaw} short of {target}"
-            );
+            if settling {
+                assert!(
+                    (next - target).abs() < (yaw - target).abs(),
+                    "the follow stalled at {yaw} short of {target}"
+                );
+            }
             yaw = next;
             ticks += 1;
             if !settling {
@@ -4048,7 +4057,10 @@ mod tests {
             }
         };
         assert!(settled, "the follow never finished: {yaw} vs {target}");
-        assert_eq!(yaw, target, "the camera must come to rest exactly behind");
+        assert!(
+            (target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT,
+            "the camera must come to rest inside the settled window: {yaw} vs {target}"
+        );
     }
 
     #[test]
@@ -4057,6 +4069,63 @@ mod tests {
         let (yaw, settling) = recenter_yaw_step(0.0, std::f32::consts::PI, AUTO_RECENTER_RATE, dt);
         assert_eq!(yaw, 0.0);
         assert!(!settling, "a planted camera has nothing left to settle");
+    }
+
+    #[test]
+    fn recenter_step_inside_the_settled_window_holds_the_yaw() {
+        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
+        let target = std::f32::consts::FRAC_PI_2;
+        let yaw = target - 0.05;
+        assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
+        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
+        assert_eq!(next, yaw, "a settled follow must not snap the last few degrees");
+        assert!(!settling);
+    }
+
+    /// With a target locked and a steer key held, the auto-recenter leaves
+    /// chase.yaw alone: the lock look-at owns the yaw (the strafe stutter).
+    #[test]
+    fn recenter_does_not_touch_the_yaw_while_locked_on() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Bindings>()
+            .init_resource::<SceneState>()
+            .init_resource::<InputMode>()
+            .init_resource::<CameraMode>()
+            .init_resource::<LockOn>()
+            .init_resource::<kuluu_render::MousePointer>()
+            .init_resource::<DispatchLocals>()
+            .init_resource::<ChaseCamera>()
+            .init_resource::<CameraAutoRecenter>()
+            .init_resource::<super::super::gamepad_input::PadStickIntent>()
+            .add_systems(Update, camera_polish_system);
+        let time: Time = Time::default();
+        app.insert_resource(time);
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .self_pos
+            .heading = 0;
+        let target_yaw = yaw_for_heading(0);
+        app.world_mut()
+            .resource_mut::<ChaseCamera>()
+            .yaw = target_yaw - 0.5;
+        app.world_mut().resource_mut::<LockOn>().target_id = Some(7);
+        let initial_yaw = app.world().resource::<ChaseCamera>().yaw;
+        for _ in 0..8 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(RETAIL_MOVE_TICKS_PER_SEC.recip()));
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyA);
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<ChaseCamera>().yaw,
+            initial_yaw,
+            "the recenter must leave the locked camera's yaw to the lock look-at"
+        );
     }
 
     #[test]

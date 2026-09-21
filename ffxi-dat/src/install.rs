@@ -276,13 +276,10 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
 #[cfg(windows)]
 const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 
-/// CreateSymbolicLinkW flags: 0 is the mount point, the privilege-free directory link.
-#[cfg(windows)]
-const SYMLINK_MOUNT_POINT_FLAGS: u32 = 0;
-
-/// The junction is a mount-point reparse point: std only exposes true symlinks, which need
-/// the privilege above, and this tree's links only bind two local roots, which is all a
-/// junction can target.
+/// A directory symlink needs SeCreateSymbolicLinkPrivilege (Developer Mode or an elevated
+/// shell). A junction (mount-point reparse point) does not: it binds two local roots, which
+/// is all this tree's links need. std has no junction constructor, so the system's own
+/// mount-point tool is the privilege-free way to make one.
 #[cfg(windows)]
 fn junction_dir(src: &Path, dst: &Path) -> io::Result<()> {
     let target = src.canonicalize().map_err(|e| {
@@ -291,48 +288,7 @@ fn junction_dir(src: &Path, dst: &Path) -> io::Result<()> {
             format!("a junction needs an absolute target: {e}"),
         )
     })?;
-    match create_mount_point(&target, dst).and_then(|()| link_exists(dst)) {
-        Ok(()) => Ok(()),
-        Err(e) => mklink_junction(&target, dst)
-            .and_then(|()| link_exists(dst))
-            .map_err(|mk| io::Error::new(mk.kind(), format!("junction link refused ({e}); {mk}"))),
-    }
-}
-
-#[cfg(windows)]
-fn create_mount_point(target: &Path, dst: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateSymbolicLinkW(
-            symlink_file: *const u16,
-            target_file: *const u16,
-            flags: u32,
-        ) -> i32;
-    }
-
-    let link: Vec<u16> = dst
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target_wide: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let ok = unsafe {
-        CreateSymbolicLinkW(
-            link.as_ptr(),
-            target_wide.as_ptr(),
-            SYMLINK_MOUNT_POINT_FLAGS,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    mklink_junction(&target, dst).and_then(|()| link_exists(dst))
 }
 
 /// A blocked machine can report success without creating anything, so the
@@ -344,8 +300,9 @@ fn link_exists(dst: &Path) -> io::Result<()> {
         .ok_or_else(|| io::Error::other(format!("no link at {}", dst.display())))
 }
 
-/// The system's own mount-point tool; on machines that block the reparse
-/// APIs for unsigned processes it is the only way left.
+/// The system's own mount-point tool: it creates the junction without the symlink
+/// privilege, where the raw reparse APIs and std's symlink_dir both refuse an
+/// unsigned, unelevated process.
 #[cfg(windows)]
 fn mklink_junction(target: &Path, dst: &Path) -> io::Result<()> {
     let out = std::process::Command::new("cmd")

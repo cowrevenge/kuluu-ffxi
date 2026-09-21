@@ -2025,8 +2025,8 @@ mod tests {
     }
 
     // research/xim EffectRoutineParser.kt parseSection2 — the magic lock form is two dwords total, so
-    // it must map without the +8 id dword (bead kuluu-3y30: the blanket gate read every shipped
-    // two-dword lock stage as Unknown).
+    // it must map without the +8 id dword: the blanket gate read every shipped two-dword lock
+    // stage as Unknown.
     #[test]
     fn magic_animation_lock_maps_at_two_dwords() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];

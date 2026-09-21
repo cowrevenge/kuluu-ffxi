@@ -1184,9 +1184,9 @@ fn return_to_launcher_on_disconnect(
 }
 
 /// `insert_dat_roots` is the one place a consumer's root is wired; a consumer that is missing
-/// from it silently keeps reading whatever it opened for itself (kuluu-1tr2, kuluu-051). The
-/// scheduler runtime's root is the load-bearing case: without it every action/emote DAT read
-/// falls back to re-opening the install per cache miss.
+/// from it silently keeps reading whatever it opened for itself. The scheduler runtime's root
+/// is the load-bearing case: without it every action/emote DAT read falls back to re-opening
+/// the install per cache miss.
 #[cfg(test)]
 mod dat_root_wiring_tests {
     use super::{insert_dat_roots, DatRootRes};

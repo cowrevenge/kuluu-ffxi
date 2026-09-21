@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(tri_hits_column(triangle, Vec2::new(6.0, 8.0)), None);
     }
 
-    /// First-load race (kuluu-mo4q class): self enters the snapshot before
+    /// First-load race: self enters the snapshot before
     /// this zone's main MZB block lands. With an empty column set every
     /// support probe misses — without the hold, that reads as "no floor in
     /// reach" and gravity integrates from the server seed forever (each

@@ -955,7 +955,7 @@ fn snapshot_drives_movement(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool 
 /// floors but none within MAX_GROUND_STEP_UP) is broken by
 /// `recover_self_ground_system`, which runs right after this one — the server
 /// does not correct a bad z, it persists and echoes back whatever c2s 0x015
-/// sends (kuluu-mo4q).
+/// sends.
 /// vendor/server/src/map/packets/c2s/0x015_pos.cpp
 ///
 /// The `field_dbg` param records this tick's walker::step outcome for the
@@ -1179,8 +1179,8 @@ pub fn dispatch_movement_system(
     // retail behavior — the body turn plus the lazy camera swing — as measured
     // from video (HorizonXI 2026-07-20), and the stored-vector steer would
     // retune the carve circle and the camera follow, which need in-game
-    // verification and the numpad-character key layout (kuluu-t820) before
-    // they are worth taking.
+    // verification and the numpad-character key layout before they are worth
+    // taking.
     let any_strafe = bindings.pressed(Action::StrafeLeft, keys)
         || bindings.pressed(Action::StrafeRight, keys)
         || pad_move.x != 0.0;
@@ -2129,7 +2129,7 @@ const AUTO_RECENTER_RATE: f32 = RETAIL_CHASE_RECENTER_PER_TICK * RETAIL_MOVE_TIC
 /// Retail's window engages at 60 degrees off-centre; this one at 2.0 rad
 /// (~115 degrees) because our A/D carve is body-led — the body turns and the
 /// camera chases — where retail's turn keys are camera-led and the body
-/// follows the camera (kuluu-8mu2, kuluu-t820). A carve past 60 degrees would
+/// follows the camera. A carve past 60 degrees would
 /// stall under retail's window until the carve matches that model. Retail
 /// plants the chase camera when the character deliberately runs toward it
 /// (unlocked S / about-face): the follow must not swing around to the

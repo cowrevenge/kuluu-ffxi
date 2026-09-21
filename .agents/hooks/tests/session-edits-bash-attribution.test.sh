@@ -158,9 +158,9 @@ test_writer_form_without_named_path_attributed() {
   assert_in_ledger "$SID" mod.rs
 }
 
-# The race kuluu-6mj5 closed for non-writer commands: a peer's write to a
-# path cargo fmt cannot touch, concurrent with a bare cargo fmt --all, must
-# land in the suspect log, not the ledger.
+# The race closed for non-writer commands: a peer's write to a path cargo
+# fmt cannot touch, concurrent with a bare cargo fmt --all, must land in the
+# suspect log, not the ledger.
 test_peer_write_outside_fmt_plausible_set_is_suspect() {
   new_repo
   local p; p=$(payload "$SID" "cargo fmt --all")

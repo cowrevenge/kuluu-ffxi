@@ -67,6 +67,11 @@ question is already answered before spending either.
   -- block counts and payload shapes for the particle-generator and scheduler
   opcodes, scanned from the retail effect DATs; the home for the figures the
   parser comments used to carry inline.
+- [Action confirm, movement locks, and the ranged sequence](references/2026-09-21-action-confirm-and-locks.md)
+  -- every menu action confirms through the sub-target cursor (SELF-only
+  included), which typed tokens skip or narrow it, that players are never
+  movement-locked by a cast or aim, that the one real lock is the weapon
+  draw/sheathe, and the ranged start/aim/finish sequence.
 
 Record new durable findings here as dated observation records, per the routing
 rule in the root `AGENTS.md`. Captures and binary dumps stay local.

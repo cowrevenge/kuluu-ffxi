@@ -2051,21 +2051,18 @@ impl SessionState {
                 }
                 changed
             }
-            AgentEvent::TargetChanged { target_id } => {
-                // The server's engage truth for self: it never sends its own 0x0E
-                // update (zone_entities.cpp UpdateEntityPacket skips the entity's
-                // own player), so the 0x058 battle-target push is what flips this
-                // byte to ATTACK on an accepted engage and back to NONE on a
-                // disengage. A "wait longer" rejection sends no 0x058, so the byte
-                // stays NONE and the weapon never draws.
-                let status = match target_id {
-                    Some(_) => ffxi_proto::decode::animation::ATTACK,
-                    None => ffxi_proto::decode::animation::NONE,
-                };
-                let changed = self.self_server_status != status;
-                self.self_server_status = status;
-                changed
-            }
+            // 0x058 commits which entity the server is fighting (the reactor
+            // re-aims on it, reactor.rs); it says nothing about whether self is
+            // in the attack state. That byte is the 0x037 CHAR_STATUS animation
+            // field, delivered as SelfServerStatus: battle_entity.cpp
+            // CBattleEntity::OnEngage sets animation = xi::Animation::Attack and
+            // updatemask |= UPDATE_HP, and char_entity.cpp CCharEntity::PostTick
+            // pushes CCharStatusPacket (char_status.cpp, id 0x037, server_status
+            // = PChar->animation) on that mask. A refused engage returns before
+            // OnEngage (CPlayerController::Engage's MsgBasic::WaitLonger /
+            // TooFarAway, or a target getValidTarget rejects), so the byte
+            // moves only on the 0x037.
+            AgentEvent::TargetChanged { .. } => false,
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }

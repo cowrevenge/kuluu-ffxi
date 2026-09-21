@@ -2102,27 +2102,44 @@ fn apply_event_reports_real_mutations_only() {
     }));
 }
 
-/// The 0x058 battle-target push is the server's engage truth for self: it flips
-/// the animation byte to ATTACK on an accepted engage and back to NONE on a
-/// disengage. A rejection sends no 0x058, so the byte stays put.
+/// The attack byte follows the 0x037 CHAR_STATUS animation field, not the
+/// 0x058 target push: a target set or clear leaves it put, and only
+/// SelfServerStatus moves it.
 #[test]
-fn apply_event_target_changed_sets_self_engage_byte() {
+fn attack_byte_follows_char_status_not_the_target_push() {
     use ffxi_proto::decode::animation::{ATTACK, NONE};
     let mut s = SessionState::default();
     assert_eq!(s.self_server_status, NONE);
 
-    assert!(s.apply_event(&AgentEvent::TargetChanged {
-        target_id: Some(99)
-    }));
-    assert_eq!(s.self_server_status, ATTACK);
     assert!(
         !s.apply_event(&AgentEvent::TargetChanged {
             target_id: Some(99)
         }),
-        "a repeat for the same target is a no-op fold"
+        "a target push is not the attack state"
     );
+    assert_eq!(s.self_server_status, NONE);
 
-    assert!(s.apply_event(&AgentEvent::TargetChanged { target_id: None }));
+    assert!(s.apply_event(&AgentEvent::SelfServerStatus {
+        status: ATTACK,
+        mount_id: 0
+    }));
+    assert_eq!(s.self_server_status, ATTACK);
+
+    assert!(s.apply_event(&AgentEvent::SelfServerStatus {
+        status: NONE,
+        mount_id: 0
+    }));
+    assert_eq!(s.self_server_status, NONE);
+}
+
+/// A 0x058 push alone must never arm the weapon: the byte stays NONE.
+#[test]
+fn target_push_alone_never_draws() {
+    use ffxi_proto::decode::animation::NONE;
+    let mut s = SessionState::default();
+    s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99),
+    });
     assert_eq!(s.self_server_status, NONE);
 }
 

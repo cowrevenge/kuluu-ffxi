@@ -171,8 +171,8 @@ snap_sweep() {
 # ledger_sweep: reap ledger and suspect logs whose owner has made no tool call
 # for the ledger TTL. A stale <sid>.suspect must not keep counting into the
 # commit nudge if the session id is reused. find's minute granularity is
-# rounded UP, so the sweep can only ever run later than the TTL asks (the
-# snap_sweep precedent).
+# rounded UP, as in snap_sweep, so the sweep can only ever run later than the
+# TTL asks.
 ledger_sweep() {
   local dir
   dir=$(ledger_dir)
@@ -446,7 +446,7 @@ git_stash_subarg() {
 
 # in_word_list <word> <list>: the word equals one of the list's words. A case
 # pattern would read the unquoted list as a single space-joined pattern, so
-# membership is a word loop (the OWNED_WRITES precedent).
+# membership is a word loop over the list's words.
 in_word_list() {
   local w="$1" e
   shift

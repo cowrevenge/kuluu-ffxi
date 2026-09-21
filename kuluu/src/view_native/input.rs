@@ -1275,10 +1275,12 @@ pub fn dispatch_movement_system(
     let turn_rate = ROTATE_KEY_RATE_RAD_PER_SEC * (resolved.rotate_dir as f32 + fp_rotate);
     let (player_rotate_u8, heading_delta_units) =
         advance_heading_turn(&mut turn_accum.units, turn_rate, time.delta_secs());
-    // research/xim EffectRoutineInstance.kt lockMovement: while the active routine's 0x2E
-    // MovementLock interval is live, the movement controller returns zero velocity - the
-    // local player's movement input is withheld for those ticks. Facing (Q/E) is the
-    // separate 0x2F lock, so rotation keeps running.
+    // research/XIClient include/Game/Scheduler/SchedulerTagCode.h SCH_TAG_0x2E - retail's
+    // movement-lock scheduler tag; its handler (source/Game/Scheduler/Tags/0x2E.cpp
+    // HandleTag0x2E) is missing from the decompile, so the zero-velocity behavior is xim's:
+    // research/xim ActorController.kt KeyboardActorController.getVelocity returns zero
+    // velocity while the 0x2E lock is live. Facing (Q/E) is the separate 0x2F lock, so
+    // rotation keeps running.
     let self_movement_locked = state
         .snapshot
         .self_char_id

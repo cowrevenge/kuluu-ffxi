@@ -133,6 +133,26 @@ table+0xEA0 for the authCode bytes and table+0xFAC for the 16-byte value. This
 is why hosting the genuine unmodified polcore over COM is a viable
 injection-free posture as well.
 
+## What a refusal means
+
+The profile service answers a bad request with a status byte, which polcore
+turns into a client code and app.dll turns into a message out of the Viewer's
+own error resource. Two of those statuses share one sentence on screen and
+must not be collapsed:
+
+| Status | Meaning |
+|---|---|
+| `0x6E` | the address is blocked from the account service |
+| `0x6F` | the Square Enix id, password or one-time password was refused |
+| `0x70` | the Square Enix account itself cannot sign in: closed, withdrawn, or in arrears |
+| `0xE2` | the account service could not certify the account |
+
+The Viewer shows the same "incorrect id or password" sentence for `0x6F` and
+`0x70`, and only the untranslated internal label of the error resource tells
+them apart. A client that reports `0x70` as a bad password sends the player to
+re-type something that was never wrong. `ffxi_pol::profile::status_meaning`
+describes each in our own words rather than reproducing the Viewer's text.
+
 ## The lobby dialect is a separate problem
 
 Kuluu's lobby client sends a `0xA1` data-port request carrying a 32-bit

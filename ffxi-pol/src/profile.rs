@@ -38,6 +38,32 @@ pub const SECRET_MAX_LEN: usize = 0x0F;
 /// polcore `0x1001f690` / `0x1001f400`: a non-zero status maps to this base.
 const ERROR_BASE: i32 = -0x1450;
 
+/// What a refusal means, in our own words. The Viewer has a message for each
+/// of these in its own resources, which are game content and are not
+/// reproduced here; these are descriptions of the branch each status takes.
+///
+/// The distinction the Viewer's visible text loses is worth keeping: it shows
+/// the same sentence for a refused identifier and for an account that cannot
+/// sign in at all, and only the status byte tells them apart.
+pub fn status_meaning(status: u8) -> Option<&'static str> {
+    match status {
+        STATUS_ADDRESS_BLOCKED => Some("this address is blocked from the account service"),
+        STATUS_IDENTITY_REFUSED => {
+            Some("the Square Enix id, password or one-time password was refused")
+        }
+        STATUS_ACCOUNT_STATE => Some(
+            "the Square Enix account itself cannot sign in, which covers a closed or              suspended account and one with an unpaid balance, rather than a mistyped              password",
+        ),
+        STATUS_SERVICE_UNAVAILABLE => Some("the account service could not certify the account"),
+        _ => None,
+    }
+}
+
+const STATUS_ADDRESS_BLOCKED: u8 = 0x6E;
+const STATUS_IDENTITY_REFUSED: u8 = 0x6F;
+const STATUS_ACCOUNT_STATE: u8 = 0x70;
+const STATUS_SERVICE_UNAVAILABLE: u8 = 0xE2;
+
 /// A category and opcode name a profile transaction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Transaction {
@@ -359,6 +385,19 @@ mod tests {
         assert_eq!(head[2], 7);
         assert_eq!(u32::from_le_bytes(head[4..8].try_into().unwrap()), 0x40);
         assert_eq!(&head[0x18..0x28], &digest);
+    }
+
+    #[test]
+    fn a_refused_identity_and_a_refused_account_are_told_apart() {
+        // The Viewer shows one sentence for both, so only the status
+        // distinguishes them; a client that collapses them would send a
+        // player to re-type a password that was never wrong.
+        let refused = status_meaning(STATUS_IDENTITY_REFUSED).unwrap();
+        let state = status_meaning(STATUS_ACCOUNT_STATE).unwrap();
+        assert_ne!(refused, state);
+        assert!(state.contains("unpaid"));
+        assert!(status_meaning(0x00).is_none());
+        assert!(status_meaning(0x79).is_none());
     }
 
     #[test]

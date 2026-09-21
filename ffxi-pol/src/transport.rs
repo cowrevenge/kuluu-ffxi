@@ -61,6 +61,10 @@ pub struct ChatSession {
     /// polcore leaves its routing global zeroed until a post-registration
     /// numeric 300 fills it, so an absent one is host index 0, not an error.
     pub routing: Option<Routing>,
+    /// When the greeting landed. polcore adopts the clock the greeting
+    /// carries and counts from that moment, so anything later that stamps a
+    /// time measures from here rather than from when the chat leg finished.
+    pub greeting_at: Instant,
 }
 
 /// polcore `0x10013ea0` passes this as the USER mode digit for a member login.
@@ -84,6 +88,7 @@ pub fn agree_session_key(
     let field3 = field(chat::line_body(&line, false), 3)
         .ok_or_else(|| Error::protocol("chat greeting has no challenge field"))?;
     let greeting = Greeting::parse(field3)?;
+    let greeting_at = Instant::now();
 
     channel.write_all(&chat::build_user(&key, mode))?;
 
@@ -133,6 +138,7 @@ pub fn agree_session_key(
         cipher,
         greeting,
         routing,
+        greeting_at,
     })
 }
 
@@ -149,6 +155,13 @@ fn parse_routing(body: &[u8]) -> Option<Routing> {
 impl ChatSession {
     pub fn profile_host(&self) -> String {
         profile::host(self.routing.map_or(0, |r| r.host_index))
+    }
+
+    /// The service's clock as of now, which is what a request stamps itself
+    /// with. The client carries no clock of its own into this: the greeting
+    /// supplies the epoch and only the elapsed time since is local.
+    pub fn now(&self) -> u64 {
+        u64::from(self.greeting.clock()) + self.greeting_at.elapsed().as_secs()
     }
 }
 
@@ -251,6 +264,8 @@ impl ProfileConnection {
                 transaction: tx.name(),
                 status: head.status,
                 code: head.error_code(),
+                meaning: profile::status_meaning(head.status)
+                    .unwrap_or("the service gave no reason this crate can name"),
             });
         }
 
@@ -381,7 +396,6 @@ pub fn login(
         &token,
         USER_MODE_MEMBER,
     )?;
-    let opened = Instant::now();
 
     let host = session.profile_host();
     let host_index = session.routing.map_or(0, |r| r.host_index);
@@ -410,7 +424,7 @@ pub fn login(
         &account.square_enix_password,
         account.otp,
     );
-    let now = u64::from(session.greeting.clock()) + opened.elapsed().as_secs();
+    let now = session.now();
     open(connector)?.transact(
         profile::MEMBER_LOGIN,
         id,
@@ -538,6 +552,23 @@ mod tests {
             host_order[2] = MOCK_HOST_INDEX;
             // The transform is its own inverse, so it makes the wire form too.
             chat::routing_host_order(&host_order)
+        }
+    }
+
+    impl Mock {
+        fn new(server_key: [u8; 8], account: &Account) -> Self {
+            Self {
+                server_key,
+                member_id: account.playonline_id.to_vec(),
+                secret: account.playonline_password.as_bytes().to_vec(),
+                dialled: Vec::new(),
+                seen: Vec::new(),
+                login_payload: Vec::new(),
+                select_payload: Vec::new(),
+                community_payload: Vec::new(),
+                community_reply: [0x33; authcode::REPLY_LEN - profile::BODY_CHECKSUM_LEN],
+                profile_cipher: None,
+            }
         }
     }
 
@@ -773,6 +804,30 @@ mod tests {
         assert_eq!(session.routing.unwrap().region, MOCK_REGION);
         assert!(!session.routing.unwrap().refused);
         assert_eq!(session.profile_host(), "pp007.pol.com");
+    }
+
+    #[test]
+    fn the_session_clock_starts_at_the_greeting_not_at_the_end_of_the_chat_leg() {
+        let server_key = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18];
+        let account = mock_account();
+        let mock = Rc::new(RefCell::new(Mock::new(server_key, &account)));
+        let mut connector = MockConnector(Rc::clone(&mock));
+        let mut channel = connector
+            .connect(crate::hosts::CHAT_HOST, chat::PORTS[0])
+            .unwrap();
+        let mut rng = SeqRng(0x1234_5678);
+        let session = agree_session_key(
+            channel.as_mut(),
+            &mut rng,
+            0x1_2345,
+            b"secret",
+            "",
+            USER_MODE_MEMBER,
+        )
+        .unwrap();
+        // The epoch is the service's, so the only local part is the elapsed
+        // time, which is still inside the same second here.
+        assert_eq!(session.now(), u64::from(MOCK_CLOCK));
     }
 
     #[test]

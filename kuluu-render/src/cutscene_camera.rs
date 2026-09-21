@@ -540,28 +540,45 @@ pub fn eid_model_point(
     locator_height_fraction(locator).map(|frac| Vec3::new(0.0, height * frac, 0.0))
 }
 
-/// research/XIClient include/World/Actor/EID_INDEX.h - the named body points as fractions of
-/// the actor's height, standing in for the skeleton reference table when the model did not
-/// load: EID_CURRENT 0.0, EID_WAIST 0.45, EID_NAME 1.05, EID_NECK 0.85, EID_LOOK_AT 0.75,
-/// EID_HEAD_TOP 1.0, EID_EYE_CENTER 0.9, EID_CHEST 0.6, EID_R_FOOT/EID_L_FOOT 0.05,
-/// EID_R_HAND/EID_L_HAND 0.65, EID_HEIGHT..EID_BODY_CENTER 0.5, EID_HEAD_CENTER 0.95,
-/// EID_MAGIC0..EID_REACH_H 0.7, EID_R_EYE0..EID_CAMERA3 0.5.
+// research/XIClient include/World/Actor/EID_INDEX.h - the named body point indices; the
+// height fractions below stand in for the skeleton reference table when the model did not
+// load.
+const EID_CURRENT: u32 = 0;
+const EID_WAIST: u32 = 1;
+const EID_NAME: u32 = 2;
+const EID_NECK: u32 = 3;
+const EID_LOOK_AT: u32 = 4;
+const EID_HEAD_TOP: u32 = 5;
+const EID_EYE_CENTER: u32 = 6;
+const EID_CHEST: u32 = 7;
+const EID_R_FOOT: u32 = 8;
+const EID_L_FOOT: u32 = 9;
+const EID_R_HAND: u32 = 10;
+const EID_L_HAND: u32 = 11;
+const EID_HEIGHT: u32 = 12;
+const EID_BODY_CENTER: u32 = 21;
+const EID_HEAD_CENTER: u32 = 22;
+const EID_MAGIC0: u32 = 23;
+const EID_REACH_H: u32 = 32;
+const EID_R_EYE0: u32 = 33;
+const EID_CAMERA3: u32 = 42;
+
 fn locator_height_fraction(locator: u32) -> Option<f32> {
     Some(match locator {
-        0 => 0.0,
-        1 => 0.45,
-        2 => 1.05,
-        3 => 0.85,
-        4 => 0.75,
-        5 => 1.0,
-        6 => 0.9,
-        7 => 0.6,
-        8 | 9 => 0.05,
-        10 | 11 => 0.65,
-        12..=21 => 0.5,
-        22 => 0.95,
-        23..=32 => 0.7,
-        33..=42 => 0.5,
+        EID_CURRENT => 0.0,
+        EID_WAIST => 0.45,
+        EID_NAME => 1.05,
+        EID_NECK => 0.85,
+        EID_LOOK_AT => 0.75,
+        EID_HEAD_TOP => 1.0,
+        EID_EYE_CENTER => 0.9,
+        EID_CHEST => 0.6,
+        EID_R_FOOT | EID_L_FOOT => 0.05,
+        EID_R_HAND | EID_L_HAND => 0.65,
+        EID_HEIGHT..=EID_BODY_CENTER => 0.5,
+        EID_HEAD_CENTER => 0.95,
+        EID_MAGIC0..=EID_REACH_H => 0.7,
+        EID_R_EYE0..=EID_CAMERA3 => 0.5,
         _ => return None,
     })
 }

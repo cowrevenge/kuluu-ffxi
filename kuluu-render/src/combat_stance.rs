@@ -1884,6 +1884,11 @@ mod tests {
             .id()
     }
 
+    /// 60 fps render frames spanning the settle gap the grounding tests leave between
+    /// server confirms: one and a quarter AI ticks, a measured inter-update interval that
+    /// keeps the segment budget ahead of the mid-tween probes that follow it.
+    const AI_TICK_FRAMES: usize = 30;
+
     fn tick_frames(app: &mut App, frames: usize) {
         for _ in 0..frames {
             app.world_mut()
@@ -1925,7 +1930,7 @@ mod tests {
             40,
             40,
         );
-        tick_frames(&mut app, 30);
+        tick_frames(&mut app, AI_TICK_FRAMES);
         app.world_mut().resource_mut::<EntityPrediction>().observe(
             901,
             Vec3::new(1.5, 1.5, 0.0),
@@ -2493,7 +2498,6 @@ mod tests {
     #[test]
     fn remote_running_keeps_gait_across_captured_lsb_arrival_jitter() {
         const FRAME_SECS: f32 = 1.0 / 60.0;
-        const PACKET_STEP: f32 = 2.4;
         const RUN_SPEED: f32 = 4.8;
         const MAX_SPEED_MULTIPLIER: f32 = 2.0;
         const WARMUP_FRAMES: usize = 180;
@@ -2501,6 +2505,7 @@ mod tests {
         const ARRIVAL_FRAMES: [usize; 10] = [24, 48, 66, 114, 138, 162, 192, 234, 264, 288];
         const SPEED_BYTE: u8 = 120;
         const BASE_BYTE: u8 = 48;
+        let packet_step = expected_step_yalms(SPEED_BYTE, BASE_BYTE);
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<SceneState>()
@@ -2537,7 +2542,7 @@ mod tests {
         for frame in 0..last_arrival + STOP_FRAMES {
             if ARRIVAL_FRAMES.get(packet) == Some(&frame) {
                 packet += 1;
-                confirmed = packet as f32 * PACKET_STEP;
+                confirmed = packet as f32 * packet_step;
                 app.world_mut().resource_mut::<EntityPrediction>().observe(
                     7,
                     Vec3::X * confirmed,
@@ -2656,9 +2661,9 @@ mod tests {
     #[test]
     fn late_tick_widens_the_ring_budget_without_popping() {
         const FRAME_SECS: f32 = 1.0 / 60.0;
-        const PACKET_STEP: f32 = 2.4;
         const SPEED_BYTE: u8 = 120;
         const BASE_BYTE: u8 = 48;
+        let packet_step = expected_step_yalms(SPEED_BYTE, BASE_BYTE);
         let mut p = EntityPrediction::default();
         p.observe(7, Vec3::ZERO, 0, SPEED_BYTE, BASE_BYTE);
         let arrivals: [usize; 6] = [24, 48, 120, 144, 168, 192];
@@ -2669,7 +2674,7 @@ mod tests {
         for frame in 0..240 {
             if arrived < arrivals.len() && arrivals[arrived] == frame {
                 arrived += 1;
-                confirmed += PACKET_STEP;
+                confirmed += packet_step;
                 p.observe(7, Vec3::X * confirmed, 0, SPEED_BYTE, BASE_BYTE);
             }
             let s = p.by_id.get_mut(&7).unwrap();

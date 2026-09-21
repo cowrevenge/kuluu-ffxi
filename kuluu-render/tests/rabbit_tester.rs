@@ -496,6 +496,11 @@ fn moving_sample(speed: f32) -> MotionSample {
     }
 }
 
+/// Wire speed bytes the S3/S4 gait tests drive: at the base the gait rule
+/// (speed > speed_base) selects walk, above it run.
+const GAIT_BASE_SPEED: u8 = 40;
+const GAIT_RUN_SPEED: u8 = 50;
+
 /// Set the wire speed bytes on an entity's snapshot entry; the next pose pass rebuilds the
 /// index from them and applies the gait rule (run = speed > speed_base).
 fn set_wire_gait(app: &mut App, world_id: u32, speed: u8, speed_base: u8) {
@@ -520,7 +525,7 @@ fn s3_walk_gait_selects_wlk_clip() {
         .resource_mut::<EntityMotion>()
         .by_id
         .insert(RARAB_W, moving_sample(1.0));
-    set_wire_gait(&mut app, RARAB_W, 40, 40);
+    set_wire_gait(&mut app, RARAB_W, GAIT_BASE_SPEED, GAIT_BASE_SPEED);
 
     let (first, _) = watch(&mut app, 60, |i, w| {
         i >= 2 && pose_clip(w, child).is_some_and(|c| c.starts_with("wlk"))
@@ -543,7 +548,7 @@ fn s4_run_gait_selects_run_clip() {
         .resource_mut::<EntityMotion>()
         .by_id
         .insert(RARAB_W, moving_sample(4.0));
-    set_wire_gait(&mut app, RARAB_W, 50, 40);
+    set_wire_gait(&mut app, RARAB_W, GAIT_RUN_SPEED, GAIT_BASE_SPEED);
 
     let (first, _) = watch(&mut app, 60, |i, w| {
         i >= 2 && pose_clip(w, child).is_some_and(|c| c.starts_with("run"))

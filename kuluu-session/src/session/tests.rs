@@ -1,4 +1,5 @@
 use super::*;
+use ffxi_proto::decode::PosHead;
 
 /// Every battle-line expectation below is the no-install wording, so these
 /// shadow the real entry points with the basic-message table absent: what a
@@ -781,7 +782,7 @@ fn worm_body(send_flag: u8, status: u8, m_flags: u32, namevis: u8) -> Vec<u8> {
     b[12..16].copy_from_slice(&(-2.0f32).to_le_bytes());
     b[16..20].copy_from_slice(&0.0f32.to_le_bytes());
     b[24] = 5;
-    b[26] = 100;
+    b[PosHead::HPP_OFFSET] = 100;
     b[28] = status;
     b[29..33].copy_from_slice(&m_flags.to_le_bytes());
     b[39] = namevis;
@@ -874,7 +875,7 @@ fn hp_update_packet_marks_entity_pending_with_new_hpp() {
     );
 
     let mut body = worm_body(0x04, 0, 0, 0);
-    body[26] = 42;
+    body[PosHead::HPP_OFFSET] = 42;
     feed_worm(&mut s, &body);
     assert_eq!(
         worm_entity(&s).hp_pct,

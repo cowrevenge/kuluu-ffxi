@@ -444,10 +444,9 @@ pub struct ParticleGeneratorDef {
     // sec3 0x02 PositionUpdater: a no-payload marker — retail's ElemIdle case 0x02 adds the
     // element's total velocity × dt to its position, and only while the block is present
     // (research/xim ParticleUpdaters.kt PositionUpdater; CYyGenerator.cpp
-    // CYyGenerator::ElemIdle case 0x02). Shipped census: 92938 sec3 0x02 blocks, all
-    // size_words=1, 92937 of them in generators carrying a sec2 0x02 base velocity; the 8
-    // velocity-carrying generators without the block are never position-stepped by retail,
-    // so the flag gates the engine's velocity integration.
+    // CYyGenerator::ElemIdle case 0x02). A generator that carries a base velocity without
+    // the block is not position-stepped by retail, so the flag gates the engine's velocity
+    // integration.
     pub position_updater: bool,
     // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
     // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
@@ -1594,11 +1593,9 @@ impl ParticleGeneratorDef {
                     // already is, so the block arms nothing and only consumes.
                     SEC3_OPCODE_NO_OP => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x1B — the color.a
-                    // ProgressValueUpdater: no payload (the shipped census is 64963 blocks, all
-                    // size_words=1). It samples the sec2 0x2D alpha track at life progress, which
-                    // particle_draw already does from def.alpha_track; the shipped corpus has zero
-                    // generators carrying the 0x2D track without this updater, so the block arms
-                    // nothing and only consumes.
+                    // ProgressValueUpdater: no payload. It samples the sec2 0x2D alpha track at
+                    // life progress, which particle_draw already does from def.alpha_track, so the
+                    // block arms nothing and only consumes.
                     SEC3_OPCODE_ALPHA_UPDATER => {}
                     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: expectZero32
                     // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
@@ -1613,8 +1610,7 @@ impl ParticleGeneratorDef {
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
                     }
                     // research/xim ParticleUpdaters.kt CameraShakeUpdater: near, far, and
-                    // shakeFactor only in the 4-word form (the opCodeSize == 4 branch; the
-                    // shipped census is 1451 four-word blocks, 8 three-word).
+                    // shakeFactor only in the 4-word form (the opCodeSize == 4 branch).
                     0x5F if payload + 8 <= body.len() => {
                         let shake_factor = if size_words == 4 && payload + 12 <= body.len() {
                             f32_le(body, payload + 8)
@@ -2494,8 +2490,7 @@ mod tests {
 
     // sec3 0x0D SpriteSheetFrameUpdater: a no-payload marker (research/xim
     // ParticleUpdaters.kt SpriteSheetFrameUpdater) — the engine's flipbook_index already
-    // advances the frame, so the arm only consumes the block. Shipped census: 7492 sec3 0x0D
-    // blocks, paired 1:1 with the 7492 sec2 0x1D initializers.
+    // advances the frame, so the arm only consumes the block.
     #[test]
     fn sprite_sheet_frame_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -2527,10 +2522,10 @@ mod tests {
     }
 
     // 0x0E NoOpParticleUpdater is a no-payload marker (research/xim ParticleUpdaters.kt
-    // NoOpParticleUpdater); the shipped census is 71013 blocks, all size_words=1. retail's
-    // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114) — the
-    // elapsed-life fraction the engine's `progress` (age/life, particle_sim.rs) already is — so
-    // the block arms nothing and only consumes, as for 0x0D.
+    // NoOpParticleUpdater). retail's ElemIdle case 0x0E computes the keyframe progress as
+    // 1.0 - (Life / field_114) — the elapsed-life fraction the engine's `progress`
+    // (age/life, particle_sim.rs) already is — so the block arms nothing and only consumes,
+    // as for 0x0D.
     #[test]
     fn no_op_particle_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -2563,8 +2558,7 @@ mod tests {
 
     // sec3 0x02 PositionUpdater: a no-payload marker that arms the position gate (research/xim
     // ParticleUpdaters.kt PositionUpdater; CYyGenerator.cpp CYyGenerator::ElemIdle case 0x02).
-    // Shipped census: 92938 blocks, all size_words=1; the flag is set only while the block is
-    // present, so a generator without it stays off.
+    // The flag is set only while the block is present, so a generator without it stays off.
     #[test]
     fn position_updater_flag_arms_only_with_the_block() {
         let mut setup = op(0x01, 12, &[]);
@@ -2604,10 +2598,9 @@ mod tests {
     }
 
     // 0x1B color.a ProgressValueUpdater is a no-payload marker (research/xim
-    // ParticleGeneratorParser.kt sec3Handler 0x1B); the shipped census is 64963 blocks, all
-    // size_words=1. It samples the sec2 0x2D alpha track at life progress, which particle_draw
-    // already does from def.alpha_track, and the shipped corpus has zero generators carrying the
-    // 0x2D track without this updater — so the block arms nothing and only consumes.
+    // ParticleGeneratorParser.kt sec3Handler 0x1B). It samples the sec2 0x2D alpha track at
+    // life progress, which particle_draw already does from def.alpha_track, so the block arms
+    // nothing and only consumes.
     #[test]
     fn alpha_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -2639,8 +2632,8 @@ mod tests {
     }
 
     // 0x8E FootMarkEffectSetup is a no-payload marker block (research/xim
-    // ParticleInitializers.kt FootMarkEffectSetup); the shipped fmrk generator carries it as a
-    // one-dword block between its sprite-sheet initializer and the end of section 2.
+    // ParticleInitializers.kt FootMarkEffectSetup): a one-dword block between the
+    // sprite-sheet initializer and the end of section 2.
     #[test]
     fn foot_mark_setup_sets_the_flag_without_payload() {
         let mut setup = op(0x01, 12, &[]);
@@ -2677,8 +2670,7 @@ mod tests {
     }
 
     // 0x3D OscillationSetup is a no-payload marker (research/xim ParticleInitializers.kt
-    // OscillationSetup); the shipped census is 441 blocks, all size_words=1, and every one
-    // precedes its 0x3E/0x40 acceleration setup in the section-2 stream.
+    // OscillationSetup), ahead of its 0x3E/0x40 acceleration setup in the section-2 stream.
     #[test]
     fn oscillation_setup_sets_the_flag_without_payload() {
         let mut setup = op(0x01, 12, &[]);
@@ -2719,8 +2711,7 @@ mod tests {
     }
 
     // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, accelerationVariance]
-    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup). Shipped census:
-    // 347 blocks, all size_words=3, every one behind a 0x3D marker.
+    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_z_reads_the_two_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2743,8 +2734,7 @@ mod tests {
     }
 
     // 0x3E OscillationAccelerationSetup (X): the X-axis twin of 0x40 (research/xim
-    // ParticleInitializers.kt OscillationAccelerationSetup). Shipped census: 113 blocks, all
-    // size_words=3, every one behind a 0x3D marker.
+    // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_x_reads_the_two_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2767,8 +2757,7 @@ mod tests {
     }
 
     // 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40 (research/xim
-    // ParticleInitializers.kt OscillationAccelerationSetup). Shipped census: 34 blocks, all
-    // size_words=3, every one behind a 0x3D marker.
+    // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_y_reads_the_two_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2792,9 +2781,8 @@ mod tests {
 
     // 0x29 OscillationApplier (X): [rate-divisor, base-offset, unused-in-xim] on the section-3
     // stream (research/xim ParticleUpdaters.kt OscillationApplier — oscillationRate = 180f /
-    // payload0, baseOffset = payload1, payload2 "no effect?"); the integrator for the sec2 0x3E
-    // acceleration. Shipped census: 113 blocks, all size_words=4, every one in a generator
-    // carrying the 0x3D marker.
+    // payload0, baseOffset = payload1, payload2 "no effect?"); the integrator for the sec2
+    // 0x3E acceleration, behind the 0x3D marker.
     #[test]
     fn oscillation_applier_x_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2828,9 +2816,8 @@ mod tests {
     }
 
     // 0x2B OscillationApplier (Z): the Z-axis twin of 0x29 on the section-3 stream (research/xim
-    // ParticleUpdaters.kt OscillationApplier), the integrator for the sec2 0x40 acceleration.
-    // Shipped census: 347 blocks, all size_words=4, every one in a generator carrying the 0x3D
-    // marker.
+    // ParticleUpdaters.kt OscillationApplier), the integrator for the sec2 0x40 acceleration,
+    // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_z_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2864,9 +2851,8 @@ mod tests {
     }
 
     // 0x2A OscillationApplier (Y): the Y-axis twin of 0x29 on the section-3 stream (research/xim
-    // ParticleUpdaters.kt OscillationApplier), the integrator for the sec2 0x3F acceleration.
-    // Shipped census: 30 blocks, all size_words=4, every one in a generator carrying the 0x3D
-    // marker.
+    // ParticleUpdaters.kt OscillationApplier), the integrator for the sec2 0x3F acceleration,
+    // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_y_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -2901,8 +2887,7 @@ mod tests {
 
     // 0x03 VelocityVarianceSetup: the three floats are the per-axis bounds of the random
     // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
-    // VelocityVarianceSetup); the shipped census is 6311 blocks, all size_words=4, and every
-    // one sits after its generator's 0x02.
+    // VelocityVarianceSetup), after its generator's 0x02.
     #[test]
     fn velocity_variance_reads_the_three_axis_bounds() {
         let mut setup = op(0x01, 12, &[]);
@@ -2932,8 +2917,7 @@ mod tests {
 
     // 0x08 RelativeVelocitySetup: a single float — the magnitude of the per-particle velocity
     // along the spawn offset's direction (research/xim ParticleInitializers.kt
-    // RelativeVelocitySetup). Shipped census: 12461 blocks, all size_words=2, every one after
-    // its generator's 0x02 base-velocity block.
+    // RelativeVelocitySetup), after its generator's 0x02 base-velocity block.
     #[test]
     fn relative_velocity_reads_the_single_float() {
         let mut setup = op(0x01, 12, &[]);
@@ -2957,8 +2941,7 @@ mod tests {
 
     // 0x41 RelativeVelocityVarianceSetup: a single float — the bound of the uniform random
     // magnitude added to the 0x08 relative velocity along the spawn offset's direction
-    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup). Shipped census:
-    // 9199 blocks, all size_words=2.
+    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
     #[test]
     fn relative_velocity_variance_reads_the_single_float() {
         let mut setup = op(0x01, 12, &[]);
@@ -2977,8 +2960,7 @@ mod tests {
 
     // 0x67 ReverseDisplacementSetup: a single float, never read by the effect — the block's
     // presence arms the spawn-at-endpoint behavior
-    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup). Shipped census:
-    // 307 blocks, all size_words=2, payload always 0.0.
+    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup).
     #[test]
     fn reverse_displacement_reads_the_single_float() {
         let mut setup = op(0x01, 12, &[]);
@@ -2997,8 +2979,7 @@ mod tests {
 
     // 0x29 KeyFrameValueSetup (scale.z): the same block shape as 0x27/0x28 — in-memory
     // pointer, keyframe DAT id, cycle/interpolation config
-    // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x29). Shipped census: 3684
-    // blocks, all size_words=4, first payload word always zero, config always single-cycle.
+    // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x29).
     #[test]
     fn scale_z_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3017,8 +2998,7 @@ mod tests {
     }
 
     // 0x5A KeyFrameValueSetup (specular rotation.y): the 0x27/0x28/0x29 track shape bound to
-    // the specular element's rotation y (research/xim ParticleGeneratorParser.kt). Shipped
-    // census: 719 blocks, all size_words=4, first payload word always zero, 719/719 behind
+    // the specular element's rotation y (research/xim ParticleGeneratorParser.kt), behind
     // a 0x55 SpecularParams record in the same generator.
     #[test]
     fn specular_rot_y_track_reads_the_keyframe_id() {
@@ -3037,9 +3017,8 @@ mod tests {
     }
 
     // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32, unk1 f32, unk2
-    // u32] (research/xim ParticleInitializers.kt CameraShakeSetup). Shipped census: 4032
-    // blocks, all size_words=6, first payload word always zero, 46 distinct track ids, and
-    // 4032/4032 generators also carry the section-3 0x5F CameraShakeUpdater.
+    // u32] (research/xim ParticleInitializers.kt CameraShakeSetup); the generator also
+    // carries the section-3 0x5F CameraShakeUpdater.
     #[test]
     fn camera_shake_setup_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3059,8 +3038,8 @@ mod tests {
     }
 
     // sec3 0x5F CameraShakeUpdater: near, far, and shakeFactor only in the 4-word form
-    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch; the
-    // shipped census is 1451 four-word blocks, 8 three-word, every one behind a sec2 0x82).
+    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch,
+    // behind a sec2 0x82).
     #[test]
     fn camera_shake_updater_reads_the_payload_shape() {
         let mut setup = op(0x01, 12, &[]);
@@ -3100,8 +3079,7 @@ mod tests {
 
     // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the
     // second float, as particle.hazeOffset.x (research/xim ParticleInitializers.kt
-    // HazeOffsetInitializer). Shipped census: 1150 sec2 0x32 blocks in the parser-accepted
-    // corpus.
+    // HazeOffsetInitializer).
     #[test]
     fn haze_offset_reads_the_second_float() {
         let mut setup = op(0x01, 12, &[]);
@@ -3122,8 +3100,7 @@ mod tests {
     }
 
     // 0x47 ParentRotateConfig: a no-payload marker (research/xim
-    // ParticleInitializers.kt ParentRotateConfig). Shipped census: 543 sec2 0x47 blocks in
-    // the parser-accepted corpus.
+    // ParticleInitializers.kt ParentRotateConfig).
     #[test]
     fn parent_rotate_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3141,8 +3118,7 @@ mod tests {
     }
 
     // 0x79 ParentRotateConfig: the 0x47 marker — xim maps both opcodes to the same
-    // class (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 15
-    // sec2 0x79 blocks in the parser-accepted corpus.
+    // class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn parent_rotate_twin_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3161,7 +3137,7 @@ mod tests {
     }
 
     // 0x56 BatchingSetup: one expectZero32 word (research/xim ParticleInitializers.kt
-    // BatchingSetup). Shipped census: 387 sec2 0x56 blocks in the parser-accepted corpus.
+    // BatchingSetup).
     #[test]
     fn batching_setup_is_a_single_word_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3179,8 +3155,7 @@ mod tests {
     }
 
     // 0x4A ParentTexCoordConfig: a no-payload marker (research/xim
-    // ParticleInitializers.kt ParentTexCoordConfig). Shipped census: 115 sec2 0x4A blocks in
-    // the parser-accepted corpus.
+    // ParticleInitializers.kt ParentTexCoordConfig).
     #[test]
     fn parent_tex_coord_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3199,7 +3174,6 @@ mod tests {
 
     // 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem ptr,
     // point list DAT id] (research/xim ParticleInitializers.kt PointListPositionSetup).
-    // Shipped census: 50 sec2 0x54 blocks in the parser-accepted corpus.
     #[test]
     fn point_list_position_reads_the_two_dat_ids() {
         let mut setup = op(0x01, 12, &[]);
@@ -3226,8 +3200,7 @@ mod tests {
     }
 
     // 0x51 KeyFrameValueSetup (velocity.y): the 0x27/0x28/0x29 track shape (research/xim
-    // ParticleGeneratorParser.kt sec2Handler). Shipped census: 10 sec2 0x51 blocks in the
-    // parser-accepted corpus.
+    // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn velocity_y_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3249,8 +3222,7 @@ mod tests {
     }
 
     // 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape (research/xim
-    // ParticleGeneratorParser.kt sec2Handler). Shipped census: 235 sec2 0x59 blocks in the
-    // parser-accepted corpus.
+    // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_rot_x_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3272,8 +3244,7 @@ mod tests {
     }
 
     // 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track shape
-    // (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 14 sec2 0x5D
-    // blocks in the parser-accepted corpus.
+    // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_color_g_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3295,8 +3266,7 @@ mod tests {
     }
 
     // 0x48 ParentColorConfig: a no-payload marker (research/xim
-    // ParticleInitializers.kt ParentColorConfig). Shipped census: 37 sec2 0x48 blocks in
-    // the parser-accepted corpus.
+    // ParticleInitializers.kt ParentColorConfig).
     #[test]
     fn parent_color_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3314,8 +3284,7 @@ mod tests {
     }
 
     // 0x49 ParentScaleConfig: a no-payload marker (research/xim
-    // ParticleInitializers.kt ParentScaleConfig). Shipped census: 141 sec2 0x49 blocks in
-    // the parser-accepted corpus.
+    // ParticleInitializers.kt ParentScaleConfig).
     #[test]
     fn parent_scale_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3334,7 +3303,6 @@ mod tests {
 
     // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape bound to
     // the element's velocity dampener (research/xim ParticleGeneratorParser.kt sec2Handler).
-    // Shipped census: 2 sec2 0x69 blocks in the parser-accepted corpus.
     #[test]
     fn velocity_dampener_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3352,8 +3320,7 @@ mod tests {
     }
 
     // sec3 0x2C VelocityDampener: two floats [dampen, unk] (research/xim
-    // ParticleUpdaters.kt VelocityDampener). Shipped census: 51845 blocks, all
-    // size_words=3.
+    // ParticleUpdaters.kt VelocityDampener).
     #[test]
     fn velocity_dampener_reads_the_two_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -3375,7 +3342,7 @@ mod tests {
     }
 
     // sec3 0x26 VelocityRotator: three floats, the rotateAmount (research/xim
-    // ParticleUpdaters.kt VelocityRotator). Shipped census: 8524 blocks, all size_words=4.
+    // ParticleUpdaters.kt VelocityRotator).
     #[test]
     fn velocity_rotator_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -3398,8 +3365,7 @@ mod tests {
     }
 
     // sec3 0x44 dampening-factor ProgressValueUpdater: no payload, it samples the sec2 0x69
-    // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44). Shipped census: 14
-    // blocks, all size_words=1, every one behind a sec2 0x69.
+    // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44), behind a sec2 0x69.
     #[test]
     fn dampening_factor_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3433,8 +3399,7 @@ mod tests {
     // sec3 0x15/0x16/0x17 scale.x/y/z ProgressValueUpdaters: no payload — they sample the
     // sec2 0x27/0x28/0x29 scale tracks at life progress, which the render path already does
     // from def.scale_x_track/scale_y_track (research/xim ParticleGeneratorParser.kt
-    // sec3Handler). Shipped census: 0x15 n=57310, 0x16 n=59425,
-    // 0x17 n=8320, all size_words=1, every one behind its sec2 scale track.
+    // sec3Handler), behind their sec2 scale track.
     #[test]
     fn scale_progress_updaters_consume_the_blocks_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3470,9 +3435,8 @@ mod tests {
 
     // sec3 0x18/0x19/0x1A color.r/g/b ProgressValueUpdaters: no payload — they sample the
     // sec2 0x2A/0x2B/0x2C color tracks at life progress; the engine's rgb is spawn-time
-    // only (research/xim ParticleGeneratorParser.kt sec3Handler).
-    // Shipped census: 0x18 n=11559, 0x19 n=15450, 0x1A n=9580, all size_words=1, every one
-    // behind its sec2 color track.
+    // only (research/xim ParticleGeneratorParser.kt sec3Handler), behind their sec2 color
+    // track.
     #[test]
     fn color_rgb_progress_updaters_consume_the_blocks_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3508,9 +3472,8 @@ mod tests {
 
     // sec3 0x36/0x37/0x3B specular rotation.y/z and color.a ProgressValueUpdaters: no
     // payload — they sample the sec2 0x5A/0x5B/0x5F specular tracks; the engine does not
-    // model the specular element (research/xim ParticleGeneratorParser.kt sec3Handler).
-    // Shipped census: all size_words=1, every one behind its sec2
-    // specular track (0x36 n=1481, 100% paired with the sec2 0x5A).
+    // model the specular element (research/xim ParticleGeneratorParser.kt sec3Handler),
+    // behind their sec2 specular track.
     #[test]
     fn specular_progress_updaters_consume_the_blocks_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3546,8 +3509,7 @@ mod tests {
 
     // sec3 0x0B ColorTransformApplier: no payload — color += (transform shr 7) × (0.5 × dt)
     // per frame; the engine does not model the color transform's application (research/xim
-    // ParticleUpdaters.kt ColorTransformApplier). Shipped census:
-    // 66990 blocks, all size_words=1.
+    // ParticleUpdaters.kt ColorTransformApplier).
     #[test]
     fn color_transform_applier_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3579,9 +3541,8 @@ mod tests {
 
     // sec3 0x25/0x33 ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload — they
     // emit/update the sec2 0x44/0x53 child generator per particle; the engine has no
-    // child-particle path (research/xim ParticleGeneratorParser.kt sec3Handler).
-    // Shipped census: 0x25 n=9488, 0x33 n=1656, all size_words=1, every
-    // one behind its sec2 child link.
+    // child-particle path (research/xim ParticleGeneratorParser.kt sec3Handler), behind
+    // their sec2 child link.
     #[test]
     fn child_generator_updaters_consume_the_blocks_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3617,7 +3578,6 @@ mod tests {
     // sec3 0x2F VelocityRotationUpdater: no payload — converts all velocity into the +x
     // axis and copies the particle's rotation into the velocity rotation; the engine has
     // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater).
-    // Shipped census: all size_words=1.
     #[test]
     fn velocity_rotation_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3650,8 +3610,7 @@ mod tests {
     // sec3 0x34 PointListPositionUpdater: no payload — samples the sec2 0x54 point-list
     // spline at the particle's progress and copies it to the position; the engine has no
     // point-list spline runtime (research/xim ParticleUpdaters.kt
-    // PointListPositionUpdater). Shipped census: 292 blocks, all
-    // size_words=1, paired 1:1 with the sec2 0x54 setup (same 22 files).
+    // PointListPositionUpdater), paired with the sec2 0x54 setup.
     #[test]
     fn point_list_position_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3683,7 +3642,6 @@ mod tests {
 
     // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id, expect32
     // (0, 1)] (research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup).
-    // Shipped census: 46 sec2 0x4E blocks in the parser-accepted corpus.
     #[test]
     fn fixed_point_position_variance_reads_the_point_list_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3704,8 +3662,7 @@ mod tests {
     }
 
     // 0x4F FixedPointPositionVarianceSetup: the twin of 0x4E — xim maps both opcodes to
-    // the same class (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped
-    // census: 442 sec2 0x4F blocks in the parser-accepted corpus.
+    // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn fixed_point_position_variance_twin_reads_the_point_list_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3727,8 +3684,7 @@ mod tests {
     }
 
     // 0x53 ChildGeneratorSetup: the 0x44 shape — xim maps both opcodes to the same class
-    // (research/xim ParticleGeneratorParser.kt sec2Handler). Shipped census: 392 sec2
-    // 0x53 blocks in the parser-accepted corpus.
+    // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn child_generator_twin_reads_the_child_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3747,8 +3703,7 @@ mod tests {
     }
 
     // 0x5B KeyFrameValueSetup (specular rotation.z): the 0x5A shape bound to the specular
-    // element's rotation z (research/xim ParticleGeneratorParser.kt). Shipped census: 214
-    // sec2 0x5B blocks in the parser-accepted corpus.
+    // element's rotation z (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_rot_z_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3766,8 +3721,7 @@ mod tests {
     }
 
     // 0x5F KeyFrameValueSetup (specular color.a): the 0x5A shape bound to the specular
-    // element's color alpha (research/xim ParticleGeneratorParser.kt). Shipped census:
-    // 133 sec2 0x5F blocks in the parser-accepted corpus.
+    // element's color alpha (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_color_a_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3785,9 +3739,8 @@ mod tests {
     }
 
     // 0x45 ParentPositionCopyConfig: a no-payload marker (research/xim
-    // ParticleInitializers.kt ParentPositionCopyConfig). Shipped census: 9698 sec2 0x45
-    // blocks, all size_words=1; 1189 generators carry it, 164 of them referenced as a
-    // child by a sec2 0x44 link in the corpus.
+    // ParticleInitializers.kt ParentPositionCopyConfig); some generators are referenced as
+    // a child by a sec2 0x44 link.
     #[test]
     fn parent_position_copy_is_a_no_payload_marker() {
         let mut setup = op(0x01, 12, &[]);
@@ -3805,8 +3758,7 @@ mod tests {
     }
 
     // 0x46 ParentVelocityConfig: one float, the multiplier on the parent's total velocity
-    // (research/xim ParticleInitializers.kt ParentVelocityConfig). Shipped census: 252
-    // sec2 0x46 blocks in the parser-accepted corpus.
+    // (research/xim ParticleInitializers.kt ParentVelocityConfig).
     #[test]
     fn parent_velocity_reads_the_single_float() {
         let mut setup = op(0x01, 12, &[]);
@@ -3824,8 +3776,7 @@ mod tests {
     }
 
     // 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] (research/xim
-    // ParticleInitializers.kt ChildGeneratorSetup). Shipped census: 1009 sec2 0x44 blocks
-    // in the parser-accepted corpus, 1041 in the raw probe walk.
+    // ParticleInitializers.kt ChildGeneratorSetup).
     #[test]
     fn child_generator_setup_reads_the_child_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3843,8 +3794,7 @@ mod tests {
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the
-    // element's red channel (research/xim ParticleGeneratorParser.kt). Shipped census:
-    // 4431 blocks, all size_words=4, first payload word always zero.
+    // element's red channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_r_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3862,8 +3812,7 @@ mod tests {
     }
 
     // 0x2B KeyFrameValueSetup (color.g): the 0x27/0x28/0x29 track shape bound to the
-    // element's green channel (research/xim ParticleGeneratorParser.kt). Shipped census:
-    // 5933 blocks, all size_words=4, first payload word always zero.
+    // element's green channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_g_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3881,8 +3830,7 @@ mod tests {
     }
 
     // 0x2C KeyFrameValueSetup (color.b): the 0x27/0x28/0x29 track shape bound to the
-    // element's blue channel (research/xim ParticleGeneratorParser.kt). Shipped census:
-    // 3302 blocks, all size_words=4, first payload word always zero.
+    // element's blue channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_b_track_reads_the_keyframe_id() {
         let mut setup = op(0x01, 12, &[]);
@@ -3900,8 +3848,8 @@ mod tests {
     }
 
     // 0x3B IncrementalRotationApplier: three floats, the per-axis rotation increment
-    // (research/xim ParticleInitializers.kt IncrementalRotationApplier). Shipped census:
-    // 19903 blocks, all size_words=4, payloads are radian angles, 1389 all-zero.
+    // (research/xim ParticleInitializers.kt IncrementalRotationApplier); the payloads are
+    // radian angles.
     #[test]
     fn incremental_rotation_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -3926,8 +3874,7 @@ mod tests {
 
     // 0x0A RotationVarianceInitializer: three floats, the per-axis bounds of the random
     // rotation added to the 0x09 base per particle (research/xim ParticleInitializers.kt
-    // RotationVarianceInitializer). Shipped census: 27736 blocks, all size_words=4, payloads
-    // are radian angles (±π, ±π/2, …); 2423 all-zero.
+    // RotationVarianceInitializer); the payloads are radian angles.
     #[test]
     fn rotation_variance_reads_the_three_axis_bounds() {
         let mut setup = op(0x01, 12, &[]);
@@ -4009,8 +3956,7 @@ mod tests {
 
     // 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound added to the 0x0F
     // base scale per particle (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10 —
-    // field_EC.x/y/z += ufrand(payload)). Shipped census: 2669 blocks, all size_words=4,
-    // [0, 2] per axis, every one behind a 0x0F base scale.
+    // field_EC.x/y/z += ufrand(payload)), behind a 0x0F base scale.
     #[test]
     fn scale_variance_reads_the_three_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -4193,9 +4139,7 @@ mod tests {
 
     // 0x72 ProjectionBiasInitializer: two floats — param0 lands in sort_offset (the same
     // field_128 0x30 writes), param1 is kept as the actor depth-scale factor
-    // (research/xim ParticleInitializers.kt ProjectionBiasInitializer). Shipped census:
-    // 24180 blocks, all size_words=3, param0 [-26, 1], param1 [-8.6, 2.5] (14388 zero),
-    // zero co-occurrence with 0x30.
+    // (research/xim ParticleInitializers.kt ProjectionBiasInitializer); no 0x30 co-occurrence.
     #[test]
     fn projection_bias_reads_the_two_floats() {
         let mut setup = op(0x01, 12, &[]);
@@ -4217,8 +4161,8 @@ mod tests {
     }
 
     // 0x17 ColorVarianceSetup: four bytes / 255, the per-channel upward variance bound
-    // (research/xim ParticleInitializers.kt ColorVarianceSetup). Shipped census: 7654 blocks,
-    // all size_words=2, alpha byte always 0, every one behind a 0x16 base color.
+    // (research/xim ParticleInitializers.kt ColorVarianceSetup); the alpha byte is 0,
+    // behind a 0x16 base color.
     #[test]
     fn color_variance_reads_the_four_bytes() {
         let mut setup = op(0x01, 12, &[]);
@@ -4238,8 +4182,8 @@ mod tests {
 
     // 0x19 ColorTransformSetup: four i16s, parsed only — the retail decompile's ElemGenerate
     // has no 0x19 case and xim's drawers never read the allocated transform
-    // (research/xim ParticleInitializers.kt ColorTransformSetup). Shipped census: 15815
-    // blocks, all size_words=3, alpha always 0, every one behind a 0x16 base color.
+    // (research/xim ParticleInitializers.kt ColorTransformSetup); the alpha is 0, behind a
+    // 0x16 base color.
     #[test]
     fn color_transform_reads_the_four_i16s() {
         let mut setup = op(0x01, 12, &[]);
@@ -4259,8 +4203,7 @@ mod tests {
     }
 
     // sec3 0x0C ColorTransformModifier: four i16s, the per-frame rate on the sec2 0x19
-    // color transform (research/xim ParticleUpdaters.kt ColorTransformModifier). Shipped
-    // census: 2379 blocks, all size_words=3.
+    // color transform (research/xim ParticleUpdaters.kt ColorTransformModifier).
     #[test]
     fn color_transform_modifier_reads_the_four_i16s() {
         let mut setup = op(0x01, 12, &[]);
@@ -4696,8 +4639,7 @@ mod tests {
     }
 
     // 0x11's config word is followPosition(0x1), followFacing(0x2), factor(>>2) - research/xim
-    // ParticleGeneratorUpdaters.kt AssociationUpdater read. The shipped census is 0x0003fd
-    // (follow position only, factor 255) and 0x0003ff (both, factor 255).
+    // ParticleGeneratorUpdaters.kt AssociationUpdater read.
     #[test]
     fn association_follow_reads_the_flags_and_factor_from_section_1() {
         let mut setup = op(0x01, 12, &[]);

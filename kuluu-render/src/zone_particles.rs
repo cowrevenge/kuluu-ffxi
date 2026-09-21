@@ -34,7 +34,7 @@ pub(crate) struct ZoneStaticDef {
 /// The same emitter is sometimes authored twice (West Ronfaure's effe/fir1 campfire subtree
 /// appears in file 200 twice, byte for byte), and a second additive flame on the same spot
 /// doubles its brightness, so an exact repeat of (name, mesh, base position) collapses to
-/// one. A repeated NAME alone is not a repeat: 4,562 corpus-wide sit at distinct positions
+/// one. A repeated NAME alone is not a repeat: many sit at distinct positions
 /// (Manaclipper's g000 under saki/, sira/ and shik/) and every one of them runs in retail.
 fn zone_static_defs(bytes: &[u8]) -> Vec<ZoneStaticDef> {
     fn walk(

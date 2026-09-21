@@ -2353,8 +2353,8 @@ mod tests {
     }
 
     /// The one-operand family. `OP_INC` is the loop counter that, while it was
-    /// only being skipped by width, left ~1200 corpus events spinning until the
-    /// opcode budget killed them (kuluu-cjct).
+    /// only being skipped by width, left corpus events spinning until the
+    /// opcode budget killed them.
     #[test]
     fn one_operand_arithmetic_matches_retail() {
         for (op, seed_val, want) in [

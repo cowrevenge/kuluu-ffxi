@@ -63,6 +63,10 @@ question is already answered before spending either.
 - [NPC animation routine selector](references/2026-09-08-npc-animation-selector.md)
   -- binary observation rather than a live drive; the computation and its
   server cross-check.
+- [Effect-DAT opcode census](references/2026-09-19-effect-dat-opcode-census.md)
+  -- block counts and payload shapes for the particle-generator and scheduler
+  opcodes, scanned from the retail effect DATs; the home for the figures the
+  parser comments used to carry inline.
 
 Record new durable findings here as dated observation records, per the routing
 rule in the root `AGENTS.md`. Captures and binary dumps stay local.

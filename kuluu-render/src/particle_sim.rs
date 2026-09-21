@@ -4226,8 +4226,7 @@ mod tests {
 
     // 0x67 ReverseDisplacementSetup: the particle spawns at the trajectory's endpoint and
     // traces the path backward (research/xim ParticleInitializers.kt ReverseDisplacementSetup
-    // — position += total velocity × maxAge, then velocity ×= −1). Shipped census: 307
-    // blocks, all size_words=2, payload always 0.0.
+    // — position += total velocity × maxAge, then velocity ×= −1).
     #[test]
     fn reverse_displacement_spawns_at_the_endpoint_and_reverses() {
         let mut d = def(10.0, 1.0, 1);
@@ -4245,8 +4244,7 @@ mod tests {
 
     // 0x3B IncrementalRotationApplier: element N's rotation gains the increment × (N + 1) on
     // top of the 0x09 base, and its orientation step flips the rotation y (research/xim
-    // ParticleInitializers.kt IncrementalRotationApplier). Shipped census: 19903 blocks, all
-    // size_words=4, payloads are radian angles, 1389 all-zero.
+    // ParticleInitializers.kt IncrementalRotationApplier).
     #[test]
     fn incremental_rotation_scales_with_the_element_index_and_flips_y() {
         let mut d = def(10.0, 1.0, 1);

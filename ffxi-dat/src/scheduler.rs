@@ -829,19 +829,16 @@ pub struct SoundEvent {
 /// Tower -> Full Moon Fountain, (194, 192) Outer Horutoto Ruins -> Inner
 /// Horutoto Ruins, (31, 34) Monarch's Linn -> Grand Palace of Hu'Xzoi,
 /// (32, 11) Sealion's Den -> Oldton Movalpolos, (32, 8) Sealion's Den ->
-/// Boneyard Gully. Hand-built from one scan of the retail corpus, which turned
-/// up 27 "another zone's model DAT" pairs; retail's loader rule for the partner
-/// fallback is unknown, and these five are the observed clean instance/entrance
-/// cases.
+/// Boneyard Gully. Hand-built; retail's loader rule for the partner fallback is
+/// unknown, and these five are the observed clean instance/entrance cases.
 const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [(242, 170), (194, 192), (31, 34), (32, 11), (32, 8)];
 
 /// The handful of non-model files that carry MAPSCHEDULOR scene keys no
 /// per-zone slot owns: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu
 /// scene families (`sc11..sc41` / `kc51..kc54` / `kci1..kci4`), file ids 641
 /// (ROM/3/48.DAT), 30705 (ROM/123/85.DAT), 57075 (ROM/213/92.DAT), 57082
-/// (ROM/216/12.DAT), 57204 (ROM/241/3.DAT). Hand-built from the same corpus
-/// scan; retail's loader rule for these is unknown. `zz-walk-errors` re-checks
-/// that all five walk clean.
+/// (ROM/216/12.DAT), 57204 (ROM/241/3.DAT). Hand-built; retail's loader rule
+/// for these is unknown. `zz-walk-errors` re-checks that all five walk clean.
 pub const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [641, 30705, 57075, 57082, 57204];
 
 /// Resolve a MAPSCHEDULOR key (the `ffxi_event::vm` scene opcode) to the DAT file
@@ -2306,9 +2303,8 @@ mod vehicle_contract_tests {
         assert_eq!(scheduler.stages[0].stage.follow_points, None);
     }
 
-    /// Anchors from the global scene file's census: ex1a plays the 1c* routes,
-    /// ex1b the 2c* routes, mov2 the c1* through c4* routes; each assert's zone id
-    /// is that route's hex prefix.
+    /// Route anchors: ex1a plays the 1c* routes, ex1b the 2c* routes, mov2 the
+    /// c1* through c4* routes; each assert's zone id is that route's hex prefix.
     #[test]
     fn zone_camera_route_name_spells_the_hex_zone_prefix_and_decimal_index() {
         assert_eq!(zone_camera_route_name(0x1C, 1), *b"1c01");
@@ -2319,8 +2315,8 @@ mod vehicle_contract_tests {
     }
 
     /// Retail-byte guard (skips without an install). The MAPSCHEDULOR keys of the
-    /// Chamber of Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT):
-    /// the corpus scan's dominant rule.
+    /// Chamber of Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT),
+    /// the dominant resolution rule.
     #[test]
     fn zone_scene_resolves_in_the_zones_own_model_dat() {
         let Some(root) = crate::archive::open_test_install() else {

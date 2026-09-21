@@ -480,6 +480,8 @@ fn toggle_debug_panel(
         DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
         DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    use kuluu_render::hud::menu::DEBUG_ENGAGE_ANIM_LOCK;
 
     // Print Pos is a button, not a toggle: fire and return before the
     // on/off banner below. Prints self wire coords to the system chat.
@@ -510,6 +512,11 @@ fn toggle_debug_panel(
         DEBUG_NOCLIP => {
             hud_panels.noclip = !hud_panels.noclip;
             hud_panels.noclip
+        }
+        #[cfg(feature = "enhanced-engage-move-lock-off")]
+        DEBUG_ENGAGE_ANIM_LOCK => {
+            hud_panels.engage_anim_lock = !hud_panels.engage_anim_lock;
+            hud_panels.engage_anim_lock
         }
         DEBUG_AUTO_ENTER_CS => {
             hud_panels.auto_enter_cs = !hud_panels.auto_enter_cs;

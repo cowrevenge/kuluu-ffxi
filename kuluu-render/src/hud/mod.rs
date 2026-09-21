@@ -69,6 +69,10 @@ pub struct HudPanels {
     /// in movement. Grounding stays on. Toggled from the Debug menu NoClip row
     /// or /noclip; both flip this same flag.
     pub noclip: bool,
+    /// Enhanced build only: forces the retail weapon draw/sheathe movement
+    /// hold back on (the gated build lifts it by default).
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    pub engage_anim_lock: bool,
     /// Debug auto-enter (enternity-style): when on, event-dialog message frames
     /// advance themselves after their read time instead of waiting for Enter.
     /// Choice frames, item lines, text-entry frames, server custom menus, and

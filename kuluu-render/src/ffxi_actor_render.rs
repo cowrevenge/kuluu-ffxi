@@ -1420,6 +1420,24 @@ impl FfxiRenderActor {
         self.action.is_some_and(|a| a.cast_pose)
     }
 
+    /// The weapon is mid draw or mid sheathe: retail holds the player in
+    /// place for the transition (record:
+    /// .agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
+    /// "The one real player lock is the weapon draw and sheathe").
+    pub fn engage_transition_in_progress(&self) -> bool {
+        matches!(self.engage, EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. })
+    }
+
+    /// Cross-crate test seam: kuluu's movement-gate tests cannot reach the
+    /// private engage field, so they drive it through here (Drawing or Engaged).
+    pub fn set_engage_for_test(&mut self, drawing: bool) {
+        self.engage = if drawing {
+            EngageMachine::Drawing { remaining: 10.0 }
+        } else {
+            EngageMachine::Engaged
+        };
+    }
+
     /// XIM's `currentlyIdle` (EffectRoutineInterpolatedEffects.kt): every coordinator slot is
     /// null or running a low-priority clip - the idle clips only. The flinch overwrites those
     /// and nothing else, so this is its gate.
@@ -1951,11 +1969,10 @@ pub fn make_render_actor(
     }
 }
 
-/// A posed actor with no model behind it, for tests that need the pose/skeleton pair a particle
-/// attachment reads and nothing else.
-#[cfg(test)]
-pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -> FfxiRenderActor {
-    let loaded = LoadedActor {
+/// A LoadedActor with no model data behind it: the given skeleton and empty
+/// clip/routine sets. The test constructors below share it.
+fn empty_loaded_actor(skeleton: Skeleton, cib: Option<Cib>) -> LoadedActor {
+    LoadedActor {
         skeleton: Arc::new(skeleton),
         skel_meshes: Vec::new(),
         effect_meshes: Vec::new(),
@@ -1967,12 +1984,31 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
         rejected_clips: Vec::new(),
         rejected_routines: Vec::new(),
         model_dat: String::new(),
-        cib: None,
-    };
+        cib,
+    }
+}
+
+/// A posed actor with no model behind it, for tests that need the pose/skeleton pair a particle
+/// attachment reads and nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -> FfxiRenderActor {
+    let loaded = empty_loaded_actor(skeleton, None);
     FfxiRenderActor {
         world_pose,
         ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
     }
+}
+
+/// A no-model render actor with a chosen world id: cross-crate test seams
+/// (kuluu's movement-gate tests) spawn one and read its engage state.
+pub fn render_actor_stub(world_id: u32) -> FfxiRenderActor {
+    let skeleton = Skeleton {
+        id: DatId::from_str("test"),
+        joints: Vec::new(),
+        references: Vec::new(),
+        bounding_boxes: Vec::new(),
+    };
+    make_render_actor(&empty_loaded_actor(skeleton, None), 0, Vec::new(), world_id, 0.0, 1.0)
 }
 
 /// A render actor with no model behind it, carrying an explicit Cib Info movement byte, for the
@@ -1987,20 +2023,7 @@ pub(crate) fn render_actor_with_movement_for_test(
         movement_type,
         ..Cib::parse(*b"cib0", &[0u8; ffxi_dat::cib::CIB_LEN]).unwrap()
     };
-    let loaded = LoadedActor {
-        skeleton: Arc::new(skeleton),
-        skel_meshes: Vec::new(),
-        effect_meshes: Vec::new(),
-        textures: Vec::new(),
-        animations: Arc::default(),
-        battle_clips: Arc::default(),
-        routines: Arc::default(),
-        action_assets: Arc::default(),
-        rejected_clips: Vec::new(),
-        rejected_routines: Vec::new(),
-        model_dat: String::new(),
-        cib: Some(cib),
-    };
+    let loaded = empty_loaded_actor(skeleton, Some(cib));
     FfxiRenderActor {
         world_pose,
         ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
@@ -6838,6 +6861,27 @@ mod pose_resolution_tests {
             advance_engage(&mut m, false, &routines, &[], &anims, 1.0),
             S::NotEngaged
         );
+    }
+
+    #[test]
+    fn engage_transition_in_progress_only_while_drawing_or_sheathing() {
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let cases = [
+            (EngageMachine::NotEngaged, false),
+            (EngageMachine::Drawing { remaining: 0.5 }, true),
+            (EngageMachine::Engaged, false),
+            (EngageMachine::Sheathing { remaining: 0.5 }, true),
+        ];
+        for (engage, in_progress) in cases {
+            let mut actor = render_actor_for_test(skeleton.clone(), Vec::new());
+            actor.engage = engage;
+            assert_eq!(actor.engage_transition_in_progress(), in_progress);
+        }
     }
 
     #[test]

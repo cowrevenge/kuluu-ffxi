@@ -14,7 +14,7 @@ pub struct StanceParams<'w> {
 }
 
 #[derive(SystemParam)]
-pub struct MoveEnvParams<'w> {
+pub struct MoveEnvParams<'w, 's> {
     // Player movement grounds height on the retail MZB zone collision (the real
     // .dat floor, which has the stairs). The coarse LSB Recast navmesh is a
     // mob-pathing mesh that flattens stairs, so it is NOT used here — only for
@@ -39,8 +39,11 @@ pub struct MoveEnvParams<'w> {
     /// Stair-capture drive channel (FFXI_STAIR_DRIVE): forward/strafe holds plus
     /// a Q/E-style turn axis for the external driver. None unless wired at connect.
     pub stair_drive: Option<Res<'w, StairDriveHandle>>,
-    // The scene's tracked entities, for the self actor's state lookups.
+    // The scene's tracked entities: the engage gate resolves the self char id
+    // to its Bevy entity here.
     pub tracked: Res<'w, kuluu_render::scene::TrackedEntities>,
+    /// The self actor's engage machine: the weapon draw/sheathe hold gate.
+    pub actors: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderActor>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1271,7 +1274,27 @@ pub fn dispatch_movement_system(
     let turn_rate = ROTATE_KEY_RATE_RAD_PER_SEC * (resolved.rotate_dir as f32 + fp_rotate);
     let (player_rotate_u8, heading_delta_units) =
         advance_heading_turn(&mut turn_accum.units, turn_rate, time.delta_secs());
-    let steer_in_chase = !first_person && !locked && (pf != 0.0 || ps != 0.0);
+    // Retail holds the player for the weapon draw and the sheathe (record:
+    // .agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
+    // "The one real player lock is the weapon draw and sheathe"). The
+    // enhanced build lifts it unless the Debug row forces it back on.
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    let hold_applies = env.hud_panels.engage_anim_lock;
+    #[cfg(not(feature = "enhanced-engage-move-lock-off"))]
+    let hold_applies = true;
+    let engage_transition = hold_applies
+        && state
+            .snapshot
+            .self_char_id
+            .and_then(|id| env.tracked.by_id.get(&id).copied())
+            .and_then(|ent| env.actors.get(ent).ok())
+            .is_some_and(|actor| actor.engage_transition_in_progress());
+    if engage_transition {
+        forward = 0;
+        strafe = 0;
+    }
+    let steer_in_chase =
+        (!first_person && !locked && (pf != 0.0 || ps != 0.0)) && !engage_transition;
     // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
     // the latch only holds the run direction against the passive
     // auto-recenter, not against the player actively steering the camera.
@@ -2437,6 +2460,92 @@ mod tests {
             app.update();
             assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, 0.75);
         }
+    }
+
+    /// Spawns the self actor (world id 1, matching self_char_id) with the
+    /// weapon mid-draw and registers it in the tracked entities so the engage
+    /// gate resolves it; returns the Bevy entity.
+    fn spawn_drawing_self_actor(app: &mut App) -> Entity {
+        let ent = app
+            .world_mut()
+            .spawn(kuluu_render::ffxi_actor_render::render_actor_stub(1))
+            .id();
+        app.world_mut()
+            .resource_mut::<kuluu_render::scene::TrackedEntities>()
+            .by_id
+            .insert(1, ent);
+        let mut actor = app.world_mut().entity_mut(ent);
+        actor
+            .get_mut::<kuluu_render::ffxi_actor_render::FfxiRenderActor>()
+            .expect("the self actor stub was just spawned")
+            .set_engage_for_test(true);
+        ent
+    }
+
+    /// Retail's one real player lock: the weapon draw holds the player in
+    /// place, and once the weapon is fully out (Engaged) the same input moves.
+    /// The gated build lifts this hold by default, so it pins the retail side
+    /// only.
+    #[cfg(not(feature = "enhanced-engage-move-lock-off"))]
+    #[test]
+    fn draw_and_sheathe_hold_the_player() {
+        let mut drive = MoveDrive::new();
+        let ent = spawn_drawing_self_actor(&mut drive.app);
+
+        drive.press(KeyCode::KeyW);
+        let held = drive.run(SETTLE_TICKS);
+        let start = held.first().expect("ticks");
+        assert_eq!(
+            held.last().expect("ticks").1,
+            start.1,
+            "the draw must hold the player in place"
+        );
+
+        let mut actor = drive.app.world_mut().entity_mut(ent);
+        actor
+            .get_mut::<kuluu_render::ffxi_actor_render::FfxiRenderActor>()
+            .expect("the self actor stub was just spawned")
+            .set_engage_for_test(false);
+        let free = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            free.last().expect("ticks").1,
+            start.1,
+            "an out weapon must move on the same input"
+        );
+    }
+
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    #[test]
+    fn gated_build_moves_freely_during_the_draw() {
+        let mut drive = MoveDrive::new();
+        spawn_drawing_self_actor(&mut drive.app);
+        // engage_anim_lock defaults to false: the gated build lifts the hold.
+        drive.press(KeyCode::KeyW);
+        let ticks = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            ticks.last().expect("ticks").1,
+            ticks.first().expect("ticks").1,
+            "the gated build must move during the draw"
+        );
+    }
+
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    #[test]
+    fn engage_anim_lock_forces_the_hold() {
+        let mut drive = MoveDrive::new();
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .engage_anim_lock = true;
+        spawn_drawing_self_actor(&mut drive.app);
+        drive.press(KeyCode::KeyW);
+        let ticks = drive.run(SETTLE_TICKS);
+        assert_eq!(
+            ticks.last().expect("ticks").1,
+            ticks.first().expect("ticks").1,
+            "the Debug row must force the retail hold back on"
+        );
     }
 
     #[test]

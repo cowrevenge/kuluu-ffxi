@@ -290,6 +290,10 @@ pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
+/// Enhanced build only: forces the retail weapon draw/sheathe movement hold
+/// back on (the gated build lifts it by default). Default off.
+#[cfg(feature = "enhanced-engage-move-lock-off")]
+pub const DEBUG_ENGAGE_ANIM_LOCK: &str = "Engage_anim_lock";
 /// Debug auto-enter row (enternity-style): [on] = event-dialog message frames
 /// advance themselves after their read time instead of parking on Enter;
 /// choice frames, item lines, text-entry frames, server custom menus, and the
@@ -339,6 +343,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_MESH,
     DEBUG_NET_STATUS,
     DEBUG_NOCLIP,
+    #[cfg(feature = "enhanced-engage-move-lock-off")]
+    DEBUG_ENGAGE_ANIM_LOCK,
     DEBUG_AUTO_ENTER_CS,
     DEBUG_WEATHER,
     DEBUG_FOG,
@@ -1538,6 +1544,8 @@ pub fn debug_panel_state(
         DEBUG_TARGET_CYCLE => panels.target_cycle,
         DEBUG_MESH => panels.mesh_debug,
         DEBUG_NOCLIP => panels.noclip,
+        #[cfg(feature = "enhanced-engage-move-lock-off")]
+        DEBUG_ENGAGE_ANIM_LOCK => panels.engage_anim_lock,
         DEBUG_AUTO_ENTER_CS => panels.auto_enter_cs,
         DEBUG_WEATHER => !panels.weather_off,
         DEBUG_FOG => !panels.fog_off,

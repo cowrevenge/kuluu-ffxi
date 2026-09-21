@@ -30,6 +30,15 @@
 # whole seconds, so a same-second in-place edit of equal length (sed -i on
 # one word) is invisible to mtime+size.
 
+# shasum is absent on some git-bash installs (Windows); sha256sum is always
+# there. Both print "<hash>  -" for stdin, so the key derivation below is
+# identical either way.
+if command -v shasum >/dev/null 2>&1; then
+  SESSION_EDITS_DIGEST='shasum -a 256'
+else
+  SESSION_EDITS_DIGEST='sha256sum'
+fi
+
 # Above this many paths the pre-command signature snapshot is skipped, and
 # attribution falls back to the porcelain delta of paths the command names.
 SESSION_EDITS_MAX_SIG_PATHS_DEFAULT=200
@@ -126,7 +135,7 @@ suspect_path() {
 snap_dir() { printf '%s/bashpre' "$(ledger_dir)"; }
 
 snap_key() {
-  printf '%s' "${1:-}" | shasum -a 256 | cut -c"1-$SESSION_EDITS_SNAP_KEY_CHARS"
+  printf '%s' "${1:-}" | $SESSION_EDITS_DIGEST | cut -c"1-$SESSION_EDITS_SNAP_KEY_CHARS"
 }
 
 # snap_path <session_id> <cmd>

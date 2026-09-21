@@ -249,7 +249,10 @@ test_stale_snapshot_pair_is_swept() {
 
 # A dead session's ledger and suspect log would accumulate for the life of the
 # temp dir, and a stale <sid>.suspect keeps counting into the commit nudge if
-# the session id is reused.
+# the session id is reused. The sweep's policy is mtime-based: a file is reaped
+# once its owner's last hook touch is older than the ledger TTL, and every hook
+# touch refreshes that mtime, so the backdated touch stands in for a dead
+# session.
 test_stale_ledger_is_swept() {
   new_repo
   local p lp sp

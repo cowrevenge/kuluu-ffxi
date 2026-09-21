@@ -4669,15 +4669,16 @@ mod cull_tests {
     /// distance-culling must not reset its Visibility back to Inherited every frame, or
     /// the model re-appears. Visible entities keep normal cull behavior.
     ///
-    /// The default cull distance equals the out-of-range fixture's 100.0, which
-    /// would sit the control on the boundary, so it is pinned to 50.0; self is
+    /// The cull distance is RETAIL_FALLBACK_DRAW_DISTANCE / 2: at the default
+    /// the out-of-range fixture would sit on the boundary (the cull is a strict
+    /// greater-than), so half the default keeps it well out of range; self is
     /// at the origin because the cull needs exactly one IsSelf.
     #[test]
     fn cull_respects_server_invisible_entities() {
         let mut app = App::new();
-        // The test's 100 m marker must stay out of range regardless of where
+        // The out-of-range fixture must stay out of range regardless of where
         // the retail fallback default lands.
-        const TEST_MOB_CULL_DISTANCE: f32 = 50.0;
+        const TEST_MOB_CULL_DISTANCE: f32 = RETAIL_FALLBACK_DRAW_DISTANCE / 2.0;
         app.insert_resource(DrawDistance {
             mob: TEST_MOB_CULL_DISTANCE,
             ..Default::default()
@@ -4722,7 +4723,7 @@ mod cull_tests {
                     act_index: 0,
                     kind: EntityKind::Mob,
                 },
-                GlobalTransform::from(Transform::from_xyz(100.0, 0.0, 0.0)),
+                GlobalTransform::from(Transform::from_xyz(RETAIL_FALLBACK_DRAW_DISTANCE, 0.0, 0.0)),
                 Visibility::Inherited,
             ))
             .id();

@@ -1817,8 +1817,9 @@ mod tests {
             .collect();
         grouped.sort();
         assert_eq!(grouped, vec![*b"atk1", *b"atk2", *b"atk3", *b"atk4"]);
-        // The routine opens with an unconditional 0x01 marker whose retail handler is a
-        // no-op, so the inert stages are the unknowns plus that marker.
+        // The routine opens with an unconditional `START_ROUTINE_MARKER_OPCODE` marker
+        // whose retail handler is a no-op, so the inert stages are the unknowns plus
+        // that marker.
         assert!(
             vatk.stages.iter().all(|t| {
                 t.stage.random_group.is_some()

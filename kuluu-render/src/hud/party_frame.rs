@@ -358,9 +358,10 @@ fn hp_value_text(m: &kuluu_snapshot::PartyMember, mode: u8) -> String {
     }
 }
 
-/// Derived max (stopgap until self max HP/MP lands from the 0x061 CLISTATUS
-/// block, vendor/server/src/map/packets/s2c/0x061_clistatus.cpp): only used
-/// for the "current/max" display mode.
+/// Derived max, used only for the "current/max" display mode: PartyMember
+/// carries no max HP/MP field, so the max is back-solved from the current
+/// value and its percentage; the authoritative source is the 0x061 CLISTATUS
+/// block (vendor/server/src/map/packets/s2c/0x061_clistatus.cpp).
 fn max_from_pct(m: &kuluu_snapshot::PartyMember) -> u32 {
     if m.hp_pct > 0 {
         (m.hp as f32 / m.hp_pct as f32 * 100.0).round() as u32

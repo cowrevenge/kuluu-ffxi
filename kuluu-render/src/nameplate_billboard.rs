@@ -330,9 +330,7 @@ pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
 /// one: Bevy's GpuImage prepare reuses a same-size texture and only
 /// re-uploads mip level 0 (write_texture), leaving every upper mip stale on
 /// the last bake; plates draw minified almost everywhere, so a
-/// colour/hp/claim move kept sampling the old mips (a dead worm stayed yellow
-/// at range while its entity-table record was already grey, and the HP bar
-/// fill looked frozen for the same reason). A new handle gets a fresh
+/// colour/hp/claim move kept sampling the old mips. A new handle gets a fresh
 /// texture with the full CPU-built mip chain, and the final pass's
 /// view-mismatch rebuild picks it up in the same frame: PrepareAssets runs
 /// before PrepareBindGroups. The displaced texture is unreferenced after the

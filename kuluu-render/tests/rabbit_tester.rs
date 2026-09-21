@@ -1054,7 +1054,7 @@ fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
 }
 
 /// S11 - missing-routine fall-through: an active animationsub on a model without the named
-/// routine must not freeze. The frozen-mob regression. A nonzero animationsub names a special
+/// routine must not freeze. A nonzero animationsub names a special
 /// routine on the wire
 /// (sub 1 -> `ini1`, FFXiMain.dll); retail plays that name on the model and no-ops when the
 /// model does not ship it. Rarab's DAT ships no `ini1` routine, so the special tier must

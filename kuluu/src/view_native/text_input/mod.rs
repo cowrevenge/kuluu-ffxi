@@ -1079,27 +1079,18 @@ fn push_local_tell_echo(scene_state: &mut SceneState, to: String, text: String) 
     });
 }
 
-/// Menu actions that take retail's sub-target confirm step before firing
-/// (spells/abilities/weaponskills/items). Everything else — move, equip, emote,
-/// and self-only spells/abilities (validTarget SELF, e.g. Boost) — dispatches
-/// immediately; dispatch_dynamic_menu_action routes the self-only ones to <me>.
-/// (vendor/server/sql/{abilities,spell_list}.sql validTarget, TARGET_SELF=0x01.)
+/// Menu actions that take retail's sub-target confirm step before firing:
+/// every spell, ability, weapon skill, ranged attack and usable item, SELF-only
+/// ones included (the cursor lands on the player and waits for Enter). Move,
+/// equip, emote and the mount/dig toggles act without a target and dispatch
+/// immediately. (.agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
+/// "Menu actions always confirm through the sub-target cursor".)
 fn sub_target_action_for(
     action: kuluu_render::hud::menu::DynamicMenuAction,
 ) -> Option<kuluu_render::input_mode::SubTargetAction> {
     use kuluu_render::hud::menu::DynamicMenuAction as A;
     use kuluu_render::input_mode::SubTargetAction as S;
     match action {
-        A::CastSpell { spell_id }
-            if ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only()) =>
-        {
-            None
-        }
-        A::JobAbility { ability_id } | A::PetAbility { ability_id }
-            if ffxi_vocab::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only()) =>
-        {
-            None
-        }
         A::CastSpell { spell_id } => Some(S::Spell(spell_id)),
         A::JobAbility { ability_id } | A::PetAbility { ability_id } => Some(S::Ability(ability_id)),
         A::Weaponskill { skill_id } => Some(S::WeaponSkill(skill_id)),
@@ -1205,11 +1196,9 @@ fn gather_sub_target_entities(
 /// refusal line. "Switch Target" picks a *different* mob: parking the cursor
 /// on the main target would make the first confirm a no-op, so the picker
 /// starts on the nearest valid candidate other than it.
-/// Retail: with a valid target already selected, confirming an action casts on it
-/// immediately — the flashing sub-target cursor is only for choosing a *different*
-/// target. True when `current_target` satisfies the action's validTarget flags, so
-/// the caller dispatches directly instead of opening the cursor. (Self-only actions
-/// never reach here — sub_target_action_for already routed them to <me>.)
+/// True when `current_target` satisfies the action's validTarget flags. The
+/// target-action menu still dispatches directly on a valid target; the main
+/// menus always confirm through the cursor and do not call this.
 fn selected_target_valid(
     action: kuluu_render::input_mode::SubTargetAction,
     current_target: Option<u32>,

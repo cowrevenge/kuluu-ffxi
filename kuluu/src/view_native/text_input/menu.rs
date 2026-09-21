@@ -285,15 +285,13 @@ pub(super) fn confirm_menu_at_cursor(
                 );
                 return None;
             }
-            let sub_action = sub_target_action_for(action);
-            if let Some(sub_action) = sub_action {
-                if !selected_target_valid(sub_action, target_id, scene_state) {
-                    // No valid target selected: retail's sub-target confirm step
-                    // fires the action only after the flashing cursor is confirmed.
-                    // Esc restores this menu with its cursor intact.
-                    let return_to = InputMode::Menu(stack.clone());
-                    return open_sub_target(sub_action, target_id, scene_state, return_to);
-                }
+            if let Some(sub_action) = sub_target_action_for(action) {
+                // Retail's sub-target confirm step: the cursor always shows,
+                // seeded on the current target when it passes the mask, else
+                // self, else the nearest candidate (initial_candidate). Esc
+                // restores this menu with its cursor intact.
+                let return_to = InputMode::Menu(stack.clone());
+                return open_sub_target(sub_action, target_id, scene_state, return_to);
             }
             let moved = matches!(action, A::MoveItem { .. });
             let entities = scene_state.snapshot.entities.clone();
@@ -1441,23 +1439,26 @@ mod menu_dispatch_tests {
     }
 
     #[test]
-    fn self_only_actions_skip_sub_target() {
+    fn every_menu_action_takes_the_sub_target_confirm() {
         use kuluu_render::hud::menu::DynamicMenuAction as A;
         use kuluu_render::input_mode::SubTargetAction as S;
-        // Boost (ability 39, validTarget SELF) casts on <me> — no <st> prompt.
+        // Boost (39) and Mighty Strikes (16) are validTarget SELF and still prompt.
         assert_eq!(
             sub_target_action_for(A::JobAbility { ability_id: 39 }),
-            None
+            Some(S::Ability(39))
         );
-        // Provoke (ability 35, ENEMY) still opens the sub-target cursor.
+        assert_eq!(
+            sub_target_action_for(A::JobAbility { ability_id: 16 }),
+            Some(S::Ability(16))
+        );
         assert_eq!(
             sub_target_action_for(A::JobAbility { ability_id: 35 }),
             Some(S::Ability(35))
         );
-        // Cure (spell 1, PARTY) still prompts.
         assert_eq!(
             sub_target_action_for(A::CastSpell { spell_id: 1 }),
             Some(S::Spell(1))
         );
+        assert_eq!(sub_target_action_for(A::Dismount), None);
     }
 }

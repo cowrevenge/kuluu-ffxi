@@ -184,6 +184,17 @@ mod tests {
     }
 
     #[test]
+    fn a_self_only_mask_seeds_on_self_past_a_targeted_mob() {
+        // A SELF-only action (Boost, Mighty Strikes) prompts with the cursor
+        // seeded on the player even while a mob is the current target
+        // (record: "Menu actions always confirm through the sub-target
+        // cursor").
+        let flags = TargetFlags(TargetFlags::SELF);
+        let ents = [me(), mob(7, 5.0)];
+        assert_eq!(initial_candidate(flags, Some(7), &ents), Some(1));
+    }
+
+    #[test]
     fn cure_defaults_to_self_without_target() {
         let flags = TargetFlags(TargetFlags::SELF | TargetFlags::PLAYER_PARTY);
         let ents = [me(), mob(10, 5.0)];

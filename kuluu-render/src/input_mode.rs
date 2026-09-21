@@ -75,6 +75,7 @@ pub struct SubTargetState {
 
     /// TARGETTYPE bitmask for the pending action (ffxi-proto valid_target).
     pub flags: u16,
+    pub candidate_filter: Option<u16>,
 
     /// Entity currently under the sub-target cursor. None when no valid
     /// candidate exists in range (cursor parks on self only if SELF is valid).
@@ -100,6 +101,7 @@ impl SubTargetState {
         Self {
             action,
             flags,
+            candidate_filter: None,
             candidate: None,
             return_to: Box::new(return_to),
             pending_switch: None,

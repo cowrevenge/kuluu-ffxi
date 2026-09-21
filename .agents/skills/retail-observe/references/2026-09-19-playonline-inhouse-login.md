@@ -155,14 +155,38 @@ describes each in our own words rather than reproducing the Viewer's text.
 
 ## The lobby dialect is a separate problem
 
-Kuluu's lobby client sends a `0xA1` data-port request carrying a 32-bit
-account id. Nothing in the PlayOnline stack builds that packet: a byte-level
-scan of FFXiMain, both polcore builds, pol.exe and FFXi.dll finds no store of
-the tag at all, and FFXiMain's only lobby builder dispatches over a table
-that does not admit it. The `0xA1` is a LandSandBoat-lineage packet and its
-account id is that server's own account row, learned over the auth port the
-PlayOnline flavor does not use. So a finished account handshake is necessary
-but not sufficient to reach the retail lobby.
+Kuluu's lobby client is LandSandBoat-shaped: two sockets opened up front, a
+`0x26` login on one and a `0xA1` character-list request on the other. Retail
+does none of that.
+
+- **One socket, not two.** The lobby client embeds a single TCP connection and
+  declares one in its group descriptor. Every WS2_32 reference in the image
+  falls into four clusters, and only one of them is the lobby. The map and
+  search sockets are created later, from addresses a lobby reply supplies.
+- **It connects late**, after a deliberate disconnect, and before polcore is
+  asked for the session.
+- **The port is a compile-time default**, not the ports a LandSandBoat profile
+  carries. The address comes from polcore resolving the lobby host, which
+  FFXiMain renders back to a dotted quad and hands to its TCP layer.
+- **The ordered exchange** is connect, then client `0x26`, server `0x05`
+  carrying a key, client `0x1F`, server `0x20`, client `0x24`, server `0x23`.
+- **The character list is server `0x20`** on that same socket, in reply to
+  `0x1F`, as a count followed by fixed-size records. There is no `0xA1`
+  anywhere: a byte-level scan of FFXiMain, both polcore builds, pol.exe and
+  FFXi.dll finds no store of that tag, and FFXiMain's only lobby builder
+  dispatches over a table that does not admit it. The `0xA1` is LandSandBoat
+  lineage and its account id is that server's own account row, learned over
+  the auth port the PlayOnline flavor does not use.
+- **The two session values go to different places.** The 64-byte authCode sits
+  in the `0x26` at offset 0x34, which Kuluu already does. The 16-byte value is
+  not in the `0x26` at all: it is held and sent from `0x1F` onward, enciphered
+  under the key the server's `0x05` carries, ratcheting after each packet.
+- **Every packet carries an MD5 over itself** with a span of its own header
+  zeroed, and retail verifies it on receive.
+
+So a finished account handshake is necessary but not sufficient. Reaching the
+retail lobby needs a second dialect beside the LandSandBoat one, not a tweak
+to it.
 
 ## What is not yet pinned
 

@@ -238,7 +238,10 @@ mod tests {
         // as the holder, and it must not have left its own note on disk.
         assert_ne!(holder.map(|h| h.pid), Some(std::process::id()));
         let (_, mut file) = open_lock_file(&root).unwrap();
-        assert_ne!(read_holder(&mut file).map(|h| h.pid), Some(std::process::id()));
+        assert_ne!(
+            read_holder(&mut file).map(|h| h.pid),
+            Some(std::process::id())
+        );
         drop(updater);
     }
 }

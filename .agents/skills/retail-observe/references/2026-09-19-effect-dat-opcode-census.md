@@ -1,7 +1,7 @@
 # Effect-DAT opcode census, 2026-09-19
 
 Block-count and payload-shape observations from a static scan of the retail
-effect-DAT corpus (the particle-generator and scheduler blocks the effect
+effect-DAT corpus of an unidentified client build (the particle-generator and scheduler blocks the effect
 files ship). Kuluu's parsers used to carry these figures inline in their
 comments; they live here so the code keeps only the citation and the
 behavioral WHY.
@@ -17,7 +17,10 @@ FFXI_DAT_PATH=<install> cargo test -p kuluu-render --test effect_instruction_cen
 
 (the test self-skips without an install). Install row: `ROW_TBD` (the
 `KNOWN_CLIENTS` row the figures were scanned against is still open; the
-counts below are corpus-shape observations, not a pin to one build).
+counts below are provisional corpus-shape observations, not a pin to one build).
+Do not use these counts as a release-wide coverage percentage or assign them
+to a KNOWN_CLIENTS row without recovering the original scan provenance or
+repeating the scan against an explicitly identified install.
 
 Two corpora are distinguished throughout:
 
@@ -25,6 +28,34 @@ Two corpora are distinguished throughout:
   (the "Shipped census" figures in `ffxi-dat/src/particle_gen.rs`).
 - **raw probe walk** — a broader walk that also counts blocks the parser
   drops; only called out where it diverges from the accepted corpus.
+
+## Coverage and evidence limits (reviewed 2026-09-21)
+
+`Decoded` in the generator opcode sink reports parser recognition. It does
+not certify that the renderer implements the opcode or reproduces its retail
+appearance. In `ffxi-dat/src/particle_gen.rs`, `ParticleGeneratorDef::parse`
+accepts several updater families without arming runtime behavior:
+
+- Child-generator updaters (section 3, 0x25/0x33) and the child expiration
+  handler (section 4, 0x01).
+- Color-transform application (section 3, 0x0B) and RGB progress updates
+  (0x18 through 0x1A).
+- Velocity rotation (section 3, 0x26/0x2F), point-list position (0x34), and
+  specular progress updates (0x36/0x37/0x3B).
+
+Some payloads are retained in `ParticleGeneratorDef` for later use; others
+are only consumed. These are known rendering gaps in the reviewed PR800
+stack, not evidence that the corresponding retail instructions are no-ops.
+An empty dropped-opcode log therefore establishes neither complete runtime
+coverage nor visual parity. Other accepted instructions may already have
+runtime equivalents, so an empty parser match arm alone is not proof of a gap.
+
+Names and behavior descriptions attributed to `research/xim` come from a
+community reimplementation. XIM is not a retail decompile. The XIClient
+reconstruction under `research/XIClient`, direct client observations, and
+build-identified binary or DAT measurements are distinct evidence sources;
+apply the authority ranking in `research/AGENTS.md` to each claim. This
+static census does not substitute for a runtime comparison with retail.
 
 ## Particle generator, section 1
 

@@ -49,6 +49,18 @@ impl Transaction {
     pub const fn new(category: u8, opcode: u8) -> Self {
         Self { category, opcode }
     }
+
+    /// What this transaction is for, so a refusal names the step rather than
+    /// a category and an opcode.
+    pub fn name(self) -> &'static str {
+        match self {
+            MEMBER_LOGIN => "the member login",
+            FRIEND_LIST => "the friend list",
+            SELECT_SERVICE => "the world select",
+            ENTER_COMMUNITY => "entering the community service",
+            _ => "a request",
+        }
+    }
 }
 
 /// polcore `0x1001e5d0`: the member login, the first application transaction.
@@ -347,6 +359,13 @@ mod tests {
         assert_eq!(head[2], 7);
         assert_eq!(u32::from_le_bytes(head[4..8].try_into().unwrap()), 0x40);
         assert_eq!(&head[0x18..0x28], &digest);
+    }
+
+    #[test]
+    fn a_transaction_names_the_step_it_is() {
+        assert_eq!(MEMBER_LOGIN.name(), "the member login");
+        assert_eq!(SELECT_SERVICE.name(), "the world select");
+        assert_ne!(Transaction::new(9, 9).name(), MEMBER_LOGIN.name());
     }
 
     #[test]

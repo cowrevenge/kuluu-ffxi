@@ -248,7 +248,9 @@ impl ProfileConnection {
         if !head.is_ok() {
             return Err(Error::Status {
                 service: "the PlayOnline profile service",
-                status: head.error_code(),
+                transaction: tx.name(),
+                status: head.status,
+                code: head.error_code(),
             });
         }
 
@@ -383,6 +385,15 @@ pub fn login(
 
     let host = session.profile_host();
     let host_index = session.routing.map_or(0, |r| r.host_index);
+    // A refusal later on is hard to read without knowing which profile host
+    // the chat service routed to, and whether it routed at all: with no
+    // routing struct the host index falls back to zero.
+    tracing::info!(
+        profile_host = %host,
+        routed = session.routing.is_some(),
+        region = session.routing.map_or(0, |r| r.region),
+        "PlayOnline chat leg complete"
+    );
     let addr20 = session.greeting.address();
     let id = &account.playonline_id;
     let secret = account.playonline_password.as_bytes();

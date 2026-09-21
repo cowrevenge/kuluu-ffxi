@@ -1501,7 +1501,7 @@ impl FfxiRenderActor {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum EngageMachine {
     NotEngaged,
 
@@ -2416,10 +2416,28 @@ pub(crate) fn action_routine(
     })
 }
 
-/// The draw/sheathe window is the `in 0`/`out0` routine's motion clip length,
-/// looked up in the battle set and the base set the way
-/// `begin_completion_motion` resolves a clip; a draw clip that ships only in
-/// the base set still sizes the window.
+/// The goals under which the reactor moves the player itself, so the self
+/// pose reads the wire motion rather than the keys. The same set
+/// `snapshot_drives_movement` (kuluu view_native/input.rs) gates the movement
+/// dispatch on: an engage goal never moves the player (`Reactor::handle_command`
+/// forwards `Move` untouched while engaged), so its pose stays key-driven.
+fn self_pose_follows_reactor(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool {
+    matches!(
+        goal,
+        Some(
+            kuluu_snapshot::ReactorGoal::Following { .. }
+                | kuluu_snapshot::ReactorGoal::Pathing { .. }
+                | kuluu_snapshot::ReactorGoal::Banking { .. }
+        )
+    )
+}
+
+/// The draw/sheathe window is the length of the `in 0`/`out0` routine's
+/// motion clip as it plays: the battle set's copy, or the base set's only when
+/// the battle set has none (`select_pose_clips_layered` overlays the battle
+/// set first). Not the max of the two: `rest_clip_len_frames` matches the `?`
+/// wild across every variant in a set, and the base PC set holds draw clips
+/// for weapons not in hand.
 fn advance_engage(
     machine: &mut EngageMachine,
     want_engaged: bool,
@@ -2434,7 +2452,12 @@ fn advance_engage(
     let transition_len = |routine: &str| -> f32 {
         routine_motion_clip(routines, rejected_routines, DatId::from_str(routine))
             .map(|clip| {
-                rest_clip_len_frames(battle_clips, clip).max(rest_clip_len_frames(animations, clip))
+                let battle = rest_clip_len_frames(battle_clips, clip);
+                if battle > 0.0 {
+                    battle
+                } else {
+                    rest_clip_len_frames(animations, clip)
+                }
             })
             .unwrap_or(0.0)
     };
@@ -4170,10 +4193,7 @@ pub fn tick_live_ffxi_actors(
         target.id.is_some(),
         self_animation_locked,
     );
-    let self_reactor_driven = !matches!(
-        state.snapshot.current_goal,
-        None | Some(kuluu_snapshot::ReactorGoal::Idle)
-    );
+    let self_reactor_driven = self_pose_follows_reactor(state.snapshot.current_goal.as_ref());
 
     let zone = state.snapshot.zone_id;
     let zone_changed = matches!(*prev_zone, Some(p) if p != zone);
@@ -7009,6 +7029,83 @@ mod pose_resolution_tests {
         assert!(matches!(m, EngageMachine::Sheathing { .. }));
     }
 
+    /// When both sets carry the draw clip, the window is the battle set's
+    /// (the one that plays), not the longest variant anywhere.
+    #[test]
+    fn engage_machine_window_is_the_battle_clip_when_both_sets_have_it() {
+        use actor_state::EngageAnimationState as S;
+        let routines = synth_routines(&[(b"in 0", b"ind?"), (b"out0", b"otd?")]);
+        let battle = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
+        let base = vec![synth_anim(b"ind3", 20), synth_anim(b"otd3", 20)];
+        let mut m = EngageMachine::NotEngaged;
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaging
+        );
+        assert!(
+            matches!(m, EngageMachine::Drawing { remaining } if (remaining - 2.0).abs() < f32::EPSILON),
+            "the window must be the battle clip's 2 frames, got {m:?}"
+        );
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaging
+        );
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaged
+        );
+        assert_eq!(
+            advance_engage(&mut m, false, &routines, &[], &battle, &base, 1.0),
+            S::Disengaging
+        );
+        assert!(
+            matches!(m, EngageMachine::Sheathing { remaining } if (remaining - 1.0).abs() < f32::EPSILON),
+            "the sheathe window must be the battle clip's 1 frame, got {m:?}"
+        );
+    }
+
+    /// The self pose reads the wire motion only under the goals where the
+    /// reactor moves the player; an engage goal, pending or accepted, leaves
+    /// the pose on the keys.
+    #[test]
+    fn self_pose_follows_reactor_only_under_movement_goals() {
+        use kuluu_snapshot::ReactorGoal as G;
+        let follows = [
+            G::Following {
+                target_id: 7,
+                distance: 2.0,
+            },
+            G::Pathing {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                waypoints_remaining: 1,
+            },
+            G::Banking {
+                threshold: 50,
+                mog_house_zoneline: 1,
+            },
+        ];
+        for g in &follows {
+            assert!(self_pose_follows_reactor(Some(g)), "{g:?}");
+        }
+        let keys = [
+            G::Idle,
+            G::Engaging {
+                target_id: 7,
+                attack_issued: true,
+            },
+            G::Engaged {
+                target_id: 7,
+                attack_issued: true,
+            },
+        ];
+        for g in &keys {
+            assert!(!self_pose_follows_reactor(Some(g)), "{g:?}");
+        }
+        assert!(!self_pose_follows_reactor(None));
+    }
+
     #[test]
     fn engage_transition_in_progress_only_while_drawing_or_sheathing() {
         let skeleton = Skeleton {
@@ -7028,6 +7125,39 @@ mod pose_resolution_tests {
             actor.engage = engage;
             assert_eq!(actor.engage_transition_in_progress(), in_progress);
         }
+    }
+
+    /// While the weapon is mid draw or mid sheathe the player is held in place
+    /// (retail's one real lock), so the self locomotion flag must be off for the
+    /// whole transition window: the pre-draw run must not keep playing through it
+    /// on the motion latch. Once the weapon is fully out (Engaged) or away
+    /// (NotEngaged) the flag follows the motion again.
+    #[test]
+    fn self_locomotion_is_held_off_for_the_whole_engage_transition() {
+        use actor_state::EngageAnimationState as S;
+        let routines = synth_routines(&[(b"in 0", b"ind?"), (b"out0", b"otd?")]);
+        let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
+
+        // The gating rule the render pass applies to the self moving flag.
+        let held_off = |engage: &EngageMachine| match advance_engage(
+            &mut EngageMachine::clone(engage),
+            true,
+            &routines,
+            &[],
+            &anims,
+            &[],
+            0.0,
+        ) {
+            S::Engaging | S::Disengaging => true,
+            S::Engaged | S::NotEngaged => false,
+        };
+
+        // Mid-draw and mid-sheathe hold the locomotion off.
+        assert!(held_off(&EngageMachine::Drawing { remaining: 5.0 }));
+        assert!(held_off(&EngageMachine::Sheathing { remaining: 5.0 }));
+        // Fully out or fully away lets the locomotion follow the motion again.
+        assert!(!held_off(&EngageMachine::Engaged));
+        assert!(!held_off(&EngageMachine::NotEngaged));
     }
 
     #[test]

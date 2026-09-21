@@ -1163,22 +1163,25 @@ fn gather_sub_target_entities(
     let self_allegiance = self_id
         .and_then(|id| snap.entities.iter().find(|e| e.id == id))
         .map(|e| e.char_flags.allegiance & 7);
+    let self_party = snap
+        .party
+        .iter()
+        .find(|m| Some(m.id) == self_id)
+        .map_or(0, |m| m.party_no);
     snap.entities
         .iter()
         .map(|e| {
             let dx = e.pos.x - self_pos.x;
             let dy = e.pos.y - self_pos.y;
             let dz = e.pos.z - self_pos.z;
-            let is_party = snap.party.iter().any(|m| m.id == e.id);
+            let member = snap.party.iter().find(|m| m.id == e.id);
+            let is_party = member.is_some_and(|m| m.party_no == self_party);
             kuluu_render::sub_target::SubTargetEntity {
                 id: e.id,
                 is_self: Some(e.id) == self_id,
                 is_pc: matches!(e.kind, EntityKind::Pc),
                 is_party,
-                // Alliance membership is not surfaced in the wire snapshot
-                // yet; party covers the common case (kuluu: revisit when
-                // alliance lists land).
-                is_alliance: is_party,
+                is_alliance: member.is_some(),
                 is_enemy: matches!(e.kind, EntityKind::Mob)
                     || (matches!(e.kind, EntityKind::Pet)
                         && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 7 != a)),
@@ -1251,9 +1254,24 @@ fn open_sub_target(
     Some(InputMode::SubTarget(st))
 }
 
-/// `open_sub_target` with a token-narrowed candidate set: the action's own mask
-/// intersected with the token's. An empty intersection reads as "no qualified
-/// targets", like an empty field.
+fn gather_filtered_sub_targets(
+    scene_state: &SceneState,
+    filter: Option<u16>,
+) -> Vec<kuluu_render::sub_target::SubTargetEntity> {
+    let mut entities = gather_sub_target_entities(scene_state);
+    if let Some(filter) = filter {
+        entities.retain(|entity| {
+            let mut membership = *entity;
+            membership.is_dead = false;
+            kuluu_render::sub_target::entity_valid(
+                ffxi_vocab::valid_target::TargetFlags(filter),
+                &membership,
+            )
+        });
+    }
+    entities
+}
+
 fn open_sub_target_narrowed(
     action: kuluu_render::input_mode::SubTargetAction,
     narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
@@ -1265,15 +1283,15 @@ fn open_sub_target_narrowed(
         return open_sub_target(action, current_target, scene_state, return_to);
     };
     use kuluu_render::sub_target;
-    let flags =
-        ffxi_vocab::valid_target::TargetFlags(sub_target::action_flags(action).0 & narrow.0);
-    let ents = gather_sub_target_entities(scene_state);
+    let flags = sub_target::action_flags(action);
+    let ents = gather_filtered_sub_targets(scene_state, Some(narrow.0));
     let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
         return None;
     };
     let mut st = kuluu_render::input_mode::SubTargetState::open(action, flags.0, return_to);
     st.candidate = Some(candidate);
+    st.candidate_filter = Some(narrow.0);
     Some(InputMode::SubTarget(st))
 }
 
@@ -1306,7 +1324,7 @@ fn handle_sub_target_key(
     use kuluu_render::sub_target;
 
     let flags = TargetFlags(state.flags);
-    let ents = gather_sub_target_entities(scene_state);
+    let ents = gather_filtered_sub_targets(scene_state, state.candidate_filter);
 
     // Entities move and die while the cursor is up; re-park on the nearest
     // valid candidate if ours stopped qualifying.
@@ -3194,6 +3212,45 @@ mod sub_target_pick_tests {
         ];
         s.snapshot.party = vec![party_member(PARTY_ID)];
         s
+    }
+
+    #[test]
+    fn narrowed_raise_keeps_dead_targets_and_party_membership() {
+        use ffxi_vocab::valid_target::TargetFlags;
+        let mut scene = battle_scene();
+        scene.snapshot.party.push(party_member(SELF_ID));
+        let mut alliance = party_member(PARTY_PET_ID);
+        alliance.party_no = 1;
+        scene.snapshot.party.push(alliance);
+        for id in [PARTY_ID, PARTY_PET_ID] {
+            let entity = scene
+                .snapshot
+                .entities
+                .iter_mut()
+                .find(|e| e.id == id)
+                .unwrap();
+            entity.kind = EntityKind::Pc;
+            entity.hp_pct = Some(0);
+        }
+        let raise = ffxi_vocab::spell_names::id_for("Raise").unwrap();
+        for (mask, expected) in [
+            (TargetFlags::PLAYER, PARTY_PET_ID),
+            (TargetFlags::PLAYER_PARTY, PARTY_ID),
+            (TargetFlags::PLAYER_ALLIANCE, PARTY_PET_ID),
+        ] {
+            let mode = open_sub_target_narrowed(
+                SubTargetAction::Spell(raise),
+                Some(TargetFlags(mask)),
+                Some(PARTY_PET_ID),
+                &mut scene,
+                InputMode::World,
+            );
+            let Some(InputMode::SubTarget(st)) = mode else {
+                panic!("Raise must retain its corpse candidates");
+            };
+            assert_eq!(st.candidate, Some(expected));
+            assert!(TargetFlags(st.flags).contains(TargetFlags::PLAYER_DEAD));
+        }
     }
 
     #[test]

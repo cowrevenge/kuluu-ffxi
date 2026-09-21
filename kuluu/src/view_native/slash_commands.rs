@@ -1032,8 +1032,7 @@ pub enum SlashOutcome {
     /// forms, or an action typed with no target argument.
     OpenSubTarget {
         action: kuluu_render::input_mode::SubTargetAction,
-        /// A token-narrowed candidate set (`<stpc>` etc.), intersected with the
-        /// action's own TARGETTYPE mask; None means the action's mask alone.
+        /// A token filter (`<stpc>` etc.) applied alongside the action's TARGETTYPE mask.
         narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
     },
 

@@ -1928,7 +1928,7 @@ const KNOCKBACK_PENDING_TTL_SECS: f32 = 3.0;
 /// knockback stage yet, keyed by attacker id (research/xim
 /// EffectRoutineInstance.kt handleKnockBackRoutine reads the magnitude off the
 /// attack context when the stage fires, not when the packet lands).
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Default, Debug, PartialEq)]
 pub struct PendingKnockbacks {
     by_actor: HashMap<u32, (Vec<(u32, u8)>, f32)>,
 }

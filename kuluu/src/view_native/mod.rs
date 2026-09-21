@@ -984,6 +984,8 @@ fn despawn_ingame_entities(
         ResMut<kuluu_render::ffxi_actor_render::ActorLoadInFlight>,
         ResMut<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>,
         ResMut<kuluu_render::elevators::ZoneElevators>,
+        ResMut<kuluu_render::ffxi_actor_render::SelfKnockback>,
+        ResMut<kuluu_render::scheduler_runtime::PendingKnockbacks>,
     ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
@@ -1020,6 +1022,8 @@ fn despawn_ingame_entities(
     *zone_geom.7 = kuluu_render::ffxi_actor_render::ActorLoadInFlight::default();
     *zone_geom.8 = kuluu_render::ffxi_zone_material::ZoneGlobalLighting::default();
     *zone_geom.9 = kuluu_render::elevators::ZoneElevators::default();
+    *zone_geom.10 = kuluu_render::ffxi_actor_render::SelfKnockback::default();
+    *zone_geom.11 = kuluu_render::scheduler_runtime::PendingKnockbacks::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -1426,6 +1430,8 @@ mod zone_teardown_tests {
     fn world_with_teardown_resources() -> World {
         let mut world = World::new();
         world.init_resource::<super::SceneState>();
+        world.init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>();
+        world.init_resource::<kuluu_render::scheduler_runtime::PendingKnockbacks>();
         world.init_resource::<kuluu_render::hud::shop::ShopScreenState>();
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
@@ -1450,6 +1456,36 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::combat_stance::EntityMotion>();
         world.init_resource::<kuluu_render::combat_stance::AnimationBlends>();
         world
+    }
+
+    #[test]
+    fn teardown_discards_unconsumed_knockback() {
+        use kuluu_render::ffxi_actor_render::SelfKnockback;
+        use kuluu_render::scheduler_runtime::{collect_knockback_hits, PendingKnockbacks};
+        let mut world = world_with_teardown_resources();
+        world.init_resource::<Time>();
+        world.insert_resource(SelfKnockback {
+            pending: Vec2::X,
+            active: true,
+            face_toward: Some(Vec2::Y),
+        });
+        world
+            .resource_mut::<super::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::Knockbacks {
+                actor_id: 1,
+                hits: vec![(2, 1)],
+            });
+        world.run_system_once(collect_knockback_hits).unwrap();
+        assert_ne!(
+            *world.resource::<PendingKnockbacks>(),
+            PendingKnockbacks::default()
+        );
+        world.run_system_once(despawn_ingame_entities).unwrap();
+        assert_eq!(*world.resource::<SelfKnockback>(), SelfKnockback::default());
+        assert_eq!(
+            *world.resource::<PendingKnockbacks>(),
+            PendingKnockbacks::default()
+        );
     }
 
     #[test]

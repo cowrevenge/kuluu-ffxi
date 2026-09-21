@@ -1073,6 +1073,16 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         }
         p.scale += p.scale_vel * frames;
         p.rotation += p.spin * frames;
+        if g.def.rotation_updater {
+            if let Some(accel) = g.def.rotation_accel {
+                p.spin += Vec3::from_array(accel) * frames;
+            }
+        }
+        if g.def.scale_updater {
+            if let Some(accel) = g.def.scale_accel {
+                p.scale_vel += Vec2::new(accel[0], accel[1]) * frames;
+            }
+        }
     }
     reap_expired(g);
 
@@ -2235,6 +2245,8 @@ mod tests {
             moon_phase_color: None,
             uv_scroll: [0.0, 0.0],
             accel: None,
+            rotation_accel: None,
+            scale_accel: None,
             emit_cull: None,
             association: None,
             foot_mark: false,
@@ -3381,6 +3393,28 @@ mod tests {
                 .any(|p| (p.scale.x - 0.1) / 0.2 != (p.scale.y - 0.1) / 0.1),
             "the axis draws must be independent"
         );
+    }
+
+    #[test]
+    fn transform_acceleration_does_not_translate_particles() {
+        let mut d = def(120.0, 1.0, 1);
+        d.init_velocity = [0.0; 3];
+        d.rotation_velocity = Some([0.0; 3]);
+        d.scale_velocity = Some([0.0; 3]);
+        d.rotation_updater = true;
+        d.scale_updater = true;
+        d.rotation_accel = Some([0.0, 0.0, 0.01]);
+        d.scale_accel = Some([0.01, 0.0, 0.0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        g.stopped = true;
+        let initial = g.particles[0].pos;
+        advance(&mut g, 1.0);
+        advance(&mut g, 1.0);
+        let p = &g.particles[0];
+        assert_eq!(p.pos, initial);
+        assert!((p.rotation.z - 0.01).abs() < 1e-6);
+        assert!((p.scale.x - 0.11).abs() < 1e-6);
     }
 
     // 0x12 ScaleVelocitySetup: the sec3 0x08 ScaleUpdater adds the per-axis rate every frame

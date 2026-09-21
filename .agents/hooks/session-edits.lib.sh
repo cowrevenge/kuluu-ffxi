@@ -110,7 +110,7 @@ SESSION_EDITS_OWNED_WRITES='bd:.beads/'
 # alive, because an unknown tool may write from its code (python, perl, awk,
 # find -delete), and miscrediting one peer write is cheaper than silencing
 # every real edit an unusual tool makes.
-SESSION_EDITS_READONLY_PROGRAMS='basename cat comm cmp cut date df du dirname echo egrep file fgrep grep head less ls md5sum more nproc od printf pwd readlink realpath sha256sum shasum sort stat strings tail tr uname uniq wc which xxd'
+SESSION_EDITS_READONLY_PROGRAMS='basename cat comm cmp cut date df du dirname echo egrep file fgrep grep head less ls md5sum more nproc od printf pwd readlink realpath sha256sum shasum stat strings tail tr uname wc which'
 # git writes through most of its subcommands, so it is judged by the first
 # bare argument after the global options (-C, -c, --git-dir, --work-tree).
 # `stash` additionally needs its own sub-argument: bare `git stash` pushes.
@@ -462,13 +462,13 @@ in_word_list() {
 # walk is bash =~, not grep: the boundary class carries a literal newline,
 # which grep's ERE reads as backslash-n and the extraction would mis-parse.
 cmd_readonly() {
-  local cmd="$1" rest="$1" pat pat_mid prog sub m first=1
+  local cmd="$1" rest="$1" pat pat_mid prog sub m invocation first=1 matched=0
   [ -n "$cmd" ] || return 1
-  pat="${SESSION_EDITS_CMD_START_RE}([A-Za-z_][A-Za-z0-9_+.-]*)"
+  pat="${SESSION_EDITS_CMD_START_RE}([A-Za-z_/][A-Za-z0-9_/+.-]*)"
   # The ^ alternative is only a boundary at the true start of the text; after
   # the first match it would read a consumed command's first argument as a new
   # program (git diff -> diff), so later passes use the boundary-class form.
-  pat_mid="((${SESSION_EDITS_CMD_START_RE:4}([A-Za-z_][A-Za-z0-9_+.-]*)"
+  pat_mid="((${SESSION_EDITS_CMD_START_RE:4}([A-Za-z_/][A-Za-z0-9_/+.-]*)"
   while :; do
     if [ "$first" = 1 ]; then
       [[ "$rest" =~ $pat ]] || break
@@ -476,22 +476,24 @@ cmd_readonly() {
     else
       [[ "$rest" =~ $pat_mid ]] || break
     fi
+    matched=1
     m="${BASH_REMATCH[0]}"
+    invocation="${rest#*"$m"}"
     prog="${BASH_REMATCH[7]##*/}"
     rest="${rest/"$m"/ }"
     case "$prog" in
       git)
-        sub=$(git_subcommand "$cmd")
+        sub=$(git_subcommand "git $invocation")
         case "$sub" in
           '') return 1 ;;
-          stash) [ "$(git_stash_subarg "$cmd")" = list ] || [ "$(git_stash_subarg "$cmd")" = show ] || return 1 ;;
+          stash) [ "$(git_stash_subarg "git $invocation")" = list ] || [ "$(git_stash_subarg "git $invocation")" = show ] || return 1 ;;
           *) in_word_list "$sub" $SESSION_EDITS_GIT_READONLY_SUBCMDS || return 1 ;;
         esac
         ;;
       *) in_word_list "$prog" $SESSION_EDITS_READONLY_PROGRAMS || return 1 ;;
     esac
   done
-  return 0
+  [ "$matched" = 1 ]
 }
 
 # cmd_names_path <cmd> <root> <subdir-prefix> <root-relative-path>: the command
@@ -501,8 +503,19 @@ cmd_readonly() {
 # command names its paths to read them, so the naming arm is withheld for it
 # and a peer's concurrent write to a named path lands in the suspect log.
 cmd_names_path() {
-  local cmd="$1" root="$2" prefix="${3:-}" p="${4:-}" rel
+  local cmd="$1" root="$2" prefix="${3:-}" p="${4:-}" rel target
   [ -n "$p" ] || return 1
+  while IFS= read -r target; do
+    cmd_mentions "$target" "$p" && return 0
+    [ -n "$root" ] && cmd_mentions "$target" "$root/$p" && return 0
+    if [ -n "$prefix" ]; then
+      case "$p" in "$prefix"*)
+        rel="${p#"$prefix"}"
+        [ -n "$rel" ] && cmd_mentions "$target" "$rel" && return 0
+        ;;
+      esac
+    fi
+  done < <(cmd_write_targets "$cmd")
   cmd_readonly "$cmd" && return 1
   cmd_mentions "$cmd" "$p" && return 0
   [ -n "$root" ] && cmd_mentions "$cmd" "$root/$p" && return 0
@@ -592,7 +605,12 @@ cmd_writer_plausible() {
         *) abs="$cwd/${t#./}" ;;
       esac
       [ -e "$abs" ] || continue
-      case "$abs" in "$root"/*) ;; *) continue ;; esac
+      if [ -d "$abs" ]; then
+        abs=$(cd "$abs" && pwd -P) || continue
+      else
+        abs="$(cd "$(dirname "$abs")" && pwd -P)/$(basename "$abs")"
+      fi
+      case "$abs" in "$root"|"$root"/*) ;; *) continue ;; esac
       if [ -d "$abs" ]; then
         [ "$abs" = "$root" ] && return 0
         prefix="${abs#"$root"/}"
@@ -604,5 +622,5 @@ cmd_writer_plausible() {
     set +f
     return 1
   fi
-  return 0
+  [[ "$cmd" =~ $SESSION_EDITS_WRITER_RE ]]
 }

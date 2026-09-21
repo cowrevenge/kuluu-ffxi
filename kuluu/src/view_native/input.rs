@@ -40,8 +40,11 @@ pub struct MoveEnvParams<'w, 's> {
     /// a Q/E-style turn axis for the external driver. None unless wired at connect.
     pub stair_drive: Option<Res<'w, StairDriveHandle>>,
     // The scene's tracked entities: the engage gate resolves the self char id
-    // to its Bevy entity here.
+    // to its wire entity here.
     pub tracked: Res<'w, kuluu_render::scene::TrackedEntities>,
+    /// The wire entity's link to its actor root: FfxiRenderActor lives on the
+    /// root (ffxi_actor_render.rs spawn_live_actor), not on the tracked entity.
+    pub roots: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderRoot>,
     /// The self actor's engage machine: the weapon draw/sheathe hold gate.
     pub actors: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderActor>,
 }
@@ -1287,7 +1290,8 @@ pub fn dispatch_movement_system(
             .snapshot
             .self_char_id
             .and_then(|id| env.tracked.by_id.get(&id).copied())
-            .and_then(|ent| env.actors.get(ent).ok())
+            .and_then(|wire| env.roots.get(wire).ok())
+            .and_then(|root| env.actors.get(root.0).ok())
             .is_some_and(|actor| actor.engage_transition_in_progress());
     if engage_transition {
         forward = 0;
@@ -2462,24 +2466,63 @@ mod tests {
         }
     }
 
-    /// Spawns the self actor (world id 1, matching self_char_id) with the
-    /// weapon mid-draw and registers it in the tracked entities so the engage
-    /// gate resolves it; returns the Bevy entity.
+    /// Spawns the self actor (world id 1, matching self_char_id) the way the
+    /// game lays it out: the render actor on its own root, the tracked wire
+    /// entity linked to it through FfxiRenderRoot. The weapon starts mid-draw.
+    /// Returns the root, which carries the engage machine.
     fn spawn_drawing_self_actor(app: &mut App) -> Entity {
-        let ent = app
+        let root = app
             .world_mut()
             .spawn(kuluu_render::ffxi_actor_render::render_actor_stub(1))
+            .id();
+        let wire = app
+            .world_mut()
+            .spawn(kuluu_render::ffxi_actor_render::FfxiRenderRoot(root))
             .id();
         app.world_mut()
             .resource_mut::<kuluu_render::scene::TrackedEntities>()
             .by_id
-            .insert(1, ent);
-        let mut actor = app.world_mut().entity_mut(ent);
+            .insert(1, wire);
+        let mut actor = app.world_mut().entity_mut(root);
         actor
             .get_mut::<kuluu_render::ffxi_actor_render::FfxiRenderActor>()
             .expect("the self actor stub was just spawned")
             .set_engage_for_test(true);
-        ent
+        root
+    }
+
+    /// The gate must reach the actor through the wire entity's root link; a
+    /// render actor sitting on the tracked entity itself is not the game's
+    /// layout and must not satisfy it.
+    #[cfg(not(feature = "enhanced-engage-move-lock-off"))]
+    #[test]
+    fn hold_resolves_the_actor_through_the_root_link_only() {
+        let mut drive = MoveDrive::new();
+        let wire = drive
+            .app
+            .world_mut()
+            .spawn(kuluu_render::ffxi_actor_render::render_actor_stub(1))
+            .id();
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::scene::TrackedEntities>()
+            .by_id
+            .insert(1, wire);
+        drive
+            .app
+            .world_mut()
+            .entity_mut(wire)
+            .get_mut::<kuluu_render::ffxi_actor_render::FfxiRenderActor>()
+            .expect("the stub was just spawned")
+            .set_engage_for_test(true);
+        drive.press(KeyCode::KeyW);
+        let ticks = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            ticks.last().expect("ticks").1,
+            ticks.first().expect("ticks").1,
+            "an actor on the wire entity is not the self actor; nothing holds"
+        );
     }
 
     /// Retail's one real player lock: the weapon draw holds the player in

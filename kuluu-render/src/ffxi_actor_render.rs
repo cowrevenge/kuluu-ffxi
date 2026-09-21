@@ -2416,11 +2416,16 @@ pub(crate) fn action_routine(
     })
 }
 
+/// The draw/sheathe window is the `in 0`/`out0` routine's motion clip length,
+/// looked up in the battle set and the base set the way
+/// `begin_completion_motion` resolves a clip; a draw clip that ships only in
+/// the base set still sizes the window.
 fn advance_engage(
     machine: &mut EngageMachine,
     want_engaged: bool,
     routines: &HashMap<DatId, Scheduler>,
     rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
+    battle_clips: &[SkeletonAnimation],
     animations: &[SkeletonAnimation],
     elapsed_frames: f32,
 ) -> actor_state::EngageAnimationState {
@@ -2428,7 +2433,9 @@ fn advance_engage(
 
     let transition_len = |routine: &str| -> f32 {
         routine_motion_clip(routines, rejected_routines, DatId::from_str(routine))
-            .map(|clip| rest_clip_len_frames(animations, clip))
+            .map(|clip| {
+                rest_clip_len_frames(battle_clips, clip).max(rest_clip_len_frames(animations, clip))
+            })
             .unwrap_or(0.0)
     };
 
@@ -4283,6 +4290,7 @@ pub fn tick_live_ffxi_actors(
                     &actor.routines,
                     &actor.rejected_routines,
                     &actor.battle_clips,
+                    &actor.animations,
                     elapsed_frames,
                 )
             };
@@ -6943,7 +6951,7 @@ mod pose_resolution_tests {
         let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
         let mut m = EngageMachine::NotEngaged;
         let step =
-            |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &[], &anims, 1.0);
+            |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &[], &anims, &[], 1.0);
 
         assert_eq!(step(&mut m, true), S::Engaging);
         assert_eq!(step(&mut m, true), S::Engaging);
@@ -6963,13 +6971,42 @@ mod pose_resolution_tests {
         let anims: Vec<SkeletonAnimation> = Vec::new();
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &anims, 1.0),
+            advance_engage(&mut m, true, &routines, &[], &anims, &[], 1.0),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &[], &anims, 1.0),
+            advance_engage(&mut m, false, &routines, &[], &anims, &[], 1.0),
             S::NotEngaged
         );
+    }
+
+    /// A draw clip that ships only in the base animation set still opens the
+    /// Drawing window; the battle set alone is not the lookup.
+    #[test]
+    fn engage_machine_sizes_the_window_from_the_base_set_too() {
+        use actor_state::EngageAnimationState as S;
+        let routines = synth_routines(&[(b"in 0", b"ind?"), (b"out0", b"otd?")]);
+        let battle: Vec<SkeletonAnimation> = Vec::new();
+        let base = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
+        let mut m = EngageMachine::NotEngaged;
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaging
+        );
+        assert!(matches!(m, EngageMachine::Drawing { .. }));
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaging
+        );
+        assert_eq!(
+            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            S::Engaged
+        );
+        assert_eq!(
+            advance_engage(&mut m, false, &routines, &[], &battle, &base, 1.0),
+            S::Disengaging
+        );
+        assert!(matches!(m, EngageMachine::Sheathing { .. }));
     }
 
     #[test]

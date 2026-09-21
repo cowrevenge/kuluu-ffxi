@@ -415,8 +415,8 @@ pub struct ParticleGeneratorDef {
     // sec3 0x0C ColorTransformModifier: four i16s [r, g, b, a] — the per-frame rate on the
     // sec2 0x19 color transform over the particle's life (research/xim
     // ParticleUpdaters.kt ColorTransformModifier — colorTransform += floor(modifier ×
-    // frames/30) per frame). The engine does not model the color transform's application
-    // (the I14 0x19 precedent), so parse-only.
+    // frames/30) per frame). The engine does not model the color transform's
+    // application, so parse-only.
     pub color_transform_modifier: Option<[i16; 4]>,
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
@@ -460,7 +460,7 @@ pub struct ParticleGeneratorDef {
     // ParticleInitializers.kt IncrementalRotationApplier — rotation += incr × (1 +
     // totalParticlesEmitted); its apply also arms the render-time rotation-y negation, even
     // for an all-zero payload. The retail decompile's ElemGenerate has no 0x3B case, so xim
-    // is the available evidence, the I6 precedent).
+    // is the available evidence.
     pub incremental_rotation: Option<[f32; 3]>,
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
@@ -498,7 +498,7 @@ pub struct ParticleGeneratorDef {
     // sec2 0x29 KeyFrameValueSetup (scale.z): retail captures field_EC.z, the element's
     // scale z, as the track's initial value (CYyGenerator.cpp CYyGenerator::ElemGenerate
     // case 0x29 — same shape as 0x27/0x28). Parsed but not applied: the engine's 2D sprite
-    // has no z axis (the 0x10/0x11 z-bound precedent).
+    // has no z axis (as for the 0x10/0x11 z bound).
     pub scale_z_track: Option<[u8; 4]>,
     pub alpha_track: Option<[u8; 4]>,
     // sec2 0x2A KeyFrameValueSetup (color.r): a keyframe track on the element's red channel
@@ -508,10 +508,10 @@ pub struct ParticleGeneratorDef {
     // spawn from the 0x16 base / 0x17 variance and has no per-frame rgb track path.
     pub color_r_track: Option<[u8; 4]>,
     // sec2 0x2B KeyFrameValueSetup (color.g): the green-channel twin of 0x2A
-    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, the 0x2A precedent.
+    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, as for 0x2A.
     pub color_g_track: Option<[u8; 4]>,
     // sec2 0x2C KeyFrameValueSetup (color.b): the blue-channel twin of 0x2A
-    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, the 0x2A precedent.
+    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, as for 0x2A.
     pub color_b_track: Option<[u8; 4]>,
 
     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
@@ -662,7 +662,7 @@ pub struct ParticleGeneratorDef {
     // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch). The
     // runtime application (sampling the sec2 0x82 track at the particle's progress with the
     // distance falloff × 1000×progress×distance×shakeFactor capped at 0.33, then
-    // camera.applyShake) is unmodeled, so parse-only (the I26 0x82 precedent).
+    // camera.applyShake) is unmodeled, so parse-only.
     pub camera_shake: Option<[f32; 3]>,
 
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
@@ -700,7 +700,7 @@ pub struct ParticleGeneratorDef {
     // sec3 0x2C VelocityDampener: [dampen, unk] — velocity ×= dampeningFactor^dt, the
     // factor coming from the sec2 0x69 track when present, else dampen (research/xim
     // ParticleUpdaters.kt VelocityDampener). The engine does not model the velocity
-    // dampener (the I35 0x69 precedent), so parse-only.
+    // dampener, so parse-only.
     pub velocity_dampener: Option<[f32; 2]>,
     // sec3 0x26 VelocityRotator: three floats, the rotateAmount added to the velocity
     // rotation × (0.5 × dt) per frame (research/xim ParticleUpdaters.kt VelocityRotator —
@@ -757,7 +757,7 @@ pub struct ParticleGeneratorDef {
     // sec2 0x4A ParentTexCoordConfig: a no-payload marker — a child particle copies the
     // parent's tex-coord translate (research/xim ParticleInitializers.kt
     // ParentTexCoordConfig). A no-op without a parent, so parsed but not applied until the
-    // child-generator path lands (the 0x45 marker precedent).
+    // child-generator path lands (as for the 0x45 marker).
     pub parent_tex_coord: bool,
 
     // sec2 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem
@@ -766,27 +766,26 @@ pub struct ParticleGeneratorDef {
     // ParticleInitializers.kt PointListPositionSetup; retail's ElemGenerate case 0x54
     // offsets the first emitted elem by the spline's start point, a shared allocation slot
     // zeroing the delta for later elems). Parsed but not applied until the sec3 0x34
-    // PointListPositionUpdater lands (the I29→U19 parse-first precedent).
+    // PointListPositionUpdater lands.
     pub point_list_position: Option<([u8; 4], [u8; 4])>,
 
     // sec2 0x51 KeyFrameValueSetup (velocity.y): the 0x27/0x28/0x29 track shape bound to
     // the element's velocity y (research/xim ParticleGeneratorParser.kt sec2Handler —
     // 0x50/0x51/0x52 are the Velocity x/y/z KeyFrameValueSetup). Parsed but not applied:
-    // the engine does not model a per-frame velocity track, the I18 precedent.
+    // the engine does not model a per-frame velocity track.
     pub velocity_y_track: Option<[u8; 4]>,
 
     // sec2 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape bound
     // to the specular element's rotation x (research/xim ParticleGeneratorParser.kt —
     // 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but not
-    // applied: the engine does not model the specular element's rotation, the I18
-    // precedent.
+    // applied: the engine does not model the specular element's rotation.
     pub specular_rot_x_track: Option<[u8; 4]>,
 
     // sec2 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track shape
     // bound to the specular element's color green (research/xim
     // ParticleGeneratorParser.kt — 0x5C..0x5F are the Specular Color r/g/b/a
     // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
-    // specular element's color, the I18 precedent.
+    // specular element's color.
     pub specular_color_g_track: Option<[u8; 4]>,
 }
 
@@ -1508,7 +1507,7 @@ impl ParticleGeneratorDef {
                     // research/xim ParticleUpdaters.kt VelocityDampener: two floats
                     // [dampen, unk] — velocity ×= dampeningFactor^dt, the factor coming
                     // from the sec2 0x69 track when present. The engine does not model
-                    // the velocity dampener (the I35 0x69 precedent), so parse-only.
+                    // the velocity dampener, so parse-only.
                     0x2C if payload + 8 <= body.len() => {
                         velocity_dampener =
                             Some([f32_le(body, payload), f32_le(body, payload + 4)]);
@@ -1516,12 +1515,11 @@ impl ParticleGeneratorDef {
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x44 — the
                     // dampening-factor ProgressValueUpdater: no payload, it samples the
                     // sec2 0x69 track. The engine does not model the velocity dampener,
-                    // so the block arms nothing and only consumes (the U1/U2 precedent).
+                    // so the block arms nothing and only consumes.
                     SEC3_OPCODE_DAMPENING_FACTOR => {}
                     // research/xim ParticleUpdaters.kt ColorTransformModifier: four i16s —
                     // the per-frame rate on the sec2 0x19 color transform. The engine does
-                    // not model the color transform's application (the I14 0x19 precedent),
-                    // so parse-only.
+                    // not model the color transform's application, so parse-only.
                     0x0C if payload + 8 <= body.len() => {
                         color_transform_modifier = Some([
                             i16::from_le_bytes([body[payload], body[payload + 1]]),
@@ -1533,46 +1531,42 @@ impl ParticleGeneratorDef {
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x15/0x16/0x17 —
                     // the scale.x/y/z ProgressValueUpdaters: no payload, they sample the
                     // sec2 0x27/0x28/0x29 scale tracks at life progress, which the render
-                    // path already does from def.scale_x_track/scale_y_track (the U3 0x1B
-                    // precedent); the engine's 2D sprite has no z axis (the I17 0x29
-                    // precedent), so the blocks arm nothing and only consume.
+                    // path already does from def.scale_x_track/scale_y_track; the engine's
+                    // 2D sprite has no z axis, so the blocks arm nothing and only consume.
                     0x15..=0x17 => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x18/0x19/0x1A —
                     // the color.r/g/b ProgressValueUpdaters: no payload, they sample the
                     // sec2 0x2A/0x2B/0x2C color tracks at life progress. The engine sets
                     // the particle's rgb at spawn from the 0x16 base / 0x17 variance and
-                    // has no per-frame rgb track path (the I19 0x2A precedent), so the
-                    // blocks arm nothing and only consume (the U1/U2 precedent).
+                    // has no per-frame rgb track path, so the blocks arm nothing and
+                    // only consume.
                     0x18..=0x1A => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x36/0x37/0x3B —
                     // the specular rotation.y/z and color.a ProgressValueUpdaters: no
                     // payload, they sample the sec2 0x5A/0x5B/0x5F specular tracks. The
-                    // engine does not model the specular element (the I18/I39/I40
-                    // precedent), so the blocks arm nothing and only consume (the U1/U2
-                    // precedent).
+                    // engine does not model the specular element, so the blocks arm
+                    // nothing and only consume.
                     0x36 | 0x37 | 0x3B => {}
                     // research/xim ParticleUpdaters.kt ColorTransformApplier: no payload —
                     // color += (transform shr 7) × (0.5 × dt) per frame. The engine does
-                    // not model the color transform's application (the I14 0x19 precedent),
-                    // so the block arms nothing and only consumes (the U1/U2 precedent).
+                    // not model the color transform's application, so the block arms
+                    // nothing and only consumes.
                     SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {}
                     // research/xim ParticleGeneratorParser.kt sec3Handler 0x25/0x33 —
                     // ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload, they
                     // emit/update the sec2 0x44/0x53 child generator per particle. The
-                    // engine has no child-particle path (the I29 0x44 precedent), so the
-                    // blocks arm nothing and only consume (the U1/U2 precedent).
+                    // engine has no child-particle path, so the blocks arm nothing and
+                    // only consume.
                     0x25 | 0x33 => {}
                     // research/xim ParticleUpdaters.kt VelocityRotationUpdater: no payload
                     // — converts all velocity into the +x axis and copies the particle's
                     // rotation into the velocity rotation. The engine has no
-                    // velocityRotation (the U8 0x26 precedent), so the block arms nothing
-                    // and only consumes (the U1/U2 precedent).
+                    // velocityRotation, so the block arms nothing and only consumes.
                     SEC3_OPCODE_VELOCITY_ROTATION_UPDATER => {}
                     // research/xim ParticleUpdaters.kt PointListPositionUpdater: no
                     // payload — samples the sec2 0x54 point-list spline at the particle's
                     // progress and copies it to the position. The engine has no point-list
-                    // spline runtime (the I45 0x54 precedent), so the block arms nothing
-                    // and only consumes (the U1/U2 precedent).
+                    // spline runtime, so the block arms nothing and only consumes.
                     SEC3_OPCODE_POINT_LIST_POSITION => {}
                     // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
                     // the rotateAmount added to the velocity rotation × (0.5 × dt) per
@@ -1591,8 +1585,8 @@ impl ParticleGeneratorDef {
                     0x45 => moon_phase_sprite = true,
                     // research/xim ParticleUpdaters.kt SpriteSheetFrameUpdater: no payload — the
                     // flipbook frame advances across the particle's life, which the engine's
-                    // flipbook_index already does for every SpriteSheet (the I1 0x1D precedent;
-                    // retail's ElemIdle case 0x0D accumulator is the same sequence).
+                    // flipbook_index already does for every SpriteSheet (retail's ElemIdle
+                    // case 0x0D accumulator is the same sequence).
                     SEC3_OPCODE_SPRITE_SHEET_FRAME => {}
                     // research/xim ParticleUpdaters.kt NoOpParticleUpdater: no payload — retail's
                     // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114),
@@ -1604,7 +1598,7 @@ impl ParticleGeneratorDef {
                     // size_words=1). It samples the sec2 0x2D alpha track at life progress, which
                     // particle_draw already does from def.alpha_track; the shipped corpus has zero
                     // generators carrying the 0x2D track without this updater, so the block arms
-                    // nothing and only consumes (the U1/U2 precedent).
+                    // nothing and only consumes.
                     SEC3_OPCODE_ALPHA_UPDATER => {}
                     // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: expectZero32
                     // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
@@ -2536,7 +2530,7 @@ mod tests {
     // NoOpParticleUpdater); the shipped census is 71013 blocks, all size_words=1. retail's
     // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114) — the
     // elapsed-life fraction the engine's `progress` (age/life, particle_sim.rs) already is — so
-    // the block arms nothing and only consumes, the 0x0D precedent.
+    // the block arms nothing and only consumes, as for 0x0D.
     #[test]
     fn no_op_particle_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -2613,8 +2607,7 @@ mod tests {
     // ParticleGeneratorParser.kt sec3Handler 0x1B); the shipped census is 64963 blocks, all
     // size_words=1. It samples the sec2 0x2D alpha track at life progress, which particle_draw
     // already does from def.alpha_track, and the shipped corpus has zero generators carrying the
-    // 0x2D track without this updater — so the block arms nothing and only consumes, the U1/U2
-    // precedent.
+    // 0x2D track without this updater — so the block arms nothing and only consumes.
     #[test]
     fn alpha_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3440,7 +3433,7 @@ mod tests {
     // sec3 0x15/0x16/0x17 scale.x/y/z ProgressValueUpdaters: no payload — they sample the
     // sec2 0x27/0x28/0x29 scale tracks at life progress, which the render path already does
     // from def.scale_x_track/scale_y_track (research/xim ParticleGeneratorParser.kt
-    // sec3Handler; the U3 0x1B precedent). Shipped census: 0x15 n=57310, 0x16 n=59425,
+    // sec3Handler). Shipped census: 0x15 n=57310, 0x16 n=59425,
     // 0x17 n=8320, all size_words=1, every one behind its sec2 scale track.
     #[test]
     fn scale_progress_updaters_consume_the_blocks_without_state() {
@@ -3477,7 +3470,7 @@ mod tests {
 
     // sec3 0x18/0x19/0x1A color.r/g/b ProgressValueUpdaters: no payload — they sample the
     // sec2 0x2A/0x2B/0x2C color tracks at life progress; the engine's rgb is spawn-time
-    // only (research/xim ParticleGeneratorParser.kt sec3Handler; the I19 0x2A precedent).
+    // only (research/xim ParticleGeneratorParser.kt sec3Handler).
     // Shipped census: 0x18 n=11559, 0x19 n=15450, 0x1A n=9580, all size_words=1, every one
     // behind its sec2 color track.
     #[test]
@@ -3515,8 +3508,8 @@ mod tests {
 
     // sec3 0x36/0x37/0x3B specular rotation.y/z and color.a ProgressValueUpdaters: no
     // payload — they sample the sec2 0x5A/0x5B/0x5F specular tracks; the engine does not
-    // model the specular element (research/xim ParticleGeneratorParser.kt sec3Handler; the
-    // I18/I39/I40 precedent). Shipped census: all size_words=1, every one behind its sec2
+    // model the specular element (research/xim ParticleGeneratorParser.kt sec3Handler).
+    // Shipped census: all size_words=1, every one behind its sec2
     // specular track (0x36 n=1481, 100% paired with the sec2 0x5A).
     #[test]
     fn specular_progress_updaters_consume_the_blocks_without_state() {
@@ -3553,7 +3546,7 @@ mod tests {
 
     // sec3 0x0B ColorTransformApplier: no payload — color += (transform shr 7) × (0.5 × dt)
     // per frame; the engine does not model the color transform's application (research/xim
-    // ParticleUpdaters.kt ColorTransformApplier; the I14 0x19 precedent). Shipped census:
+    // ParticleUpdaters.kt ColorTransformApplier). Shipped census:
     // 66990 blocks, all size_words=1.
     #[test]
     fn color_transform_applier_consumes_the_block_without_state() {
@@ -3586,8 +3579,8 @@ mod tests {
 
     // sec3 0x25/0x33 ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload — they
     // emit/update the sec2 0x44/0x53 child generator per particle; the engine has no
-    // child-particle path (research/xim ParticleGeneratorParser.kt sec3Handler; the I29
-    // 0x44 precedent). Shipped census: 0x25 n=9488, 0x33 n=1656, all size_words=1, every
+    // child-particle path (research/xim ParticleGeneratorParser.kt sec3Handler).
+    // Shipped census: 0x25 n=9488, 0x33 n=1656, all size_words=1, every
     // one behind its sec2 child link.
     #[test]
     fn child_generator_updaters_consume_the_blocks_without_state() {
@@ -3623,8 +3616,8 @@ mod tests {
 
     // sec3 0x2F VelocityRotationUpdater: no payload — converts all velocity into the +x
     // axis and copies the particle's rotation into the velocity rotation; the engine has
-    // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater; the
-    // U8 0x26 precedent). Shipped census: all size_words=1.
+    // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater).
+    // Shipped census: all size_words=1.
     #[test]
     fn velocity_rotation_updater_consumes_the_block_without_state() {
         let mut setup = op(0x01, 12, &[]);
@@ -3657,7 +3650,7 @@ mod tests {
     // sec3 0x34 PointListPositionUpdater: no payload — samples the sec2 0x54 point-list
     // spline at the particle's progress and copies it to the position; the engine has no
     // point-list spline runtime (research/xim ParticleUpdaters.kt
-    // PointListPositionUpdater; the I45 0x54 precedent). Shipped census: 292 blocks, all
+    // PointListPositionUpdater). Shipped census: 292 blocks, all
     // size_words=1, paired 1:1 with the sec2 0x54 setup (same 22 files).
     #[test]
     fn point_list_position_updater_consumes_the_block_without_state() {

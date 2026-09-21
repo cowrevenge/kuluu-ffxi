@@ -1306,8 +1306,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // allocationOffset binds it to the scale transform; retail's shared 0x03/0x0C/0x13 case
     // adds frand(bounds) to the transform's velocity). The draw lands on the same transform
     // velocity the sec3 0x08 ScaleUpdater integrates, so it is inert without the updater,
-    // the 0x0C precedent; the z bound has no axis on the engine's 2D sprite, the 0x10
-    // precedent.
+    // as for 0x0C; the z bound has no axis on the engine's 2D sprite, as for 0x10.
     let mut scale_vel = Vec2::ZERO;
     if let Some(rate) = g.def.scale_rate() {
         scale_vel = Vec2::new(rate[0], rate[1]);

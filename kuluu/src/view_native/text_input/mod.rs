@@ -941,6 +941,13 @@ fn apply_chat_action(
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
                     fishing_gate,
+                    match scene_state.snapshot.current_goal {
+                        Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => {
+                            Some(target_id)
+                        }
+                        _ => None,
+                    },
+                    scene_state.snapshot.self_pet_targid,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");
 
@@ -961,6 +968,13 @@ fn apply_chat_action(
                         stack.push(*kind);
                         Some(InputMode::Menu(stack))
                     }
+                    SlashOutcome::OpenSubTarget { action, narrow } => open_sub_target_narrowed(
+                        *action,
+                        *narrow,
+                        current_target,
+                        scene_state,
+                        InputMode::World,
+                    ),
                     // `/check <pc>` opens the same window the Check menu entry
                     // does; the other check kinds answer in chat only.
                     SlashOutcome::Command(AgentCommand::CheckTarget {
@@ -1240,6 +1254,31 @@ fn open_sub_target(
         sub_target::initial_candidate(flags, parked, &ents)
     };
     let Some(candidate) = candidate else {
+        push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
+        return None;
+    };
+    let mut st = kuluu_render::input_mode::SubTargetState::open(action, flags.0, return_to);
+    st.candidate = Some(candidate);
+    Some(InputMode::SubTarget(st))
+}
+
+/// `open_sub_target` with a token-narrowed candidate set: the action's own mask
+/// intersected with the token's. An empty intersection reads as "no qualified
+/// targets", like an empty field.
+fn open_sub_target_narrowed(
+    action: kuluu_render::input_mode::SubTargetAction,
+    narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
+    current_target: Option<u32>,
+    scene_state: &mut SceneState,
+    return_to: InputMode,
+) -> Option<InputMode> {
+    let Some(narrow) = narrow else {
+        return open_sub_target(action, current_target, scene_state, return_to);
+    };
+    use kuluu_render::sub_target;
+    let flags = ffxi_vocab::valid_target::TargetFlags(sub_target::action_flags(action).0 & narrow.0);
+    let ents = gather_sub_target_entities(scene_state);
+    let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
         return None;
     };

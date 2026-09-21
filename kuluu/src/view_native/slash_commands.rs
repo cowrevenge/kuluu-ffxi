@@ -33,12 +33,42 @@ const PARTY_TARGET_TOKENS: &[&str] = &[
 /// three parties of this many.
 const PARTY_SLOTS: usize = 6;
 
+/// Retail's sub-target tokens: the bare form opens the cursor on the action's
+/// own TARGETTYPE mask, the suffixed forms narrow the candidate set.
+const SUB_TARGET_TOKENS: &[(&str, Option<u16>)] = &[
+    ("<st>", None),
+    (
+        "<stpc>",
+        Some(
+            ffxi_vocab::valid_target::TargetFlags::SELF
+                | ffxi_vocab::valid_target::TargetFlags::PLAYER_PARTY
+                | ffxi_vocab::valid_target::TargetFlags::PLAYER_ALLIANCE
+                | ffxi_vocab::valid_target::TargetFlags::PLAYER,
+        ),
+    ),
+    (
+        "<stnpc>",
+        Some(ffxi_vocab::valid_target::TargetFlags::NPC | ffxi_vocab::valid_target::TargetFlags::ENEMY),
+    ),
+    (
+        "<stpt>",
+        Some(ffxi_vocab::valid_target::TargetFlags::SELF | ffxi_vocab::valid_target::TargetFlags::PLAYER_PARTY),
+    ),
+    (
+        "<stal>",
+        Some(
+            ffxi_vocab::valid_target::TargetFlags::SELF
+                | ffxi_vocab::valid_target::TargetFlags::PLAYER_PARTY
+                | ffxi_vocab::valid_target::TargetFlags::PLAYER_ALLIANCE,
+        ),
+    ),
+];
+const BATTLE_TARGET_TOKEN: &str = "<bt>";
+const PET_TARGET_TOKEN: &str = "<pet>";
+
 /// Retail target tokens Kuluu parses but has no state to answer with yet, kept
 /// apart from a typo so the two report differently.
-const UNRESOLVED_TARGET_TOKENS: &[&str] = &[
-    "<st>", "<stpc>", "<stnpc>", "<stal>", "<stpt>", "<bt>", "<ft>", "<ht>", "<r>", "<pet>",
-    "<scan>", "<lastst>", "<focust>",
-];
+const UNRESOLVED_TARGET_TOKENS: &[&str] = &["<ft>", "<ht>", "<r>", "<scan>", "<lastst>", "<focust>"];
 
 struct SlashCtx<'a> {
     cmd: &'a str,
@@ -54,6 +84,10 @@ struct SlashCtx<'a> {
     /// Retail's client-side fishing gate, evaluated by the renderer against the
     /// loaded zone collision (`kuluu_render::fishing_spot`).
     fishing: kuluu_render::fishing_spot::FishingGate,
+    /// The reactor's engaged target, retail's `<bt>`.
+    battle_target: Option<u32>,
+    /// The player's own pet by act_index, retail's `<pet>`.
+    self_pet_targid: Option<u16>,
 }
 
 struct Command {
@@ -987,6 +1021,15 @@ pub enum SlashOutcome {
 
     OpenMenu(MenuKind),
 
+    /// The action wants retail's sub-target cursor: `<st>` and its narrowed
+    /// forms, or an action typed with no target argument.
+    OpenSubTarget {
+        action: kuluu_render::input_mode::SubTargetAction,
+        /// A token-narrowed candidate set (`<stpc>` etc.), intersected with the
+        /// action's own TARGETTYPE mask; None means the action's mask alone.
+        narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
+    },
+
     /// Dev-only (the `/widescan` command is gated to debug builds); the
     /// retail-faithful path is the Map screen's Wide Scan submenu.
     #[cfg(debug_assertions)]
@@ -1193,6 +1236,8 @@ pub fn parse_slash(
     self_char_id: Option<u32>,
     party: &[kuluu_snapshot::PartyMember],
     fishing: kuluu_render::fishing_spot::FishingGate,
+    battle_target: Option<u32>,
+    self_pet_targid: Option<u16>,
 ) -> SlashOutcome {
     let Some(typed) = command_surface::classify(buffer) else {
         return SlashOutcome::SystemMessage("empty command".into());
@@ -1214,6 +1259,8 @@ pub fn parse_slash(
         self_char_id,
         party,
         fishing,
+        battle_target,
+        self_pet_targid,
     };
 
     match typed.surface {
@@ -1761,6 +1808,28 @@ fn resolve_target_token(token: &str, ctx: &SlashCtx) -> Result<(u32, u16), Strin
             resolve_action_target("", ctx.entities, ctx.self_pos, ctx.current_target)
                 .ok_or_else(|| format!("{token}: no target"))
         }
+        BATTLE_TARGET_TOKEN => {
+            let id = ctx
+                .battle_target
+                .ok_or_else(|| format!("{token}: not engaged"))?;
+            let index = ctx
+                .entities
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.act_index)
+                .unwrap_or(0);
+            Ok((id, index))
+        }
+        PET_TARGET_TOKEN => {
+            let targid = ctx
+                .self_pet_targid
+                .ok_or_else(|| format!("{token}: no pet"))?;
+            ctx.entities
+                .iter()
+                .find(|e| e.act_index == targid)
+                .map(|e| (e.id, e.act_index))
+                .ok_or_else(|| format!("{token}: pet not in view"))
+        }
         _ => match PARTY_TARGET_TOKENS.iter().position(|t| *t == lower) {
             Some(slot) => party_slot_target(slot, ctx.party)
                 .ok_or_else(|| format!("{token}: nobody in that slot")),
@@ -1772,18 +1841,27 @@ fn resolve_target_token(token: &str, ctx: &SlashCtx) -> Result<(u32, u16), Strin
     }
 }
 
-/// Resolve the target argument of an action command, returning how many
-/// arguments it took. An absent target falls back to the current one; a raw
-/// `id [index]` pair stays accepted alongside retail's `<token>` and name forms.
-fn resolve_command_target(args: &[String], ctx: &SlashCtx) -> Result<((u32, u16), usize), String> {
+/// What an action command's target argument resolved to.
+enum TargetArg {
+    Resolved((u32, u16), usize),
+    /// Retail's sub-target cursor takes it from here.
+    Picker {
+        narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
+        used: usize,
+    },
+}
+
+/// Resolve the target argument of an action command. No argument, or a
+/// sub-target token, hands the choice to retail's cursor; `<me>`, `<t>`,
+/// `<bt>`, `<pet>`, party slots, a name, or a raw `id [index]` pair resolve
+/// here and the action fires without the cursor.
+fn resolve_command_target(args: &[String], ctx: &SlashCtx) -> Result<TargetArg, String> {
     let Some(first) = args.first() else {
-        let pair = resolve_action_target("", ctx.entities, ctx.self_pos, ctx.current_target)
-            .ok_or_else(|| "no target".to_string())?;
-        return Ok((pair, 0));
+        return Ok(TargetArg::Picker { narrow: None, used: 0 });
     };
     if let Ok(id) = first.parse::<u32>() {
         return match args.get(1).map(|t| t.parse::<u16>()) {
-            Some(Ok(index)) => Ok(((id, index), 2)),
+            Some(Ok(index)) => Ok(TargetArg::Resolved((id, index), 2)),
             Some(Err(_)) | None => {
                 let index = ctx
                     .entities
@@ -1791,15 +1869,22 @@ fn resolve_command_target(args: &[String], ctx: &SlashCtx) -> Result<((u32, u16)
                     .find(|e| e.id == id)
                     .map(|e| e.act_index)
                     .unwrap_or(0);
-                Ok(((id, index), 1))
+                Ok(TargetArg::Resolved((id, index), 1))
             }
         };
     }
     if first.starts_with(TARGET_TOKEN_OPEN) && first.ends_with(TARGET_TOKEN_CLOSE) {
-        return resolve_target_token(first, ctx).map(|pair| (pair, 1));
+        let lower = first.to_ascii_lowercase();
+        if let Some((_, narrow)) = SUB_TARGET_TOKENS.iter().find(|(t, _)| *t == lower) {
+            return Ok(TargetArg::Picker {
+                narrow: narrow.map(ffxi_vocab::valid_target::TargetFlags),
+                used: 1,
+            });
+        }
+        return resolve_target_token(first, ctx).map(|pair| TargetArg::Resolved(pair, 1));
     }
     resolve_action_target(first, ctx.entities, ctx.self_pos, ctx.current_target)
-        .map(|pair| (pair, 1))
+        .map(|pair| TargetArg::Resolved(pair, 1))
         .ok_or_else(|| format!("no one named `{first}` nearby"))
 }
 
@@ -1825,7 +1910,30 @@ fn parse_cast(ctx: &SlashCtx) -> SlashOutcome {
         return SlashOutcome::SystemMessage(format!("/{cmd}: unknown spell `{name}`"));
     };
     let ((target_id, target_index), used) = match resolve_command_target(&args[1..], ctx) {
-        Ok(pair) => pair,
+        Ok(TargetArg::Resolved(pair, used)) => (pair, used),
+        // A self-only spell typed with no target fires at the player without
+        // the cursor: there is no other target for retail to ask about.
+        Ok(TargetArg::Picker { narrow: None, used: 0 })
+            if u16::try_from(spell_id)
+                .ok()
+                .and_then(ffxi_vocab::valid_target::spell)
+                .is_some_and(|f| f.is_self_only()) =>
+        {
+            let pair = resolve_target_token(SELF_TARGET_TOKEN, ctx)
+                .map_err(|msg| SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")));
+            match pair {
+                Ok(pair) => (pair, 0),
+                Err(out) => return out,
+            }
+        }
+        Ok(TargetArg::Picker { narrow, .. }) => {
+            return SlashOutcome::OpenSubTarget {
+                action: kuluu_render::input_mode::SubTargetAction::Spell(
+                    u16::try_from(spell_id).unwrap_or(u16::MAX),
+                ),
+                narrow,
+            };
+        }
         Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
     };
     let coords = match parse_ground_target(&args[1 + used..]) {
@@ -1854,7 +1962,15 @@ fn parse_weaponskill(ctx: &SlashCtx) -> SlashOutcome {
         return SlashOutcome::SystemMessage(format!("/{cmd}: unknown weapon skill `{name}`"));
     };
     let ((target_id, target_index), _) = match resolve_command_target(&args[1..], ctx) {
-        Ok(pair) => pair,
+        Ok(TargetArg::Resolved(pair, _)) => (pair, 0),
+        Ok(TargetArg::Picker { narrow, .. }) => {
+            return SlashOutcome::OpenSubTarget {
+                action: kuluu_render::input_mode::SubTargetAction::WeaponSkill(
+                    u16::try_from(skill_id).unwrap_or(u16::MAX),
+                ),
+                narrow,
+            };
+        }
         Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
     };
     SlashOutcome::Command(AgentCommand::Action {
@@ -1867,10 +1983,17 @@ fn parse_weaponskill(ctx: &SlashCtx) -> SlashOutcome {
 /// `/ra [target]` -- ranged attack (the Shoot action). Takes no id, only a
 /// target (defaults to the current target).
 fn parse_ranged_attack(ctx: &SlashCtx) -> SlashOutcome {
+    let cmd = ctx.cmd;
     let args = split_command_args(ctx.rest);
     let ((target_id, target_index), _) = match resolve_command_target(&args, ctx) {
-        Ok(pair) => pair,
-        Err(msg) => return SlashOutcome::SystemMessage(format!("/{}: {msg}", ctx.cmd)),
+        Ok(TargetArg::Resolved(pair, _)) => (pair, 0),
+        Ok(TargetArg::Picker { narrow, .. }) => {
+            return SlashOutcome::OpenSubTarget {
+                action: kuluu_render::input_mode::SubTargetAction::Ranged,
+                narrow,
+            };
+        }
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
     };
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
@@ -1888,25 +2011,34 @@ fn parse_job_ability(ctx: &SlashCtx) -> SlashOutcome {
     let Some(ability_id) = action_id(name, ffxi_vocab::ability_names::id_for) else {
         return SlashOutcome::SystemMessage(format!("/{cmd}: unknown ability `{name}`"));
     };
-
-    // An ability whose validTarget is SELF alone takes no target argument in
-    // retail, and the menus already route those to <me>
-    // (vendor/server/sql/abilities.sql validTarget).
-    let self_only = u16::try_from(ability_id)
-        .ok()
-        .and_then(ffxi_vocab::valid_target::ability)
-        .is_some_and(|f| f.is_self_only());
-    let target = if args.len() > 1 {
-        match resolve_command_target(&args[1..], ctx) {
-            Ok((pair, _)) => Some(pair),
-            Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
+    let ((target_id, target_index), _) = match resolve_command_target(&args[1..], ctx) {
+        Ok(TargetArg::Resolved(pair, _)) => (pair, 0),
+        // A self-only ability typed with no target fires at the player without
+        // the cursor: there is no other target for retail to ask about
+        // (vendor/server/sql/abilities.sql validTarget).
+        Ok(TargetArg::Picker { narrow: None, used: 0 })
+            if u16::try_from(ability_id)
+                .ok()
+                .and_then(ffxi_vocab::valid_target::ability)
+                .is_some_and(|f| f.is_self_only()) =>
+        {
+            let pair = resolve_target_token(SELF_TARGET_TOKEN, ctx)
+                .map_err(|msg| SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")));
+            match pair {
+                Ok(pair) => (pair, 0),
+                Err(out) => return out,
+            }
         }
-    } else if self_only {
-        resolve_target_token(SELF_TARGET_TOKEN, ctx).ok()
-    } else {
-        resolve_command_target(&[], ctx).ok().map(|(pair, _)| pair)
+        Ok(TargetArg::Picker { narrow, .. }) => {
+            return SlashOutcome::OpenSubTarget {
+                action: kuluu_render::input_mode::SubTargetAction::Ability(
+                    u16::try_from(ability_id).unwrap_or(u16::MAX),
+                ),
+                narrow,
+            };
+        }
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
     };
-    let (target_id, target_index) = target.unwrap_or_default();
     SlashOutcome::Command(AgentCommand::Action {
         target_id,
         target_index,
@@ -1939,9 +2071,20 @@ fn parse_use_item(ctx: &SlashCtx) -> SlashOutcome {
         },
         None => 0,
     };
-    let (target_id, target_index) = resolve_command_target(&parts[3.min(parts.len())..], ctx)
-        .map(|(pair, _)| pair)
-        .unwrap_or_default();
+    let ((target_id, target_index), _) = match resolve_command_target(&parts[3.min(parts.len())..], ctx) {
+        Ok(TargetArg::Resolved(pair, _)) => (pair, 0),
+        Ok(TargetArg::Picker { narrow, .. }) => {
+            return SlashOutcome::OpenSubTarget {
+                action: kuluu_render::input_mode::SubTargetAction::Item {
+                    container,
+                    index: slot,
+                    item_no: u16::try_from(item_no).unwrap_or(u16::MAX),
+                },
+                narrow,
+            };
+        }
+        Err(msg) => return SlashOutcome::SystemMessage(format!("/{cmd}: {msg}")),
+    };
     SlashOutcome::Command(AgentCommand::UseItem {
         container,
         slot,
@@ -3169,6 +3312,8 @@ mod tests {
             None,
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         )
     }
     #[test]
@@ -3209,6 +3354,8 @@ mod tests {
             Some(42),
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         assert!(matches!(
             outcome,
@@ -4111,6 +4258,8 @@ mod tests {
             Some(0x0100_0001),
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         assert!(matches!(
             out,
@@ -4260,9 +4409,9 @@ mod tests {
     }
 
     #[test]
-    fn cast_defaults_target_to_current() {
+    fn cast_resolves_a_raw_id_target_without_the_picker() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
-        match parse_slash_t("/magic 1", &entities, origin(), Some(7), None) {
+        match parse_slash_t("/magic 1 7", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::Action {
                 target_id,
                 kind: ActionKind::CastMagic { spell_id, .. },
@@ -4292,18 +4441,13 @@ mod tests {
     }
 
     #[test]
-    fn job_ability_defaults_to_zero_target() {
-        match parse_slash_t("/jobability 88", &empty_entities(), origin(), None, None) {
-            SlashOutcome::Command(AgentCommand::Action {
-                target_id,
-                kind: ActionKind::JobAbility { ability_id },
-                ..
-            }) => {
-                assert_eq!(ability_id, 88);
-                assert_eq!(target_id, 0);
-            }
-            other => panic!("expected JobAbility, got {other:?}"),
-        }
+    fn job_ability_with_no_target_opens_the_picker() {
+        // Assault (88) is enemy-targeted, so a missing target argument hands
+        // the choice to the sub-target cursor instead of defaulting to zero.
+        assert!(matches!(
+            parse_slash_t("/jobability 88", &empty_entities(), origin(), None, None),
+            SlashOutcome::OpenSubTarget { .. }
+        ));
     }
 
     fn parse_slash_as(
@@ -4312,6 +4456,8 @@ mod tests {
         current_target: Option<u32>,
         self_char_id: Option<u32>,
         party: &[kuluu_snapshot::PartyMember],
+        battle_target: Option<u32>,
+        self_pet_targid: Option<u16>,
     ) -> SlashOutcome {
         parse_slash(
             buffer,
@@ -4323,6 +4469,8 @@ mod tests {
             self_char_id,
             party,
             kuluu_render::fishing_spot::FishingGate::Ready,
+            battle_target,
+            self_pet_targid,
         )
     }
 
@@ -4370,11 +4518,22 @@ mod tests {
             None,
             Some(9),
             &[],
+            None,
+            None,
         ));
         assert_eq!((ability_id, target_id), (flee, 9));
         assert_eq!(target_index, entities[0].act_index);
         assert_eq!(
-            ability_action(parse_slash_as("/ja Flee", &entities, None, Some(9), &[])).0,
+            ability_action(parse_slash_as(
+                "/ja Flee",
+                &entities,
+                None,
+                Some(9),
+                &[],
+                None,
+                None
+            ))
+            .0,
             flee
         );
     }
@@ -4392,13 +4551,23 @@ mod tests {
                 &entities,
                 None,
                 Some(9),
-                &[]
+                &[],
+                None,
+                None
             ))
             .0,
             strikes
         );
         assert!(matches!(
-            parse_slash_as("/ja Mighty Strikes", &entities, None, Some(9), &[]),
+            parse_slash_as(
+                "/ja Mighty Strikes",
+                &entities,
+                None,
+                Some(9),
+                &[],
+                None,
+                None
+            ),
             SlashOutcome::SystemMessage(_)
         ));
     }
@@ -4413,8 +4582,15 @@ mod tests {
             ffxi_vocab::valid_target::ability(flee).is_some_and(|f| f.is_self_only()),
             "Flee is the self-only case this test rests on"
         );
-        let (_, target_id, _) =
-            ability_action(parse_slash_as("/ja Flee", &entities, None, Some(9), &[]));
+        let (_, target_id, _) = ability_action(parse_slash_as(
+            "/ja Flee",
+            &entities,
+            None,
+            Some(9),
+            &[],
+            None,
+            None,
+        ));
         assert_eq!(target_id, 9);
     }
 
@@ -4434,6 +4610,8 @@ mod tests {
                 None,
                 None,
                 &party,
+                None,
+                None,
             ) {
                 SlashOutcome::Command(AgentCommand::Action {
                     target_id,
@@ -4447,9 +4625,166 @@ mod tests {
             }
         }
         assert!(matches!(
-            parse_slash_as("/ma Cure <p5>", &empty_entities(), None, None, &party),
+            parse_slash_as(
+                "/ma Cure <p5>",
+                &empty_entities(),
+                None,
+                None,
+                &party,
+                None,
+                None
+            ),
             SlashOutcome::SystemMessage(_)
         ));
+    }
+
+    /// `<st>` and its suffixed forms open retail's sub-target cursor instead of
+    /// resolving a target here.
+    #[test]
+    fn st_token_opens_the_picker_on_the_spell_mask() {
+        let cure = u32::from(ffxi_vocab::spell_names::id_for("Cure").expect("Cure present"));
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        match parse_slash_as(
+            "/ma Cure <st>",
+            &entities,
+            Some(7),
+            None,
+            &[],
+            None,
+            None,
+        ) {
+            SlashOutcome::OpenSubTarget { action, narrow } => {
+                assert_eq!(
+                    action,
+                    kuluu_render::input_mode::SubTargetAction::Spell(
+                        u16::try_from(cure).expect("spell id fits")
+                    )
+                );
+                assert_eq!(narrow, None);
+            }
+            other => panic!("expected the sub-target picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stpt_token_narrows_to_party() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        match parse_slash_as(
+            "/ma Cure <stpt>",
+            &entities,
+            Some(7),
+            None,
+            &[],
+            None,
+            None,
+        ) {
+            SlashOutcome::OpenSubTarget { narrow, .. } => {
+                assert_eq!(
+                    narrow,
+                    Some(ffxi_vocab::valid_target::TargetFlags(
+                        ffxi_vocab::valid_target::TargetFlags::SELF
+                            | ffxi_vocab::valid_target::TargetFlags::PLAYER_PARTY
+                    ))
+                );
+            }
+            other => panic!("expected the sub-target picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_target_argument_prompts_the_cursor() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        assert!(matches!(
+            parse_slash_as("/ma Cure", &entities, Some(7), None, &[], None, None),
+            SlashOutcome::OpenSubTarget { .. }
+        ));
+        // A self-only ability typed with no target fires at the player instead.
+        let strikes = u32::from(
+            ffxi_vocab::ability_names::id_for("Mighty Strikes").expect("Mighty Strikes present"),
+        );
+        let me = ent(9, "Me", EntityKind::Pc, 0.0, 0.0);
+        let (ability_id, target_id, _) = ability_action(parse_slash_as(
+            "/ja \"Mighty Strikes\"",
+            &[me],
+            None,
+            Some(9),
+            &[],
+            None,
+            None,
+        ));
+        assert_eq!((ability_id, target_id), (strikes, 9));
+    }
+
+    #[test]
+    fn bt_resolves_the_engaged_target() {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        let dia = u32::from(ffxi_vocab::spell_names::id_for("Dia").expect("Dia present"));
+        match parse_slash_as(
+            "/ma Dia <bt>",
+            &entities,
+            Some(7),
+            None,
+            &[],
+            Some(7),
+            None,
+        ) {
+            SlashOutcome::Command(AgentCommand::Action {
+                target_id,
+                target_index,
+                kind: ActionKind::CastMagic { spell_id, .. },
+            }) => {
+                assert_eq!(spell_id, dia);
+                assert_eq!(target_id, 7);
+                assert_eq!(target_index, 7);
+            }
+            other => panic!("expected CastMagic, got {other:?}"),
+        }
+        let not_engaged =
+            match parse_slash_as("/ma Dia <bt>", &entities, Some(7), None, &[], None, None) {
+                SlashOutcome::SystemMessage(m) => m,
+                other => panic!("expected a message, got {other:?}"),
+            };
+        assert!(not_engaged.contains("not engaged"), "{not_engaged}");
+    }
+
+    #[test]
+    fn pet_resolves_the_own_pet() {
+        let pet = ent(0x120, "Petite Cactuar", EntityKind::Pet, 0.0, 0.0);
+        let entities = vec![pet];
+        let cure = u32::from(ffxi_vocab::spell_names::id_for("Cure").expect("Cure present"));
+        match parse_slash_as(
+            "/ma Cure <pet>",
+            &entities,
+            None,
+            None,
+            &[],
+            None,
+            Some(0x120),
+        ) {
+            SlashOutcome::Command(AgentCommand::Action {
+                target_id,
+                target_index,
+                kind: ActionKind::CastMagic { spell_id, .. },
+            }) => {
+                assert_eq!(spell_id, cure);
+                assert_eq!(target_id, 0x120);
+                assert_eq!(target_index, 0x120);
+            }
+            other => panic!("expected CastMagic, got {other:?}"),
+        }
+        let no_pet = match parse_slash_as(
+            "/ma Cure <pet>",
+            &entities,
+            None,
+            None,
+            &[],
+            None,
+            None,
+        ) {
+            SlashOutcome::SystemMessage(m) => m,
+            other => panic!("expected a message, got {other:?}"),
+        };
+        assert!(no_pet.contains("no pet"), "{no_pet}");
     }
 
     /// A token the client has but Kuluu cannot answer yet must not read as a
@@ -4458,13 +4793,29 @@ mod tests {
     fn unresolved_and_unknown_target_tokens_report_differently() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
         let unresolved =
-            match parse_slash_as("/ws \"Fast Blade\" <bt>", &entities, Some(7), None, &[]) {
+            match parse_slash_as(
+                "/ws \"Fast Blade\" <ft>",
+                &entities,
+                Some(7),
+                None,
+                &[],
+                None,
+                None
+            ) {
                 SlashOutcome::SystemMessage(m) => m,
                 other => panic!("expected a message, got {other:?}"),
             };
         assert!(unresolved.contains("not supported yet"), "{unresolved}");
         let unknown =
-            match parse_slash_as("/ws \"Fast Blade\" <nope>", &entities, Some(7), None, &[]) {
+            match parse_slash_as(
+                "/ws \"Fast Blade\" <nope>",
+                &entities,
+                Some(7),
+                None,
+                &[],
+                None,
+                None
+            ) {
                 SlashOutcome::SystemMessage(m) => m,
                 other => panic!("expected a message, got {other:?}"),
             };
@@ -4479,7 +4830,15 @@ mod tests {
         let fast_blade = u32::from(
             ffxi_vocab::weapon_skill_names::id_for("Fast Blade").expect("Fast Blade present"),
         );
-        match parse_slash_as("/ws \"Fast Blade\" <t>", &entities, Some(7), None, &[]) {
+        match parse_slash_as(
+            "/ws \"Fast Blade\" <t>",
+            &entities,
+            Some(7),
+            None,
+            &[],
+            None,
+            None
+        ) {
             SlashOutcome::Command(AgentCommand::Action {
                 target_id,
                 kind: ActionKind::Weaponskill { skill_id },
@@ -4491,7 +4850,15 @@ mod tests {
             other => panic!("expected Weaponskill, got {other:?}"),
         }
         assert!(matches!(
-            parse_slash_as("/ws \"Uppercut\" <t>", &entities, Some(7), None, &[]),
+            parse_slash_as(
+                "/ws \"Uppercut\" <t>",
+                &entities,
+                Some(7),
+                None,
+                &[],
+                None,
+                None
+            ),
             SlashOutcome::SystemMessage(_)
         ));
     }
@@ -4502,7 +4869,7 @@ mod tests {
     fn ground_target_coords_follow_whatever_form_the_target_took() {
         let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
         for slash in ["/ma Cure <t> 1 2 3", "/ma Cure 7 0 1 2 3"] {
-            match parse_slash_as(slash, &entities, Some(7), None, &[]) {
+            match parse_slash_as(slash, &entities, Some(7), None, &[], None, None) {
                 SlashOutcome::Command(AgentCommand::Action {
                     kind:
                         ActionKind::CastMagic {
@@ -4520,19 +4887,27 @@ mod tests {
 
     #[test]
     fn useitem_basic() {
-        match parse_slash_t("/item 0 4 4112", &empty_entities(), origin(), None, None) {
+        let entities = vec![ent(7, "Mob", EntityKind::Mob, 0.0, 0.0)];
+        match parse_slash_t("/item 0 4 4112 7", &entities, origin(), Some(7), None) {
             SlashOutcome::Command(AgentCommand::UseItem {
                 container,
                 slot,
                 item_no,
+                target_id,
                 ..
             }) => {
                 assert_eq!(container, 0);
                 assert_eq!(slot, 4);
                 assert_eq!(item_no, 4112);
+                assert_eq!(target_id, 7);
             }
             other => panic!("expected UseItem, got {other:?}"),
         }
+        // No target argument hands the choice to the sub-target cursor.
+        assert!(matches!(
+            parse_slash_t("/item 0 4 4112", &empty_entities(), origin(), None, None),
+            SlashOutcome::OpenSubTarget { .. }
+        ));
     }
 
     #[test]
@@ -4792,6 +5167,8 @@ mod tests {
             None,
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         match out {
             SlashOutcome::SystemMessage(s) => {
@@ -4974,6 +5351,8 @@ mod tests {
             None,
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         assert!(
             matches!(out, SlashOutcome::Command(AgentCommand::Engage { .. })),
@@ -4989,6 +5368,8 @@ mod tests {
             None,
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         assert!(
             matches!(aliased, SlashOutcome::SystemMessage(ref s) if s.starts_with("unknown command:")),
@@ -5010,6 +5391,8 @@ mod tests {
             None,
             &[],
             kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
         );
         match out {
             SlashOutcome::SystemMessage(s) => {
@@ -5277,7 +5660,7 @@ mod tests {
             ("\u{002F}\u{002F}snapshot", |c| {
                 matches!(c, AgentCommand::Snapshot)
             }),
-            ("/magic 1", |c| {
+            ("/magic 1 42", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5286,7 +5669,7 @@ mod tests {
                     }
                 )
             }),
-            ("/weaponskill 1", |c| {
+            ("/weaponskill 1 42", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5295,7 +5678,7 @@ mod tests {
                     }
                 )
             }),
-            ("/jobability 1", |c| {
+            ("/jobability 1 42", |c| {
                 matches!(
                     c,
                     AgentCommand::Action {
@@ -5304,7 +5687,7 @@ mod tests {
                     }
                 )
             }),
-            ("/item 0 4", |c| matches!(c, AgentCommand::UseItem { .. })),
+            ("/item 0 4 4112 42", |c| matches!(c, AgentCommand::UseItem { .. })),
         ];
         for (slash, pred) in &cases {
             let out = parse_slash_t(slash, &entities, pos, cur, None);

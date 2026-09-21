@@ -808,6 +808,10 @@ pub(super) fn apply_slash_outcome(
             };
             push_system_chat_line(scene_state, format!("[menu] opened {label}"));
         }
+        SlashOutcome::OpenSubTarget { .. } => {
+            // The caller's mode override opens the sub-target cursor; there is
+            // no command to apply until it is confirmed.
+        }
     }
 }
 

@@ -2,6 +2,7 @@
 //! and hands the game a 16-byte passwd and a 64-byte authCode, which the lobby
 //! validates. The viewer keeps them inside its own process, so a producer
 //! running beside it writes them to a session file that this module reads.
+//! vendor/server/src/login/view_session.cpp
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -118,7 +119,7 @@ fn located_from_file(path: &Path) -> Result<LocatedSession> {
 }
 
 /// `None` when `KULUU_POL_SESSION` is unset; an error when it names a file that
-/// cannot be read as a session, so a typo never falls through to password auth.
+/// cannot be read as a session, so a typo does not fall through to password auth.
 pub fn session_from_env() -> Result<Option<AuthSession>> {
     match std::env::var_os(SESSION_FILE_ENV) {
         Some(path) if !path.is_empty() => session_from_file(Path::new(&path)).map(Some),

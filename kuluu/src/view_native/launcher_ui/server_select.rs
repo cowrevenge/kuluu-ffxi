@@ -261,6 +261,14 @@ pub(super) fn despawn_ui(mut commands: Commands, q: Query<Entity, With<ServerSel
     }
 }
 
+/// Where Escape backs out from the server list: Login, but only when a
+/// server was last used - the same condition the "Cancel" button is shown
+/// under. Without it there is no login to return to, so the key stays inert
+/// and the user must add a server first.
+pub(super) fn escape_back_target(store: &launcher_store::LauncherStore) -> Option<LauncherState> {
+    store.last_used.is_some().then_some(LauncherState::Login)
+}
+
 pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
     mut commands: Commands,
@@ -272,10 +280,26 @@ pub(super) fn keyboard_input_system(
         }
         if matches!(ev.logical_key, Key::Escape) {
             commands.insert_resource(PendingServerDelete(None));
-            if launcher_store::load().last_used.is_some() {
-                next.set(LauncherState::Login);
+            if let Some(target) = escape_back_target(&launcher_store::load()) {
+                next.set(target);
             }
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_backs_out_to_login_only_when_a_server_was_last_used() {
+        let mut store = launcher_store::LauncherStore::default();
+        assert!(
+            escape_back_target(&store).is_none(),
+            "without a last-used server there is no login to return to"
+        );
+        store.last_used = Some(("HXI".into(), "batti".into()));
+        assert_eq!(escape_back_target(&store), Some(LauncherState::Login));
     }
 }

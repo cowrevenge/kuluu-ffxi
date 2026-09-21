@@ -354,7 +354,8 @@ pub struct CharFlags {
 impl CharFlags {
     /// `flags4` is the decoded `Flags4.JobMasterFlag` bit — `None` when the packet
     /// stops short of body offset 0x2F or the caller is not on a CHAR_PC (the byte
-    /// means something else in a 0x0E), which reads as "not set".
+    /// means something else in a 0x0E), which reads as "not set"
+    /// (vendor/server/src/map/packets/char_update.cpp `flags4_t`).
     pub fn from_pos_head(head: &PosHead, flags4_job_master: Option<bool>) -> Self {
         let (f1, f2, f3) = (head.flags1, head.flags2, head.flags3);
         Self {
@@ -1078,7 +1079,8 @@ mod char_flags_tests {
             "FLAG_UNTARGETABLE did not light TargetOffFlag"
         );
         // The neighbouring ENTITYFLAGS bits (HIDE_NAME 0x8, CALL_FOR_HELP 0x20,
-        // HIDE_MODEL 0x80, HIDE_HP 0x100) must not bleed into any decoded field.
+        // HIDE_MODEL 0x80, HIDE_HP 0x100) must not bleed into any decoded field
+        // (vendor/server/data/enums/entity_flags.yaml).
         for m_flags in [0x008u32, 0x020, 0x080, 0x100] {
             let mut body = vec![0u8; PosHead::SIZE];
             body[M_FLAGS_OFFSET..M_FLAGS_OFFSET + 4].copy_from_slice(&m_flags.to_le_bytes());
@@ -1173,19 +1175,20 @@ mod char_flags_tests {
     }
 
     /// `Flags4.JobMasterFlag` — bit 6 of the u8 at body offset 0x2F, past
-    /// `PosHead`. Unlike the flags1..3 words it is not part of any decoded word,
-    /// so a lone set bit must light exactly one field.
+    /// `PosHead` (vendor/server/src/map/packets/char_update.cpp `flags4_t`).
+    /// Unlike the flags1..3 words it is not part of any decoded word, so a lone
+    /// set bit must light exactly one field, and the neighbouring bits of the
+    /// same byte (unknown_0_0, TrialFlag, unknown_0_2/0_4, unknown_0_7) must
+    /// not bleed in.
     #[test]
     fn flags4_job_master_bit_lights_the_field() {
-        let mut body = vec![0u8; 0x30]; // ≥ 0x30 so byte 0x2F is present
+        let mut body = vec![0u8; 48];
         body[0x2F] |= 1 << flags4::JOB_MASTER;
         let head = PosHead::decode(&body).unwrap();
         assert_eq!(PosHead::flags4_job_master(&body), Some(true));
         let flags = CharFlags::from_pos_head(&head, PosHead::flags4_job_master(&body));
         assert!(flags.job_master_display);
 
-        // The neighbouring bits of the same byte (unknown_0_0, TrialFlag,
-        // unknown_0_2/0_4, unknown_0_7) must not bleed in.
         for bit in [0u32, 1, 2, 3, 4, 5, 7] {
             let mut body = vec![0u8; 0x30];
             body[0x2F] |= 1 << bit;
@@ -1194,10 +1197,11 @@ mod char_flags_tests {
     }
 
     /// A body that stops short of byte 0x2F decodes to "not set" rather than
-    /// erroring — `from_pos_head` treats it as false.
+    /// erroring — `from_pos_head` treats it as false
+    /// (vendor/server/src/map/packets/char_update.cpp `flags4_t`).
     #[test]
     fn flags4_job_master_is_none_when_the_body_stops_short() {
-        let body = vec![0u8; PosHead::SIZE]; // 40 bytes: no byte at 0x2F
+        let body = vec![0u8; PosHead::SIZE];
         assert_eq!(PosHead::flags4_job_master(&body), None);
         let head = PosHead::decode(&body).unwrap();
         let flags = CharFlags::from_pos_head(&head, PosHead::flags4_job_master(&body));
@@ -1581,6 +1585,8 @@ mod pos_head_tests {
         assert_eq!(PosHead::mount_index(&short), None);
     }
 
+    /// A General-only update stops before the Model block's field, so the
+    /// short body reads as "not a monstrosity".
     #[test]
     fn char_pc_monstrosity_reads_the_model_block_flags() {
         // MonstrosityFlags is the int16 at body 0x3A; LSB writes `0x8000 | Species`
@@ -1593,7 +1599,6 @@ mod pos_head_tests {
         buf[PosHead::MONSTROSITY_FLAGS_OFFSET..].copy_from_slice(&0x8005u16.to_le_bytes());
         assert_eq!(PosHead::monstrosity(&buf), Some(true));
 
-        // A General-only update stops before the Model block's field.
         let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
         assert_eq!(PosHead::monstrosity(&short), None);
     }

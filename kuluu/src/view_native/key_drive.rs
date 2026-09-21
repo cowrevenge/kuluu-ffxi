@@ -30,7 +30,9 @@ pub enum KeyMsg {
 }
 
 impl KeyMsg {
-    /// Decode one driver line into a message (see module docs for the protocol).
+    /// Decode one driver line into a message (see module docs for the
+    /// protocol). A lone key name is a tap; explicit down/up give hold
+    /// control.
     pub fn from_json_line(line: &str) -> Option<Self> {
         let v = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
         if let Some(text) = v.get("text").and_then(|x| x.as_str()) {
@@ -40,7 +42,6 @@ impl KeyMsg {
         let down = v.get("down").and_then(|x| x.as_bool()).unwrap_or(false);
         let up = v.get("up").and_then(|x| x.as_bool()).unwrap_or(false);
         match (down, up) {
-            // A lone "key" is a tap; explicit down/up give hold control.
             (_, true) => Some(KeyMsg::Release(key.to_ascii_lowercase())),
             (true, false) => Some(KeyMsg::Press(key.to_ascii_lowercase())),
             _ => Some(KeyMsg::Tap(key.to_ascii_lowercase())),
@@ -146,7 +147,7 @@ impl Default for KeyDriveQueue {
 
 /// Bind and serve the `FFXI_STAIR_DRIVE`-style TCP listener. One JSON line per
 /// connection; each valid line enqueues one [KeyMsg]. Malformed lines are
-/// skipped (never drop the connection over a typo).
+/// skipped (the connection stays open over a typo).
 pub async fn serve_key_drive(addr: SocketAddr, queue: Arc<Mutex<Vec<KeyMsg>>>) {
     let Ok(listener) = tokio::net::TcpListener::bind(addr).await else {
         tracing::warn!(%addr, "FFXI_KEY_DRIVE bind failed");
@@ -175,14 +176,15 @@ pub async fn serve_key_drive(addr: SocketAddr, queue: Arc<Mutex<Vec<KeyMsg>>>) {
 /// PreUpdate: drain the queue into global `KeyboardInput` events so every
 /// Update-phase consumer (launcher screens, in-game input, text buffers) sees
 /// the same frame's synthetic presses. A tap is a press+release pair queued
-/// back-to-back; holds are explicit down/up messages from the driver.
+/// back-to-back; holds are explicit down/up messages from the driver. On the
+/// first frame the window may not exist yet; the queue is left in place.
 pub fn key_drive_system(
     mut events: MessageWriter<KeyboardInput>,
     queue: Res<KeyDriveQueue>,
     windows: Query<Entity, With<PrimaryWindow>>,
 ) {
     let Ok(window) = windows.single() else {
-        return; // no window yet (first frame) — keep the queued messages
+        return;
     };
     let mut batch = std::mem::take(&mut *match queue.0.lock() {
         Ok(mut q) => q,
@@ -296,10 +298,11 @@ mod tests {
         ));
     }
 
+    /// .is_none() rather than assert_eq!(.., None): rkyv's cross-type
+    /// PartialEq impls (via ffxi-nav-recast) break bare-None inference in
+    /// assert_eq!.
     #[test]
     fn unknown_lines_rejected() {
-        // .is_none() (not assert_eq!(.., None)): rkyv's cross-type PartialEq
-        // impls (via ffxi-nav-recast) break bare-None inference in assert_eq!
         assert!(KeyMsg::from_json_line("not json").is_none());
         assert!(KeyMsg::from_json_line(r#"{"foo":1}"#).is_none());
     }

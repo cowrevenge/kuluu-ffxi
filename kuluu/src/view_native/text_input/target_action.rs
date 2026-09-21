@@ -226,6 +226,8 @@ pub(super) fn handle_target_action_key(
     None
 }
 
+/// Confirm the target-action entry under the cursor. Disengage releases the
+/// camera lock like the H toggle.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn confirm_target_action_at_cursor(
     state: &mut kuluu_render::input_mode::TargetActionState,
@@ -256,8 +258,9 @@ pub(super) fn confirm_target_action_at_cursor(
             match target_ent {
                 Some(e) => {
                     // The server's engage rejections, answered locally before the
-                    // command goes out (the server's own 0x029 lines still land
-                    // in the main log; these save the round trip).
+                    // command goes out (the server's own 0x029 lines still land in
+                    // the main log, vendor/server/src/map/packets/s2c/0x029_battle_message.cpp;
+                    // these save the round trip).
                     if let Some(line) = crate::view_native::engage::rejection_line(
                         e,
                         scene_state.snapshot.self_pos.pos,
@@ -280,14 +283,14 @@ pub(super) fn confirm_target_action_at_cursor(
         }
         TargetActionId::SwitchTarget => {
             // Retail's "Switch Target" opens the sub-target picker over the
-            // other mobs; confirming asks the server to move the battle
-            // target, and it becomes the main target when the 0x058 lands.
+            // other mobs; confirming asks the server to move the battle target,
+            // and it becomes the main target when the 0x058 lands
+            // (vendor/server/src/map/packets/s2c/0x058_assist.cpp).
             let sub_action = kuluu_render::input_mode::SubTargetAction::PickSub;
             let return_to = InputMode::TargetAction(state.clone());
             open_sub_target(sub_action, current_target, scene_state, return_to)
         }
         TargetActionId::Disengage => {
-            // Disengage releases the camera lock like the H toggle.
             lock_on.target_id = None;
             if let Err(err) = cmd_tx.try_send(AgentCommand::Cancel) {
                 push_system_chat_line(

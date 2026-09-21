@@ -245,6 +245,7 @@ pub struct CutsceneMode {
     pub active: bool,
     pub camera_locked: bool,
     /// The last 0x67/0x68 the running event staged; `None` until one arrives.
+    /// research/XiEvents/OpCodes/0x0067.md
     pub(crate) hud_event: Option<bool>,
 }
 
@@ -255,6 +256,7 @@ impl CutsceneMode {
 
     /// An active session holding the camera, no 0x67/0x68 staged yet — what tests construct
     /// when they need a locked cutscene without driving the cue stream.
+    /// research/XiEvents/OpCodes/0x0067.md
     pub fn active_locked() -> Self {
         Self {
             active: true,
@@ -424,6 +426,7 @@ fn event_name_string(name: &[u8; 16]) -> String {
 /// Event-scoped like every other cue: cleared at [`ViewerEvent::CutsceneEnded`]
 /// so the server-authored name returns. The nameplate pass reads these ahead
 /// of the entity-table record.
+/// research/XiEvents/OpCodes/0x00B5.md
 #[derive(Resource, Debug, Default)]
 pub struct EventNameOverrides {
     names: HashMap<u32, String>,
@@ -443,6 +446,8 @@ impl EventNameOverrides {
     }
 }
 
+/// Apply the cue to the mode and fade state; actor motion and non-fade
+/// schedulers are dispatched by scheduler_runtime::dispatch_cutscene_motion.
 fn apply_cue(
     cue: &CutsceneCue,
     programs: &FadePrograms,
@@ -468,14 +473,13 @@ fn apply_cue(
                 fade.start(&scaled(program, ratio));
             }
         }
-        // Actor motion and non-fade schedulers are dispatched by
-        // scheduler_runtime::dispatch_cutscene_motion.
         _ => {}
     }
 }
 
 /// The 0x77/0x78 game-clock hold, drained on its own cursor because [`VanaClock`] outlives this
 /// module's other systems; a session exit releases whatever it left held.
+/// research/XiEvents/OpCodes/0x0077.md
 pub fn drain_cutscene_clock(
     events: Res<EventLog>,
     mut cursor: Local<u64>,
@@ -640,6 +644,8 @@ mod tests {
                     actor_fade: None,
                     idle_transition_time: None,
                     flinch_duration: None,
+                    model_visibility: None,
+                    spell_effect: None,
                     random_group: None,
                     local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
                 },
@@ -776,6 +782,7 @@ mod tests {
 
     /// Event 503's D1 shows the HUD while the camera stays locked until H7: an explicit
     /// 0x68 must win over the lock default, and both clear at session end.
+    /// research/XiEvents/OpCodes/0x0068.md
     #[test]
     fn an_explicit_show_hud_wins_over_the_camera_lock_and_clears_at_session_end() {
         let mut app = test_app();
@@ -963,6 +970,7 @@ mod tests {
 
     /// A 0xB5 rename resolves its actor to a server id (the local player
     /// through the table's self id) and holds the name until the session ends.
+    /// research/XiEvents/OpCodes/0x00B5.md
     #[test]
     fn an_entity_name_cue_overrides_the_plate_name_until_session_end() {
         const SELF: u32 = 0x010E_6001;

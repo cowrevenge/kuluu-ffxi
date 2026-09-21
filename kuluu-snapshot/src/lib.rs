@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v42: ViewerEvent::Knockbacks - every target result of one 0x028 that landed with a
+// knockback level (GP_SERV_COMMAND_BATTLE2::pack), so the client can shove the victims when
+// the skill routine's knockback stage fires; ActionStarted.outcome carries the first
+// target's only.
 // v41: EntityLook::Transport.travel_secs - the lift's seconds between floors from the 0x0E
 // name block, the fallback for a shaft whose zone DAT routine states no travel of its own.
 // v40: InventoryItem.unselectable - the NoSelect lock an in-flight item use holds, which is the
@@ -95,7 +99,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -455,6 +459,7 @@ pub struct Entity {
     /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) — the character is a
     /// monstrosity (Feretory). Written in the Model block only; drives the retail
     /// Monstrosity nameplate marker. See ffxi-proto's `PosHead::monstrosity`.
+    /// research/XiPackets/world/server/0x000D/
     #[serde(default)]
     pub monstrosity: bool,
 
@@ -516,7 +521,7 @@ pub mod speed {
     pub const AUTHORED_ANIM_RATE: f32 = BASE_PACKET_SPEED as f32 * SPEED_TO_YPS;
 
     /// Yalms per second for a decoded packet speed. `speed_base` is a separate value retail keeps but
-    /// never spends on the movement rate; StepControl reads only the doubled-and-clamped `speed`, so
+    /// does not spend on the movement rate; StepControl reads only the doubled-and-clamped `speed`, so
     /// scaling by `speed / speed_base` would under-drive a mounted PC rather than over-drive it.
     pub const fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
         let speed = packet_speed as f32 * SPEED_TO_YPS;
@@ -808,6 +813,12 @@ pub enum ReactorGoal {
         target_id: u32,
         attack_issued: bool,
     },
+    /// Attack sent, server not yet answered; see kuluu-session
+    /// ReactorGoalSnapshot::Engaging.
+    Engaging {
+        target_id: u32,
+        attack_issued: bool,
+    },
     Pathing {
         x: f32,
         y: f32,
@@ -867,6 +878,7 @@ pub struct SceneSnapshot {
 
     /// Targid of the player's own up pet, from 0x068 PetSync (sent to the
     /// owner only); `None` while the pet is down.
+    /// vendor/server/src/map/packets/pet_sync.cpp
     #[serde(default)]
     pub self_pet_targid: Option<u16>,
 
@@ -1119,6 +1131,7 @@ impl SceneSnapshot {
     /// cluster decides it alone; the party `in_mog_house` flag describes other
     /// members' display state, not ours. Mirrors
     /// `SessionState::self_in_mog_house` on the producer side.
+    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp
     pub fn self_in_mog_house(&self) -> bool {
         self.myroom.is_some()
     }
@@ -1433,6 +1446,7 @@ pub struct DialogState {
     /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
     /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
     /// true so frames from an unknown producer stay cancellable.
+    /// research/XiEvents/OpCodes/0x0042.md, 0x002E.md
     #[serde(default = "cancel_armed_default")]
     pub cancel_armed: bool,
     /// The speaking entity's target index for this frame; `None` is a line the
@@ -1540,10 +1554,12 @@ pub struct ShopState {
     pub opened: bool,
 
     /// How many rows s2c 0x03E SHOP_OPEN said to expect.
+    /// vendor/server/src/map/packets/s2c/0x03e_shop_open.cpp
     #[serde(default)]
     pub expected_items: u16,
 
     /// The final s2c 0x03C page has landed, so `items` is the whole stock.
+    /// vendor/server/src/map/packets/s2c/0x03c_shop_list.cpp
     #[serde(default)]
     pub complete: bool,
 
@@ -1557,6 +1573,7 @@ pub struct ShopState {
 }
 
 /// A sale appraised by s2c 0x03D and not yet confirmed with c2s 0x085.
+/// vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp, c2s/0x085_shop_sell_set.cpp
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShopSale {
     pub item_index: u8,
@@ -1627,10 +1644,12 @@ pub enum CutsceneActor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExtSchedulerMotion {
     /// 0x5B: the event motion resource a single DAT file id names.
+    /// research/XiEvents/OpCodes/0x005B.md
     Event(u32),
     /// 0x66 in range: container A (resource tag 1) and the two B candidates
     /// (resource tag 2); the renderer picks between them from the actor's CIB
     /// waist byte.
+    /// research/XiEvents/OpCodes/0x0066.md
     Tpc { a: u32, b_set: u32, b_clear: u32 },
 }
 
@@ -1680,6 +1699,7 @@ pub enum CutsceneCue {
     /// with `partner`. `motion` is `None` for the 0x66 out-of-range package,
     /// where retail logs and loads nothing and the renderer plays `key` on the
     /// actor's own resources.
+    /// research/XiEvents/OpCodes/0x0066.md
     ExtScheduler {
         motion: Option<ExtSchedulerMotion>,
         actor: CutsceneActor,
@@ -1708,6 +1728,7 @@ pub enum CutsceneCue {
         heading: i32,
         /// Raw 0x32 MainSpeed operand; the renderer scales it with
         /// `ffxi_event::vm::scene::EVENT_SPEED_SCALE`.
+        /// research/XiEvents/OpCodes/0x0032.md
         speed: i32,
     },
     /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
@@ -1735,6 +1756,8 @@ pub enum CutsceneCue {
     /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
     /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
     /// table); released like every other cue at [`ViewerEvent::CutsceneEnded`].
+    /// research/XiEvents/OpCodes/0x00B5.md,
+    /// vendor/server/src/map/packets/s2c/0x05d_pendingstr.cpp
     EntityName {
         actor: CutsceneActor,
         name: [u8; 16],
@@ -1764,6 +1787,7 @@ pub enum ViewerEvent {
     /// zero `AssistNo` (the target went away), which leaves the local target
     /// alone rather than clearing it - retail's `RecvAssist` behaviour for a
     /// zero id is not established.
+    /// vendor/server/src/map/packets/s2c/0x058_assist.cpp
     TargetChanged {
         target_id: Option<u32>,
     },
@@ -1786,6 +1810,7 @@ pub enum ViewerEvent {
     },
 
     /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    /// research/XiEvents/OpCodes/0x00C8.md
     MapOpen {
         map_id: u16,
         tutorial: bool,
@@ -1793,6 +1818,7 @@ pub enum ViewerEvent {
 
     /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
     /// coordinates on zone `map_id`'s map.
+    /// research/XiEvents/OpCodes/0x008B.md
     MapMarkerPlaced {
         map_id: u16,
         x_milli: i32,
@@ -1801,6 +1827,7 @@ pub enum ViewerEvent {
     },
 
     /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    /// research/XiEvents/OpCodes/0x008A.md
     MapClosed,
 
     LevelUp {
@@ -1829,6 +1856,15 @@ pub enum ViewerEvent {
         /// read for every category; absent when the body carries no result block. `info` is
         /// only meaningful for a basic attack (vendor/server/src/map/enums/action/info.h).
         outcome: Option<(u8, u8, u8)>,
+    },
+
+    /// Every target of one 0x028 whose result landed with a knockback level:
+    /// `(target_id, level)`, level 1..=7 (vendor/server/src/map/enums/action/knockback.h).
+    /// The server moves nobody; the victim's client shoves itself when the
+    /// caster's skill routine reaches its knockback stage.
+    Knockbacks {
+        actor_id: u32,
+        hits: Vec<(u32, u8)>,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire
@@ -1991,7 +2027,7 @@ pub enum ViewerCommand {
 
     /// Capture the native client's primary window to PNG via Bevy render-target
     /// readback — no focus or screen-recording permission needed. GUI-side only:
-    /// the relay routes it into `DebugControl`, never the session (which treats
+    /// the relay routes it into `DebugControl`, not the session (which treats
     /// `AgentCommand::Screenshot` as a no-op). `None` leaves default naming
     /// (`screenshot-N.png`) to the GUI side.
     Screenshot {
@@ -2410,7 +2446,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 41;
+        const VERSION: u32 = 42;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2635,9 +2671,10 @@ mod tests {
         }
     }
 
+    /// The Weather enum's unknown 20-39 ids must not wrap onto real weathers.
+    /// vendor/server/data/enums/weather.yaml
     #[test]
     fn from_lsb_unknown_ids_are_none() {
-        // weather.h Weather unknown 0x14-0x27 set must not wrap onto real weathers.
         assert_eq!(Weather::from_lsb(20), Weather::None);
         assert_eq!(Weather::from_lsb(26), Weather::None);
         assert_eq!(Weather::from_lsb(39), Weather::None);
@@ -2776,10 +2813,11 @@ mod tests {
         );
     }
 
+    /// The authored base plays at unity; halves of it walk in half-speed slow
+    /// motion, and a faster base scales up. No kind or threshold anywhere: the
+    /// byte is the whole input.
     #[test]
     fn anim_rate_scales_with_speed_base() {
-        // The authored base plays at unity; halves of it walk in half-speed slow motion, and a
-        // faster base scales up. No kind or threshold anywhere: the byte is the whole input.
         assert!(
             (speed::anim_rate_scale(50) - 1.0).abs() < 1e-6,
             "authored base plays at unity"

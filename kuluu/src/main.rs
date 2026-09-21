@@ -268,6 +268,10 @@ fn resolve_dat_root(require_dat: bool) -> Result<Option<std::sync::Arc<ffxi_dat:
     }
 }
 
+/// Run the selected subcommand. The relay path has no entity-change
+/// translator, so the event folder's change batches are drained but not
+/// consumed; and the relay path is headless, so screenshot requests have no
+/// DebugControl to land on (relay::serve takes None for it).
 async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<()> {
     match args.command {
         Command::Install { .. } | Command::SteamShortcut { .. } => {
@@ -461,16 +465,12 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 let (state_tx, state_rx) =
                     tokio::sync::watch::channel(state::SessionState::default());
                 let folder_rx = event_tx.subscribe();
-                // The relay path has no translator: change batches are drained
-                // by the folder but never consumed.
                 let (changes_tx, _entity_changes_rx) = tokio::sync::mpsc::unbounded_channel();
                 let _folder =
                     tokio::spawn(session::run_event_folder(folder_rx, state_tx, changes_tx));
                 let relay_event_tx = event_tx.clone();
                 let relay_cmd_tx = cmd_tx.clone();
                 tokio::spawn(async move {
-                    // No GUI in the headless path: screenshot requests have no
-                    // DebugControl to land on.
                     if let Err(err) =
                         relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx, None).await
                     {

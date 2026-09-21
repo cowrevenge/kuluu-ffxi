@@ -795,9 +795,18 @@ pub(super) fn despawn_login_ui(mut commands: Commands, q: Query<Entity, With<Log
     }
 }
 
+/// Login is the root of the launcher's back tree - the default startup state
+/// and the back target of every other screen - so Escape has nowhere to back
+/// out to. The pad's Cancel lands here too; at the root it cancels the form.
+/// A back hop to ServerSelect would loop: its Escape returns to Login.
+///
+/// Real keyboard Enter submits whenever BOTH fields are filled, regardless of
+/// which widget (if any) holds UI focus. The per-field TextFieldSubmitted path
+/// only fires for a FOCUSED field and stays silent when the other side is
+/// still empty - that was the "pressing enter does nothing" dead end.
 pub(super) fn keyboard_input_system(
     mut events: MessageReader<KeyboardInput>,
-    form: Res<LoginForm>,
+    mut form: ResMut<LoginForm>,
     version: Res<ServerVersionStatus>,
     era: Res<ClientEraStatus>,
     mut next: ResMut<NextState<LauncherState>>,
@@ -807,18 +816,11 @@ pub(super) fn keyboard_input_system(
             continue;
         }
         match ev.logical_key {
-            // Back, not a credential wipe: the pad's Cancel lands here too and
-            // needs a back action. `LoginForm` survives the transition, so
-            // nothing typed is lost.
             Key::Escape => {
-                next.set(LauncherState::ServerSelect);
+                form.user.clear();
+                form.pass.clear();
                 return;
             }
-            // Real keyboard Enter: submits whenever BOTH fields are filled,
-            // regardless of which widget (if any) holds UI focus. The
-            // per-field TextFieldSubmitted path only fires for a FOCUSED field
-            // and stays silent when the other side is still empty - that was
-            // the "pressing enter does nothing" dead end.
             Key::Enter
                 if !login_blocked(&version, &era)
                     && !form.user.is_empty()
@@ -835,7 +837,9 @@ pub(super) fn keyboard_input_system(
 /// Arrow-key navigation for the login form: move the blue focus outline between
 /// tabbable widgets (saved-account chips, fields, remember checkbox, buttons)
 /// in visual order, wrapping at the edges. While a text field holds focus,
-/// Left/Right stay with the caret; Up/Down still navigate.
+/// Left/Right stay with the caret, not the selection; Up/Down still navigate.
+/// The per-widget center estimate uses a uniform convention across all nodes;
+/// only relative positions matter for scoring.
 pub(super) fn arrow_nav_system(
     mut events: MessageReader<KeyboardInput>,
     mut input_focus: ResMut<InputFocus>,
@@ -856,13 +860,10 @@ pub(super) fn arrow_nav_system(
         };
 
         let cur = input_focus.get();
-        // Left/Right inside a focused field moves the caret, not the selection.
         if dir.x != 0.0 && cur.is_some_and(|e| q_fields.contains(e)) {
             continue;
         }
 
-        // Center estimate per tabbable widget (uniform convention across all
-        // nodes; only relative positions matter for scoring).
         let cands: Vec<(Vec2, Entity)> = q_tabs
             .iter()
             .map(|(e, cn, gt)| (gt.affine().translation + cn.size * 0.5, e))
@@ -983,5 +984,55 @@ pub(super) fn error_keyboard_system(
             back_from_error(*ret, &mut err, &mut form, &mut creds, &mut next_state);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::window::PrimaryWindow;
+
+    fn escape_app() -> App {
+        let mut app = App::new();
+        app.add_message::<KeyboardInput>()
+            .init_resource::<NextState<LauncherState>>()
+            .insert_resource(LoginForm {
+                user: "cow".into(),
+                pass: "moo".into(),
+                ..Default::default()
+            })
+            .insert_resource(ServerVersionStatus::default())
+            .insert_resource(ClientEraStatus::default())
+            .add_systems(Update, keyboard_input_system);
+        app
+    }
+
+    fn press_escape(app: &mut App, window: Entity) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window,
+        });
+    }
+
+    #[test]
+    fn escape_at_login_wipes_credentials_without_leaving_the_screen() {
+        let mut app = escape_app();
+        let window = app.world_mut().spawn(PrimaryWindow).id();
+        press_escape(&mut app, window);
+        app.update();
+        let form = app.world().resource::<LoginForm>();
+        assert!(form.user.is_empty(), "Escape must clear the user field");
+        assert!(form.pass.is_empty(), "Escape must clear the password field");
+        assert!(
+            matches!(
+                *app.world().resource::<NextState<LauncherState>>(),
+                NextState::Unchanged
+            ),
+            "Login is the back-tree root: Escape must not request a screen change"
+        );
     }
 }

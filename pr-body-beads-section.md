@@ -1,0 +1,13 @@
+# Beads resolved by this PR
+
+Paste below the PR description. One line per bead; the two movement/camera
+beads carry their divergence sentences verbatim from the code comments.
+
+- **kuluu-6z6w** — `0c14dc8`: the `RECT_CLASS_HIT_CHECKED` / `rect_class` docs now state the real `RidManager::Add` filter — only `m`/`M`-prefixed source fourccs are class-gated; a rect whose source fourcc does not start with `m`/`M` enters the hit-check array in every class.
+- **kuluu-bga7** — `dc952a4`: Login is now the root of the launcher's back tree; Escape on Login wipes the typed credentials and stays on Login instead of hopping to ServerSelect, and ServerSelect's back edge moved to `escape_back_target` (Login only when a server was last used). Pinned with tests in `login.rs` and `server_select.rs`.
+- **kuluu-4yf8** — `8d94492`: session edit ledgers are reaped by a liveness TTL (`SESSION_EDITS_LEDGER_TTL`, default 7 days, refreshed on every hook touch); `ledger_sweep` deletes `*.paths`/`*.suspect` older than the TTL, so a stale suspect log can no longer keep counting into the commit nudge.
+- **kuluu-zsgf** — `2c35223`: `cmd_readonly` allowlists the read-only programs and withholds the naming arm for a command whose programs are all read-only, so `wc`/`cat`/`grep`/`git diff` merely mentioning a path can no longer be credited with a peer's write.
+- **kuluu-bs1n** — `8717508`: `cmd_writer_plausible` scopes a bare writer form (`cargo fmt --all`, bare `rustfmt`) to the tool's plausible file set; a peer's concurrent write to a named path outside that set lands in the suspect log instead of the ledger.
+- **kuluu-2rt8** — `ffe25fd`: the chase-recenter divergence from retail's single law is recorded at `RECENTER_HOLD_RAD` in `kuluu/src/view_native/input.rs`: "Retail's window engages at 60 degrees off-centre; this one at 2.0 rad (~115 degrees) because our A/D carve is body-led — the body turns and the camera chases — where retail's turn keys are camera-led and the body follows the camera."
+- **kuluu-8mu2** — `cd66f1a`: the autorun-steer divergence is recorded at the strafe/autorun gate in `kuluu/src/view_native/input.rs`: "A/D keeps the camera-relative carve instead: it reproduces the observed retail behavior — the body turn plus the lazy camera swing — as measured from video (HorizonXI 2026-07-20), and the stored-vector steer would retune the carve circle and the camera follow, which need in-game verification and the numpad-character key layout before they are worth taking."
+- **kuluu-icz4** — `9d7d875` imports the const where a value was re-typed; `b36590b` (round 3) names the EID, HPP, and combat-stance literals as consts.

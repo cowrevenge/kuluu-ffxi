@@ -59,6 +59,12 @@ enhanced-job-display = []
 # are unaffected - they come from kuluu-session).
 enhanced-shutdown-counter = []
 
+# Enhanced (non-retail): the movement hold retail applies while the weapon is
+# drawn or sheathed is off by default, with a Debug-menu row (Engage_anim_lock)
+# that forces it back on. Without this feature the hold always applies and the
+# row does not exist.
+enhanced-engage-move-lock-off = []
+
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
 # holds by construction; dev/test builds pass `--features debug-menu` explicitly.

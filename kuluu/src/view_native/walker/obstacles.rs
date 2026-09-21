@@ -123,7 +123,7 @@ pub struct MobObstacle {
 /// a mesh DESCENDANT of the WorldEntity (WorldEntity -> actor_root -> mesh
 /// child) and is updated every frame by `update_actor_mesh_aabbs`; we snapshot
 /// it once the child exists rather than re-reading each tick — a walk cycle
-/// barely moves the horizontal extent, and the old avian bridge thrashed its
+/// barely moves the horizontal extent, and the former avian bridge thrashed its
 /// broadphase resizing a collider per tick.
 #[derive(Component, Clone, Copy)]
 pub struct MobBlockRadius {
@@ -132,7 +132,9 @@ pub struct MobBlockRadius {
 
 /// Snapshot pass (old `sync_mob_collider_radius`): insert [`MobBlockRadius`] on
 /// each non-self actor once its descendant Aabb exists. Runs before the rebuild
-/// so a freshly spawned mob blocks from the tick after its mesh is posed.
+/// so a freshly spawned mob blocks from the tick after its mesh is posed. A
+/// degenerate or not-yet-posed bound (zero radius or height) is skipped and
+/// retried on a later tick.
 pub fn snapshot_mob_block_radius(
     mut commands: Commands,
     entities: Query<
@@ -147,7 +149,6 @@ pub fn snapshot_mob_block_radius(
         if let Some(aabb) = find_descendant_aabb(kids, &children_q, &aabb_q) {
             let he = aabb.half_extents;
             let radius = he.x.max(he.z);
-            // Ignore degenerate/not-yet-posed bounds; retry next tick.
             if radius > 1e-3 && he.y > 1e-3 {
                 commands.entity(entity).insert(MobBlockRadius { radius });
             }
@@ -156,7 +157,7 @@ pub fn snapshot_mob_block_radius(
 }
 
 /// Depth-first search of an entity's descendants for the first `Aabb` (same
-/// walk as the old avian bridge's radius snapshot).
+/// walk as the former avian bridge's radius snapshot).
 fn find_descendant_aabb(
     kids: &Children,
     children_q: &Query<&Children>,
@@ -175,7 +176,7 @@ fn find_descendant_aabb(
     None
 }
 
-/// "Is the texture drawn": a rendered mesh in the actor's subtree. InheritedVisibility so a real mob doesn't turn walk-through when the camera looks away (same test as the old avian bridge).
+/// "Is the texture drawn": a rendered mesh in the actor's subtree. InheritedVisibility so a real mob doesn't turn walk-through when the camera looks away (same test as the former avian bridge).
 fn drawn_mesh_in(
     kids: &Children,
     children_q: &Query<&Children>,
@@ -197,6 +198,29 @@ fn drawn_mesh_in(
 }
 
 /// Rebuild [`ObstacleSet`] for this tick. Runs in FixedUpdate before dispatch.
+///
+/// Doors: bake the closed leaves' triangles through the authored pose. The
+/// verts are mirror-correct via the full matrix and independent of the
+/// current swing; only the CLOSED-ness gate is live state. A leaf collides
+/// only while fully closed (zero authored pose); open or mid-swing doors are
+/// passable, as are leaves whose mesh asset is still loading (retried next
+/// tick) and degenerate faces (zero cross product).
+///
+/// Platforms: a lift platform's leaf bakes at its rendered pose - the swing
+/// plus the lift-height override that replaces the authored y - so the
+/// platform mesh is the floor at the height the elevator currently holds.
+/// A leaf that is neither a door-routine group nor a platform is MZB-only:
+/// the zone collision mesh owns it, not this set.
+///
+/// Mobs: body-block rules, in order. Dead entities drop out on the tick they
+/// die, no grace period: the wire 0x0E HPP byte is the server's HP truth
+/// (vendor/server/src/map/packets/entity_update.cpp), so a corpse does not
+/// enter the set and the contact budget cannot latch onto it.
+/// 1. Dead (wire hp_pct == 0): no body-block, whatever kind or mesh.
+/// 2. EntityKind::Other (the HUD's "[obj]" — door objects, "???" points,
+///    event triggers): they do not body-block, whatever mesh they carry.
+/// 3. Character kinds block only when their texture is actually drawn: an
+///    undrawn actor is an invisible entity, walkable through.
 pub fn rebuild_obstacles_system(
     doors_res: Res<ZoneDoors>,
     scene: Res<kuluu_render::snapshot::SceneState>,
@@ -218,9 +242,6 @@ pub fn rebuild_obstacles_system(
     mut dead_ids: Local<HashSet<u32>>,
     mut set: ResMut<ObstacleSet>,
 ) {
-    // Doors: bake the closed leaves' triangles through the authored pose. The
-    // verts are mirror-correct via the full matrix and independent of the
-    // current swing; only the CLOSED-ness gate is live state (old toggle pass).
     let mut doors: Vec<_> = doors_res
         .collision_rects()
         .iter()
@@ -237,7 +258,7 @@ pub fn rebuild_obstacles_system(
         }
         let platform = doors_res.is_platform(leaf.four_cc);
         if !platform && doors_res.dir(leaf.four_cc).is_none() {
-            continue; // not a door-routine group: MZB-only
+            continue;
         }
         let xform = if platform {
             leaf.posed_transform(doors_res.leaf_pose(leaf))
@@ -245,7 +266,7 @@ pub fn rebuild_obstacles_system(
             let pose = doors_res.pose(leaf.key());
             let closed = pose.rotation == Vec3::ZERO && pose.translation == Vec3::ZERO;
             if !closed {
-                continue; // open or mid-swing: passable this tick
+                continue;
             }
             leaf.posed_transform(DoorPose::default())
         };
@@ -254,7 +275,6 @@ pub fn rebuild_obstacles_system(
             let Ok(m3) = mesh_children.get(child) else {
                 continue;
             };
-            // Asset still loading: skip this leaf this tick, retry next.
             let Some(mesh) = meshes.get(m3.0.id()) else {
                 continue;
             };
@@ -276,7 +296,7 @@ pub fn rebuild_obstacles_system(
                 ];
                 let n = (v[1] - v[0]).cross(v[2] - v[0]);
                 if n.length_squared() < 1e-12 {
-                    continue; // degenerate: no face to collide with
+                    continue;
                 }
                 tris.push((v, n.normalize()));
             }
@@ -295,10 +315,6 @@ pub fn rebuild_obstacles_system(
         doors.push(DoorObstacle { tris, min, max });
     }
 
-    // Mobs: body-block rules, in order. Dead entities drop out on the tick
-    // they die, no grace period: the wire 0x0E hp_pct is the server's HP truth
-    // (Entity::is_dead == Some(0)), so a corpse never enters the set and the
-    // contact budget cannot latch onto it.
     let mut mobs = Vec::new();
     dead_ids.clear();
     for e in &scene.snapshot.entities {
@@ -307,17 +323,12 @@ pub fn rebuild_obstacles_system(
         }
     }
     for (_ent, we, kids, t, r) in mob_q.iter() {
-        // 1. Dead (wire hp_pct == 0): no body-block, whatever kind or mesh.
         if dead_ids.contains(&we.id) {
             continue;
         }
-        // 2. EntityKind::Other, the HUD's "[obj]": door objects, "???" points,
-        //    event triggers. These NEVER body-block, whatever mesh they carry.
         if matches!(we.kind, kuluu_snapshot::EntityKind::Other) {
             continue;
         }
-        // 3. Character kinds block only when their texture is actually drawn:
-        //    undrawn actor = invisible entity = walk through.
         let Some(kids) = kids else {
             continue;
         };
@@ -509,10 +520,10 @@ mod tests {
         assert_eq!(set.mobs[0].id, 8);
     }
 
+    /// No hp read yet (None) is not dead: the conservative default keeps
+    /// blocking until the wire says otherwise.
     #[test]
     fn unknown_hp_still_blocks() {
-        // No hp read yet (None) is not dead: the conservative default keeps
-        // blocking until the wire says otherwise.
         let mut app = app_with_mobs(vec![snap_entity(9, None)]);
         spawn_drawn_mob(app.world_mut(), 9, Vec2::new(1.0, 0.0));
 

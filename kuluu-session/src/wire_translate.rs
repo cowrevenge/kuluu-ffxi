@@ -433,6 +433,10 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::SkillLevelUp { skill_id, level } => {
             Some(wire::ViewerEvent::SkillLevelUp { skill_id, level })
         }
+        AgentEvent::Knockbacks { actor_id, hits } => Some(wire::ViewerEvent::Knockbacks {
+            actor_id,
+            hits: hits.iter().map(|h| (h.target_id, h.level)).collect(),
+        }),
         AgentEvent::ActionStarted {
             actor_id,
             action_id,
@@ -448,6 +452,7 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             target_id,
             // The swing pair stays raw: the snapshot's `result` is basic-attack-only, and the
             // typed resolution rides in `outcome`.
+            // ffxi-proto/src/melee.rs
             result: result.map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
             animation,
             outcome: outcome.map(ffxi_proto::melee::ResultOutcome::to_wire),
@@ -940,6 +945,13 @@ pub fn goal_to_wire(g: &ReactorGoalSnapshot) -> wire::ReactorGoal {
             target_id,
             attack_issued,
         },
+        ReactorGoalSnapshot::Engaging {
+            target_id,
+            attack_issued,
+        } => wire::ReactorGoal::Engaging {
+            target_id,
+            attack_issued,
+        },
         ReactorGoalSnapshot::Pathing {
             x,
             y,
@@ -1176,6 +1188,13 @@ mod tests {
                 matches_engaged,
             ),
             (
+                ReactorGoalSnapshot::Engaging {
+                    target_id: 0x99,
+                    attack_issued: false,
+                },
+                matches_engaging,
+            ),
+            (
                 ReactorGoalSnapshot::Pathing {
                     x: 1.0,
                     y: 2.0,
@@ -1210,6 +1229,15 @@ mod tests {
             wire::ReactorGoal::Engaged {
                 target_id: 0x99,
                 attack_issued: true
+            }
+        )
+    }
+    fn matches_engaging(w: &wire::ReactorGoal) -> bool {
+        matches!(
+            w,
+            wire::ReactorGoal::Engaging {
+                target_id: 0x99,
+                attack_issued: false
             }
         )
     }

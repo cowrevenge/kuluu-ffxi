@@ -235,6 +235,20 @@ use crate::view_native::slash_commands::{
 use kuluu_session::state::AgentEvent;
 use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, ReqLogoutKind};
 
+/// The chat/input system: slash commands, menus, and the sub-target picker.
+///
+/// A Switch Target confirm holds the picker up until the server's 0x058
+/// (`vendor/server/src/map/packets/s2c/0x058_assist.cpp`) commits the
+/// candidate into the main target (apply_server_retarget_system runs before
+/// this one); the frame tracks the candidate meanwhile, so the swap lands on
+/// the server's word. The lapse covers the server answering with a rejection
+/// line instead (its not-engaged fall-through). If the main target dies while
+/// the picker is up (auto_clear dropped it, which runs before this system),
+/// the switch is moot: close the picker; the weapon sheathes on its own since
+/// the pose pass gates the weapon on an active target. A switch already in
+/// flight keeps waiting for its 0x058 even if the old target dies first (the
+/// commit lands the new one); only a picker with no pending switch closes on
+/// the main target going away.
 pub(crate) fn text_input_system(
     mut events: KeyEventStreams,
     cmd_tx: Res<CommandTx>,
@@ -268,19 +282,7 @@ pub(crate) fn text_input_system(
 
     let target_changed = target.is_changed();
 
-    // A Switch Target confirm holds the picker up until the server's 0x058
-    // commits the candidate into the main target (apply_server_retarget_system
-    // runs before this one); the frame tracks the candidate meanwhile, so the
-    // swap lands on the server's word. The lapse covers the server answering
-    // with a rejection line instead (its not-engaged fall-through). If the main
-    // target dies while the picker is up (auto_clear dropped it, which runs
-    // before this system), the switch is moot: close the picker; the weapon
-    // sheathes on its own since the pose pass gates the weapon on an active
-    // target.
     if let InputMode::SubTarget(st) = &mut *mode {
-        // A switch already in flight keeps waiting for its 0x058 even if the
-        // old target dies first (the commit lands the new one); only a picker
-        // with no pending switch closes on the main target going away.
         let main_target_gone = matches!(
             st.action,
             kuluu_render::input_mode::SubTargetAction::PickSub
@@ -939,6 +941,13 @@ fn apply_chat_action(
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
                     fishing_gate,
+                    match scene_state.snapshot.current_goal {
+                        Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => {
+                            Some(target_id)
+                        }
+                        _ => None,
+                    },
+                    scene_state.snapshot.self_pet_targid,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");
 
@@ -959,6 +968,13 @@ fn apply_chat_action(
                         stack.push(*kind);
                         Some(InputMode::Menu(stack))
                     }
+                    SlashOutcome::OpenSubTarget { action, narrow } => open_sub_target_narrowed(
+                        *action,
+                        *narrow,
+                        current_target,
+                        scene_state,
+                        InputMode::World,
+                    ),
                     // `/check <pc>` opens the same window the Check menu entry
                     // does; the other check kinds answer in chat only.
                     SlashOutcome::Command(AgentCommand::CheckTarget {
@@ -1063,27 +1079,18 @@ fn push_local_tell_echo(scene_state: &mut SceneState, to: String, text: String) 
     });
 }
 
-/// Menu actions that take retail's sub-target confirm step before firing
-/// (spells/abilities/weaponskills/items). Everything else — move, equip, emote,
-/// and self-only spells/abilities (validTarget SELF, e.g. Boost) — dispatches
-/// immediately; dispatch_dynamic_menu_action routes the self-only ones to <me>.
-/// (vendor/server/sql/{abilities,spell_list}.sql validTarget, TARGET_SELF=0x01.)
+/// Menu actions that take retail's sub-target confirm step before firing:
+/// every spell, ability, weapon skill, ranged attack and usable item, SELF-only
+/// ones included (the cursor lands on the player and waits for Enter). Move,
+/// equip, emote and the mount/dig toggles act without a target and dispatch
+/// immediately. (.agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
+/// "Menu actions always confirm through the sub-target cursor".)
 fn sub_target_action_for(
     action: kuluu_render::hud::menu::DynamicMenuAction,
 ) -> Option<kuluu_render::input_mode::SubTargetAction> {
     use kuluu_render::hud::menu::DynamicMenuAction as A;
     use kuluu_render::input_mode::SubTargetAction as S;
     match action {
-        A::CastSpell { spell_id }
-            if ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only()) =>
-        {
-            None
-        }
-        A::JobAbility { ability_id } | A::PetAbility { ability_id }
-            if ffxi_vocab::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only()) =>
-        {
-            None
-        }
         A::CastSpell { spell_id } => Some(S::Spell(spell_id)),
         A::JobAbility { ability_id } | A::PetAbility { ability_id } => Some(S::Ability(ability_id)),
         A::Weaponskill { skill_id } => Some(S::WeaponSkill(skill_id)),
@@ -1110,7 +1117,9 @@ fn sub_target_action_for(
 
 /// Inverse of `sub_target_action_for`, used to fire the pending action once
 /// the sub-target cursor is confirmed. Job vs pet ability collapses to
-/// JobAbility; their dispatch is identical.
+/// JobAbility; their dispatch is identical. PickSub does not fire an action:
+/// handle_sub_target_key stores the candidate in the sub slot before this is
+/// ever called.
 fn dynamic_action_for(
     action: kuluu_render::input_mode::SubTargetAction,
 ) -> kuluu_render::hud::menu::DynamicMenuAction {
@@ -1130,8 +1139,6 @@ fn dynamic_action_for(
             index,
             item_no,
         },
-        // PickSub never fires an action — handle_sub_target_key stores the
-        // candidate in the sub slot before this is ever called.
         S::PickSub => unreachable!("PickSub is resolved before dispatch"),
     }
 }
@@ -1155,7 +1162,7 @@ fn gather_sub_target_entities(
     // char_status.cpp), so compare the low three bits.
     let self_allegiance = self_id
         .and_then(|id| snap.entities.iter().find(|e| e.id == id))
-        .map(|e| e.char_flags.allegiance & 0x07);
+        .map(|e| e.char_flags.allegiance & 7);
     snap.entities
         .iter()
         .map(|e| {
@@ -1174,7 +1181,7 @@ fn gather_sub_target_entities(
                 is_alliance: is_party,
                 is_enemy: matches!(e.kind, EntityKind::Mob)
                     || (matches!(e.kind, EntityKind::Pet)
-                        && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 0x07 != a)),
+                        && self_allegiance.is_some_and(|a| e.char_flags.allegiance & 7 != a)),
                 is_npc: matches!(e.kind, EntityKind::Npc),
                 is_own_pet: self_pet.is_some_and(|t| e.act_index == t),
                 is_dead: e.hp_pct == Some(0),
@@ -1186,12 +1193,12 @@ fn gather_sub_target_entities(
 
 /// Open the retail sub-target confirm step for `action`. Returns None (stay
 /// in the current mode) when nothing in range qualifies, echoing retail's
-/// refusal line.
-/// Retail: with a valid target already selected, confirming an action casts on it
-/// immediately — the flashing sub-target cursor is only for choosing a *different*
-/// target. True when `current_target` satisfies the action's validTarget flags, so
-/// the caller dispatches directly instead of opening the cursor. (Self-only actions
-/// never reach here — sub_target_action_for already routed them to <me>.)
+/// refusal line. "Switch Target" picks a *different* mob: parking the cursor
+/// on the main target would make the first confirm a no-op, so the picker
+/// starts on the nearest valid candidate other than it.
+/// True when `current_target` satisfies the action's validTarget flags. The
+/// target-action menu still dispatches directly on a valid target; the main
+/// menus always confirm through the cursor and do not call this.
 fn selected_target_valid(
     action: kuluu_render::input_mode::SubTargetAction,
     current_target: Option<u32>,
@@ -1217,9 +1224,6 @@ fn open_sub_target(
     use kuluu_render::sub_target;
     let flags = sub_target::action_flags(action);
     let ents = gather_sub_target_entities(scene_state);
-    // "Switch Target" picks a *different* mob: parking the cursor on the
-    // main target would make the first confirm a no-op, so the picker starts
-    // on the nearest valid candidate other than it.
     let parked = if matches!(action, SubTargetAction::PickSub) {
         None
     } else {
@@ -1247,14 +1251,48 @@ fn open_sub_target(
     Some(InputMode::SubTarget(st))
 }
 
-/// How long a Switch Target confirm waits for the server's 0x058 before the
-/// picker closes on its own; the answer lands within one AI tick, so this
-/// only covers the server refusing with a rejection line instead.
+/// `open_sub_target` with a token-narrowed candidate set: the action's own mask
+/// intersected with the token's. An empty intersection reads as "no qualified
+/// targets", like an empty field.
+fn open_sub_target_narrowed(
+    action: kuluu_render::input_mode::SubTargetAction,
+    narrow: Option<ffxi_vocab::valid_target::TargetFlags>,
+    current_target: Option<u32>,
+    scene_state: &mut SceneState,
+    return_to: InputMode,
+) -> Option<InputMode> {
+    let Some(narrow) = narrow else {
+        return open_sub_target(action, current_target, scene_state, return_to);
+    };
+    use kuluu_render::sub_target;
+    let flags =
+        ffxi_vocab::valid_target::TargetFlags(sub_target::action_flags(action).0 & narrow.0);
+    let ents = gather_sub_target_entities(scene_state);
+    let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
+        push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
+        return None;
+    };
+    let mut st = kuluu_render::input_mode::SubTargetState::open(action, flags.0, return_to);
+    st.candidate = Some(candidate);
+    Some(InputMode::SubTarget(st))
+}
+
+/// How long a Switch Target confirm waits for the server's 0x058
+/// (`vendor/server/src/map/packets/s2c/0x058_assist.cpp`) before the picker
+/// closes on its own; the answer lands within one AI tick, so this only
+/// covers the server refusing with a rejection line instead.
 const SWITCH_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Retail sub-target cursor keys: Tab/arrows cycle valid candidates in
 /// distance order, Enter fires the pending action at the candidate, Esc
-/// returns to the originating menu with its cursor preserved.
+/// returns to the originating menu with its cursor preserved. A Switch Target
+/// confirm is gated by the local engage pre-checks, the only range/claim gate
+/// on that path: a candidate the server would refuse at the next swing
+/// (36/12 + disengage) does not leave the client — the server keeps swinging
+/// the current target and the cursor stays up. Re-picking cancels the
+/// in-flight switch: the sent 0x058
+/// (vendor/server/src/map/packets/s2c/0x058_assist.cpp) may still land the
+/// main target, but the picker stays up for the new choice.
 fn handle_sub_target_key(
     key: &Key,
     bindings: &Bindings,
@@ -1287,8 +1325,6 @@ fn handle_sub_target_key(
     let reverse = bindings.matches_logical(Action::NavUp, key)
         || bindings.matches_logical(Action::NavLeft, key);
     if forward || reverse {
-        // Re-picking cancels the in-flight switch: the sent 0x058 may still
-        // land the main target, but the picker stays up for the new choice.
         state.pending_switch = None;
         state.pending_since = None;
         state.candidate = sub_target::cycle_candidate(flags, state.candidate, &ents, reverse);
@@ -1314,10 +1350,6 @@ fn handle_sub_target_key(
                 push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());
                 return None;
             };
-            // The local engage pre-checks are the only range/claim gate on
-            // this path: a candidate the server would refuse at the next
-            // swing (36/12 + disengage) never leaves the client, the server
-            // keeps swinging the current target, and the cursor stays up.
             if let Some(line) = crate::view_native::engage::rejection_line(
                 ent,
                 scene_state.snapshot.self_pos.pos,
@@ -1360,6 +1392,8 @@ fn handle_sub_target_key(
     None
 }
 
+/// Fires a confirmed dynamic-menu action. OpenItemAction and DropItem are
+/// pushed as submenus by confirm_menu_at_cursor and do not dispatch here.
 fn dispatch_dynamic_menu_action(
     action: kuluu_render::hud::menu::DynamicMenuAction,
     target_id: Option<u32>,
@@ -1580,7 +1614,6 @@ fn dispatch_dynamic_menu_action(
                 },
             )
         }
-        // Pushed as submenus by confirm_menu_at_cursor, never dispatched.
         A::OpenItemAction { .. } | A::DropItem { .. } => return,
         // Handled in confirm_menu_at_cursor (chat echo, menu stays open).
         A::KeyItem { .. } => return,
@@ -1865,6 +1898,10 @@ pub fn mouse_nav_dispatch_system(
     }
 }
 
+/// Dialog/cutscene key handling. ESC reconciliation goes through the session
+/// snapshot (clearing locally flickers multi-frame events): the session
+/// decides whether this pops a client-local menu level or ends the
+/// interaction, because only it knows the depth.
 fn handle_dialog_key(
     key: &Key,
     bindings: &Bindings,
@@ -1978,9 +2015,10 @@ fn handle_dialog_key(
             });
             return None;
         }
-        // Retail's 0x42 disarms ESC-cancel in the prologue of cutscenes that lock
-        // you in (event 503 runs it as its second opcode); while disarmed, ESC is
-        // a no-op — no EVENT_END goes out and the event keeps running.
+        // Retail's 0x42 (research/XiEvents/OpCodes/0x0042.md) disarms
+        // ESC-cancel in the prologue of cutscenes that lock you in (event 503
+        // runs it as its second opcode); while disarmed, ESC is a no-op — no
+        // EVENT_END goes out and the event keeps running.
         if scene_state
             .snapshot
             .dialog
@@ -1989,9 +2027,6 @@ fn handle_dialog_key(
         {
             return None;
         }
-        // Reconcile via the session snapshot; clearing here flickers multi-frame
-        // events. The session decides whether this pops a client-local menu
-        // level or ends the interaction, because only it knows the depth.
         let _ = cmd_tx.try_send(AgentCommand::EndEventBack);
         return None;
     }
@@ -2684,9 +2719,9 @@ mod dialog_esc_gate_tests {
         sent
     }
 
-    /// Event 503's master block runs 0x42 as its second opcode: while the VM
-    /// reports cancel_armed=false, ESC must not send any command (retail locks
-    /// you in; no EVENT_END goes out at all).
+    /// Event 503's master block runs 0x42 (research/XiEvents/OpCodes/0x0042.md)
+    /// as its second opcode: while the VM reports cancel_armed=false, ESC must
+    /// not send any command (retail locks you in; no EVENT_END goes out at all).
     #[test]
     fn esc_is_a_noop_while_the_vm_has_disarmed_cancel() {
         let bindings = Bindings::default();
@@ -2758,11 +2793,15 @@ mod cs_input_lock_tests {
     use bevy::input::keyboard::KeyCode;
     use kuluu_snapshot::DialogState;
 
-    /// The full resource set text_input_system's parameters fetch, so the gate can be driven
-    /// on a bare app exactly like cutscene.rs's tests do.
+    /// The full resource set text_input_system's parameters fetch, so the gate
+    /// can be driven on a bare app exactly like cutscene.rs's tests do.
+    /// Message storage covers every reader/writer the system carries. The
+    /// shutdown-counter feature adds a slash writer for LogoutRequested; the
+    /// bare app registers it or the gate's fetch panics. CutsceneMode is
+    /// initialized by the plugin in production; the gate reads it
+    /// unconditionally, so the bare app carries a default.
     pub(super) fn gate_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
         let mut app = App::new();
-        // Message storage for every reader/writer the system carries.
         app.add_message::<KeyboardInput>()
             .add_message::<crate::view_native::gamepad_input::PadKeyEvent>()
             .add_message::<AppExit>()
@@ -2773,11 +2812,8 @@ mod cs_input_lock_tests {
             .add_message::<kuluu_render::audio::SfxEvent>()
             .add_message::<crate::view_native::screenshot::ScreenshotRequest>()
             .add_message::<kuluu_render::hud::trade::TradeIntent>();
-        // The shutdown-counter feature adds a slash writer for this message;
-        // the bare app must register it or the gate's fetch panics.
         #[cfg(feature = "enhanced-shutdown-counter")]
         app.add_message::<kuluu_render::hud::logout_countdown::LogoutRequested>();
-        // The rest of the parameters.
         app.insert_resource(CommandTx(cmd_tx));
         app.insert_resource(Bindings::default());
         app.insert_resource(KeybindsStateRes {
@@ -2793,7 +2829,6 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::LockOn::default());
         app.insert_resource(crate::view_native::auto_target::AutoAttack::default());
         app.insert_resource(SceneState::default());
-        // The plugin initializes this in production; the gate reads it unconditionally.
         app.insert_resource(kuluu_render::cutscene::CutsceneMode::default());
         app.insert_resource(crate::view_native::navmesh_overlay::NavmeshOverlayVisible::default());
         app.insert_resource(crate::view_native::navmesh_overlay::NavmeshState::default());
@@ -2910,9 +2945,11 @@ mod cs_input_lock_tests {
         );
     }
 
-    /// The gate must not overreach: with no cutscene session active the same Menu(Map) + frame
-    /// state routes to the menu handler as before — its map-beat branch cancels the event
-    /// unconditionally (no cancel_armed check), which is exactly what the gated path refuses.
+    /// The gate must not overreach: with no cutscene session active (the gate
+    /// app's default CutsceneMode) the same Menu(Map) + frame state routes to
+    /// the menu handler as before — its map-beat branch cancels the event
+    /// unconditionally (no cancel_armed check), which is exactly what the
+    /// gated path refuses.
     #[test]
     fn without_a_cutscene_session_the_menu_handler_keeps_the_keys() {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -2921,8 +2958,6 @@ mod cs_input_lock_tests {
             cancel_armed: false,
             ..Default::default()
         });
-        // CutsceneMode defaults to inactive — no session brackets this frame.
-
         press(&mut app, Key::Escape);
         app.update();
 
@@ -3229,11 +3264,12 @@ mod sub_target_pick_tests {
         assert!(st.pending_since.is_some());
     }
 
+    /// The candidate sits inside the sub-target range, beyond the engage
+    /// range: the local pre-check refuses and no command leaves the client.
     #[test]
     fn pick_sub_confirm_refuses_a_mob_beyond_the_engage_range() {
         let far_id: u32 = 0x0200_0003;
         let mut scene = battle_scene();
-        // Inside the sub-target range, beyond the engage range.
         scene
             .snapshot
             .entities
@@ -3273,6 +3309,8 @@ mod sub_target_pick_tests {
         );
     }
 
+    /// Enemy pets are valid Switch Target candidates, friendly pets are not,
+    /// and the picker parks on the enemy pet, not a friendly one.
     #[test]
     fn switch_target_includes_enemy_pets_not_friendly_pets() {
         let scene = battle_scene();
@@ -3291,7 +3329,6 @@ mod sub_target_pick_tests {
             flags,
             by_id(PARTY_PET_ID)
         ));
-        // The picker itself must park on the enemy pet, not a friendly one.
         let mut scene = battle_scene();
         let mode = open_sub_target(
             SubTargetAction::PickSub,
@@ -3306,10 +3343,10 @@ mod sub_target_pick_tests {
         assert_eq!(st.candidate, Some(ENEMY_PET_ID));
     }
 
+    /// The retail "confirm on the current target" rule stays for actions:
+    /// Cure on a valid party target parks on it, not on self.
     #[test]
     fn spell_prompt_still_parks_on_the_current_target() {
-        // The retail "confirm on the current target" rule stays for actions:
-        // Cure on a valid party target parks on it, not on self.
         let mut scene = battle_scene();
         let mode = open_sub_target(
             SubTargetAction::Spell(1),
@@ -3324,10 +3361,12 @@ mod sub_target_pick_tests {
         assert_eq!(st.candidate, Some(PARTY_ID));
     }
 
+    /// Own-pet marking comes from the pet-sync targid (distinct wire targids
+    /// per entity). A PET-flagged ability (Sic, 72) accepts the own pet; the
+    /// ENEMY-only Switch Target does not.
     #[test]
     fn own_pet_is_marked_from_the_pet_sync_targid() {
         let mut scene = battle_scene();
-        // Distinct wire targids per entity.
         for (i, e) in scene.snapshot.entities.iter_mut().enumerate() {
             e.act_index = i as u16 + 1;
         }
@@ -3343,8 +3382,6 @@ mod sub_target_pick_tests {
         assert!(by_id(OWNED_PET_ID).is_own_pet);
         assert!(!by_id(PARTY_PET_ID).is_own_pet);
         assert!(!by_id(ENEMY_PET_ID).is_own_pet);
-        // A PET-flagged ability (Sic, 72) accepts the own pet; the
-        // ENEMY-only Switch Target does not.
         let flags = kuluu_render::sub_target::action_flags(SubTargetAction::Ability(72));
         assert!(kuluu_render::sub_target::entity_valid(
             flags,
@@ -3399,9 +3436,10 @@ mod sub_target_pick_tests {
         assert!(st.pending_since.is_none());
     }
 
-    /// The picker holds while the 0x058 is in flight and closes the moment the
-    /// main target lands on the sent candidate — the swap the frame shows is
-    /// the server's commit, not our send.
+    /// The picker holds while the 0x058
+    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp) is in flight and
+    /// closes the moment the main target lands on the sent candidate — the
+    /// swap the frame shows is the server's commit, not our send.
     #[test]
     fn pick_sub_picker_closes_when_the_server_commits_the_candidate() {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -3431,8 +3469,10 @@ mod sub_target_pick_tests {
         );
     }
 
-    /// No 0x058, no rejection the client can see: the wait lapses and the
-    /// picker closes on its own, leaving the main target where it was.
+    /// No 0x058 (vendor/server/src/map/packets/s2c/0x058_assist.cpp), no
+    /// rejection the client can see: the wait lapses and the picker closes on
+    /// its own, leaving the main target where it was. The pending window is
+    /// armed past the answer timeout: the 0x058 did not come.
     #[test]
     fn pick_sub_picker_lapses_when_no_answer_lands() {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -3444,7 +3484,6 @@ mod sub_target_pick_tests {
         );
         st.candidate = Some(MOB2_ID);
         st.pending_switch = Some(MOB2_ID);
-        // Armed past the answer window: the 0x058 never came.
         st.pending_since = Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
         app.world_mut().insert_resource(InputMode::SubTarget(st));
         app.update();
@@ -3471,7 +3510,6 @@ mod sub_target_pick_tests {
             0,
             InputMode::World,
         );
-        // The main target is live while the picker is up.
         app.world_mut().resource_mut::<Target>().id = Some(MOB_ID);
         app.world_mut().insert_resource(InputMode::SubTarget(st));
         app.update();
@@ -3482,7 +3520,6 @@ mod sub_target_pick_tests {
             ),
             "the picker must stay up while the main target is alive"
         );
-        // The main target dies: auto_clear drops it, the picker must close.
         app.world_mut().resource_mut::<Target>().id = None;
         app.update();
         assert!(

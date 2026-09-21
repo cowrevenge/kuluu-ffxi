@@ -2757,6 +2757,15 @@ fn battle2_mob_readies_resolves_skill_from_param() {
 }
 
 #[test]
+fn battle2_mob_magic_start_says_starts_casting() {
+    // MagicStart (8) carries msg 327 with the spell id in param
+    // (vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init).
+    let line = build_battle2_line(327, "Goblin Tinkerer", "Oldman", false, true, 4, 0, 8)
+        .expect("msg 327 must resolve");
+    assert!(line.text.contains("starts casting Cure"), "got: {}", line.text);
+}
+
+#[test]
 fn battle2_plain_job_ability_names_the_ability() {
     // Sneak Attack (abilityId 44) has abilities.sql message1 = 0, so LSB falls back to
     // msg 100 — whose LSB comment is "The <player> uses .." and needs the override.

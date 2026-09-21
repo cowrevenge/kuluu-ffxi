@@ -4489,10 +4489,41 @@ pub fn dispatch_action_overlay(
                 {
                     (routine, looping) = (DatId::from_str("ati0"), false);
                 }
-                let Some(clip_id) =
-                    routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
-                else {
-                    continue;
+                let clip_id = match routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                {
+                    Some(id) => id,
+                    // A mob DAT may lack the spell school's cast routine (cawh & co);
+                    // the generic `cast` is the race-base fallback the start pose still
+                    // reads.
+                    None if action_kind == MAGIC_START_CATEGORY && routine != DatId::from_str("cast") =>
+                    {
+                        match routine_motion_clip(
+                            &actor.routines,
+                            &actor.rejected_routines,
+                            DatId::from_str("cast"),
+                        ) {
+                            Some(id) => id,
+                            None => {
+                                tracing::debug!(
+                                    target: "combat",
+                                    actor_id,
+                                    ?routine,
+                                    "no cast clip on this model; start pose skipped"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::debug!(
+                            target: "combat",
+                            actor_id,
+                            action_kind,
+                            ?routine,
+                            "no motion clip for this action; pose skipped"
+                        );
+                        continue;
+                    }
                 };
 
                 let len = rest_clip_len_frames(&actor.battle_clips, clip_id)
@@ -6823,6 +6854,64 @@ mod pose_resolution_tests {
             let mut em = world.entity_mut(ent);
             let actor = em.get_mut::<FfxiRenderActor>().unwrap();
             assert!(actor.action.is_none(), "the interrupt drops the aim pose");
+        }
+    }
+
+    // A mob DAT that lacks the spell school's cast routine (cawh & co) still
+    // shows the start: the pose falls back to the generic `cast` routine.
+    #[test]
+    fn a_mob_magic_start_without_the_school_routine_falls_back_to_cast() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const CAWH: u32 = 0x68776163;
+
+        let mut world = World::new();
+        world.init_resource::<crate::snapshot::EventLog>();
+        world.init_resource::<SpellSuffixCache>();
+        world.init_resource::<ActorDatRoot>();
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let mut actor = render_actor_for_test(skeleton, vec![Mat4::IDENTITY]);
+        actor.world_id = 7;
+        actor.routines = Arc::new(synth_routines(&[(b"cast", b"cl0?")]));
+        let ent = world.spawn(actor).id();
+
+        let run_overlay = |world: &mut World| {
+            world.run_system_once(
+                |events: Res<crate::snapshot::EventLog>,
+                 q: Query<&mut FfxiRenderActor>,
+                 last: Local<u64>,
+                 suffix: ResMut<SpellSuffixCache>,
+                 root: Res<ActorDatRoot>| {
+                    dispatch_action_overlay(events, q, last, suffix, root)
+                },
+            )
+            .unwrap();
+        };
+
+        let magic_start = kuluu_snapshot::ViewerEvent::ActionStarted {
+            actor_id: 7,
+            action_id: CAWH,
+            action_kind: MAGIC_START_CATEGORY,
+            target_id: None,
+            result: None,
+            animation: None,
+            outcome: None,
+        };
+
+        world.resource_mut::<crate::snapshot::EventLog>().push(magic_start);
+        run_overlay(&mut world);
+        {
+            let mut em = world.entity_mut(ent);
+            let actor = em.get_mut::<FfxiRenderActor>().unwrap();
+            assert!(
+                actor.action.is_some_and(|a| a.looping && a.cast_pose),
+                "a magic start without the school routine holds the cast pose"
+            );
         }
     }
 

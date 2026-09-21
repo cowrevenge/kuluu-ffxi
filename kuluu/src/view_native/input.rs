@@ -4078,7 +4078,10 @@ mod tests {
         let yaw = target - 0.05;
         assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
         let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
-        assert_eq!(next, yaw, "a settled follow must not snap the last few degrees");
+        assert_eq!(
+            next, yaw,
+            "a settled follow must not snap the last few degrees"
+        );
         assert!(!settling);
     }
 
@@ -4107,9 +4110,7 @@ mod tests {
             .self_pos
             .heading = 0;
         let target_yaw = yaw_for_heading(0);
-        app.world_mut()
-            .resource_mut::<ChaseCamera>()
-            .yaw = target_yaw - 0.5;
+        app.world_mut().resource_mut::<ChaseCamera>().yaw = target_yaw - 0.5;
         app.world_mut().resource_mut::<LockOn>().target_id = Some(7);
         let initial_yaw = app.world().resource::<ChaseCamera>().yaw;
         for _ in 0..8 {

@@ -840,19 +840,80 @@ impl EmitCull {
 
 const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
 const SEC1_OPCODE_ASSOCIATION: u8 = 0x11;
+const SEC2_OPCODE_VELOCITY_VARIANCE: u8 = 0x03;
+const SEC2_OPCODE_ROTATION_VARIANCE: u8 = 0x0A;
+const SEC2_OPCODE_ROTATION_VEL_VARIANCE: u8 = 0x0C;
+const SEC2_OPCODE_SCALE_VARIANCE: u8 = 0x10;
+const SEC2_OPCODE_SINGLE_SCALE_VARIANCE: u8 = 0x11;
+const SEC2_OPCODE_SCALE_VELOCITY: u8 = 0x12;
+const SEC2_OPCODE_SCALE_VEL_VARIANCE: u8 = 0x13;
+const SEC2_OPCODE_COLOR_VARIANCE: u8 = 0x17;
+const SEC2_OPCODE_COLOR_TRANSFORM_SETUP: u8 = 0x19;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
-const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
+const SEC2_OPCODE_SPHERICAL_VARIANCE_FULL: u8 = 0x1F;
+const SEC2_OPCODE_SCALE_Z_TRACK: u8 = 0x29;
+const SEC2_OPCODE_COLOR_R_TRACK: u8 = 0x2A;
+const SEC2_OPCODE_COLOR_G_TRACK: u8 = 0x2B;
+const SEC2_OPCODE_COLOR_B_TRACK: u8 = 0x2C;
+const SEC2_OPCODE_HAZE_OFFSET: u8 = 0x32;
+const SEC2_OPCODE_INCREMENTAL_ROTATION: u8 = 0x3B;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
+const SEC2_OPCODE_OSCILLATION_ACCEL_X: u8 = 0x3E;
+const SEC2_OPCODE_OSCILLATION_ACCEL_Y: u8 = 0x3F;
+const SEC2_OPCODE_OSCILLATION_ACCEL_Z: u8 = 0x40;
+const SEC2_OPCODE_RELATIVE_VEL_VARIANCE: u8 = 0x41;
+const SEC2_OPCODE_CHILD_GENERATOR: u8 = 0x44;
+const SEC2_OPCODE_PARENT_POSITION_COPY: u8 = 0x45;
+const SEC2_OPCODE_PARENT_VELOCITY: u8 = 0x46;
+const SEC2_OPCODE_PARENT_ROTATE: u8 = 0x47;
+const SEC2_OPCODE_PARENT_COLOR: u8 = 0x48;
+const SEC2_OPCODE_PARENT_SCALE: u8 = 0x49;
+const SEC2_OPCODE_PARENT_TEX_COORD: u8 = 0x4A;
+const SEC2_OPCODE_FIXED_POINT_POSITION_VARIANCE: u8 = 0x4E;
+const SEC2_OPCODE_FIXED_POINT_POSITION_VARIANCE_2: u8 = 0x4F;
+const SEC2_OPCODE_VELOCITY_Y_TRACK: u8 = 0x51;
+const SEC2_OPCODE_CHILD_GENERATOR_2: u8 = 0x53;
+const SEC2_OPCODE_POINT_LIST_POSITION: u8 = 0x54;
+const SEC2_OPCODE_BATCHING_SETUP: u8 = 0x56;
+const SEC2_OPCODE_SPECULAR_ROT_X_TRACK: u8 = 0x59;
+const SEC2_OPCODE_SPECULAR_ROT_Y_TRACK: u8 = 0x5A;
+const SEC2_OPCODE_SPECULAR_ROT_Z_TRACK: u8 = 0x5B;
+const SEC2_OPCODE_SPECULAR_COLOR_G_TRACK: u8 = 0x5D;
+const SEC2_OPCODE_SPECULAR_COLOR_A_TRACK: u8 = 0x5F;
+const SEC2_OPCODE_REVERSE_DISPLACEMENT: u8 = 0x67;
+const SEC2_OPCODE_VELOCITY_DAMPENER_TRACK: u8 = 0x69;
+const SEC2_OPCODE_PROJECTION_BIAS: u8 = 0x72;
+const SEC2_OPCODE_PARENT_ROTATE_2: u8 = 0x79;
+const SEC2_OPCODE_CAMERA_SHAKE_SETUP: u8 = 0x82;
+const SEC2_OPCODE_FOOT_MARK: u8 = 0x8E;
 const SEC3_OPCODE_POSITION: u8 = 0x02;
 const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
 const SEC3_OPCODE_SCALE_UPDATER: u8 = 0x08;
+const SEC3_OPCODE_COLOR_TRANSFORM_APPLIER: u8 = 0x0B;
+const SEC3_OPCODE_COLOR_TRANSFORM_MODIFIER: u8 = 0x0C;
 const SEC3_OPCODE_SPRITE_SHEET_FRAME: u8 = 0x0D;
 const SEC3_OPCODE_NO_OP: u8 = 0x0E;
+const SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_FIRST: u8 = 0x06;
+const SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_LAST: u8 = 0x09;
+const SEC3_OPCODE_SCALE_PROGRESS_FIRST: u8 = 0x15;
+const SEC3_OPCODE_SCALE_PROGRESS_LAST: u8 = 0x17;
+const SEC3_OPCODE_COLOR_RGB_PROGRESS_FIRST: u8 = 0x18;
+const SEC3_OPCODE_COLOR_RGB_PROGRESS_LAST: u8 = 0x1A;
 const SEC3_OPCODE_ALPHA_UPDATER: u8 = 0x1B;
-const SEC3_OPCODE_COLOR_TRANSFORM_APPLIER: u8 = 0x0B;
-const SEC3_OPCODE_DAMPENING_FACTOR: u8 = 0x44;
+const SEC3_OPCODE_CHILD_GENERATOR_BASIC: u8 = 0x25;
+const SEC3_OPCODE_VELOCITY_ROTATOR: u8 = 0x26;
+const SEC3_OPCODE_OSCILLATION_APPLIER_X: u8 = 0x29;
+const SEC3_OPCODE_OSCILLATION_APPLIER_Y: u8 = 0x2A;
+const SEC3_OPCODE_OSCILLATION_APPLIER_Z: u8 = 0x2B;
+const SEC3_OPCODE_VELOCITY_DAMPENER: u8 = 0x2C;
 const SEC3_OPCODE_VELOCITY_ROTATION_UPDATER: u8 = 0x2F;
+const SEC3_OPCODE_CHILD_GENERATOR: u8 = 0x33;
 const SEC3_OPCODE_POINT_LIST_POSITION: u8 = 0x34;
+const SEC3_OPCODE_SPECULAR_ROT_Y_PROGRESS: u8 = 0x36;
+const SEC3_OPCODE_SPECULAR_ROT_Z_PROGRESS: u8 = 0x37;
+const SEC3_OPCODE_SPECULAR_COLOR_A_PROGRESS: u8 = 0x3B;
+const SEC3_OPCODE_DAMPENING_FACTOR: u8 = 0x44;
+const SEC3_OPCODE_CAMERA_SHAKE_UPDATER: u8 = 0x5F;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
 const SEC4_OPCODE_EMIT_CHILD: u8 = 0x01;
@@ -1032,7 +1093,7 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 8),
                     ];
                 }
-                0x03 if payload + 12 <= body.len() => {
+                SEC2_OPCODE_VELOCITY_VARIANCE if payload + 12 <= body.len() => {
                     velocity_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1060,10 +1121,9 @@ impl ParticleGeneratorDef {
                 0x08 if payload + 4 <= body.len() => {
                     relative_velocity = Some(f32_le(body, payload));
                 }
-                // 0x1F SphericalPositionVarianceFull: nine floats, the camera flag u32, and the
-                // azimuth-step u16 (0 = random azimuth, otherwise one higher than the steps;
-                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1F).
-                0x1F if payload + 42 <= body.len() => {
+                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1F: a raw 0 azimuth
+                // step means random azimuth.
+                SEC2_OPCODE_SPHERICAL_VARIANCE_FULL if payload + 42 <= body.len() => {
                     spherical_full = Some(SphericalPositionVarianceFull {
                         radius_variance: f32_le(body, payload),
                         base_radius: f32_le(body, payload + 4),
@@ -1094,7 +1154,7 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 8),
                     ];
                 }
-                0x0A if payload + 12 <= body.len() => {
+                SEC2_OPCODE_ROTATION_VARIANCE if payload + 12 <= body.len() => {
                     rotation_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1108,27 +1168,24 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 8),
                     ]);
                 }
-                0x0C if payload + 12 <= body.len() => {
+                SEC2_OPCODE_ROTATION_VEL_VARIANCE if payload + 12 <= body.len() => {
                     rotation_velocity_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ]);
                 }
-                // 0x13 VelocityVarianceSetup (scale): three floats, the per-axis variance
-                // bound on the 0x12 scale velocity
-                // (research/xim ParticleInitializers.kt VelocityVarianceSetup — the
-                // allocationOffset binds it to the scale transform).
-                0x13 if payload + 12 <= body.len() => {
+                // research/xim ParticleInitializers.kt VelocityVarianceSetup: the
+                // allocationOffset binds the variance to the scale velocity.
+                SEC2_OPCODE_SCALE_VEL_VARIANCE if payload + 12 <= body.len() => {
                     scale_velocity_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ]);
                 }
-                // 0x3B IncrementalRotationApplier: three floats, the per-axis increment
-                // (research/xim ParticleInitializers.kt IncrementalRotationApplier).
-                0x3B if payload + 12 <= body.len() => {
+                // research/xim ParticleInitializers.kt IncrementalRotationApplier.
+                SEC2_OPCODE_INCREMENTAL_ROTATION if payload + 12 <= body.len() => {
                     incremental_rotation = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1142,19 +1199,18 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 8),
                     ];
                 }
-                // 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound
-                // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10).
-                0x10 if payload + 12 <= body.len() => {
+                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10.
+                SEC2_OPCODE_SCALE_VARIANCE if payload + 12 <= body.len() => {
                     scale_variance = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ]);
                 }
-                0x11 if payload + 4 <= body.len() => {
+                SEC2_OPCODE_SINGLE_SCALE_VARIANCE if payload + 4 <= body.len() => {
                     single_scale_variance = Some(f32_le(body, payload));
                 }
-                0x12 if payload + 12 <= body.len() => {
+                SEC2_OPCODE_SCALE_VELOCITY if payload + 12 <= body.len() => {
                     scale_velocity = Some([
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
@@ -1180,50 +1236,43 @@ impl ParticleGeneratorDef {
                         flags: u32_le(body, payload + 32),
                     });
                 }
-                // 0x5A KeyFrameValueSetup (specular rotation.y): the 0x27/0x28/0x29 track
-                // shape bound to the specular element's rotation y
-                // (research/xim ParticleGeneratorParser.kt).
-                0x5A if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe
+                // track bound to the specular element's rotation y.
+                SEC2_OPCODE_SPECULAR_ROT_Y_TRACK if payload + 8 <= body.len() => {
                     specular_rot_y_track = track_id(body, payload + 4);
                 }
-                // 0x5B KeyFrameValueSetup (specular rotation.z): the 0x5A shape bound to
-                // the specular element's rotation z (research/xim
-                // ParticleGeneratorParser.kt).
-                0x5B if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe
+                // track bound to the specular element's rotation z.
+                SEC2_OPCODE_SPECULAR_ROT_Z_TRACK if payload + 8 <= body.len() => {
                     specular_rot_z_track = track_id(body, payload + 4);
                 }
-                // 0x5F KeyFrameValueSetup (specular color.a): the 0x5A shape bound to
-                // the specular element's color alpha (research/xim
-                // ParticleGeneratorParser.kt).
-                0x5F if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe
+                // track bound to the specular element's color alpha.
+                SEC2_OPCODE_SPECULAR_COLOR_A_TRACK if payload + 8 <= body.len() => {
                     specular_color_a_track = track_id(body, payload + 4);
                 }
-                // 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32,
-                // unk1 f32, unk2 u32] — the DAT id of the keyframe track the section-3
-                // 0x5F CameraShakeUpdater samples at the particle's progress
-                // (research/xim ParticleInitializers.kt CameraShakeSetup). The whole 6-word
-                // block is consumed; only the track id is kept.
-                0x82 if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt CameraShakeSetup: the DAT id of
+                // the keyframe track SEC3_OPCODE_CAMERA_SHAKE_UPDATER samples at the
+                // particle's progress; the block's other words are consumed, not kept.
+                SEC2_OPCODE_CAMERA_SHAKE_SETUP if payload + 8 <= body.len() => {
                     camera_shake_track = track_id(body, payload + 4);
                 }
-                // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim
-                // applies only the second float, as particle.hazeOffset.x (research/xim
-                // ParticleInitializers.kt HazeOffsetInitializer).
-                0x32 if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt HazeOffsetInitializer: xim applies
+                // only the second float, as particle.hazeOffset.x.
+                SEC2_OPCODE_HAZE_OFFSET if payload + 8 <= body.len() => {
                     haze_offset_x = Some(f32_le(body, payload + 4));
                 }
                 0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
-                // 0x41 RelativeVelocityVarianceSetup: one float, the bound of the random
-                // magnitude added to the 0x08 relative velocity
-                // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
-                0x41 if payload + 4 <= body.len() => {
+                // research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup: the
+                // bound of the random magnitude added to the relative velocity.
+                SEC2_OPCODE_RELATIVE_VEL_VARIANCE if payload + 4 <= body.len() => {
                     relative_velocity_variance = Some(f32_le(body, payload));
                 }
-                // 0x72 ProjectionBiasInitializer: two floats — param0 sets the same field_128
-                // as 0x30 (last write in stream order wins, as in retail's sequential walk; the
-                // shipped data never carries both), param1 is the actor depth-scale factor
-                // (research/xim ParticleInitializers.kt ProjectionBiasInitializer).
-                0x72 if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt ProjectionBiasInitializer: param0
+                // sets the same field as the sort offset (last write in stream order wins,
+                // as in retail's sequential walk; the shipped data never carries both),
+                // param1 is the actor depth-scale factor.
+                SEC2_OPCODE_PROJECTION_BIAS if payload + 8 <= body.len() => {
                     let p0 = f32_le(body, payload);
                     let p1 = f32_le(body, payload + 4);
                     sort_offset = p0;
@@ -1237,9 +1286,8 @@ impl ParticleGeneratorDef {
                         body[payload + 3] as f32 / 255.0,
                     ];
                 }
-                // 0x17 ColorVarianceSetup: four bytes, the per-channel upward variance bound
-                // (research/xim ParticleInitializers.kt ColorVarianceSetup).
-                0x17 if payload + 4 <= body.len() => {
+                // research/xim ParticleInitializers.kt ColorVarianceSetup.
+                SEC2_OPCODE_COLOR_VARIANCE if payload + 4 <= body.len() => {
                     color_variance = Some([
                         body[payload] as f32 / 255.0,
                         body[payload + 1] as f32 / 255.0,
@@ -1247,10 +1295,9 @@ impl ParticleGeneratorDef {
                         body[payload + 3] as f32 / 255.0,
                     ]);
                 }
-                // 0x19 ColorTransformSetup: four i16s, parsed only (the application is
-                // unknown — see the `color_transform` field; CYyGenerator.cpp ElemGenerate
-                // has no 0x19 case).
-                0x19 if payload + 8 <= body.len() => {
+                // Parsed only: CYyGenerator.cpp CYyGenerator::ElemGenerate has no 0x19
+                // case, so the transform's application is unknown.
+                SEC2_OPCODE_COLOR_TRANSFORM_SETUP if payload + 8 <= body.len() => {
                     color_transform = Some([
                         i16::from_le_bytes([body[payload], body[payload + 1]]),
                         i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
@@ -1261,139 +1308,132 @@ impl ParticleGeneratorDef {
                 // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
-                0x29 if payload + 8 <= body.len() => scale_z_track = track_id(body, payload + 4),
+                SEC2_OPCODE_SCALE_Z_TRACK if payload + 8 <= body.len() => {
+                    scale_z_track = track_id(body, payload + 4)
+                }
                 0x2D if payload + 8 <= body.len() => alpha_track = track_id(body, payload + 4),
-                // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to
-                // the element's red channel (research/xim ParticleGeneratorParser.kt).
-                0x2A if payload + 8 <= body.len() => color_r_track = track_id(body, payload + 4),
-                // 0x2B KeyFrameValueSetup (color.g): the 0x27/0x28/0x29 track shape bound to
-                // the element's green channel (research/xim ParticleGeneratorParser.kt).
-                0x2B if payload + 8 <= body.len() => color_g_track = track_id(body, payload + 4),
-                // 0x2C KeyFrameValueSetup (color.b): the 0x27/0x28/0x29 track shape bound to
-                // the element's blue channel (research/xim ParticleGeneratorParser.kt).
-                0x2C if payload + 8 <= body.len() => color_b_track = track_id(body, payload + 4),
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the element's red channel.
+                SEC2_OPCODE_COLOR_R_TRACK if payload + 8 <= body.len() => {
+                    color_r_track = track_id(body, payload + 4)
+                }
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the element's green channel.
+                SEC2_OPCODE_COLOR_G_TRACK if payload + 8 <= body.len() => {
+                    color_g_track = track_id(body, payload + 4)
+                }
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the element's blue channel.
+                SEC2_OPCODE_COLOR_B_TRACK if payload + 8 <= body.len() => {
+                    color_b_track = track_id(body, payload + 4)
+                }
                 // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are the same
                 // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
                 // the section-3 ClockValueUpdater 0x3C..0x3F.
                 0x60..=0x63 if payload + 8 <= body.len() => {
                     tod_color_tracks[(opcode - 0x60) as usize] = track_id(body, payload + 4);
                 }
-                // 0x67 ReverseDisplacementSetup: one float, never read by the effect
-                // (research/xim ParticleInitializers.kt ReverseDisplacementSetup).
-                0x67 if payload + 4 <= body.len() => {
+                // research/xim ParticleInitializers.kt ReverseDisplacementSetup: parsed,
+                // never read by the effect.
+                SEC2_OPCODE_REVERSE_DISPLACEMENT if payload + 4 <= body.len() => {
                     reverse_displacement = Some(f32_le(body, payload));
                 }
-                // 0x1D SpriteSheetInitializer: retail derives the flipbook's per-frame interval
-                // from the frame count inside the CMoD3a resource, not the DAT (research/XIClient
-                // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1D), so the payload word is
-                // never read and no state is set.
+                // research/XIClient CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x1D
+                // retail derives the flipbook's per-frame interval from the CMoD3a resource's
+                // frame count, not the DAT, so the payload word is never read.
                 SEC2_OPCODE_SPRITE_SHEET_INIT if payload + 4 <= body.len() => {}
-                // 0x8E FootMarkEffectSetup: no payload — the particle snaps to the actor's
-                // position + joint and facing on the spawn frame, then stops following the
-                // generator (research/xim Particle.kt updateAssociatedPosition /
-                // updateAssociatedFacing footMarkEffect branches).
+                // research/xim Particle.kt updateAssociatedPosition / updateAssociatedFacing
+                // footMarkEffect branches: the particle snaps to the actor's position + joint
+                // and facing on the spawn frame, then stops following the generator.
                 SEC2_OPCODE_FOOT_MARK => foot_mark = true,
-                // 0x3D OscillationSetup: no payload — the marker that allocates the particle's
-                // oscillation state (research/xim ParticleInitializers.kt OscillationSetup).
+                // research/xim ParticleInitializers.kt OscillationSetup: the marker that
+                // allocates the particle's oscillation state.
                 SEC2_OPCODE_OSCILLATION_SETUP => oscillation = true,
-                // 0x45 ParentPositionCopyConfig: no payload — the marker that makes a child
-                // particle copy its parent's position (research/xim
-                // ParticleInitializers.kt ParentPositionCopyConfig).
-                0x45 => parent_position_copy = true,
-                // 0x46 ParentVelocityConfig: one float — the multiplier on the parent's
-                // total velocity copied into the child's velocity
-                // (research/xim ParticleInitializers.kt ParentVelocityConfig).
-                0x46 if payload + 4 <= body.len() => {
+                // research/xim ParticleInitializers.kt ParentPositionCopyConfig: the marker
+                // that makes a child particle copy its parent's position.
+                SEC2_OPCODE_PARENT_POSITION_COPY => parent_position_copy = true,
+                // research/xim ParticleInitializers.kt ParentVelocityConfig: the multiplier
+                // on the parent's total velocity copied into the child's velocity.
+                SEC2_OPCODE_PARENT_VELOCITY if payload + 4 <= body.len() => {
                     parent_velocity = Some(f32_le(body, payload));
                 }
-                // 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] — the
-                // sibling generator emitted as a child of each particle
-                // (research/xim ParticleInitializers.kt ChildGeneratorSetup).
-                0x44 if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt ChildGeneratorSetup: the sibling
+                // generator emitted as a child of each particle.
+                SEC2_OPCODE_CHILD_GENERATOR if payload + 8 <= body.len() => {
                     child_generator = track_id(body, payload + 4);
                 }
-                // 0x53 ChildGeneratorSetup: the 0x44 shape — xim maps both opcodes to
-                // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x53 if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: xim maps this opcode
+                // to the same ChildGeneratorSetup as SEC2_OPCODE_CHILD_GENERATOR.
+                SEC2_OPCODE_CHILD_GENERATOR_2 if payload + 8 <= body.len() => {
                     child_generator_2 = track_id(body, payload + 4);
                 }
-                // 0x47 ParentRotateConfig: no payload — the marker that makes a child
-                // particle copy its parent's rotation (research/xim
-                // ParticleInitializers.kt ParentRotateConfig).
-                0x47 => parent_rotate = true,
-                // 0x79 ParentRotateConfig: the 0x47 marker — xim maps both opcodes to
-                // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x79 => parent_rotate_2 = true,
-                // 0x56 BatchingSetup: one expectZero32 word (research/xim
-                // ParticleInitializers.kt BatchingSetup).
-                0x56 if payload + 4 <= body.len() => batching_setup = true,
-                // 0x48 ParentColorConfig: no payload — the marker that makes a child
-                // particle copy its parent's color (research/xim
-                // ParticleInitializers.kt ParentColorConfig).
-                0x48 => parent_color = true,
-                // 0x49 ParentScaleConfig: no payload — the marker that makes a child
-                // particle copy its parent's scale (research/xim
-                // ParticleInitializers.kt ParentScaleConfig).
-                0x49 => parent_scale = true,
-                // 0x4A ParentTexCoordConfig: no payload — the marker that makes a child
-                // particle copy its parent's tex-coord translate (research/xim
-                // ParticleInitializers.kt ParentTexCoordConfig).
-                0x4A => parent_tex_coord = true,
-                // 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero,
-                // in-mem ptr, point list DAT id] (research/xim ParticleInitializers.kt
-                // PointListPositionSetup).
-                0x54 if payload + 20 <= body.len() => {
+                // research/xim ParticleInitializers.kt ParentRotateConfig: the marker that
+                // makes a child particle copy its parent's rotation.
+                SEC2_OPCODE_PARENT_ROTATE => parent_rotate = true,
+                // research/xim ParticleGeneratorParser.kt sec2Handler: xim maps this opcode
+                // to the same ParentRotateConfig as SEC2_OPCODE_PARENT_ROTATE.
+                SEC2_OPCODE_PARENT_ROTATE_2 => parent_rotate_2 = true,
+                // research/xim ParticleInitializers.kt BatchingSetup: the word is an
+                // expectZero32; only the marker is kept.
+                SEC2_OPCODE_BATCHING_SETUP if payload + 4 <= body.len() => batching_setup = true,
+                // research/xim ParticleInitializers.kt ParentColorConfig: the marker that
+                // makes a child particle copy its parent's color.
+                SEC2_OPCODE_PARENT_COLOR => parent_color = true,
+                // research/xim ParticleInitializers.kt ParentScaleConfig: the marker that
+                // makes a child particle copy its parent's scale.
+                SEC2_OPCODE_PARENT_SCALE => parent_scale = true,
+                // research/xim ParticleInitializers.kt ParentTexCoordConfig: the marker that
+                // makes a child particle copy its parent's tex-coord translate.
+                SEC2_OPCODE_PARENT_TEX_COORD => parent_tex_coord = true,
+                // research/xim ParticleInitializers.kt PointListPositionSetup: the keyframe
+                // and point-list DAT ids; the in-mem pointer words are consumed, not kept.
+                SEC2_OPCODE_POINT_LIST_POSITION if payload + 20 <= body.len() => {
                     point_list_position = Some((
                         DatId::from(body, payload + 4).0,
                         DatId::from(body, payload + 16).0,
                     ));
                 }
-                // 0x51 KeyFrameValueSetup (velocity.y): the 0x27/0x28/0x29 track shape
-                // (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x51 if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the element's velocity y.
+                SEC2_OPCODE_VELOCITY_Y_TRACK if payload + 8 <= body.len() => {
                     velocity_y_track = track_id(body, payload + 4);
                 }
-                // 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape
-                // (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x59 if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the specular element's rotation x.
+                SEC2_OPCODE_SPECULAR_ROT_X_TRACK if payload + 8 <= body.len() => {
                     specular_rot_x_track = track_id(body, payload + 4);
                 }
-                // 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track
-                // shape (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x5D if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the specular element's color green.
+                SEC2_OPCODE_SPECULAR_COLOR_G_TRACK if payload + 8 <= body.len() => {
                     specular_color_g_track = track_id(body, payload + 4);
                 }
-                // 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track
-                // shape bound to the element's velocity dampener
-                // (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x69 if payload + 8 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: the keyframe track
+                // bound to the element's velocity dampener.
+                SEC2_OPCODE_VELOCITY_DAMPENER_TRACK if payload + 8 <= body.len() => {
                     velocity_dampener_track = track_id(body, payload + 4);
                 }
-                // 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
-                // expect32(0, 1)] — the point list a per-emitted-particle position offset
-                // cycles through (research/xim ParticleInitializers.kt
-                // FixedPointPositionVarianceSetup).
-                0x4E if payload + 12 <= body.len() => {
+                // research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup: the
+                // point list a per-emitted-particle position offset cycles through.
+                SEC2_OPCODE_FIXED_POINT_POSITION_VARIANCE if payload + 12 <= body.len() => {
                     fixed_point_position_variance = track_id(body, payload + 4);
                 }
-                // 0x4F: the twin of 0x4E — xim maps both to the same class
-                // (research/xim ParticleGeneratorParser.kt sec2Handler).
-                0x4F if payload + 12 <= body.len() => {
+                // research/xim ParticleGeneratorParser.kt sec2Handler: xim maps this opcode
+                // to the same FixedPointPositionVarianceSetup as 0x4E.
+                SEC2_OPCODE_FIXED_POINT_POSITION_VARIANCE_2 if payload + 12 <= body.len() => {
                     fixed_point_position_variance_2 = track_id(body, payload + 4);
                 }
-                // 0x40 OscillationAccelerationSetup (Z): two floats, [acceleration, variance]
-                // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
-                0x40 if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt OscillationAccelerationSetup (Z)
+                // [acceleration, variance].
+                SEC2_OPCODE_OSCILLATION_ACCEL_Z if payload + 8 <= body.len() => {
                     oscillation_accel_z = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                 }
-                // 0x3E OscillationAccelerationSetup (X): the X-axis twin of 0x40
-                // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
-                0x3E if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt OscillationAccelerationSetup (X).
+                SEC2_OPCODE_OSCILLATION_ACCEL_X if payload + 8 <= body.len() => {
                     oscillation_accel_x = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                 }
-                // 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40
-                // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
-                0x3F if payload + 8 <= body.len() => {
+                // research/xim ParticleInitializers.kt OscillationAccelerationSetup (Y).
+                SEC2_OPCODE_OSCILLATION_ACCEL_Y if payload + 8 <= body.len() => {
                     oscillation_accel_y = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                 }
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
@@ -1463,21 +1503,21 @@ impl ParticleGeneratorDef {
                     0x28 if payload + 4 <= body.len() => uv_scroll[1] = f32_le(body, payload),
                     // research/xim ParticleUpdaters.kt OscillationApplier: oscillationRate =
                     // 180f / payload0, baseOffset = payload1, payload2 has no effect.
-                    0x29 if payload + 12 <= body.len() => {
+                    SEC3_OPCODE_OSCILLATION_APPLIER_X if payload + 12 <= body.len() => {
                         oscillation_applier_x = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    0x2B if payload + 12 <= body.len() => {
+                    SEC3_OPCODE_OSCILLATION_APPLIER_Z if payload + 12 <= body.len() => {
                         oscillation_applier_z = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    0x2A if payload + 12 <= body.len() => {
+                    SEC3_OPCODE_OSCILLATION_APPLIER_Y if payload + 12 <= body.len() => {
                         oscillation_applier_y = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
@@ -1491,11 +1531,14 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    // research/xim ParticleGeneratorParser.kt sec3Handler — 0x03/0x06/0x09 all
-                    // map to VelocityAccelerator: a Vector3f added × dt to the velocity
-                    // allocation, ungated for 0x06/0x09 (CYyGenerator.cpp
-                    // CYyGenerator::ElemIdle cases 0x06/0x09), so the payloads sum.
-                    0x06 | 0x09 if payload + 12 <= body.len() => {
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: these map to the
+                    // same VelocityAccelerator as 0x03, ungated in retail's ElemIdle
+                    // (CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x06/0x09), so the
+                    // payloads sum.
+                    SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_FIRST
+                    | SEC3_OPCODE_VELOCITY_ACCELERATOR_UNGATED_LAST
+                        if payload + 12 <= body.len() =>
+                    {
                         let v = [
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
@@ -1503,23 +1546,23 @@ impl ParticleGeneratorDef {
                         ];
                         accel = Some(accel.map_or(v, |a| [a[0] + v[0], a[1] + v[1], a[2] + v[2]]));
                     }
-                    // research/xim ParticleUpdaters.kt VelocityDampener: two floats
-                    // [dampen, unk] — velocity ×= dampeningFactor^dt, the factor coming
-                    // from the sec2 0x69 track when present. The engine does not model
-                    // the velocity dampener, so parse-only.
-                    0x2C if payload + 8 <= body.len() => {
+                    // research/xim ParticleUpdaters.kt VelocityDampener: velocity is scaled
+                    // by dampeningFactor^dt, the factor from
+                    // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK when present. The engine does not
+                    // model the dampener, so parse-only.
+                    SEC3_OPCODE_VELOCITY_DAMPENER if payload + 8 <= body.len() => {
                         velocity_dampener =
                             Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                     }
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x44 — the
-                    // dampening-factor ProgressValueUpdater: no payload, it samples the
-                    // sec2 0x69 track. The engine does not model the velocity dampener,
-                    // so the block arms nothing and only consumes.
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: the dampening-factor
+                    // ProgressValueUpdater: no payload, it samples
+                    // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK. The engine does not model the
+                    // dampener, so the block arms nothing and only consumes.
                     SEC3_OPCODE_DAMPENING_FACTOR => {}
-                    // research/xim ParticleUpdaters.kt ColorTransformModifier: four i16s —
-                    // the per-frame rate on the sec2 0x19 color transform. The engine does
-                    // not model the color transform's application, so parse-only.
-                    0x0C if payload + 8 <= body.len() => {
+                    // research/xim ParticleUpdaters.kt ColorTransformModifier: the per-frame
+                    // rate on the SEC2_OPCODE_COLOR_TRANSFORM_SETUP transform. The engine does
+                    // not model the transform's application, so parse-only.
+                    SEC3_OPCODE_COLOR_TRANSFORM_MODIFIER if payload + 8 <= body.len() => {
                         color_transform_modifier = Some([
                             i16::from_le_bytes([body[payload], body[payload + 1]]),
                             i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
@@ -1527,78 +1570,78 @@ impl ParticleGeneratorDef {
                             i16::from_le_bytes([body[payload + 6], body[payload + 7]]),
                         ]);
                     }
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x15/0x16/0x17 —
-                    // the scale.x/y/z ProgressValueUpdaters: no payload, they sample the
-                    // sec2 0x27/0x28/0x29 scale tracks at life progress, which the render
-                    // path already does from def.scale_x_track/scale_y_track; the engine's
-                    // 2D sprite has no z axis, so the blocks arm nothing and only consume.
-                    0x15..=0x17 => {}
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x18/0x19/0x1A —
-                    // the color.r/g/b ProgressValueUpdaters: no payload, they sample the
-                    // sec2 0x2A/0x2B/0x2C color tracks at life progress. The engine sets
-                    // the particle's rgb at spawn from the 0x16 base / 0x17 variance and
-                    // has no per-frame rgb track path, so the blocks arm nothing and
-                    // only consume.
-                    0x18..=0x1A => {}
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x36/0x37/0x3B —
-                    // the specular rotation.y/z and color.a ProgressValueUpdaters: no
-                    // payload, they sample the sec2 0x5A/0x5B/0x5F specular tracks. The
-                    // engine does not model the specular element, so the blocks arm
-                    // nothing and only consume.
-                    0x36 | 0x37 | 0x3B => {}
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: the scale.x/y/z
+                    // ProgressValueUpdaters: no payload, they sample the sec2 scale tracks at
+                    // life progress, which the render path already does from
+                    // def.scale_x_track/scale_y_track; the engine's 2D sprite has no z axis,
+                    // so the blocks arm nothing and only consume.
+                    SEC3_OPCODE_SCALE_PROGRESS_FIRST..=SEC3_OPCODE_SCALE_PROGRESS_LAST => {}
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: the color.r/g/b
+                    // ProgressValueUpdaters: no payload, they sample the sec2 color tracks at
+                    // life progress. The engine sets the particle's rgb at spawn from the 0x16
+                    // base / 0x17 variance and has no per-frame rgb track path, so the blocks
+                    // arm nothing and only consume.
+                    SEC3_OPCODE_COLOR_RGB_PROGRESS_FIRST..=SEC3_OPCODE_COLOR_RGB_PROGRESS_LAST => {}
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: the specular
+                    // rotation.y/z and color.a ProgressValueUpdaters: no payload, they sample
+                    // the sec2 specular tracks. The engine does not model the specular
+                    // element, so the blocks arm nothing and only consume.
+                    SEC3_OPCODE_SPECULAR_ROT_Y_PROGRESS
+                    | SEC3_OPCODE_SPECULAR_ROT_Z_PROGRESS
+                    | SEC3_OPCODE_SPECULAR_COLOR_A_PROGRESS => {}
                     // research/xim ParticleUpdaters.kt ColorTransformApplier: no payload —
-                    // color += (transform shr 7) × (0.5 × dt) per frame. The engine does
-                    // not model the color transform's application, so the block arms
-                    // nothing and only consumes.
+                    // color += (transform shr 7) * (0.5 * dt) per frame. The engine does
+                    // not model the transform's application, so the block arms nothing and
+                    // only consumes.
                     SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {}
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x25/0x33 —
-                    // ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload, they
-                    // emit/update the sec2 0x44/0x53 child generator per particle. The
-                    // engine has no child-particle path, so the blocks arm nothing and
-                    // only consume.
-                    0x25 | 0x33 => {}
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: ChildGeneratorBasicUpdater
+                    // / ChildGeneratorUpdater: no payload, they emit/update the sec2 child
+                    // generator per particle. The engine has no child-particle path, so the
+                    // blocks arm nothing and only consume.
+                    SEC3_OPCODE_CHILD_GENERATOR_BASIC | SEC3_OPCODE_CHILD_GENERATOR => {}
                     // research/xim ParticleUpdaters.kt VelocityRotationUpdater: no payload
-                    // — converts all velocity into the +x axis and copies the particle's
-                    // rotation into the velocity rotation. The engine has no
-                    // velocityRotation, so the block arms nothing and only consumes.
+                    // converts all velocity into the +x axis and copies the particle's
+                    // rotation into the velocity rotation. The engine has no velocityRotation,
+                    // so the block arms nothing and only consumes.
                     SEC3_OPCODE_VELOCITY_ROTATION_UPDATER => {}
-                    // research/xim ParticleUpdaters.kt PointListPositionUpdater: no
-                    // payload — samples the sec2 0x54 point-list spline at the particle's
+                    // research/xim ParticleUpdaters.kt PointListPositionUpdater: no payload
+                    // samples the SEC2_OPCODE_POINT_LIST_POSITION spline at the particle's
                     // progress and copies it to the position. The engine has no point-list
                     // spline runtime, so the block arms nothing and only consumes.
                     SEC3_OPCODE_POINT_LIST_POSITION => {}
-                    // research/xim ParticleUpdaters.kt VelocityRotator: three floats,
-                    // the rotateAmount added to the velocity rotation × (0.5 × dt) per
-                    // frame. The engine has no velocityRotation, so parse-only.
-                    0x26 if payload + 12 <= body.len() => {
+                    // research/xim ParticleUpdaters.kt VelocityRotator: the rotateAmount
+                    // added to the velocity rotation * (0.5 * dt) per frame. The engine has
+                    // no velocityRotation, so parse-only.
+                    SEC3_OPCODE_VELOCITY_ROTATOR if payload + 12 <= body.len() => {
                         velocity_rotator = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — these
-                    // carry no payload; they mark which 0x60..0x63 track drives its channel.
+                    // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater
+                    // no payload; marks which 0x60..0x63 track drives its channel.
                     0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
                     // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater.
                     0x45 => moon_phase_sprite = true,
-                    // research/xim ParticleUpdaters.kt SpriteSheetFrameUpdater: no payload — the
-                    // flipbook frame advances across the particle's life, which the engine's
-                    // flipbook_index already does for every SpriteSheet (retail's ElemIdle
-                    // case 0x0D accumulator is the same sequence).
+                    // research/xim ParticleUpdaters.kt SpriteSheetFrameUpdater: no payload
+                    // the flipbook frame advances across the particle's life, which the
+                    // engine's flipbook_index already does for every SpriteSheet (retail's
+                    // ElemIdle case 0x0D accumulator is the same sequence).
                     SEC3_OPCODE_SPRITE_SHEET_FRAME => {}
-                    // research/xim ParticleUpdaters.kt NoOpParticleUpdater: no payload — retail's
-                    // ElemIdle case 0x0E computes the keyframe progress as 1.0 - (Life / field_114),
-                    // the elapsed-life fraction the engine's `progress` (age/life, particle_sim.rs)
-                    // already is, so the block arms nothing and only consumes.
+                    // research/xim ParticleUpdaters.kt NoOpParticleUpdater: no payload
+                    // retail's ElemIdle case 0x0E computes the keyframe progress as
+                    // 1.0 - (Life / field_114), the elapsed-life fraction the engine's
+                    // `progress` (age/life, particle_sim.rs) already is, so the block arms
+                    // nothing and only consumes.
                     SEC3_OPCODE_NO_OP => {}
-                    // research/xim ParticleGeneratorParser.kt sec3Handler 0x1B — the color.a
-                    // ProgressValueUpdater: no payload. It samples the sec2 0x2D alpha track at
-                    // life progress, which particle_draw already does from def.alpha_track, so the
-                    // block arms nothing and only consumes.
+                    // research/xim ParticleGeneratorParser.kt sec3Handler: the color.a
+                    // ProgressValueUpdater: no payload. It samples the sec2 alpha track at
+                    // life progress, which particle_draw already does from def.alpha_track, so
+                    // the block arms nothing and only consumes.
                     SEC3_OPCODE_ALPHA_UPDATER => {}
-                    // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: expectZero32
-                    // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
+                    // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: the zero u32
+                    // is at payload+0, then 8 RGBA quads (u8x4, 0..=255).
                     0x4E if payload + 4 + 4 * DAYS_OF_WEEK <= body.len() => {
                         day_of_week_color =
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
@@ -1609,9 +1652,10 @@ impl ParticleGeneratorDef {
                         moon_phase_color =
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
                     }
-                    // research/xim ParticleUpdaters.kt CameraShakeUpdater: near, far, and
-                    // shakeFactor only in the 4-word form (the opCodeSize == 4 branch).
-                    0x5F if payload + 8 <= body.len() => {
+                    // research/xim ParticleUpdaters.kt CameraShakeUpdater: near and far
+                    // always; shakeFactor only in the 4-word form (the opCodeSize == 4
+                    // branch).
+                    SEC3_OPCODE_CAMERA_SHAKE_UPDATER if payload + 8 <= body.len() => {
                         let shake_factor = if size_words == 4 && payload + 12 <= body.len() {
                             f32_le(body, payload + 8)
                         } else {
@@ -2079,6 +2123,19 @@ pub(crate) mod test_support {
         v
     }
 
+    /// The block-relative offset of the StandardParticleSetup linked-data-kind byte:
+    /// the 4-word chunk header plus the 29th payload byte (research/xim
+    /// ParticleGeneratorSettings.kt LinkedDataType).
+    pub(crate) const LINKED_DATA_KIND_OFFSET: usize = 4 + 29;
+
+    /// A StandardParticleSetup block whose linked-data-kind byte selects `kind`;
+    /// every other byte is zero.
+    pub(crate) fn setup_with_link(kind: u8) -> Vec<u8> {
+        let mut setup = op(OPCODE_STANDARD_SETUP, 12, &[]);
+        setup[LINKED_DATA_KIND_OFFSET] = kind;
+        setup
+    }
+
     /// A generator whose section-3 stream carries the celestial updaters: the moon-phase
     /// sprite-sheet marker when `moon_phase_sprite`, then the day-of-week and moon-phase color
     /// tables (each an expectZero32 followed by RGBA u8 quads).
@@ -2087,8 +2144,7 @@ pub(crate) mod test_support {
         day_of_week: &[[u8; 4]; DAYS_OF_WEEK],
         moon_phase: &[[u8; 4]; MOON_PHASES],
     ) -> Vec<u8> {
-        let mut sec2 = op(0x01, 12, &[]);
-        sec2[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut body = build(&sec2, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_at = body.len();
@@ -2122,15 +2178,14 @@ mod tests {
 
     #[test]
     fn parses_particle_generator_header_and_setup() {
-        let mut setup = op(0x01, 12, &[]);
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         // billboard XYZ
         setup[4] = 0x01;
         // mesh id at payload+8 (payload = cursor+4 = setup index 4)
         setup[4 + 8..4 + 12].copy_from_slice(b"kir1");
         // base position y at payload+20
         setup[4 + 20..4 + 24].copy_from_slice(&0.2f32.to_le_bytes());
-        // linked-data type at payload+29 = particle; max life u16 at payload+30
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        // max life u16 at payload+30
         setup[4 + 30..4 + 32].copy_from_slice(&36u16.to_le_bytes());
 
         let mut sec2 = setup;
@@ -2176,8 +2231,7 @@ mod tests {
     fn parses_section3_uv_scroll_and_accel() {
         // Minimal particle setup in section 2, terminated, then a section-3 stream at
         // body[0x78] with TextureCoordinateUpdater 0x27/0x28 and VelocityAccelerator 0x03.
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
@@ -2212,8 +2266,7 @@ mod tests {
     // not a gate.
     #[test]
     fn velocity_accelerators_06_09_sum_into_the_03_accel() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
@@ -2251,8 +2304,7 @@ mod tests {
     // real DAT, which is what left the moon on hand-tuned fallback tints.
     #[test]
     fn celestial_updaters_come_from_section3_only() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
 
         let dow = |base: u8| {
             let mut p = vec![0u8; 4];
@@ -2301,8 +2353,7 @@ mod tests {
     // time-of-day RGBA curves; the section-3 ClockValueUpdater 0x3C..0x3F arms each channel.
     #[test]
     fn tod_color_tracks_pair_setup_with_updater() {
-        let mut sec2 = op(0x01, 12, &[]);
-        sec2[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         for (opcode, id) in [(0x60u8, b"ksr1"), (0x61, b"ksg1"), (0x62, b"ksb1")] {
             let mut p = vec![0u8; 4];
             p.extend_from_slice(id);
@@ -2377,8 +2428,7 @@ mod tests {
 
     #[test]
     fn no_section3_leaves_defaults() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.uv_scroll, [0.0, 0.0]);
@@ -2387,8 +2437,7 @@ mod tests {
 
     #[test]
     fn gen_flags_decode_auto_run_and_continuous() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let body = build(&setup, 1, GEN_FLAG_AUTO_RUN | GEN_FLAG_CONTINUOUS | 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(def.auto_run);
@@ -2411,8 +2460,7 @@ mod tests {
     // curtains: La Theine's `~1ra` authors 299 and an 8-bit read yields 43.
     #[test]
     fn particle_count_is_nine_bits_wide() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let def = ParticleGeneratorDef::parse(&build(&setup, 30, 0x2000_112B))
             .unwrap()
             .unwrap();
@@ -2424,13 +2472,11 @@ mod tests {
 
     #[test]
     fn non_particle_setup_is_none() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_POINT_LIGHT;
+        let setup = setup_with_link(LINKED_DATA_POINT_LIGHT);
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
 
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_NULL_PARTICLE;
+        let setup = setup_with_link(LINKED_DATA_NULL_PARTICLE);
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
     }
@@ -2439,9 +2485,8 @@ mod tests {
     /// `mesh_kind == SpriteSheet`, not just the `LINKED_DATA_STATIC_MESH` kind.
     #[test]
     fn sprite_sheet_setup_parses_with_mesh_kind() {
-        let mut setup = op(0x01, 12, &[]);
+        let mut setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         setup[4 + 8..4 + 12].copy_from_slice(b"fir ");
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
         setup[4 + 30..4 + 32].copy_from_slice(&24u16.to_le_bytes());
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -2456,8 +2501,7 @@ mod tests {
     // the blocks after it.
     #[test]
     fn sprite_sheet_initializer_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup;
         sec2.extend(op(SEC2_OPCODE_SPRITE_SHEET_INIT, 2, &0u32.to_le_bytes()));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2493,8 +2537,7 @@ mod tests {
     // advances the frame, so the arm only consumes the block.
     #[test]
     fn sprite_sheet_frame_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2528,8 +2571,7 @@ mod tests {
     // as for 0x0D.
     #[test]
     fn no_op_particle_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2561,8 +2603,7 @@ mod tests {
     // The flag is set only while the block is present, so a generator without it stays off.
     #[test]
     fn position_updater_flag_arms_only_with_the_block() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2603,8 +2644,7 @@ mod tests {
     // nothing and only consumes.
     #[test]
     fn alpha_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2636,8 +2676,7 @@ mod tests {
     // sprite-sheet initializer and the end of section 2.
     #[test]
     fn foot_mark_setup_sets_the_flag_without_payload() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup;
         sec2.extend(op(SEC2_OPCODE_FOOT_MARK, 1, &[]));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2673,8 +2712,7 @@ mod tests {
     // OscillationSetup), ahead of its 0x3E/0x40 acceleration setup in the section-2 stream.
     #[test]
     fn oscillation_setup_sets_the_flag_without_payload() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2714,8 +2752,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_z_reads_the_two_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2737,8 +2774,7 @@ mod tests {
     // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_x_reads_the_two_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2760,8 +2796,7 @@ mod tests {
     // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_y_reads_the_two_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2785,8 +2820,7 @@ mod tests {
     // 0x3E acceleration, behind the 0x3D marker.
     #[test]
     fn oscillation_applier_x_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.44f32.to_le_bytes());
         p.extend_from_slice(&0.6f32.to_le_bytes());
@@ -2820,8 +2854,7 @@ mod tests {
     // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_z_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.9f32.to_le_bytes());
         p.extend_from_slice(&0.5f32.to_le_bytes());
@@ -2855,8 +2888,7 @@ mod tests {
     // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_y_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.44f32.to_le_bytes());
         p.extend_from_slice(&0.6f32.to_le_bytes());
@@ -2890,8 +2922,7 @@ mod tests {
     // VelocityVarianceSetup), after its generator's 0x02.
     #[test]
     fn velocity_variance_reads_the_three_axis_bounds() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let axis = |values: [f32; 3], block: &mut Vec<u8>, opcode: u8| {
             let mut bytes = Vec::new();
@@ -2920,8 +2951,7 @@ mod tests {
     // RelativeVelocitySetup), after its generator's 0x02 base-velocity block.
     #[test]
     fn relative_velocity_reads_the_single_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.5f32, -0.25, 0.0] {
@@ -2944,8 +2974,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
     #[test]
     fn relative_velocity_variance_reads_the_single_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x41, 2, &0.2f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -2963,8 +2992,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ReverseDisplacementSetup).
     #[test]
     fn reverse_displacement_reads_the_single_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x67, 2, &0.0f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -2982,8 +3010,7 @@ mod tests {
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x29).
     #[test]
     fn scale_z_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x29, 4, &[0, 0, 0, 0, b'k', b'1', b'z', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3002,8 +3029,7 @@ mod tests {
     // a 0x55 SpecularParams record in the same generator.
     #[test]
     fn specular_rot_y_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5A, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'y']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3021,8 +3047,7 @@ mod tests {
     // carries the section-3 0x5F CameraShakeUpdater.
     #[test]
     fn camera_shake_setup_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 20];
         payload[4..8].copy_from_slice(b"shak");
@@ -3042,8 +3067,7 @@ mod tests {
     // behind a sec2 0x82).
     #[test]
     fn camera_shake_updater_reads_the_payload_shape() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let vec3 = |x: f32, y: f32, z: f32| -> [u8; 12] {
             let mut p = [0u8; 12];
             p[0..4].copy_from_slice(&x.to_le_bytes());
@@ -3082,8 +3106,7 @@ mod tests {
     // HazeOffsetInitializer).
     #[test]
     fn haze_offset_reads_the_second_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&0.5f32.to_le_bytes());
@@ -3103,8 +3126,7 @@ mod tests {
     // ParticleInitializers.kt ParentRotateConfig).
     #[test]
     fn parent_rotate_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x47, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3121,8 +3143,7 @@ mod tests {
     // class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn parent_rotate_twin_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x79, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3140,8 +3161,7 @@ mod tests {
     // BatchingSetup).
     #[test]
     fn batching_setup_is_a_single_word_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x56, 2, &[0, 0, 0, 0]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3158,8 +3178,7 @@ mod tests {
     // ParticleInitializers.kt ParentTexCoordConfig).
     #[test]
     fn parent_tex_coord_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x4A, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3176,8 +3195,7 @@ mod tests {
     // point list DAT id] (research/xim ParticleInitializers.kt PointListPositionSetup).
     #[test]
     fn point_list_position_reads_the_two_dat_ids() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u32.to_le_bytes());
@@ -3203,8 +3221,7 @@ mod tests {
     // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn velocity_y_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x51,
@@ -3225,8 +3242,7 @@ mod tests {
     // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_rot_x_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x59,
@@ -3247,8 +3263,7 @@ mod tests {
     // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_color_g_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x5D,
@@ -3269,8 +3284,7 @@ mod tests {
     // ParticleInitializers.kt ParentColorConfig).
     #[test]
     fn parent_color_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x48, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3287,8 +3301,7 @@ mod tests {
     // ParticleInitializers.kt ParentScaleConfig).
     #[test]
     fn parent_scale_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x49, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3305,8 +3318,7 @@ mod tests {
     // the element's velocity dampener (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn velocity_dampener_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x69, 4, &[0, 0, 0, 0, b'v', b'd', b'm', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3323,8 +3335,7 @@ mod tests {
     // ParticleUpdaters.kt VelocityDampener).
     #[test]
     fn velocity_dampener_reads_the_two_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&0.9f32.to_le_bytes());
         payload[4..8].copy_from_slice(&0.25f32.to_le_bytes());
@@ -3345,8 +3356,7 @@ mod tests {
     // ParticleUpdaters.kt VelocityRotator).
     #[test]
     fn velocity_rotator_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = [0u8; 12];
         payload[0..4].copy_from_slice(&0.1f32.to_le_bytes());
         payload[4..8].copy_from_slice(&(-0.2f32).to_le_bytes());
@@ -3368,8 +3378,7 @@ mod tests {
     // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44), behind a sec2 0x69.
     #[test]
     fn dampening_factor_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3402,8 +3411,7 @@ mod tests {
     // sec3Handler), behind their sec2 scale track.
     #[test]
     fn scale_progress_updaters_consume_the_blocks_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3439,8 +3447,7 @@ mod tests {
     // track.
     #[test]
     fn color_rgb_progress_updaters_consume_the_blocks_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3476,8 +3483,7 @@ mod tests {
     // behind their sec2 specular track.
     #[test]
     fn specular_progress_updaters_consume_the_blocks_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3512,8 +3518,7 @@ mod tests {
     // ParticleUpdaters.kt ColorTransformApplier).
     #[test]
     fn color_transform_applier_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3545,8 +3550,7 @@ mod tests {
     // their sec2 child link.
     #[test]
     fn child_generator_updaters_consume_the_blocks_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3580,8 +3584,7 @@ mod tests {
     // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater).
     #[test]
     fn velocity_rotation_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3613,8 +3616,7 @@ mod tests {
     // PointListPositionUpdater), paired with the sec2 0x54 setup.
     #[test]
     fn point_list_position_updater_consumes_the_block_without_state() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3644,8 +3646,7 @@ mod tests {
     // (0, 1)] (research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup).
     #[test]
     fn fixed_point_position_variance_reads_the_point_list_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 12];
         payload[4..8].copy_from_slice(b"pts0");
@@ -3665,8 +3666,7 @@ mod tests {
     // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn fixed_point_position_variance_twin_reads_the_point_list_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 12];
         payload[4..8].copy_from_slice(b"pts1");
@@ -3687,8 +3687,7 @@ mod tests {
     // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn child_generator_twin_reads_the_child_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x53, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'2']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3706,8 +3705,7 @@ mod tests {
     // element's rotation z (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_rot_z_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5B, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'z']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3724,8 +3722,7 @@ mod tests {
     // element's color alpha (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_color_a_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5F, 4, &[0, 0, 0, 0, b's', b'p', b'a', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3743,8 +3740,7 @@ mod tests {
     // a child by a sec2 0x44 link.
     #[test]
     fn parent_position_copy_is_a_no_payload_marker() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x45, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3761,8 +3757,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ParentVelocityConfig).
     #[test]
     fn parent_velocity_reads_the_single_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x46, 2, &2.5f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3779,8 +3774,7 @@ mod tests {
     // ParticleInitializers.kt ChildGeneratorSetup).
     #[test]
     fn child_generator_setup_reads_the_child_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x44, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3797,8 +3791,7 @@ mod tests {
     // element's red channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_r_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2A, 4, &[0, 0, 0, 0, b'c', b'r', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3815,8 +3808,7 @@ mod tests {
     // element's green channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_g_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2B, 4, &[0, 0, 0, 0, b'c', b'g', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3833,8 +3825,7 @@ mod tests {
     // element's blue channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_b_track_reads_the_keyframe_id() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2C, 4, &[0, 0, 0, 0, b'c', b'b', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3852,8 +3843,7 @@ mod tests {
     // radian angles.
     #[test]
     fn incremental_rotation_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x3B, 4, &{
             let mut p = Vec::new();
@@ -3877,8 +3867,7 @@ mod tests {
     // RotationVarianceInitializer); the payloads are radian angles.
     #[test]
     fn rotation_variance_reads_the_three_axis_bounds() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.1f32, 0.2, 0.3] {
@@ -3906,8 +3895,7 @@ mod tests {
     // allocationOffset binds it to the rotation transform).
     #[test]
     fn rotation_velocity_variance_reads_the_three_axis_bounds() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut rate: Vec<u8> = Vec::new();
         for f in [0.0f32, 0.01, 0.0] {
@@ -3934,8 +3922,7 @@ mod tests {
     // axis per particle (research/xim ParticleInitializers.kt — scale += posRand(v)).
     #[test]
     fn single_scale_variance_reads_the_single_float() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.1f32, 0.2, 0.3] {
@@ -3959,8 +3946,7 @@ mod tests {
     // field_EC.x/y/z += ufrand(payload)), behind a 0x0F base scale.
     #[test]
     fn scale_variance_reads_the_three_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = Vec::new();
         for f in [0.5f32, 0.25, 0.125] {
             payload.extend_from_slice(&f.to_le_bytes());
@@ -3969,9 +3955,10 @@ mod tests {
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.scale_variance, Some([0.5, 0.25, 0.125]));
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
-            .unwrap()
-            .unwrap();
+        let plain =
+            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
+                .unwrap()
+                .unwrap();
         assert_eq!(plain.scale_variance, None);
     }
 
@@ -3989,7 +3976,7 @@ mod tests {
             p.extend_from_slice(&raw_steps.to_le_bytes());
             p
         };
-        let mut sec2 = mesh_setup();
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         sec2.extend(op(0x1F, 12, &payload(1, 4)));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
             .unwrap()
@@ -4005,7 +3992,7 @@ mod tests {
         assert!(sp.camera_oriented);
         assert_eq!(sp.azimuth_steps, 5);
 
-        let mut sec2 = mesh_setup();
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         sec2.extend(op(0x1F, 12, &payload(0, 0)));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
             .unwrap()
@@ -4014,9 +4001,10 @@ mod tests {
         assert!(!sp.camera_oriented);
         assert_eq!(sp.azimuth_steps, 0, "raw 0 is the random-azimuth case");
 
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
-            .unwrap()
-            .unwrap();
+        let plain =
+            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
+                .unwrap()
+                .unwrap();
         assert_eq!(plain.spherical_full, None);
     }
 
@@ -4025,7 +4013,7 @@ mod tests {
     // elapsedFrames; retail's ElemGenerate shares the 0x0B/0x12 memcpy case).
     #[test]
     fn scale_velocity_reads_the_three_axis_rate() {
-        let mut sec2 = mesh_setup();
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         sec2.extend(op(0x12, 4, &vec3_payload([0.0, 0.01, 0.0])));
         let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
@@ -4046,15 +4034,19 @@ mod tests {
     // adds frand(bounds) to the transform's velocity).
     #[test]
     fn scale_velocity_variance_reads_the_three_floats() {
-        let mut sec2 = mesh_setup();
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         sec2.extend(op(0x13, 4, &vec3_payload([0.0, 0.005, 0.0])));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
             .unwrap();
         assert_eq!(def.scale_velocity_variance, Some([0.0, 0.005, 0.0]));
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
-            .unwrap()
-            .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            120,
+            0x1400,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.scale_velocity_variance, None);
     }
 
@@ -4063,9 +4055,8 @@ mod tests {
     #[test]
     fn render_state_flag_selects_ignore_texture_alpha_element() {
         let element = |render_state: u16| {
-            let mut setup = op(0x01, 12, &[]);
+            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
-            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
             let body = build(&setup, 1, 1);
             ParticleGeneratorDef::parse(&body)
                 .unwrap()
@@ -4082,9 +4073,8 @@ mod tests {
     #[test]
     fn render_state_flag_0x0200_disables_fog() {
         let fogged = |render_state: u16| {
-            let mut setup = op(0x01, 12, &[]);
+            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
-            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
             let body = build(&setup, 1, 1);
             ParticleGeneratorDef::parse(&body)
                 .unwrap()
@@ -4103,10 +4093,9 @@ mod tests {
     #[test]
     fn render_state_and_billboard_words_select_draw_priority_and_depth_write() {
         let parsed = |billboard: u16, render_state: u16| {
-            let mut setup = op(0x01, 12, &[]);
+            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
             setup[4..4 + 2].copy_from_slice(&billboard.to_le_bytes());
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
-            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
             let body = build(&setup, 1, 1);
             let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
             (def.draw_priority, def.depth_write)
@@ -4124,14 +4113,12 @@ mod tests {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — one float, the sort offset.
     #[test]
     fn opcode_0x30_sets_the_sort_offset() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         setup.extend(op(0x30, 2, &7.5f32.to_le_bytes()));
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, 7.5);
-        let mut plain = op(0x01, 12, &[]);
-        plain[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let plain = setup_with_link(LINKED_DATA_STATIC_MESH);
         let body = build(&plain, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, 0.0);
@@ -4142,8 +4129,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ProjectionBiasInitializer); no 0x30 co-occurrence.
     #[test]
     fn projection_bias_reads_the_two_floats() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = Vec::new();
         for f in [-0.5f32, 2.0] {
             payload.extend_from_slice(&f.to_le_bytes());
@@ -4153,9 +4139,10 @@ mod tests {
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, -0.5);
         assert_eq!(def.projection_bias, Some([-0.5, 2.0]));
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
-            .unwrap()
-            .unwrap();
+        let plain =
+            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
+                .unwrap()
+                .unwrap();
         assert_eq!(plain.sort_offset, 0.0);
         assert_eq!(plain.projection_bias, None);
     }
@@ -4165,8 +4152,7 @@ mod tests {
     // behind a 0x16 base color.
     #[test]
     fn color_variance_reads_the_four_bytes() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         setup.extend(op(0x17, 2, &[20u8, 10, 5, 0]));
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4174,9 +4160,10 @@ mod tests {
             def.color_variance,
             Some([20.0 / 255.0, 10.0 / 255.0, 5.0 / 255.0, 0.0])
         );
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
-            .unwrap()
-            .unwrap();
+        let plain =
+            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
+                .unwrap()
+                .unwrap();
         assert_eq!(plain.color_variance, None);
     }
 
@@ -4186,8 +4173,7 @@ mod tests {
     // 0x16 base color.
     #[test]
     fn color_transform_reads_the_four_i16s() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = Vec::new();
         for v in [-160i16, -160, 0, 0] {
             payload.extend_from_slice(&v.to_le_bytes());
@@ -4196,9 +4182,10 @@ mod tests {
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.color_transform, Some([-160, -160, 0, 0]));
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 1, 1))
-            .unwrap()
-            .unwrap();
+        let plain =
+            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
+                .unwrap()
+                .unwrap();
         assert_eq!(plain.color_transform, None);
     }
 
@@ -4206,8 +4193,7 @@ mod tests {
     // color transform (research/xim ParticleUpdaters.kt ColorTransformModifier).
     #[test]
     fn color_transform_modifier_reads_the_four_i16s() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut payload = Vec::new();
         for v in [1i16, -2, 3, 0] {
             payload.extend_from_slice(&v.to_le_bytes());
@@ -4223,12 +4209,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.color_transform_modifier, None);
-    }
-
-    fn mesh_setup() -> Vec<u8> {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
-        setup
     }
 
     fn vec3_payload(v: [f32; 3]) -> Vec<u8> {
@@ -4249,7 +4229,7 @@ mod tests {
     #[test]
     fn rotation_velocity_spins_only_with_the_sec3_updater() {
         const BND0_YAW_PER_FRAME: f32 = -0.015_707_5;
-        let mut sec2 = mesh_setup();
+        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
         sec2.extend(op(0x0B, 4, &vec3_payload([0.0, BND0_YAW_PER_FRAME, 0.0])));
         let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
@@ -4267,7 +4247,7 @@ mod tests {
         assert_eq!(spinning.spin(), Some([0.0, BND0_YAW_PER_FRAME, 0.0]));
 
         let updater_only = ParticleGeneratorDef::parse(&with_section(
-            build(&mesh_setup(), 120, 0x1400),
+            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
             0x78,
             &op(0x05, 1, &[]),
         ))
@@ -4284,16 +4264,28 @@ mod tests {
     // Point layer carries.
     #[test]
     fn section_4_relife_opcode_is_read() {
-        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
-            .unwrap()
-            .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            120,
+            0x1400,
+        ))
+        .unwrap()
+        .unwrap();
         assert!(!plain.relife_on_expiry);
 
-        let body = with_section(build(&mesh_setup(), 120, 0x1400), 0x7C, &op(0x05, 1, &[]));
+        let body = with_section(
+            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            0x7C,
+            &op(0x05, 1, &[]),
+        );
         let relife = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(relife.relife_on_expiry);
 
-        let other = with_section(build(&mesh_setup(), 120, 0x1400), 0x7C, &op(0x04, 1, &[]));
+        let other = with_section(
+            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            0x7C,
+            &op(0x04, 1, &[]),
+        );
         assert!(
             !ParticleGeneratorDef::parse(&other)
                 .unwrap()
@@ -4308,7 +4300,7 @@ mod tests {
     #[test]
     fn section_4_emit_child_opcode_is_read() {
         let body = with_section(
-            build(&mesh_setup(), 120, 0x1400),
+            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
             0x7C,
             &op(
                 SEC4_OPCODE_EMIT_CHILD,
@@ -4333,7 +4325,7 @@ mod tests {
     /// `bnd0`'s StandardSetup carries the specular selector in the high u16 of its setup dword.
     #[test]
     fn specular_selector_and_params_are_read() {
-        let mut setup = mesh_setup();
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         setup[4 + 2..4 + 4].copy_from_slice(&0x0101u16.to_le_bytes());
         let mut payload = vec3_payload([0.0349, -0.5410, 0.6108]);
         payload.extend_from_slice(b"nami");
@@ -4354,9 +4346,13 @@ mod tests {
         assert_eq!(spec.color_bgra, [0xAA, 0xAA, 0x8C, 0x80]);
         assert_eq!(spec.flags, 3);
 
-        let common = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
-            .unwrap()
-            .unwrap();
+        let common = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            120,
+            0x1400,
+        ))
+        .unwrap()
+        .unwrap();
         assert!(!common.specular_element);
         assert_eq!(common.specular, None);
     }
@@ -4366,8 +4362,7 @@ mod tests {
     #[test]
     fn blend_byte_survives_the_blend_func_collapse() {
         let parsed = |p0: u8| {
-            let mut setup = op(0x01, 12, &[]);
-            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
             setup.extend(op(0x1E, 2, &[p0, 0, 0, 0]));
             let body = build(&setup, 1, 1);
             let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4380,8 +4375,7 @@ mod tests {
 
     #[test]
     fn static_mesh_setup_reports_static_mesh_kind() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.mesh_kind, ParticleMeshKind::StaticMesh);
@@ -4389,9 +4383,8 @@ mod tests {
 
     #[test]
     fn singleton_when_max_life_zero() {
-        let mut setup = op(0x01, 12, &[]);
+        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         setup[4 + 8..4 + 12].copy_from_slice(b"sea0");
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         // max life left at 0
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4402,8 +4395,7 @@ mod tests {
     // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020).
     #[test]
     fn attach_flags_split_type_and_joints() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
 
         let body = build_attached(&setup, 1, 1, 0x5402, ATTACH_SOURCE_ORIENTED);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4577,9 +4569,8 @@ mod tests {
     // silent everywhere instead of loud everywhere inside far.
     #[test]
     fn sound_setup_reads_far_then_near_and_ignores_the_third_word() {
-        let mut setup = op(0x01, 12, &[]);
+        let mut setup = setup_with_link(LINKED_DATA_SOUND);
         setup[4 + 8..4 + 12].copy_from_slice(b"2024");
-        setup[4 + 29] = LINKED_DATA_SOUND;
         setup[4 + 16..4 + 20].copy_from_slice(&(-293.5f32).to_le_bytes());
         let mut p = Vec::new();
         p.extend_from_slice(&50.0f32.to_le_bytes());
@@ -4611,8 +4602,7 @@ mod tests {
 
     #[test]
     fn emit_cull_reads_max_then_min_then_unlink_bit_from_section_1() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&40.0f32.to_le_bytes());
         p.extend_from_slice(&(-1.0f32).to_le_bytes());
@@ -4642,8 +4632,7 @@ mod tests {
     // ParticleGeneratorUpdaters.kt AssociationUpdater read.
     #[test]
     fn association_follow_reads_the_flags_and_factor_from_section_1() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let parse_cfg = |cfg: u32| {
             let mut sec1 = op(0x04, 2, &[0, 0, 0, 0]);
             sec1.extend(op(SEC1_OPCODE_ASSOCIATION, 2, &cfg.to_le_bytes()));
@@ -4701,8 +4690,7 @@ mod tests {
 
     #[test]
     fn particle_setups_are_not_sound_generators() {
-        let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
         let body = build(&setup, 1, 1);
         assert!(SoundGeneratorDef::parse(&body).unwrap().is_none());
     }

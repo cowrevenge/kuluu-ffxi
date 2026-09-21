@@ -739,6 +739,9 @@ mod tests {
                 }
                 profile::SELECT_SERVICE => {
                     self.mock.borrow_mut().select_payload = payload;
+                    // The mock answers with a wire body of the width polcore
+                    // reads, so the payload under the trailer is what the
+                    // client actually parses.
                     let mut reply = [0u8; authcode::SELECT_REPLY_LEN];
                     reply[0x00] = MOCK_CONTENT_INDEX;
                     reply[0x01] = 1;

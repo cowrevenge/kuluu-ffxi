@@ -212,9 +212,13 @@ impl CommunityRequest {
     }
 }
 
-/// The world-select reply, which is 0x80 bytes of which the client reads the
-/// leading sixteen and one flag near the end.
-pub const SELECT_REPLY_LEN: usize = 0x80;
+/// The world-select reply body as it arrives. polcore reads a fixed 0x80
+/// bytes for it, which like every declared body length counts the four-byte
+/// checksum the trailer carries.
+pub const SELECT_REPLY_WIRE_LEN: usize = 0x80;
+/// What is left once the trailer is stripped, which is what `parse` reads.
+/// The client reads the leading sixteen bytes of it and one flag near the end.
+pub const SELECT_REPLY_LEN: usize = SELECT_REPLY_WIRE_LEN - crate::profile::BODY_CHECKSUM_LEN;
 /// A content entry is addressed by a six-bit ordinal, so an index at or above
 /// this is not one.
 const CONTENT_INDEX_LIMIT: u8 = 0x40;
@@ -435,7 +439,22 @@ mod tests {
         assert_eq!(decoded.content_index, None);
         assert_eq!(decoded.world_index, 4);
         assert_eq!(decoded.confirm(&a_request()).content_index, 0x1C);
-        assert!(SelectReply::parse(&reply[..0x7F]).is_err());
+        assert!(SelectReply::parse(&reply[..SELECT_REPLY_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn the_reply_is_sized_by_its_payload_not_its_wire_body() {
+        // polcore reads a fixed 0x80-byte body, and like every declared
+        // length that counts the checksum trailer, so a reply that parsed
+        // only at the wire width would reject every real one.
+        assert_eq!(
+            SELECT_REPLY_LEN + crate::profile::BODY_CHECKSUM_LEN,
+            SELECT_REPLY_WIRE_LEN
+        );
+        let wire = crate::profile::seal_body(&[0u8; SELECT_REPLY_LEN]);
+        assert_eq!(wire.len(), SELECT_REPLY_WIRE_LEN);
+        let payload = crate::profile::open_body(&wire).unwrap();
+        assert!(SelectReply::parse(&payload).is_ok());
     }
 
     #[test]

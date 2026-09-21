@@ -1,5 +1,13 @@
 // vendor/server/src/map/enums/action/category.h ActionCategory - `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
+// vendor/server/src/map/enums/action/category.h ActionCategory::RangedFinish - the
+// shot motion after a completed aim.
+pub const CATEGORY_RANGED_FINISH: u8 = 2;
+// vendor/server/src/map/action/interrupts.cpp RangedInterrupt - an interrupted aim
+// re-issues the ranged-start category with this per-target animation id
+// (ActionAnimation::SkillInterrupt, vendor/server/src/map/enums/action/animation.h)
+// alongside the "splg" FourCC.
+pub const RANGED_INTERRUPT_ANIMATION: u16 = 0x1FC;
 // The finish categories that key a completion effect DAT (scheduler_runtime's
 // action_dat_file_id) and the start categories that carry a cast-loop routine (the "ca??" family).
 pub const CATEGORY_SKILL_FINISH: u8 = 3;

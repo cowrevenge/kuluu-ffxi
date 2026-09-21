@@ -2325,6 +2325,10 @@ fn death_collapse_clip(routines: &HashMap<DatId, Scheduler>) -> Option<(DatId, f
 
 pub(crate) use ffxi_vocab::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
+// The actor's shot motion on a ranged finish, one-shot for every weapon type.
+// research/xim/src/jsMain/kotlin/xim/poc/Actor.kt onRangedAttack.
+const RANGED_FINISH_ROUTINE: &str = "shlg";
+
 // vendor/server/src/map/enums/four_cc.h FourCC - SkillUse/ItemUse/RangedStart carry the
 // routine's FourCC in BATTLE2 cmd_arg ("cate"/"cait"/"calg"); "sp??" is that category's
 // interrupt. A payload that is not such a FourCC falls back to the category's hard-coded retail
@@ -2370,6 +2374,8 @@ pub(crate) fn action_routine(
                 .unwrap_or_else(|| DatId::from_str("cast"));
             (id, true)
         }
+
+        ffxi_proto::melee::CATEGORY_RANGED_FINISH => (DatId::from_str(RANGED_FINISH_ROUTINE), false),
 
         _ => return None,
     })
@@ -4417,7 +4423,13 @@ pub fn dispatch_action_overlay(
         let start = matches!(action_kind, 7 | 9 | 10 | 12 | MAGIC_START_CATEGORY)
             .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
             .flatten();
-        if start.is_some_and(|m| m.interrupt) {
+        // An interrupted aim re-issues the ranged-start category carrying the
+        // SkillInterrupt animation id (vendor/server/src/map/action/interrupts.cpp
+        // RangedInterrupt); matching the animation drops the aim even for a
+        // payload whose FourCC is not the "sp??" marker the check above keys on.
+        let ranged_interrupt = action_kind == ffxi_proto::melee::CATEGORY_RANGED_START
+            && animation == Some(ffxi_proto::melee::RANGED_INTERRUPT_ANIMATION);
+        if start.is_some_and(|m| m.interrupt) || ranged_interrupt {
             // Only a pose that outlives its own clip needs dropping; a one-shot has already
             // finished by the time an interrupt could matter (interrupts.cpp MagicInterrupt).
             if actor.action.is_some_and(|a| a.held()) {
@@ -6703,12 +6715,91 @@ mod pose_resolution_tests {
             "fallback"
         );
 
-        for finish in [2u8, 3, 4, 5, 6, 0] {
+        // RangedFinish plays the actor's own shot motion, one-shot
+        // (research/xim Actor.kt onRangedAttack).
+        assert_eq!(
+            r(2, 0, None, None),
+            Some(("shlg".to_string(), false)),
+            "the ranged finish plays the shot"
+        );
+
+        for finish in [3u8, 4, 5, 6, 0] {
             assert_eq!(
                 r(finish, 0, None, None),
                 None,
                 "category {finish} should not pose"
             );
+        }
+    }
+
+    // An interrupted aim re-issues the ranged-start category carrying the
+    // SkillInterrupt animation (vendor/server/src/map/action/interrupts.cpp
+    // RangedInterrupt): the looping aim pose must drop, while a plain start
+    // still arms it.
+    #[test]
+    fn ranged_interrupt_drops_the_aiming_pose() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        const CALG: u32 = 0x676C6163;
+
+        let mut world = World::new();
+        world.init_resource::<crate::snapshot::EventLog>();
+        world.init_resource::<SpellSuffixCache>();
+        world.init_resource::<ActorDatRoot>();
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let mut actor = render_actor_for_test(skeleton, vec![Mat4::IDENTITY]);
+        actor.world_id = 7;
+        actor.routines = Arc::new(synth_routines(&[(b"calg", b"cl0?")]));
+        let ent = world.spawn(actor).id();
+
+        let run_overlay = |world: &mut World| {
+            world.run_system_once(
+                |events: Res<crate::snapshot::EventLog>,
+                 q: Query<&mut FfxiRenderActor>,
+                 last: Local<u64>,
+                 suffix: ResMut<SpellSuffixCache>,
+                 root: Res<ActorDatRoot>| {
+                    dispatch_action_overlay(events, q, last, suffix, root)
+                },
+            )
+            .unwrap();
+        };
+
+        let ranged = |animation: Option<u16>| kuluu_snapshot::ViewerEvent::ActionStarted {
+            actor_id: 7,
+            action_id: CALG,
+            action_kind: ffxi_proto::melee::CATEGORY_RANGED_START,
+            target_id: None,
+            result: None,
+            animation,
+            outcome: None,
+        };
+
+        // The aim start arms the looping pose.
+        world.resource_mut::<crate::snapshot::EventLog>().push(ranged(None));
+        run_overlay(&mut world);
+        {
+            let mut em = world.entity_mut(ent);
+            let actor = em.get_mut::<FfxiRenderActor>().unwrap();
+            assert!(
+                actor.action.is_some_and(|a| a.looping),
+                "a ranged start arms the looping aim pose"
+            );
+        }
+
+        // The interrupt (start category + SkillInterrupt animation) drops it.
+        world.resource_mut::<crate::snapshot::EventLog>()
+            .push(ranged(Some(ffxi_proto::melee::RANGED_INTERRUPT_ANIMATION)));
+        run_overlay(&mut world);
+        {
+            let mut em = world.entity_mut(ent);
+            let actor = em.get_mut::<FfxiRenderActor>().unwrap();
+            assert!(actor.action.is_none(), "the interrupt drops the aim pose");
         }
     }
 

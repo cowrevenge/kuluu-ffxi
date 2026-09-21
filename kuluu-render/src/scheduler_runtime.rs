@@ -250,8 +250,9 @@ impl ActiveScheduler {
     }
 
     /// The MovementLock twin of [`Self::locks_at`]: true while a 0x2E interval covers `frame`.
-    /// research/xim EffectRoutineInstance.kt lockMovement - the movement controller returns
-    /// zero velocity for the interval; the pose and the facing (0x2F) are separate locks.
+    /// Parsed as data; players are never movement-locked by a routine (record:
+    /// .agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
+    /// "Players are never movement-locked by a cast or a ranged aim").
     pub fn movement_locks_at(&self, frame: u32) -> bool {
         self.stages.iter().any(|t| {
             t.stage.kind == StageKind::MovementLock
@@ -328,15 +329,6 @@ impl ActiveSchedulers {
     /// test itself (ActionTimer1 reached 2 and 3 when a hit reaction overlapped a swing).
     pub fn is_locked_now(&self) -> bool {
         self.routines.iter().any(|r| r.locks_at(r.current_frame()))
-    }
-
-    /// True while any entry's MovementLock interval covers its own current frame: the local
-    /// player's movement input is withheld for those ticks (research/xim EffectRoutineInstance.kt
-    /// lockMovement).
-    pub fn movement_locked_now(&self) -> bool {
-        self.routines
-            .iter()
-            .any(|r| r.movement_locks_at(r.current_frame()))
     }
 
     /// The hidden model-slot set this entity's running routines produce at their own current
@@ -1952,6 +1944,10 @@ pub fn action_dat_file_id(
         CATEGORY_MOB_SKILL_FINISH | CATEGORY_PET_SKILL_FINISH => {
             Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?))
         }
+        // RangedFinish (2) carries no effect DAT: research/xim EffectDisplayer.kt
+        // displaySkill returns early for the ranged attack ("Displayed as an
+        // auto-attack"); the shot is the actor's own "shlg" routine
+        // (ffxi_actor_render::action_routine).
         _ => None,
     }
 }
@@ -4382,9 +4378,9 @@ mod tests {
         }
     }
 
-    // 0x2E is the movement twin of 0x59: same interval rules, a different lock. A routine that
-    // animates-lock only must never withhold movement, and the two intervals may end apart
-    // (research/xim EffectRoutineInstance.kt lockMovement).
+    // 0x2E is the movement twin of 0x59: same interval rules, a different lock. The 0x2E
+    // parse stays data even though no routine locks a player's movement (record:
+    // "Players are never movement-locked by a cast or a ranged aim").
     #[test]
     fn movement_lock_interval_is_independent_of_the_animation_lock() {
         let lock_stage = |frame: u32, kind: StageKind, raw: u8, dur: u16| -> TimedStage {
@@ -4422,21 +4418,8 @@ mod tests {
         ));
         assert!(
             !anim_only.movement_locks_at(10),
-            "an animation-only routine never withholds movement"
+            "an animation-only routine never reads as a movement lock"
         );
-
-        let mut both = ActiveSchedulers::one(cast);
-        both.push(ActiveScheduler::from_scheduler(&make_scheduler(
-            *b"damg",
-            vec![lock_stage(50, StageKind::MovementLock, 0x2E, 20)],
-        )));
-        for (frame, locked) in [(10u32, true), (53, true), (55, true), (70, false)] {
-            let mut probe = both.clone();
-            for r in &mut probe.routines {
-                r.elapsed = frame as f32 / ROUTINE_FPS;
-            }
-            assert_eq!(probe.movement_locked_now(), locked, "frame {frame}");
-        }
     }
 
     // 0x75 SetModelVisibility: the hidden-slot set starts ranged-only (slot 2) - retail's

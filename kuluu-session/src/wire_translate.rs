@@ -433,6 +433,10 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::SkillLevelUp { skill_id, level } => {
             Some(wire::ViewerEvent::SkillLevelUp { skill_id, level })
         }
+        AgentEvent::Knockbacks { actor_id, hits } => Some(wire::ViewerEvent::Knockbacks {
+            actor_id,
+            hits: hits.iter().map(|h| (h.target_id, h.level)).collect(),
+        }),
         AgentEvent::ActionStarted {
             actor_id,
             action_id,

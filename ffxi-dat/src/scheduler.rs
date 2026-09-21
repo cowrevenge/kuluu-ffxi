@@ -101,6 +101,13 @@ const MODEL_TRANSFORM_SUBCHUNK_OFFSET: usize = 20;
 const FLINCH_ANIMATION_DURATION_OFFSET: usize = 24;
 const FLINCH_PAYLOAD_LEN: usize = FLINCH_ANIMATION_DURATION_OFFSET + 4;
 
+// research/xim EffectRoutineParser.kt parseSection2, 0x5E / 0xBF: after delay/duration the
+// knockback payload is u16, u16, f32 animationDuration, f32, u32. The duration is how long
+// the victim's bf0? knock-down plays before the bf1? stand-up
+// (EffectRoutineInterpolatedEffects.kt KnockBackInstance).
+const KNOCKBACK_ANIMATION_DURATION_OFFSET: usize = ID_OFFSET + 4;
+const KNOCKBACK_DURATION_PAYLOAD_LEN: usize = KNOCKBACK_ANIMATION_DURATION_OFFSET + 4;
+
 // A stage addresses a slot of the group `mzb::underscore_at_groups` builds, so the bound is
 // that builder's rather than a second reading of the same retail array.
 pub const MODEL_TRANSFORM_SUBCHUNK_SLOTS: u32 =
@@ -230,10 +237,12 @@ pub struct SchedulerStage {
     // xim EffectRoutineParser.kt parseSection2); `id` is `NO_STAGE_ID` there.
     pub idle_transition_time: Option<f32>,
 
-    // `Some` exactly for the two flinch kinds when the stage carries the full 9-dword payload:
-    // the animationDuration f32 at +24 (research/xim EffectRoutineParser.kt parseFlinchEffect).
-    // Retail plays the dfi?/dfm? flinch clip with transition in/out of
-    // animationDuration/2 frames each (EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance).
+    // The stage's animationDuration. `Some` for the two flinch kinds when the stage carries
+    // the full 9-dword payload (the f32 at +24, research/xim EffectRoutineParser.kt
+    // parseFlinchEffect; retail plays the dfi?/dfm? flinch clip with transition in/out of
+    // animationDuration/2 frames each, EffectRoutineInterpolatedEffects.kt
+    // FlinchAnimationInstance), and for the knockback kind (the f32 at +12,
+    // parseSection2 0x5E / 0xBF; the bf0? knock-down's length, KnockBackInstance).
     pub flinch_duration: Option<f32>,
 
     // `Some` exactly for `SetModelVisibility`, whose payload (hidden u32, slot u16, ifEngaged
@@ -680,17 +689,17 @@ impl Scheduler {
                 let spell_effect = payload
                     .filter(|_| kind == StageKind::SpellEffect)
                     .map(u32::from_le_bytes);
-                let flinch_duration =
-                    (matches!(kind, StageKind::FlinchOnCaster | StageKind::FlinchOnTarget)
-                        && stage_bytes >= FLINCH_PAYLOAD_LEN)
-                        .then(|| {
-                            f32::from_le_bytes([
-                                body[cursor + FLINCH_ANIMATION_DURATION_OFFSET],
-                                body[cursor + FLINCH_ANIMATION_DURATION_OFFSET + 1],
-                                body[cursor + FLINCH_ANIMATION_DURATION_OFFSET + 2],
-                                body[cursor + FLINCH_ANIMATION_DURATION_OFFSET + 3],
-                            ])
-                        });
+                let flinch_duration = match kind {
+                    StageKind::FlinchOnCaster | StageKind::FlinchOnTarget
+                        if stage_bytes >= FLINCH_PAYLOAD_LEN =>
+                    {
+                        Some(f32::from_bits(read_u32(FLINCH_ANIMATION_DURATION_OFFSET)))
+                    }
+                    StageKind::Knockback if stage_bytes >= KNOCKBACK_DURATION_PAYLOAD_LEN => Some(
+                        f32::from_bits(read_u32(KNOCKBACK_ANIMATION_DURATION_OFFSET)),
+                    ),
+                    _ => None,
+                };
                 // Flinch and knockback payloads are floats/ints from +8 on (research/xim
                 // EffectRoutineParser.kt parseSection2), so their id slot is not a DatId either.
                 let non_id_payload = model_transform.is_some()
@@ -2008,6 +2017,28 @@ mod tests {
         assert_eq!(s.stages[0].stage.id, NO_STAGE_ID);
         assert_eq!(s.stages[1].stage.kind, StageKind::Knockback);
         assert_eq!(s.stages[1].stage.id, NO_STAGE_ID);
+    }
+
+    // research/xim EffectRoutineParser.kt parseSection2 0x5E: u16, u16, then the f32
+    // animationDuration, so it sits four bytes into the payload.
+    #[test]
+    fn knockback_stage_reads_its_animation_duration() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            KNOCKBACK_OPCODE,
+            KNOCKBACK_STAGE_WORDS,
+            0,
+            0,
+        ));
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&12.5f32.to_le_bytes());
+        body.extend_from_slice(&0f32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+
+        let s = Scheduler::parse(*b"kb00", &body).unwrap();
+        assert_eq!(s.stages[0].stage.kind, StageKind::Knockback);
+        assert_eq!(s.stages[0].stage.flinch_duration, Some(12.5));
     }
 
     // The 0x28 payload is an f32 transition time in the id slot (research/xim

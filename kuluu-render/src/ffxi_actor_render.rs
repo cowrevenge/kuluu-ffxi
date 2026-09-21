@@ -1351,6 +1351,8 @@ pub struct FfxiRenderActor {
 
     engage: EngageMachine,
 
+    knockback: Option<KnockbackPlayback>,
+
     action: Option<ActionPlayback>,
     action_clips: Vec<SkeletonAnimation>,
 
@@ -1431,6 +1433,63 @@ impl FfxiRenderActor {
         )
     }
 
+    /// Starts a knockback on this actor (research/xim
+    /// EffectRoutineInterpolatedEffects.kt KnockBackInstance init): the
+    /// knock-down clip for `animation_frames`, the lock for the whole run. It
+    /// deliberately consults neither the pose-idle nor the scheduler lock a
+    /// flinch checks: a knockback lands over a swing, a cast pose or the draw.
+    pub fn begin_knockback(&mut self, dir: Vec2, level: u8, animation_frames: f32) {
+        let kb = KnockbackPlayback {
+            dir,
+            magnitude: level as f32 / KNOCKBACK_LEVEL_DIVISOR,
+            animation_frames: animation_frames.max(0.0),
+            run_time: 0.0,
+            stand_up_started: false,
+        };
+        self.knockback = Some(kb);
+        self.begin_completion_motion(
+            DatId::from_str(KNOCKBACK_DOWN_CLIP),
+            CompletionMotion {
+                local_clips: &[],
+                duration_frames: kb.total_frames(),
+                max_loops: 1,
+                transition_in: KNOCKBACK_DOWN_TRANSITION_IN,
+                transition_out: KNOCKBACK_DOWN_TRANSITION_OUT,
+            },
+        );
+    }
+
+    /// Advances the knockback by `elapsed_frames` routine frames and returns
+    /// this step's shove (KnockBackInstance updateEffect); starts the stand-up
+    /// clip once the knock-down has run; `None` when no knockback is running.
+    pub fn advance_knockback(&mut self, elapsed_frames: f32) -> Option<Vec2> {
+        let mut kb = self.knockback?;
+        kb.run_time += elapsed_frames;
+        let shove = kb.dir * (elapsed_frames * kb.magnitude / KNOCKBACK_VELOCITY_DIVISOR);
+        if !kb.stand_up_started && kb.run_time > kb.animation_frames {
+            kb.stand_up_started = true;
+            self.begin_completion_motion(
+                DatId::from_str(KNOCKBACK_STAND_UP_CLIP),
+                CompletionMotion {
+                    local_clips: &[],
+                    duration_frames: KNOCKBACK_STAND_UP_FRAMES,
+                    max_loops: 1,
+                    transition_in: KNOCKBACK_DOWN_TRANSITION_OUT,
+                    transition_out: KNOCKBACK_DOWN_TRANSITION_IN,
+                },
+            );
+        }
+        self.knockback = (kb.run_time < kb.total_frames()).then_some(kb);
+        Some(shove)
+    }
+
+    /// The run locks movement from its first frame to its last
+    /// (KnockBackInstance `lockMovement(totalDuration / 2)` on the skeleton
+    /// clock, the whole run on this one).
+    pub fn knockback_active(&self) -> bool {
+        self.knockback.is_some()
+    }
+
     /// Cross-crate test seam: kuluu's movement-gate tests cannot reach the
     /// private engage field, so they drive it through here (Drawing or Engaged).
     pub fn set_engage_for_test(&mut self, drawing: bool) {
@@ -1509,6 +1568,51 @@ enum EngageMachine {
     Engaged,
 
     Sheathing { remaining: f32 },
+}
+
+// research/xim EffectRoutineInterpolatedEffects.kt KnockBackInstance: the knock-down clip
+// plays for the stage's animationDuration, the stand-up for standUpTime = 8 frames after it;
+// the velocity each tick is direction * elapsedFrames * magnitude / 8 with magnitude =
+// wire level / 2; the whole run locks animation and movement. Frames are routine frames
+// (scheduler_runtime::ROUTINE_FPS), the clock xim's interpolated effects tick on.
+const KNOCKBACK_DOWN_CLIP: &str = "bf0?";
+const KNOCKBACK_STAND_UP_CLIP: &str = "bf1?";
+pub const KNOCKBACK_STAND_UP_FRAMES: f32 = 8.0;
+const KNOCKBACK_LEVEL_DIVISOR: f32 = 2.0;
+const KNOCKBACK_VELOCITY_DIVISOR: f32 = 8.0;
+// KnockBackInstance's TransitionParams: 7.5 in / 3.5 out for the knock-down, mirrored for
+// the stand-up, in whole frames; HalfFrames stores twice that.
+const KNOCKBACK_DOWN_TRANSITION_IN: HalfFrames = HalfFrames::from_dat(15);
+const KNOCKBACK_DOWN_TRANSITION_OUT: HalfFrames = HalfFrames::from_dat(7);
+
+/// One knockback in flight on an actor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnockbackPlayback {
+    /// Unit direction of the shove in FFXI x/y, away from the attacker.
+    pub dir: Vec2,
+    /// Wire level / KNOCKBACK_LEVEL_DIVISOR.
+    pub magnitude: f32,
+    /// The knock-down's length, the stage's animationDuration.
+    pub animation_frames: f32,
+    pub run_time: f32,
+    pub stand_up_started: bool,
+}
+
+impl KnockbackPlayback {
+    pub fn total_frames(&self) -> f32 {
+        self.animation_frames + KNOCKBACK_STAND_UP_FRAMES
+    }
+}
+
+/// The self actor's knockback as the walker sees it: the shove accumulated
+/// since the walker last took it (FFXI x/y yalms), whether the run still locks
+/// movement, and the attacker's position to face once when the shove begins
+/// (KnockBackInstance `faceToward(source)`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct SelfKnockback {
+    pub pending: Vec2,
+    pub active: bool,
+    pub face_toward: Option<Vec2>,
 }
 
 /// DAT transition fields are authored in half-frames: a stored value V plays as V/2 whole frames.
@@ -1959,6 +2063,7 @@ pub fn make_render_actor(
         rest_phase: RestPlayback::Inactive,
         death_phase: actor_state::DeathPhase::Unobserved,
         engage: EngageMachine::NotEngaged,
+        knockback: None,
         action: None,
         action_clips: Vec::new(),
         head_neck,
@@ -2561,6 +2666,7 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
 
     actor.action = None;
     actor.engage = EngageMachine::NotEngaged;
+    actor.knockback = None;
     actor.coordinator.clear();
     actor.current_clip = None;
     advance_actor_pose(actor, elapsed_frames, None, None, false, name);
@@ -7104,6 +7210,61 @@ mod pose_resolution_tests {
             assert!(!self_pose_follows_reactor(Some(g)), "{g:?}");
         }
         assert!(!self_pose_follows_reactor(None));
+    }
+
+    /// KnockBackInstance: the knock-down clip goes up at once with the run's
+    /// lock, each step shoves dir * elapsed * (level / 2) / 8, the stand-up
+    /// clip starts once the knock-down's frames are spent, and the run ends
+    /// 8 frames after that.
+    #[test]
+    fn knockback_shoves_then_stands_up() {
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let mut actor = render_actor_for_test(skeleton, Vec::new());
+        assert!(actor.advance_knockback(1.0).is_none());
+
+        actor.begin_knockback(Vec2::new(1.0, 0.0), 4, 10.0);
+        assert!(actor.knockback_active());
+        assert!(
+            actor
+                .action
+                .is_some_and(|a| a.clip_id == DatId::from_str(KNOCKBACK_DOWN_CLIP)),
+            "the knock-down clip must be up at once"
+        );
+
+        let step = actor.advance_knockback(2.0).expect("running");
+        assert!(
+            (step.x - 0.5).abs() < 1e-6,
+            "2 frames * (4 / 2) / 8 = 0.5, got {step:?}"
+        );
+        assert!(step.y.abs() < 1e-6);
+        assert!(actor.knockback_active());
+        assert!(actor
+            .action
+            .is_some_and(|a| a.clip_id == DatId::from_str(KNOCKBACK_DOWN_CLIP)));
+
+        let _ = actor.advance_knockback(9.0);
+        assert!(
+            actor
+                .action
+                .is_some_and(|a| a.clip_id == DatId::from_str(KNOCKBACK_STAND_UP_CLIP)),
+            "past the knock-down's 10 frames the stand-up clip takes over"
+        );
+        assert!(
+            actor.knockback_active(),
+            "the lock holds through the stand-up"
+        );
+
+        let last = actor
+            .advance_knockback(7.0)
+            .expect("still running for the stand-up");
+        assert!(last.x > 0.0, "the shove keeps going during the stand-up");
+        assert!(!actor.knockback_active(), "18 frames in, the run is over");
+        assert!(actor.advance_knockback(1.0).is_none());
     }
 
     #[test]

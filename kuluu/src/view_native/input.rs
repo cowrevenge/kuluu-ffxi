@@ -47,6 +47,8 @@ pub struct MoveEnvParams<'w, 's> {
     pub roots: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderRoot>,
     /// The self actor's engage machine: the weapon draw/sheathe hold gate.
     pub actors: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderActor>,
+    /// The self actor's knockback: its lock and the shove the walker owes it.
+    pub self_knockback: ResMut<'w, kuluu_render::ffxi_actor_render::SelfKnockback>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -977,7 +979,7 @@ pub fn dispatch_movement_system(
     mut turn_accum: ResMut<HeadingTurnAccum>,
     mut locals: ResMut<DispatchLocals>,
     mut prediction: ResMut<LocalPlayerPrediction>,
-    env: MoveEnvParams,
+    mut env: MoveEnvParams,
     mut stance: StanceParams,
     mut field_dbg: ResMut<super::walker::debug::FieldDebug>,
 ) {
@@ -1297,8 +1299,23 @@ pub fn dispatch_movement_system(
         forward = 0;
         strafe = 0;
     }
-    let steer_in_chase =
-        (!first_person && !locked && (pf != 0.0 || ps != 0.0)) && !engage_transition;
+    // A knockback (research/xim EffectRoutineInterpolatedEffects.kt
+    // KnockBackInstance: lockMovement for the whole run) beats the keys and
+    // the draw hold alike. Its shove is added to the walker step below, under
+    // collision, whatever the keys say; the server forced move (the reactor
+    // override) still outranks both, it returns before this system moves.
+    let knockback = *env.self_knockback;
+    env.self_knockback.pending = bevy::math::Vec2::ZERO;
+    env.self_knockback.face_toward = None;
+    if knockback.active {
+        forward = 0;
+        strafe = 0;
+    }
+    let shove = knockback.pending;
+    let shoved = shove != bevy::math::Vec2::ZERO;
+    let steer_in_chase = (!first_person && !locked && (pf != 0.0 || ps != 0.0))
+        && !engage_transition
+        && !knockback.active;
     // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
     // the latch only holds the run direction against the passive
     // auto-recenter, not against the player actively steering the camera.
@@ -1405,7 +1422,7 @@ pub fn dispatch_movement_system(
         }
     }
 
-    if forward == 0 && strafe == 0 && player_rotate_u8 == 0 && !steer_in_chase {
+    if forward == 0 && strafe == 0 && player_rotate_u8 == 0 && !steer_in_chase && !shoved {
         if snapshot_driven {
             return;
         }
@@ -1599,6 +1616,18 @@ pub fn dispatch_movement_system(
 
     x += turn_dx;
     y += turn_dy;
+    // The shove rides the same step as a run so the walker's wall slide and
+    // grounding apply to it; the victim faces the attacker once as it lands
+    // (KnockBackInstance init `faceToward(source)`).
+    x += shove.x;
+    y += shove.y;
+    if let Some(source) = knockback.face_toward {
+        let dx = source.x - basis_pos.x;
+        let dy = source.y - basis_pos.y;
+        if dx.abs() > 0.001 || dy.abs() > 0.001 {
+            heading = heading_for_angle((-dy).atan2(dx));
+        }
+    }
     if forward != 0 && step > 0.0 {
         let (fwd_x, fwd_y) = heading_to_forward(heading);
 
@@ -2334,6 +2363,7 @@ mod tests {
             .init_resource::<kuluu_render::combat_stance::WalkMode>()
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<kuluu_render::scene::TrackedEntities>()
+            .init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>()
             .init_resource::<super::super::walker::debug::FieldDebug>()
             .add_systems(
                 Update,
@@ -2489,6 +2519,76 @@ mod tests {
             .expect("the self actor stub was just spawned")
             .set_engage_for_test(true);
         root
+    }
+
+    /// A knockback shove moves the player through the walker on a tick where
+    /// the keys are held and the draw hold is on: the lock zeroes the keys, the
+    /// shove still lands, and the walker takes it exactly once.
+    #[cfg(not(feature = "enhanced-engage-move-lock-off"))]
+    #[test]
+    fn knockback_shove_moves_the_held_player_once() {
+        let mut drive = MoveDrive::new();
+        spawn_drawing_self_actor(&mut drive.app);
+        let (_, start) = drive.tick();
+        drive.press(KeyCode::KeyW);
+        {
+            let mut kb = drive
+                .app
+                .world_mut()
+                .resource_mut::<kuluu_render::ffxi_actor_render::SelfKnockback>();
+            kb.pending = bevy::math::Vec2::new(1.5, 0.0);
+            kb.active = true;
+        }
+        let (_, shoved) = drive.tick();
+        assert!(
+            (shoved.x - start.x - 1.5).abs() < 0.05 && (shoved.y - start.y).abs() < 0.05,
+            "the shove must move the held player by itself: {start:?} -> {shoved:?}"
+        );
+        let taken = drive
+            .app
+            .world()
+            .resource::<kuluu_render::ffxi_actor_render::SelfKnockback>()
+            .pending;
+        assert_eq!(
+            taken,
+            bevy::math::Vec2::ZERO,
+            "the walker takes the shove once"
+        );
+        let (_, held) = drive.tick();
+        assert!(
+            (held - shoved).length() < 1e-3,
+            "with the shove spent and the lock on, W moves nothing: {shoved:?} -> {held:?}"
+        );
+    }
+
+    /// The knockback lock alone, no shove, holds the player like the draw does
+    /// and releases with the run.
+    #[test]
+    fn knockback_lock_holds_and_releases() {
+        let mut drive = MoveDrive::new();
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::ffxi_actor_render::SelfKnockback>()
+            .active = true;
+        drive.press(KeyCode::KeyW);
+        let locked = drive.run(SETTLE_TICKS);
+        assert_eq!(
+            locked.last().expect("ticks").1,
+            locked.first().expect("ticks").1,
+            "the knockback lock must hold the player"
+        );
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::ffxi_actor_render::SelfKnockback>()
+            .active = false;
+        let free = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            free.last().expect("ticks").1,
+            locked.last().expect("ticks").1,
+            "the run over, the same key moves"
+        );
     }
 
     /// The gate must reach the actor through the wire entity's root link; a

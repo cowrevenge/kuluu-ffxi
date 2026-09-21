@@ -5157,3 +5157,70 @@ fn only_the_no_select_flag_marks_a_slot_an_action_owns() {
         }
     }
 }
+
+/// Two targets of one skill: the hit with a level is a knockback, the miss
+/// with the same level is not (vendor/server/src/map/packets/s2c/0x028_battle2.cpp
+/// GP_SERV_COMMAND_BATTLE2::pack field order; research/xim
+/// EffectRoutineInstance.kt handleKnockBackRoutine skips a miss).
+#[test]
+fn battle2_knockbacks_collect_landed_levels_per_target() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(2, 6);
+    w.write(2, 4);
+    w.write(11, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+
+    for (target, resolution, level) in [(0xBEEFu64, 0u64, 3u64), (0xF00Du64, 1u64, 3u64)] {
+        w.write(target, 32);
+        w.write(1, 4);
+        w.write(resolution, 3);
+        w.write(0, 2);
+        w.write(0, 12);
+        w.write(0, 5);
+        w.write(0, 2);
+        w.write(level, 3);
+        w.write(40, 17);
+        w.write(1, 10);
+        w.write(0, 31);
+        w.write(0, 1);
+        w.write(0, 1);
+    }
+    let data = w.into_bytes();
+
+    let (actor_id, hits) = super::decode_battle2_knockbacks(&data).expect("one knockback");
+    assert_eq!(actor_id, 0xCAFE);
+    assert_eq!(
+        hits,
+        vec![crate::state::KnockbackHit {
+            target_id: 0xBEEF,
+            level: 3
+        }]
+    );
+}
+
+#[test]
+fn battle2_knockbacks_are_none_without_a_level() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(1, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3);
+    w.write(0, 2);
+    w.write(0, 12);
+    w.write(0, 5);
+    w.write(0, 2);
+    w.write(0, 3);
+    w.write(40, 17);
+    w.write(1, 10);
+    w.write(0, 31);
+    w.write(0, 1);
+    w.write(0, 1);
+    assert!(super::decode_battle2_knockbacks(&w.into_bytes()).is_none());
+}

@@ -2579,6 +2579,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::LevelUp { .. } => (),
         AgentEvent::SkillLevelUp { .. } => (),
         AgentEvent::EngageRefused { .. } => (),
+        AgentEvent::Knockbacks { .. } => (),
         AgentEvent::FishingCast { .. } => (),
         AgentEvent::FishHooked { .. } => (),
         AgentEvent::FishHookedSize { .. } => (),

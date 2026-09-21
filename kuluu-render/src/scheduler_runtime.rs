@@ -1917,6 +1917,149 @@ pub fn dispatch_flinch_stages(
     }
 }
 
+/// How long a 0x028's knockback levels wait on the attacker for the skill
+/// routine's knockback stage. The stage's own delay is authored in the
+/// routine and is at most a few seconds; a skill whose routine has no
+/// knockback stage never fires one, and its levels expire here instead of
+/// piling up.
+const KNOCKBACK_PENDING_TTL_SECS: f32 = 3.0;
+
+/// The knockback levels of the 0x028s whose routines have not reached their
+/// knockback stage yet, keyed by attacker id (research/xim
+/// EffectRoutineInstance.kt handleKnockBackRoutine reads the magnitude off the
+/// attack context when the stage fires, not when the packet lands).
+#[derive(Resource, Default, Debug)]
+pub struct PendingKnockbacks {
+    by_actor: HashMap<u32, (Vec<(u32, u8)>, f32)>,
+}
+
+/// Parks each `ViewerEvent::Knockbacks` on its attacker until the routine
+/// stage consumes it, and drops the ones no stage ever claimed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn collect_knockback_hits(
+    time: Res<Time>,
+    events: Res<crate::snapshot::EventLog>,
+    mut pending: ResMut<PendingKnockbacks>,
+    mut last_seen: Local<u64>,
+) {
+    let now = time.elapsed_secs();
+    pending
+        .by_actor
+        .retain(|_, (_, expires_at)| *expires_at > now);
+
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Knockbacks { actor_id, hits } = ev else {
+            continue;
+        };
+        pending
+            .by_actor
+            .insert(*actor_id, (hits.clone(), now + KNOCKBACK_PENDING_TTL_SECS));
+    }
+}
+
+/// FFXI x/y of a snapshot entity; the self entity reads the self position.
+fn knockback_xy(snap: &kuluu_snapshot::SceneSnapshot, id: u32) -> Option<Vec2> {
+    if snap.self_char_id == Some(id) {
+        return Some(Vec2::new(snap.self_pos.pos.x, snap.self_pos.pos.y));
+    }
+    snap.entities
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| Vec2::new(e.pos.x, e.pos.y))
+}
+
+/// The routine's knockback stage (ffxi-dat StageKind::Knockback, xim 0x5E /
+/// 0xBF): every victim the 0x028 marked shoves away from the attacker, faces
+/// it, and plays the knock-down (EffectRoutineInstance.kt
+/// handleKnockBackRoutine, KnockBackInstance). The self victim's facing goes
+/// to the walker through SelfKnockback so it rides the next Move.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_knockback_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    state: Res<crate::snapshot::SceneState>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    mut pending: ResMut<PendingKnockbacks>,
+    mut self_kb: ResMut<crate::ffxi_actor_render::SelfKnockback>,
+    q_kind: Query<&crate::components::WorldEntity>,
+    q_roots: Query<&crate::ffxi_actor_render::FfxiRenderRoot>,
+    mut q_render: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::Knockback {
+            continue;
+        }
+        let Ok(caster) = q_kind.get(ev.actor) else {
+            continue;
+        };
+        let Some((hits, _)) = pending.by_actor.remove(&caster.id) else {
+            tracing::debug!(target: "combat", "KNOCKBACK stage caster={} no-pending-levels", caster.id);
+            continue;
+        };
+        let snap = &state.snapshot;
+        let Some(source) = knockback_xy(snap, caster.id) else {
+            continue;
+        };
+        let animation_frames = ev.stage.stage.flinch_duration.unwrap_or(0.0);
+        for (target_id, level) in hits {
+            let Some(target) = knockback_xy(snap, target_id) else {
+                continue;
+            };
+            let dir = target - source;
+            if dir.length_squared() <= f32::EPSILON {
+                continue;
+            }
+            let Some(&wire) = tracked.by_id.get(&target_id) else {
+                continue;
+            };
+            let Ok(root) = q_roots.get(wire) else {
+                continue;
+            };
+            let Ok(mut actor) = q_render.get_mut(root.0) else {
+                continue;
+            };
+            tracing::debug!(target: "combat", "KNOCKBACK caster={} target={} level={} frames={}", caster.id, target_id, level, animation_frames);
+            actor.begin_knockback(dir.normalize(), level, animation_frames);
+            if snap.self_char_id == Some(target_id) {
+                self_kb.face_toward = Some(source);
+            }
+        }
+    }
+}
+
+/// Integrates every running knockback on the routine clock and hands the
+/// self actor's shove and lock to the walker (KnockBackInstance updateEffect
+/// adds the velocity after the movement-lock zeroing; here the walker adds
+/// SelfKnockback.pending after zeroing the keys).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn tick_knockbacks(
+    time: Res<Time>,
+    state: Res<crate::snapshot::SceneState>,
+    mut self_kb: ResMut<crate::ffxi_actor_render::SelfKnockback>,
+    mut q_render: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+) {
+    let elapsed_frames = time.delta_secs() * ROUTINE_FPS;
+    let self_id = state.snapshot.self_char_id;
+    let mut self_active = false;
+    for mut actor in &mut q_render {
+        let Some(shove) = actor.advance_knockback(elapsed_frames) else {
+            continue;
+        };
+        if Some(actor.world_id) == self_id {
+            self_kb.pending += shove;
+            self_active |= actor.knockback_active();
+        }
+    }
+    if self_kb.active != self_active {
+        self_kb.active = self_active;
+    }
+}
+
 pub fn action_dat_file_id(
     action_id: u32,
     animation: Option<u16>,
@@ -3695,6 +3838,8 @@ impl Plugin for SchedulerRuntimePlugin {
             // (kuluu/src/view_native/mod.rs), after resolve_camera.
             app.init_resource::<CutsceneCameraTasks>();
             app.init_resource::<ActionDatRoot>();
+            app.init_resource::<PendingKnockbacks>();
+            app.init_resource::<crate::ffxi_actor_render::SelfKnockback>();
             app.add_systems(Startup, load_global_effect_dir);
             // Ordered ahead of the poll so a root change landing on the same frame as an
             // in-flight dll cannot have the poll's `remove_resource::<ActionMainDllTask>`
@@ -3751,6 +3896,9 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_sound_stages,
                     dispatch_motion_stages,
                     dispatch_flinch_stages,
+                    collect_knockback_hits,
+                    dispatch_knockback_stages,
+                    tick_knockbacks,
                     (dispatch_damage_callback_stages, settle_dead_from_action).chain(),
                     dispatch_target_routine_stages,
                 )

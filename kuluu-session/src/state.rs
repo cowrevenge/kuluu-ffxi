@@ -2100,6 +2100,7 @@ impl SessionState {
             | AgentEvent::LevelUp { .. }
             | AgentEvent::SkillLevelUp { .. }
             | AgentEvent::EngageRefused { .. }
+            | AgentEvent::Knockbacks { .. }
             | AgentEvent::VanaTimeSynced { .. } => false,
             AgentEvent::InventoryUpdated { container, update } => {
                 let entry = self.inventory.containers.entry(*container).or_default();
@@ -2707,6 +2708,14 @@ impl SessionState {
     }
 }
 
+/// One target's knockback out of a 0x028: `level` is the wire's 3-bit
+/// Knockback (vendor/server/src/map/enums/action/knockback.h), 1..=7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnockbackHit {
+    pub target_id: u32,
+    pub level: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -3134,6 +3143,16 @@ pub enum AgentEvent {
     /// with instead of the 0x058 accept. Emitted only for our own casts.
     EngageRefused {
         message_num: u16,
+    },
+
+    /// Every target result of one s2c 0x028 that carried a knockback level on
+    /// a hit (vendor/server/src/map/packets/s2c/0x028_battle2.cpp
+    /// GP_SERV_COMMAND_BATTLE2::pack, the 3 knockback bits per result). The
+    /// server moves nobody for it; the client shoves the victim when the
+    /// skill routine's knockback stage fires.
+    Knockbacks {
+        actor_id: u32,
+        hits: Vec<KnockbackHit>,
     },
 
     /// Self has cast a line: the server set FISHING_START with this hook delay (frames).

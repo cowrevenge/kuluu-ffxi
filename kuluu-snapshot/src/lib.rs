@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v42: ViewerEvent::Knockbacks - every target result of one 0x028 that landed with a
+// knockback level (GP_SERV_COMMAND_BATTLE2::pack), so the client can shove the victims when
+// the skill routine's knockback stage fires; ActionStarted.outcome carries the first
+// target's only.
 // v41: EntityLook::Transport.travel_secs - the lift's seconds between floors from the 0x0E
 // name block, the fallback for a shaft whose zone DAT routine states no travel of its own.
 // v40: InventoryItem.unselectable - the NoSelect lock an in-flight item use holds, which is the
@@ -95,7 +99,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1854,6 +1858,15 @@ pub enum ViewerEvent {
         outcome: Option<(u8, u8, u8)>,
     },
 
+    /// Every target of one 0x028 whose result landed with a knockback level:
+    /// `(target_id, level)`, level 1..=7 (vendor/server/src/map/enums/action/knockback.h).
+    /// The server moves nobody; the victim's client shoves itself when the
+    /// caster's skill routine reaches its knockback stage.
+    Knockbacks {
+        actor_id: u32,
+        hits: Vec<(u32, u8)>,
+    },
+
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire
     /// MesNum (job emotes arrive as 74..=95), `mode` the EmoteMode byte.
     EntityEmoted {
@@ -2433,7 +2446,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 41;
+        const VERSION: u32 = 42;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

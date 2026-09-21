@@ -1608,6 +1608,9 @@ fn handle_sub_packet(
             for line in decode_battle2_action(sub.data, name_cache, kind_cache, mes_basic.table()) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
+            if let Some((actor_id, hits)) = decode_battle2_knockbacks(sub.data) {
+                let _ = event_tx.send(AgentEvent::Knockbacks { actor_id, hits });
+            }
         }
         s2c::ASSIST => {
             if let Ok(a) =
@@ -5699,10 +5702,16 @@ impl<'a> BattleBitReader<'a> {
             }
             u32::from_le_bytes(self.data[byte_offset..byte_offset + 4].try_into().ok()?) as u64
         } else {
-            if byte_offset + 8 > self.data.len() {
+            // A read starting mid-byte spans at most five bytes (32 bits at bit 7), so bound
+            // on that span: exact-length packets end right after the last result block, and
+            // a wider fetch would reject reads that fit.
+            let span = total_bits.div_ceil(8);
+            if byte_offset + span > self.data.len() {
                 return None;
             }
-            u64::from_le_bytes(self.data[byte_offset..byte_offset + 8].try_into().ok()?)
+            let mut buf = [0u8; 8];
+            buf[..span].copy_from_slice(&self.data[byte_offset..byte_offset + span]);
+            u64::from_le_bytes(buf)
         };
         let mask = if bits == 64 {
             u64::MAX
@@ -5936,6 +5945,61 @@ fn decode_battle2_action(
 
 fn is_start_category(cmd_no: u8) -> bool {
     matches!(cmd_no, 7 | 8 | 9 | 10 | 12)
+}
+
+/// Walks every target and result of a 0x028 (the same bit layout
+/// `decode_battle2_action` reads, vendor/server/src/map/packets/s2c/0x028_battle2.cpp
+/// GP_SERV_COMMAND_BATTLE2::pack) and collects the targets whose result landed
+/// with a knockback level. A miss carries no shove (research/xim
+/// EffectRoutineInstance.kt handleKnockBackRoutine, `context.missed()`), and
+/// LSB zeroes the level on an evade anyway (entities/battle_entity.cpp).
+/// `None` when nothing knocked back, so the caller sends nothing.
+fn decode_battle2_knockbacks(data: &[u8]) -> Option<(u32, Vec<crate::state::KnockbackHit>)> {
+    use ffxi_proto::melee::ActionResolution;
+    let mut br = BattleBitReader::new(data, 8);
+    let actor_id = br.read(32)? as u32;
+    let trg_sum = br.read(6)? as usize;
+    let _res_sum = br.read(4)?;
+    let _cmd_no = br.read(4)?;
+    let _cmd_arg = br.read(32)?;
+    let _info = br.read(32)?;
+
+    let mut hits = Vec::new();
+    for _t in 0..trg_sum.min(15) {
+        let target_id = br.read(32)? as u32;
+        let result_sum = br.read(4)? as usize;
+        for _r in 0..result_sum.min(8) {
+            let resolution = br.read(3)? as u8;
+            let _kind = br.read(2)?;
+            let _animation = br.read(12)?;
+            let _info = br.read(5)?;
+            let _hit_distortion = br.read(2)?;
+            let level = br.read(3)? as u8;
+            let _param = br.read(17)?;
+            let _message = br.read(10)?;
+            let _modifier = br.read(31)?;
+            if br.read(1)? != 0 {
+                let _proc_kind = br.read(6)?;
+                let _proc_info = br.read(4)?;
+                let _proc_param = br.read(17)?;
+                let _proc_message = br.read(10)?;
+            }
+            if br.read(1)? != 0 {
+                let _react_kind = br.read(6)?;
+                let _react_info = br.read(4)?;
+                let _react_value = br.read(14)?;
+                let _react_message = br.read(10)?;
+            }
+            let landed = !matches!(
+                ActionResolution::from_wire(resolution),
+                Some(ActionResolution::Miss) | None
+            );
+            if landed && level > 0 {
+                hits.push(crate::state::KnockbackHit { target_id, level });
+            }
+        }
+    }
+    (!hits.is_empty()).then_some((actor_id, hits))
 }
 
 fn build_battle2_line(

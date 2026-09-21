@@ -15,8 +15,9 @@ pub fn lock_path(root: &Path) -> PathBuf {
 }
 
 /// A reader's note about itself; the OS lock is what actually holds, this
-/// only makes the refusal message name someone. Several readers keep the
-/// first one's note, since a locked range refuses the later writers.
+/// only makes the refusal message name someone. A reader that fails to take
+/// the lock restores the note it found, so the file never names a process that
+/// is not actually holding the install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Holder {
     pub pid: u32,
@@ -142,11 +143,27 @@ fn write_holder_note(file: &mut File) {
 /// A reader's share of `root`; fails while an updater holds it exclusively.
 pub fn shared(root: &Path) -> Result<SharedLock, LockError> {
     let (path, mut file) = open_lock_file(root)?;
+    let prev = read_holder(&mut file);
     write_holder_note(&mut file);
     if let Err(e) = file.try_lock_shared() {
+        // A refused lock means we are not a holder, so undo the note we just
+        // wrote and name the reader that was here before us, if any.
+        if matches!(e, TryLockError::WouldBlock) {
+            restore_holder_note(&mut file, prev.as_ref());
+            return Err(LockError::Held { path, holder: prev });
+        }
         return Err(classify(path, &mut file, e));
     }
     Ok(SharedLock { _file: file })
+}
+
+/// Put back the note a refused shared lock found, so the file does not name a
+/// process that is not holding the install.
+fn restore_holder_note(file: &mut File, prev: Option<&Holder>) {
+    let _ = file.set_len(0).and_then(|()| file.rewind());
+    if let Some(h) = prev {
+        let _ = writeln!(file, "{} {}", h.pid, h.exe);
+    }
 }
 
 /// The updater's exclusive claim on `root`; fails while any reader holds it.
@@ -206,5 +223,22 @@ mod tests {
         let root = temp_root("stale");
         std::fs::write(lock_path(&root), "999999 ghost\n").unwrap();
         assert!(exclusive(&root).is_ok());
+    }
+
+    #[test]
+    fn a_refused_reader_does_not_name_itself() {
+        let root = temp_root("refused");
+        let updater = exclusive(&root).unwrap();
+        let err = shared(&root).unwrap_err();
+        assert!(err.is_held(), "{err}");
+        let LockError::Held { holder, .. } = err else {
+            unreachable!()
+        };
+        // The refused reader never took the lock, so it must not report itself
+        // as the holder, and it must not have left its own note on disk.
+        assert_ne!(holder.map(|h| h.pid), Some(std::process::id()));
+        let (_, mut file) = open_lock_file(&root).unwrap();
+        assert_ne!(read_holder(&mut file).map(|h| h.pid), Some(std::process::id()));
+        drop(updater);
     }
 }

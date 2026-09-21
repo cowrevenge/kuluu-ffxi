@@ -31,6 +31,9 @@ use kuluu_session::playonline;
 #[derive(Component)]
 pub(super) struct LoginUiRoot;
 
+#[derive(Component)]
+pub(super) struct LoginCredentialField;
+
 #[derive(Resource, Default)]
 pub(super) struct LoginUiDirty(pub bool);
 
@@ -752,6 +755,7 @@ fn spawn_field(
                 submit_on_enter: true,
                 ..default()
             }))
+            .insert(LoginCredentialField)
             .with_children(|tf| {
                 tf.spawn((
                     Node {
@@ -810,6 +814,7 @@ pub(super) fn keyboard_input_system(
     version: Res<ServerVersionStatus>,
     era: Res<ClientEraStatus>,
     mut next: ResMut<NextState<LauncherState>>,
+    mut fields: Query<&mut TextField, With<LoginCredentialField>>,
 ) {
     for ev in events.read() {
         if ev.state != ButtonState::Pressed {
@@ -819,6 +824,10 @@ pub(super) fn keyboard_input_system(
             Key::Escape => {
                 form.user.clear();
                 form.pass.clear();
+                for mut field in &mut fields {
+                    field.value.clear();
+                    field.cursor = 0;
+                }
                 return;
             }
             Key::Enter
@@ -1022,11 +1031,31 @@ mod tests {
     fn escape_at_login_wipes_credentials_without_leaving_the_screen() {
         let mut app = escape_app();
         let window = app.world_mut().spawn(PrimaryWindow).id();
+        let fields: Vec<_> = ["cow", "moo"]
+            .into_iter()
+            .map(|value| {
+                app.world_mut()
+                    .spawn((
+                        LoginCredentialField,
+                        TextField {
+                            value: value.into(),
+                            cursor: value.len(),
+                            ..Default::default()
+                        },
+                    ))
+                    .id()
+            })
+            .collect();
         press_escape(&mut app, window);
         app.update();
         let form = app.world().resource::<LoginForm>();
         assert!(form.user.is_empty(), "Escape must clear the user field");
         assert!(form.pass.is_empty(), "Escape must clear the password field");
+        for field in fields {
+            let editor = app.world().get::<TextField>(field).unwrap();
+            assert!(editor.value.is_empty());
+            assert_eq!(editor.cursor, 0);
+        }
         assert!(
             matches!(
                 *app.world().resource::<NextState<LauncherState>>(),

@@ -2114,26 +2114,72 @@ fn target_push_without_an_engage_goal_never_draws() {
     assert_eq!(s.self_server_status, NONE);
 }
 
-/// With our engage goal up, the server's 0x058 is the accept: the byte flips
-/// to ATTACK on it, before any 0x037 arrives.
+/// With our engage pending, the server's 0x058 is the accept: the byte flips
+/// to ATTACK on it, before any 0x037 arrives. The standing Engaged goal
+/// (a re-aim while fighting) passes the same gate.
 #[test]
 fn target_push_with_the_engage_goal_draws_on_the_accept() {
     use ffxi_proto::decode::animation::{ATTACK, NONE};
+    for goal in [
+        ReactorGoalSnapshot::Engaging {
+            target_id: 99,
+            attack_issued: true,
+        },
+        ReactorGoalSnapshot::Engaged {
+            target_id: 99,
+            attack_issued: true,
+        },
+    ] {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::ReactorGoalChanged { goal });
+        assert_eq!(
+            s.self_server_status, NONE,
+            "sending the engage draws nothing"
+        );
+        assert!(s.apply_event(&AgentEvent::TargetChanged {
+            target_id: Some(99)
+        }));
+        assert_eq!(s.self_server_status, ATTACK);
+    }
+}
+
+/// The refusal event is inert in the fold: the reactor owns the goal change,
+/// and the byte never moved.
+#[test]
+fn engage_refused_changes_nothing_in_the_fold() {
+    use ffxi_proto::decode::animation::NONE;
     let mut s = SessionState::default();
     s.apply_event(&AgentEvent::ReactorGoalChanged {
-        goal: ReactorGoalSnapshot::Engaged {
+        goal: ReactorGoalSnapshot::Engaging {
             target_id: 99,
             attack_issued: true,
         },
     });
-    assert_eq!(
-        s.self_server_status, NONE,
-        "sending the engage draws nothing"
-    );
-    assert!(s.apply_event(&AgentEvent::TargetChanged {
-        target_id: Some(99)
+    assert!(!s.apply_event(&AgentEvent::EngageRefused {
+        message_num: crate::session::MSG_BASIC_WAIT_LONGER
     }));
-    assert_eq!(s.self_server_status, ATTACK);
+    assert_eq!(s.self_server_status, NONE);
+}
+
+#[test]
+fn engaging_goal_event_roundtrip() {
+    let ev = AgentEvent::ReactorGoalChanged {
+        goal: ReactorGoalSnapshot::Engaging {
+            target_id: 99,
+            attack_issued: false,
+        },
+    };
+    let s = serde_json::to_string(&ev).unwrap();
+    let back: AgentEvent = serde_json::from_str(&s).unwrap();
+    assert!(matches!(
+        back,
+        AgentEvent::ReactorGoalChanged {
+            goal: ReactorGoalSnapshot::Engaging {
+                target_id: 99,
+                attack_issued: false,
+            },
+        }
+    ));
 }
 
 /// 0x037 remains the authority in both directions: it can flip the byte to
@@ -2532,6 +2578,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),
         AgentEvent::SkillLevelUp { .. } => (),
+        AgentEvent::EngageRefused { .. } => (),
         AgentEvent::FishingCast { .. } => (),
         AgentEvent::FishHooked { .. } => (),
         AgentEvent::FishHookedSize { .. } => (),

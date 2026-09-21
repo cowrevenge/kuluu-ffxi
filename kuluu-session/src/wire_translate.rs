@@ -941,6 +941,13 @@ pub fn goal_to_wire(g: &ReactorGoalSnapshot) -> wire::ReactorGoal {
             target_id,
             attack_issued,
         },
+        ReactorGoalSnapshot::Engaging {
+            target_id,
+            attack_issued,
+        } => wire::ReactorGoal::Engaging {
+            target_id,
+            attack_issued,
+        },
         ReactorGoalSnapshot::Pathing {
             x,
             y,
@@ -1177,6 +1184,13 @@ mod tests {
                 matches_engaged,
             ),
             (
+                ReactorGoalSnapshot::Engaging {
+                    target_id: 0x99,
+                    attack_issued: false,
+                },
+                matches_engaging,
+            ),
+            (
                 ReactorGoalSnapshot::Pathing {
                     x: 1.0,
                     y: 2.0,
@@ -1211,6 +1225,15 @@ mod tests {
             wire::ReactorGoal::Engaged {
                 target_id: 0x99,
                 attack_issued: true
+            }
+        )
+    }
+    fn matches_engaging(w: &wire::ReactorGoal) -> bool {
+        matches!(
+            w,
+            wire::ReactorGoal::Engaging {
+                target_id: 0x99,
+                attack_issued: false
             }
         )
     }

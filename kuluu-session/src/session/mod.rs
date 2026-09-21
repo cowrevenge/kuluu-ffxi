@@ -1529,6 +1529,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, true, event_tx);
+            emit_engage_refusal_event(sub.data, self_char_id, event_tx);
         }
         s2c::BATTLE_MESSAGE2 => {
             for line in
@@ -5521,6 +5522,41 @@ fn emit_battle_message_audio_event(
             });
         }
         _ => {}
+    }
+}
+
+// vendor/server/src/map/enums/msg_basic.h MsgBasic: the answers
+// vendor/server/src/map/ai/controllers/player_controller.cpp
+// CPlayerController::Engage and entities/char_entity.cpp
+// CCharEntity::applyTargetRestrictions give a 0x01A Attack in place of the
+// 0x058 accept. pub(crate) so the reactor tests name them.
+pub(crate) const MSG_BASIC_ALREADY_CLAIMED: u16 = 12;
+pub(crate) const MSG_BASIC_TOO_FAR_AWAY: u16 = 78;
+pub(crate) const MSG_BASIC_WAIT_LONGER: u16 = 94;
+pub(crate) const MSG_BASIC_CANNOT_ON_THAT_TARGET: u16 = 155;
+pub(crate) const MSG_BASIC_CANNOT_ATTACK_TARGET: u16 = 446;
+const ENGAGE_REFUSAL_IDS: [u16; 5] = [
+    MSG_BASIC_ALREADY_CLAIMED,
+    MSG_BASIC_TOO_FAR_AWAY,
+    MSG_BASIC_WAIT_LONGER,
+    MSG_BASIC_CANNOT_ON_THAT_TARGET,
+    MSG_BASIC_CANNOT_ATTACK_TARGET,
+];
+
+/// A 0x029 from CPlayerController::Engage carries cas = self; the refusal
+/// events of other casters are theirs, not ours.
+fn emit_engage_refusal_event(
+    data: &[u8],
+    self_char_id: u32,
+    event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+) {
+    if data.len() < 24 {
+        return;
+    }
+    let cas_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    let message_num = u16::from_le_bytes(data[20..22].try_into().unwrap());
+    if cas_id == self_char_id && ENGAGE_REFUSAL_IDS.contains(&message_num) {
+        let _ = event_tx.send(AgentEvent::EngageRefused { message_num });
     }
 }
 

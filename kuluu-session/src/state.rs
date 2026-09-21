@@ -1426,6 +1426,14 @@ pub enum ReactorGoalSnapshot {
         attack_issued: bool,
     },
 
+    /// The Attack has been sent and the server has not answered. Readers that
+    /// mean "the server has us engaged" match `Engaged` only; this variant
+    /// exists so nothing reads as engaged on a refusal.
+    Engaging {
+        target_id: u32,
+        attack_issued: bool,
+    },
+
     Pathing {
         x: f32,
         y: f32,
@@ -2051,20 +2059,24 @@ impl SessionState {
                 }
                 changed
             }
-            // 0x058 (CLockOnPacket) is pushed from OnEngage, which runs only
-            // on ForceChangeState<CAttackState> after CPlayerController::Engage
-            // has passed its MsgBasic::WaitLonger / TooFarAway / getValidTarget
-            // checks (vendor/server/src/map/ai/controllers/player_controller.cpp
-            // CPlayerController::Engage; ai_container.cpp
-            // CAIContainer::Internal_Engage; battle_entity.cpp
-            // CBattleEntity::OnEngage). It is therefore the server's accept,
-            // and the synchronous one: 0x037 CHAR_STATUS carries the same byte
-            // from CCharEntity::PostTick a tick later. A refused engage sends
-            // neither. The write is gated on our own Engaged goal because
-            // battleutils::assistTarget pushes the same packet for /assist.
+            // 0x058 (GP_SERV_COMMAND_ASSIST) is pushed by
+            // vendor/server/src/map/ai/controllers/player_controller.cpp
+            // CPlayerController::Engage only after its IsValidTarget,
+            // distance and MsgBasic::WaitLonger checks pass and
+            // CController::Engage returns true. It is therefore the server's
+            // accept, and the synchronous one: 0x037 CHAR_STATUS carries the
+            // same byte from entities/char_entity.cpp CCharEntity::PostTick
+            // behind m_nextUpdateTimer. A refused engage sends neither. The
+            // write is gated on our own pending or standing engage goal
+            // because battleutils::assistTarget pushes the same packet for
+            // /assist.
             AgentEvent::TargetChanged { target_id } => {
-                let engaged =
-                    matches!(self.current_goal, Some(ReactorGoalSnapshot::Engaged { .. }));
+                let engaged = matches!(
+                    self.current_goal,
+                    Some(
+                        ReactorGoalSnapshot::Engaging { .. } | ReactorGoalSnapshot::Engaged { .. }
+                    )
+                );
                 let status = match target_id {
                     Some(_) if engaged => ffxi_proto::decode::animation::ATTACK,
                     Some(_) => return false,
@@ -2087,6 +2099,7 @@ impl SessionState {
             | AgentEvent::MusicVolumeChanged { .. }
             | AgentEvent::LevelUp { .. }
             | AgentEvent::SkillLevelUp { .. }
+            | AgentEvent::EngageRefused { .. }
             | AgentEvent::VanaTimeSynced { .. } => false,
             AgentEvent::InventoryUpdated { container, update } => {
                 let entry = self.inventory.containers.entry(*container).or_default();
@@ -3112,6 +3125,15 @@ pub enum AgentEvent {
     SkillLevelUp {
         skill_id: u16,
         level: u32,
+    },
+
+    /// s2c 0x029 with a MsgBasic that
+    /// vendor/server/src/map/ai/controllers/player_controller.cpp
+    /// CPlayerController::Engage (or entities/char_entity.cpp
+    /// CCharEntity::applyTargetRestrictions under it) answers a 0x01A Attack
+    /// with instead of the 0x058 accept. Emitted only for our own casts.
+    EngageRefused {
+        message_num: u16,
     },
 
     /// Self has cast a line: the server set FISHING_START with this hook delay (frames).

@@ -809,6 +809,12 @@ pub enum ReactorGoal {
         target_id: u32,
         attack_issued: bool,
     },
+    /// Attack sent, server not yet answered; see kuluu-session
+    /// ReactorGoalSnapshot::Engaging.
+    Engaging {
+        target_id: u32,
+        attack_issued: bool,
+    },
     Pathing {
         x: f32,
         y: f32,

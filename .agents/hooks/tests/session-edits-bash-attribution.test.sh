@@ -639,7 +639,37 @@ test_commit_nudge_names_the_suspect_log() {
     || fail "commit nudge does not name the suspect log"
 }
 
-CASES=(  test_peer_write_not_attributed
+test_redirect_write_attributed() {
+  new_repo
+  local p; p=$(payload "$SID" "printf beta > src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  printf 'peer\n' >> "$REPO/src/b.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_in_ledger "$SID" src/a.txt
+  assert_not_in_ledger "$SID" src/b.txt
+}
+
+test_absolute_writer_attributed() {
+  new_repo
+  local p; p=$(payload "$SID" "/usr/bin/python3 gen.py src/a.txt")
+  run_hook session-edits-bash-pre.sh "$p"
+  printf 'beta\n' > "$REPO/src/a.txt"
+  run_hook session-edits-bash-post.sh "$p"
+  assert_in_ledger "$SID" src/a.txt
+}
+
+test_write_capable_utility_not_readonly() {
+  for cmd in 'sort -o src/a.txt src/a.txt' 'uniq src/a.txt src/b.txt' 'xxd -r src/a.txt src/b.txt' 'git diff -- src/b.txt && git restore src/a.txt'; do
+    cmd_readonly "$cmd" && fail "write classified as read-only: $cmd"
+  done
+  return 0
+}
+
+CASES=(  test_write_capable_utility_not_readonly
+  test_redirect_write_attributed
+  test_absolute_writer_attributed
+  test_peer_write_not_attributed
   test_peer_write_recorded_as_suspect
   test_named_sed_write_attributed
   test_named_write_to_already_dirty_path_attributed

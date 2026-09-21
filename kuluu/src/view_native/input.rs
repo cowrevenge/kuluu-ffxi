@@ -1355,8 +1355,8 @@ pub fn dispatch_movement_system(
             .iter()
             .find(|e| e.id == id)
             .and_then(|ent| {
-                let dx = ent.pos.x - self_pos.pos.x;
-                let dy = ent.pos.y - self_pos.pos.y;
+                let dx = ent.pos.x - basis_pos.x;
+                let dy = ent.pos.y - basis_pos.y;
                 if dx.abs() <= 0.001 && dy.abs() <= 0.001 {
                     None
                 } else {

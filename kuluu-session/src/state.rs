@@ -2051,18 +2051,29 @@ impl SessionState {
                 }
                 changed
             }
-            // 0x058 commits which entity the server is fighting (the reactor
-            // re-aims on it, reactor.rs); it says nothing about whether self is
-            // in the attack state. That byte is the 0x037 CHAR_STATUS animation
-            // field, delivered as SelfServerStatus: battle_entity.cpp
-            // CBattleEntity::OnEngage sets animation = xi::Animation::Attack and
-            // updatemask |= UPDATE_HP, and char_entity.cpp CCharEntity::PostTick
-            // pushes CCharStatusPacket (char_status.cpp, id 0x037, server_status
-            // = PChar->animation) on that mask. A refused engage returns before
-            // OnEngage (CPlayerController::Engage's MsgBasic::WaitLonger /
-            // TooFarAway, or a target getValidTarget rejects), so the byte
-            // moves only on the 0x037.
-            AgentEvent::TargetChanged { .. } => false,
+            // 0x058 (CLockOnPacket) is pushed from OnEngage, which runs only
+            // on ForceChangeState<CAttackState> after CPlayerController::Engage
+            // has passed its MsgBasic::WaitLonger / TooFarAway / getValidTarget
+            // checks (vendor/server/src/map/ai/controllers/player_controller.cpp
+            // CPlayerController::Engage; ai_container.cpp
+            // CAIContainer::Internal_Engage; battle_entity.cpp
+            // CBattleEntity::OnEngage). It is therefore the server's accept,
+            // and the synchronous one: 0x037 CHAR_STATUS carries the same byte
+            // from CCharEntity::PostTick a tick later. A refused engage sends
+            // neither. The write is gated on our own Engaged goal because
+            // battleutils::assistTarget pushes the same packet for /assist.
+            AgentEvent::TargetChanged { target_id } => {
+                let engaged =
+                    matches!(self.current_goal, Some(ReactorGoalSnapshot::Engaged { .. }));
+                let status = match target_id {
+                    Some(_) if engaged => ffxi_proto::decode::animation::ATTACK,
+                    Some(_) => return false,
+                    None => ffxi_proto::decode::animation::NONE,
+                };
+                let changed = self.self_server_status != status;
+                self.self_server_status = status;
+                changed
+            }
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }

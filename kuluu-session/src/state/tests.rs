@@ -2102,44 +2102,61 @@ fn apply_event_reports_real_mutations_only() {
     }));
 }
 
-/// The attack byte follows the 0x037 CHAR_STATUS animation field, not the
-/// 0x058 target push: a target set or clear leaves it put, and only
-/// SelfServerStatus moves it.
+/// A 0x058 target push with no engage goal of our own (an /assist push, a
+/// stray commit) never arms the weapon: the byte stays NONE.
 #[test]
-fn attack_byte_follows_char_status_not_the_target_push() {
+fn target_push_without_an_engage_goal_never_draws() {
+    use ffxi_proto::decode::animation::NONE;
+    let mut s = SessionState::default();
+    assert!(!s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+    assert_eq!(s.self_server_status, NONE);
+}
+
+/// With our engage goal up, the server's 0x058 is the accept: the byte flips
+/// to ATTACK on it, before any 0x037 arrives.
+#[test]
+fn target_push_with_the_engage_goal_draws_on_the_accept() {
     use ffxi_proto::decode::animation::{ATTACK, NONE};
     let mut s = SessionState::default();
-    assert_eq!(s.self_server_status, NONE);
-
-    assert!(
-        !s.apply_event(&AgentEvent::TargetChanged {
-            target_id: Some(99)
-        }),
-        "a target push is not the attack state"
+    s.apply_event(&AgentEvent::ReactorGoalChanged {
+        goal: ReactorGoalSnapshot::Engaged {
+            target_id: 99,
+            attack_issued: true,
+        },
+    });
+    assert_eq!(
+        s.self_server_status, NONE,
+        "sending the engage draws nothing"
     );
-    assert_eq!(s.self_server_status, NONE);
+    assert!(s.apply_event(&AgentEvent::TargetChanged {
+        target_id: Some(99)
+    }));
+    assert_eq!(s.self_server_status, ATTACK);
+}
 
+/// 0x037 remains the authority in both directions: it can flip the byte to
+/// ATTACK on its own and back to NONE, and a 0x058 clear also sheathes.
+#[test]
+fn char_status_and_target_clear_both_move_the_byte() {
+    use ffxi_proto::decode::animation::{ATTACK, NONE};
+    let mut s = SessionState::default();
     assert!(s.apply_event(&AgentEvent::SelfServerStatus {
         status: ATTACK,
         mount_id: 0
     }));
     assert_eq!(s.self_server_status, ATTACK);
-
+    assert!(s.apply_event(&AgentEvent::TargetChanged { target_id: None }));
+    assert_eq!(s.self_server_status, NONE);
+    assert!(s.apply_event(&AgentEvent::SelfServerStatus {
+        status: ATTACK,
+        mount_id: 0
+    }));
     assert!(s.apply_event(&AgentEvent::SelfServerStatus {
         status: NONE,
         mount_id: 0
     }));
-    assert_eq!(s.self_server_status, NONE);
-}
-
-/// A 0x058 push alone must never arm the weapon: the byte stays NONE.
-#[test]
-fn target_push_alone_never_draws() {
-    use ffxi_proto::decode::animation::NONE;
-    let mut s = SessionState::default();
-    s.apply_event(&AgentEvent::TargetChanged {
-        target_id: Some(99),
-    });
     assert_eq!(s.self_server_status, NONE);
 }
 

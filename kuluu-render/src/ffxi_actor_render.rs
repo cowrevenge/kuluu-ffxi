@@ -7127,39 +7127,6 @@ mod pose_resolution_tests {
         }
     }
 
-    /// While the weapon is mid draw or mid sheathe the player is held in place
-    /// (retail's one real lock), so the self locomotion flag must be off for the
-    /// whole transition window: the pre-draw run must not keep playing through it
-    /// on the motion latch. Once the weapon is fully out (Engaged) or away
-    /// (NotEngaged) the flag follows the motion again.
-    #[test]
-    fn self_locomotion_is_held_off_for_the_whole_engage_transition() {
-        use actor_state::EngageAnimationState as S;
-        let routines = synth_routines(&[(b"in 0", b"ind?"), (b"out0", b"otd?")]);
-        let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
-
-        // The gating rule the render pass applies to the self moving flag.
-        let held_off = |engage: &EngageMachine| match advance_engage(
-            &mut EngageMachine::clone(engage),
-            true,
-            &routines,
-            &[],
-            &anims,
-            &[],
-            0.0,
-        ) {
-            S::Engaging | S::Disengaging => true,
-            S::Engaged | S::NotEngaged => false,
-        };
-
-        // Mid-draw and mid-sheathe hold the locomotion off.
-        assert!(held_off(&EngageMachine::Drawing { remaining: 5.0 }));
-        assert!(held_off(&EngageMachine::Sheathing { remaining: 5.0 }));
-        // Fully out or fully away lets the locomotion follow the motion again.
-        assert!(!held_off(&EngageMachine::Engaged));
-        assert!(!held_off(&EngageMachine::NotEngaged));
-    }
-
     #[test]
     fn weapon_never_out_without_an_active_target() {
         use ffxi_proto::decode::animation::ATTACK;

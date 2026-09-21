@@ -2762,7 +2762,11 @@ fn battle2_mob_magic_start_says_starts_casting() {
     // (vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init).
     let line = build_battle2_line(327, "Goblin Tinkerer", "Oldman", false, true, 4, 0, 8)
         .expect("msg 327 must resolve");
-    assert!(line.text.contains("starts casting Cure"), "got: {}", line.text);
+    assert!(
+        line.text.contains("starts casting Cure"),
+        "got: {}",
+        line.text
+    );
 }
 
 #[test]

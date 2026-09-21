@@ -1265,7 +1265,8 @@ fn open_sub_target_narrowed(
         return open_sub_target(action, current_target, scene_state, return_to);
     };
     use kuluu_render::sub_target;
-    let flags = ffxi_vocab::valid_target::TargetFlags(sub_target::action_flags(action).0 & narrow.0);
+    let flags =
+        ffxi_vocab::valid_target::TargetFlags(sub_target::action_flags(action).0 & narrow.0);
     let ents = gather_sub_target_entities(scene_state);
     let Some(candidate) = sub_target::initial_candidate(flags, current_target, &ents) else {
         push_system_chat_line(scene_state, "Unable to see any qualified targets.".into());

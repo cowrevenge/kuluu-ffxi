@@ -1425,7 +1425,10 @@ impl FfxiRenderActor {
     /// .agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
     /// "The one real player lock is the weapon draw and sheathe").
     pub fn engage_transition_in_progress(&self) -> bool {
-        matches!(self.engage, EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. })
+        matches!(
+            self.engage,
+            EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. }
+        )
     }
 
     /// Cross-crate test seam: kuluu's movement-gate tests cannot reach the
@@ -2008,7 +2011,14 @@ pub fn render_actor_stub(world_id: u32) -> FfxiRenderActor {
         references: Vec::new(),
         bounding_boxes: Vec::new(),
     };
-    make_render_actor(&empty_loaded_actor(skeleton, None), 0, Vec::new(), world_id, 0.0, 1.0)
+    make_render_actor(
+        &empty_loaded_actor(skeleton, None),
+        0,
+        Vec::new(),
+        world_id,
+        0.0,
+        1.0,
+    )
 }
 
 /// A render actor with no model behind it, carrying an explicit Cib Info movement byte, for the
@@ -2398,7 +2408,9 @@ pub(crate) fn action_routine(
             (id, true)
         }
 
-        ffxi_proto::melee::CATEGORY_RANGED_FINISH => (DatId::from_str(RANGED_FINISH_ROUTINE), false),
+        ffxi_proto::melee::CATEGORY_RANGED_FINISH => {
+            (DatId::from_str(RANGED_FINISH_ROUTINE), false)
+        }
 
         _ => return None,
     })
@@ -4489,42 +4501,43 @@ pub fn dispatch_action_overlay(
                 {
                     (routine, looping) = (DatId::from_str("ati0"), false);
                 }
-                let clip_id = match routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
-                {
-                    Some(id) => id,
-                    // A mob DAT may lack the spell school's cast routine (cawh & co);
-                    // the generic `cast` is the race-base fallback the start pose still
-                    // reads.
-                    None if action_kind == MAGIC_START_CATEGORY && routine != DatId::from_str("cast") =>
-                    {
-                        match routine_motion_clip(
-                            &actor.routines,
-                            &actor.rejected_routines,
-                            DatId::from_str("cast"),
-                        ) {
-                            Some(id) => id,
-                            None => {
-                                tracing::debug!(
-                                    target: "combat",
-                                    actor_id,
-                                    ?routine,
-                                    "no cast clip on this model; start pose skipped"
-                                );
-                                continue;
+                let clip_id =
+                    match routine_motion_clip(&actor.routines, &actor.rejected_routines, routine) {
+                        Some(id) => id,
+                        // A mob DAT may lack the spell school's cast routine (cawh & co);
+                        // the generic `cast` is the race-base fallback the start pose still
+                        // reads.
+                        None if action_kind == MAGIC_START_CATEGORY
+                            && routine != DatId::from_str("cast") =>
+                        {
+                            match routine_motion_clip(
+                                &actor.routines,
+                                &actor.rejected_routines,
+                                DatId::from_str("cast"),
+                            ) {
+                                Some(id) => id,
+                                None => {
+                                    tracing::debug!(
+                                        target: "combat",
+                                        actor_id,
+                                        ?routine,
+                                        "no cast clip on this model; start pose skipped"
+                                    );
+                                    continue;
+                                }
                             }
                         }
-                    }
-                    None => {
-                        tracing::debug!(
-                            target: "combat",
-                            actor_id,
-                            action_kind,
-                            ?routine,
-                            "no motion clip for this action; pose skipped"
-                        );
-                        continue;
-                    }
-                };
+                        None => {
+                            tracing::debug!(
+                                target: "combat",
+                                actor_id,
+                                action_kind,
+                                ?routine,
+                                "no motion clip for this action; pose skipped"
+                            );
+                            continue;
+                        }
+                    };
 
                 let len = rest_clip_len_frames(&actor.battle_clips, clip_id)
                     .max(rest_clip_len_frames(&actor.animations, clip_id));
@@ -6812,16 +6825,17 @@ mod pose_resolution_tests {
         let ent = world.spawn(actor).id();
 
         let run_overlay = |world: &mut World| {
-            world.run_system_once(
-                |events: Res<crate::snapshot::EventLog>,
-                 q: Query<&mut FfxiRenderActor>,
-                 last: Local<u64>,
-                 suffix: ResMut<SpellSuffixCache>,
-                 root: Res<ActorDatRoot>| {
-                    dispatch_action_overlay(events, q, last, suffix, root)
-                },
-            )
-            .unwrap();
+            world
+                .run_system_once(
+                    |events: Res<crate::snapshot::EventLog>,
+                     q: Query<&mut FfxiRenderActor>,
+                     last: Local<u64>,
+                     suffix: ResMut<SpellSuffixCache>,
+                     root: Res<ActorDatRoot>| {
+                        dispatch_action_overlay(events, q, last, suffix, root)
+                    },
+                )
+                .unwrap();
         };
 
         let ranged = |animation: Option<u16>| kuluu_snapshot::ViewerEvent::ActionStarted {
@@ -6835,7 +6849,9 @@ mod pose_resolution_tests {
         };
 
         // The aim start arms the looping pose.
-        world.resource_mut::<crate::snapshot::EventLog>().push(ranged(None));
+        world
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(ranged(None));
         run_overlay(&mut world);
         {
             let mut em = world.entity_mut(ent);
@@ -6847,7 +6863,8 @@ mod pose_resolution_tests {
         }
 
         // The interrupt (start category + SkillInterrupt animation) drops it.
-        world.resource_mut::<crate::snapshot::EventLog>()
+        world
+            .resource_mut::<crate::snapshot::EventLog>()
             .push(ranged(Some(ffxi_proto::melee::RANGED_INTERRUPT_ANIMATION)));
         run_overlay(&mut world);
         {
@@ -6881,16 +6898,17 @@ mod pose_resolution_tests {
         let ent = world.spawn(actor).id();
 
         let run_overlay = |world: &mut World| {
-            world.run_system_once(
-                |events: Res<crate::snapshot::EventLog>,
-                 q: Query<&mut FfxiRenderActor>,
-                 last: Local<u64>,
-                 suffix: ResMut<SpellSuffixCache>,
-                 root: Res<ActorDatRoot>| {
-                    dispatch_action_overlay(events, q, last, suffix, root)
-                },
-            )
-            .unwrap();
+            world
+                .run_system_once(
+                    |events: Res<crate::snapshot::EventLog>,
+                     q: Query<&mut FfxiRenderActor>,
+                     last: Local<u64>,
+                     suffix: ResMut<SpellSuffixCache>,
+                     root: Res<ActorDatRoot>| {
+                        dispatch_action_overlay(events, q, last, suffix, root)
+                    },
+                )
+                .unwrap();
         };
 
         let magic_start = kuluu_snapshot::ViewerEvent::ActionStarted {
@@ -6903,7 +6921,9 @@ mod pose_resolution_tests {
             outcome: None,
         };
 
-        world.resource_mut::<crate::snapshot::EventLog>().push(magic_start);
+        world
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(magic_start);
         run_overlay(&mut world);
         {
             let mut em = world.entity_mut(ent);

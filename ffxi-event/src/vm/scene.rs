@@ -841,7 +841,7 @@ impl EventVm {
         None
     }
 
-    fn position_operands(&self, start: usize, heading: bool) -> EventPosition {
+    pub(super) fn position_operands(&self, start: usize, heading: bool) -> EventPosition {
         EventPosition {
             x: self.getworkofs(start, 0),
             z: self.getworkofs(start + 2, 0),

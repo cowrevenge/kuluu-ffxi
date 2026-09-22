@@ -181,6 +181,13 @@ const OP_MAGIC_TWIN: u8 = 0xC4;
 // The local-player scheduler (rank-up animations): work at +1, both actors the
 // player, the `main` routine (research/XiEvents/OpCodes/0x007D.md).
 const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
+// Non-scene NPC choreography: the same cues the scene path (vm/scene.rs) emits
+// when the event carries scene data. 0x1F itself is the sub-byte `OP_MOVE`.
+const OP_MAIN_SPEED: u8 = 0x32;
+const OP_SET_FACING: u8 = 0x39;
+const OP_YAW: u8 = 0x4B;
+const OP_SET_EVENT_POS: u8 = 0x36;
+const OP_SET_ACTOR_POS: u8 = 0xBA;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
@@ -288,6 +295,21 @@ const MAGIC_TWIN_ACTOR2_OFS: usize = 8;
 const MAGIC_TWIN_SIZE: usize = 12;
 // 0x007D: the work operand at +1 (research/XiEvents/OpCodes/0x007D.md).
 const LOCAL_PLAYER_SCHEDULER_FILE_OFS: usize = 1;
+// 0x0032 MainSpeed: the speed operand at +1 (research/XiEvents/OpCodes/0x0032.md).
+const MAIN_SPEED_OFS: usize = 1;
+// 0x0039 SetFacing: the heading operand at +1 (research/XiEvents/OpCodes/0x0039.md).
+const SET_FACING_OFS: usize = 1;
+// 0x004B yaw: the named actor at +1, the heading at +5
+// (research/XiEvents/OpCodes/0x004B.md).
+const YAW_ACTOR_OFS: usize = 1;
+const YAW_HEADING_OFS: usize = 5;
+// 0x0036 / 0x00BA position: x, z, y at +1/+3/+5 (0x36) and +5/+7/+9 with the
+// heading at +11 (0xBA); the goal of 0x1F case 0 sits at +2/+4/+6
+// (research/XiEvents/OpCodes/0x0036.md, 0x00BA.md, 0x001F.md).
+const SET_EVENT_POS_X_OFS: usize = 1;
+const SET_ACTOR_POS_ACTOR_OFS: usize = 1;
+const SET_ACTOR_POS_X_OFS: usize = 5;
+const MOVE_GOAL_X_OFS: usize = 2;
 const LOADEXTSCHEDULER_FILE_OFS: usize = 1; // 0x005B / 0x0066
 const LOADEXTSCHEDULER_ACTOR1_OFS: usize = 3;
 const LOADEXTSCHEDULER_ACTOR2_OFS: usize = 7;
@@ -448,6 +470,10 @@ pub struct EventVm {
     /// Host-armed move holds a non-player MOVE case 1 parks on; see
     /// [`MoveHold`].
     move_holds: Vec<MoveHold>,
+    /// The MainSpeed operand (0x32) the non-scene path arms its `OP_MOVE`
+    /// `ActorMove` cue with; the scene path tracks the same value on its own
+    /// `Scene` (research/XiEvents/OpCodes/0x0032.md).
+    move_speed: i32,
     /// The retail entity Type byte of the actors this VM's
     /// `OP_LOADEXTSCHEDULER`/`OP_LOADEXTSCHEDULER2` opcodes name, keyed by the
     /// actor's server id and target index: the gate both motion resource
@@ -644,6 +670,7 @@ impl EventVm {
             req_wait: None,
             action_holds: Vec::new(),
             move_holds: Vec::new(),
+            move_speed: 0,
             actor_types: std::collections::HashMap::new(),
             pending_action_starts: Vec::new(),
             pending_action_holds: Vec::new(),
@@ -1614,6 +1641,50 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // 0x32 MainSpeed: arm the speed the non-scene `OP_MOVE` case 0
+                // carries; the scene path keeps the same value on its `Scene`
+                // (research/XiEvents/OpCodes/0x0032.md).
+                OP_MAIN_SPEED => {
+                    self.move_speed = self.getworkofs(MAIN_SPEED_OFS, 0);
+                    self.advance(op);
+                }
+                // 0x39 SetFacing: set the event entity's facing, the raw work
+                // value on the 0..4095 heading scale (research/XiEvents/OpCodes/
+                // 0x0039.md).
+                OP_SET_FACING => {
+                    let heading = self.getworkofs(SET_FACING_OFS, 0);
+                    self.cues.push(EventCue::ActorFace {
+                        actor: ActorLookup::EVENT_ENTITY,
+                        heading,
+                    });
+                    self.advance(op);
+                }
+                // 0x4B: turn the named actor to the work-operand yaw
+                // (research/XiEvents/OpCodes/0x004B.md).
+                OP_YAW => {
+                    let actor = ActorLookup(self.eventgetcode2(YAW_ACTOR_OFS));
+                    let heading = self.getworkofs(YAW_HEADING_OFS, 0);
+                    self.cues.push(EventCue::ActorFace { actor, heading });
+                    self.advance(op);
+                }
+                // 0x36: place the event entity at the work-operand position, no
+                // heading (research/XiEvents/OpCodes/0x0036.md).
+                OP_SET_EVENT_POS => {
+                    let position = self.position_operands(SET_EVENT_POS_X_OFS, false);
+                    self.cues.push(EventCue::ActorPlace {
+                        actor: ActorLookup::EVENT_ENTITY,
+                        position,
+                    });
+                    self.advance(op);
+                }
+                // 0xBA: place the named actor at the work-operand position and
+                // heading (research/XiEvents/OpCodes/0x00BA.md).
+                OP_SET_ACTOR_POS => {
+                    let actor = ActorLookup(self.eventgetcode2(SET_ACTOR_POS_ACTOR_OFS));
+                    let position = self.position_operands(SET_ACTOR_POS_X_OFS, true);
+                    self.cues.push(EventCue::ActorPlace { actor, position });
+                    self.advance(op);
+                }
                 // Case 2 queries the camera state into a work slot rather than
                 // changing it, and every other case is retail's no-op
                 // fall-through (research/XiEvents/OpCodes/0x0046.md).
@@ -1799,6 +1870,24 @@ impl EventVm {
                                 actor: ActorLookup::EVENT_ENTITY,
                                 name: self.getworkstr(2),
                             });
+                        }
+                        // 0x1F case 0: walk the event entity to its goal at the
+                        // 0x32 speed; case 1 holds while that move still has
+                        // frames left (research/XiEvents/OpCodes/0x001F.md).
+                        (OP_MOVE, 0x00) => {
+                            let goal = self.position_operands(MOVE_GOAL_X_OFS, false);
+                            self.cues.push(EventCue::ActorMove {
+                                actor: ActorLookup::EVENT_ENTITY,
+                                goal,
+                                speed: self.move_speed,
+                            });
+                        }
+                        (OP_MOVE, 0x01) => {
+                            if self.move_running(ActorLookup::EVENT_ENTITY) {
+                                self.parked_on_move_hold = true;
+                                return StepResult::Waiting;
+                            }
+                            self.parked_on_move_hold = false;
                         }
                         _ => {}
                     }
@@ -4080,6 +4169,125 @@ mod tests {
                 actor2: ActorLookup::LOCAL_PLAYER,
                 tag: MAGIC_ROUTINE_TAG,
                 duration: SCHEDULER_DURATION_FROM_DAT,
+            }]
+        );
+    }
+
+    /// Without scene data, 0x32 arms the speed and 0x1F case 0 walks the event
+    /// entity to its goal; the goal reads x@2, z@4, y@6
+    /// (research/XiEvents/OpCodes/0x001F.md, research/XiEvents/OpCodes/0x0032.md).
+    #[test]
+    fn main_speed_arms_the_non_scene_move() {
+        const MOVE_CASE_WALK: u8 = 0x00;
+        let mut data = vec![OP_MAIN_SPEED];
+        data.extend_from_slice(&REF0);
+        data.push(crate::opcode_meta::OP_MOVE);
+        data.push(MOVE_CASE_WALK);
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&REF2);
+        data.extend_from_slice(&REF3);
+        data.push(OP_END);
+        let mut e = vm(data, vec![10, 20, 40, (-5_i32) as u32]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorMove {
+                actor: ActorLookup::EVENT_ENTITY,
+                goal: crate::vm::scene::EventPosition {
+                    x: 20,
+                    z: 40,
+                    y: -5,
+                    heading: 0,
+                },
+                speed: 10,
+            }]
+        );
+    }
+
+    /// 0x1F case 1 parks on the host-armed move hold and advances once it is
+    /// released (research/XiEvents/OpCodes/0x001F.md).
+    #[test]
+    fn non_scene_move_case1_holds_on_the_move_hold() {
+        let program = || {
+            let mut data = vec![crate::opcode_meta::OP_MOVE, 0x01, OP_END];
+            data
+        };
+        let mut e = vm(program(), vec![]);
+        e.hold_move(ActorLookup::EVENT_ENTITY, 5.0);
+        assert_eq!(e.step(), StepResult::Waiting, "the move is running");
+        e.tick(5.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done, "the move is over");
+    }
+
+    /// 0x39 sets the event entity's facing from the raw work value
+    /// (research/XiEvents/OpCodes/0x0039.md).
+    #[test]
+    fn set_facing_faces_the_event_entity() {
+        assert_eq!(
+            cues_of(OP_SET_FACING, &REF0, vec![2048]),
+            [EventCue::ActorFace {
+                actor: ActorLookup::EVENT_ENTITY,
+                heading: 2048,
+            }]
+        );
+    }
+
+    /// 0x4B turns the named actor to the work-operand yaw
+    /// (research/XiEvents/OpCodes/0x004B.md).
+    #[test]
+    fn yaw_turns_the_named_actor() {
+        let mut operands = NPC_SERVER_ID.to_le_bytes().to_vec();
+        operands.extend_from_slice(&REF0);
+        assert_eq!(
+            cues_of(OP_YAW, &operands, vec![100]),
+            [EventCue::ActorFace {
+                actor: ActorLookup(NPC_SERVER_ID),
+                heading: 100,
+            }]
+        );
+    }
+
+    /// 0x36 places the event entity at the work-operand position, no heading
+    /// (research/XiEvents/OpCodes/0x0036.md).
+    #[test]
+    fn set_event_pos_places_the_event_entity() {
+        let mut operands = Vec::new();
+        operands.extend_from_slice(&REF0);
+        operands.extend_from_slice(&REF1);
+        operands.extend_from_slice(&REF2);
+        assert_eq!(
+            cues_of(OP_SET_EVENT_POS, &operands, vec![20, 40, 3]),
+            [EventCue::ActorPlace {
+                actor: ActorLookup::EVENT_ENTITY,
+                position: crate::vm::scene::EventPosition {
+                    x: 20,
+                    z: 40,
+                    y: 3,
+                    heading: 0,
+                },
+            }]
+        );
+    }
+
+    /// 0xBA places the named actor at the work-operand position and heading
+    /// (research/XiEvents/OpCodes/0x00BA.md).
+    #[test]
+    fn set_actor_pos_places_the_named_actor() {
+        let mut operands = NPC_SERVER_ID.to_le_bytes().to_vec();
+        operands.extend_from_slice(&REF0);
+        operands.extend_from_slice(&REF1);
+        operands.extend_from_slice(&REF2);
+        operands.extend_from_slice(&REF3);
+        assert_eq!(
+            cues_of(OP_SET_ACTOR_POS, &operands, vec![20, 40, 3, 512]),
+            [EventCue::ActorPlace {
+                actor: ActorLookup(NPC_SERVER_ID),
+                position: crate::vm::scene::EventPosition {
+                    x: 20,
+                    z: 40,
+                    y: 3,
+                    heading: 512,
+                },
             }]
         );
     }

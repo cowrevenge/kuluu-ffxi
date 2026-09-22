@@ -184,6 +184,13 @@ impl DialogRunner {
         self.vm.set_zone_rects(rects);
     }
 
+    /// Install the zone number 0xD4 case 0 opens the map on; see
+    /// [`EventVm::set_current_zone`]. The session injects the event zone before
+    /// driving.
+    pub fn set_current_zone(&mut self, zone: i32) {
+        self.vm.set_current_zone(zone);
+    }
+
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
     /// reports the routine finished; see [`EventVm::hold_action_pending`]. The
     /// session calls this when it publishes a SCHEDULOR motion cue, whose

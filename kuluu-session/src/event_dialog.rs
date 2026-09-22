@@ -358,6 +358,7 @@ impl DialogSession {
         if let Some(rects) = self.zone_rects.clone() {
             runner.set_zone_rects(rects);
         }
+        runner.set_current_zone(event_zone as i32);
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event

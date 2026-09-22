@@ -6,10 +6,9 @@ use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
     dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
-    EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, MAGIC_DAT_ID_BASE,
-    MAGIC_ROUTINE_TAG, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE, MUSIC_VOLUME_MAX, NO_ACTION_KEY,
-    SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE,
-    STATUS_EVENT_MOUNT,
+    EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE,
+    MAGIC_DAT_ID_BASE, MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
+    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -188,6 +187,9 @@ const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
 const OP_SET_ACTOR_POS: u8 = 0xBA;
+// 0x0020: writes retail's CliEventUcFlag — the player-control lock
+// (research/XiEvents/OpCodes/0x0020.md).
+const OP_PLAYER_CONTROL: u8 = 0x20;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
@@ -332,6 +334,8 @@ const EMOT_VALUE_OFS: usize = 5;
 const PLAYANIM_VALUE_OFS: usize = 1;
 // 0x0099 ANIMWAIT: the actor lookup at +1 (research/XiEvents/OpCodes/0x0099.md).
 const ANIMWAIT_ACTOR_OFS: usize = 1;
+// 0x0020: the flag byte at +1 (research/XiEvents/OpCodes/0x0020.md).
+const PLAYER_CONTROL_FLAG_OFS: usize = 1;
 const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
 const DEFCAMERA_CASE_UNLOCK: u8 = 0;
 const DEFCAMERA_CASE_LOCK: u8 = 1;
@@ -1696,6 +1700,14 @@ impl EventVm {
                         }
                         _ => {}
                     }
+                    self.advance(op);
+                }
+                // 0x20 writes retail's CliEventUcFlag; while it holds, the
+                // player's CanIMove is false (research/XiEvents/OpCodes/0x0020.md).
+                OP_PLAYER_CONTROL => {
+                    self.cues.push(EventCue::PlayerControl {
+                        locked: self.byte_at(PLAYER_CONTROL_FLAG_OFS) != 0,
+                    });
                     self.advance(op);
                 }
                 OP_EVENTHIDE => {
@@ -4131,7 +4143,11 @@ mod tests {
             operands.extend_from_slice(&MAGIC_ROUTINE_TAG);
             operands.extend_from_slice(&REF1);
             assert_eq!(
-                cues_of(op, &operands, vec![WORK, SCHEDULER_DURATION_FROM_DAT as u32]),
+                cues_of(
+                    op,
+                    &operands,
+                    vec![WORK, SCHEDULER_DURATION_FROM_DAT as u32]
+                ),
                 [EventCue::Scheduler {
                     dat_id: base + WORK,
                     actor1: ActorLookup::EVENT_ENTITY,
@@ -4616,6 +4632,20 @@ mod tests {
             [EventCue::CameraLock { lock: false }]
         );
         assert!(cues_of(OP_DEFCAMERA, &[2, 0x0A, 0x00], vec![]).is_empty());
+    }
+
+    /// 0x20 writes retail's CliEventUcFlag: any nonzero byte locks the
+    /// player, zero releases it (research/XiEvents/OpCodes/0x0020.md).
+    #[test]
+    fn player_control_opcode_writes_the_flag() {
+        assert_eq!(
+            cues_of(OP_PLAYER_CONTROL, &[1], vec![]),
+            [EventCue::PlayerControl { locked: true }]
+        );
+        assert_eq!(
+            cues_of(OP_PLAYER_CONTROL, &[0], vec![]),
+            [EventCue::PlayerControl { locked: false }]
+        );
     }
 
     /// `OP_MUSICVOLUME`'s first operand is a volume *table index*, its second

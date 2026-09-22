@@ -874,6 +874,7 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             hide,
         },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::PlayerControl { locked } => CutsceneCue::PlayerControl { locked },
         EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
         EventCue::ClockHold { stop, hour } => CutsceneCue::ClockHold { stop, hour },
         EventCue::Mount {
@@ -3345,6 +3346,18 @@ pub(crate) mod tests {
 
         let events = drain(&mut rx);
         assert_eq!(camera_locks(&events), vec![true, false], "{events:?}");
+    }
+
+    /// 0x20 carries no actor: the flag write crosses the boundary as-is.
+    /// research/XiEvents/OpCodes/0x0020.md
+    #[test]
+    fn the_player_control_cue_resolves_without_an_actor() {
+        for locked in [true, false] {
+            assert_eq!(
+                resolve_cue(EventCue::PlayerControl { locked }, 0, 1, 0),
+                ResolvedCue::Scene(CutsceneCue::PlayerControl { locked })
+            );
+        }
     }
 
     /// 0x5D is a master volume, so it rides the existing music-volume event on

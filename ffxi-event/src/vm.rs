@@ -7,8 +7,9 @@ use ffxi_dat::event_dat::EventBlock;
 use crate::cue::{
     dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
     EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, MAGIC_DAT_ID_BASE,
-    MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
-    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    MAGIC_ROUTINE_TAG, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE, MUSIC_VOLUME_MAX, NO_ACTION_KEY,
+    SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE,
+    STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -177,6 +178,9 @@ const OP_SCHED_TWIN_D5: u8 = 0xD5;
 // The 0x73 twin: the spell cast with a case byte, wider than 0x73 by that
 // byte (research/XiEvents/OpCodes/0x00C4.md).
 const OP_MAGIC_TWIN: u8 = 0xC4;
+// The local-player scheduler (rank-up animations): work at +1, both actors the
+// player, the `main` routine (research/XiEvents/OpCodes/0x007D.md).
+const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
@@ -282,6 +286,8 @@ const MAGIC_TWIN_KEY_OFS: usize = 2;
 const MAGIC_TWIN_ACTOR1_OFS: usize = 3;
 const MAGIC_TWIN_ACTOR2_OFS: usize = 8;
 const MAGIC_TWIN_SIZE: usize = 12;
+// 0x007D: the work operand at +1 (research/XiEvents/OpCodes/0x007D.md).
+const LOCAL_PLAYER_SCHEDULER_FILE_OFS: usize = 1;
 const LOADEXTSCHEDULER_FILE_OFS: usize = 1; // 0x005B / 0x0066
 const LOADEXTSCHEDULER_ACTOR1_OFS: usize = 3;
 const LOADEXTSCHEDULER_ACTOR2_OFS: usize = 7;
@@ -1593,6 +1599,20 @@ impl EventVm {
                         }
                     }
                     self.exec_pointer += MAGIC_TWIN_SIZE;
+                }
+                // 0x7D runs the work-operand scheduler on the local player with
+                // the player as its own target — the rank-up animations
+                // (research/XiEvents/OpCodes/0x007D.md).
+                OP_LOCAL_PLAYER_SCHEDULER => {
+                    let file = self.getworkofs(LOCAL_PLAYER_SCHEDULER_FILE_OFS, 0) as u32;
+                    self.cues.push(EventCue::Scheduler {
+                        dat_id: LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE + file,
+                        actor1: ActorLookup::LOCAL_PLAYER,
+                        actor2: ActorLookup::LOCAL_PLAYER,
+                        tag: MAGIC_ROUTINE_TAG,
+                        duration: SCHEDULER_DURATION_FROM_DAT,
+                    });
+                    self.advance(op);
                 }
                 // Case 2 queries the camera state into a work slot rather than
                 // changing it, and every other case is retail's no-op
@@ -4057,6 +4077,23 @@ mod tests {
             [EventCue::Scheduler {
                 dat_id: MAGIC_DAT_ID_BASE + ANIMATION,
                 actor1: ActorLookup(ACTOR1),
+                actor2: ActorLookup::LOCAL_PLAYER,
+                tag: MAGIC_ROUTINE_TAG,
+                duration: SCHEDULER_DURATION_FROM_DAT,
+            }]
+        );
+    }
+
+    /// 0x7D runs the work-operand scheduler on the local player with the player
+    /// as its own target — the rank-up animations, tag `main`, no helper remap.
+    #[test]
+    fn local_player_scheduler_runs_on_the_player() {
+        const WORK: u32 = 100;
+        assert_eq!(
+            cues_of(OP_LOCAL_PLAYER_SCHEDULER, &REF0, vec![WORK]),
+            [EventCue::Scheduler {
+                dat_id: LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE + WORK,
+                actor1: ActorLookup::LOCAL_PLAYER,
                 actor2: ActorLookup::LOCAL_PLAYER,
                 tag: MAGIC_ROUTINE_TAG,
                 duration: SCHEDULER_DURATION_FROM_DAT,

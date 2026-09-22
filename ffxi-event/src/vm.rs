@@ -86,6 +86,12 @@ pub enum PendingTag {
     /// (research/XiEvents/OpCodes/0x00A6.md;
     /// vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
     SubMapNum,
+    /// `FUNC_gcZoneSendQueSearch(0x1B)`: the world-pass request the 0x87/0x88
+    /// send cases arm, carrying the `Para` the c2s 0x01B FRIENDPASS carries
+    /// (0x87: 0 begin / 2 begin-gold; 0x88: 1 confirm / 3 confirm-gold); the
+    /// 0x059 s2c is its answer (research/XiEvents/OpCodes/0x0087.md, 0x0088.md;
+    /// vendor/server/src/map/packets/c2s/0x01b_friendpass.cpp).
+    FriendPass { para: u16 },
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -207,6 +213,14 @@ const OP_GETWEATHER: u8 = 0x72;
 // by the u32 at +1; a hit advances 7, a miss jumps to the u16 at +5
 // (research/XiEvents/OpCodes/0x0082.md).
 const OP_RANGE_RECT: u8 = 0x82;
+// 0x87/0x88 WORLD PASS: the send cases arm the 0x01B FRIENDPASS request
+// with the case's `Para` (0x87: 0 begin / 2 begin-gold; 0x88: 1 confirm /
+// 3 confirm-gold) and hold on the 0x059 answer; case 1 yields until it
+// lands. The pass number the 0x059 carries has no kuluu display, so the
+// receipt only clears the await
+// (research/XiEvents/OpCodes/0x0087.md, 0x0088.md).
+const OP_FRIENDPASS_87: u8 = 0x87;
+const OP_FRIENDPASS_88: u8 = 0x88;
 // 0xD4 MAP_QUERY: case 0 runs the 0x24 query helper and opens the current
 // zone's map (type 6), parking on the answer; case 2 runs the helper without
 // the map; cases 1/3/4/5 copy into the client's query window, which has no
@@ -1630,6 +1644,35 @@ impl EventVm {
                     }
                     _ => self.exec_pointer += 2,
                 },
+                // 0x87/0x88: the world pass. The send cases (0 and 2) arm
+                // the 0x01B FRIENDPASS with the case's `Para` and hold on the
+                // 0x059 answer; case 1 yields until it lands. The server
+                // answers a random pass number for the confirm cases and 0
+                // for the begin cases; the number has no kuluu display, so
+                // the receipt only clears the await
+                // (vendor/server/src/map/packets/c2s/0x01b_friendpass.cpp).
+                // Retail spins on any other case byte, so authored data
+                // cannot hold one.
+                OP_FRIENDPASS_87 | OP_FRIENDPASS_88 => {
+                    let sub = self.byte_at(1);
+                    let para = match (op, sub) {
+                        (OP_FRIENDPASS_87, 0) => 0,
+                        (OP_FRIENDPASS_88, 0) => 1,
+                        (OP_FRIENDPASS_87, 2) => 2,
+                        (OP_FRIENDPASS_88, 2) => 3,
+                        _ => 0,
+                    };
+                    match sub {
+                        0 | 2 => {
+                            if self.pending_ack.is_none() {
+                                self.pending_ack = Some(PendingTag::FriendPass { para });
+                            }
+                            let tag = self.pending_ack.clone().expect("armed above");
+                            return StepResult::AwaitServerAck(tag);
+                        }
+                        _ => self.exec_pointer += 2,
+                    }
+                }
                 OP_JUMP => {
                     if self.jump_index == JUMP_STACK_LEN {
                         self.finished = true;
@@ -6417,6 +6460,32 @@ mod tests {
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 4, "case 2 advances its 4-byte width");
         assert_eq!(e.work_zone(0), 0, "no answer means the zero MapNum");
+    }
+
+    /// 0x87/0x88 pair: each send case arms the 0x01B FRIENDPASS with its
+    /// case's `Para` (0x87: 0 begin / 2 begin-gold; 0x88: 1 confirm /
+    /// 3 confirm-gold), holds on the 0x059 answer, and case 1 yields until it
+    /// lands (research/XiEvents/OpCodes/0x0087.md, 0x0088.md).
+    #[test]
+    fn friendpass_pairs_arm_their_para_and_hold() {
+        for (op, paras) in [(OP_FRIENDPASS_87, [0u16, 2]), (OP_FRIENDPASS_88, [1, 3])] {
+            for (sub, para) in [(0u8, paras[0]), (2, paras[1])] {
+                let data = vec![op, sub, op, 0x01, OP_END];
+                let mut e = vm(data, vec![]);
+                assert_eq!(
+                    e.step(),
+                    StepResult::AwaitServerAck(PendingTag::FriendPass { para }),
+                    "0x{op:02X} sub {sub} arms para {para}"
+                );
+                assert_eq!(
+                    e.step(),
+                    StepResult::AwaitServerAck(PendingTag::FriendPass { para }),
+                    "a second step must not resend"
+                );
+                e.ack_server();
+                assert_eq!(e.step(), StepResult::Done);
+            }
+        }
     }
 
     /// 0xB2 mode 0 counts down WaitTime by frame delay and steps its 4-byte

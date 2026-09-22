@@ -101,6 +101,13 @@ pub mod c2s {
 
     pub const REQ_LOGOUT: u16 = 0x0E7;
 
+    // GP_CLI_COMMAND_FRIENDPASS, vendor/server/src/map/packets/c2s/
+    // 0x01b_friendpass.h: uint16 Para, uint16 padding. The world-pass request
+    // the event VM's 0x87/0x88 send cases send (Para 0/2 begin, 1/3 confirm);
+    // the server answers s2c 0x059 with a random pass number for the confirm
+    // cases and 0 for the begin cases (0x01b_friendpass.cpp process).
+    pub const FRIENDPASS: u16 = 0x01B;
+
     // GP_CLI_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/c2s/
     // 0x0eb_reqsubmapnum.h. Header-only request the event VM sends from 0xA6
     // case 0 to fetch the event's sub-map number; the server answers with s2c
@@ -638,6 +645,14 @@ pub mod s2c {
     // GP_SERV_COMMAND_BAZAAR_SELL, vendor/server/src/map/packets/s2c/0x109_bazaar_sell.h.
     // Another customer bought a row of the bazaar we are browsing.
     pub const BAZAAR_SELL: u16 = 0x109;
+
+    // GP_SERV_COMMAND_FRIENDPASS, vendor/server/src/map/packets/s2c/
+    // 0x059_friendpass.h: int32 leftNum/leftDays/passPop, char String[16]
+    // (the pass number zero-padded to 10 digits when non-zero), char Type,
+    // char unknown21, uint16 padding. The answer to our c2s 0x01B request
+    // (the event VM's 0x87/0x88 send cases); the server fills the pass for
+    // the confirm Paras and 0 for the begin ones (0x059_friendpass.cpp).
+    pub const FRIENDPASS: u16 = 0x059;
 
     // GP_SERV_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/s2c/
     // 0x10e_reqsubmapnum.h: uint32 MapNum. The answer to our c2s 0x0EB request

@@ -201,6 +201,10 @@ const OP_RANGE_RECT: u8 = 0x82;
 // kuluu counterpart, so they advance by their width
 // (research/XiEvents/OpCodes/0x00D4.md).
 const OP_MAP_QUERY: u8 = 0xD4;
+// 0xA7 waits on the server's response to the client's request: case 0 sends
+// the pending tag (EndPara = Work_Zone[1]) and case 1 writes the result the
+// ack carried into its work slot (research/XiEvents/OpCodes/0x00A7.md).
+const OP_A7_WAIT: u8 = 0xA7;
 // 0xB3 RANKING: the ranking-board cases. LSB has no ranking handler, so the
 // read cases write zeros into the board's work slots (the board draws empty)
 // and every case advances by its width; no packet is sent
@@ -559,6 +563,10 @@ pub struct EventVm {
     /// position-tag counterpart), held until [`Self::ack_server`]. While set,
     /// execution stays parked on the sending opcode's case-1 poll.
     pending_ack: Option<PendingTag>,
+    /// 0xA7's response result: the EndPara the case-0 tag carried, which case
+    /// 1 writes into its work slot once the server acks the tag
+    /// (research/XiEvents/OpCodes/0x00A7.md).
+    a7_result: u32,
     /// The request this VM queued via REQEW and is still tracking, as (actor,
     /// tag): retail keeps that wait in `ReqStack[RunPos].ReqFlag` across ticks
     /// (research/XiEvents/Event VM Structures.md ReqFlag;
@@ -796,6 +804,7 @@ impl EventVm {
             ran_past_end: false,
             wait: None,
             pending_ack: None,
+            a7_result: 0,
             req_wait: None,
             action_holds: Vec::new(),
             move_holds: Vec::new(),
@@ -1511,6 +1520,32 @@ impl EventVm {
                         Some(tag) => return StepResult::AwaitServerAck(tag.clone()),
                         None => self.exec_pointer += 2,
                     },
+                    _ => self.exec_pointer += 2,
+                },
+                // 0xA7: waits on the server's response to the client's request.
+                // Case 0 arms the await bit and sends the pending tag
+                // (EndPara = Work_Zone[1]), holding until the server acks; case
+                // 1 writes the result the ack carried into the work slot its
+                // +2 operand selects. The result is the EndPara the tag carried
+                // — the value the session's ack path already knows — so it is
+                // captured when the tag is armed
+                // (research/XiEvents/OpCodes/0x00A7.md). Retail spins on any
+                // other case byte, so authored data cannot hold one.
+                OP_A7_WAIT => match self.byte_at(1) {
+                    0 => {
+                        if self.pending_ack.is_none() {
+                            self.a7_result = self.work_zone(1) as u32;
+                            self.pending_ack = Some(PendingTag::SendTag {
+                                end_para: self.a7_result,
+                            });
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    1 => {
+                        self.setworkofs(2, self.a7_result as i32, 0);
+                        self.exec_pointer += 4;
+                    }
                     _ => self.exec_pointer += 2,
                 },
                 OP_JUMP => {
@@ -6221,6 +6256,48 @@ mod tests {
         let data = vec![OP_SENDTAG, 0x01, OP_END];
         let mut e = vm(data, vec![]);
         assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// 0xA7 pair: case 0 arms the await and sends the tag (EndPara =
+    /// Work_Zone[1], which the program seeds from refs[1]), holding until the
+    /// server acks; case 1 then writes the result the ack carried into the
+    /// work slot its +2 operand selects (research/XiEvents/OpCodes/0x00A7.md).
+    #[test]
+    fn a7_pair_sends_the_tag_and_writes_the_result() {
+        let mut data = vec![OP_GET_STORE, 0x01, 0x10, SRC[0], SRC[1]];
+        data.extend_from_slice(&[OP_A7_WAIT, 0x00]);
+        data.extend_from_slice(&[OP_A7_WAIT, 0x01, 0x03, 0x10]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![0, 42]);
+
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 42 })
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 42 }),
+            "a second step must not resend"
+        );
+
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.work_zone(3),
+            42,
+            "case 1 writes the result the ack carried"
+        );
+    }
+
+    /// A bare 0xA7 case-1 poll with no outstanding tag writes the zero result
+    /// and advances its width, matching retail's acknowledged path.
+    #[test]
+    fn a7_case1_without_a_tag_writes_the_zero_result() {
+        let data = vec![OP_A7_WAIT, 0x01, 0x03, 0x10, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4, "case 1 advances its 4-byte width");
+        assert_eq!(e.work_zone(3), 0, "no tag means the zero result");
     }
 
     /// The position-tag pair: case 0 scales its work-slot raw values into the

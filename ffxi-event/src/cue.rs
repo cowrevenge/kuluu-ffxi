@@ -81,6 +81,18 @@ pub type FourCc = [u8; 4];
 /// 30704 to `CodeLOADEVENTSCHEDULER2`).
 pub const SCHEDULER_DAT_ID_BASE: u32 = 30704;
 
+/// Base DAT file id opcode 0x73 MAGICSCHEDULOR adds its work operand to. The
+/// operand is a spell animation index: the same column vendor/server
+/// sql/spell_list.sql `animation` fills for a cast (Invisible 498, Sneak 499,
+/// Deodorize 500 sit beside the gate guard's Signet 497 and home point 504),
+/// and the same base a 0x028 magic finish resolves through
+/// (ffxi_vocab::action_anim::spell_file_id).
+pub const MAGIC_DAT_ID_BASE: u32 = ffxi_vocab::action_anim::SPELL_FILE_TABLE_OFFSET;
+
+/// The routine 0x73 plays out of that DAT: research/XiEvents/OpCodes/0x0073.md
+/// passes `0x6E69616D` ("main") to `FUNC_XiActor_Unknown` for every case.
+pub const MAGIC_ROUTINE_TAG: FourCc = *b"main";
+
 /// Scheduler DAT holding the screen-fade pair (ROM/62/110.DAT).
 pub const SCHEDULER_FADE_DAT_ID: u32 = 30904;
 

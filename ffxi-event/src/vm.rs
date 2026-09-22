@@ -6,8 +6,9 @@ use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
     dat_id_helper, event_motion_dat_id, tpc_motion_packages, ActorLookup, EventCue,
-    ExtSchedulerMotion, FourCc, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
-    STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    ExtSchedulerMotion, FourCc, MAGIC_DAT_ID_BASE, MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX,
+    NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO,
+    STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -163,6 +164,7 @@ const OP_LOADEXTSCHEDULER2: u8 = 0x66;
 const OP_SCHEDULOR: u8 = 0x2C;
 const OP_MAPSCHEDULOR: u8 = 0x2D;
 const OP_LOADEVENTSCHEDULER2: u8 = 0x45;
+const OP_MAGICSCHEDULOR: u8 = 0x73;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
@@ -255,6 +257,12 @@ const LOADEVENTSCHEDULER2_ACTOR1_OFS: usize = 3;
 const LOADEVENTSCHEDULER2_ACTOR2_OFS: usize = 7;
 const LOADEVENTSCHEDULER2_TAG_OFS: usize = 11;
 const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
+// 0x0073: work operand at +1 (`getworkofs(param1 + 1)`, param1 = 0), the two
+// actor lookups at +3 and +7 (`eventgetcode2(3)`, `eventgetcode2(7 + param1)`),
+// research/XiEvents/OpCodes/0x0073.md.
+const MAGICSCHEDULOR_KEY_OFS: usize = 1;
+const MAGICSCHEDULOR_ACTOR1_OFS: usize = 3;
+const MAGICSCHEDULOR_ACTOR2_OFS: usize = 7;
 const LOADEXTSCHEDULER_FILE_OFS: usize = 1; // 0x005B / 0x0066
 const LOADEXTSCHEDULER_ACTOR1_OFS: usize = 3;
 const LOADEXTSCHEDULER_ACTOR2_OFS: usize = 7;
@@ -1442,6 +1450,30 @@ impl EventVm {
                         tag,
                         duration: self.getworkofs(LOADEVENTSCHEDULER2_DURATION_OFS, 0) as u16,
                     });
+                    self.advance(op);
+                }
+                // The cast is the spell effect DAT for the work operand's
+                // animation index, its `main` routine on actor1 with actor2 as
+                // the target: the same file and routine a 0x028 magic finish
+                // plays, so the 0x45 cue carries it unchanged. No hold entry:
+                // retail's 0x73 arms no wait of its own and the scripts that
+                // author it cover the cast with a 0x1C WAIT
+                // (research/XiEvents/OpCodes/0x0073.md). A work operand outside
+                // u16 names no file and plays nothing, like retail's
+                // unresolved-actor early return.
+                OP_MAGICSCHEDULOR => {
+                    let actor1 = ActorLookup(self.eventgetcode2(MAGICSCHEDULOR_ACTOR1_OFS));
+                    let actor2 = ActorLookup(self.eventgetcode2(MAGICSCHEDULOR_ACTOR2_OFS));
+                    if let Ok(animation) = u16::try_from(self.getworkofs(MAGICSCHEDULOR_KEY_OFS, 0))
+                    {
+                        self.cues.push(EventCue::Scheduler {
+                            dat_id: MAGIC_DAT_ID_BASE + u32::from(animation),
+                            actor1,
+                            actor2,
+                            tag: MAGIC_ROUTINE_TAG,
+                            duration: SCHEDULER_DURATION_FROM_DAT,
+                        });
+                    }
                     self.advance(op);
                 }
                 // Case 2 queries the camera state into a work slot rather than
@@ -3821,6 +3853,40 @@ mod tests {
                 }]
             );
         }
+    }
+
+    /// 0x73's work operand is a spell animation index; the cue is the spell
+    /// effect DAT's `main` on actor1 with actor2 as the target, the gate guard's
+    /// Signet (497) and home point (504) casts being the authored cases.
+    #[test]
+    fn magic_schedulor_opcode_emits_the_spell_dat_main_routine() {
+        const SIGNET_ANIMATION: u32 = 497;
+        const HOME_POINT_ANIMATION: u32 = 504;
+        for animation in [SIGNET_ANIMATION, HOME_POINT_ANIMATION] {
+            let mut operands = REF0.to_vec();
+            operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+            operands.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
+            assert_eq!(
+                cues_of(OP_MAGICSCHEDULOR, &operands, vec![animation]),
+                [EventCue::Scheduler {
+                    dat_id: MAGIC_DAT_ID_BASE + animation,
+                    actor1: ActorLookup::EVENT_ENTITY,
+                    actor2: ActorLookup::LOCAL_PLAYER,
+                    tag: MAGIC_ROUTINE_TAG,
+                    duration: SCHEDULER_DURATION_FROM_DAT,
+                }]
+            );
+        }
+    }
+
+    /// A work operand that is not a u16 names no spell DAT: the opcode is
+    /// stepped over with no cue, and the program continues.
+    #[test]
+    fn magic_schedulor_opcode_with_no_animation_emits_nothing() {
+        let mut operands = REF0.to_vec();
+        operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        operands.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
+        assert!(cues_of(OP_MAGICSCHEDULOR, &operands, vec![u32::MAX]).is_empty());
     }
 
     /// 0x2C's third operand is an ASCII action key, not a numeric id.

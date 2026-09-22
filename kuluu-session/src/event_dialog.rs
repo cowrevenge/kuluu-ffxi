@@ -992,6 +992,7 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             duration_frames,
         },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::LocalMode { mode } => CutsceneCue::LocalMode { mode },
         EventCue::PlayerControl { locked } => CutsceneCue::PlayerControl { locked },
         EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
         EventCue::ClockHold {

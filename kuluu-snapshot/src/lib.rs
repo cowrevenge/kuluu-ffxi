@@ -108,7 +108,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1696,6 +1696,11 @@ pub enum CutsceneCue {
     },
     /// Take camera control away from the player, or give it back.
     CameraLock { lock: bool },
+    /// 0x38: the lower word of retail's `CliEventModeLocal` (the operand's
+    /// high byte with 0x20 forced). While it holds, hide the local player
+    /// model and the HUD pieces; the event end clears the flag
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    LocalMode { mode: u16 },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
     /// research/XIClient ActorTelemetry::CanIMove).
@@ -2473,7 +2478,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 45;
+        const VERSION: u32 = 46;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

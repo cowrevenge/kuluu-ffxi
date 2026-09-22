@@ -575,6 +575,7 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             duration_frames,
         },
         Cue::CameraLock { lock } => wire::CutsceneCue::CameraLock { lock },
+        Cue::LocalMode { mode } => wire::CutsceneCue::LocalMode { mode },
         Cue::PlayerControl { locked } => wire::CutsceneCue::PlayerControl { locked },
         Cue::HudHide { hide } => wire::CutsceneCue::HudHide { hide },
         Cue::ClockHold {

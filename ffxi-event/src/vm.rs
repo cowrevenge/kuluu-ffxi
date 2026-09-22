@@ -181,6 +181,7 @@ const OP_MESSAGE_UNNAMED_ACTOR: u8 = 0x49;
 const OP_MESSAGE_ACTOR_PAIR: u8 = 0xB0;
 const OP_EXECEND: u8 = 0x21;
 const OP_EVENT_HIDE_SELF: u8 = 0x22;
+const OP_LOCAL_MODE: u8 = 0x38;
 pub(crate) const OP_MESWAIT: u8 = 0x23;
 // 0x42 clears CliEventCancelSetData/CliEventCancelFlag and 0x2E sets them:
 // whether ESC may cancel this event. Cutscenes that lock you in disarm it in
@@ -1456,6 +1457,17 @@ impl EventVm {
                     self.cues.push(EventCue::ActorHide {
                         target: ActorLookup::EVENT_ENTITY,
                         hide: self.byte_at(EVENTHIDE_FLAG_OFS) & EVENTHIDE_FLAG_MASK != 0,
+                    });
+                    self.advance(op);
+                }
+                // The handler writes the operand's high byte with 0x20 forced
+                // into CliEventModeLocal's lower word; retail's Ailevia tour
+                // stores 0x2003, which applies as 0x20
+                // (research/XiEvents/OpCodes/0x0038.md).
+                OP_LOCAL_MODE => {
+                    let val = self.getworkofs(1, 0);
+                    self.cues.push(EventCue::LocalMode {
+                        mode: ((val >> 8) & 0xFF) as u16 | 0x20,
                     });
                     self.advance(op);
                 }
@@ -6273,6 +6285,25 @@ mod tests {
             [EventCue::CameraLock { lock: false }]
         );
         assert!(cues_of(OP_DEFCAMERA, &[2, 0x0A, 0x00], vec![]).is_empty());
+    }
+
+    /// 0x38 writes the operand's high byte with 0x20 forced: retail's Ailevia
+    /// tour stores 0x2003, which applies as 0x20, as does the 0x0013 default
+    /// that covers most of the retail corpus
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    #[test]
+    fn local_mode_opcode_carries_the_high_byte_with_the_cinematic_bit() {
+        for (stored, applied) in [
+            (0x2003u32, 0x20u16),
+            (0x0013, 0x20),
+            (0x0413, 0x24),
+            (0, 0x20),
+        ] {
+            assert_eq!(
+                cues_of(OP_LOCAL_MODE, &[0x01, 0x80], vec![0, stored]),
+                [EventCue::LocalMode { mode: applied }]
+            );
+        }
     }
 
     /// 0x20 writes retail's CliEventUcFlag: any nonzero byte locks the

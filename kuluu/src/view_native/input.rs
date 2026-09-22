@@ -49,6 +49,9 @@ pub struct MoveEnvParams<'w, 's> {
     pub actors: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderActor>,
     /// The self actor's knockback: its lock and the shove the walker owes it.
     pub self_knockback: ResMut<'w, kuluu_render::ffxi_actor_render::SelfKnockback>,
+    /// The running server event: retail locks the player from its first frame
+    /// to EVENT_END, dialog frame on screen or not.
+    pub cutscene: Res<'w, kuluu_render::cutscene::CutsceneMode>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1008,7 +1011,12 @@ pub fn dispatch_movement_system(
         return;
     }
 
-    let dialog_driven = matches!(*mode, InputMode::Dialog(_));
+    // A dialog frame or a running event both pin the player to the snapshot
+    // position: the frame because input belongs to the menu, the event
+    // because retail holds the player for the whole script, including its
+    // authored waits between frames (the session's walk-away release exists
+    // only because this lock was missing; it stays as the headless backstop).
+    let dialog_driven = matches!(*mode, InputMode::Dialog(_)) || env.cutscene.active;
     let snapshot_driven =
         snapshot_drives_movement(state.snapshot.current_goal.as_ref()) || dialog_driven;
     if snapshot_driven || prediction.snapshot_driven {
@@ -2364,6 +2372,7 @@ mod tests {
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<kuluu_render::scene::TrackedEntities>()
             .init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>()
+            .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<super::super::walker::debug::FieldDebug>()
             .add_systems(
                 Update,
@@ -2622,6 +2631,36 @@ mod tests {
             ticks.last().expect("ticks").1,
             ticks.first().expect("ticks").1,
             "an actor on the wire entity is not the self actor; nothing holds"
+        );
+    }
+
+    /// A running event holds the player with no dialog frame on screen (the
+    /// script's own waits), and releases with the event.
+    #[test]
+    fn running_event_holds_the_player_between_frames() {
+        let mut drive = MoveDrive::new();
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::cutscene::CutsceneMode>()
+            .active = true;
+        drive.press(KeyCode::KeyW);
+        let held = drive.run(SETTLE_TICKS);
+        assert_eq!(
+            held.last().expect("ticks").1,
+            held.first().expect("ticks").1,
+            "the event must hold the player through its waits"
+        );
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::cutscene::CutsceneMode>()
+            .active = false;
+        let free = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            free.last().expect("ticks").1,
+            held.last().expect("ticks").1,
+            "the event over, the same key moves"
         );
     }
 

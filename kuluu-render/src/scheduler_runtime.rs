@@ -2631,6 +2631,15 @@ fn event_heading_to_quat(heading: i32) -> Quat {
     Quat::from_rotation_y(-std::f32::consts::TAU * heading as f32 / EVENT_HEADING_UNITS)
 }
 
+/// The rotation that points an actor's +X forward along the Bevy-space
+/// horizontal offset `(dx, dz)` to its target. Same basis as
+/// `crate::scene::heading_to_quat` and `event_heading_to_quat`: a rotation of
+/// `-theta` about Y sends +X to `(cos theta, 0, sin theta)`
+/// (combat_stance::heading_forward), so the yaw is the negated atan2.
+fn look_at_rotation(dx: f32, dz: f32) -> Quat {
+    Quat::from_rotation_y(-dz.atan2(dx))
+}
+
 // The five client-side actor cues (research/XiEvents/OpCodes/0x001F.md, 0x0037.md, 0x0039.md,
 // 0x004A.md, 0x005E.md): the event script's NPC choreography. Every write is client-side
 // transform state scoped to the running cutscene; release_cutscene_actors puts each touched
@@ -2756,7 +2765,7 @@ pub fn apply_cutscene_actor_cues(
                     continue;
                 }
                 if let Ok(mut t) = q_xform.get_mut(entity) {
-                    t.rotation = Quat::from_rotation_y(dz.atan2(dx));
+                    t.rotation = look_at_rotation(dx, dz);
                     state.touch(id);
                     tracing::debug!(
                         target: "kuluu_render::scheduler_runtime",
@@ -3928,6 +3937,32 @@ impl Plugin for SchedulerRuntimePlugin {
 mod tests {
     use super::*;
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
+
+    /// A look-at must send the actor's +X forward along the offset to its
+    /// target, on the same basis every other heading in the renderer uses.
+    #[test]
+    fn look_at_rotation_faces_the_offset() {
+        for (dx, dz) in [
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (0.6, -0.8),
+        ] {
+            let forward = look_at_rotation(dx, dz) * Vec3::X;
+            let want = Vec3::new(dx, 0.0, dz).normalize();
+            assert!(
+                (forward - want).length() < 1e-5,
+                "offset ({dx}, {dz}): forward {forward:?}, want {want:?}"
+            );
+        }
+        // The event-heading path agrees: heading 0 faces +X, a quarter turn
+        // faces the same way a look-at toward +Z does.
+        let quarter = (EVENT_HEADING_UNITS / 4.0) as i32;
+        let a = event_heading_to_quat(quarter) * Vec3::X;
+        let b = look_at_rotation(0.0, 1.0) * Vec3::X;
+        assert!((a - b).length() < 1e-4, "{a:?} vs {b:?}");
+    }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]

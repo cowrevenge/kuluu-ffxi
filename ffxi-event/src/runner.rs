@@ -174,6 +174,16 @@ impl DialogRunner {
         self.vm.set_weather_forecast(forecast);
     }
 
+    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against; see
+    /// [`EventVm::set_zone_rects`]. The session loads the event zone's RID table
+    /// once and shares the same `Arc` across every runner it drives.
+    pub fn set_zone_rects(
+        &mut self,
+        rects: std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    ) {
+        self.vm.set_zone_rects(rects);
+    }
+
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
     /// reports the routine finished; see [`EventVm::hold_action_pending`]. The
     /// session calls this when it publishes a SCHEDULOR motion cue, whose

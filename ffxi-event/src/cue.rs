@@ -81,6 +81,24 @@ pub type FourCc = [u8; 4];
 /// 30704 to `CodeLOADEVENTSCHEDULER2`).
 pub const SCHEDULER_DAT_ID_BASE: u32 = 30704;
 
+/// The DAT file id base each 0x45 twin adds its work operand to. Each twin
+/// calls `FUNC_XiEvent_CodeLOADEVENTSCHEDULER2` with a fixed second argument
+/// and skips the 0x45-only `dat_id_helper` remap, so its DAT id is this base
+/// plus the raw work value (research/XiEvents/OpCodes/0x0062.md, 0x009F.md,
+/// 0x00BB.md, 0x00C5.md, 0x00CD.md, 0x00D0.md, 0x00D5.md).
+pub const fn scheduler_twin_base(op: u8) -> Option<u32> {
+    Some(match op {
+        0x62 => 5012,
+        0x9F => 51183,
+        0xBB => 56685,
+        0xC5 => 67355,
+        0xCD => 70435,
+        0xD0 => 70691,
+        0xD5 => 102449,
+        _ => return None,
+    })
+}
+
 /// Base DAT file id opcode 0x73 MAGICSCHEDULOR adds its work operand to. The
 /// operand is a spell animation index: the same column vendor/server
 /// sql/spell_list.sql `animation` fills for a cast (Invisible 498, Sneak 499,

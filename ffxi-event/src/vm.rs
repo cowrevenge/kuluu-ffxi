@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
-    dat_id_helper, event_motion_dat_id, tpc_motion_packages, ActorLookup, EventCue,
-    ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, MAGIC_DAT_ID_BASE, MAGIC_ROUTINE_TAG,
-    MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT,
-    STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
+    EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, MAGIC_DAT_ID_BASE,
+    MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
+    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -165,6 +165,18 @@ const OP_SCHEDULOR: u8 = 0x2C;
 const OP_MAPSCHEDULOR: u8 = 0x2D;
 const OP_LOADEVENTSCHEDULER2: u8 = 0x45;
 const OP_MAGICSCHEDULOR: u8 = 0x73;
+// The 0x45 scheduler twins: same layout and cue, each on its own DAT base
+// (research/XiEvents/OpCodes/0x0062.md and kin).
+const OP_SCHED_TWIN_62: u8 = 0x62;
+const OP_SCHED_TWIN_9F: u8 = 0x9F;
+const OP_SCHED_TWIN_BB: u8 = 0xBB;
+const OP_SCHED_TWIN_C5: u8 = 0xC5;
+const OP_SCHED_TWIN_CD: u8 = 0xCD;
+const OP_SCHED_TWIN_D0: u8 = 0xD0;
+const OP_SCHED_TWIN_D5: u8 = 0xD5;
+// The 0x73 twin: the spell cast with a case byte, wider than 0x73 by that
+// byte (research/XiEvents/OpCodes/0x00C4.md).
+const OP_MAGIC_TWIN: u8 = 0xC4;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
@@ -261,6 +273,15 @@ const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
 const MAGICSCHEDULOR_KEY_OFS: usize = 1;
 const MAGICSCHEDULOR_ACTOR1_OFS: usize = 3;
 const MAGICSCHEDULOR_ACTOR2_OFS: usize = 7;
+// 0x00C4: the 0x73 sub-handler with param1 = 1 — the case byte at +1, the key
+// work at +2 (`getworkofs(param1 + 1)`), actor1 at +3, actor2 at +8
+// (`eventgetcode2(7 + param1)`), and the advance is `11 + param1` = 12
+// (research/XiEvents/OpCodes/0x00C4.md, 0x0073.md).
+const MAGIC_TWIN_CASE_OFS: usize = 1;
+const MAGIC_TWIN_KEY_OFS: usize = 2;
+const MAGIC_TWIN_ACTOR1_OFS: usize = 3;
+const MAGIC_TWIN_ACTOR2_OFS: usize = 8;
+const MAGIC_TWIN_SIZE: usize = 12;
 const LOADEXTSCHEDULER_FILE_OFS: usize = 1; // 0x005B / 0x0066
 const LOADEXTSCHEDULER_ACTOR1_OFS: usize = 3;
 const LOADEXTSCHEDULER_ACTOR2_OFS: usize = 7;
@@ -1505,6 +1526,27 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // The 0x45 twins: the same helper and layout, but each on its
+                // own DAT base and with the work value used raw — the
+                // `dat_id_helper` remap is the 0x45-only branch of the helper
+                // (research/XiEvents/OpCodes/0x0045.md, 0x0062.md and kin).
+                OP_SCHED_TWIN_62 | OP_SCHED_TWIN_9F | OP_SCHED_TWIN_BB | OP_SCHED_TWIN_C5
+                | OP_SCHED_TWIN_CD | OP_SCHED_TWIN_D0 | OP_SCHED_TWIN_D5 => {
+                    let base = scheduler_twin_base(op).expect("matched a 0x45 twin");
+                    let file = self.getworkofs(LOADEVENTSCHEDULER2_FILE_OFS, 0) as u32;
+                    let actor1 = ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR1_OFS));
+                    let tag = self.fourcc_at(LOADEVENTSCHEDULER2_TAG_OFS);
+                    self.pending_action_starts
+                        .push((self.resolve_hold_actor(actor1), tag));
+                    self.cues.push(EventCue::Scheduler {
+                        dat_id: base + file,
+                        actor1,
+                        actor2: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR2_OFS)),
+                        tag,
+                        duration: self.getworkofs(LOADEVENTSCHEDULER2_DURATION_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
                 // The cast is the spell effect DAT for the work operand's
                 // animation index, its `main` routine on actor1 with actor2 as
                 // the target: the same file and routine a 0x028 magic finish
@@ -1528,6 +1570,29 @@ impl EventVm {
                         });
                     }
                     self.advance(op);
+                }
+                // The 0x73 twin: the same spell cast, but the case byte at +1
+                // shifts the key to +2 and actor2 to +8 and widens the advance
+                // to 12. Cases 0/1/2 all run the `main` routine; a case past 2
+                // arms no cast (retail's empty switch fall-through) yet still
+                // advances the full width (research/XiEvents/OpCodes/0x00C4.md).
+                OP_MAGIC_TWIN => {
+                    let case = self.byte_at(MAGIC_TWIN_CASE_OFS);
+                    let actor1 = ActorLookup(self.eventgetcode2(MAGIC_TWIN_ACTOR1_OFS));
+                    let actor2 = ActorLookup(self.eventgetcode2(MAGIC_TWIN_ACTOR2_OFS));
+                    if case <= 2 {
+                        if let Ok(animation) = u16::try_from(self.getworkofs(MAGIC_TWIN_KEY_OFS, 0))
+                        {
+                            self.cues.push(EventCue::Scheduler {
+                                dat_id: MAGIC_DAT_ID_BASE + u32::from(animation),
+                                actor1,
+                                actor2,
+                                tag: MAGIC_ROUTINE_TAG,
+                                duration: SCHEDULER_DURATION_FROM_DAT,
+                            });
+                        }
+                    }
+                    self.exec_pointer += MAGIC_TWIN_SIZE;
                 }
                 // Case 2 queries the camera state into a work slot rather than
                 // changing it, and every other case is retail's no-op
@@ -3934,6 +3999,85 @@ mod tests {
         operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
         operands.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
         assert!(cues_of(OP_MAGICSCHEDULOR, &operands, vec![u32::MAX]).is_empty());
+    }
+
+    /// The 0x45 twins load their scheduler DAT from their own base plus the raw
+    /// work value — the `dat_id_helper` remap is the 0x45-only branch, so a
+    /// mid-band reference (400) must land at `base + 400`, not `base + 25937 + 400`.
+    #[test]
+    fn scheduler_twin_uses_its_base_without_the_dat_id_helper() {
+        const WORK: u32 = 400;
+        for (op, base) in [
+            (OP_SCHED_TWIN_62, 5012u32),
+            (OP_SCHED_TWIN_9F, 51183),
+            (OP_SCHED_TWIN_BB, 56685),
+            (OP_SCHED_TWIN_C5, 67355),
+            (OP_SCHED_TWIN_CD, 70435),
+            (OP_SCHED_TWIN_D0, 70691),
+            (OP_SCHED_TWIN_D5, 102449),
+        ] {
+            let mut operands = REF0.to_vec();
+            operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+            operands.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
+            operands.extend_from_slice(&MAGIC_ROUTINE_TAG);
+            operands.extend_from_slice(&REF1);
+            assert_eq!(
+                cues_of(op, &operands, vec![WORK, SCHEDULER_DURATION_FROM_DAT as u32]),
+                [EventCue::Scheduler {
+                    dat_id: base + WORK,
+                    actor1: ActorLookup::EVENT_ENTITY,
+                    actor2: ActorLookup::LOCAL_PLAYER,
+                    tag: MAGIC_ROUTINE_TAG,
+                    duration: SCHEDULER_DURATION_FROM_DAT,
+                }],
+                "op 0x{op:02X}"
+            );
+        }
+    }
+
+    /// 0xC4 is the 0x73 cast with a case byte: the key shifts to +2, actor2 to
+    /// +8, and the advance is 12 (11 + param1), not the 11 the table records.
+    /// The key's reference high byte doubles as actor1's low byte, so actor1 is
+    /// a server id whose low byte is 0x80.
+    #[test]
+    fn magic_twin_0xc4_casts_and_advances_twelve() {
+        const ANIMATION: u32 = 497;
+        const ACTOR1: u32 = 0x0100_0080;
+        let mut data = vec![OP_MAGIC_TWIN, 0x00]; // case 0
+        data.extend_from_slice(&REF0); // key at +2 -> References[0]; high byte is actor1's low
+        data.extend_from_slice(&[0x00, 0x00, 0x01]); // actor1 0x0100_0080, low byte already written
+        data.push(0x00); // +7 padding
+        data.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes()); // actor2 at +8
+        data.push(OP_END);
+        let mut e = vm(data, vec![ANIMATION]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), MAGIC_TWIN_SIZE, "0xC4 must advance 12");
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::Scheduler {
+                dat_id: MAGIC_DAT_ID_BASE + ANIMATION,
+                actor1: ActorLookup(ACTOR1),
+                actor2: ActorLookup::LOCAL_PLAYER,
+                tag: MAGIC_ROUTINE_TAG,
+                duration: SCHEDULER_DURATION_FROM_DAT,
+            }]
+        );
+    }
+
+    /// A 0xC4 case past 2 arms no cast (retail's empty switch fall-through) yet
+    /// still advances the full 12-byte width.
+    #[test]
+    fn magic_twin_0xc4_case_past_two_casts_nothing() {
+        let mut data = vec![OP_MAGIC_TWIN, 0x03]; // case 3
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&[0x00, 0x00, 0x01]);
+        data.push(0x00);
+        data.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
+        data.push(OP_END);
+        let mut e = vm(data, vec![497]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), MAGIC_TWIN_SIZE);
+        assert!(e.take_cues().is_empty());
     }
 
     /// 0x6E's work value splits into the emote id (low byte) and the variant

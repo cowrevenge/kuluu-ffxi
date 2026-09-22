@@ -3265,6 +3265,7 @@ name = "ffxi-event"
 version = "0.7.0"
 dependencies = [
  "ffxi-dat",
+ "ffxi-vocab",
  "tracing",
 ]
 

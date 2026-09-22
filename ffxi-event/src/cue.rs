@@ -349,6 +349,10 @@ pub enum EventCue {
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
+    /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
+    /// research/XIClient ActorTelemetry::CanIMove).
+    PlayerControl { locked: bool },
     /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
     /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
     HudHide { hide: bool },

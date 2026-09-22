@@ -247,6 +247,10 @@ pub struct CutsceneMode {
     /// The last 0x67/0x68 the running event staged; `None` until one arrives.
     /// research/XiEvents/OpCodes/0x0067.md
     pub(crate) hud_event: Option<bool>,
+    /// True once the running event's 0x20 released the player's control
+    /// (retail's `CliEventUcFlag` written 0), lifting the event-wide pin
+    /// until a later 0x20 re-locks. research/XiEvents/OpCodes/0x0020.md
+    pub player_released: bool,
 }
 
 impl CutsceneMode {
@@ -262,6 +266,7 @@ impl CutsceneMode {
             active: true,
             camera_locked: true,
             hud_event: None,
+            player_released: false,
         }
     }
 }
@@ -456,6 +461,7 @@ fn apply_cue(
 ) {
     match *cue {
         CutsceneCue::CameraLock { lock } => mode.camera_locked = lock,
+        CutsceneCue::PlayerControl { locked } => mode.player_released = !locked,
         CutsceneCue::HudHide { hide } => mode.hud_event = Some(hide),
         CutsceneCue::Scheduler {
             dat_id,
@@ -778,6 +784,46 @@ mod tests {
         step(&mut app, 1.0);
         assert!(!app.world().resource::<HudHidden>().cutscene);
         assert!(!app.world().resource::<CutsceneMode>().camera_locked);
+    }
+
+    /// The 0x20 write of retail's CliEventUcFlag: 0 lifts the event-wide pin,
+    /// 1 re-locks, and the session end resets it with the mode.
+    /// research/XiEvents/OpCodes/0x0020.md
+    #[test]
+    fn the_player_control_cue_writes_the_pin_flag() {
+        let mut app = test_app();
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 100 });
+        step(&mut app, 1.0);
+        assert!(
+            !app.world().resource::<CutsceneMode>().player_released,
+            "the event pins until the script says otherwise"
+        );
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::PlayerControl { locked: false },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(app.world().resource::<CutsceneMode>().player_released);
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::PlayerControl { locked: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(!app.world().resource::<CutsceneMode>().player_released);
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        let mode = app.world().resource::<CutsceneMode>();
+        assert!(
+            !mode.active && !mode.player_released,
+            "session end resets the mode"
+        );
     }
 
     /// Event 503's D1 shows the HUD while the camera stays locked until H7: an explicit

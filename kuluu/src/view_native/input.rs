@@ -1008,7 +1008,8 @@ pub fn dispatch_movement_system(
         return;
     }
 
-    let dialog_driven = matches!(*mode, InputMode::Dialog(_));
+    let dialog_driven = matches!(*mode, InputMode::Dialog(_))
+        || (env.cutscene.active && !env.cutscene.player_released);
     let snapshot_driven =
         snapshot_drives_movement(state.snapshot.current_goal.as_ref()) || dialog_driven;
     if snapshot_driven || prediction.snapshot_driven {
@@ -1045,8 +1046,12 @@ pub fn dispatch_movement_system(
         return;
     }
 
+    // Retail's StepControl returns before reading any input while the player
+    // is locked (CliEventUcFlag or the event status a dialog frame carries),
+    // so a dialog frame or a running event mutes the keys the way chat does.
+    // research/XIClient ControllableActor::StepControl, ActorTelemetry::CanIMove
     let no_keys = ButtonInput::<KeyCode>::default();
-    let keys: &ButtonInput<KeyCode> = if mode_swallows_keys(&mode) {
+    let keys: &ButtonInput<KeyCode> = if mode_swallows_keys(&mode) || dialog_driven {
         &no_keys
     } else {
         &keys
@@ -1062,9 +1067,19 @@ pub fn dispatch_movement_system(
 
     // Pad sticks stay live where keyboard is muted or repurposed: retail keeps
     // the pad moving the character while the chat line has focus and while a
-    // menu is open (menus are the d-pad's domain, not the sticks').
-    let pad_move = env.pad.movement;
-    let pad_cam = env.pad.camera;
+    // menu is open (menus are the d-pad's domain, not the sticks'). A locked
+    // player (dialog frame or running event) reads no analog input at all
+    // (research/XIClient ControllableActor::StepControl).
+    let pad_move = if dialog_driven {
+        Vec2::ZERO
+    } else {
+        env.pad.movement
+    };
+    let pad_cam = if dialog_driven {
+        Vec2::ZERO
+    } else {
+        env.pad.camera
+    };
     let pad_move_started = pad_move != Vec2::ZERO && !locals.pad_edges.move_active;
     locals.pad_edges.move_active = pad_move != Vec2::ZERO;
     let pad_back = pad_move.y < -PAD_BACK_CANCEL_DEFLECTION;

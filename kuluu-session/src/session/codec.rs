@@ -272,6 +272,21 @@ pub fn build_subpacket_reqsubmapnum(sync: u16) -> Vec<u8> {
     build_subpacket_header(ffxi_proto::map::c2s::REQSUBMAPNUM, 1, sync).to_vec()
 }
 
+// GP_CLI_COMMAND_FRIENDPASS, vendor/server/src/map/packets/c2s/
+// 0x01b_friendpass.h: uint16 Para, uint16 padding. The event VM's 0x87/0x88
+// send cases send it (Para 0/2 begin, 1/3 confirm); the server answers with
+// s2c 0x059 (0x01b_friendpass.cpp process).
+pub fn build_subpacket_friendpass(sync: u16, para: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::FRIENDPASS,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&para.to_le_bytes());
+    buf
+}
+
 pub fn build_subpacket_reqlogout(sync: u16, mode: u16, kind: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -1096,6 +1111,22 @@ mod tests {
             ffxi_proto::map::submap::NO_SUB_AREA,
         );
         assert_eq!(u16::from_le_bytes([buf[6], buf[7]]), 0);
+    }
+
+    #[test]
+    fn friendpass_layout_matches_server_struct() {
+        let buf = build_subpacket_friendpass(0x0102, 3);
+        assert_eq!(buf.len(), 8, "sizeof(GP_CLI_COMMAND_FRIENDPASS) + header");
+        let hdr = u16::from_le_bytes([buf[0], buf[1]]);
+        assert_eq!(
+            hdr & ffxi_proto::framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::FRIENDPASS,
+            "opcode 0x01B"
+        );
+        assert_eq!((hdr >> 9) as usize, 2, "size_words");
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x0102, "sync");
+        assert_eq!(u16::from_le_bytes([buf[4], buf[5]]), 3, "Para");
+        assert_eq!(u16::from_le_bytes([buf[6], buf[7]]), 0, "padding00");
     }
 
     #[test]

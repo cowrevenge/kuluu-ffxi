@@ -27,12 +27,12 @@ pub use codec::{
     build_subpacket_auc_lot_in, build_subpacket_auc_work_check, build_subpacket_bazaar_buy,
     build_subpacket_bazaar_exit, build_subpacket_bazaar_list, build_subpacket_buffcancel,
     build_subpacket_camp, build_subpacket_emote_list_req, build_subpacket_equip_inspect,
-    build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_item_move,
-    build_subpacket_item_stack, build_subpacket_item_use, build_subpacket_motion,
-    build_subpacket_myroom_job, build_subpacket_pbx, build_subpacket_reqlogout,
-    build_subpacket_reqsubmapnum, build_subpacket_shop_buy, build_subpacket_shop_sell_req,
-    build_subpacket_shop_sell_set, build_subpacket_tracking_end, build_subpacket_tracking_list,
-    build_subpacket_tracking_start, log_action_sent,
+    build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_friendpass,
+    build_subpacket_item_move, build_subpacket_item_stack, build_subpacket_item_use,
+    build_subpacket_motion, build_subpacket_myroom_job, build_subpacket_pbx,
+    build_subpacket_reqlogout, build_subpacket_reqsubmapnum, build_subpacket_shop_buy,
+    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
+    build_subpacket_tracking_list, build_subpacket_tracking_start, log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -2432,6 +2432,10 @@ async fn send_pending_tag(
         // 0xA6 case 0: the header-only 0x0EB sub-map request; the 0x10E s2c is
         // its answer (vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
         PendingTag::SubMapNum => build_subpacket_reqsubmapnum(*sub_seq),
+        // 0x87/0x88 send cases: the 0x01B world-pass request with the case's
+        // Para; the 0x059 s2c is its answer
+        // (vendor/server/src/map/packets/c2s/0x01b_friendpass.cpp).
+        PendingTag::FriendPass { para } => build_subpacket_friendpass(*sub_seq, *para),
     };
     let header = datagram_header_id(*sub_seq);
     *sub_seq = sub_seq.wrapping_add(1);
@@ -5051,6 +5055,113 @@ async fn keepalive_loop(
                                                             tracing::warn!(
                                                                 error = %e,
                                                                 "EVENT_END (sub-map ack) send failed"
+                                                            );
+                                                        }
+                                                    }
+                                                    cutscene.end(
+                                                        crate::event_dialog::EventSessionExit::ScriptEnded,
+                                                        &event_tx,
+                                                    );
+                                                    let _ = event_tx.send(
+                                                        AgentEvent::EventEnded,
+                                                    );
+                                                }
+                                                crate::event_dialog::Advance::AwaitServerAck(
+                                                    tag,
+                                                ) => {
+                                                    send_pending_tag(
+                                                        map, &mut sub_seq,
+                                                        server_last_seq,
+                                                        current_zone_id, u, a,
+                                                        n, &tag,
+                                                    )
+                                                    .await;
+                                                }
+                                                crate::event_dialog::Advance::Waiting => {}
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
+                            // s2c 0x059 FRIENDPASS is the answer to the event
+                            // VM's 0x87/0x88 world-pass request (c2s 0x01B).
+                            // The pass number it carries has no kuluu display,
+                            // so the receipt only releases the hold when the
+                            // FriendPass tag is in flight
+                            // (vendor/server/src/map/packets/c2s/0x01b_friendpass.cpp).
+                            if sub.opcode == ffxi_proto::map::s2c::FRIENDPASS {
+                                match decode::FriendPass::decode(sub.data) {
+                                    Ok(_) => {
+                                        if matches!(
+                                            dialog_session.pending_tag(),
+                                            Some(PendingTag::FriendPass { .. })
+                                        ) {
+                                            let Some((u, a, n)) =
+                                                dialog_session.active_end()
+                                            else {
+                                                continue;
+                                            };
+                                            let advance =
+                                                dialog_session.ack_server();
+                                            for cue in
+                                                dialog_session.take_cues()
+                                            {
+                                                cutscene.push(cue, &event_tx);
+                                            }
+                                            match advance {
+                                                crate::event_dialog::Advance::Frame(
+                                                    mut dialog,
+                                                ) => {
+                                                    attribute_event_speaker(
+                                                        &mut dialog,
+                                                        &target_cache,
+                                                        &name_cache,
+                                                    );
+                                                    emit_event_speech_to_chat(
+                                                        &event_tx, &dialog,
+                                                    );
+                                                    let _ = event_tx.send(
+                                                        AgentEvent::EventDialog {
+                                                            dialog,
+                                                        },
+                                                    );
+                                                }
+                                                crate::event_dialog::Advance::Ended
+                                                {
+                                                    end_para,
+                                                    ..
+                                                } => {
+                                                    if take_pending_event_end(
+                                                        &mut pending_event_end,
+                                                        u,
+                                                        n,
+                                                    ) {
+                                                        let payload =
+                                                            build_subpacket_event_end(
+                                                                sub_seq, u, a,
+                                                                current_zone_id,
+                                                                n, end_para,
+                                                                ffxi_proto::map::c2s::event_end_mode::END,
+                                                            );
+                                                        sub_seq =
+                                                            sub_seq
+                                                                .wrapping_add(1);
+                                                        if let Err(e) = map
+                                                            .send_encrypted(
+                                                                &payload,
+                                                                datagram_header_id(
+                                                                    sub_seq,
+                                                                ),
+                                                                server_last_seq,
+                                                            )
+                                                            .await
+                                                        {
+                                                            tracing::warn!(
+                                                                error = %e,
+                                                                "EVENT_END (world-pass ack) send failed"
                                                             );
                                                         }
                                                     }

@@ -75,6 +75,45 @@ impl ReqSubMapNum {
     }
 }
 
+/// One s2c 0x059 `GP_SERV_COMMAND_FRIENDPASS`, the answer to the event VM's
+/// 0x87/0x88 world-pass request (c2s 0x01B): int32 leftNum/leftDays/passPop,
+/// the pass number as a 10-digit zero-padded String[16], and the Type/unknown
+/// bytes the server's constructor fills (vendor/server/src/map/packets/s2c/
+/// 0x059_friendpass.h). kuluu keeps the fields to clear the event's await;
+/// the pass number has no display here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FriendPass {
+    pub left_num: i32,
+    pub left_days: i32,
+    pub pass_pop: i32,
+    pub string: [u8; 16],
+    pub type_byte: u8,
+}
+
+impl FriendPass {
+    /// Body size after the 4-byte sub-header: 3 + 16 + 1 + 1 + 2 bytes.
+    pub(crate) const SIZE: usize =
+        3 * std::mem::size_of::<i32>() + 16 + 2 + std::mem::size_of::<u16>();
+
+    pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
+        if body.len() < Self::SIZE {
+            return Err(DecodeError::Truncated(Self::SIZE, body.len()));
+        }
+        let left_num = i32::from_le_bytes(body[0..4].try_into().unwrap());
+        let left_days = i32::from_le_bytes(body[4..8].try_into().unwrap());
+        let pass_pop = i32::from_le_bytes(body[8..12].try_into().unwrap());
+        let mut string = [0u8; 16];
+        string.copy_from_slice(&body[12..28]);
+        Ok(Self {
+            left_num,
+            left_days,
+            pass_pop,
+            string,
+            type_byte: body[28],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +172,26 @@ mod tests {
         assert!(matches!(
             ReqSubMapNum::decode(&[0; ReqSubMapNum::SIZE - 1]),
             Err(DecodeError::Truncated(ReqSubMapNum::SIZE, _))
+        ));
+    }
+
+    #[test]
+    fn friendpass_decodes_the_pass_fields() {
+        let mut body = [0u8; FriendPass::SIZE];
+        body[0..4].copy_from_slice(&1i32.to_le_bytes());
+        body[4..8].copy_from_slice(&167i32.to_le_bytes());
+        body[8..12].copy_from_slice(&10000i32.to_le_bytes());
+        body[12..22].copy_from_slice(b"0000123456");
+        body[28] = 0x06;
+        let decoded = FriendPass::decode(&body).unwrap();
+        assert_eq!(decoded.left_num, 1);
+        assert_eq!(decoded.left_days, 167);
+        assert_eq!(decoded.pass_pop, 10000);
+        assert_eq!(&decoded.string[..10], b"0000123456");
+        assert_eq!(decoded.type_byte, 0x06);
+        assert!(matches!(
+            FriendPass::decode(&[0; FriendPass::SIZE - 1]),
+            Err(DecodeError::Truncated(FriendPass::SIZE, _))
         ));
     }
 }

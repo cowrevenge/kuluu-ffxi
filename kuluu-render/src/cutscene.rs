@@ -499,9 +499,20 @@ pub fn drain_cutscene_clock(
     for g in (*cursor).max(first_global)..total {
         match &events.recent[(g - first_global) as usize] {
             ViewerEvent::Cutscene { cue } => match cue {
-                CutsceneCue::ClockHold { stop: true, hour } => match *hour {
-                    Some(hour) => clock.freeze_at_hour(hour),
-                    None => clock.freeze(),
+                CutsceneCue::ClockHold {
+                    stop: true,
+                    hour,
+                    minute,
+                    day_from_epoch,
+                } => match *day_from_epoch {
+                    Some(day) => {
+                        let hour = hour.unwrap_or(0);
+                        clock.freeze_at_day_hour_minute(day, hour, *minute as u32);
+                    }
+                    None => match *hour {
+                        Some(hour) => clock.freeze_at_hour_minute(hour, *minute as u32),
+                        None => clock.freeze(),
+                    },
                 },
                 CutsceneCue::ClockHold { stop: false, .. } => clock.thaw(),
                 _ => {}
@@ -888,7 +899,12 @@ mod tests {
 
     fn clock_hold(stop: bool, hour: Option<u32>) -> ViewerEvent {
         ViewerEvent::Cutscene {
-            cue: CutsceneCue::ClockHold { stop, hour },
+            cue: CutsceneCue::ClockHold {
+                stop,
+                hour,
+                minute: 0,
+                day_from_epoch: None,
+            },
         }
     }
 
@@ -949,12 +965,60 @@ mod tests {
     }
 
     #[test]
-    fn freeze_at_hour_lands_on_the_zero_minute_of_that_day() {
+    fn freeze_at_hour_minute_lands_on_the_authored_hour_and_minute() {
         let mut clock = VanaClock::default();
-        clock.freeze_at_hour(8);
+        clock.freeze_at_hour_minute(8, 0);
         assert_eq!(
             crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
             "8:00"
+        );
+        clock.freeze_at_hour_minute(8, 30);
+        assert_eq!(
+            crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
+            "8:30"
+        );
+    }
+
+    /// 0xA9's date jump: Vana day 14 from the epoch at 00:30 is 886/1/15.
+    #[test]
+    fn freeze_at_day_hour_minute_lands_on_the_authored_vana_day() {
+        let mut clock = VanaClock::default();
+        clock.freeze_at_day_hour_minute(14, 0, 30);
+        assert_eq!(
+            crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
+            "0:30"
+        );
+        let date = crate::vana_time::VanaDate::from_earth_unix(clock.earth_unix_secs_now());
+        assert_eq!(date.year, 886);
+        assert_eq!(date.month, 1);
+        assert_eq!(date.day, 15);
+    }
+
+    /// A 0xA9-style cue (a day_from_epoch) drives the date jump through the
+    /// drain, not just the VanaClock method.
+    #[test]
+    fn a_set_clock_date_cue_jumps_the_vana_date() {
+        let mut app = clock_app();
+        step(&mut app, 1.0);
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::ClockHold {
+                    stop: true,
+                    hour: Some(0),
+                    minute: 30,
+                    day_from_epoch: Some(14),
+                },
+            },
+        );
+        step(&mut app, 1.0);
+        let clock = app.world().resource::<VanaClock>();
+        assert!(clock.is_frozen());
+        let date = crate::vana_time::VanaDate::from_earth_unix(clock.earth_unix_secs_now());
+        assert_eq!(date.day, 15, "jumped to Vana day 14 (1-based 15)");
+        assert_eq!(
+            crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
+            "0:30"
         );
     }
 

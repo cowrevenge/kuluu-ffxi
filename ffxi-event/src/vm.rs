@@ -205,6 +205,10 @@ const OP_SHOW_HUD: u8 = 0x68;
 const OP_STOP_CLOCK: u8 = 0x77;
 const OP_RESTORE_CLOCK: u8 = 0x78;
 const OP_MUSICVOLUME: u8 = 0x5D;
+const OP_SET_SOUND_VOLUME: u8 = 0x69;
+const OP_CHANGE_SOUND_VOLUME: u8 = 0x6A;
+const OP_SET_CLOCK_DATE: u8 = 0xA9;
+const OP_ENABLE_TIMER: u8 = 0xC9;
 const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
@@ -375,6 +379,22 @@ const MUSICVOLUME_FADE_OFS: usize = 3;
 const STOP_CLOCK_HOUR_OFS: usize = 1;
 /// `OP_STOP_CLOCK`'s "no time change" sentinel for the hour operand.
 const STOP_CLOCK_NO_HOUR: i32 = 255;
+/// 0x69's on/off flag byte (0 -> full volume, non-zero -> mute) and its
+/// sound-type mask at +2 (research/XiEvents/OpCodes/0x0069.md).
+const SET_SOUND_FLAG_OFS: usize = 1;
+const SET_SOUND_MASK_OFS: usize = 2;
+/// 0x6A's volume (work[1] * 0.001), fade frames (work[3]) and sound-type mask
+/// (work[5]) (research/XiEvents/OpCodes/0x006A.md).
+const CHANGE_SOUND_LEVEL_OFS: usize = 1;
+const CHANGE_SOUND_FADE_OFS: usize = 3;
+const CHANGE_SOUND_MASK_OFS: usize = 5;
+/// 0xA9's day operand: the clock jumps to Vana day `7 * work[1]` at 00:30
+/// (research/XiEvents/OpCodes/0x00A9.md).
+const SET_CLOCK_DATE_DAY_OFS: usize = 1;
+/// 0xA9's authored minute and hour (the local time is zeroed before the day
+/// jump, so the clock lands at 00:30).
+const SET_CLOCK_DATE_MINUTE: u8 = 30;
+const SET_CLOCK_DATE_HOUR: u32 = 0;
 const MAP_OPEN_ID_OFS: usize = 1; // 0x00C8
 const MAP_OPEN_TUTORIAL_OFS: usize = 5; // 0x00C8, LOBYTE is the bool
 const MAP_MARKER_ID_OFS: usize = 1; // 0x008B
@@ -1862,6 +1882,8 @@ impl EventVm {
                         self.cues.push(EventCue::ClockHold {
                             stop: true,
                             hour: Some(hour.rem_euclid(24) as u32),
+                            minute: 0,
+                            day_from_epoch: None,
                         });
                     }
                     self.advance(op);
@@ -1870,6 +1892,32 @@ impl EventVm {
                     self.cues.push(EventCue::ClockHold {
                         stop: false,
                         hour: None,
+                        minute: 0,
+                        day_from_epoch: None,
+                    });
+                    self.advance(op);
+                }
+                // 0xA9 zeros the local time, then jumps the date to Vana day
+                // 7 * work[1] at 00:30 (research/XiEvents/OpCodes/0x00A9.md
+                // Helper2, SetMinute).
+                OP_SET_CLOCK_DATE => {
+                    let day = self.getworkofs(SET_CLOCK_DATE_DAY_OFS, 0);
+                    self.cues.push(EventCue::ClockHold {
+                        stop: true,
+                        hour: Some(SET_CLOCK_DATE_HOUR),
+                        minute: SET_CLOCK_DATE_MINUTE,
+                        day_from_epoch: Some(day.saturating_mul(7).max(0) as u32),
+                    });
+                    self.advance(op);
+                }
+                // 0xC9 releases the hold 0x77/0xA9 set
+                // (research/XiEvents/OpCodes/0x00C9.md).
+                OP_ENABLE_TIMER => {
+                    self.cues.push(EventCue::ClockHold {
+                        stop: false,
+                        hour: None,
+                        minute: 0,
+                        day_from_epoch: None,
                     });
                     self.advance(op);
                 }
@@ -1880,6 +1928,35 @@ impl EventVm {
                             .clamp(0, MUSIC_VOLUME_MAX as i32)
                             as u8,
                         fade_frames: self.getworkofs(MUSICVOLUME_FADE_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
+                // 0x69 sets the named sound types to full volume or mutes them
+                // (the flag byte); 0x6A eases them to work[1] * 0.001 over
+                // work[3] frames (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).
+                OP_SET_SOUND_VOLUME => {
+                    let mask = self.getworkofs(SET_SOUND_MASK_OFS, 0) as u8;
+                    let volume = if self.byte_at(SET_SOUND_FLAG_OFS) == 0 {
+                        MUSIC_VOLUME_MAX
+                    } else {
+                        0
+                    };
+                    self.cues.push(EventCue::SoundVolume {
+                        mask,
+                        volume,
+                        fade_frames: 0,
+                    });
+                    self.advance(op);
+                }
+                OP_CHANGE_SOUND_VOLUME => {
+                    let mask = self.getworkofs(CHANGE_SOUND_MASK_OFS, 0) as u8;
+                    let volume = (self.getworkofs(CHANGE_SOUND_LEVEL_OFS, 0).clamp(0, 1000)
+                        * MUSIC_VOLUME_MAX as i32
+                        / 1000) as u8;
+                    self.cues.push(EventCue::SoundVolume {
+                        mask,
+                        volume,
+                        fade_frames: self.getworkofs(CHANGE_SOUND_FADE_OFS, 0) as u16,
                     });
                     self.advance(op);
                 }
@@ -4827,14 +4904,18 @@ mod tests {
             cues_of(OP_STOP_CLOCK, &ops, vec![0, 8, 0, 1]),
             [EventCue::ClockHold {
                 stop: true,
-                hour: Some(8)
+                hour: Some(8),
+                minute: 0,
+                day_from_epoch: None
             }]
         );
         assert_eq!(
             cues_of(OP_STOP_CLOCK, &ops, vec![0, 30, 0, 1]),
             [EventCue::ClockHold {
                 stop: true,
-                hour: Some(6)
+                hour: Some(6),
+                minute: 0,
+                day_from_epoch: None
             }]
         );
         assert!(cues_of(OP_STOP_CLOCK, &ops, vec![0, 255, 0, 1]).is_empty());
@@ -4846,7 +4927,98 @@ mod tests {
             cues_of(OP_RESTORE_CLOCK, &[], vec![]),
             [EventCue::ClockHold {
                 stop: false,
-                hour: None
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
+            }]
+        );
+    }
+
+    /// 0xA9's day operand is multiplied by seven: work slot 1 of 2 lands on
+    /// Vana day 14 at 00:30 (research/XiEvents/OpCodes/0x00A9.md).
+    #[test]
+    fn set_clock_date_opcode_jumps_seven_days_per_work_unit() {
+        let ops = [0x01u8, 0x80];
+        assert_eq!(
+            cues_of(OP_SET_CLOCK_DATE, &ops, vec![0, 2]),
+            [EventCue::ClockHold {
+                stop: true,
+                hour: Some(0),
+                minute: 30,
+                day_from_epoch: Some(14)
+            }]
+        );
+        assert_eq!(
+            cues_of(OP_SET_CLOCK_DATE, &ops, vec![0, 0]),
+            [EventCue::ClockHold {
+                stop: true,
+                hour: Some(0),
+                minute: 30,
+                day_from_epoch: Some(0)
+            }]
+        );
+    }
+
+    /// 0xC9 releases the game-timer hold, the same cue 0x78 emits.
+    #[test]
+    fn enable_timer_opcode_releases_the_hold() {
+        assert_eq!(
+            cues_of(OP_ENABLE_TIMER, &[], vec![]),
+            [EventCue::ClockHold {
+                stop: false,
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
+            }]
+        );
+    }
+
+    /// 0x69's flag byte selects full volume (0) or mute (nonzero); the mask
+    /// rides work slot 2 (research/XiEvents/OpCodes/0x0069.md).
+    #[test]
+    fn set_sound_volume_opcode_toggles_the_named_channels() {
+        // [flag, mask-ref] with the mask in References[2].
+        let ops = [0x00, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_SET_SOUND_VOLUME, &ops, vec![0, 0, 0x04]),
+            [EventCue::SoundVolume {
+                mask: 0x04,
+                volume: MUSIC_VOLUME_MAX,
+                fade_frames: 0
+            }]
+        );
+        let mute = [0x01, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_SET_SOUND_VOLUME, &mute, vec![0, 0, 0x08]),
+            [EventCue::SoundVolume {
+                mask: 0x08,
+                volume: 0,
+                fade_frames: 0
+            }]
+        );
+    }
+
+    /// 0x6A scales work[1] by 0.001 onto the 0..=127 table, carries work[3]
+    /// as the fade and work[5] as the mask (research/XiEvents/OpCodes/0x006A.md).
+    #[test]
+    fn change_sound_volume_opcode_scales_the_level_and_carries_the_fade() {
+        // level -> refs[1], fade -> refs[3], mask -> refs[5].
+        let ops = [0x01u8, 0x80, 0x03, 0x80, 0x05, 0x80];
+        assert_eq!(
+            cues_of(OP_CHANGE_SOUND_VOLUME, &ops, vec![0, 500, 0, 60, 0, 0x04]),
+            [EventCue::SoundVolume {
+                mask: 0x04,
+                volume: 63,
+                fade_frames: 60
+            }]
+        );
+        // A level past 1000 saturates at the table top instead of wrapping.
+        assert_eq!(
+            cues_of(OP_CHANGE_SOUND_VOLUME, &ops, vec![0, 9999, 0, 0, 0, 0x01]),
+            [EventCue::SoundVolume {
+                mask: 0x01,
+                volume: MUSIC_VOLUME_MAX,
+                fade_frames: 0
             }]
         );
     }

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v45: CutsceneCue::ClockHold gains `minute` and `day_from_epoch` (0xA9
+// SET_CLOCK_DATE jumps the whole date to Vana day 7*work[1] at 00:30; 0xC9
+// ENABLE_TIMER releases the hold), so the 0x77/0x78 hour-only shape now carries
+// minute 0 and no day.
 // v44: CutsceneCue::Transpar (0x6C) - the target's alpha fade to the authored
 // byte over the authored frame count, the first actor-colour drive on the cue channel.
 // v43: CutsceneCue::PlayerControl (0x20) - the script's write of retail's
@@ -104,7 +108,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 44;
+pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1699,10 +1703,17 @@ pub enum CutsceneCue {
     /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
     /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
     HudHide { hide: bool },
-    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
-    /// hour `hour`, or release it back to server time
-    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
-    ClockHold { stop: bool, hour: Option<u32> },
+    /// 0x77/0x78/0xA9/0xC9 game-clock holds: hold the clock at Vana'diel hour
+    /// `hour`, minute `minute`, on Vana day `day_from_epoch` from the calendar
+    /// epoch when set (else the current day), or release it back to server
+    /// time (research/XiEvents/OpCodes/0x0077.md, 0x0078.md, 0x00A9.md,
+    /// 0x00C9.md).
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+        minute: u8,
+        day_from_epoch: Option<u32>,
+    },
     /// Put the target on or off a mount. `status_event` is the `GameStatus`
     /// value the script writes; `mount_id` is carried only by the non-chocobo
     /// mount cases.
@@ -2462,7 +2473,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 44;
+        const VERSION: u32 = 45;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

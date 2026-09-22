@@ -157,6 +157,15 @@ pub const STATUS_EVENT_DOOR_CLOSE2: u8 = 46;
 /// argument indexes a volume table; it is not a percentage).
 pub const MUSIC_VOLUME_MAX: u8 = 127;
 
+/// The retail sound-type bits the 0x69/0x6A volume opcodes write
+/// (research/XiEvents/OpCodes/0x0069.md): which of the client's volume
+/// channels the opcode sets.
+pub const SOUND_TYPE_EFFECT: u8 = 0x01;
+pub const SOUND_TYPE_SYSTEM: u8 = 0x02;
+pub const SOUND_TYPE_ZONE: u8 = 0x04;
+pub const SOUND_TYPE_MASTER: u8 = 0x08;
+pub const SOUND_TYPE_SPECIAL_CHAT: u8 = 0x10;
+
 /// `FUNC_DatIdHelper` (research/XiEvents/OpCodes/0x0045.md): the two folded
 /// bands of the scheduler DAT id space.
 pub fn dat_id_helper(param: i32) -> i32 {
@@ -377,13 +386,30 @@ pub enum EventCue {
     /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
     /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
     HudHide { hide: bool },
-    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
-    /// hour `hour`, or release it back to server time
-    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
-    ClockHold { stop: bool, hour: Option<u32> },
+    /// 0x77/0x78/0xA9/0xC9 game-clock holds: hold the clock at Vana'diel hour
+    /// `hour`, minute `minute`, on Vana day `day_from_epoch` from the calendar
+    /// epoch when set (else the current day), or release it back to server
+    /// time (research/XiEvents/OpCodes/0x0077.md, 0x0078.md, 0x00A9.md,
+    /// 0x00C9.md). 0x77 sets the hour on the current day at minute zero; 0xA9
+    /// zeros the local time first, so it jumps the whole date to Vana day
+    /// `7 * work[1]` at 00:30.
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+        minute: u8,
+        day_from_epoch: Option<u32>,
+    },
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x69/0x6A SET/CHANGE sound volume: set the named retail sound types
+    /// (the `mask` bits) to `volume` over `fade_frames`
+    /// (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).
+    SoundVolume {
+        mask: u8,
+        volume: u8,
+        fade_frames: u16,
+    },
     /// 0x7E CHOCOBO/MOUNT: put the target on or off a mount by writing its
     /// `StatusEvent` (research/XiEvents/OpCodes/0x007E.md). `mount_id` is
     /// carried only by the non-chocobo mount cases.

@@ -1072,12 +1072,16 @@ pub enum CutsceneCue {
     HudHide {
         hide: bool,
     },
-    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
-    /// hour `hour`, or release it back to server time
-    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    /// 0x77/0x78/0xA9/0xC9 game-clock holds: hold the clock at Vana'diel hour
+    /// `hour`, minute `minute`, on Vana day `day_from_epoch` from the calendar
+    /// epoch when set (else the current day), or release it back to server
+    /// time (research/XiEvents/OpCodes/0x0077.md, 0x0078.md, 0x00A9.md,
+    /// 0x00C9.md).
     ClockHold {
         stop: bool,
         hour: Option<u32>,
+        minute: u8,
+        day_from_epoch: Option<u32>,
     },
     Mount {
         target: CutsceneActor,

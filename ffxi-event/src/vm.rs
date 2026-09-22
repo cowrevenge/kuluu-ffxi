@@ -193,7 +193,10 @@ const OP_PLAYER_CONTROL: u8 = 0x20;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
+const OP_OPEN_MAP: u8 = 0x89;
+const OP_OPEN_MAP_PROPS: u8 = 0x8D;
 const OP_MAP_MARKER: u8 = 0x8B;
+const OP_MAP_ADD_MARK: u8 = 0xB8;
 const OP_MAP_TUTORIAL: u8 = 0xC8;
 const OP_HIDE_HUD: u8 = 0x67;
 const OP_SHOW_HUD: u8 = 0x68;
@@ -355,6 +358,11 @@ const MAP_MARKER_ID_OFS: usize = 1; // 0x008B
 const MAP_MARKER_X_OFS: usize = 5; // 0x008B
 const MAP_MARKER_Y_OFS: usize = 7; // 0x008B
 const MAP_MARKER_NAME_OFS: usize = 9; // 0x008B, 16 bytes
+const OPEN_MAP_ID_OFS: usize = 1; // 0x0089, 0x008D
+const MAP_ADD_MARK_ID_OFS: usize = 1; // 0x00B8
+const MAP_ADD_MARK_X_OFS: usize = 7; // 0x00B8
+const MAP_ADD_MARK_Y_OFS: usize = 9; // 0x00B8
+const MAP_ADD_MARK_NAME_OFS: usize = 11; // 0x00B8, 16 bytes
 const CHOCOBO_CASE_OFS: usize = 1; // 0x007E
 const CHOCOBO_TARGET_OFS: usize = 2;
 const CHOCOBO_MOUNT_ID_OFS: usize = 6;
@@ -1744,6 +1752,49 @@ impl EventVm {
                         map_id: self.getworkofs(MAP_MARKER_ID_OFS, 0),
                         x_milli: self.getworkofs(MAP_MARKER_X_OFS, 0),
                         y_milli: self.getworkofs(MAP_MARKER_Y_OFS, 0),
+                        name,
+                    });
+                    self.advance(op);
+                }
+                // 0x89 opens the map on the work-slot zone id, sub-menus
+                // hidden (research/XiEvents/OpCodes/0x0089.md).
+                OP_OPEN_MAP => {
+                    self.cues.push(EventCue::MapOpen {
+                        map_id: self.getworkofs(OPEN_MAP_ID_OFS, 0),
+                        tutorial: false,
+                    });
+                    self.advance(op);
+                }
+                // 0x8D opens the map with its authored sub-menu property, which
+                // the MapOpen carrier does not carry
+                // (research/XiEvents/OpCodes/0x008D.md).
+                OP_OPEN_MAP_PROPS => {
+                    self.cues.push(EventCue::MapOpen {
+                        map_id: self.getworkofs(OPEN_MAP_ID_OFS, 0),
+                        tutorial: false,
+                    });
+                    self.advance(op);
+                }
+                // 0xB8 adds a named marker to the map; with the map closed
+                // retail opens it data-level and closes it again, so the
+                // visible result is the marker itself
+                // (research/XiEvents/OpCodes/0x00B8.md).
+                OP_MAP_ADD_MARK => {
+                    let mut name = [0u8; 16];
+                    for (slot, byte) in name.iter_mut().enumerate() {
+                        *byte = self.byte_at(MAP_ADD_MARK_NAME_OFS + slot);
+                    }
+                    // Retail rewrites underscores to spaces before the rename
+                    // (research/XiEvents/OpCodes/0x00B8.md).
+                    for b in &mut name {
+                        if *b == b'_' {
+                            *b = b' ';
+                        }
+                    }
+                    self.cues.push(EventCue::MapMarker {
+                        map_id: self.getworkofs(MAP_ADD_MARK_ID_OFS, 0),
+                        x_milli: self.getworkofs(MAP_ADD_MARK_X_OFS, 0),
+                        y_milli: self.getworkofs(MAP_ADD_MARK_Y_OFS, 0),
                         name,
                     });
                     self.advance(op);
@@ -4224,10 +4275,7 @@ mod tests {
     /// released (research/XiEvents/OpCodes/0x001F.md).
     #[test]
     fn non_scene_move_case1_holds_on_the_move_hold() {
-        let program = || {
-            let mut data = vec![crate::opcode_meta::OP_MOVE, 0x01, OP_END];
-            data
-        };
+        let program = || vec![crate::opcode_meta::OP_MOVE, 0x01, OP_END];
         let mut e = vm(program(), vec![]);
         e.hold_move(ActorLookup::EVENT_ENTITY, 5.0);
         assert_eq!(e.step(), StepResult::Waiting, "the move is running");
@@ -4500,6 +4548,59 @@ mod tests {
                 OP_MAP_MARKER,
                 &ops2[1..],
                 vec![0, 230, 0, (-10264i32) as u32, (-363i32) as u32]
+            ),
+            [EventCue::MapMarker {
+                map_id: 230,
+                x_milli: -10264,
+                y_milli: -363,
+                name: *b"some name\0\0\0\0\0\0\0",
+            }]
+        );
+    }
+
+    /// `OP_OPEN_MAP` opens the map on the work-slot zone id, sub-menus
+    /// hidden (research/XiEvents/OpCodes/0x0089.md).
+    #[test]
+    fn open_map_opcode_emits_the_open_cue() {
+        assert_eq!(
+            cues_of(OP_OPEN_MAP, &REF1, vec![0, 230]),
+            [EventCue::MapOpen {
+                map_id: 230,
+                tutorial: false
+            }]
+        );
+    }
+
+    /// `OP_OPEN_MAP_PROPS`'s sub-menu property has no carrier field; the cue
+    /// carries the zone id only (research/XiEvents/OpCodes/0x008D.md).
+    #[test]
+    fn open_map_props_opcode_drops_its_property_operand() {
+        assert_eq!(
+            cues_of(OP_OPEN_MAP_PROPS, &[REF1, REF2].concat(), vec![0, 230, 5]),
+            [EventCue::MapOpen {
+                map_id: 230,
+                tutorial: false
+            }]
+        );
+    }
+
+    /// `OP_MAP_ADD_MARK` carries the marker's zone id and milli-unit position
+    /// in work slots, its sub-menu and index operands uncarried, and its
+    /// 16-byte name inline with the underscore rewrite
+    /// (research/XiEvents/OpCodes/0x00B8.md).
+    #[test]
+    fn map_add_mark_opcode_carries_position_and_rewritten_name() {
+        let mut ops = [REF1, REF2, REF3].concat();
+        ops.extend_from_slice(&[4, 0x80]);
+        ops.extend_from_slice(&[5, 0x80]);
+        let mut name = [0u8; 16];
+        name[..9].copy_from_slice(b"some_name");
+        ops.extend_from_slice(&name);
+        assert_eq!(
+            cues_of(
+                OP_MAP_ADD_MARK,
+                &ops,
+                vec![0, 230, 0, 3, (-10264i32) as u32, (-363i32) as u32]
             ),
             [EventCue::MapMarker {
                 map_id: 230,

@@ -509,6 +509,7 @@ impl EventVm {
             Arc::clone(&self.work_zone),
         );
         child.actor_types = self.actor_types.clone();
+        child.weather_forecast = self.weather_forecast.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -565,6 +566,7 @@ impl EventVm {
             Arc::clone(&self.work_zone),
         );
         child.actor_types = self.actor_types.clone();
+        child.weather_forecast = self.weather_forecast.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {

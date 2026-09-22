@@ -164,6 +164,11 @@ pub struct DialogSession {
     /// [`crate::session::event_transport::receive`]; an absent entry is Type 0.
     /// research/XiEvents/OpCodes/0x005B.md
     entity_types: std::collections::HashMap<u32, u8>,
+    /// The global weather forecast table 0x72 GETWEATHER reads, loaded once
+    /// from the install's forecast DATs and shared across every runner. `None`
+    /// until the first event that needs it (or the install has no forecast
+    /// DATs).
+    weather_forecast: Option<std::sync::Arc<ffxi_dat::weather::WeatherForecast>>,
     /// Motion holds awaiting the renderer's finish report, keyed by the wire
     /// actor the cue named plus its key: the value is the VM's own unresolved
     /// lookup (for the release), the count of outstanding issues for the pair
@@ -204,6 +209,7 @@ impl DialogSession {
             emote_base_index: None,
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
+            weather_forecast: None,
             pending_motion_holds: std::collections::HashMap::new(),
             frame_was_up: false,
             skew: std::collections::HashMap::new(),
@@ -242,6 +248,28 @@ impl DialogSession {
         self.strings = load_strings(self.dat_root.as_deref(), zone);
     }
 
+    /// Load the global weather forecast table once, for 0x72 GETWEATHER. The
+    /// table is zone-independent, so it is cached for the session's life; a
+    /// missing install or forecast DAT leaves it `None` and 0x72 advances
+    /// without writing.
+    fn ensure_weather_forecast(&mut self) {
+        if self.weather_forecast.is_some() {
+            return;
+        }
+        let Some(root) = self.dat_root.clone() else {
+            return;
+        };
+        match ffxi_dat::weather::load_weather_forecast(&root) {
+            Ok(forecast) => self.weather_forecast = Some(std::sync::Arc::new(forecast)),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "could not load the weather forecast table; 0x72 will advance without writing"
+                );
+            }
+        }
+    }
+
     /// Begin a VM-driven event for a server trigger.
     pub fn begin(&mut self, trigger: EventTrigger) -> Begin {
         self.clear();
@@ -256,6 +284,7 @@ impl DialogSession {
         } = trigger;
         self.ensure_event_dat(event_zone);
         self.ensure_strings(text_zone);
+        self.ensure_weather_forecast();
         let undriveable = |reason| Begin::Undriveable {
             stopped_op: None,
             reason,
@@ -283,6 +312,9 @@ impl DialogSession {
             return undriveable(UndriveableReason::NoEventEntry);
         };
         runner.set_actor_types(&self.entity_types);
+        if let Some(forecast) = self.weather_forecast.clone() {
+            runner.set_weather_forecast(forecast);
+        }
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event

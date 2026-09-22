@@ -164,6 +164,16 @@ impl DialogRunner {
         self.vm.set_actor_types(types);
     }
 
+    /// Install the global weather forecast table 0x72 GETWEATHER reads; see
+    /// [`EventVm::set_weather_forecast`]. The session loads it once and shares
+    /// the same `Arc` across every runner it drives.
+    pub fn set_weather_forecast(
+        &mut self,
+        forecast: std::sync::Arc<ffxi_dat::weather::WeatherForecast>,
+    ) {
+        self.vm.set_weather_forecast(forecast);
+    }
+
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
     /// reports the routine finished; see [`EventVm::hold_action_pending`]. The
     /// session calls this when it publishes a SCHEDULOR motion cue, whose

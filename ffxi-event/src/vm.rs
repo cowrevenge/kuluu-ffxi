@@ -79,6 +79,13 @@ pub enum PendingTag {
     /// (research/XiEvents/OpCodes/0x00B2.md;
     /// vendor/server/src/map/packets/c2s/0x04d_pbx.cpp).
     DeliveryOpen,
+    /// `FUNC_gcZoneSendQueSearch(0xEB)`: the header-only 0x0EB REQSUBMAPNUM
+    /// request the 0xA6 case 0 sends; the 0x10E s2c's MapNum is its answer,
+    /// and the server answers nothing when the char is not npc-locked, so the
+    /// session's grace watchdog releases an unanswered hold
+    /// (research/XiEvents/OpCodes/0x00A6.md;
+    /// vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
+    SubMapNum,
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -210,6 +217,11 @@ const OP_MAP_QUERY: u8 = 0xD4;
 // the pending tag (EndPara = Work_Zone[1]) and case 1 writes the result the
 // ack carried into its work slot (research/XiEvents/OpCodes/0x00A7.md).
 const OP_A7_WAIT: u8 = 0xA7;
+// 0xA6 requests the event's sub-map number: case 0 sends the header-only
+// 0x0EB REQSUBMAPNUM and holds on the 0x10E answer, case 1 yields until it
+// lands, and case 2 writes the answered MapNum into its work slot
+// (research/XiEvents/OpCodes/0x00A6.md).
+const OP_A6_SUBMAP: u8 = 0xA6;
 // 0xB2: mode 0 is a timed wait (WaitTime from work slot 1, +4 on expiry);
 // mode 1 requests delivery mode (the 0x04D PBX open, +2 on the 0x04B ack)
 // (research/XiEvents/OpCodes/0x00B2.md).
@@ -576,6 +588,11 @@ pub struct EventVm {
     /// 1 writes into its work slot once the server acks the tag
     /// (research/XiEvents/OpCodes/0x00A7.md).
     a7_result: u32,
+    /// 0xA6's response result: the MapNum the 0x10E s2c carried, which case 2
+    /// writes into its work slot; 0 when the server answered nothing and the
+    /// session's grace watchdog released the hold
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    a6_submap_num: u32,
     /// The request this VM queued via REQEW and is still tracking, as (actor,
     /// tag): retail keeps that wait in `ReqStack[RunPos].ReqFlag` across ticks
     /// (research/XiEvents/Event VM Structures.md ReqFlag;
@@ -814,6 +831,7 @@ impl EventVm {
             wait: None,
             pending_ack: None,
             a7_result: 0,
+            a6_submap_num: 0,
             req_wait: None,
             action_holds: Vec::new(),
             move_holds: Vec::new(),
@@ -1278,6 +1296,17 @@ impl EventVm {
         self.for_each_child_vm(&mut land);
     }
 
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the 0xA6 result slot case 2 reads;
+    /// lands before the next step even while the SubMapNum tag is held, like
+    /// [`Self::apply_pending_num`]. The tag is one global per event, so the
+    /// value lands in every VM's copy at once
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    pub fn set_submap_num(&mut self, num: u32) {
+        self.a6_submap_num = num;
+        let mut land = |child: &mut EventVm| child.set_submap_num(num);
+        self.for_each_child_vm(&mut land);
+    }
+
     /// The tag held on its case-1 poll, if any: this VM's own, else the first
     /// one held by a child (the tag is one global per event in retail, so an
     /// owner child can be the holder the host must gate on).
@@ -1553,6 +1582,31 @@ impl EventVm {
                     }
                     1 => {
                         self.setworkofs(2, self.a7_result as i32, 0);
+                        self.exec_pointer += 4;
+                    }
+                    _ => self.exec_pointer += 2,
+                },
+                // 0xA6: case 0 sends the header-only 0x0EB REQSUBMAPNUM and
+                // holds on the 0x10E answer; case 1 yields until it lands; case
+                // 2 writes the answered MapNum into the work slot its +2 operand
+                // selects. The server answers 0 when the char is npc-locked and
+                // nothing otherwise, so an unanswered request is released by the
+                // session's grace watchdog, which lands case 2 on 0
+                // (research/XiEvents/OpCodes/0x00A6.md). Retail spins on any
+                // other case byte, so authored data cannot hold one.
+                OP_A6_SUBMAP => match self.byte_at(1) {
+                    0 => {
+                        if self.pending_ack.is_none() {
+                            self.pending_ack = Some(PendingTag::SubMapNum);
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    1 => {
+                        self.exec_pointer += 2;
+                    }
+                    2 => {
+                        self.setworkofs(2, self.a6_submap_num as i32, 0);
                         self.exec_pointer += 4;
                     }
                     _ => self.exec_pointer += 2,
@@ -6326,6 +6380,43 @@ mod tests {
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 4, "case 1 advances its 4-byte width");
         assert_eq!(e.work_zone(3), 0, "no tag means the zero result");
+    }
+
+    /// 0xA6 pair: case 0 sends the 0x0EB request and holds on the 0x10E
+    /// answer, case 1 yields until it lands, and case 2 writes the answered
+    /// MapNum into the work slot its +2 operand selects
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    #[test]
+    fn a6_pair_requests_and_writes_the_submap_num() {
+        let mut data = vec![OP_A6_SUBMAP, 0x00, OP_A6_SUBMAP, 0x01, OP_A6_SUBMAP, 0x02];
+        data.extend_from_slice(&DST);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+
+        assert_eq!(e.step(), StepResult::AwaitServerAck(PendingTag::SubMapNum));
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SubMapNum),
+            "a second step must not resend"
+        );
+
+        e.set_submap_num(77);
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_zone(0), 77, "case 2 writes the answered MapNum");
+    }
+
+    /// A bare 0xA6 case-2 read with no outstanding request writes the zero
+    /// MapNum and advances its width, like retail's unanswered path.
+    #[test]
+    fn a6_case2_without_a_request_writes_the_zero_result() {
+        let mut data = vec![OP_A6_SUBMAP, 0x02];
+        data.extend_from_slice(&DST);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4, "case 2 advances its 4-byte width");
+        assert_eq!(e.work_zone(0), 0, "no answer means the zero MapNum");
     }
 
     /// 0xB2 mode 0 counts down WaitTime by frame delay and steps its 4-byte

@@ -263,6 +263,15 @@ pub fn build_subpacket_bazaar_exit(sync: u16) -> Vec<u8> {
     buf
 }
 
+// GP_CLI_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/c2s/
+// 0x0eb_reqsubmapnum.h: header only. The event VM's 0xA6 case 0 sends it to
+// fetch the event's sub-map number; the server answers with s2c 0x10E when
+// the char is npc-locked and with nothing otherwise
+// (0x0eb_reqsubmapnum.cpp process).
+pub fn build_subpacket_reqsubmapnum(sync: u16) -> Vec<u8> {
+    build_subpacket_header(ffxi_proto::map::c2s::REQSUBMAPNUM, 1, sync).to_vec()
+}
+
 pub fn build_subpacket_reqlogout(sync: u16, mode: u16, kind: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(

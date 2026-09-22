@@ -507,6 +507,16 @@ impl DialogSession {
         }
     }
 
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot, where
+    /// case 2 reads it; lands before the next step even while the SubMapNum
+    /// tag is held. No-op when no VM event runs
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    pub fn set_submap_num(&mut self, num: u32) {
+        if let Some(runner) = self.runner.as_mut() {
+            runner.set_submap_num(num);
+        }
+    }
+
     /// True while any VM in the event (the master or an owner child) holds a
     /// pending tag awaiting its s2c ack — the tag is one global per event in
     /// retail, so a child's held tag gates the drain too. While true the

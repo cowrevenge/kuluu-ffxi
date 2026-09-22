@@ -101,6 +101,13 @@ pub mod c2s {
 
     pub const REQ_LOGOUT: u16 = 0x0E7;
 
+    // GP_CLI_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/c2s/
+    // 0x0eb_reqsubmapnum.h. Header-only request the event VM sends from 0xA6
+    // case 0 to fetch the event's sub-map number; the server answers with s2c
+    // 0x10E when the char is npc-locked and with nothing otherwise
+    // (0x0eb_reqsubmapnum.cpp process).
+    pub const REQSUBMAPNUM: u16 = 0x0EB;
+
     // GP_CLI_COMMAND_SUBMAPCHANGE, vendor/server/src/map/packets/c2s/
     // 0x0f2_submapchange.h. Sent whenever the client crosses into a different
     // sub-area within the current zone (State/SubMapNumber below); the server
@@ -631,6 +638,12 @@ pub mod s2c {
     // GP_SERV_COMMAND_BAZAAR_SELL, vendor/server/src/map/packets/s2c/0x109_bazaar_sell.h.
     // Another customer bought a row of the bazaar we are browsing.
     pub const BAZAAR_SELL: u16 = 0x109;
+
+    // GP_SERV_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/s2c/
+    // 0x10e_reqsubmapnum.h: uint32 MapNum. The answer to our c2s 0x0EB request
+    // (the event VM's 0xA6 case 0); the server pushes 0 when the char is
+    // npc-locked and nothing otherwise (0x0eb_reqsubmapnum.cpp process).
+    pub const REQSUBMAPNUM: u16 = 0x10E;
 
     // GP_SERV_COMMAND_TRACKING_LIST, vendor/server/src/map/packets/s2c/0x0f4_tracking_list.h.
     // One wide-scan entry (ActIndex/Level/Type + relative x/z + sName[16]).

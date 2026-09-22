@@ -105,6 +105,11 @@ pub const SCHEDULER_TAG_FADE_IN: FourCc = *b"fdi0";
 /// timing verbatim" — the overwhelming majority of authored call sites.
 pub const SCHEDULER_DURATION_FROM_DAT: u16 = 0;
 
+/// The hold key 0x6E/0x63 arm and 0x99 polls: retail's `AnimationPlay` is one
+/// per-entity slot, so the wait carries no key operand of its own and keys on
+/// this constant (research/XiEvents/OpCodes/0x006E.md, 0x0099.md).
+pub const EMOTE_ANIMATION_KEY: FourCc = *b"emot";
+
 /// `GameStatus` values opcode 0x7E writes to the target's `StatusEvent`
 /// (research/XIClient/src/XIClient/include/World/Actor/GameStatus.h; the case-to-value mapping is
 /// research/XiEvents/OpCodes/0x007E.md).
@@ -274,6 +279,15 @@ pub enum EventCue {
         actor2: ActorLookup,
         key: FourCc,
     },
+    /// 0x6E EMOT / 0x63 PLAYANIM: play the emote animation `emote_id` on
+    /// `actor`, `param` the emote's variant selector (salute nation, …).
+    /// `emote_id` is the low byte and `param` the high byte of the operand's
+    /// work value (research/XiEvents/OpCodes/0x006E.md, 0x0063.md).
+    Emote {
+        actor: ActorLookup,
+        emote_id: u16,
+        param: u16,
+    },
     /// 0x45 LOADEVENTSCHEDULER2: run scheduler `tag` out of DAT file `dat_id`
     /// over the two actors (research/XiEvents/OpCodes/0x0045.md). `duration` is
     /// the authored override, [`SCHEDULER_DURATION_FROM_DAT`] for none.
@@ -402,6 +416,15 @@ impl EventCue {
                 actor1: resolve(actor1),
                 actor2: resolve(actor2),
                 key,
+            },
+            Self::Emote {
+                actor,
+                emote_id,
+                param,
+            } => Self::Emote {
+                actor: resolve(actor),
+                emote_id,
+                param,
             },
             Self::Scheduler {
                 dat_id,

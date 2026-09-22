@@ -243,6 +243,13 @@ impl DialogRunner {
         self.vm.apply_pending_str(strings);
     }
 
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot; lands
+    /// before the next step even while the SubMapNum tag is held, like
+    /// [`Self::apply_pending_num`].
+    pub fn set_submap_num(&mut self, num: u32) {
+        self.vm.set_submap_num(num);
+    }
+
     /// The pending tag the VM holds on its case-1 poll, if any.
     pub fn pending_tag(&self) -> Option<&PendingTag> {
         self.vm.pending_tag()

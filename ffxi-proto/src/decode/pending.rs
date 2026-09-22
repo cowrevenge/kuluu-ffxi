@@ -53,6 +53,28 @@ impl PendingStr {
     }
 }
 
+/// One s2c 0x10E `GP_SERV_COMMAND_REQSUBMAPNUM`: uint32 MapNum, the answer to
+/// the event VM's 0xA6 case 0 request (c2s 0x0EB). The server pushes 0 when
+/// the char is npc-locked and nothing otherwise
+/// (vendor/server/src/map/packets/s2c/0x10e_reqsubmapnum.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReqSubMapNum {
+    pub map_num: u32,
+}
+
+impl ReqSubMapNum {
+    /// Body size after the 4-byte sub-header: one uint32 MapNum.
+    pub(crate) const SIZE: usize = std::mem::size_of::<u32>();
+
+    pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
+        if body.len() < Self::SIZE {
+            return Err(DecodeError::Truncated(Self::SIZE, body.len()));
+        }
+        let map_num = u32::from_le_bytes(body[..Self::SIZE].try_into().unwrap());
+        Ok(Self { map_num })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +123,16 @@ mod tests {
         assert!(matches!(
             PendingStr::decode(&[0; PendingStr::SIZE - 1]),
             Err(DecodeError::Truncated(PendingStr::SIZE, _))
+        ));
+    }
+
+    #[test]
+    fn reqsubmapnum_decodes_the_map_num() {
+        let decoded = ReqSubMapNum::decode(&0xDEAD_BEEFu32.to_le_bytes()).unwrap();
+        assert_eq!(decoded.map_num, 0xDEAD_BEEF);
+        assert!(matches!(
+            ReqSubMapNum::decode(&[0; ReqSubMapNum::SIZE - 1]),
+            Err(DecodeError::Truncated(ReqSubMapNum::SIZE, _))
         ));
     }
 }

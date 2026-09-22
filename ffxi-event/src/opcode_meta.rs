@@ -1471,6 +1471,14 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             1 => Some(4),
             _ => None,
         },
+        // 0x00A6.md: cases 0/1 are the request and its poll (2 each), case 2
+        // writes the answered MapNum (4); retail spins on any other case, so
+        // no width is encoded for it.
+        OP_A6_SUBMAP => match sub {
+            0 | 1 => Some(2),
+            2 => Some(4),
+            _ => None,
+        },
         // 0x00B2.md: mode 0 is the timed wait (4), mode 1 the delivery-mode
         // request (2); retail returns without advancing on any other mode, so
         // no width is encoded for it.
@@ -1628,6 +1636,7 @@ pub(crate) const OP_STATUSSET: u8 = 0xAC;
 pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
 pub(crate) const OP_RANKING: u8 = 0xB3;
 pub(crate) const OP_A7_WAIT: u8 = 0xA7;
+pub(crate) const OP_A6_SUBMAP: u8 = 0xA6;
 pub(crate) const OP_B2_DELIVERY: u8 = 0xB2;
 
 #[cfg(test)]
@@ -1705,6 +1714,11 @@ mod tests {
         assert_eq!(sub_size(0xA7, 0), Some(2));
         assert_eq!(sub_size(0xA7, 1), Some(4));
         assert_eq!(sub_size(0xA7, 2), None, "undocumented sub spins");
+        // 0x00A6.md — the sub-map request; an undocumented case spins.
+        assert_eq!(sub_size(0xA6, 0), Some(2));
+        assert_eq!(sub_size(0xA6, 1), Some(2));
+        assert_eq!(sub_size(0xA6, 2), Some(4));
+        assert_eq!(sub_size(0xA6, 3), None, "undocumented case spins");
         // 0x00B2.md — the delivery box; an undocumented mode spins.
         assert_eq!(sub_size(0xB2, 0), Some(4));
         assert_eq!(sub_size(0xB2, 1), Some(2));

@@ -188,6 +188,9 @@ const OP_MAIN_SPEED: u8 = 0x32;
 // 0x31 SMOVE: 0x1F with a heading update and a MoveTime budget, on the
 // non-scene path (research/XiEvents/OpCodes/0x0031.md).
 const OP_SMOVE: u8 = 0x31;
+// 0x72 GETWEATHER: read the global forecast table into Work_Zone[2..5).
+// Sub-byte: mode 0 is 4 bytes, mode 1 is 6 (research/XiEvents/OpCodes/0x0072.md).
+const OP_GETWEATHER: u8 = 0x72;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -595,6 +598,11 @@ pub struct EventVm {
     parked_on_action_hold: bool,
     /// The same for a non-player MOVE case 1 parked on its move hold.
     parked_on_move_hold: bool,
+    /// The global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md). The host loads it once from the
+    /// forecast DATs and shares one copy across every VM it drives; `None` in a
+    /// host that never injects it, where 0x72 advances without writing.
+    weather_forecast: Option<Arc<ffxi_dat::weather::WeatherForecast>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -777,6 +785,7 @@ impl EventVm {
             pending_action_holds: Vec::new(),
             parked_on_action_hold: false,
             parked_on_move_hold: false,
+            weather_forecast: None,
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -929,6 +938,19 @@ impl EventVm {
     /// update lands before the next step.
     pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
         self.actor_types = types.clone();
+    }
+
+    /// Install the global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md). The host loads it once from the
+    /// install's forecast DATs and shares the same `Arc` across every VM, so the
+    /// table is read, not copied, per event. No-op on a second install.
+    pub fn set_weather_forecast(
+        &mut self,
+        forecast: std::sync::Arc<ffxi_dat::weather::WeatherForecast>,
+    ) {
+        self.weather_forecast = Some(forecast.clone());
+        let mut land = |child: &mut EventVm| child.set_weather_forecast(forecast.clone());
+        self.for_each_child_vm(&mut land);
     }
 
     /// The retail entity Type byte the `OP_LOADEXTSCHEDULER`/
@@ -1851,6 +1873,34 @@ impl EventVm {
                         }
                         self.parked_on_move_hold = false;
                         self.exec_pointer += 2;
+                    }
+                    _ => return StepResult::Unimplemented(op),
+                },
+                // 0x72 GETWEATHER: mode 0 kicks off the forecast read and mode 1
+                // copies three values into Work_Zone[2..5)
+                // (research/XiEvents/OpCodes/0x0072.md). The table is resident
+                // in kuluu (the host loads it once), so the read is instant:
+                // mode 0 advances past itself and yields one frame the way
+                // retail's async read does, and mode 1 reads the values and
+                // advances. A region or index the shipped table does not cover
+                // writes nothing, like retail's unresolved early return.
+                OP_GETWEATHER => match self.byte_at(1) {
+                    0x00 => {
+                        self.exec_pointer += 4;
+                        return self.arm_wait(0.0, 0);
+                    }
+                    0x01 => {
+                        if let Some(forecast) = &self.weather_forecast {
+                            let region = self.getworkofs(2, 0) as u32;
+                            let day = self.getworkofs(4, 0) as u32;
+                            if let Some([v0, v1, v2]) = forecast.values(region, day) {
+                                let mut zone = self.work_zone.lock().unwrap();
+                                zone[2] = v0;
+                                zone[3] = v1;
+                                zone[4] = v2;
+                            }
+                        }
+                        self.exec_pointer += 6;
                     }
                     _ => return StepResult::Unimplemented(op),
                 },
@@ -4966,6 +5016,73 @@ mod tests {
         let data = vec![OP_SMOVE, 0x02, OP_END];
         let mut e = vm(data, vec![]);
         assert_eq!(e.step(), StepResult::Unimplemented(OP_SMOVE));
+    }
+
+    /// 0x72 mode 0 kicks off the forecast read: it advances past itself and
+    /// yields one frame the way retail's async read does, then mode 1 copies
+    /// the region's three forecast values into Work_Zone[2..5)
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_reads_the_forecast_into_work_zone() {
+        let mut data = vec![OP_GETWEATHER, 0x00];
+        data.extend_from_slice(&REF0);
+        data.push(OP_GETWEATHER);
+        data.push(0x01);
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.push(OP_END);
+        let mut head_low = [0u8; ffxi_dat::weather::FORECAST_HEADS_LOW];
+        head_low[17] = 5;
+        let mut data_low = vec![0u32; 14000];
+        // region 17 -> head 5, day 100 -> 6480 + 5 + 3*100 = 6785.
+        data_low[6785] = 111;
+        data_low[6786] = 222;
+        data_low[6787] = 333;
+        let forecast = ffxi_dat::weather::WeatherForecast::from_parts(
+            head_low,
+            data_low,
+            [0u8; ffxi_dat::weather::FORECAST_HEADS_HIGH],
+            vec![0u32; 14000],
+        );
+        let mut e = vm(data, vec![17, 100]);
+        e.set_weather_forecast(std::sync::Arc::new(forecast));
+        assert_eq!(e.step(), StepResult::Waiting, "mode 0 yields on the read");
+        e.tick(1.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done, "mode 1 reads and advances");
+        assert_eq!(e.work_zone(2), 111);
+        assert_eq!(e.work_zone(3), 222);
+        assert_eq!(e.work_zone(4), 333);
+        assert!(e.take_cues().is_empty(), "0x72 writes work, not cues");
+    }
+
+    /// A VM the host never gave the forecast table advances past 0x72 without
+    /// writing, like retail's unresolved early return
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_without_the_forecast_advances_without_writing() {
+        let mut data = vec![OP_GETWEATHER, 0x00];
+        data.extend_from_slice(&REF0);
+        data.push(OP_GETWEATHER);
+        data.push(0x01);
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.push(OP_END);
+        let mut e = vm(data, vec![17, 100]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(1.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_zone(2), 0);
+        assert_eq!(e.work_zone(3), 0);
+        assert_eq!(e.work_zone(4), 0);
+    }
+
+    /// 0x72's undocumented sub-byte stops the VM rather than guessing a width
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_unknown_sub_byte_stops() {
+        let data = vec![OP_GETWEATHER, 0x02, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_GETWEATHER));
     }
 
     /// 0x39 sets the event entity's facing from the raw work value

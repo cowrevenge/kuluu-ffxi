@@ -1360,6 +1360,13 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
         // 0x0046.md: sub 2 reads a work offset (4); every other path, including
         // the render-flag-gated fall-through, advances 2.
         OP_DEFCAMERA => Some(if sub == 2 { 4 } else { 2 }),
+        // 0x0072.md: mode 0 (the forecast read) is 4 bytes, mode 1 (the value
+        // copy) is 6; an unknown mode retail spins on, so no width is encoded.
+        OP_GETWEATHER => match sub {
+            0 => Some(4),
+            1 => Some(6),
+            _ => None,
+        },
         // 0x0079.md: sub 1 is lookatone with a trailing work offset (12); sub 2
         // and the zero path are both 10.
         OP_LOOKAT => Some(if sub == 1 { 12 } else { 10 }),
@@ -1562,6 +1569,7 @@ pub fn is_input_wait(op: u8, sub: u8) -> bool {
 }
 
 const OP_DEFCAMERA: u8 = 0x46;
+const OP_GETWEATHER: u8 = 0x72;
 const OP_LOOKAT: u8 = 0x79;
 const OP_MUSIC: u8 = 0x5C;
 const OP_MOGHOUSE_VISIT: u8 = 0xC2;

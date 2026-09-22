@@ -1494,6 +1494,17 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             0..=2 => Some(2),
             _ => None,
         },
+        // 0x008C.md: case 0 is 8, the poll 2, case 2 is 12, cases 3/4 are
+        // 10, case 5 is 14; retail spins on any other case, so no width is
+        // encoded for it.
+        OP_RECIPE => match sub {
+            0 => Some(8),
+            1 => Some(2),
+            2 => Some(12),
+            3 | 4 => Some(10),
+            5 => Some(14),
+            _ => None,
+        },
         // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
         // frame while the entity walks and advances 2 on arrival. No frame
         // clock here, so case 1 arrives immediately.
@@ -1647,6 +1658,7 @@ pub(crate) const OP_A6_SUBMAP: u8 = 0xA6;
 pub(crate) const OP_B2_DELIVERY: u8 = 0xB2;
 pub(crate) const OP_FRIENDPASS_87: u8 = 0x87;
 pub(crate) const OP_FRIENDPASS_88: u8 = 0x88;
+pub(crate) const OP_RECIPE: u8 = 0x8C;
 
 #[cfg(test)]
 mod tests {
@@ -1739,6 +1751,14 @@ mod tests {
             }
             assert_eq!(sub_size(op, 3), None, "undocumented case spins");
         }
+        // 0x008C.md — the crafting support; an undocumented case spins.
+        assert_eq!(sub_size(0x8C, 0), Some(8));
+        assert_eq!(sub_size(0x8C, 1), Some(2));
+        assert_eq!(sub_size(0x8C, 2), Some(12));
+        assert_eq!(sub_size(0x8C, 3), Some(10));
+        assert_eq!(sub_size(0x8C, 4), Some(10));
+        assert_eq!(sub_size(0x8C, 5), Some(14));
+        assert_eq!(sub_size(0x8C, 6), None, "undocumented case spins");
         // 0x0075.md — case 2's -6/+8 pair nets +2.
         assert_eq!(sub_size(0x75, 0), Some(4));
         assert_eq!(sub_size(0x75, 1), Some(2));

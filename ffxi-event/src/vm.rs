@@ -191,6 +191,10 @@ const OP_SMOVE: u8 = 0x31;
 // 0x72 GETWEATHER: read the global forecast table into Work_Zone[2..5).
 // Sub-byte: mode 0 is 4 bytes, mode 1 is 6 (research/XiEvents/OpCodes/0x0072.md).
 const OP_GETWEATHER: u8 = 0x72;
+// 0x82 RANGE_RECT: hit-test the event entity against the zone range rect named
+// by the u32 at +1; a hit advances 7, a miss jumps to the u16 at +5
+// (research/XiEvents/OpCodes/0x0082.md).
+const OP_RANGE_RECT: u8 = 0x82;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -603,6 +607,11 @@ pub struct EventVm {
     /// forecast DATs and shares one copy across every VM it drives; `None` in a
     /// host that never injects it, where 0x72 advances without writing.
     weather_forecast: Option<Arc<ffxi_dat::weather::WeatherForecast>>,
+    /// The zone's range rects 0x82 RANGE_RECT hit-tests against: every RID chunk
+    /// of the event zone's resource DAT (ffxi-dat zone_interaction). The host
+    /// loads it once per zone and shares one copy across every VM; empty when the
+    /// host has no install, where 0x82 always misses and jumps.
+    zone_rects: Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -786,6 +795,7 @@ impl EventVm {
             parked_on_action_hold: false,
             parked_on_move_hold: false,
             weather_forecast: None,
+            zone_rects: Arc::new(Vec::new()),
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -951,6 +961,33 @@ impl EventVm {
         self.weather_forecast = Some(forecast.clone());
         let mut land = |child: &mut EventVm| child.set_weather_forecast(forecast.clone());
         self.for_each_child_vm(&mut land);
+    }
+
+    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md). The host loads the event zone's
+    /// RID table once and shares the same `Arc` across every VM it drives, so
+    /// the table is read, not copied, per event. An empty install leaves the
+    /// default empty table, where 0x82 always misses.
+    pub fn set_zone_rects(
+        &mut self,
+        rects: std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    ) {
+        self.zone_rects = rects.clone();
+        let mut land = |child: &mut EventVm| child.set_zone_rects(rects.clone());
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// 0x82's hit test: whether the event entity's tracked position falls inside
+    /// the zone range rect named by `rect_id`. `false` when no scene tracks a
+    /// position (retail's null-entity early return) or no rect matches
+    /// (research/XiEvents/OpCodes/0x0082.md).
+    fn range_rect_hit(&self, rect_id: u32) -> bool {
+        let Some(pos) = self.event_entity_rid_position() else {
+            return false;
+        };
+        self.zone_rects
+            .iter()
+            .any(|r| r.rect_id() == rect_id && r.contains(pos))
     }
 
     /// The retail entity Type byte the `OP_LOADEXTSCHEDULER`/
@@ -1904,6 +1941,18 @@ impl EventVm {
                     }
                     _ => return StepResult::Unimplemented(op),
                 },
+                // 0x82 RANGE_RECT: find the zone range rect named by the u32 at
+                // +1 and hit-test the event entity's tracked position against it;
+                // a hit advances 7, a miss (no rect, no position, or outside) jumps
+                // to the u16 at +5 (research/XiEvents/OpCodes/0x0082.md).
+                OP_RANGE_RECT => {
+                    let rect_id = self.eventgetcode2(1);
+                    if self.range_rect_hit(rect_id) {
+                        self.exec_pointer += 7;
+                    } else {
+                        self.exec_pointer = self.eventgetcode(5) as usize;
+                    }
+                }
                 // 0x39 SetFacing: set the event entity's facing, the raw work
                 // value on the 0..4095 heading scale (research/XiEvents/OpCodes/
                 // 0x0039.md).
@@ -4116,13 +4165,107 @@ mod tests {
 
     #[test]
     fn unimplemented_jump_opcode_stops() {
-        // 0x82 is a jumping opcode we don't implement; it must not be skipped by
+        // 0xD4 is a jumping opcode we don't implement; it must not be skipped by
         // size (that would desync ExecPointer), so the VM stops.
-        const OP_UNIMPLEMENTED_JUMP: u8 = 0x82;
+        const OP_UNIMPLEMENTED_JUMP: u8 = 0xD4;
         assert!(OPCODE_META[OP_UNIMPLEMENTED_JUMP as usize].jumps);
-        let mut e = vm(vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0], vec![]);
+        let mut e = vm(
+            vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![],
+        );
         assert_eq!(e.step(), StepResult::Unimplemented(OP_UNIMPLEMENTED_JUMP));
         assert_eq!(e.exec_pointer(), 0);
+    }
+
+    /// 0x82 RANGE_RECT hit-tests the event entity's tracked position against the
+    /// zone range rect named by the u32 at +1: a hit advances 7, a miss (outside
+    /// the box, or no rect) jumps to the u16 at +5
+    /// (research/XiEvents/OpCodes/0x0082.md).
+    #[test]
+    fn range_rect_hit_tests_the_event_entity() {
+        use ffxi_dat::datid::DatId;
+        use ffxi_dat::zone_interaction::ZoneInteraction;
+        // An axis-aligned 10x10x10 box centered on the origin: (0,0,0) is inside,
+        // (6,0,0) is past the 5.0 half-extent.
+        fn box_rect(source: [u8; 4]) -> ZoneInteraction {
+            ZoneInteraction {
+                position: [0.0, 0.0, 0.0],
+                rect_class: 0,
+                orientation: [0.0, 0.0, 0.0],
+                size: [10.0, 10.0, 10.0],
+                source_id: DatId(source),
+                dest_id: None,
+                param: 0,
+                terrain_flags: 0,
+                map_id: 0,
+                elevator_bottom_y: 0.0,
+                elevator_top_y: 0.0,
+            }
+        }
+        let source: [u8; 4] = *b"test";
+        let rect_id = u32::from_le_bytes(source);
+        let rects = std::sync::Arc::new(vec![box_rect(source)]);
+
+        // 0x82 <rect_id:4> <jump:2> END pad pad END
+        //   hit  -> exec_pointer += 7  -> offset 7 (END)
+        //   miss -> exec_pointer = 10  -> offset 10 (END)
+        let mut data = vec![OP_RANGE_RECT];
+        data.extend_from_slice(&rect_id.to_le_bytes());
+        data.extend_from_slice(&10u16.to_le_bytes());
+        data.push(OP_END);
+        data.push(0xFF);
+        data.push(0xFF);
+        data.push(OP_END);
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![])],
+        });
+
+        // Inside the box: the tracked position (0,0,0) is in the rect -> hit.
+        let mut e = vm(data.clone(), vec![]);
+        e.set_zone_rects(rects.clone());
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 0,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 7, "a hit advances 7");
+
+        // Just outside the box: (6,0,0) is past the half-extent -> miss -> jump.
+        let mut e = vm(data.clone(), vec![]);
+        e.set_zone_rects(rects.clone());
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 6000,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 10, "a miss jumps to the u16 at +5");
+
+        // No rect table: the host has no install -> miss -> jump.
+        let mut e = vm(data.clone(), vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 0,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 10, "no rect table misses");
     }
 
     /// The actor-driven waits all reduce to retail's own "no such entity"

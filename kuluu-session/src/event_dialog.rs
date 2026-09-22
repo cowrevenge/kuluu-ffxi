@@ -133,6 +133,10 @@ pub struct DialogSession {
     player_id: u32,
     loaded_event_zone: Option<u16>,
     loaded_string_zone: Option<u16>,
+    loaded_zone_rects_zone: Option<u16>,
+    /// The event zone's range rects 0x82 RANGE_RECT hit-tests against, loaded
+    /// from the zone resource DAT's RID chunks (ffxi-dat zone_interaction).
+    zone_rects: Option<std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>>,
     event_dat: Option<Arc<EventDat>>,
     player_position: Option<ffxi_event::vm::scene::EventPosition>,
     scene_actions: Vec<ffxi_event::vm::scene::SceneAction>,
@@ -197,6 +201,8 @@ impl DialogSession {
             player_id: 0,
             loaded_event_zone: None,
             loaded_string_zone: None,
+            loaded_zone_rects_zone: None,
+            zone_rects: None,
             event_dat: None,
             player_position: None,
             scene_actions: Vec::new(),
@@ -270,6 +276,39 @@ impl DialogSession {
         }
     }
 
+    /// Load the event zone's range rects once, for 0x82 RANGE_RECT
+    /// (research/XiEvents/OpCodes/0x0082.md). The RID table is per-zone, so it
+    /// is cached per zone; a missing install or zone resource DAT leaves it
+    /// empty and 0x82 always misses.
+    fn ensure_zone_rects(&mut self, zone: u16) {
+        if self.loaded_zone_rects_zone == Some(zone) {
+            return;
+        }
+        self.loaded_zone_rects_zone = Some(zone);
+        let Some(root) = self.dat_root.clone() else {
+            return;
+        };
+        let Some(file_id) = ffxi_dat::zone_dat::zone_id_to_mzb_file_id(zone) else {
+            return;
+        };
+        let Ok(loc) = root.resolve(file_id) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+            return;
+        };
+        match ffxi_dat::zone_interaction::from_dat(&bytes) {
+            Ok(rects) => self.zone_rects = Some(std::sync::Arc::new(rects)),
+            Err(e) => {
+                tracing::debug!(
+                    zone,
+                    error = %e,
+                    "could not parse the zone RID table; 0x82 will always miss"
+                );
+            }
+        }
+    }
+
     /// Begin a VM-driven event for a server trigger.
     pub fn begin(&mut self, trigger: EventTrigger) -> Begin {
         self.clear();
@@ -285,6 +324,7 @@ impl DialogSession {
         self.ensure_event_dat(event_zone);
         self.ensure_strings(text_zone);
         self.ensure_weather_forecast();
+        self.ensure_zone_rects(event_zone);
         let undriveable = |reason| Begin::Undriveable {
             stopped_op: None,
             reason,
@@ -314,6 +354,9 @@ impl DialogSession {
         runner.set_actor_types(&self.entity_types);
         if let Some(forecast) = self.weather_forecast.clone() {
             runner.set_weather_forecast(forecast);
+        }
+        if let Some(rects) = self.zone_rects.clone() {
+            runner.set_zone_rects(rects);
         }
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);

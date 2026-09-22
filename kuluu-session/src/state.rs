@@ -1061,6 +1061,13 @@ pub enum CutsceneCue {
     CameraLock {
         lock: bool,
     },
+    /// 0x38: the lower word of retail's `CliEventModeLocal` (the operand's
+    /// high byte with 0x20 forced). While it holds, the local player model
+    /// and the HUD pieces stay hidden
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    LocalMode {
+        mode: u16,
+    },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
     /// research/XIClient ActorTelemetry::CanIMove).

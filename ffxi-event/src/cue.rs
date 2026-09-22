@@ -380,6 +380,13 @@ pub enum EventCue {
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// 0x38: write the lower word of retail's `CliEventModeLocal` — the work
+    /// operand's high byte with 0x20 forced (the base cinematic bit the
+    /// handler always sets, so every authored value keeps it). While it holds,
+    /// the client hides the local player model and the HUD pieces and lets the
+    /// event drive the camera; the event end clears the flag
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    LocalMode { mode: u16 },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
     /// research/XIClient ActorTelemetry::CanIMove).

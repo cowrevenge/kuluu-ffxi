@@ -519,6 +519,12 @@ impl DialogSession {
             .is_some_and(|r| r.pending_tag().is_some())
     }
 
+    /// The pending tag held by any VM in the event, if one: a clone, so the
+    /// caller can match on the variant without borrowing the runner.
+    pub fn pending_tag(&self) -> Option<PendingTag> {
+        self.runner.as_ref().and_then(|r| r.pending_tag().cloned())
+    }
+
     /// True exactly once per up→down transition of the displayed frame: call it
     /// after every step and emit [`AgentEvent::DialogDismissed`](crate::state::AgentEvent)
     /// when it fires. Retail clears CliEventMessOpenFlag on dismissal, so the

@@ -1471,6 +1471,14 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             1 => Some(4),
             _ => None,
         },
+        // 0x00B2.md: mode 0 is the timed wait (4), mode 1 the delivery-mode
+        // request (2); retail returns without advancing on any other mode, so
+        // no width is encoded for it.
+        OP_B2_DELIVERY => match sub {
+            0 => Some(4),
+            1 => Some(2),
+            _ => None,
+        },
         // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
         // frame while the entity walks and advances 2 on arrival. No frame
         // clock here, so case 1 arrives immediately.
@@ -1620,6 +1628,7 @@ pub(crate) const OP_STATUSSET: u8 = 0xAC;
 pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
 pub(crate) const OP_RANKING: u8 = 0xB3;
 pub(crate) const OP_A7_WAIT: u8 = 0xA7;
+pub(crate) const OP_B2_DELIVERY: u8 = 0xB2;
 
 #[cfg(test)]
 mod tests {
@@ -1696,6 +1705,10 @@ mod tests {
         assert_eq!(sub_size(0xA7, 0), Some(2));
         assert_eq!(sub_size(0xA7, 1), Some(4));
         assert_eq!(sub_size(0xA7, 2), None, "undocumented sub spins");
+        // 0x00B2.md — the delivery box; an undocumented mode spins.
+        assert_eq!(sub_size(0xB2, 0), Some(4));
+        assert_eq!(sub_size(0xB2, 1), Some(2));
+        assert_eq!(sub_size(0xB2, 2), None, "undocumented mode spins");
         // 0x0075.md — case 2's -6/+8 pair nets +2.
         assert_eq!(sub_size(0x75, 0), Some(4));
         assert_eq!(sub_size(0x75, 1), Some(2));

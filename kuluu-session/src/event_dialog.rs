@@ -598,6 +598,8 @@ impl DialogSession {
             DialogStep::Stopped(op) => {
                 tracing::warn!(
                     op = format!("0x{op:02X}"),
+                    zone,
+                    event_id = active.event_id,
                     "event VM stopped mid-dialog; releasing with end_para 0"
                 );
                 Advance::Ended {

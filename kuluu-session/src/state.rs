@@ -1051,6 +1051,13 @@ pub enum CutsceneCue {
         target: CutsceneActor,
         hide: bool,
     },
+    /// 0x6C TRANSPAR: fade `target`'s alpha to `end_alpha` (0..=255) over
+    /// `duration_frames` frames (research/XiEvents/OpCodes/0x006C.md).
+    Transpar {
+        target: CutsceneActor,
+        end_alpha: i32,
+        duration_frames: i32,
+    },
     CameraLock {
         lock: bool,
     },

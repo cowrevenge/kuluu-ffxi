@@ -2424,6 +2424,11 @@ async fn send_pending_tag(
             current_zone_id,
             event_id,
         ),
+        // 0xB2 case 1: the delivery-mode request is the 0x04D PBX open, not an
+        // event-end subpacket (vendor/server/src/map/packets/c2s/0x04d_pbx.cpp).
+        PendingTag::DeliveryOpen => {
+            build_subpacket_pbx(*sub_seq, &crate::state::DeliveryBoxOp::DeliOpen)
+        }
     };
     let header = datagram_header_id(*sub_seq);
     *sub_seq = sub_seq.wrapping_add(1);
@@ -4762,6 +4767,34 @@ async fn keepalive_loop(
                                 match decode::PbxResult::decode(sub.data) {
                                     Ok(r) => {
                                         let out = dbox.on_result(&r);
+                                        // 0xB2 case 1 parked the event VM on the
+                                        // delivery-mode request; the DELI_OPEN/
+                                        // POST_OPEN ack is its s2c, so release the
+                                        // hold and let the script run on
+                                        // (research/XiEvents/OpCodes/0x00B2.md).
+                                        if matches!(
+                                            r.command,
+                                            ffxi_proto::map::pbx::command::DELI_OPEN
+                                                | ffxi_proto::map::pbx::command::POST_OPEN
+                                        ) && r.result == ffxi_proto::map::pbx::result::OK
+                                            && dialog_session.pending_tag()
+                                                == Some(PendingTag::DeliveryOpen)
+                                        {
+                                            let advance = dialog_session.ack_server();
+                                            for cue in dialog_session.take_cues() {
+                                                cutscene.push(cue, &event_tx);
+                                            }
+                                            if matches!(
+                                                advance,
+                                                crate::event_dialog::Advance::Ended { .. }
+                                            ) {
+                                                cutscene.end(
+                                                    crate::event_dialog::EventSessionExit::ScriptEnded,
+                                                    &event_tx,
+                                                );
+                                                let _ = event_tx.send(AgentEvent::EventEnded);
+                                            }
+                                        }
                                         // Settle a pending recipient Query: an OK
                                         // check locks the name into the Send panel
                                         // (re-rendered with slots activated); a miss

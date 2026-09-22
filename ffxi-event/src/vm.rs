@@ -74,6 +74,11 @@ pub enum PendingTag {
         dir: u8,
         end_para: u32,
     },
+    /// `CTkDelivery_RequestEnterDeliveryMode`: the 0x04D PBX open request the
+    /// 0xB2 case 1 sends, acked by the 0x04B DELI_OPEN/POST_OPEN result
+    /// (research/XiEvents/OpCodes/0x00B2.md;
+    /// vendor/server/src/map/packets/c2s/0x04d_pbx.cpp).
+    DeliveryOpen,
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -205,6 +210,10 @@ const OP_MAP_QUERY: u8 = 0xD4;
 // the pending tag (EndPara = Work_Zone[1]) and case 1 writes the result the
 // ack carried into its work slot (research/XiEvents/OpCodes/0x00A7.md).
 const OP_A7_WAIT: u8 = 0xA7;
+// 0xB2: mode 0 is a timed wait (WaitTime from work slot 1, +4 on expiry);
+// mode 1 requests delivery mode (the 0x04D PBX open, +2 on the 0x04B ack)
+// (research/XiEvents/OpCodes/0x00B2.md).
+const OP_B2_DELIVERY: u8 = 0xB2;
 // 0xB3 RANKING: the ranking-board cases. LSB has no ranking handler, so the
 // read cases write zeros into the board's work slots (the board draws empty)
 // and every case advances by its width; no packet is sent
@@ -1545,6 +1554,25 @@ impl EventVm {
                     1 => {
                         self.setworkofs(2, self.a7_result as i32, 0);
                         self.exec_pointer += 4;
+                    }
+                    _ => self.exec_pointer += 2,
+                },
+                // 0xB2: mode 0 counts down WaitTime — the u16 at +1, which
+                // spans the mode byte and the first operand byte, so authors
+                // steer it to work_zone[0] with a 0x10 first byte — by frame
+                // delay and steps +4 on expiry. Mode 1 requests delivery mode:
+                // it arms the 0x04D PBX open request and holds until the 0x04B
+                // DELI_OPEN/POST_OPEN ack, then +2. Retail spins on any other
+                // mode byte, so authored data cannot hold one
+                // (research/XiEvents/OpCodes/0x00B2.md).
+                OP_B2_DELIVERY => match self.byte_at(1) {
+                    0 => return self.arm_wait(self.getworkofs(1, 0) as f32, 4),
+                    1 => {
+                        if self.pending_ack.is_none() {
+                            self.pending_ack = Some(PendingTag::DeliveryOpen);
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
                     }
                     _ => self.exec_pointer += 2,
                 },
@@ -6298,6 +6326,46 @@ mod tests {
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 4, "case 1 advances its 4-byte width");
         assert_eq!(e.work_zone(3), 0, "no tag means the zero result");
+    }
+
+    /// 0xB2 mode 0 counts down WaitTime by frame delay and steps its 4-byte
+    /// width on expiry. Retail reads WaitTime as the u16 at +1, which spans
+    /// the mode byte and the first operand byte, so the authored events steer
+    /// that read to work_zone[0] with a 0x10 first byte; the program seeds
+    /// work_zone[0] from refs[1] (60 units = one second)
+    /// (research/XiEvents/OpCodes/0x00B2.md).
+    #[test]
+    fn b2_mode0_waits_then_advances() {
+        let mut data = vec![OP_GET_STORE, DST[0], DST[1], SRC[0], SRC[1]];
+        data.extend_from_slice(&[OP_B2_DELIVERY, 0x00, 0x10, 0x00, OP_END]);
+        let mut e = vm(data, vec![0, 60]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(0.5);
+        assert_eq!(e.step(), StepResult::Waiting, "halfway through the wait");
+        e.tick(0.51);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 9, "mode 0 advances its 4-byte width");
+    }
+
+    /// 0xB2 mode 1 arms the 0x04D PBX open request and holds until the server
+    /// acks it, then steps its 2-byte width
+    /// (research/XiEvents/OpCodes/0x00B2.md).
+    #[test]
+    fn b2_mode1_holds_until_the_delivery_ack() {
+        let data = vec![OP_B2_DELIVERY, 0x01, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::DeliveryOpen)
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::DeliveryOpen),
+            "a second step must not resend"
+        );
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 2, "mode 1 advances its 2-byte width");
     }
 
     /// The position-tag pair: case 0 scales its work-slot raw values into the

@@ -195,6 +195,12 @@ const OP_GETWEATHER: u8 = 0x72;
 // by the u32 at +1; a hit advances 7, a miss jumps to the u16 at +5
 // (research/XiEvents/OpCodes/0x0082.md).
 const OP_RANGE_RECT: u8 = 0x82;
+// 0xD4 MAP_QUERY: case 0 runs the 0x24 query helper and opens the current
+// zone's map (type 6), parking on the answer; case 2 runs the helper without
+// the map; cases 1/3/4/5 copy into the client's query window, which has no
+// kuluu counterpart, so they advance by their width
+// (research/XiEvents/OpCodes/0x00D4.md).
+const OP_MAP_QUERY: u8 = 0xD4;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -612,6 +618,10 @@ pub struct EventVm {
     /// loads it once per zone and shares one copy across every VM; empty when the
     /// host has no install, where 0x82 always misses and jumps.
     zone_rects: Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    /// The zone number 0xD4 case 0 opens the map on: retail's
+    /// `pGlobalNowZone->ZoneNo`, injected by the host via
+    /// [`Self::set_current_zone`] before driving.
+    current_zone: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -796,6 +806,7 @@ impl EventVm {
             parked_on_move_hold: false,
             weather_forecast: None,
             zone_rects: Arc::new(Vec::new()),
+            current_zone: 0,
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -977,6 +988,16 @@ impl EventVm {
         self.for_each_child_vm(&mut land);
     }
 
+    /// Install the zone number 0xD4 case 0 opens the map on
+    /// (research/XiEvents/OpCodes/0x00D4.md). The host injects the event zone
+    /// before driving; a host that never does leaves the default 0, where
+    /// case 0 opens the map on zone 0.
+    pub fn set_current_zone(&mut self, zone: i32) {
+        self.current_zone = zone;
+        let mut land = |child: &mut EventVm| child.set_current_zone(zone);
+        self.for_each_child_vm(&mut land);
+    }
+
     /// 0x82's hit test: whether the event entity's tracked position falls inside
     /// the zone range rect named by `rect_id`. `false` when no scene tracks a
     /// position (retail's null-entity early return) or no rect matches
@@ -988,6 +1009,20 @@ impl EventVm {
         self.zone_rects
             .iter()
             .any(|r| r.rect_id() == rect_id && r.contains(pos))
+    }
+
+    /// Arm the 0x24-style choice the 0xD4 cases 0/2 open. The embedded 0x24
+    /// helper is entered one byte past the opcode start, so its message and
+    /// default-cursor selectors sit at +2 and +4 here, not +1 and +3 as on a
+    /// standalone 0x24 (research/XiEvents/OpCodes/0x00D4.md, 0x0024.md).
+    fn arm_map_query_choice(&mut self) {
+        self.pending_choice = Some(EventChoice {
+            message_id: self.getworkofs(2, 0) as u32,
+            speaker_index: self.speaker_index,
+            default_index: self.getworkofs(4, 0) as u32,
+            params: self.params(),
+        });
+        self.selection_made = false;
     }
 
     /// The retail entity Type byte the `OP_LOADEXTSCHEDULER`/
@@ -2109,6 +2144,50 @@ impl EventVm {
                 OP_CLOSE_MAP => {
                     self.cues.push(EventCue::MapClose);
                     self.advance(op);
+                }
+                // 0xD4 MAP_QUERY: cases 0 and 2 run the 0x24 query helper —
+                // case 0 also opens the current zone's map (type 6) — and park
+                // on the answer; cases 1/3/4/5 copy into the client's query
+                // window, which has no kuluu counterpart, so they advance by
+                // their width; an unknown case parks
+                // (research/XiEvents/OpCodes/0x00D4.md).
+                OP_MAP_QUERY => {
+                    let sub = self.byte_at(1);
+                    match sub {
+                        0 | 2 => {
+                            if self.selection_made {
+                                self.selection_made = false;
+                                self.pending_choice = None;
+                                if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                                    self.finished = true;
+                                    return StepResult::Cancelled;
+                                }
+                                self.exec_pointer += 8;
+                            } else {
+                                self.arm_map_query_choice();
+                                if sub == 0 {
+                                    self.cues.push(EventCue::MapOpen {
+                                        map_id: self.current_zone,
+                                        tutorial: false,
+                                    });
+                                }
+                                return match self.pending_choice.clone() {
+                                    Some(choice) => StepResult::AwaitChoice(choice),
+                                    None => StepResult::AwaitMessageAck,
+                                };
+                            }
+                        }
+                        1 => {
+                            self.exec_pointer += 8;
+                        }
+                        3 => {
+                            self.exec_pointer += 6;
+                        }
+                        4 | 5 => {
+                            self.exec_pointer += 12;
+                        }
+                        _ => return StepResult::Unimplemented(op),
+                    }
                 }
                 // 0x67's operands are retail's event-message presets, which carry no cue
                 // payload (research/XiEvents/OpCodes/0x0067.md).
@@ -4163,20 +4242,6 @@ mod tests {
         assert_eq!(e.exec_pointer(), 3);
     }
 
-    #[test]
-    fn unimplemented_jump_opcode_stops() {
-        // 0xD4 is a jumping opcode we don't implement; it must not be skipped by
-        // size (that would desync ExecPointer), so the VM stops.
-        const OP_UNIMPLEMENTED_JUMP: u8 = 0xD4;
-        assert!(OPCODE_META[OP_UNIMPLEMENTED_JUMP as usize].jumps);
-        let mut e = vm(
-            vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![],
-        );
-        assert_eq!(e.step(), StepResult::Unimplemented(OP_UNIMPLEMENTED_JUMP));
-        assert_eq!(e.exec_pointer(), 0);
-    }
-
     /// 0x82 RANGE_RECT hit-tests the event entity's tracked position against the
     /// zone range rect named by the u32 at +1: a hit advances 7, a miss (outside
     /// the box, or no rect) jumps to the u16 at +5
@@ -5527,6 +5592,96 @@ mod tests {
                 tutorial: false
             }]
         );
+    }
+
+    /// 0xD4 case 0 runs the 0x24 query helper and opens the current zone's map
+    /// (type 6), parking on the answer; the message and default-cursor selectors
+    /// sit at +2 and +4, where the embedded helper reads them
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_case0_opens_the_map_and_parks_on_the_answer() {
+        let mut data = vec![OP_MAP_QUERY, 0x00];
+        data.extend_from_slice(&REF0); // message -> references[0] = 500
+        data.extend_from_slice(&REF1); // default -> references[1] = 0
+        data.extend_from_slice(&[0x00, 0x00]); // val2, uncarried
+        data.push(OP_END);
+        let mut e = vm(data, vec![500, 0]);
+        e.set_current_zone(283);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitChoice(EventChoice {
+                message_id: 500,
+                speaker_index: 5,
+                default_index: 0,
+                params: vec![],
+            })
+        );
+        let cues = e.take_cues();
+        assert!(
+            cues.contains(&EventCue::MapOpen {
+                map_id: 283,
+                tutorial: false
+            }),
+            "case 0 opens the current zone's map: {cues:?}"
+        );
+        e.select_choice(Some(1));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8, "case 0 advances its 8-byte width");
+    }
+
+    /// 0xD4 case 2 runs the 0x24 query helper without the map, parking on the
+    /// answer (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_case2_parks_on_the_answer_without_the_map() {
+        let mut data = vec![OP_MAP_QUERY, 0x02];
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&[0x00, 0x00]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![500, 0]);
+        e.set_current_zone(283);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitChoice(EventChoice {
+                message_id: 500,
+                speaker_index: 5,
+                default_index: 0,
+                params: vec![],
+            })
+        );
+        assert!(e.take_cues().is_empty(), "case 2 opens no map");
+        e.select_choice(Some(1));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+    }
+
+    /// 0xD4 cases 1/3/4/5 copy into the client's query window, which has no
+    /// kuluu counterpart, so they advance by their width and emit no cue
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_data_cases_advance_by_their_width() {
+        // case 1 (8 bytes), case 3 (6 bytes), case 5 (12 bytes).
+        for (sub, width) in [(1u8, 8usize), (3, 6), (5, 12)] {
+            let mut data = vec![OP_MAP_QUERY, sub];
+            data.extend(std::iter::repeat(0).take(width - 2));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(e.step(), StepResult::Done, "case {sub}");
+            assert_eq!(e.exec_pointer(), width, "case {sub} advances {width}");
+            assert!(e.take_cues().is_empty(), "case {sub} emits no cue");
+        }
+    }
+
+    /// 0xD4's unknown cases stop the VM: it is a jumping opcode, so the
+    /// default arm's rule applies — no size-skip that would desync ExecPointer
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_unknown_case_stops() {
+        let mut data = vec![OP_MAP_QUERY, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_MAP_QUERY));
+        assert_eq!(e.exec_pointer(), 0, "an unknown case does not advance");
     }
 
     /// `OP_MAP_ADD_MARK` carries the marker's zone id and milli-unit position

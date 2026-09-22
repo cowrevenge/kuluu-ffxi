@@ -1443,6 +1443,15 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             6 => Some(6),
             _ => None,
         },
+        // 0x00D4.md: cases 0 and 2 each run the 0x24 query helper (+1, then
+        // the helper's +7) and case 1 is a flat +8; case 3 is +6; cases 4/5
+        // are +12. An unknown case parks, so no width is encoded for it.
+        OP_MAP_QUERY => match sub {
+            0..=2 => Some(8),
+            3 => Some(6),
+            4 | 5 => Some(12),
+            _ => None,
+        },
         // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
         // frame while the entity walks and advances 2 on arrival. No frame
         // clock here, so case 1 arrives immediately.
@@ -1589,6 +1598,7 @@ pub(crate) const OP_NAMESET: u8 = 0xB5;
 pub(crate) const OP_SUBSCHED: u8 = 0x5F;
 pub(crate) const OP_STRINGOPS: u8 = 0x9D;
 pub(crate) const OP_STATUSSET: u8 = 0xAC;
+pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
 
 #[cfg(test)]
 mod tests {
@@ -1643,6 +1653,14 @@ mod tests {
         assert_eq!(sub_size(0x47, 0), Some(10));
         assert_eq!(sub_size(0x47, 1), Some(2));
         assert_eq!(sub_size(0x47, 2), None);
+        // 0x00D4.md — cases 0/1/2 are 8, case 3 is 6, cases 4/5 are 12.
+        for sub in [0u8, 1, 2] {
+            assert_eq!(sub_size(0xD4, sub), Some(8), "0xD4 sub {sub}");
+        }
+        assert_eq!(sub_size(0xD4, 3), Some(6));
+        assert_eq!(sub_size(0xD4, 4), Some(12));
+        assert_eq!(sub_size(0xD4, 5), Some(12));
+        assert_eq!(sub_size(0xD4, 6), None, "undocumented case has no width");
         // 0x0075.md — case 2's -6/+8 pair nets +2.
         assert_eq!(sub_size(0x75, 0), Some(4));
         assert_eq!(sub_size(0x75, 1), Some(2));

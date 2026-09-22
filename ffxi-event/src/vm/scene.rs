@@ -526,6 +526,7 @@ impl EventVm {
         child.actor_types = self.actor_types.clone();
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
+        child.current_zone = self.current_zone;
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -584,6 +585,7 @@ impl EventVm {
         child.actor_types = self.actor_types.clone();
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
+        child.current_zone = self.current_zone;
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {

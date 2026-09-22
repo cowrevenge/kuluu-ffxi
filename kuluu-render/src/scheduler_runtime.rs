@@ -1593,8 +1593,19 @@ pub fn poll_action_dat_tasks(
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
-                else {
+                // A spell DAT's `main` links the caster's own invoke routine (0x3C `shwh`,
+                // research/xim DatResource.kt invokeWhiteMagic) out of the caster's skeleton
+                // DAT, which in turn links global-dir routines — so the flatten spans the
+                // same three tiers apply_action_dispatch uses: the file's schedulers, then
+                // the actor's, then the global effect dir.
+                let mut lookup = RoutineLookup::new().with_dat(&parsed.schedulers);
+                if let Some(r) = actor_routines_via_mut(actor_entity, &q_children, &q_actors) {
+                    lookup = lookup.with_actor(r);
+                }
+                if let Some(g) = global.as_ref() {
+                    lookup = lookup.with_dat(&g.schedulers);
+                }
+                let Some(mut active) = ActiveScheduler::from_routine(&lookup, &routine) else {
                     // A cutscene motion's key is not an emote name: report the miss so the
                     // session's hold releases (kuluu-session/src/state.rs
                     // AgentCommand::CutsceneMotionDone), instead of playing a local clip.
@@ -1665,8 +1676,16 @@ pub fn poll_action_dat_tasks(
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
-                else {
+                // Same three-tier flatten as the Routine arm: a package routine's
+                // sub-routines may live on the actor or in the global effect dir.
+                let mut lookup = RoutineLookup::new().with_dat(&parsed.schedulers);
+                if let Some(r) = actor_routines_via_mut(actor_entity, &q_children, &q_actors) {
+                    lookup = lookup.with_actor(r);
+                }
+                if let Some(g) = global.as_ref() {
+                    lookup = lookup.with_dat(&g.schedulers);
+                }
+                let Some(mut active) = ActiveScheduler::from_routine(&lookup, &routine) else {
                     // A cutscene motion's key is not an emote name: report the miss so the
                     // session's hold releases (kuluu-session/src/state.rs
                     // AgentCommand::CutsceneMotionDone), instead of playing a local clip.
@@ -5469,6 +5488,54 @@ mod tests {
             .count(),
             0,
             "without the global tier the aura sub-routines resolve to nothing — the original bug"
+        );
+    }
+
+    // Retail-DAT guard (skips without an install): the gate guard's Signet cast (zone 231,
+    // event 32762) is spell DAT 3297's `main` over 0x73. Its 0x3C `shwh` invoke routine lives
+    // in the caster's skeleton DAT, and `shwh`'s `sswh` holds the cast's Motion stages — so a
+    // flatten over the spell DAT alone drops the arm raise (research/xim DatResource.kt
+    // invokeWhiteMagic).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn spell_main_flattens_the_caster_invoke_routine_from_the_actor_tier() {
+        const SIGNET_SPELL_FILE: u32 = 3297;
+        const HUME_M_SKELETON_FILE: u32 = 7072;
+
+        let (Some(spell_bytes), Some(actor_bytes), Some(global_bytes)) = (
+            read_dat(SIGNET_SPELL_FILE),
+            read_dat(HUME_M_SKELETON_FILE),
+            read_dat(GLOBAL_EFFECT_DIR_FILE_ID),
+        ) else {
+            return;
+        };
+        let (spell_scheds, _, _) = parse_action_bytes(&spell_bytes);
+        let (actor_scheds, _, _) = parse_action_bytes(&actor_bytes);
+        let (global_scheds, _, _) = parse_action_bytes(&global_bytes);
+
+        let spell_only = ActiveScheduler::from_main(&spell_scheds, b"main").expect("main exists");
+        assert!(
+            spell_only
+                .stages
+                .iter()
+                .all(|t| t.stage.kind != StageKind::Motion),
+            "the spell DAT alone carries no cast motion — shwh is on the caster"
+        );
+
+        let lookup = RoutineLookup::new()
+            .with_dat(&spell_scheds)
+            .with_dat(&actor_scheds)
+            .with_dat(&global_scheds);
+        let full = ActiveScheduler::from_routine(&lookup, b"main").expect("main exists");
+        let motions: Vec<[u8; 4]> = full
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Motion)
+            .map(|t| t.stage.id)
+            .collect();
+        assert!(
+            motions.contains(&*b"mw1?") && motions.contains(&*b"mw2?"),
+            "the skeleton tier's sswh cast motion must flatten into main, got {motions:?}"
         );
     }
 

@@ -212,6 +212,21 @@ const OP_ENABLE_TIMER: u8 = 0xC9;
 const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
+// 0x55's WAITLOADSCHEDULER twins: the same hold, each on its own scheduler
+// DAT base (research/XiEvents/OpCodes/0x00A0.md, 0x00BC.md, 0x00C6.md,
+// 0x00CE.md, 0x00D1.md, 0x00D6.md).
+const OP_WAITLOADSCHED_TWIN_A0: u8 = 0xA0;
+const OP_WAITLOADSCHED_TWIN_BC: u8 = 0xBC;
+const OP_WAITLOADSCHED_TWIN_C6: u8 = 0xC6;
+const OP_WAITLOADSCHED_TWIN_CE: u8 = 0xCE;
+const OP_WAITLOADSCHED_TWIN_D1: u8 = 0xD1;
+const OP_WAITLOADSCHED_TWIN_D6: u8 = 0xD6;
+const OP_ACTOR_NOP: u8 = 0x56;
+const OP_ZONE_READ_YIELD: u8 = 0x98;
+const OP_ANIM_YIELD: u8 = 0x9B;
+const OP_YIELD_FOREVER: u8 = 0x26;
+const OP_ENTITY_VALID: u8 = 0x44;
+const OP_KILL_LAST_ACTION: u8 = 0xC1;
 const OP_CHOCOBO: u8 = 0x7E;
 // The door status writes: the event entity's StatusEvent, gated on a
 // Render.Flags0 bit no tier names (research/XiEvents/OpCodes/0x004C.md,
@@ -348,6 +363,14 @@ const WAITSCHEDULOR_ACTOR1_OFS: usize = 1;
 const WAITSCHEDULOR_KEY_OFS: usize = 9;
 const WAITLOADSCHEDULER_ACTOR1_OFS: usize = 3;
 const WAITLOADSCHEDULER_KEY_OFS: usize = 11;
+// 0x0044: the work operand at +1 names the entity to test, the else-target
+// at +3 (research/XiEvents/OpCodes/0x0044.md).
+const ENTITY_VALID_ID_OFS: usize = 1;
+const ENTITY_VALID_TARGET_OFS: usize = 3;
+// 0x0056: the actor at +1, read and discarded (research/XiEvents/OpCodes/0x0056.md).
+const ACTOR_NOP_ACTOR_OFS: usize = 1;
+// 0x00C1: the actor at +1 (research/XiEvents/OpCodes/0x00C1.md).
+const KILL_LAST_ACTION_ACTOR_OFS: usize = 1;
 const MAPSCHEDULOR_KEY_OFS: usize = 9; // 0x002D, same layout as the WAIT family
 const MAPSCHEDULOR_ACTOR2_OFS: usize = 5; // 0x002D partner slot of that layout
                                           // 0x006E EMOT: actor lookup at +1, the work value (emote id low byte, variant
@@ -973,6 +996,39 @@ impl EventVm {
         actor
     }
 
+    /// `FUNC_SearchUniqueID` (research/XiEvents/OpCodes/0x0044.md): non-zero
+    /// when an actor with that server id is in the pool. The host publishes
+    /// event participants under their target index (kuluu-session's
+    /// note_entity_type), so a published target index is the modelled "in the
+    /// pool"; a reserved selector or an unpublished id is not.
+    fn entity_in_pool(&self, server_id: u32) -> bool {
+        ActorLookup(server_id)
+            .target_index()
+            .is_some_and(|t| self.actor_types.contains_key(&(t as u32)))
+    }
+
+    /// Whether retail's `GetActorIndex` would succeed for `actor` in this
+    /// model (research/XiEvents/Event VM Functions.md GetActorIndex): the
+    /// reserved selectors the host always stands in for, or a literal server
+    /// id the host has published.
+    fn actor_resolved(&self, actor: ActorLookup) -> bool {
+        actor.is_local_player()
+            || actor == ActorLookup::EVENT_ENTITY
+            || self.entity_in_pool(actor.0)
+    }
+
+    /// True while any host-armed or this-pass started action holds the event
+    /// entity: retail's `AnimationPlay` is a per-entity "any animation" flag
+    /// (research/XiEvents/OpCodes/0x009B.md), not a routine slot.
+    fn entity_animation_running(&self) -> bool {
+        let actor = self.resolve_hold_actor(ActorLookup::EVENT_ENTITY);
+        self.action_holds
+            .iter()
+            .any(|h| h.actor == actor && h.remaining_units > 0.0)
+            || self.pending_action_holds.iter().any(|(a, _)| *a == actor)
+            || self.pending_action_starts.iter().any(|(a, _)| *a == actor)
+    }
+
     fn arm_wait(&mut self, units: f32, advance: usize) -> StepResult {
         self.wait = Some(Wait {
             remaining_units: units,
@@ -1510,7 +1566,17 @@ impl EventVm {
                 }
                 // XiEvent WAITLOADSCHEDULER (research/XiEvents/OpCodes/0x0055.md):
                 // same hold, keyed on the actor1/key pair a 0x45 or 0x5B started.
-                OP_WAITLOADSCHEDULER => {
+                // The six twins run the identical hold on their own scheduler
+                // DAT base, which names no file in this model: the loader that
+                // armed the hold already chose the DAT and the routine
+                // (research/XiEvents/OpCodes/0x00A0.md and kin).
+                OP_WAITLOADSCHEDULER
+                | OP_WAITLOADSCHED_TWIN_A0
+                | OP_WAITLOADSCHED_TWIN_BC
+                | OP_WAITLOADSCHED_TWIN_C6
+                | OP_WAITLOADSCHED_TWIN_CE
+                | OP_WAITLOADSCHED_TWIN_D1
+                | OP_WAITLOADSCHED_TWIN_D6 => {
                     let actor = ActorLookup(self.eventgetcode2(WAITLOADSCHEDULER_ACTOR1_OFS));
                     let key = self.fourcc_at(WAITLOADSCHEDULER_KEY_OFS);
                     if self.action_running(actor, key) {
@@ -1519,6 +1585,27 @@ impl EventVm {
                     }
                     self.parked_on_action_hold = false;
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // 0x56 reads an actor and does nothing with it: a deprecated
+                // yield (research/XiEvents/OpCodes/0x0056.md). The zero-length
+                // wait spends the frame retail's RetFlag spends.
+                OP_ACTOR_NOP => {
+                    self.eventgetcode2(ACTOR_NOP_ACTOR_OFS);
+                    return self.arm_wait(0.0, OPCODE_META[op as usize].size as usize);
+                }
+                // 0xC1 kills the named entity's last action and returns it to
+                // idle, then yields (research/XiEvents/OpCodes/0x00C1.md): the
+                // stop-all the ActorStopAction cue already carries, on the
+                // resolved actor, no key. An actor retail's GetActorIndex would
+                // drop emits nothing.
+                OP_KILL_LAST_ACTION => {
+                    let actor = ActorLookup(self.eventgetcode2(KILL_LAST_ACTION_ACTOR_OFS));
+                    if self.actor_resolved(actor) {
+                        self.cues
+                            .push(EventCue::ActorStopAction { actor, key: None });
+                    }
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                    return StepResult::Waiting;
                 }
                 // 0x6E EMOT: the work value's low byte is the emote id, its high
                 // byte the variant selector (research/XiEvents/OpCodes/0x006E.md).
@@ -2023,7 +2110,40 @@ impl EventVm {
                 OP_LOADWAIT | OP_TURNCHECK => self.exec_pointer += LOADWAIT_SIZE,
                 OP_MAPLOAD | OP_MAPLOAD_KEEP => self.exec_pointer += MAPLOAD_SIZE,
                 OP_MUSICREADWAIT | OP_YIELD => self.exec_pointer += YIELD_SIZE,
+                // 0x98 yields while the zone is reading ext data; an event
+                // never starts before the zone is resident, so only the
+                // advance path is reachable (research/XiEvents/OpCodes/0x0098.md).
+                OP_ZONE_READ_YIELD => self.exec_pointer += OPCODE_META[op as usize].size as usize,
+                // 0x9B yields while the event entity is playing any animation
+                // (research/XiEvents/OpCodes/0x009B.md): the same hold the
+                // loader waits arm, read for the event entity against every
+                // key, retail's AnimationPlay being a per-entity flag, not a
+                // routine slot.
+                OP_ANIM_YIELD => {
+                    if self.entity_animation_running() {
+                        self.parked_on_action_hold = true;
+                        return StepResult::Waiting;
+                    }
+                    self.parked_on_action_hold = false;
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // 0x26 sets RetFlag and never advances: a deprecated yield that
+                // spins in place until the event ends by another route
+                // (research/XiEvents/OpCodes/0x0026.md).
+                OP_YIELD_FOREVER => return StepResult::Waiting,
                 OP_BITTEST => self.op_bit_test(op),
+                // 0x44 tests whether the entity the work operand names is in
+                // the pool and branches on it: an if without an else body, the
+                // else-target skipping the true side
+                // (research/XiEvents/OpCodes/0x0044.md).
+                OP_ENTITY_VALID => {
+                    let id = self.getworkofs(ENTITY_VALID_ID_OFS, 0) as u32;
+                    if self.entity_in_pool(id) {
+                        self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                    } else {
+                        self.exec_pointer = self.eventgetcode(ENTITY_VALID_TARGET_OFS) as usize;
+                    }
+                }
                 // 0x007F is 0x25 QUERYWAIT with one difference: a cancelled
                 // menu stores 255 and runs on rather than ending the event
                 // (research/XiEvents/OpCodes/0x007F.md).
@@ -3229,6 +3349,224 @@ mod tests {
         }
     }
 
+    /// The six 0x55 twins share 0x55's width and fall through with no hold,
+    /// the way the base opcode does.
+    #[test]
+    fn waitloadsched_twin_falls_through_without_a_hold() {
+        for op in [
+            OP_WAITLOADSCHED_TWIN_A0,
+            OP_WAITLOADSCHED_TWIN_BC,
+            OP_WAITLOADSCHED_TWIN_C6,
+            OP_WAITLOADSCHED_TWIN_CE,
+            OP_WAITLOADSCHED_TWIN_D1,
+            OP_WAITLOADSCHED_TWIN_D6,
+        ] {
+            assert_eq!(
+                OPCODE_META[op as usize].size as usize, 15,
+                "op 0x{op:02X} size drifted from research/XiEvents/OpCodes"
+            );
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, 14));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} should run to END"
+            );
+            assert_eq!(e.exec_pointer(), 15, "op 0x{op:02X} advanced wrong size");
+        }
+    }
+
+    /// A twin parks on the same (actor, key) hold as 0x55 and falls through
+    /// when the hold expires.
+    #[test]
+    fn waitloadsched_twin_parks_on_the_actors_hold() {
+        /// A literal server id with no References entry: it resolves to itself.
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        for op in [OP_WAITLOADSCHED_TWIN_A0, OP_WAITLOADSCHED_TWIN_D1] {
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, 2));
+            data.extend_from_slice(&ACTOR.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&key);
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+            assert_eq!(
+                e.step(),
+                StepResult::Waiting,
+                "op 0x{op:02X} parks on its hold"
+            );
+            e.tick(1.1);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} falls through after expiry"
+            );
+            assert_eq!(e.exec_pointer(), 15);
+        }
+    }
+
+    /// 0x56 yields one frame and then advances past its five bytes, emitting
+    /// nothing.
+    #[test]
+    fn actor_nop_yields_a_frame_then_advances() {
+        let mut data = vec![OP_ACTOR_NOP];
+        data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the deprecated yield holds the frame"
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done, "the next frame runs past it");
+        assert_eq!(e.exec_pointer(), 5);
+        assert!(e.take_cues().is_empty());
+    }
+
+    /// 0x98 takes its one-byte advance: kuluu never starts an event while the
+    /// zone is reading ext data.
+    #[test]
+    fn zone_read_yield_advances_past_itself() {
+        let mut e = vm(vec![OP_ZONE_READ_YIELD, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
+    }
+
+    /// 0x9B parks while any animation holds the event entity, from a
+    /// host-armed hold, and falls through when nothing plays.
+    #[test]
+    fn anim_yield_parks_while_the_event_entity_animates() {
+        let key: [u8; 4] = *b"abcd";
+        let program = || vm(vec![OP_ANIM_YIELD, OP_END], vec![]);
+        let mut e = program();
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "no animation: the yield falls through"
+        );
+        assert_eq!(e.exec_pointer(), 1);
+        let mut e = program();
+        e.hold_action(ActorLookup::EVENT_ENTITY, key, WAIT_UNITS_PER_SEC);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "a running animation parks the yield"
+        );
+        e.tick(1.1);
+        assert_eq!(e.step(), StepResult::Done, "an expired hold falls through");
+    }
+
+    /// A 0x9B after a 0x6E on the event entity in one pass parks on the
+    /// same-batch start, the way retail's AnimationPlay goes up at the emote.
+    #[test]
+    fn anim_yield_parks_on_the_same_pass_emote() {
+        let mut data = vec![OP_EMOT];
+        data.extend_from_slice(&ActorLookup::EVENT_ENTITY.0.to_le_bytes());
+        data.extend_from_slice(&REF0);
+        data.push(OP_ANIM_YIELD);
+        data.push(OP_END);
+        let mut e = vm(data, vec![7]);
+        assert_eq!(e.step(), StepResult::Waiting);
+    }
+
+    /// 0x26 parks without advancing: the next step lands on the same byte, so
+    /// the event only ends by another route.
+    #[test]
+    fn yield_forever_parks_without_advancing() {
+        let mut e = vm(vec![OP_YIELD_FOREVER, OP_END], vec![]);
+        for frame in 0..3 {
+            assert_eq!(
+                e.step(),
+                StepResult::Waiting,
+                "frame {frame}: the deprecated yield never advances"
+            );
+            assert_eq!(e.exec_pointer(), 0, "frame {frame}: the pointer holds");
+            e.tick(1.0 / 60.0);
+        }
+    }
+
+    /// 0x44 runs on past itself when the entity the work operand names is in
+    /// the pool, and jumps to its else-target when it is not.
+    #[test]
+    fn entity_valid_branches_on_the_pool() {
+        const NPC: u32 = 0x0100_02C5;
+        let program = |references: Vec<u32>| {
+            let mut data = vec![OP_ENTITY_VALID];
+            data.extend_from_slice(&REF0);
+            data.extend_from_slice(&8u16.to_le_bytes());
+            data.extend_from_slice(&[OP_WAIT, 0x01, 0x80]);
+            data.push(OP_END);
+            (data, references)
+        };
+        let (data, references) = program(vec![NPC]);
+        let mut e = vm(data, references);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "a published entity runs on past the opcode into the wait"
+        );
+        let (data, references) = program(vec![0x0100_9999]);
+        let mut e = vm(data, references);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "an unpublished entity takes the else-target"
+        );
+        assert_eq!(e.exec_pointer(), 8);
+        let (data, references) = program(vec![ActorLookup::EVENT_ENTITY.0]);
+        let mut e = vm(data, references);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "a reserved selector names no pool entry"
+        );
+    }
+
+    /// 0xC1 emits the stop-all for a resolved actor and parks one frame; an
+    /// actor retail's GetActorIndex would drop emits nothing but still parks.
+    #[test]
+    fn kill_last_action_stops_the_resolved_actor_and_yields() {
+        const NPC: u32 = 0x0100_02C5;
+        let program = |actor: u32| {
+            let mut data = vec![OP_KILL_LAST_ACTION];
+            data.extend_from_slice(&actor.to_le_bytes());
+            data.push(OP_END);
+            data
+        };
+        let mut e = vm(program(NPC), vec![]);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(e.step(), StepResult::Waiting, "the kill yields its frame");
+        assert_eq!(
+            e.take_cues(),
+            vec![EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: None,
+            }]
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 5);
+        let mut e = vm(program(0x0100_9999), vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "an unresolved actor still yields"
+        );
+        assert!(
+            e.take_cues().is_empty(),
+            "an actor retail would drop emits nothing"
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
     /// `OP_MAPSCHEDULOR` starts the zone-level routine (kuluu resolves the key
     /// out of the current zone's own model DAT); the key sits at @9 like the
     /// WAIT family's, and both actors ride along for the host
@@ -3666,9 +4004,9 @@ mod tests {
 
     #[test]
     fn unimplemented_jump_opcode_stops() {
-        // 0x44 is a jumping opcode we don't implement; it must not be skipped by
+        // 0x82 is a jumping opcode we don't implement; it must not be skipped by
         // size (that would desync ExecPointer), so the VM stops.
-        const OP_UNIMPLEMENTED_JUMP: u8 = 0x44;
+        const OP_UNIMPLEMENTED_JUMP: u8 = 0x82;
         assert!(OPCODE_META[OP_UNIMPLEMENTED_JUMP as usize].jumps);
         let mut e = vm(vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0], vec![]);
         assert_eq!(e.step(), StepResult::Unimplemented(OP_UNIMPLEMENTED_JUMP));

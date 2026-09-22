@@ -92,6 +92,21 @@ pub enum PendingTag {
     /// 0x059 s2c is its answer (research/XiEvents/OpCodes/0x0087.md, 0x0088.md;
     /// vendor/server/src/map/packets/c2s/0x01b_friendpass.cpp).
     FriendPass { para: u16 },
+    /// `FUNC_gcZoneSendQueSearch(0x58)`: the crafting-support request the 0x8C
+    /// send cases arm, carrying the c2s 0x058 RECIPE's Mode/skill/level/
+    /// Param0..4 exactly as the case's retail pseudo code fills them; the
+    /// 0x031 s2c is its answer (research/XiEvents/OpCodes/0x008C.md;
+    /// vendor/server/src/map/packets/c2s/0x058_recipe.cpp).
+    Recipe {
+        mode: u16,
+        skill: u16,
+        level: u16,
+        param0: u16,
+        param1: u16,
+        param2: u16,
+        param3: u16,
+        param4: u16,
+    },
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -221,6 +236,12 @@ const OP_RANGE_RECT: u8 = 0x82;
 // (research/XiEvents/OpCodes/0x0087.md, 0x0088.md).
 const OP_FRIENDPASS_87: u8 = 0x87;
 const OP_FRIENDPASS_88: u8 = 0x88;
+// 0x8C RECIPE: the crafting-support cases fill the 0x058 RECIPE with their
+// Mode and work-slot fields, hold on the 0x031 answer, and case 1 yields
+// until it lands; retail's case 5 sends mode 5 without setting the flag, and
+// case 5 has no LSB handler, so it advances without a send
+// (research/XiEvents/OpCodes/0x008C.md).
+const OP_RECIPE: u8 = 0x8C;
 // 0xD4 MAP_QUERY: case 0 runs the 0x24 query helper and opens the current
 // zone's map (type 6), parking on the answer; case 2 runs the helper without
 // the map; cases 1/3/4/5 copy into the client's query window, which has no
@@ -1673,6 +1694,61 @@ impl EventVm {
                         _ => self.exec_pointer += 2,
                     }
                 }
+                // 0x8C: the crafting support. The send cases (0/2/3/4) fill
+                // the 0x058 RECIPE with their Mode and the work-slot fields
+                // the retail pseudo code names, arm the await on the 0x031
+                // answer, and hold; case 1 yields until it lands. Mode 4 has
+                // no LSB handler, so its answer is the grace watchdog; retail
+                // case 5 sends mode 5 without setting RecRecipeFlag at all
+                // and LSB implements no mode 5, so it advances its width
+                // without a send (research/XiEvents/OpCodes/0x008C.md;
+                // vendor/server/src/map/packets/c2s/0x058_recipe.cpp). Retail
+                // spins on any other case byte, so authored data cannot hold
+                // one.
+                OP_RECIPE => match self.byte_at(1) {
+                    0 | 2 | 3 | 4 => {
+                        let recipe = match self.byte_at(1) {
+                            0 => PendingTag::Recipe {
+                                mode: 1,
+                                skill: self.getworkofs(2, 0) as u16,
+                                level: self.getworkofs(4, 0) as u16,
+                                param0: self.getworkofs(6, 0) as u16,
+                                param1: 0,
+                                param2: 0,
+                                param3: 0,
+                                param4: 0,
+                            },
+                            2 => PendingTag::Recipe {
+                                mode: 2,
+                                skill: self.getworkofs(2, 0) as u16,
+                                level: self.getworkofs(4, 0) as u16,
+                                param0: 0,
+                                param1: self.getworkofs(8, 0) as u16,
+                                param2: self.getworkofs(10, 0) as u16,
+                                param3: 0,
+                                param4: self.getworkofs(6, 0) as u16,
+                            },
+                            _ => PendingTag::Recipe {
+                                mode: u16::from(self.byte_at(1) == 4) + 3,
+                                skill: self.getworkofs(2, 0) as u16,
+                                level: self.getworkofs(4, 0) as u16,
+                                param0: 0,
+                                param1: 0,
+                                param2: 0,
+                                param3: self.getworkofs(8, 0) as u16,
+                                param4: self.getworkofs(6, 0) as u16,
+                            },
+                        };
+                        if self.pending_ack.is_none() {
+                            self.pending_ack = Some(recipe);
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    1 => self.exec_pointer += 2,
+                    5 => self.exec_pointer += 14,
+                    _ => self.exec_pointer += 2,
+                },
                 OP_JUMP => {
                     if self.jump_index == JUMP_STACK_LEN {
                         self.finished = true;
@@ -6486,6 +6562,129 @@ mod tests {
                 assert_eq!(e.step(), StepResult::Done);
             }
         }
+    }
+
+    /// Seed `slot` of Work_Zone from `refs[i]` with one GET_STORE each.
+    fn seed_work_slots(slots: &[(u16, u16)]) -> (Vec<u8>, Vec<u32>) {
+        let mut data = Vec::new();
+        let mut refs = vec![0u32];
+        for (slot, value) in slots {
+            refs.push(u32::from(*value));
+            data.push(OP_GET_STORE);
+            data.extend_from_slice(&(*slot + 0x1000).to_le_bytes());
+            data.extend_from_slice(&((refs.len() - 1) as u16 | 0x8000).to_le_bytes());
+        }
+        (data, refs)
+    }
+
+    /// 0x8C case 0 arms the 0x058 RECIPE with Mode 1 and the work-slot fields
+    /// its retail pseudo code names (skill work[2], level work[4], Param0
+    /// work[6]), holds on the 0x031 answer, and case 1 yields until it lands
+    /// (research/XiEvents/OpCodes/0x008C.md).
+    #[test]
+    fn recipe_case0_arms_mode1_from_the_work_slots() {
+        let (seed, refs) = seed_work_slots(&[(2, 3), (4, 40), (6, 7)]);
+        let mut data = seed;
+        // Case 0's skill/level/Param0 operands are work-zone selectors
+        // (0x1002/0x1004/0x1006), which the arm resolves through getworkofs.
+        data.extend_from_slice(&[OP_RECIPE, 0x00, 0x02, 0x10, 0x04, 0x10, 0x06, 0x10]);
+        data.extend_from_slice(&[OP_RECIPE, 0x01, OP_END]);
+        let mut e = vm(data, refs);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::Recipe {
+                mode: 1,
+                skill: 3,
+                level: 40,
+                param0: 7,
+                param1: 0,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+            })
+        );
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// 0x8C cases 2/3/4 arm Mode 2/3/4 with their own work-slot field maps
+    /// (research/XiEvents/OpCodes/0x008C.md).
+    #[test]
+    fn recipe_cases_fill_their_mode_and_params() {
+        let (seed, refs) = seed_work_slots(&[(2, 3), (4, 40), (6, 7), (8, 11), (10, 13)]);
+        let cases: [(u8, &[u8], PendingTag); 3] = [
+            (
+                2u8,
+                &[0x02, 0x10, 0x04, 0x10, 0x06, 0x10, 0x08, 0x10, 0x0A, 0x10],
+                PendingTag::Recipe {
+                    mode: 2,
+                    skill: 3,
+                    level: 40,
+                    param0: 0,
+                    param1: 11,
+                    param2: 13,
+                    param3: 0,
+                    param4: 7,
+                },
+            ),
+            (
+                3,
+                &[0x02, 0x10, 0x04, 0x10, 0x06, 0x10, 0x08, 0x10],
+                PendingTag::Recipe {
+                    mode: 3,
+                    skill: 3,
+                    level: 40,
+                    param0: 0,
+                    param1: 0,
+                    param2: 0,
+                    param3: 11,
+                    param4: 7,
+                },
+            ),
+            (
+                4,
+                &[0x02, 0x10, 0x04, 0x10, 0x06, 0x10, 0x08, 0x10],
+                PendingTag::Recipe {
+                    mode: 4,
+                    skill: 3,
+                    level: 40,
+                    param0: 0,
+                    param1: 0,
+                    param2: 0,
+                    param3: 11,
+                    param4: 7,
+                },
+            ),
+        ];
+        for (sub, selectors, tag) in cases {
+            let mut data = seed.clone();
+            data.push(OP_RECIPE);
+            data.push(sub);
+            data.extend_from_slice(selectors);
+            data.extend_from_slice(&[OP_RECIPE, 0x01, OP_END]);
+            let mut e = vm(data, refs.clone());
+            assert_eq!(
+                e.step(),
+                StepResult::AwaitServerAck(tag.clone()),
+                "case {sub}"
+            );
+            e.ack_server();
+            assert_eq!(e.step(), StepResult::Done);
+        }
+    }
+
+    /// 0x8C case 5 advances its 14-byte width without arming a tag: retail
+    /// sends mode 5 without setting RecRecipeFlag, and LSB implements no
+    /// mode 5 (research/XiEvents/OpCodes/0x008C.md).
+    #[test]
+    fn recipe_case5_advances_without_a_tag() {
+        let mut data = vec![OP_RECIPE, 0x05];
+        data.extend_from_slice(&[0u8; 12]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 14, "case 5 advances its 14-byte width");
+        assert_eq!(e.pending_tag(), None);
     }
 
     /// 0xB2 mode 0 counts down WaitTime by frame delay and steps its 4-byte

@@ -410,6 +410,12 @@ pub enum EventCue {
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x5C MUSIC: set BGM slot `slot`'s song to `track` and its start volume
+    /// to `volume` (the 0x00-0x07 band starts at full, 127; the 0x80-0x87 band
+    /// starts at the authored value). The slot indexes retail's `PTR_MusicSongIds`
+    /// table, the same table the BGM slot layout reads
+    /// (research/XiEvents/OpCodes/0x005C.md).
+    MusicSong { slot: u8, track: u16, volume: u8 },
     /// 0x69/0x6A SET/CHANGE sound volume: set the named retail sound types
     /// (the `mask` bits) to `volume` over `fade_frames`
     /// (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).

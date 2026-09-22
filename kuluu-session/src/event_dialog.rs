@@ -875,6 +875,10 @@ pub enum ResolvedCue {
     /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
     /// the cue stream.
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x5C rides the existing [`AgentEvent::MusicChanged`] (the song) and
+    /// [`AgentEvent::MusicVolumeChanged`] (its start volume) on the named BGM
+    /// slot instead of the cue stream.
+    MusicSong { slot: u8, track: u16, volume: u8 },
     /// 0x69/0x6A ride the existing [`AgentEvent::MusicVolumeChanged`], scoped
     /// to the BGM slots the retail sound-type `mask` reaches.
     SoundVolume {
@@ -1065,6 +1069,17 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
                 fade_frames,
             }
         }
+        EventCue::MusicSong {
+            slot,
+            track,
+            volume,
+        } => {
+            return ResolvedCue::MusicSong {
+                slot,
+                track,
+                volume,
+            }
+        }
         EventCue::SoundVolume {
             mask,
             volume,
@@ -1213,6 +1228,18 @@ impl CutsceneScope {
                 for slot in 0..crate::state::MUSIC_SLOT_COUNT {
                     let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
                 }
+            }
+            ResolvedCue::MusicSong {
+                slot,
+                track,
+                volume,
+            } => {
+                tracing::debug!(slot, track, volume, "event script set BGM slot song (0x5C)");
+                let _ = event_tx.send(AgentEvent::MusicChanged {
+                    slot,
+                    track_id: track,
+                });
+                let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
             }
             ResolvedCue::SoundVolume {
                 mask,

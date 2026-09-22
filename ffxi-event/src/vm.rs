@@ -286,6 +286,7 @@ const OP_HIDE_HUD: u8 = 0x67;
 const OP_SHOW_HUD: u8 = 0x68;
 const OP_STOP_CLOCK: u8 = 0x77;
 const OP_RESTORE_CLOCK: u8 = 0x78;
+const OP_MUSIC: u8 = 0x5C;
 const OP_MUSICVOLUME: u8 = 0x5D;
 const OP_SET_SOUND_VOLUME: u8 = 0x69;
 const OP_CHANGE_SOUND_VOLUME: u8 = 0x6A;
@@ -479,6 +480,10 @@ const TRANSPAR_ALPHA_OFS: usize = 5;
 const TRANSPAR_TIME_OFS: usize = 7;
 const MUSICVOLUME_LEVEL_OFS: usize = 1; // 0x005D
 const MUSICVOLUME_FADE_OFS: usize = 3;
+// 0x005C: the low band (0x00-0x07) is 4 bytes, the 0x80-0x87 and 0xA0/0xA1
+// bands are 6; the song id is the +2 work selector in both song bands.
+const MUSIC_SONG_TRACK_OFS: usize = 2;
+const MUSIC_SONG_VOLUME_OFS: usize = 4;
 /// 0x77's hour operand (research/XiEvents/OpCodes/0x0077.md); its weather
 /// half is server-driven here, so it has no cue.
 const STOP_CLOCK_HOUR_OFS: usize = 1;
@@ -2530,6 +2535,45 @@ impl EventVm {
                         day_from_epoch: None,
                     });
                     self.advance(op);
+                }
+                // 0x5C MUSIC: the low band (0x00-0x07) sets BGM slot `sub`'s
+                // song to the +2 work selector and starts it at full volume;
+                // the 0x80-0x87 band does the same for slot `sub & 7` at the
+                // +4 start volume; 0xA0/0xA1 ease the playing track to the +2
+                // volume over the +4 frames, the 0x5D shape
+                // (research/XiEvents/OpCodes/0x005C.md).
+                OP_MUSIC => {
+                    let sub = self.byte_at(1);
+                    match sub {
+                        0x00..=0x07 => {
+                            self.cues.push(EventCue::MusicSong {
+                                slot: sub,
+                                track: self.getworkofs(MUSIC_SONG_TRACK_OFS, 0) as u16,
+                                volume: MUSIC_VOLUME_MAX,
+                            });
+                            self.exec_pointer += 4;
+                        }
+                        0x80..=0x87 => {
+                            self.cues.push(EventCue::MusicSong {
+                                slot: sub & 0x07,
+                                track: self.getworkofs(MUSIC_SONG_TRACK_OFS, 0) as u16,
+                                volume: self.getworkofs(MUSIC_SONG_VOLUME_OFS, 0).clamp(0, 255)
+                                    as u8,
+                            });
+                            self.exec_pointer += 6;
+                        }
+                        0xA0 | 0xA1 => {
+                            self.cues.push(EventCue::MusicVolume {
+                                volume: self
+                                    .getworkofs(MUSIC_SONG_TRACK_OFS, 0)
+                                    .clamp(0, MUSIC_VOLUME_MAX as i32)
+                                    as u8,
+                                fade_frames: self.getworkofs(MUSIC_SONG_VOLUME_OFS, 0) as u16,
+                            });
+                            self.exec_pointer += 6;
+                        }
+                        _ => return StepResult::Unimplemented(op),
+                    }
                 }
                 OP_MUSICVOLUME => {
                     self.cues.push(EventCue::MusicVolume {
@@ -6341,6 +6385,43 @@ mod tests {
             [EventCue::MusicVolume {
                 volume: MUSIC_VOLUME_MAX,
                 fade_frames: 0,
+            }]
+        );
+    }
+
+    /// 0x5C's low band sets the BGM slot's song from the +2 work selector and
+    /// starts it at full volume; the 0x80 band names the slot in its high
+    /// nibble and carries the start volume at +4; 0xA0/0xA1 ride 0x5D's shape
+    /// (research/XiEvents/OpCodes/0x005C.md).
+    #[test]
+    fn music_opcode_sets_the_slot_song_and_start_volume() {
+        // Low band: slot 0, song = refs[1] = 101, full volume.
+        let low = [0x00u8, 0x01, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &low, vec![0, 101]),
+            [EventCue::MusicSong {
+                slot: 0,
+                track: 101,
+                volume: MUSIC_VOLUME_MAX
+            }]
+        );
+        // 0x80 band: slot 3 (0x83), song = refs[1] = 99, start volume = refs[2] = 40.
+        let vol = [0x83u8, 0x01, 0x80, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &vol, vec![0, 99, 40]),
+            [EventCue::MusicSong {
+                slot: 3,
+                track: 99,
+                volume: 40
+            }]
+        );
+        // 0xA0: ease the playing track to refs[1] = 32 over refs[2] = 60 frames.
+        let fade = [0xA0u8, 0x01, 0x80, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &fade, vec![0, 32, 60]),
+            [EventCue::MusicVolume {
+                volume: 32,
+                fade_frames: 60
             }]
         );
     }

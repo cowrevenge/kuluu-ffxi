@@ -25,8 +25,8 @@ pub mod vm;
 
 pub use cue::{
     dat_id_helper, event_motion_dat_id, tpc_b_for_waist, tpc_motion_packages, ActorLookup,
-    EventCue, ExtSchedulerMotion, FourCc, TpcMotionPackages, MUSIC_VOLUME_MAX, NO_ACTION_KEY,
-    SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+    EventCue, ExtSchedulerMotion, FourCc, TpcMotionPackages, EMOTE_ANIMATION_KEY, MUSIC_VOLUME_MAX,
+    NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
     SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE,
     STATUS_EVENT_MOUNT, TPC_PACKAGE_OUT_OF_RANGE,
 };

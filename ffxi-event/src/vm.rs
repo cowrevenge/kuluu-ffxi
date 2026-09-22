@@ -8,7 +8,9 @@ use crate::cue::{
     dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
     EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE,
     MAGIC_DAT_ID_BASE, MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
-    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_DOOR_CLOSE,
+    STATUS_EVENT_DOOR_CLOSE2, STATUS_EVENT_DOOR_OPEN, STATUS_EVENT_DOOR_OPEN2, STATUS_EVENT_IDLE,
+    STATUS_EVENT_MOTION_BASE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -207,6 +209,20 @@ const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
 const OP_CHOCOBO: u8 = 0x7E;
+// The door status writes: the event entity's StatusEvent, gated on a
+// Render.Flags0 bit no tier names (research/XiEvents/OpCodes/0x004C.md,
+// 0x004D.md, 0x004F.md).
+const OP_DOOR_OPEN: u8 = 0x4C;
+const OP_DOOR_CLOSE: u8 = 0x4D;
+const OP_STATUS_EVENT: u8 = 0x4F;
+// The D_OPEN2/D_CLOSE2 writes: 0x4C/0x4D's twins on the second door status
+// pair, the same gate and field (research/XiEvents/OpCodes/0x008E.md,
+// 0x008F.md).
+const OP_DOOR_OPEN2: u8 = 0x8E;
+const OP_DOOR_CLOSE2: u8 = 0x8F;
+// 0x90 writes the event-hide flag (the 0x4E bit, value 1) on the event
+// entity, plus a Flags1 bit no tier names (research/XiEvents/OpCodes/0x0090.md).
+const OP_EVENT_HIDE_ALWAYS: u8 = 0x90;
 const OP_SETBITWORK: u8 = 0x40;
 const OP_GETBITWORK: u8 = 0x41;
 const OP_SENDTAG: u8 = 0x43;
@@ -383,6 +399,9 @@ const CHOCOBO_CASE_UNMOUNT: u8 = 8;
 /// `entity->MountId = getworkofs(6) + 1` — the id is stored biased by one.
 const CHOCOBO_MOUNT_ID_BIAS: u16 = 1;
 const CHOCOBO_UNMOUNT_ID: u16 = 0;
+/// 0x4F's work operand, the value added to `STATUS_EVENT_MOTION_BASE`
+/// (research/XiEvents/OpCodes/0x004F.md).
+const STATUS_EVENT_VALUE_OFS: usize = 1;
 
 const WORK_LOCAL_LEN: usize = 80;
 // `XiEvent::setworkstrofs` refuses string writes at slot 64 and up: a 16-byte
@@ -1864,6 +1883,47 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // 0x4C/0x4D/0x4F write the event entity's StatusEvent: the door's
+                // open/close byte and the M1..M8 event-motion range
+                // (research/XiEvents/OpCodes/0x004C.md, 0x004D.md, 0x004F.md;
+                // research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+                // Each is gated on a Render.Flags0 bit no tier names; the door
+                // consumer's change-dedup is the modelled equivalent, and the
+                // cue rides 0x7E's Mount shape — the same field, so the whole
+                // path is already there.
+                OP_DOOR_OPEN => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_OPEN);
+                    self.advance(op);
+                }
+                OP_DOOR_CLOSE => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_CLOSE);
+                    self.advance(op);
+                }
+                OP_STATUS_EVENT => {
+                    let status = self
+                        .getworkofs(STATUS_EVENT_VALUE_OFS, 0)
+                        .wrapping_add(STATUS_EVENT_MOTION_BASE as i32)
+                        as u8;
+                    self.emit_status_event_cue(status);
+                    self.advance(op);
+                }
+                OP_DOOR_OPEN2 => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_OPEN2);
+                    self.advance(op);
+                }
+                OP_DOOR_CLOSE2 => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_CLOSE2);
+                    self.advance(op);
+                }
+                // The Flags1 half of 0x90 has no tier-named meaning, so the cue
+                // carries only the hide write.
+                OP_EVENT_HIDE_ALWAYS => {
+                    self.cues.push(EventCue::ActorHide {
+                        target: ActorLookup::EVENT_ENTITY,
+                        hide: true,
+                    });
+                    self.advance(op);
+                }
                 // XiEvent CHOCOBO (research/XiEvents/OpCodes/0x007E.md): puts an
                 // actor on or off a mount mid-cutscene. Its width is its case
                 // byte's; refusing it auto-released the rental cutscene one
@@ -2054,6 +2114,17 @@ impl EventVm {
     /// the scheduler/action keys are tags, not numbers.
     fn fourcc_at(&self, index: usize) -> FourCc {
         self.eventgetcode2(index).to_le_bytes()
+    }
+
+    /// The door opcodes' `StatusEvent` write, on 0x7E's Mount cue: same field,
+    /// so the session and wire paths 0x7E already owns carry it
+    /// (research/XiEvents/OpCodes/0x004C.md).
+    fn emit_status_event_cue(&mut self, status_event: u8) {
+        self.cues.push(EventCue::Mount {
+            target: ActorLookup::EVENT_ENTITY,
+            status_event,
+            mount_id: None,
+        });
     }
 
     /// The `StatusEvent` write 0x7E's case performs, as a cue
@@ -4876,6 +4947,52 @@ mod tests {
         assert_eq!(
             cues_of(OP_CHOCOBO, &case(CHOCOBO_CASE_UNMOUNT), vec![]),
             mount(STATUS_EVENT_IDLE, Some(CHOCOBO_UNMOUNT_ID))
+        );
+    }
+
+    /// 0x4C/0x4D/0x4F/0x8E/0x8F write the event entity's StatusEvent on the
+    /// Mount cue: the door's open/close byte, its D_OPEN2/D_CLOSE2 pair, and
+    /// work(1) + 18 into the M1..M8 range.
+    #[test]
+    fn door_status_opcodes_write_the_event_entity_status() {
+        let door = |status_event| {
+            [EventCue::Mount {
+                target: ActorLookup::EVENT_ENTITY,
+                status_event,
+                mount_id: None,
+            }]
+        };
+        assert_eq!(
+            cues_of(OP_DOOR_OPEN, &[], vec![]),
+            door(STATUS_EVENT_DOOR_OPEN)
+        );
+        assert_eq!(
+            cues_of(OP_DOOR_CLOSE, &[], vec![]),
+            door(STATUS_EVENT_DOOR_CLOSE)
+        );
+        assert_eq!(
+            cues_of(OP_DOOR_OPEN2, &[], vec![]),
+            door(STATUS_EVENT_DOOR_OPEN2)
+        );
+        assert_eq!(
+            cues_of(OP_DOOR_CLOSE2, &[], vec![]),
+            door(STATUS_EVENT_DOOR_CLOSE2)
+        );
+        assert_eq!(
+            cues_of(OP_STATUS_EVENT, &REF1, vec![0, 3]),
+            door(STATUS_EVENT_MOTION_BASE as u8 + 3)
+        );
+    }
+
+    /// 0x90 hides the event entity: the 0x4E bit with the value fixed at 1.
+    #[test]
+    fn event_hide_always_opcode_hides_the_event_entity() {
+        assert_eq!(
+            cues_of(OP_EVENT_HIDE_ALWAYS, &[], vec![]),
+            [EventCue::ActorHide {
+                target: ActorLookup::EVENT_ENTITY,
+                hide: true,
+            }]
         );
     }
 

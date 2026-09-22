@@ -2322,7 +2322,7 @@ fn actor_render_routines<'a>(
 /// against the entity table's self id (None until it is known), everything else
 /// is already a literal.
 #[cfg(not(target_arch = "wasm32"))]
-fn cutscene_actor_server_id(
+pub(crate) fn cutscene_actor_server_id(
     self_id: Option<u32>,
     actor: kuluu_snapshot::CutsceneActor,
 ) -> Option<u32> {

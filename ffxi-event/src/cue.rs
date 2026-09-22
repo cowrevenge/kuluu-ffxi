@@ -140,6 +140,18 @@ pub const EMOTE_ANIMATION_KEY: FourCc = *b"emot";
 pub const STATUS_EVENT_IDLE: u8 = 0;
 pub const STATUS_EVENT_CHOCOBO: u8 = 5;
 pub const STATUS_EVENT_MOUNT: u8 = 85;
+/// The door bytes opcodes 0x4C/0x4D write: `GameStatus` `D_OPEN`/`D_CLOSE`
+/// (research/XiEvents/OpCodes/0x004C.md, 0x004D.md; research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_DOOR_OPEN: u8 = 8;
+pub const STATUS_EVENT_DOOR_CLOSE: u8 = 9;
+/// 0x4F adds this to its work operand: the `M1`..`M8` event-motion statuses
+/// (research/XiEvents/OpCodes/0x004F.md; research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_MOTION_BASE: u32 = 18;
+/// The second door status pair opcodes 0x8E/0x8F write: `GameStatus`
+/// `D_OPEN2`/`D_CLOSE2` (research/XiEvents/OpCodes/0x008E.md, 0x008F.md;
+/// research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_DOOR_OPEN2: u8 = 45;
+pub const STATUS_EVENT_DOOR_CLOSE2: u8 = 46;
 
 /// Highest music-volume table index (`FUNC_YmMusicServer_Volume`'s first
 /// argument indexes a volume table; it is not a percentage).

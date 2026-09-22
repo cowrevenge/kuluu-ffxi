@@ -99,6 +99,12 @@ pub const fn scheduler_twin_base(op: u8) -> Option<u32> {
     })
 }
 
+/// Base DAT file id opcode 0x7D adds its work operand to: the scheduler that
+/// runs on the local player (the rank-up animations), its `main` routine on
+/// the player with the player as its own target, no `dat_id_helper` remap
+/// (research/XiEvents/OpCodes/0x007D.md, `FUNC_LoadStartScheduler(val + 5112, …)`).
+pub const LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE: u32 = 5112;
+
 /// Base DAT file id opcode 0x73 MAGICSCHEDULOR adds its work operand to. The
 /// operand is a spell animation index: the same column vendor/server
 /// sql/spell_list.sql `animation` fills for a cast (Invisible 498, Sneak 499,

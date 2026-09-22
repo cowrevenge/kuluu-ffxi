@@ -565,6 +565,15 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             target: cutscene_actor_to_wire(target),
             hide,
         },
+        Cue::Transpar {
+            target,
+            end_alpha,
+            duration_frames,
+        } => wire::CutsceneCue::Transpar {
+            target: cutscene_actor_to_wire(target),
+            end_alpha,
+            duration_frames,
+        },
         Cue::CameraLock { lock } => wire::CutsceneCue::CameraLock { lock },
         Cue::PlayerControl { locked } => wire::CutsceneCue::PlayerControl { locked },
         Cue::HudHide { hide } => wire::CutsceneCue::HudHide { hide },

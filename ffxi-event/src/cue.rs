@@ -345,6 +345,15 @@ pub enum EventCue {
     /// 0x4E EVENTHIDE: set/clear the target's event-hide render flag
     /// (research/XiEvents/OpCodes/0x004E.md).
     ActorHide { target: ActorLookup, hide: bool },
+    /// 0x6C TRANSPAR: fade the target's alpha to `end_alpha` (a 0..=255 byte,
+    /// the work(5) operand) over `duration_frames` frames (the work(7)
+    /// operand, 0 read as 1), parking the script for that fade
+    /// (research/XiEvents/OpCodes/0x006C.md).
+    Transpar {
+        actor: ActorLookup,
+        end_alpha: i32,
+        duration_frames: i32,
+    },
     /// 0x46 DEFCAMERA: take the camera (and the cutscene HUD) away from the
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
@@ -490,6 +499,15 @@ impl EventCue {
             Self::ActorHide { target, hide } => Self::ActorHide {
                 target: resolve(target),
                 hide,
+            },
+            Self::Transpar {
+                actor,
+                end_alpha,
+                duration_frames,
+            } => Self::Transpar {
+                actor: resolve(actor),
+                end_alpha,
+                duration_frames,
             },
             Self::Mount {
                 target,

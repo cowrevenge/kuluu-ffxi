@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v44: CutsceneCue::Transpar (0x6C) - the target's alpha fade to the authored
+// byte over the authored frame count, the first actor-colour drive on the cue channel.
 // v43: CutsceneCue::PlayerControl (0x20) - the script's write of retail's
 // CliEventUcFlag, so an event that releases the player mid-script (the flag's 0) stops the
 // event-wide pin instead of holding it to EVENT_END.
@@ -102,7 +104,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1681,6 +1683,13 @@ pub enum CutsceneCue {
     /// the event session ends — retail stops consulting it rather than
     /// clearing it.
     ActorHide { target: CutsceneActor, hide: bool },
+    /// 0x6C TRANSPAR: fade `target`'s alpha to `end_alpha` (0..=255) over
+    /// `duration_frames` frames (research/XiEvents/OpCodes/0x006C.md).
+    Transpar {
+        target: CutsceneActor,
+        end_alpha: i32,
+        duration_frames: i32,
+    },
     /// Take camera control away from the player, or give it back.
     CameraLock { lock: bool },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
@@ -2453,7 +2462,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 42;
+        const VERSION: u32 = 44;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2708,6 +2717,13 @@ mod tests {
                     server_id: 0x010E_6032,
                 },
                 hide: true,
+            },
+            CutsceneCue::Transpar {
+                target: CutsceneActor::Entity {
+                    server_id: 0x010E_6032,
+                },
+                end_alpha: 0,
+                duration_frames: 60,
             },
             CutsceneCue::Mount {
                 target: CutsceneActor::LocalPlayer,

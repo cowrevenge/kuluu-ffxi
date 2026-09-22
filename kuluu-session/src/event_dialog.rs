@@ -873,6 +873,15 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             target: actor(target),
             hide,
         },
+        EventCue::Transpar {
+            actor: target,
+            end_alpha,
+            duration_frames,
+        } => CutsceneCue::Transpar {
+            target: actor(target),
+            end_alpha,
+            duration_frames,
+        },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
         EventCue::PlayerControl { locked } => CutsceneCue::PlayerControl { locked },
         EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
@@ -3431,6 +3440,41 @@ pub(crate) mod tests {
                 server_id: POSED_NPC
             }
         );
+    }
+
+    /// 0x6C rides the same actor resolution as the other actor cues: the fade
+    /// targets the running event's entity, not the VM's own sentinel
+    /// (research/XiEvents/OpCodes/0x006C.md).
+    #[test]
+    fn transpar_cue_resolves_its_actor_against_the_running_event() {
+        const EVENT_ENTITY: u32 = 0x010E_602F;
+        let cue = resolve_cue(
+            EventCue::Transpar {
+                actor: ActorLookup::EVENT_ENTITY,
+                end_alpha: 0,
+                duration_frames: 60,
+            },
+            EVENT_ENTITY,
+            0,
+            0,
+        );
+        match cue {
+            ResolvedCue::Scene(CutsceneCue::Transpar {
+                target,
+                end_alpha,
+                duration_frames,
+            }) => {
+                assert_eq!(
+                    target,
+                    CutsceneActor::Entity {
+                        server_id: EVENT_ENTITY
+                    }
+                );
+                assert_eq!(end_alpha, 0);
+                assert_eq!(duration_frames, 60);
+            }
+            other => panic!("not a transpar cue: {other:?}"),
+        }
     }
 
     /// 0xB5 names the event entity by default: the rename cue rides the

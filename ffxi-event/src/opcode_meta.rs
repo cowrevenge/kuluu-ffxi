@@ -1454,6 +1454,15 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             4 | 5 => Some(12),
             _ => None,
         },
+        // 0x00B3.md: the ranking-board cases — 0/3/4/6/7/9 are 4, case 1 is 14,
+        // case 5 is 18, cases 2/8 are 2, and retail's default arm advances 2
+        // for any other sub.
+        OP_RANKING => match sub {
+            1 => Some(14),
+            5 => Some(18),
+            0 | 3 | 4 | 6 | 7 | 9 => Some(4),
+            _ => Some(2),
+        },
         // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
         // frame while the entity walks and advances 2 on arrival. No frame
         // clock here, so case 1 arrives immediately.
@@ -1601,6 +1610,7 @@ pub(crate) const OP_SUBSCHED: u8 = 0x5F;
 pub(crate) const OP_STRINGOPS: u8 = 0x9D;
 pub(crate) const OP_STATUSSET: u8 = 0xAC;
 pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
+pub(crate) const OP_RANKING: u8 = 0xB3;
 
 #[cfg(test)]
 mod tests {
@@ -1663,6 +1673,16 @@ mod tests {
         assert_eq!(sub_size(0xD4, 4), Some(12));
         assert_eq!(sub_size(0xD4, 5), Some(12));
         assert_eq!(sub_size(0xD4, 6), None, "undocumented case has no width");
+        // 0x00B3.md — the ranking-board widths; unlike 0xD4, an undocumented
+        // sub still advances 2 (retail's default arm).
+        for sub in [0u8, 3, 4, 6, 7, 9] {
+            assert_eq!(sub_size(0xB3, sub), Some(4), "0xB3 sub {sub}");
+        }
+        assert_eq!(sub_size(0xB3, 1), Some(14));
+        assert_eq!(sub_size(0xB3, 5), Some(18));
+        for sub in [2u8, 8, 0x0A, 0xFF] {
+            assert_eq!(sub_size(0xB3, sub), Some(2), "0xB3 sub {sub}");
+        }
         // 0x0075.md — case 2's -6/+8 pair nets +2.
         assert_eq!(sub_size(0x75, 0), Some(4));
         assert_eq!(sub_size(0x75, 1), Some(2));

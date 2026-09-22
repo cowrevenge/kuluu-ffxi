@@ -201,6 +201,11 @@ const OP_RANGE_RECT: u8 = 0x82;
 // kuluu counterpart, so they advance by their width
 // (research/XiEvents/OpCodes/0x00D4.md).
 const OP_MAP_QUERY: u8 = 0xD4;
+// 0xB3 RANKING: the ranking-board cases. LSB has no ranking handler, so the
+// read cases write zeros into the board's work slots (the board draws empty)
+// and every case advances by its width; no packet is sent
+// (research/XiEvents/OpCodes/0x00B3.md).
+const OP_RANKING: u8 = 0xB3;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -2187,6 +2192,37 @@ impl EventVm {
                             self.exec_pointer += 12;
                         }
                         _ => return StepResult::Unimplemented(op),
+                    }
+                }
+                // 0xB3 RANKING: the ranking-board cases. LSB has no ranking
+                // handler, so the read cases write zeros into the board's work
+                // slots (the board draws empty) and every case advances by its
+                // width; no packet is sent (research/XiEvents/OpCodes/0x00B3.md).
+                OP_RANKING => {
+                    let sub = self.byte_at(1);
+                    match sub {
+                        1 => {
+                            for ofs in [2usize, 4, 6, 8, 10, 12] {
+                                self.setworkofs(ofs, 0, 0);
+                            }
+                            self.exec_pointer += 14;
+                        }
+                        5 => {
+                            for ofs in [2usize, 4, 6, 8, 10, 12, 14, 16] {
+                                self.setworkofs(ofs, 0, 0);
+                            }
+                            self.exec_pointer += 18;
+                        }
+                        9 => {
+                            self.setworkofs(2, 0, 0);
+                            self.exec_pointer += 4;
+                        }
+                        0 | 3 | 4 | 6 | 7 => {
+                            self.exec_pointer += 4;
+                        }
+                        _ => {
+                            self.exec_pointer += 2;
+                        }
                     }
                 }
                 // 0x67's operands are retail's event-message presets, which carry no cue
@@ -5682,6 +5718,79 @@ mod tests {
         let mut e = vm(data, vec![]);
         assert_eq!(e.step(), StepResult::Unimplemented(OP_MAP_QUERY));
         assert_eq!(e.exec_pointer(), 0, "an unknown case does not advance");
+    }
+
+    /// 0xB3 RANKING: LSB has no ranking handler, so every case advances by
+    /// its width and emits no cue (research/XiEvents/OpCodes/0x00B3.md).
+    #[test]
+    fn ranking_cases_advance_by_their_widths() {
+        for (sub, width) in [
+            (0u8, 4usize),
+            (1, 14),
+            (2, 2),
+            (3, 4),
+            (4, 4),
+            (5, 18),
+            (6, 4),
+            (7, 4),
+            (8, 2),
+            (9, 4),
+            (0x0A, 2),
+        ] {
+            let mut data = vec![OP_RANKING, sub];
+            data.extend(std::iter::repeat(0).take(width - 2));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(e.step(), StepResult::Done, "case {sub}");
+            assert_eq!(e.exec_pointer(), width, "case {sub} advances {width}");
+            assert!(e.take_cues().is_empty(), "case {sub} emits no cue");
+        }
+    }
+
+    /// 0xB3's read cases fill the board's work slots from the server answer;
+    /// with no ranking server to answer, they write zeros so the board draws
+    /// empty instead of the event dying
+    /// (research/XiEvents/OpCodes/0x00B3.md).
+    #[test]
+    fn ranking_read_cases_zero_their_board_slots() {
+        // A work_zone selector is its slot plus WORK_ZONE_BASE; the event
+        // params pre-set work_zone slots 2..10, so a zeroed slot proves the
+        // write landed.
+        let sel = |slot: u32| -> [u8; 2] { ((WORK_ZONE_BASE + slot) as u16).to_le_bytes() };
+        for (sub, width, slots, untouched) in [
+            (1u8, 14usize, &[2u32, 4, 6, 8, 2, 4][..], Some(3u32)),
+            (5, 18, &[2, 3, 4, 5, 6, 7, 8, 9][..], Some(10)),
+            (9, 4, &[2][..], Some(3)),
+        ] {
+            let mut data = vec![OP_RANKING, sub];
+            for &slot in slots {
+                data.extend_from_slice(&sel(slot));
+            }
+            data.extend(std::iter::repeat(0).take(width - 2 - 2 * slots.len()));
+            data.push(OP_END);
+            let mut e = EventVm::start(&block(data, vec![]), 7, 5, vec![1; 8]).unwrap();
+            if let Some(slot) = untouched {
+                if slot < 10 {
+                    assert_eq!(e.work_zone(slot as usize), 1, "params pre-set slot {slot}");
+                }
+            }
+            assert_eq!(e.step(), StepResult::Done, "case {sub}");
+            assert_eq!(e.exec_pointer(), width, "case {sub} advances {width}");
+            for &slot in slots {
+                assert_eq!(
+                    e.work_zone(slot as usize),
+                    0,
+                    "case {sub} zeroes slot {slot}"
+                );
+            }
+            if let Some(slot) = untouched {
+                assert_eq!(
+                    e.work_zone(slot as usize),
+                    if slot < 10 { 1 } else { 0 },
+                    "case {sub} leaves untouched slot {slot} alone"
+                );
+            }
+        }
     }
 
     /// `OP_MAP_ADD_MARK` carries the marker's zone id and milli-unit position

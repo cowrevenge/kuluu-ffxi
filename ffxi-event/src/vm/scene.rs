@@ -727,6 +727,7 @@ impl EventVm {
                         actor: ActorLookup::EVENT_ENTITY,
                         goal,
                         speed,
+                        max_time: None,
                     });
                     self.advance(op);
                 } else if self.byte_at(1) == 1 {

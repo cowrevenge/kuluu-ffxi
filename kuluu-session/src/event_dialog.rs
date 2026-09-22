@@ -310,7 +310,12 @@ impl DialogSession {
             emote_base,
             &mut self.pending_motion_holds,
         );
-        arm_move_holds(&mut runner, &raw_cues, &self.entity_positions, unique_no);
+        arm_move_holds(
+            &mut runner,
+            &raw_cues,
+            &mut self.entity_positions,
+            unique_no,
+        );
         self.cues.extend(
             raw_cues
                 .into_iter()
@@ -482,7 +487,7 @@ impl DialogSession {
             emote_base,
             &mut self.pending_motion_holds,
         );
-        arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
+        arm_move_holds(runner, &raw_cues, &mut self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
             .map(|c| resolve_cue(c, event_entity, zone, self.player_id))
@@ -919,6 +924,7 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             actor: target,
             goal,
             speed,
+            max_time: _,
         } => CutsceneCue::ActorMove {
             actor: actor(target),
             x: goal.x,
@@ -1755,11 +1761,17 @@ const PENDING_MOTION_HOLD_MAX: std::time::Duration = std::time::Duration::from_s
 fn arm_move_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
-    positions: &std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    positions: &mut std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
     event_entity: u32,
 ) {
     for cue in raw_cues {
-        let EventCue::ActorMove { actor, goal, speed } = *cue else {
+        let EventCue::ActorMove {
+            actor,
+            goal,
+            speed,
+            max_time,
+        } = *cue
+        else {
             continue;
         };
         let server_id = if actor.is_event_entity() {
@@ -1796,8 +1808,13 @@ fn arm_move_holds(
         let dx = (goal.x - current.x) as f32;
         let dz = (goal.z - current.z) as f32;
         let yalms_per_sec = speed as f32 * ffxi_event::vm::scene::EVENT_SPEED_SCALE;
-        let units = dx.hypot(dz) / (yalms_per_sec * ffxi_event::vm::scene::EVENT_COORD_UNITS)
+        let mut units = dx.hypot(dz) / (yalms_per_sec * ffxi_event::vm::scene::EVENT_COORD_UNITS)
             * WAIT_UNITS_PER_SEC;
+        // 0x31 SMOVE's MoveTime budget caps the distance-derived length when it
+        // is shorter (research/XiEvents/OpCodes/0x0031.md).
+        if let Some(cap) = max_time {
+            units = units.min(cap * WAIT_UNITS_PER_SEC);
+        }
         tracing::debug!(
             target: "kuluu_session::event_dialog",
             server_id,
@@ -1806,6 +1823,9 @@ fn arm_move_holds(
             "armed the MOVE hold from the session's own entity positions"
         );
         runner.hold_move(actor, units);
+        // The walk ends at the goal, so the next move measures from there
+        // (research/XiEvents/OpCodes/0x0031.md).
+        positions.insert(server_id, goal);
     }
 }
 
@@ -2675,6 +2695,68 @@ pub(crate) mod tests {
         assert!(
             dialog.cancel_armed,
             "without the disarm opcode the program stays cancellable"
+        );
+    }
+
+    /// 0x31 SMOVE: the session arms the move hold from its own entity position
+    /// and the authored speed, and moves the tracked position to the goal
+    /// (research/XiEvents/OpCodes/0x0031.md).
+    #[test]
+    fn smove_arms_the_move_hold_and_updates_the_tracked_position() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 9001;
+        const ZONE: u16 = 248;
+        // 0x32 speed@ref0; 0x31 mode 0: x@ref1 z@ref2 y@ref3 time@ref4;
+        // 0x31 mode 1; END.
+        let program = vec![
+            0x32, 0x00, 0x80, 0x31, 0x00, 0x01, 0x80, 0x02, 0x80, 0x03, 0x80, 0x04, 0x80, 0x31,
+            0x01, 0x00,
+        ];
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![100, 200, 400, (-5_i32) as u32, 4000],
+            event_data: program,
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        session.note_entity_position(
+            NPC,
+            ffxi_event::vm::scene::EventPosition {
+                x: 0,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(
+            matches!(session.begin(trigger), Begin::Waiting),
+            "the move hold parks the event"
+        );
+        // The walk ends at the goal, so the tracked position moved there.
+        assert_eq!(
+            session.entity_positions.get(&NPC),
+            Some(&ffxi_event::vm::scene::EventPosition {
+                x: 200,
+                y: -5,
+                z: 400,
+                heading: 0,
+            })
         );
     }
 

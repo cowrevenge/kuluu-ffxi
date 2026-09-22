@@ -185,6 +185,9 @@ const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
 // Non-scene NPC choreography: the same cues the scene path (vm/scene.rs) emits
 // when the event carries scene data. 0x1F itself is the sub-byte `OP_MOVE`.
 const OP_MAIN_SPEED: u8 = 0x32;
+// 0x31 SMOVE: 0x1F with a heading update and a MoveTime budget, on the
+// non-scene path (research/XiEvents/OpCodes/0x0031.md).
+const OP_SMOVE: u8 = 0x31;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -555,6 +558,19 @@ pub struct EventVm {
     /// `ActorMove` cue with; the scene path tracks the same value on its own
     /// `Scene` (research/XiEvents/OpCodes/0x0032.md).
     move_speed: i32,
+    /// 0x31 SMOVE mode 0's goal, armed for the mode 1 that walks to it
+    /// (research/XiEvents/OpCodes/0x0031.md).
+    smove_goal: Option<crate::vm::scene::EventPosition>,
+    /// 0x31 SMOVE's MoveTime budget in seconds, from mode 0's work slot 8;
+    /// `0.0` arms no cap.
+    smove_time: f32,
+    /// Set once 0x31 mode 1 has emitted its `ActorMove` cue, so a re-run of
+    /// the parked opcode parks instead of emitting a second cue.
+    smove_started: bool,
+    /// 0x31 mode 1's same-pass bridge: the actor its `ActorMove` cue named,
+    /// held until [`Self::take_cues`] arms the move hold from it, so the
+    /// parked opcode sees the move as running before the host arms it.
+    pending_move_starts: Vec<ActorLookup>,
     /// The retail entity Type byte of the actors this VM's
     /// `OP_LOADEXTSCHEDULER`/`OP_LOADEXTSCHEDULER2` opcodes name, keyed by the
     /// actor's server id and target index: the gate both motion resource
@@ -752,6 +768,10 @@ impl EventVm {
             action_holds: Vec::new(),
             move_holds: Vec::new(),
             move_speed: 0,
+            smove_goal: None,
+            smove_time: 0.0,
+            smove_started: false,
+            pending_move_starts: Vec::new(),
             actor_types: std::collections::HashMap::new(),
             pending_action_starts: Vec::new(),
             pending_action_holds: Vec::new(),
@@ -825,6 +845,7 @@ impl EventVm {
     pub fn take_cues(&mut self) -> Vec<EventCue> {
         let cues = std::mem::take(&mut self.cues);
         self.pending_action_starts.clear();
+        self.pending_move_starts.clear();
         if let Some(scene) = &self.scene {
             cues.into_iter()
                 .map(|cue| cue.resolve_event_actor(ActorLookup(scene.actor)))
@@ -951,12 +972,15 @@ impl EventVm {
         });
     }
 
-    /// True while a host-armed move hold for `actor` still has frames left.
+    /// True while a host-armed move hold for `actor` still has frames left, or
+    /// this VM's own 0x31 cue named `actor` in the current batch, before the
+    /// host armed the hold from it.
     fn move_running(&self, actor: ActorLookup) -> bool {
         let actor = self.resolve_hold_actor(actor);
         self.move_holds
             .iter()
             .any(|h| h.actor == actor && h.remaining_units > 0.0)
+            || self.pending_move_starts.contains(&actor)
     }
 
     /// True while a host-armed hold for `(actor, key)` still has frames left,
@@ -1793,6 +1817,43 @@ impl EventVm {
                     self.move_speed = self.getworkofs(MAIN_SPEED_OFS, 0);
                     self.advance(op);
                 }
+                // 0x31 SMOVE: mode 0 arms the goal (work slots 2/4/6, event
+                // units) and the MoveTime budget (slot 8, seconds); mode 1
+                // walks the event entity to that goal at the 0x32 speed and
+                // parks until the move hold releases it. The cue carries the
+                // budget so the host caps the distance-derived hold to it
+                // (research/XiEvents/OpCodes/0x0031.md).
+                OP_SMOVE => match self.byte_at(1) {
+                    0x00 => {
+                        self.smove_goal = Some(self.position_operands(2, false));
+                        self.smove_time = self.getworkofs(8, 0) as f32 * 0.001;
+                        self.smove_started = false;
+                        self.exec_pointer += 10;
+                    }
+                    0x01 => {
+                        if !self.smove_started {
+                            if let Some(goal) = self.smove_goal {
+                                let actor = ActorLookup::EVENT_ENTITY;
+                                self.pending_move_starts
+                                    .push(self.resolve_hold_actor(actor));
+                                self.cues.push(EventCue::ActorMove {
+                                    actor,
+                                    goal,
+                                    speed: self.move_speed,
+                                    max_time: (self.smove_time > 0.0).then_some(self.smove_time),
+                                });
+                                self.smove_started = true;
+                            }
+                        }
+                        if self.move_running(ActorLookup::EVENT_ENTITY) {
+                            self.parked_on_move_hold = true;
+                            return StepResult::Waiting;
+                        }
+                        self.parked_on_move_hold = false;
+                        self.exec_pointer += 2;
+                    }
+                    _ => return StepResult::Unimplemented(op),
+                },
                 // 0x39 SetFacing: set the event entity's facing, the raw work
                 // value on the 0..4095 heading scale (research/XiEvents/OpCodes/
                 // 0x0039.md).
@@ -2220,6 +2281,7 @@ impl EventVm {
                                 actor: ActorLookup::EVENT_ENTITY,
                                 goal,
                                 speed: self.move_speed,
+                                max_time: None,
                             });
                         }
                         (OP_MOVE, 0x01) => {
@@ -4813,6 +4875,7 @@ mod tests {
                     heading: 0,
                 },
                 speed: 10,
+                max_time: None,
             }]
         );
     }
@@ -4827,6 +4890,82 @@ mod tests {
         assert_eq!(e.step(), StepResult::Waiting, "the move is running");
         e.tick(5.0 / WAIT_UNITS_PER_SEC);
         assert_eq!(e.step(), StepResult::Done, "the move is over");
+    }
+
+    /// 0x31 mode 0 arms the goal (refs 1/2/3) and the MoveTime budget (ref 0),
+    /// advancing ten bytes with no cue (research/XiEvents/OpCodes/0x0031.md).
+    #[test]
+    fn smove_mode0_arms_the_goal_and_time() {
+        let mut data = vec![OP_SMOVE, 0x00];
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&REF2);
+        data.extend_from_slice(&REF3);
+        data.extend_from_slice(&REF0);
+        data.push(OP_END);
+        let mut e = vm(data, vec![4000, 20, 40, (-5_i32) as u32]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert!(e.take_cues().is_empty(), "mode 0 emits no cue");
+    }
+
+    /// 0x31 mode 1 walks the event entity to the mode-0 goal at the 0x32
+    /// speed, carries the MoveTime budget as the cue's cap, and parks until the
+    /// move hold releases it (research/XiEvents/OpCodes/0x0031.md).
+    #[test]
+    fn smove_mode1_walks_and_parks_on_the_move_hold() {
+        let mut data = vec![OP_SMOVE, 0x00];
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&REF2);
+        data.extend_from_slice(&REF3);
+        data.extend_from_slice(&REF0);
+        data.push(OP_SMOVE);
+        data.push(0x01);
+        data.push(OP_END);
+        let mut e = vm(data, vec![4000, 20, 40, (-5_i32) as u32]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "mode 0 arms, mode 1 emits the cue and parks"
+        );
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorMove {
+                actor: ActorLookup::EVENT_ENTITY,
+                goal: crate::vm::scene::EventPosition {
+                    x: 20,
+                    z: 40,
+                    y: -5,
+                    heading: 0,
+                },
+                speed: 0,
+                max_time: Some(4.0),
+            }]
+        );
+        // The host arms the hold from the cue; the parked opcode stays parked
+        // while it has frames left and advances once it expires.
+        e.hold_move(ActorLookup::EVENT_ENTITY, 5.0);
+        assert_eq!(e.step(), StepResult::Waiting, "the move is running");
+        e.tick(5.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done, "the move is over");
+    }
+
+    /// 0x31 mode 1 with no mode-0 goal emits no cue and falls through, the way
+    /// retail's zero MovePosition snaps immediately (research/XiEvents/OpCodes/
+    /// 0x0031.md).
+    #[test]
+    fn smove_mode1_without_a_goal_falls_through() {
+        let data = vec![OP_SMOVE, 0x01, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert!(e.take_cues().is_empty(), "no goal, no cue");
+    }
+
+    /// 0x31's undocumented cases stop the VM rather than guessing a width
+    /// (research/XiEvents/OpCodes/0x0031.md).
+    #[test]
+    fn smove_unknown_case_stops() {
+        let data = vec![OP_SMOVE, 0x02, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_SMOVE));
     }
 
     /// 0x39 sets the event entity's facing from the raw work value
@@ -6064,6 +6203,7 @@ mod tests {
                     heading: 0,
                 },
                 speed: MOVE_SPEED_REF as i32,
+                max_time: None,
             }]
         );
 
@@ -6298,6 +6438,7 @@ mod tests {
                         heading: 0,
                     },
                     speed: SPEED_REF as i32,
+                    max_time: None,
                 },
                 EventCue::ActorHide {
                     target: ActorLookup(NPC_SERVER_ID),

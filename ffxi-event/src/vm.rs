@@ -150,6 +150,23 @@ pub enum StepResult {
     AwaitServerAck(PendingTag),
 }
 
+/// Why the VM is not advancing right now, for the host's liveness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Park {
+    /// Running, or ended.
+    None,
+    /// A frame is displayed and waits on the player; never stale.
+    Frame,
+    /// A timed wait with units left; stale only if the host stops ticking it.
+    TimedWait,
+    /// A scheduler/move hold the host must release when the action finishes.
+    Hold,
+    /// A pending tag awaiting the s2c ack.
+    ServerAck,
+    /// Parked with nothing that can move it (a yield-forever, an unmodelled poll).
+    Dead,
+}
+
 pub(crate) const OP_END: u8 = 0x00;
 const OP_GOTO: u8 = 0x01;
 const OP_IF: u8 = 0x02;
@@ -655,6 +672,14 @@ pub struct EventVm {
     /// [`Self::take_cues`].
     cues: Vec<EventCue>,
     finished: bool,
+    /// Set by the last [`step`](Self::step): whether it yielded
+    /// [`StepResult::Waiting`] with none of the state [`Self::park`] names,
+    /// the Park::Dead half of the host's liveness check.
+    last_waiting: bool,
+    /// The host force-cancelled the event (the liveness stall): the next
+    /// [`step`](Self::step) reports [`StepResult::Cancelled`] whatever the VM
+    /// was parked on.
+    force_cancelled: bool,
     /// Diagnostics: execution ran off the end of the bytecode without an
     /// END/EXECEND opcode. Retail treats this the same as END (the missing-
     /// byte read yields 0 == OP_END), so it only signals a decode or
@@ -919,6 +944,8 @@ impl EventVm {
             cancel_armed: true,
             cues: Vec::new(),
             finished: false,
+            last_waiting: false,
+            force_cancelled: false,
             ran_past_end: false,
             wait: None,
             pending_ack: None,
@@ -1006,6 +1033,66 @@ impl EventVm {
 
     pub fn exec_pointer(&self) -> usize {
         self.exec_pointer
+    }
+
+    /// The opcode byte the VM is parked on, for the host's stall diagnostics;
+    /// 0 when the pointer ran past the end of the bytecode.
+    pub fn current_opcode(&self) -> u8 {
+        self.event_data.get(self.exec_pointer).copied().unwrap_or(0)
+    }
+
+    /// The timed wait's remaining units (1/60 s, the [`Self::tick`] clock),
+    /// 0 when no wait is held: the host's liveness check watches it move.
+    pub fn wait_units_remaining(&self) -> f32 {
+        self.wait.as_ref().map_or(0.0, |w| w.remaining_units)
+    }
+
+    /// Why the VM is not advancing right now, for the host's liveness check:
+    /// a frame and a moving timed wait are never stale, a hold and a pending
+    /// tag are stale when their release does not arrive, and a yield with
+    /// nothing armed behind it is stale immediately.
+    pub fn park(&self) -> Park {
+        if self.force_cancelled {
+            return Park::None;
+        }
+        if self.frame_displayed() {
+            return Park::Frame;
+        }
+        if self.wait.is_some() {
+            return Park::TimedWait;
+        }
+        if self.parked_on_action_hold || self.parked_on_move_hold || self.scene_waiting() {
+            return Park::Hold;
+        }
+        if self.pending_tag().is_some() {
+            return Park::ServerAck;
+        }
+        if self.last_waiting {
+            return Park::Dead;
+        }
+        Park::None
+    }
+
+    /// End the event from the host side (the liveness stall): the next
+    /// [`step`](Self::step) reports [`StepResult::Cancelled`] whatever the VM
+    /// was parked on, and the pending tag, holds and children are dropped
+    /// with it (research/XiPackets/world/client/0x005B).
+    pub fn force_cancel(&mut self) {
+        self.force_cancelled = true;
+        self.finished = true;
+        self.pending_ack = None;
+        self.wait = None;
+        self.action_holds.clear();
+        self.move_holds.clear();
+        self.pending_action_holds.clear();
+        self.parked_on_action_hold = false;
+        self.parked_on_move_hold = false;
+        self.pending_message = None;
+        self.pending_choice = None;
+        self.selection_made = false;
+        self.message_open = MESSAGE_OPEN_NONE;
+        let mut cancel = |child: &mut EventVm| child.force_cancel();
+        self.for_each_child_vm(&mut cancel);
     }
 
     /// Drain the [`EventCue`]s the staging opcodes emitted, in execution order.
@@ -1428,6 +1515,16 @@ impl EventVm {
 
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
+        let result = self.step_inner();
+        self.last_waiting = matches!(result, StepResult::Waiting);
+        result
+    }
+
+    /// The yield loop [`step`](Self::step) runs.
+    fn step_inner(&mut self) -> StepResult {
+        if self.force_cancelled {
+            return StepResult::Cancelled;
+        }
         if self.scene_cancelled {
             return StepResult::Cancelled;
         }
@@ -2182,10 +2279,14 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
-                OP_ENDLOADSCHEDULER_MAIN | OP_ENDLOADSCHED_TWIN_A1
-                | OP_ENDLOADSCHED_TWIN_A3 | OP_ENDLOADSCHED_TWIN_BD
-                | OP_ENDLOADSCHED_TWIN_C7 | OP_ENDLOADSCHED_TWIN_CF
-                | OP_ENDLOADSCHED_TWIN_D2 | OP_ENDLOADSCHED_TWIN_D7 => {
+                OP_ENDLOADSCHEDULER_MAIN
+                | OP_ENDLOADSCHED_TWIN_A1
+                | OP_ENDLOADSCHED_TWIN_A3
+                | OP_ENDLOADSCHED_TWIN_BD
+                | OP_ENDLOADSCHED_TWIN_C7
+                | OP_ENDLOADSCHED_TWIN_CF
+                | OP_ENDLOADSCHED_TWIN_D2
+                | OP_ENDLOADSCHED_TWIN_D7 => {
                     let actor = ActorLookup(self.eventgetcode2(ENDLOADSCHED_ACTOR1_OFS));
                     self.cues.push(EventCue::ActorStopAction {
                         actor,
@@ -4144,6 +4245,121 @@ mod tests {
             assert_eq!(e.exec_pointer(), 0, "frame {frame}: the pointer holds");
             e.tick(1.0 / 60.0);
         }
+    }
+
+    /// The liveness classification: one program per Park variant, the input
+    /// the host's stall check reads between steps.
+    #[test]
+    fn park_classifies_each_yield_state() {
+        let mut e = vm(vec![OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.park(), Park::None, "an ended VM is not parked");
+
+        let mut e = vm(vec![OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END], vec![100]);
+        assert!(matches!(e.step(), StepResult::AwaitMessage(_)));
+        assert_eq!(
+            e.park(),
+            Park::Frame,
+            "a displayed frame waits on the player"
+        );
+
+        let mut e = vm(vec![OP_WAIT, 0x28, 0x01, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(e.park(), Park::TimedWait, "a timed wait has units left");
+
+        let mut e = vm(
+            vec![
+                OP_WAITSCHEDULOR,
+                0xF8,
+                0xFF,
+                0xFF,
+                0x7F,
+                0,
+                0,
+                0,
+                0,
+                b'm',
+                b'a',
+                b'i',
+                b'n',
+                OP_END,
+            ],
+            vec![],
+        );
+        e.hold_action_pending(ActorLookup::EVENT_ENTITY, *b"main");
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(
+            e.park(),
+            Park::Hold,
+            "a pending hold is the host's to release"
+        );
+
+        // Case 0 sends the tag and runs into its case-1 poll, which yields
+        // until the s2c ack (research/XiEvents/OpCodes/0x0043.md).
+        let mut e = vm(vec![OP_SENDTAG, 0x00, OP_SENDTAG, 0x01, OP_END], vec![]);
+        assert!(matches!(e.step(), StepResult::AwaitServerAck(_)));
+        assert_eq!(
+            e.park(),
+            Park::ServerAck,
+            "a pending tag waits on the s2c ack"
+        );
+
+        let mut e = vm(vec![OP_YIELD_FOREVER, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(
+            e.park(),
+            Park::Dead,
+            "a yield with nothing armed moves on no clock"
+        );
+    }
+
+    /// force_cancel ends the event from the host side: a VM parked on each
+    /// Park variant reports Cancelled from the next step, and reads as
+    /// un-parked after.
+    #[test]
+    fn force_cancel_reports_cancelled_from_every_park() {
+        let programs = [
+            (vec![OP_END], vec![]),
+            (vec![OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END], vec![100]),
+            (vec![OP_WAIT, 0x28, 0x01, OP_END], vec![]),
+            (vec![OP_YIELD_FOREVER, OP_END], vec![]),
+            (vec![OP_SENDTAG, 0x00, OP_SENDTAG, 0x01, OP_END], vec![]),
+        ];
+        for (data, references) in programs {
+            let mut e = vm(data, references);
+            e.step();
+            e.force_cancel();
+            assert_eq!(
+                e.step(),
+                StepResult::Cancelled,
+                "the force-cancelled VM ends cancelled"
+            );
+            assert_eq!(e.park(), Park::None, "a cancelled VM is not parked");
+        }
+        // The Hold variant needs its hold armed before the step.
+        let mut e = vm(
+            vec![
+                OP_WAITSCHEDULOR,
+                0xF8,
+                0xFF,
+                0xFF,
+                0x7F,
+                0,
+                0,
+                0,
+                0,
+                b'm',
+                b'a',
+                b'i',
+                b'n',
+                OP_END,
+            ],
+            vec![],
+        );
+        e.hold_action_pending(ActorLookup::EVENT_ENTITY, *b"main");
+        e.step();
+        e.force_cancel();
+        assert_eq!(e.step(), StepResult::Cancelled);
     }
 
     #[test]

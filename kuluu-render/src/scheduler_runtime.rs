@@ -5643,10 +5643,10 @@ mod tests {
             .with_dat(&spell_scheds)
             .with_dat(&actor_scheds)
             .with_dat(&global_scheds);
-        let mut active =
-            ActiveScheduler::from_routine(&lookup, b"main").expect("main exists");
-        active.cutscene_motion_actor =
-            Some(kuluu_snapshot::CutsceneActor::Entity { server_id: GUARD_ID });
+        let mut active = ActiveScheduler::from_routine(&lookup, b"main").expect("main exists");
+        active.cutscene_motion_actor = Some(kuluu_snapshot::CutsceneActor::Entity {
+            server_id: GUARD_ID,
+        });
         let end_frame = active.end_frame();
 
         // The guard as load_pc builds it: a WorldEntity parent running the
@@ -5690,8 +5690,7 @@ mod tests {
         // One pose tick per frame to the routine's authored end plus the
         // post-finish TTL: the point tick_active_schedulers retires the entry,
         // where a self-releasing pose is already idle.
-        let step =
-            std::time::Duration::from_secs_f32(1.0 / crate::ffxi_actor_render::FRAME_RATE);
+        let step = std::time::Duration::from_secs_f32(1.0 / crate::ffxi_actor_render::FRAME_RATE);
         let ticks = ((end_frame as f32 / ROUTINE_FPS + POST_FINISH_TTL_SECS)
             * crate::ffxi_actor_render::FRAME_RATE)
             .ceil() as u32;
@@ -5765,20 +5764,21 @@ mod tests {
         let mut lock = stage(0, StageKind::AnimationLock, 0x07, *b"lock");
         lock.stage.duration_frames = 600;
         let motion = stage(1, StageKind::Motion, 0x05, CAST_CLIP);
-        let active =
-            ActiveScheduler::from_scheduler(&make_scheduler(*b"cast", vec![lock, motion]));
+        let active = ActiveScheduler::from_scheduler(&make_scheduler(*b"cast", vec![lock, motion]));
 
         let mut app = actor_cue_app();
         app.add_message::<SchedulerStageEvent>()
             .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
-            .add_systems(Update, (tick_active_schedulers, dispatch_motion_stages).chain());
+            .add_systems(
+                Update,
+                (tick_active_schedulers, dispatch_motion_stages).chain(),
+            );
 
         let child = app
             .world_mut()
             .spawn(crate::ffxi_actor_render::render_actor_with_skeleton_clips(
-                NPC_ID,
-                clips,
+                NPC_ID, clips,
             ))
             .id();
         let parent = app

@@ -257,6 +257,36 @@ impl DialogRunner {
         self.vm.pending_tag()
     }
 
+    /// Why the VM is not advancing right now, for the host's liveness check;
+    /// see [`EventVm::park`].
+    pub fn park(&self) -> crate::vm::Park {
+        self.vm.park()
+    }
+
+    /// The opcode byte the VM is parked on (0 past the end of the bytecode),
+    /// for the host's stall diagnostics.
+    pub fn current_opcode(&self) -> u8 {
+        self.vm.current_opcode()
+    }
+
+    /// The VM's exec pointer, for the host's stall diagnostics.
+    pub fn exec_pointer(&self) -> usize {
+        self.vm.exec_pointer()
+    }
+
+    /// The timed wait's remaining units, 0 when no wait is held: the host's
+    /// liveness check watches it move on every tick.
+    pub fn wait_units_remaining(&self) -> f32 {
+        self.vm.wait_units_remaining()
+    }
+
+    /// Force-cancel the event from the host side (the liveness stall): the
+    /// next step reports Cancelled, which [`Self::run`] maps to
+    /// [`DialogStep::Ended`] with [`EVENT_CANCELLED_END_PARA`].
+    pub fn force_cancel(&mut self) {
+        self.vm.force_cancel();
+    }
+
     /// Whether ESC may cancel this event right now (retail's `CliEventCancelFlag`;
     /// armed at start, flipped by the CANCEL_ARM/CANCEL_DISARM opcodes).
     pub fn cancel_armed(&self) -> bool {

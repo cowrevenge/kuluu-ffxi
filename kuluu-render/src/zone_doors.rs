@@ -140,7 +140,8 @@ pub struct ZoneDoorNpc {
     pub animation: u8,
 
     /// Last StatusEvent the running event wrote for this door (the 0x4C/0x4D/0x4F
-    /// cues). Kept off `animation` because the wire byte keeps reporting the
+    /// cues, research/XiEvents/OpCodes/0x004C.md, 0x004D.md, 0x004F.md).
+    /// Kept off `animation` because the wire byte keeps reporting the
     /// server's own state and would clobber the event's dedup.
     pub event_animation: u8,
 }
@@ -587,7 +588,8 @@ pub fn trigger_event_doors(
         else {
             continue;
         };
-        // A mount id names a mount, not a door state.
+        // A mount id names a mount, not a door state
+        // (research/XiEvents/OpCodes/0x004C.md and its 0x4D/0x4F twins).
         if mount_id.is_some() {
             continue;
         }
@@ -977,7 +979,8 @@ mod tests {
 
     /// The 0x4C/0x4D/0x4F StatusEvent writes on the Mount cue swing the door
     /// the target's look names, with the server's byte still shut: the event is
-    /// the only trigger. A repeated cue and a non-door status swing nothing.
+    /// the only trigger. A repeated cue and a non-door status swing nothing
+    /// (research/XiEvents/OpCodes/0x004C.md, 0x004D.md, 0x004F.md).
     #[test]
     fn an_event_cue_swings_the_door_and_dedups_on_the_same_state() {
         let swing = SSANDY_STABLES_SWING_DEG.to_radians();
@@ -1053,7 +1056,6 @@ mod tests {
         }
         step(&mut app, SWING_FRAMES as f32 / 2.0);
 
-        // The same state again: no second swing.
         let at = (0..2)
             .map(|slot| swept(&app, leaves[slot], shut[slot]))
             .collect::<Vec<_>>();
@@ -1067,8 +1069,6 @@ mod tests {
             );
         }
 
-        // A status no routine names swings nothing; the current door state
-        // again dedups.
         for status in [animation::CHOCOBO, animation::OPEN_DOOR] {
             let before = (0..2)
                 .map(|slot| swept(&app, leaves[slot], shut[slot]))

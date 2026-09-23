@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 // v45: CutsceneCue::ClockHold gains `minute` and `day_from_epoch` (0xA9
 // SET_CLOCK_DATE jumps the whole date to Vana day 7*work[1] at 00:30; 0xC9
 // ENABLE_TIMER releases the hold), so the 0x77/0x78 hour-only shape now carries
-// minute 0 and no day.
+// minute 0 and no day (research/XiEvents/OpCodes/0x00A9.md, 0x00C9.md,
+// 0x0077.md, 0x0078.md).
 // v44: CutsceneCue::Transpar (0x6C) - the target's alpha fade to the authored
-// byte over the authored frame count, the first actor-colour drive on the cue channel.
+// byte over the authored frame count, the first actor-colour drive on the cue
+// channel (research/XiEvents/OpCodes/0x006C.md).
 // v43: CutsceneCue::PlayerControl (0x20) - the script's write of retail's
 // CliEventUcFlag, so an event that releases the player mid-script (the flag's 0) stops the
-// event-wide pin instead of holding it to EVENT_END.
+// event-wide pin instead of holding it to EVENT_END
+// (research/XiEvents/OpCodes/0x0020.md).
 // v42: ViewerEvent::Knockbacks - every target result of one 0x028 that landed with a
 // knockback level (GP_SERV_COMMAND_BATTLE2::pack), so the client can shove the victims when
 // the skill routine's knockback stage fires; ActionStarted.outcome carries the first

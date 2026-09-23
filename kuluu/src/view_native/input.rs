@@ -2203,21 +2203,45 @@ pub fn recenter_follow_allowed(yaw_diff: f32) -> bool {
     yaw_diff.abs() < RECENTER_HOLD_RAD
 }
 
-/// Retail stops the pull once the eye is within this dot product of the
-/// behind-the-actor direction (UpdatePlayerFollowingCamera again, the
-/// `> 0.5 && < 0.99` engagement window), about eight degrees: inside the
-/// window the follow holds the yaw where it is, it does not snap the
-/// remainder.
+/// Retail's chase window: the pull engages only while the eye sits between
+/// this dot and 0.5 of the behind-the-actor direction (the `> 0.5 && < 0.99`
+/// engagement window, research/XIClient/src/XIClient/source/World/Camera/
+/// CameraManager.cpp UpdatePlayerFollowingCamera), about eight degrees. A
+/// follow that is not yet running starts only when the eye leaves this window;
+/// inside it the yaw holds where the player left it.
 const RETAIL_CHASE_RECENTER_SETTLED_DOT: f32 = 0.99;
 
-/// Returns the camera yaw after one follow step and whether it still has
-/// ground to cover.
-pub fn recenter_yaw_step(yaw: f32, target_yaw: f32, rate: f32, dt: f32) -> (f32, bool) {
+/// The stop for a follow that is already running: it keeps closing the gap
+/// until the yaw is within this dot of the target (well under a degree),
+/// instead of pausing at the eight-degree window above. Holding a running
+/// follow at eight degrees is what stuttered the chase camera on a turning
+/// body; retail's pull is 2.5 percent of the remaining offset per tick
+/// (UpdatePlayerFollowingCamera, `scale = 50 * 0.01 * 0.05`), which closes
+/// that last stretch before the pause reads.
+const RECENTER_DONE_DOT: f32 = 0.9999;
+
+/// Returns the camera yaw after one follow step and whether the follow still
+/// has ground to cover. `running` is whether the follow was stepping on the
+/// previous tick (or was just armed by a movement input): a running follow
+/// stops only at [`RECENTER_DONE_DOT`], a new one starts only outside
+/// [`RETAIL_CHASE_RECENTER_SETTLED_DOT`].
+pub fn recenter_yaw_step(
+    yaw: f32,
+    target_yaw: f32,
+    rate: f32,
+    dt: f32,
+    running: bool,
+) -> (f32, bool) {
     let diff = wrap_signed_pi(target_yaw - yaw);
     if !recenter_follow_allowed(diff) {
         return (yaw, false);
     }
-    if diff.cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT {
+    let settled_dot = if running {
+        RECENTER_DONE_DOT
+    } else {
+        RETAIL_CHASE_RECENTER_SETTLED_DOT
+    };
+    if diff.cos() >= settled_dot {
         return (yaw, false);
     }
     let alpha = 1.0 - (-rate * dt).exp();
@@ -2299,7 +2323,12 @@ pub fn camera_polish_system(
             AUTO_RECENTER_RATE
         };
         let target_yaw = yaw_for_heading(state.snapshot.self_pos.heading);
-        let (yaw, settling) = recenter_yaw_step(chase.yaw, target_yaw, rate, time.delta_secs());
+        // `recenter.settling` is the hysteresis state: the follow keeps its
+        // running stop (a degree, not the eight-degree start window) for as
+        // long as the body keeps turning.
+        let running = recenter.settling;
+        let (yaw, settling) =
+            recenter_yaw_step(chase.yaw, target_yaw, rate, time.delta_secs(), running);
         chase.yaw = yaw;
         recenter.settling = settling;
     }
@@ -4325,9 +4354,10 @@ mod tests {
         let target = std::f32::consts::FRAC_PI_2;
         let mut yaw = target
             - (ROTATE_KEY_RATE_RAD_PER_SEC - ROTATE_KEY_ORBIT_RAD_PER_SEC) / AUTO_RECENTER_RATE;
+        let mut running = true;
         let mut ticks = 0u32;
         let settled = loop {
-            let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
+            let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, running);
             if settling {
                 assert!(
                     (next - target).abs() < (yaw - target).abs(),
@@ -4335,6 +4365,7 @@ mod tests {
                 );
             }
             yaw = next;
+            running = settling;
             ticks += 1;
             if !settling {
                 break true;
@@ -4345,15 +4376,16 @@ mod tests {
         };
         assert!(settled, "the follow never finished: {yaw} vs {target}");
         assert!(
-            (target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT,
-            "the camera must come to rest inside the settled window: {yaw} vs {target}"
+            (target - yaw).cos() >= RECENTER_DONE_DOT,
+            "the running follow must come to rest within a degree: {yaw} vs {target}"
         );
     }
 
     #[test]
     fn recenter_step_leaves_the_planted_about_face_camera_alone() {
         let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let (yaw, settling) = recenter_yaw_step(0.0, std::f32::consts::PI, AUTO_RECENTER_RATE, dt);
+        let (yaw, settling) =
+            recenter_yaw_step(0.0, std::f32::consts::PI, AUTO_RECENTER_RATE, dt, true);
         assert_eq!(yaw, 0.0);
         assert!(!settling, "a planted camera has nothing left to settle");
     }
@@ -4364,12 +4396,118 @@ mod tests {
         let target = std::f32::consts::FRAC_PI_2;
         let yaw = target - 0.05;
         assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
-        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt);
+        // A follow that is not running starts only outside the retail start
+        // window, so inside it the yaw holds where the player left it.
+        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, false);
         assert_eq!(
             next, yaw,
             "a settled follow must not snap the last few degrees"
         );
         assert!(!settling);
+    }
+
+    /// The hysteresis: at the same off-centre yaw inside the retail start
+    /// window, a follow that is running keeps stepping (toward a degree) while
+    /// a follow that is not running holds (a new one starts only outside the
+    /// window).
+    #[test]
+    fn recenter_running_follow_keeps_stepping_inside_the_start_window() {
+        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
+        let target = std::f32::consts::FRAC_PI_2;
+        let yaw = target - 0.05;
+        assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
+        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, true);
+        assert!(
+            (next - target).abs() < (yaw - target).abs(),
+            "a running follow must keep closing the last few degrees"
+        );
+        assert!(settling, "the running follow is not yet within a degree");
+    }
+
+    /// A carve that keeps turning: the follow must not pause at the settled
+    /// window. A per-frame hold inside eight degrees makes the yaw advance on
+    /// some ticks and not others (the stutter); a running follow instead keeps
+    /// running until it is within a degree of the target, so every tick the
+    /// body keeps turning, the camera keeps moving.
+    #[test]
+    fn recenter_does_not_stutter_while_the_body_keeps_turning() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Bindings>()
+            .init_resource::<SceneState>()
+            .init_resource::<InputMode>()
+            .init_resource::<CameraMode>()
+            .init_resource::<LockOn>()
+            .init_resource::<kuluu_render::MousePointer>()
+            .init_resource::<DispatchLocals>()
+            .init_resource::<ChaseCamera>()
+            .init_resource::<CameraAutoRecenter>()
+            .init_resource::<super::super::gamepad_input::PadStickIntent>()
+            .add_systems(Update, camera_polish_system);
+        let time: Time = Time::default();
+        app.insert_resource(time);
+
+        // The body turns one heading unit every 40 ticks: slow enough that the
+        // carve follow (0.55 rad/s) catches up into the settled window and
+        // lingers there, fast enough that it never settles to a degree over the
+        // run. Start the camera 0.35 rad off the (decreasing) target so the
+        // follow is armed well outside the window and pulls the yaw one way for
+        // the whole run.
+        let mut heading = 0u8;
+        let target_yaw = yaw_for_heading(heading);
+        app.world_mut().resource_mut::<ChaseCamera>().yaw = target_yaw + 0.35;
+
+        // A held carve: the follow is armed by the movement input.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyA);
+
+        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
+        let mut prev_yaw = app.world().resource::<ChaseCamera>().yaw;
+        let mut heading_moved = false;
+        let mut zero_deltas = 0usize;
+        let mut sign_mismatch = false;
+        let mut first_sign: i32 = 0;
+        for tick in 0..180 {
+            if tick % 40 == 0 {
+                heading = heading.wrapping_add(1);
+                heading_moved = true;
+                app.world_mut()
+                    .resource_mut::<SceneState>()
+                    .snapshot
+                    .self_pos
+                    .heading = heading;
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(dt));
+            app.update();
+            let yaw = app.world().resource::<ChaseCamera>().yaw;
+            let delta = yaw - prev_yaw;
+            if delta == 0.0 {
+                zero_deltas += 1;
+            } else {
+                let s = delta.signum() as i32;
+                if first_sign == 0 {
+                    first_sign = s;
+                } else if s != first_sign {
+                    sign_mismatch = true;
+                }
+            }
+            prev_yaw = yaw;
+        }
+        assert!(heading_moved, "the body must keep turning");
+        assert!(
+            !sign_mismatch,
+            "the follow must not reverse direction while the body keeps turning"
+        );
+        assert_eq!(
+            zero_deltas, 0,
+            "a running follow must not pause: {zero_deltas} of 180 ticks advanced no yaw"
+        );
     }
 
     /// With a target locked and a steer key held, the auto-recenter leaves

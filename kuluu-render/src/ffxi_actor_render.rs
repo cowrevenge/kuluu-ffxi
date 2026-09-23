@@ -5707,9 +5707,11 @@ mod pose_resolution_tests {
     fn engaged_strafe_with_a_weapon_keeps_the_base_family() {
         const HUME_M: u8 = 1;
         const MAIN_HAND_SLOT: u8 = 6;
-        let Some(root) = ffxi_dat::archive::open_test_install() else { return };
-        let dll = crate::scheduler_runtime::main_dll_for_root(root.root())
-            .expect("FFXiMain.dll loads");
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll =
+            crate::scheduler_runtime::main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
         let main_weapon = crate::look_resolver::equipment_dat_id(&dll, MAIN_HAND_SLOT, 0, HUME_M)
             .expect("HumeM main-hand model 0");
         let loaded = load_pc(&root, HUME_M, false, &[], None, Some(main_weapon), None)

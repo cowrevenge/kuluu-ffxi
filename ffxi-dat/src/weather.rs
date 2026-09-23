@@ -762,7 +762,7 @@ pub fn load_weather_forecast(root: &DatRoot) -> Result<WeatherForecast> {
     let head_high = read_file(root, FORECAST_HEAD_HIGH_FILE)?;
     if head_low.len() < FORECAST_HEADS_LOW || head_high.len() < FORECAST_HEADS_HIGH {
         return Err(DatError::Weather(format!(
-            "forecast head tables too small: 7032={} bytes (need {}), 7036={} bytes (need {})",
+            "forecast head tables too small: {FORECAST_HEAD_LOW_FILE}={} bytes (need {}), {FORECAST_HEAD_HIGH_FILE}={} bytes (need {})",
             head_low.len(),
             FORECAST_HEADS_LOW,
             head_high.len(),
@@ -1454,7 +1454,7 @@ mod tests {
         let fc = synth_forecast();
         assert_eq!(fc.values(5, 10), Some([1, 2, 3]));
         assert_eq!(fc.values(105, 0), Some([4, 5, 6]));
-        assert_eq!(fc.values(5, 2160), fc.values(5, 0));
+        assert_eq!(fc.values(5, FORECAST_DAYS), fc.values(5, 0));
         assert_eq!(fc.values(0, 0), Some([0, 0, 0]));
     }
 

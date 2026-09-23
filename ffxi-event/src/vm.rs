@@ -5996,7 +5996,7 @@ mod tests {
     fn map_query_data_cases_advance_by_their_width() {
         for (sub, width) in [(1u8, 8usize), (3, 6), (5, 12)] {
             let mut data = vec![OP_MAP_QUERY, sub];
-            data.extend(std::iter::repeat(0).take(width - 2));
+            data.extend(std::iter::repeat_n(0, width - 2));
             data.push(OP_END);
             let mut e = vm(data, vec![]);
             assert_eq!(e.step(), StepResult::Done, "case {sub}");
@@ -6035,7 +6035,7 @@ mod tests {
             (0x0A, 2),
         ] {
             let mut data = vec![OP_RANKING, sub];
-            data.extend(std::iter::repeat(0).take(width - 2));
+            data.extend(std::iter::repeat_n(0, width - 2));
             data.push(OP_END);
             let mut e = vm(data, vec![]);
             assert_eq!(e.step(), StepResult::Done, "case {sub}");
@@ -6060,7 +6060,7 @@ mod tests {
             for &slot in slots {
                 data.extend_from_slice(&sel(slot));
             }
-            data.extend(std::iter::repeat(0).take(width - 2 - 2 * slots.len()));
+            data.extend(std::iter::repeat_n(0, width - 2 - 2 * slots.len()));
             data.push(OP_END);
             let mut e = EventVm::start(&block(data, vec![]), 7, 5, vec![1; 8]).unwrap();
             if let Some(slot) = untouched {

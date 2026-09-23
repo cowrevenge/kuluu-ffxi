@@ -5587,7 +5587,7 @@ mod tests {
             .map(|t| t.stage.id)
             .collect();
         assert!(
-            motions.contains(&*b"mw1?") && motions.contains(&*b"mw2?"),
+            motions.contains(b"mw1?") && motions.contains(b"mw2?"),
             "the skeleton tier's sswh cast motion must flatten into main, got {motions:?}"
         );
     }

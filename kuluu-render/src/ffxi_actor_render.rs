@@ -1411,6 +1411,11 @@ impl FfxiRenderActor {
         self.action_clips.clear();
     }
 
+    /// A scheduler Motion stage's action is in flight on this model.
+    pub fn has_action(&self) -> bool {
+        self.action.is_some()
+    }
+
     pub fn instance_slots(&self) -> &[u32] {
         &self.instance_slots
     }
@@ -1554,12 +1559,16 @@ impl FfxiRenderActor {
             .max(rest_clip_len_frames(&self.animations, clip_id));
         // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance - maxLoops
         // passes through to the coordinator verbatim: 0 loops until the effect ends, N ≥ 1 plays
-        // N times and pins the end frame (SkeletonAnimator.kt applyLoopBounds).
+        // N times and pins the end frame (SkeletonAnimator.kt applyLoopBounds). Retail holds the
+        // pose for the whole authored loop count - the cast's mw2? hold, released when the
+        // sequence ends - so the countdown must cover every loop or the cleared action leaves
+        // the pinned end frame behind.
         let num_loops = (motion.max_loops != 0).then_some(motion.max_loops as u32);
+        let loop_total = len * num_loops.unwrap_or(1) as f32;
         self.action = Some(ActionPlayback {
             clip_id,
             looping: num_loops.is_some(),
-            remaining: len.max(motion.duration_frames * 0.5).max(1.0),
+            remaining: loop_total.max(motion.duration_frames * 0.5).max(1.0),
             num_loops,
             transition_in: motion.transition_in.whole_frames(),
             transition_out: motion.transition_out.whole_frames(),
@@ -2135,6 +2144,18 @@ pub fn render_actor_stub(world_id: u32) -> FfxiRenderActor {
     )
 }
 
+/// A stub actor carrying the skeleton's clip set, the way load_pc fills
+/// `animations` from the race skeleton DAT, for the cutscene cast tests.
+#[cfg(test)]
+pub(crate) fn render_actor_with_skeleton_clips(
+    world_id: u32,
+    clips: Vec<SkeletonAnimation>,
+) -> FfxiRenderActor {
+    let mut actor = render_actor_stub(world_id);
+    actor.animations = Arc::new(clips);
+    actor
+}
+
 /// A render actor with no model behind it, carrying an explicit Cib Info movement byte, for the
 /// remote-grounding test that gates on MovementType and needs nothing else.
 #[cfg(test)]
@@ -2241,6 +2262,18 @@ pub fn advance_actor_pose_standalone(
     mount: Option<MountAttach>,
 ) {
     advance_actor_pose(actor, elapsed_frames, None, mount, false, None);
+}
+
+/// The same standalone advance with the caller's routine-lock state instead of
+/// the fixed `false`: the flag the full pose system passes from
+/// scheduler_runtime's `is_locked_now`.
+#[cfg(test)]
+pub(crate) fn advance_actor_pose_standalone_locked(
+    actor: &mut FfxiRenderActor,
+    elapsed_frames: f32,
+    animation_locked: bool,
+) {
+    advance_actor_pose(actor, elapsed_frames, None, None, animation_locked, None);
 }
 
 pub fn tick_ffxi_render_actors(
@@ -2722,6 +2755,7 @@ fn advance_actor_pose(
     let animations: &[SkeletonAnimation] = animations;
     let battle_clips: &[SkeletonAnimation] = battle_clips;
 
+    let action_pre = action.is_some();
     let action_id = match action.as_mut() {
         Some(act) => {
             act.remaining -= elapsed_frames;
@@ -2751,6 +2785,10 @@ fn advance_actor_pose(
         }
         None => None,
     };
+    // The frame the action's clip loses the pose: its slot must hand over to
+    // the idle selection at once (below) instead of waiting for the clip to
+    // finish looping, which a hold loop never does on its own.
+    let action_just_ended = action_pre && action.is_none();
 
     let engage_overlay = match *engage {
         EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. } => {
@@ -3013,7 +3051,11 @@ fn advance_actor_pose(
 
         if is_idle {
             for &clip in &matches {
-                coordinator.register_idle_animation(clip.clone(), true);
+                if action_just_ended {
+                    coordinator.register_idle_animation_eager(clip.clone());
+                } else {
+                    coordinator.register_idle_animation(clip.clone(), true);
+                }
             }
         } else {
             // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance loopParams — when the pose came from

@@ -2917,8 +2917,20 @@ fn advance_actor_pose(
         || !matches!(*engage, EngageMachine::NotEngaged)
         || inputs.engage_state.is_battle_idle();
     let overlay: &[SkeletonAnimation] = if use_battle { battle_clips } else { &[] };
+    // The strafe family (mvl?/mvr?/mvb?) is authored as one coherent set across the base
+    // motion DATs: the lower body in the race skeleton, the upper body in the upper-body
+    // motion DAT, the waist in the waist DAT (research/xim Model.kt getAnimationDirectories,
+    // the three disjoint joint ranges). The battle set ships its own upper-body strafe clip
+    // that poses the torso against the base lower/waist, so a battle-first dedup splits the
+    // family across two sets and the top half fights the legs; the family resolves from the
+    // base set alone, the set that carries the lower body.
+    let strafe_family = |id: &DatId| {
+        let s = id.as_str();
+        s.starts_with("mvl") || s.starts_with("mvr") || s.starts_with("mvb")
+    };
     // Skill-DAT (localDir) clips win over the actor's own pose set, per XIM resolution order.
     let resolve = |id: DatId| -> Vec<&SkeletonAnimation> {
+        let overlay: &[SkeletonAnimation] = if strafe_family(&id) { &[] } else { overlay };
         if !action_clips.is_empty() {
             pose_clip_matches(animations, action_clips.iter().chain(overlay.iter()), id)
         } else {
@@ -5636,6 +5648,109 @@ mod pose_resolution_tests {
         let root = ffxi_dat::archive::open_test_install()?;
 
         Some(load_pc(&root, 1, false, &[], None, None, None).expect("load Hume M"))
+    }
+
+    /// The engaged strafe keeps its clip family in one set: the upper body must
+    /// play the base set's mvl1 (the coherent partner of the base lower/waist),
+    /// not the battle set's mvl1, which poses the torso against the base legs
+    /// and reads as the top half flipping against them.
+    #[test]
+    fn engaged_strafe_resolves_the_family_from_one_set() {
+        let Some(loaded) = load_hume_m() else { return };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let inputs = inputs_for_pose(PoseState::StrafeLeft, true);
+
+        // The base set's mvl1 (upper-body motion DAT) and the battle set's mvl1
+        // are different clips; the strafe must keep the base one.
+        let base_mvl1_kfs = loaded
+            .animations
+            .iter()
+            .find(|a| a.id.as_str() == "mvl1")
+            .map(|a| a.key_frame_sets.len())
+            .expect("the base set ships an upper-body strafe clip");
+        let battle_mvl1_kfs = loaded
+            .battle_clips
+            .iter()
+            .find(|a| a.id.as_str() == "mvl1")
+            .map(|a| a.key_frame_sets.len())
+            .expect("the battle set ships an upper-body strafe clip");
+        assert_ne!(
+            base_mvl1_kfs, battle_mvl1_kfs,
+            "the test needs the two mvl1 variants to differ"
+        );
+
+        for _ in 0..90 {
+            actor.inputs = inputs;
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+
+        // The upper body (slot 1) must be playing the base set's mvl1.
+        let upper = actor
+            .coordinator
+            .animations
+            .get(1)
+            .and_then(|s| s.as_ref())
+            .and_then(|s| s.current_animation.as_ref())
+            .expect("the upper body slot is occupied");
+        assert_eq!(upper.animation.id.as_str(), "mvl1");
+        assert_eq!(
+            upper.animation.key_frame_sets.len(),
+            base_mvl1_kfs,
+            "the upper body must play the base set's strafe clip, not the battle set's"
+        );
+    }
+
+    /// With a main-hand weapon equipped, the weapon battle DAT's mvl1 must still
+    /// lose to the base set's: the strafe family resolves from one set per slot,
+    /// the base set that carries the lower body, regardless of the weapon.
+    #[test]
+    fn engaged_strafe_with_a_weapon_keeps_the_base_family() {
+        const HUME_M: u8 = 1;
+        const MAIN_HAND_SLOT: u8 = 6;
+        let Some(root) = ffxi_dat::archive::open_test_install() else { return };
+        let dll = crate::scheduler_runtime::main_dll_for_root(root.root())
+            .expect("FFXiMain.dll loads");
+        let main_weapon = crate::look_resolver::equipment_dat_id(&dll, MAIN_HAND_SLOT, 0, HUME_M)
+            .expect("HumeM main-hand model 0");
+        let loaded = load_pc(&root, HUME_M, false, &[], None, Some(main_weapon), None)
+            .expect("load Hume M with a main-hand weapon");
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let inputs = inputs_for_pose(PoseState::StrafeLeft, true);
+
+        let base_mvl1_kfs = loaded
+            .animations
+            .iter()
+            .find(|a| a.id.as_str() == "mvl1")
+            .map(|a| a.key_frame_sets.len())
+            .expect("the base set ships an upper-body strafe clip");
+        let weapon_mvl1_kfs = loaded
+            .battle_clips
+            .iter()
+            .find(|a| a.id.as_str() == "mvl1")
+            .map(|a| a.key_frame_sets.len())
+            .expect("the weapon battle set ships an upper-body strafe clip");
+        assert_ne!(
+            base_mvl1_kfs, weapon_mvl1_kfs,
+            "the test needs the base and weapon mvl1 to differ"
+        );
+
+        for _ in 0..90 {
+            actor.inputs = inputs;
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+
+        let upper = actor
+            .coordinator
+            .animations
+            .get(1)
+            .and_then(|s| s.as_ref())
+            .and_then(|s| s.current_animation.as_ref())
+            .expect("the upper body slot is occupied");
+        assert_eq!(
+            upper.animation.key_frame_sets.len(),
+            base_mvl1_kfs,
+            "the upper body must play the base set's strafe clip, not the weapon battle set's"
+        );
     }
 
     #[test]

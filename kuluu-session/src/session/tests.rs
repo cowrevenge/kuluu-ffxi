@@ -933,7 +933,6 @@ fn flush_inputs(user_driven: bool, watchdog_fires: bool, walked_away: bool) -> E
         watchdog_fires,
         walked_away,
         tag_in_flight: false,
-        hard_watchdog_fires: false,
     }
 }
 
@@ -949,7 +948,6 @@ fn a_tag_in_flight_holds_the_flush_even_in_agent_mode() {
                 watchdog_fires: true,
                 walked_away: true,
                 tag_in_flight,
-                hard_watchdog_fires: false,
             },
             &mut pending,
             Some(PINNED_EVENT),
@@ -967,28 +965,6 @@ fn a_tag_in_flight_holds_the_flush_even_in_agent_mode() {
         !flushes(true),
         "a tag in flight holds the event open for OnEventUpdate"
     );
-}
-
-/// The hard grace overrides the tag-in-flight deferral: a pending tag whose
-/// ack does not arrive must not hold the player pin indefinitely.
-#[test]
-fn hard_grace_flushes_even_with_a_tag_in_flight() {
-    let mut pending = vec![PINNED_EVENT];
-    let flush = flush_pending_event_end(
-        EventEndFlushInputs {
-            user_driven: true,
-            watchdog_fires: true,
-            walked_away: false,
-            tag_in_flight: true,
-            hard_watchdog_fires: true,
-        },
-        &mut pending,
-        Some(PINNED_EVENT),
-        FLUSH_ZONE,
-        FLUSH_SEQ,
-    );
-    assert!(flush.is_some(), "the hard grace force-ends the event");
-    assert!(pending.is_empty(), "the pinned event is drained");
 }
 
 #[test]

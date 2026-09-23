@@ -415,37 +415,6 @@ pub fn drain_cutscene_events(
     *cursor = total;
 }
 
-// Last-resort release for a cutscene the session leaves running: the session's
-// hard grace force-ends a stuck event, but if that path does not fire (a
-// dropped session, a desynced scope) the player would stay pinned with no
-// dialog and no release. A legitimate event shows a dialog or ends well
-// inside this, so a held `active` this long is a missing release, not a long
-// cutscene; the script's own waits bound a legitimate hold
-// (research/XiEvents/OpCodes/0x001C.md).
-const CUTSCENE_MODE_MAX_HOLD_SECS: f32 = 90.0;
-
-/// Force-clear a `CutsceneMode.active` that has outlived every legitimate
-/// event, so a lost session-side release does not hold the player pin.
-pub fn backstop_cutscene_mode(
-    time: Res<Time>,
-    mut held_secs: Local<f32>,
-    mut mode: ResMut<CutsceneMode>,
-) {
-    if !mode.active {
-        *held_secs = 0.0;
-        return;
-    }
-    *held_secs += time.delta_secs();
-    if *held_secs > CUTSCENE_MODE_MAX_HOLD_SECS {
-        tracing::warn!(
-            held_secs = *held_secs,
-            "cutscene mode outlived its max hold; force-releasing the player pin"
-        );
-        mode.end();
-        *held_secs = 0.0;
-    }
-}
-
 /// A `CutsceneCue::EntityName` target as a server id: the local player's own
 /// id from the table, the literal id otherwise.
 fn cutscene_actor_server_id(self_id: Option<u32>, actor: CutsceneActor) -> Option<u32> {
@@ -644,7 +613,6 @@ impl Plugin for CutscenePlugin {
                 Update,
                 (
                     drain_cutscene_events,
-                    backstop_cutscene_mode,
                     apply_cutscene_hud_hide,
                     tick_screen_fade,
                     apply_screen_fade,

@@ -665,7 +665,8 @@ pub const FORECAST_DAYS: u32 = 2160;
 /// (research/XiEvents/OpCodes/0x0072.md).
 pub const FORECAST_DATA_BASE: usize = 6480;
 
-/// The three values 0x72 copies into `Work_Zone[2..5)` per day.
+/// The three values 0x72 copies into `Work_Zone[2..5)` per day
+/// (research/XiEvents/OpCodes/0x0072.md `PTR_Work_Zone[2..5)` loop).
 pub const FORECAST_VALUES_PER_DAY: usize = 3;
 
 /// The head-table entry counts: 7032 serves regions < 100 (100 entries), 7036
@@ -718,7 +719,8 @@ impl WeatherForecast {
     }
 
     /// The three forecast values 0x72 writes into `Work_Zone[2..5)` for
-    /// `region` on `day` of the 2160-day cycle. `None` if the region or the
+    /// `region` on `day` of the 2160-day cycle
+    /// (research/XiEvents/OpCodes/0x0072.md). `None` if the region or the
     /// derived index falls outside the shipped table.
     pub fn values(&self, region: u32, day: u32) -> Option<[u32; 3]> {
         let day = (day % FORECAST_DAYS) as usize;
@@ -1429,16 +1431,13 @@ mod tests {
     }
 
     fn synth_forecast() -> WeatherForecast {
-        // Identity head tables: region r uses head r within its group.
         let head_low = std::array::from_fn(|i| i as u8);
         let head_high = std::array::from_fn(|i| i as u8);
         let mut data_low = vec![0u32; 14000];
         let mut data_high = vec![0u32; 14000];
-        // region 5, day 10 -> head 5, base 6480 + 5 + 30 = 6515.
         data_low[6515] = 1;
         data_low[6516] = 2;
         data_low[6517] = 3;
-        // region 105, day 0 -> head_idx 5, head 5, base 6485.
         data_high[6485] = 4;
         data_high[6486] = 5;
         data_high[6487] = 6;
@@ -1455,22 +1454,16 @@ mod tests {
         let fc = synth_forecast();
         assert_eq!(fc.values(5, 10), Some([1, 2, 3]));
         assert_eq!(fc.values(105, 0), Some([4, 5, 6]));
-        // day wraps the 2160-day cycle.
         assert_eq!(fc.values(5, 2160), fc.values(5, 0));
-        // an unmarked cell reads the table's zero.
         assert_eq!(fc.values(0, 0), Some([0, 0, 0]));
     }
 
     #[test]
     fn forecast_values_out_of_range_region_is_none() {
         let fc = synth_forecast();
-        // region 300 -> head_idx 200, past the 200-entry high table.
         assert_eq!(fc.values(300, 0), None);
     }
 
-    // Pins the shipped layout the index arithmetic reads. Measured from the
-    // install: 7033's u32 @6480..6482 is [0x01FFFF01, 0xFF01FFFF, 0xFFFF01FF],
-    // and region 0's head (7032[0]) is 0, so (0, 0) lands exactly there.
     #[test]
     fn real_forecast_reads_the_shipped_base_cell() {
         let Some(root) = crate::archive::open_test_install() else {

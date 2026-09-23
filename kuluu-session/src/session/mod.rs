@@ -2301,6 +2301,13 @@ const KEY3_SEED_XOR: u8 = 0x5a;
 
 const PENDING_EVENT_END_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+// A VM pending tag in flight owns the server-side event until its s2c ack, so the soft
+// watchdog above defers to it. But an ack that does not arrive (a tag the server does
+// not answer, or a dropped reply) would hold the player pin indefinitely, so this hard
+// grace force-ends the event regardless of the tag: a stuck transaction is worse than
+// a torn one (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+const HARD_PENDING_EVENT_END_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 // Retail locks movement during events, so there is no upstream value: player
 // drift past this (above rubber-band jitter, ~one deliberate step at 5 yalm/s)
 // releases a pinned message-dialog as walked-away rather than waiting out the grace.
@@ -4467,6 +4474,9 @@ async fn keepalive_loop(
                 let watchdog_fires = pending_event_end_since
                     .map(|t| t.elapsed() > PENDING_EVENT_END_GRACE)
                     .unwrap_or(false);
+                let hard_watchdog_fires = pending_event_end_since
+                    .map(|t| t.elapsed() > HARD_PENDING_EVENT_END_GRACE)
+                    .unwrap_or(false);
                 let walk_dist = pending_event_end_anchor.map(|anchor| {
                     let dx = self_pos.pos.x - anchor.x;
                     let dy = self_pos.pos.y - anchor.y;
@@ -4560,6 +4570,7 @@ async fn keepalive_loop(
                         watchdog_fires,
                         walked_away,
                         tag_in_flight: dialog_session.has_pending_tag(),
+                        hard_watchdog_fires,
                     },
                     &mut pending_event_end,
                     dialog_session.active_end(),
@@ -4589,6 +4600,21 @@ async fn keepalive_loop(
                                     .into(),
                                 server_ts: 0,
                             },
+                        });
+                    } else if hard_watchdog_fires {
+                        // The soft grace defers to a tag in flight; this branch is the
+                        // override that flushes the 0x05B when the tag's ack does not
+                        // arrive (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+                        tracing::warn!(
+                            grace_secs = HARD_PENDING_EVENT_END_GRACE.as_secs(),
+                            "auto-flushed pending EVENT_END (hard grace expired; pending-tag ack never arrived)"
+                        );
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: format!(
+                                "auto-released pinned event after {}s hard grace \
+                                 (a pending server reply never arrived)",
+                                HARD_PENDING_EVENT_END_GRACE.as_secs()
+                            ),
                         });
                     } else if watchdog_fires {
                         tracing::warn!(
@@ -7948,6 +7974,10 @@ struct EventEndFlushInputs {
     /// A VM pending tag is in flight: its event must stay open server-side for
     /// OnEventUpdate, so no Mode-0 END may drain it this tick.
     tag_in_flight: bool,
+    /// The hard grace expired: the event is force-ended even with a tag in
+    /// flight, because a tag whose ack does not arrive would otherwise hold the
+    /// player pin indefinitely.
+    hard_watchdog_fires: bool,
 }
 
 /// What the tick owes the rest of the loop once the pinned events are drained.
@@ -7980,8 +8010,13 @@ fn flush_pending_event_end(
     // A pending tag in flight owns the server-side event until its s2c ack: a
     // Mode-0 END here would kill it mid-transaction and OnEventUpdate would
     // find no currentEvent (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
-    let flush = !inputs.tag_in_flight
-        && (inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open));
+    // The hard grace overrides that deferral: a tag whose ack does not arrive
+    // would otherwise pin the player with no dialog and no release
+    // (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+    let flush = inputs.hard_watchdog_fires
+        || (!inputs.tag_in_flight
+            && (inputs.walked_away
+                || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open)));
     if !flush || pending_event_end.is_empty() {
         return None;
     }

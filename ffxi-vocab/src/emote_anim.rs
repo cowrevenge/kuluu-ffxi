@@ -28,9 +28,11 @@ fn em_routine(sub: u16) -> [u8; 4] {
 /// Mining=(6,0), Harvesting=(7,0) — confirmed by the files' Japanese tool
 /// particles: ono0=axe, turu=pickaxe, kama=sickle). Notable non-uniformities
 /// the old id/8 hypothesis missed: Point/Bow are swapped in file 0, Salute
-/// occupies em02..em04 (one per nation, 0x05A Param = nation), and ids ≥ 6
-/// sit at (id+2)/8 only through id 37. Returns None when no body routine
-/// exists in the era DATs (face-only emotes, id gaps, unmapped job emotes).
+/// occupies em02..em04 (one per nation, 0x05A Param = nation), ids ≥ 6
+/// sit at (id+2)/8 only through id 37, and Hurray, bell-ring and aim have
+/// weapon- or note-keyed variants with unmapped selection, so those ids play
+/// the em00 default. Returns None when no body routine exists in the era
+/// DATs (face-only emotes, id gaps, unmapped job emotes).
 pub fn emote_routine(emote_id: u16, param: u16) -> Option<(u32, [u8; 4])> {
     match emote_id {
         0 => Some((0, *b"em01")),
@@ -46,18 +48,13 @@ pub fn emote_routine(emote_id: u16, param: u16) -> Option<(u32, [u8; 4])> {
                 em_routine(shifted % EMOTE_ROUTINES_PER_FILE),
             ))
         }
-        // HELM (server-initiated): axe / pickaxe / sickle files.
         40 => Some((5, *b"em00")),
         41 => Some((6, *b"em00")),
         42 => Some((7, *b"em00")),
-        // Hurray variants (xe0..xe6) are weapon-keyed; selection unmapped — em00 default.
         43 => Some((8, *b"em00")),
         44 => Some((11, *b"em00")),
-        // Dance1-4 (dc0..dc3).
         65..=68 => Some((12, em_routine(emote_id - 65))),
-        // Bell-ring motion variants (rx/rs); note→variant selection unmapped.
         73 => Some((10, *b"em00")),
-        // Aim variants (ye0..ye6) are ranged-weapon-keyed; selection unmapped — em00 default.
         96 => Some((9, *b"em00")),
         _ => None,
     }

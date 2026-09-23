@@ -1676,8 +1676,6 @@ pub fn poll_action_dat_tasks(
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                // Same three-tier flatten as the Routine arm: a package routine's
-                // sub-routines may live on the actor or in the global effect dir.
                 let mut lookup = RoutineLookup::new().with_dat(&parsed.schedulers);
                 if let Some(r) = actor_routines_via_mut(actor_entity, &q_children, &q_actors) {
                     lookup = lookup.with_actor(r);
@@ -2596,8 +2594,8 @@ pub struct CutsceneActorState {
     /// Server ids hidden by a running cutscene's EVENT_HIDE cue; cleared at CutsceneEnded.
     hidden: std::collections::HashSet<u32>,
     /// Server ids with a running 0x6C TRANSPAR fade (the
-    /// crate::ffxi_actor_render::CutsceneTranspar component); cleared at
-    /// CutsceneEnded.
+    /// crate::ffxi_actor_render::CutsceneTranspar component,
+    /// research/XiEvents/OpCodes/0x006C.md); cleared at CutsceneEnded.
     faded: std::collections::HashSet<u32>,
 }
 
@@ -2895,7 +2893,7 @@ pub fn apply_cutscene_actor_cues(
                 duration_frames,
             } => {
                 // Fading the local player model is a valid ask, so resolve
-                // without excluding self.
+                // without excluding self (research/XiEvents/OpCodes/0x006C.md).
                 let Some(id) = cutscene_actor_server_id(self_id, target) else {
                     continue;
                 };
@@ -2979,6 +2977,9 @@ pub fn release_cutscene_actors(
     mut q_xform: Query<&mut Transform, With<WorldEntity>>,
     q_hidden: Query<Entity, With<CutsceneHidden>>,
     q_faded: Query<Entity, With<crate::ffxi_actor_render::CutsceneTranspar>>,
+    q_scheds: Query<(Entity, &ActiveSchedulers), With<WorldEntity>>,
+    q_children: Query<&Children>,
+    mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     mut commands: Commands,
 ) {
     let total = events.pushed_total;
@@ -2993,7 +2994,36 @@ pub fn release_cutscene_actors(
         }
     }
     *cursor = total;
-    if !ended || state.is_empty() {
+    if !ended {
+        return;
+    }
+    // A cutscene cast's Motion stage owns the caster's pose (the gate guard's
+    // Signet arm-raise, research/XiEvents/OpCodes/0x0073.md). The event
+    // ending must release it: stop the routine so its Motion stage cannot
+    // re-arm the pose, and drop the held action so the pose pass falls back
+    // to idle on its next run. This runs even when no entity was touched
+    // (the cast does not move the guard), so it precedes the touched-only
+    // position reset below.
+    for (entity, scheds) in q_scheds.iter() {
+        if !scheds
+            .routines
+            .iter()
+            .any(|r| r.cutscene_motion_actor.is_some())
+        {
+            continue;
+        }
+        if let Ok(children) = q_children.get(entity) {
+            for &child in children {
+                if let Ok(mut actor) = q_actors.get_mut(child) {
+                    actor.clear_cutscene_action();
+                }
+            }
+        }
+        commands
+            .entity(entity)
+            .remove::<(ActiveSchedulers, ActionAssets, ActionTarget)>();
+    }
+    if state.is_empty() {
         return;
     }
     for wire in &scene_state.snapshot.entities {
@@ -3015,7 +3045,8 @@ pub fn release_cutscene_actors(
         commands.entity(e).remove::<CutsceneHidden>();
     }
     // Stop every running 0x6C fade at its current value: retail drops the
-    // fade's driver with the event's own ExtData.
+    // fade's driver with the event's own ExtData
+    // (research/XiEvents/OpCodes/0x006C.md).
     for e in q_faded.iter() {
         commands
             .entity(e)
@@ -3999,8 +4030,6 @@ mod tests {
                 "offset ({dx}, {dz}): forward {forward:?}, want {want:?}"
             );
         }
-        // The event-heading path agrees: heading 0 faces +X, a quarter turn
-        // faces the same way a look-at toward +Z does.
         let quarter = (EVENT_HEADING_UNITS / 4.0) as i32;
         let a = event_heading_to_quat(quarter) * Vec3::X;
         let b = look_at_rotation(0.0, 1.0) * Vec3::X;
@@ -6692,7 +6721,8 @@ mod tests {
     }
 
     /// 0x6C inserts the fade component on the target and stops it, at whatever
-    /// value it reached, on CutsceneEnded.
+    /// value it reached, on CutsceneEnded
+    /// (research/XiEvents/OpCodes/0x006C.md).
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn transpar_cue_inserts_the_fade_and_end_stops_it() {

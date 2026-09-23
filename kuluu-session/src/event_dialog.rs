@@ -135,7 +135,8 @@ pub struct DialogSession {
     loaded_string_zone: Option<u16>,
     loaded_zone_rects_zone: Option<u16>,
     /// The event zone's range rects 0x82 RANGE_RECT hit-tests against, loaded
-    /// from the zone resource DAT's RID chunks (ffxi-dat zone_interaction).
+    /// from the zone resource DAT's RID chunks (ffxi-dat zone_interaction,
+    /// research/XiEvents/OpCodes/0x0082.md).
     zone_rects: Option<std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>>,
     event_dat: Option<Arc<EventDat>>,
     player_position: Option<ffxi_event::vm::scene::EventPosition>,
@@ -169,9 +170,9 @@ pub struct DialogSession {
     /// research/XiEvents/OpCodes/0x005B.md
     entity_types: std::collections::HashMap<u32, u8>,
     /// The global weather forecast table 0x72 GETWEATHER reads, loaded once
-    /// from the install's forecast DATs and shared across every runner. `None`
-    /// until the first event that needs it (or the install has no forecast
-    /// DATs).
+    /// from the install's forecast DATs and shared across every runner
+    /// (research/XiEvents/OpCodes/0x0072.md). `None` until the first event
+    /// that needs it (or the install has no forecast DATs).
     weather_forecast: Option<std::sync::Arc<ffxi_dat::weather::WeatherForecast>>,
     /// Motion holds awaiting the renderer's finish report, keyed by the wire
     /// actor the cue named plus its key: the value is the VM's own unresolved
@@ -254,10 +255,10 @@ impl DialogSession {
         self.strings = load_strings(self.dat_root.as_deref(), zone);
     }
 
-    /// Load the global weather forecast table once, for 0x72 GETWEATHER. The
-    /// table is zone-independent, so it is cached for the session's life; a
-    /// missing install or forecast DAT leaves it `None` and 0x72 advances
-    /// without writing.
+    /// Load the global weather forecast table once, for 0x72 GETWEATHER
+    /// (research/XiEvents/OpCodes/0x0072.md). The table is zone-independent,
+    /// so it is cached for the session's life; a missing install or forecast
+    /// DAT leaves it `None` and 0x72 advances without writing.
     fn ensure_weather_forecast(&mut self) {
         if self.weather_forecast.is_some() {
             return;
@@ -877,10 +878,11 @@ pub enum ResolvedCue {
     MusicVolume { volume: u8, fade_frames: u16 },
     /// 0x5C rides the existing [`AgentEvent::MusicChanged`] (the song) and
     /// [`AgentEvent::MusicVolumeChanged`] (its start volume) on the named BGM
-    /// slot instead of the cue stream.
+    /// slot instead of the cue stream (research/XiEvents/OpCodes/0x005C.md).
     MusicSong { slot: u8, track: u16, volume: u8 },
     /// 0x69/0x6A ride the existing [`AgentEvent::MusicVolumeChanged`], scoped
-    /// to the BGM slots the retail sound-type `mask` reaches.
+    /// to the BGM slots the retail sound-type `mask` reaches
+    /// (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).
     SoundVolume {
         mask: u8,
         volume: u8,
@@ -892,7 +894,8 @@ pub enum ResolvedCue {
     Map(MapOp),
     /// 0x6E/0x63 ride the existing [`AgentEvent::EntityEmoted`] (the same event
     /// a server MOTIONMES sends): the renderer's emote dispatcher already plays
-    /// the DAT routine, so no new wire shape is needed.
+    /// the DAT routine, so no new wire shape is needed
+    /// (research/XiEvents/OpCodes/0x006E.md, 0x0063.md).
     Emote {
         actor_id: u32,
         emote_id: u16,
@@ -932,7 +935,7 @@ fn snapshot_motion(motion: ffxi_event::ExtSchedulerMotion) -> kuluu_snapshot::Ex
 
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
 /// running event belongs to, and `player_id`, the server id the LocalPlayer
-/// lookup resolves to. `zone` is the event's zone, carried on the 0x2D
+/// lookup resolves to. `zone` is the event's zone, carried on the
 /// ZoneScheduler cue so the host resolves its key out of the zone's own model
 /// DAT (the VM does not know it).
 /// research/XiEvents/OpCodes/0x002D.md
@@ -1207,6 +1210,10 @@ impl CutsceneScope {
             return;
         }
         self.open = true;
+        tracing::info!(
+            event_id,
+            "cutscene session opened (player pinned until CutsceneEnded)"
+        );
         let _ = event_tx.send(AgentEvent::CutsceneStarted { event_id });
     }
 
@@ -1279,8 +1286,6 @@ impl CutsceneScope {
                 emote_id,
                 param,
             } => {
-                // The MOTIONMES shape with no target: the renderer's emote
-                // dispatcher plays the routine on `actor_id`.
                 let _ = event_tx.send(AgentEvent::EntityEmoted {
                     actor_id,
                     actor_index: 0,
@@ -1312,7 +1317,7 @@ impl CutsceneScope {
         }
         self.open = false;
         self.published = false;
-        tracing::debug!(?exit, "event session closed");
+        tracing::info!(?exit, "cutscene session closed (player unpinned)");
         let _ = event_tx.send(AgentEvent::CutsceneEnded);
     }
 
@@ -2447,6 +2452,7 @@ mod zone_text_skew_tests {
 pub(crate) mod tests {
     use super::*;
     use crate::session::event_transport::contracts::NPC;
+    use ffxi_event::{SOUND_TYPE_EFFECT, SOUND_TYPE_SPECIAL_CHAT};
 
     /// A miniature fishing block: offsets relative to a base, mirroring the
     /// real layout's landmark lines.
@@ -2829,7 +2835,8 @@ pub(crate) mod tests {
         const EVENT: u16 = 9001;
         const ZONE: u16 = 248;
         // 0x32 speed@ref0; 0x31 mode 0: x@ref1 z@ref2 y@ref3 time@ref4;
-        // 0x31 mode 1; END.
+        // 0x31 mode 1; END
+        // (research/XiEvents/OpCodes/0x0031.md, 0x0032.md).
         let program = vec![
             0x32, 0x00, 0x80, 0x31, 0x00, 0x01, 0x80, 0x02, 0x80, 0x03, 0x80, 0x04, 0x80, 0x31,
             0x01, 0x00,
@@ -2870,7 +2877,6 @@ pub(crate) mod tests {
             matches!(session.begin(trigger), Begin::Waiting),
             "the move hold parks the event"
         );
-        // The walk ends at the goal, so the tracked position moved there.
         assert_eq!(
             session.entity_positions.get(&NPC),
             Some(&ffxi_event::vm::scene::EventPosition {
@@ -2878,7 +2884,8 @@ pub(crate) mod tests {
                 y: -5,
                 z: 400,
                 heading: 0,
-            })
+            }),
+            "the walk ends at the goal, so the tracked position moved there"
         );
     }
 
@@ -3670,7 +3677,7 @@ pub(crate) mod tests {
 
     /// 0x69/0x6A scope the volume to the BGM slots the retail sound-type mask
     /// reaches: zone hits the day/night slots, master hits every slot, and the
-    /// SFX-only bits hit none.
+    /// SFX-only bits hit none (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).
     #[test]
     fn sound_volume_rides_the_music_event_on_the_masked_slots() {
         const VOLUME: u8 = 64;
@@ -3697,16 +3704,26 @@ pub(crate) mod tests {
                 })
                 .collect()
         };
-        assert_eq!(slots_for(0x04), vec![0, 1], "zone -> day/night slots");
         assert_eq!(
-            slots_for(0x08),
+            slots_for(SOUND_TYPE_ZONE),
+            vec![0, 1],
+            "zone -> day/night slots"
+        );
+        assert_eq!(
+            slots_for(SOUND_TYPE_MASTER),
             (0..crate::state::MUSIC_SLOT_COUNT).collect::<Vec<_>>(),
             "master -> every slot"
         );
-        assert!(slots_for(0x01).is_empty(), "effect has no BGM slot");
-        assert!(slots_for(0x10).is_empty(), "special chat has no BGM slot");
+        assert!(
+            slots_for(SOUND_TYPE_EFFECT).is_empty(),
+            "effect has no BGM slot"
+        );
+        assert!(
+            slots_for(SOUND_TYPE_SPECIAL_CHAT).is_empty(),
+            "special chat has no BGM slot"
+        );
         assert_eq!(
-            slots_for(0x04 | 0x08),
+            slots_for(SOUND_TYPE_ZONE | SOUND_TYPE_MASTER),
             (0..crate::state::MUSIC_SLOT_COUNT).collect::<Vec<_>>(),
             "master subsumes zone"
         );

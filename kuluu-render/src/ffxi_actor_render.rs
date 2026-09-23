@@ -1402,6 +1402,15 @@ impl FfxiRenderActor {
         self.action.as_ref().map(|a| &a.clip_id)
     }
 
+    /// Drop the completion motion a cutscene cast started so the pose falls back to idle on the
+    /// next frame. A cutscene's cast pose (the gate guard's Signet arm-raise) is owned by the
+    /// event, not by combat: when the event ends, the pose must not outlive it. The pose pass
+    /// re-selects idle from the cleared `action` on its next run.
+    pub fn clear_cutscene_action(&mut self) {
+        self.action = None;
+        self.action_clips.clear();
+    }
+
     pub fn instance_slots(&self) -> &[u32] {
         &self.instance_slots
     }
@@ -3328,7 +3337,6 @@ mod cutscene_transpar_tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(0.5));
         app.update();
-        // A quarter into the fade: 0.8 + (0.4 - 0.8) * 0.25 = 0.7.
         assert!(
             (app.world()
                 .resource::<FfxiSkinRegistry>()
@@ -3874,9 +3882,9 @@ pub fn finish_actor_reveal(
         for child in children {
             if let Ok((opaque, mut material)) = materials.get_mut(*child) {
                 material.0 = opaque.0.clone();
-                // A zone change despawns these children in the same frame
-                // the fade finishes; a removal on a gone entity is nothing to
-                // warn about.
+                // A zone change despawns these children in the same frame the
+                // fade finishes (scene.rs sync_entities_system); a removal on
+                // a gone entity is nothing to warn about.
                 commands.entity(*child).try_remove::<ActorFadeMaterial>();
             }
         }

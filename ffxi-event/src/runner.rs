@@ -164,7 +164,8 @@ impl DialogRunner {
         self.vm.set_actor_types(types);
     }
 
-    /// Install the global weather forecast table 0x72 GETWEATHER reads; see
+    /// Install the global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md); see
     /// [`EventVm::set_weather_forecast`]. The session loads it once and shares
     /// the same `Arc` across every runner it drives.
     pub fn set_weather_forecast(
@@ -174,9 +175,10 @@ impl DialogRunner {
         self.vm.set_weather_forecast(forecast);
     }
 
-    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against; see
-    /// [`EventVm::set_zone_rects`]. The session loads the event zone's RID table
-    /// once and shares the same `Arc` across every runner it drives.
+    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md); see [`EventVm::set_zone_rects`].
+    /// The session loads the event zone's RID table once and shares the same
+    /// `Arc` across every runner it drives.
     pub fn set_zone_rects(
         &mut self,
         rects: std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
@@ -184,9 +186,9 @@ impl DialogRunner {
         self.vm.set_zone_rects(rects);
     }
 
-    /// Install the zone number 0xD4 case 0 opens the map on; see
-    /// [`EventVm::set_current_zone`]. The session injects the event zone before
-    /// driving.
+    /// Install the zone number 0xD4 case 0 opens the map on
+    /// (research/XiEvents/OpCodes/0x00D4.md); see [`EventVm::set_current_zone`].
+    /// The session injects the event zone before driving.
     pub fn set_current_zone(&mut self, zone: i32) {
         self.vm.set_current_zone(zone);
     }
@@ -243,9 +245,9 @@ impl DialogRunner {
         self.vm.apply_pending_str(strings);
     }
 
-    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot; lands
-    /// before the next step even while the SubMapNum tag is held, like
-    /// [`Self::apply_pending_num`].
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot
+    /// (research/XiEvents/OpCodes/0x00A6.md); lands before the next step even
+    /// while the SubMapNum tag is held, like [`Self::apply_pending_num`].
     pub fn set_submap_num(&mut self, num: u32) {
         self.vm.set_submap_num(num);
     }

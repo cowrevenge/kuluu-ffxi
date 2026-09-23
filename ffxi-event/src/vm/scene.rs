@@ -151,7 +151,8 @@ impl EventVm {
     }
 
     /// The event entity's tracked position in the zone-interaction (RID) float
-    /// space 0x82 RANGE_RECT hit-tests against: the scene's tracked position
+    /// space 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md): the scene's tracked position
     /// rescaled from event units back to the zone's native float coords. Event
     /// units store x * 1000, wire-z * 1000 in y, and wire-y * 1000 in z, so the
     /// inverse is [x/1000, z/1000, y/1000]. `None` when no scene is attached,

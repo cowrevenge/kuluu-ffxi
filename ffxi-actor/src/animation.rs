@@ -440,6 +440,15 @@ impl SkeletonAnimationCoordinator {
         );
     }
 
+    /// The idle registration that hands the slot over at once even though the
+    /// current clip is still mid-loop: the action driving that clip just
+    /// ended, and retail's kill drops the sequence's animation instance, so
+    /// the pinned end frame must not outlive it. The crossfade runs the
+    /// current clip's own transition-out window.
+    pub fn register_idle_animation_eager(&mut self, animation: SkeletonAnimation) {
+        self.register_animation(animation, LoopParams::low_priority_loop(), None, |_| true);
+    }
+
     pub fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
         let mut high: Option<(KeyFrameTransform, &SkeletonAnimator)> = None;
         let mut low: Option<KeyFrameTransform> = None;

@@ -217,6 +217,19 @@ const OP_SCHED_TWIN_D5: u8 = 0xD5;
 // The 0x73 twin: the spell cast with a case byte, wider than 0x73 by that
 // byte (research/XiEvents/OpCodes/0x00C4.md).
 const OP_MAGIC_TWIN: u8 = 0xC4;
+// The end-scheduler family: kill the tag-named action on actor1, actor2
+// riding along (research/XiEvents/OpCodes/0x0050.md, 0x0051.md, 0x0052.md).
+// 0x50/0x51 are 13 bytes; 0x52 and its seven twins are 15.
+const OP_ENDSCHEDULOR: u8 = 0x50;
+const OP_ENDMAPSCHEDULOR: u8 = 0x51;
+const OP_ENDLOADSCHEDULER_MAIN: u8 = 0x52;
+const OP_ENDLOADSCHED_TWIN_A1: u8 = 0xA1;
+const OP_ENDLOADSCHED_TWIN_A3: u8 = 0xA3;
+const OP_ENDLOADSCHED_TWIN_BD: u8 = 0xBD;
+const OP_ENDLOADSCHED_TWIN_C7: u8 = 0xC7;
+const OP_ENDLOADSCHED_TWIN_CF: u8 = 0xCF;
+const OP_ENDLOADSCHED_TWIN_D2: u8 = 0xD2;
+const OP_ENDLOADSCHED_TWIN_D7: u8 = 0xD7;
 // The local-player scheduler (rank-up animations): work at +1, both actors the
 // player, the `main` routine (research/XiEvents/OpCodes/0x007D.md).
 const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
@@ -416,6 +429,25 @@ const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
 const MAGICSCHEDULOR_KEY_OFS: usize = 1;
 const MAGICSCHEDULOR_ACTOR1_OFS: usize = 3;
 const MAGICSCHEDULOR_ACTOR2_OFS: usize = 7;
+// 0x0050/0x0051: actor1 at +1, the tag at +9 (research/XiEvents/OpCodes/
+// 0x0050.md, 0x0051.md).
+const ENDSCHEDULOR_ACTOR1_OFS: usize = 1;
+const ENDSCHEDULOR_TAG_OFS: usize = 9;
+// 0x0052 and its twins: actor1 at +3, the tag at +11; the work operand at +1
+// selects the DAT, which the stop cue does not carry
+// (research/XiEvents/OpCodes/0x0052.md).
+const ENDLOADSCHED_ACTOR1_OFS: usize = 3;
+const ENDLOADSCHED_TAG_OFS: usize = 11;
+/// The stop family's tag operand values that name no routine slot: zero, and
+/// the four spaces retail writes over a cleared tag
+/// (research/XiEvents/OpCodes/0x005E.md `Unknown0001 = 0x20202020`).
+const STOP_TAG_ZERO: FourCc = [0, 0, 0, 0];
+const STOP_TAG_SPACES: FourCc = *b"    ";
+
+/// The stop family's tag operand as the cue's `key`.
+fn stop_action_key(tag: FourCc) -> Option<FourCc> {
+    (tag != STOP_TAG_ZERO && tag != STOP_TAG_SPACES).then_some(tag)
+}
 // 0x00C4: the 0x73 sub-handler with param1 = 1 — the case byte at +1, the key
 // work at +2 (`getworkofs(param1 + 1)`), actor1 at +3, actor2 at +8
 // (`eventgetcode2(7 + param1)`), and the advance is `11 + param1` = 12
@@ -2133,6 +2165,31 @@ impl EventVm {
                         actor2: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR2_OFS)),
                         tag,
                         duration: self.getworkofs(LOADEVENTSCHEDULER2_DURATION_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
+                // The end-scheduler family: kill the tag-named action on
+                // actor1 (research/XiEvents/OpCodes/0x0050.md, 0x0051.md,
+                // 0x0052.md). Retail skips the kill when either actor does not
+                // resolve; this VM resolves reserved lookups to the event
+                // entity, so the cue goes out unconditionally and the consumer
+                // drops an unknown id, the way the other actor cues do.
+                OP_ENDSCHEDULOR | OP_ENDMAPSCHEDULOR => {
+                    let actor = ActorLookup(self.eventgetcode2(ENDSCHEDULOR_ACTOR1_OFS));
+                    self.cues.push(EventCue::ActorStopAction {
+                        actor,
+                        key: stop_action_key(self.fourcc_at(ENDSCHEDULOR_TAG_OFS)),
+                    });
+                    self.advance(op);
+                }
+                OP_ENDLOADSCHEDULER_MAIN | OP_ENDLOADSCHED_TWIN_A1
+                | OP_ENDLOADSCHED_TWIN_A3 | OP_ENDLOADSCHED_TWIN_BD
+                | OP_ENDLOADSCHED_TWIN_C7 | OP_ENDLOADSCHED_TWIN_CF
+                | OP_ENDLOADSCHED_TWIN_D2 | OP_ENDLOADSCHED_TWIN_D7 => {
+                    let actor = ActorLookup(self.eventgetcode2(ENDLOADSCHED_ACTOR1_OFS));
+                    self.cues.push(EventCue::ActorStopAction {
+                        actor,
+                        key: stop_action_key(self.fourcc_at(ENDLOADSCHED_TAG_OFS)),
                     });
                     self.advance(op);
                 }
@@ -5443,6 +5500,74 @@ mod tests {
         operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
         operands.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
         assert!(cues_of(OP_MAGICSCHEDULOR, &operands, vec![u32::MAX]).is_empty());
+    }
+
+    /// 0x50 ENDSCHEDULOR: kill the tag-named action on actor1, actor2 riding
+    /// along; a zero word or four spaces names no routine slot
+    /// (research/XiEvents/OpCodes/0x0050.md).
+    #[test]
+    fn end_schedulor_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let operands = |tag: FourCc| {
+            let mut o = NPC.to_le_bytes().to_vec();
+            o.extend_from_slice(&NPC.to_le_bytes());
+            o.extend_from_slice(&tag);
+            o
+        };
+        assert_eq!(
+            cues_of(OP_ENDSCHEDULOR, &operands(*b"sswh"), vec![]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
+        for tag in [STOP_TAG_ZERO, STOP_TAG_SPACES] {
+            assert_eq!(
+                cues_of(OP_ENDSCHEDULOR, &operands(tag), vec![]),
+                [EventCue::ActorStopAction {
+                    actor: ActorLookup(NPC),
+                    key: None,
+                }]
+            );
+        }
+    }
+
+    /// 0x52 ENDLOADSCHEDULER_Main: the same kill with the DAT-selector work
+    /// operand at +1, which the stop cue does not carry (the arm does not read
+    /// it), actor1 at +3, the tag at +11
+    /// (research/XiEvents/OpCodes/0x0052.md).
+    #[test]
+    fn end_loads_scheduler_main_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let mut operands = REF0.to_vec();
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(b"sswh");
+        assert_eq!(
+            cues_of(OP_ENDLOADSCHEDULER_MAIN, &operands, vec![0]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
+    }
+
+    /// The 0x52 twins share the layout and the cue, each on its own DAT base
+    /// (research/XiEvents/OpCodes/0x00A3.md).
+    #[test]
+    fn end_loads_scheduler_twin_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let mut operands = REF0.to_vec();
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(b"sswh");
+        assert_eq!(
+            cues_of(OP_ENDLOADSCHED_TWIN_A3, &operands, vec![0]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
     }
 
     /// The 0x45 twins load their scheduler DAT from their own base plus the raw

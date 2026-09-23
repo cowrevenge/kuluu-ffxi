@@ -631,6 +631,22 @@ mod tests {
         );
     }
 
+    /// Regression: a bare QUERYWAIT used to yield AwaitMessageAck without moving
+    /// EP, and this loop answered it with dismiss_message and stepped onto the
+    /// same opcode forever (8700's favorites branch). It now ends.
+    #[test]
+    fn bare_querywait_does_not_spin_the_runner() {
+        let strings = empty_strings();
+        let mut r = DialogRunner::start(
+            &one_event_block(vec![OP_QUERYWAIT, OP_END], vec![]),
+            1,
+            0,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(r.advance(None, &strings), DialogStep::Ended { end_para: 0 });
+    }
+
     #[test]
     fn cancel_on_choice_frame_ends_cancelled() {
         let data = vec![

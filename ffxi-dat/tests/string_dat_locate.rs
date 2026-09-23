@@ -55,7 +55,9 @@ fn pinned_zones_address_the_measured_file_ids() {
 
 #[test]
 fn the_zone_set_resolves_to_files_that_parse_as_dialog_tables() {
-    let Some(root) = vanilla_install() else { return };
+    let Some(root) = vanilla_install() else {
+        return;
+    };
     let mut parsed = 0usize;
     let mut failures = Vec::new();
     for &(zone, _) in ZONE_DAT_TABLE {

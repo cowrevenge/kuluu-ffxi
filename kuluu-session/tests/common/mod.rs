@@ -72,7 +72,7 @@ const FIXTURE_SESSION_BUDGET_SECS: u32 = 300;
 const TOMBSTONE_TTL_SECS: u32 = LSB_MAX_TIME_LASTUPDATE_SECS + FIXTURE_SESSION_BUDGET_SECS;
 
 // Local UDP port range the live tests pin `FFXI_MAP_LOCAL_PORT` into: high
-// enough to stay clear of the server's ports (map 48000 / view 54001 /
+// enough to stay clear of the server's ports (map 53230 / view 54001 /
 // data 54230 / auth 54231) and the OS's low ephemeral allocations, wide
 // enough that two runs don't land on the same port.
 const LOCAL_PORT_BASE: u16 = 49_000;

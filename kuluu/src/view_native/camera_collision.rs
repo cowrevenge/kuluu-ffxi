@@ -244,16 +244,24 @@ pub fn resolve_camera(
     // Eye: where it was; swung straight to the yaw if the player (or the
     // lock) turned the camera since last frame, no spring; then the leash
     // says where it must be and the spring says how fast it gets there.
-    let eye_prev = match (leash_state.eye, leash_state.yaw) {
+    // A yaw this system did not write (arrows, mouse drag, Q/E, the lock
+    // turn) is a manual turn: the whole rig, eye and focus together, turns
+    // about the player by the yaw's change. Nothing jumps and the player
+    // keeps its spot on screen; the focus's dead-zone offset turns with the
+    // rig instead of making the camera orbit a point beside the player.
+    let (focus, eye_prev) = match (leash_state.eye, leash_state.yaw) {
         (Some(e), Some(last_yaw)) if !chase.snap_to_anchor => {
             if last_yaw == chase.yaw {
-                e
+                (focus, e)
             } else {
-                let h = (e - focus).length().clamp(min_h, max_h);
-                focus + yaw_dir(chase.yaw) * h
+                let d = continuous_yaw(last_yaw, chase.yaw) - last_yaw;
+                (
+                    rotate_about(focus, pivot_xz, d),
+                    rotate_about(e, pivot_xz, d),
+                )
             }
         }
-        _ => focus + yaw_dir(chase.yaw) * max_h,
+        _ => (focus, focus + yaw_dir(chase.yaw) * max_h),
     };
     let eye_goal = leash(eye_prev, focus, min_h, max_h, yaw_dir(chase.yaw));
     let eye = if settings.camera_spring && !chase.snap_to_anchor {
@@ -298,6 +306,15 @@ pub fn resolve_camera(
     cam_t.translation = pivot + dir * effective;
     cam_t.look_at(pivot, Vec3::Y);
     chase.snap_to_anchor = false;
+}
+
+/// `point` turned about `center` by `d` radians of chase yaw (bevy xz, the
+/// boom direction is `(sin yaw, cos yaw)`, so a point on the boom at yaw `y`
+/// lands on the boom at `y + d`).
+pub fn rotate_about(point: Vec2, center: Vec2, d: f32) -> Vec2 {
+    let v = point - center;
+    let (s, c) = d.sin_cos();
+    center + Vec2::new(v.x * c + v.y * s, v.y * c - v.x * s)
 }
 
 fn clamped_camera_distance(hit_t: f32, wanted: f32) -> f32 {
@@ -629,5 +646,45 @@ mod tests {
             "forward {forward:?}, target {to_target:?}"
         );
         assert!(lock_yaw(player, player).is_none());
+    }
+
+    /// The rig turns rigidly about the player: the focus keeps its offset
+    /// from the player, the eye keeps its distance from the focus, and the
+    /// eye-to-focus direction lands on the new yaw.
+    #[test]
+    fn a_manual_turn_rotates_the_rig_about_the_player() {
+        let player = Vec2::new(10.0, -3.0);
+        let focus = player + Vec2::new(0.4, 0.1);
+        let yaw0 = 0.3_f32;
+        let eye = focus + Vec2::new(yaw0.sin(), yaw0.cos()) * 5.0;
+        for d in [0.05_f32, 0.5, -1.2, 3.0] {
+            let f = rotate_about(focus, player, d);
+            let e = rotate_about(eye, player, d);
+            assert!(((f - player).length() - (focus - player).length()).abs() < 1e-5);
+            assert!(((e - f).length() - 5.0).abs() < 1e-4);
+            let v = e - f;
+            let got = v.x.atan2(v.y);
+            let want = yaw0 + d;
+            let diff = (got - want + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            assert!(
+                diff.abs() < 1e-4,
+                "turn {d}: eye-to-focus yaw {got}, want {want}"
+            );
+        }
+    }
+
+    /// Many small turns add up to one big one: holding an arrow key does not
+    /// drift the rig off the player.
+    #[test]
+    fn held_turn_does_not_drift_off_the_player() {
+        let player = Vec2::new(0.0, 0.0);
+        let mut focus = player + Vec2::new(0.45, 0.0);
+        let r0 = (focus - player).length();
+        for _ in 0..720 {
+            focus = rotate_about(focus, player, std::f32::consts::TAU / 720.0);
+        }
+        assert!(((focus - player).length() - r0).abs() < 1e-3);
+        assert!((focus - (player + Vec2::new(0.45, 0.0))).length() < 1e-2);
     }
 }

@@ -118,16 +118,6 @@ const RETAIL_AUTORUN_STEER_DEG_PER_TICK: f32 = 2.0;
 pub const ROTATE_KEY_RATE_RAD_PER_SEC: f32 =
     RETAIL_AUTORUN_STEER_DEG_PER_TICK * (std::f32::consts::PI / 180.0) * RETAIL_MOVE_TICKS_PER_SEC;
 
-// The same retail key also orbits the eye around its target, 1.6 degrees per
-// tick (research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp,
-// CameraManager::UpdatePlayerFollowingCamera scales the CameraControlX analog
-// value by 0.027924445 rad). Steering a retail autorun moves both, so the run
-// leads the eye only by the 0.4 deg/tick difference; Q/E is that pair with the
-// two halves named separately and drives the same orbit.
-const RETAIL_TURN_KEY_ORBIT_DEG_PER_TICK: f32 = 1.6;
-pub const ROTATE_KEY_ORBIT_RAD_PER_SEC: f32 =
-    RETAIL_TURN_KEY_ORBIT_DEG_PER_TICK * (std::f32::consts::PI / 180.0) * RETAIL_MOVE_TICKS_PER_SEC;
-
 const CAMERA_YAW_RATE: f32 = HEADING_TURN_RATE * 4.0;
 
 const PITCH_STEP_HELD: f32 = 0.015;
@@ -1441,11 +1431,12 @@ pub fn dispatch_movement_system(
             })
     });
 
-    if player_rotate_u8 != 0 && first_person {
+    // Q/E turn the body and the camera by the same angle on the same tick, in
+    // both camera modes (the Compact 2 keyboard doc: "Camera will rotate with
+    // the character"). The leash in camera_collision.rs sees a yaw it did not
+    // write and swings the eye to it at once; no spring applies to it.
+    if player_rotate_u8 != 0 {
         chase.yaw -= heading_delta_units * std::f32::consts::TAU / 256.0;
-    }
-    if !first_person && resolved.rotate_dir != 0 {
-        chase.yaw -= resolved.rotate_dir as f32 * ROTATE_KEY_ORBIT_RAD_PER_SEC * time.delta_secs();
     }
 
     if drive_c != 0 {
@@ -4255,28 +4246,21 @@ mod tests {
         );
     }
 
-    /// The two retail rates are within a fifth of each other, so a ratio that
-    /// missed by this much would have to be a different pairing entirely.
-    /// Measured from standstill: while a run is held the body faces the
-    /// camera-relative run direction and the Q/E orbit carries it.
-    const ORBIT_RATIO_TOLERANCE: f32 = 0.05;
-
+    /// Q/E turn the camera by exactly the body's angle: after a held Q the
+    /// camera yaw has moved by the body's turn, to within one heading unit.
     #[test]
-    fn a_held_rotate_key_orbits_the_camera_with_the_body() {
+    fn a_held_rotate_key_turns_the_camera_exactly_with_the_body() {
         let mut drive = MoveDrive::new();
         drive.run(SETTLE_TICKS);
         let (start, _) = drive.tick();
         let yaw_start = drive.camera_yaw();
         drive.press(KeyCode::KeyQ);
         let (end, _) = *drive.run(ROTATE_TICKS).last().expect("ticks");
-
         let body = turned_units(start, end) as f32 * std::f32::consts::TAU / 256.0;
-        let orbit = -(drive.camera_yaw() - yaw_start);
-        let ratio = orbit / body;
-        let want = ROTATE_KEY_ORBIT_RAD_PER_SEC / ROTATE_KEY_RATE_RAD_PER_SEC;
+        let camera = -(drive.camera_yaw() - yaw_start);
         assert!(
-            (ratio - want).abs() < ORBIT_RATIO_TOLERANCE,
-            "the eye orbited {ratio} of the body turn, retail pairs them at {want}"
+            (camera - body).abs() <= std::f32::consts::TAU / 256.0,
+            "the camera turned {camera} rad, the body {body} rad"
         );
     }
 

@@ -307,9 +307,6 @@ pub const DEBUG_WEATHER: &str = "Weather";
 /// Debug fog gate row: [on] = every fog layer (DAT distance fog, volumetric
 /// ground haze) renders; toggling it off strips all of them. Default on.
 pub const DEBUG_FOG: &str = "Fog";
-/// Debug camera smoother row: [on] = the chase yaw follows its target through
-/// the damped step; off = the yaw sits on the target every tick. Default on.
-pub const DEBUG_CAMERA_SMOOTHER: &str = "Camera_smoother";
 /// Debug body smoother row: [on] = the self model slerps toward the dispatch
 /// heading; off = it sits on it every frame. Default on.
 pub const DEBUG_BODY_SMOOTHER: &str = "Body_smoother";
@@ -354,7 +351,6 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_AUTO_ENTER_CS,
     DEBUG_WEATHER,
     DEBUG_FOG,
-    DEBUG_CAMERA_SMOOTHER,
     DEBUG_BODY_SMOOTHER,
     DEBUG_ENTITY_LIST,
     DEBUG_SOUND,
@@ -1557,7 +1553,6 @@ pub fn debug_panel_state(
         DEBUG_AUTO_ENTER_CS => panels.auto_enter_cs,
         DEBUG_WEATHER => !panels.weather_off,
         DEBUG_FOG => !panels.fog_off,
-        DEBUG_CAMERA_SMOOTHER => !panels.camera_smoother_off,
         DEBUG_BODY_SMOOTHER => !panels.body_smoother_off,
         DEBUG_ENTITY_LIST => panels.entity_list,
         DEBUG_NET_STATUS => net_status_on,

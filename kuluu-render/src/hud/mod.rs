@@ -111,6 +111,14 @@ pub struct HudPanels {
     /// scene-graphic errors can be isolated. Independent of `weather_off`.
     /// Runtime-only, no persist.
     pub fog_off: bool,
+    /// Debug Camera_smoother row: when true the chase yaw follow
+    /// (`recenter_yaw_step`, both states) is bypassed and the yaw sits on its
+    /// target every tick. Runtime-only, no persist.
+    pub camera_smoother_off: bool,
+    /// Debug Body_smoother row: when true the self model's visual yaw slerp
+    /// (`self_visual_yaw_system`) is bypassed and the model sits on the
+    /// dispatch heading every frame. Runtime-only, no persist.
+    pub body_smoother_off: bool,
     /// Debug Entity List overlay (Debug menu "Entity List" row): when true,
     /// shows a scrollable dump of every live wire entity from the
     /// EntityTable — id, name, kind, position, status byte, hp%, invis/name-

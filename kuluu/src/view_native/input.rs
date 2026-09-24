@@ -2254,10 +2254,14 @@ pub fn camera_polish_system(
     locals: Res<DispatchLocals>,
     prediction: Res<LocalPlayerPrediction>,
     intent: Res<kuluu_render::combat_stance::SelfMoveIntent>,
+    hud_panels: Res<kuluu_render::hud::HudPanels>,
     mut chase: ResMut<ChaseCamera>,
     mut recenter: ResMut<CameraAutoRecenter>,
-    self_q: Query<&Transform, (With<IsSelf>, Without<OperatorCamera>)>,
-    target_q: Query<(&WorldEntity, &Transform), Without<OperatorCamera>>,
+    // One query instead of two: Bevy's system-param tuple tops out at 16 and
+    // this system already uses them all (round 22 added HudPanels). The self
+    // entity is a wire entity (scene.rs sync_entities_system), so it carries
+    // WorldEntity and the merged query sees it.
+    actors_q: Query<(&WorldEntity, &Transform, Option<&IsSelf>), Without<OperatorCamera>>,
 ) {
     if !matches!(*mode, InputMode::World) {
         recenter.forward_held_since = None;
@@ -2336,14 +2340,21 @@ pub fn camera_polish_system(
                 (yaw_for_heading(body_heading), rate, recenter.settling, true)
             }
         };
-        let (yaw, settling) = recenter_yaw_step(
-            chase.yaw,
-            target_yaw,
-            rate,
-            time.delta_secs(),
-            running,
-            hold,
-        );
+        // Debug Camera_smoother off: the yaw sits on its target every tick,
+        // no damped step, so a fault in the follow's state shows as "off
+        // fixes it".
+        let (yaw, settling) = if hud_panels.camera_smoother_off {
+            (target_yaw, false)
+        } else {
+            recenter_yaw_step(
+                chase.yaw,
+                target_yaw,
+                rate,
+                time.delta_secs(),
+                running,
+                hold,
+            )
+        };
         chase.yaw = yaw;
         recenter.settling = settling && locked_target_yaw.is_none();
     }
@@ -2354,11 +2365,15 @@ pub fn camera_polish_system(
     let Some(target_id) = lock_on.target_id else {
         return;
     };
-    let Ok(self_t) = self_q.single() else {
+    let self_t = actors_q
+        .iter()
+        .find(|(_, _, is_self)| is_self.is_some())
+        .map(|(_, t, _)| t);
+    let Some(self_t) = self_t else {
         return;
     };
     let mut target_pos: Option<Vec3> = None;
-    for (we, t) in target_q.iter() {
+    for (we, t, _) in actors_q.iter() {
         if we.id == target_id {
             target_pos = Some(t.translation);
             break;
@@ -4241,6 +4256,7 @@ mod tests {
             .init_resource::<LockOn>()
             .init_resource::<kuluu_render::MousePointer>()
             .init_resource::<DispatchLocals>()
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .init_resource::<LocalPlayerPrediction>()
             .init_resource::<ChaseCamera>()
             .init_resource::<CameraAutoRecenter>()
@@ -4636,6 +4652,7 @@ mod tests {
             .init_resource::<LockOn>()
             .init_resource::<kuluu_render::MousePointer>()
             .init_resource::<DispatchLocals>()
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .init_resource::<LocalPlayerPrediction>()
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<ChaseCamera>()
@@ -4722,6 +4739,7 @@ mod tests {
             .init_resource::<LockOn>()
             .init_resource::<kuluu_render::MousePointer>()
             .init_resource::<DispatchLocals>()
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .init_resource::<LocalPlayerPrediction>()
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<ChaseCamera>()

@@ -824,6 +824,7 @@ pub fn self_visual_yaw_system(
     time: Res<Time>,
     state: Res<SceneState>,
     intent: Option<Res<crate::combat_stance::SelfMoveIntent>>,
+    panels: Option<Res<crate::hud::HudPanels>>,
     mut q_self: Query<&mut Transform, With<IsSelf>>,
 ) {
     let Ok(mut t) = q_self.single_mut() else {
@@ -836,6 +837,12 @@ pub fn self_visual_yaw_system(
         .and_then(|i| i.heading)
         .unwrap_or(state.snapshot.self_pos.heading);
     let target = heading_to_quat(heading);
+    // Debug Body_smoother off: the model sits on the dispatch heading every
+    // frame, no slerp.
+    if panels.as_ref().is_some_and(|p| p.body_smoother_off) {
+        t.rotation = target;
+        return;
+    }
     let alpha = 1.0 - (-SELF_VISUAL_YAW_RATE * time.delta_secs()).exp();
     t.rotation = t.rotation.slerp(target, alpha);
 }

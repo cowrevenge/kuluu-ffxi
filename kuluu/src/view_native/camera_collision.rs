@@ -55,21 +55,6 @@ pub fn lock_yaw(player: Vec2, target: Vec2) -> Option<f32> {
     (away.length_squared() > 1e-6).then(|| away.x.atan2(away.y))
 }
 
-/// A manual camera turn pivots on the player: the focus lands on them and the
-/// eye swings around them to `yaw` at once, keeping its distance from the old
-/// focus clamped to the slack band. Returns the new `(focus, eye)`.
-pub fn manual_swing(
-    focus_prev: Vec2,
-    eye_prev: Vec2,
-    pivot: Vec2,
-    yaw: f32,
-    min_h: f32,
-    max_h: f32,
-) -> (Vec2, Vec2) {
-    let h = (eye_prev - focus_prev).length().clamp(min_h, max_h);
-    (pivot, pivot + Vec2::new(yaw.sin(), yaw.cos()) * h)
-}
-
 /// The eye's slack band: it holds still while its horizontal distance from the
 /// focus is between `max * LEASH_SLACK_MIN_RATIO` and `max` (the zoom), and is
 /// dragged or pushed to the band's edge outside it. The reference client pulls
@@ -256,15 +241,6 @@ pub fn resolve_camera(
         chase.yaw += gap * alpha;
     }
 
-    // A yaw this system did not write (arrows, mouse drag, Q/E, the lock turn)
-    // is a manual camera move: it pivots on the player, not on the dead-zone
-    // focus beside them, and it snaps. The focus goes back onto the player
-    // before the eye swings, so the player stays centred under a rotation
-    // instead of tracing an oval.
-    let focus_prev = focus;
-    let manual_turn = leash_state.yaw.is_some_and(|y| y != chase.yaw);
-    let focus = if manual_turn { pivot_xz } else { focus };
-
     // Eye: where it was; swung straight to the yaw if the player (or the
     // lock) turned the camera since last frame, no spring; then the leash
     // says where it must be and the spring says how fast it gets there.
@@ -273,7 +249,8 @@ pub fn resolve_camera(
             if last_yaw == chase.yaw {
                 e
             } else {
-                manual_swing(focus_prev, e, pivot_xz, chase.yaw, min_h, max_h).1
+                let h = (e - focus).length().clamp(min_h, max_h);
+                focus + yaw_dir(chase.yaw) * h
             }
         }
         _ => focus + yaw_dir(chase.yaw) * max_h,
@@ -652,24 +629,5 @@ mod tests {
             "forward {forward:?}, target {to_target:?}"
         );
         assert!(lock_yaw(player, player).is_none());
-    }
-
-    /// A manual turn with the focus off to the side: the focus lands on the
-    /// player and the eye sits on the new yaw around the player, no oval.
-    #[test]
-    fn a_manual_turn_pivots_on_the_player() {
-        let pivot = Vec2::new(10.0, 10.0);
-        let focus_prev = pivot + Vec2::new(0.4, 0.0);
-        let eye_prev = focus_prev + Vec2::new(0.0, 5.0);
-        for yaw in [0.0_f32, 0.8, 2.0, -2.5] {
-            let (focus, eye) = manual_swing(focus_prev, eye_prev, pivot, yaw, 3.0, 6.0);
-            assert_eq!(focus, pivot);
-            let v = eye - pivot;
-            assert!(
-                (v.x.atan2(v.y) - yaw).abs() < 1e-4,
-                "yaw {yaw}: eye off the yaw"
-            );
-            assert!((3.0..=6.0).contains(&v.length()));
-        }
     }
 }

@@ -1003,4 +1003,149 @@ mod tests {
             "the rental ducks the music: {cues:#?}"
         );
     }
+
+    /// The Upper Jeuno rental (Mairee, event 10002) with a live scene: the
+    /// player walks the authored approach to the chocobo and the mount cue
+    /// fires. A y/z slip between the session and the scene turns that
+    /// four-yalm walk into a hundred-yalm jog, so the final position is
+    /// pinned to the authored goal.
+    #[test]
+    fn upper_jeuno_rental_walks_the_authored_approach() {
+        let Some(root) = install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const ZONE: u16 = 244;
+        const EVENT: u16 = 10002;
+        const MAIREE: u32 = 0x010F_4048;
+
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
+        let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
+            .expect("parse event dat");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
+        let sloc = root.resolve(sfid).expect("resolve string dat");
+        let strings =
+            StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
+                .expect("parse string dat");
+
+        let block = edat.block_for_actor(MAIREE).expect("mairee block");
+        let mut runner =
+            DialogRunner::start(block, EVENT, 0, vec![160, 10000, 0]).expect("rental event 10002");
+        // Mairee stands at wire (-56.308, 7.999, 109.080); event units are
+        // wire coords * 1000 on the wire's own axes (x, y = height, z).
+        use crate::cue::STATUS_EVENT_CHOCOBO;
+        use crate::vm::scene::EventPosition;
+        let start = EventPosition {
+            x: -56308,
+            y: 7999,
+            z: 109080,
+            heading: 0,
+        };
+        runner.attach_scene(std::sync::Arc::new(edat.clone()), MAIREE, start);
+
+        const DT: f32 = 1.0 / 30.0;
+        let mut response = None;
+        let mut cues = Vec::new();
+        let mut last_player = start;
+        let mut furthest = 0.0_f32;
+        let mut ended: Option<u32> = None;
+        let mut ticks = 0u32;
+        let mut track = |p: EventPosition| {
+            let dx = (p.x - start.x) as f32;
+            let dz = (p.z - start.z) as f32;
+            furthest = furthest.max(dx.hypot(dz) / 1000.0);
+            p
+        };
+        while ended.is_none() && ticks < 6000 {
+            let step = runner.advance(response.take(), &strings);
+            cues.extend(runner.take_cues());
+            for action in runner.take_scene_actions() {
+                if let crate::vm::scene::SceneAction::PlayerPosition(p) = action {
+                    last_player = track(p);
+                }
+            }
+            match step {
+                DialogStep::Frame(f) => {
+                    response = if f.choices.is_empty() { None } else { Some(0) };
+                    ticks += 1;
+                }
+                DialogStep::Ended { end_para } => {
+                    ended = Some(end_para);
+                }
+                DialogStep::Stopped(op) => {
+                    panic!("event 10002 stopped on opcode 0x{op:02X}");
+                }
+                DialogStep::Waiting => {
+                    ticks += 1;
+                    let step = runner.tick(DT, &strings);
+                    cues.extend(runner.take_cues());
+                    for action in runner.take_scene_actions() {
+                        if let crate::vm::scene::SceneAction::PlayerPosition(p) = action {
+                            last_player = track(p);
+                        }
+                    }
+                    match step {
+                        DialogStep::Frame(f) => {
+                            response = if f.choices.is_empty() { None } else { Some(0) };
+                        }
+                        DialogStep::Ended { end_para } => {
+                            ended = Some(end_para);
+                        }
+                        DialogStep::Stopped(op) => {
+                            panic!("event 10002 stopped on opcode 0x{op:02X}");
+                        }
+                        DialogStep::Waiting => {}
+                        DialogStep::AwaitServerAck(_) => {
+                            let _ = runner.ack_server(&strings);
+                        }
+                    }
+                }
+                DialogStep::AwaitServerAck(_) => {
+                    let _ = runner.ack_server(&strings);
+                }
+            }
+        }
+        assert!(
+            ended.is_some(),
+            "event 10002 did not end within {ticks} ticks"
+        );
+        assert_eq!(
+            ended,
+            Some(0),
+            "the rental's \"yes\" choice must end with EndPara 0"
+        );
+        assert!(
+            cues.iter().any(|c| matches!(
+                c,
+                EventCue::Mount {
+                    target: ActorLookup(2_147_483_632),
+                    status_event: STATUS_EVENT_CHOCOBO,
+                    mount_id: None
+                }
+            )),
+            "the rental must mount the player: {cues:#?}"
+        );
+        // The authored end of the rental: the mount position the tag-24
+        // program writes after the SMOVE approach to the chocobo (the player
+        // block's refs 415..417, right after the SMOVE goal's 412..414).
+        let goal = EventPosition {
+            x: -72299,
+            y: 7999,
+            z: 120506,
+            heading: 0,
+        };
+        let dx = (last_player.x - goal.x) as f32;
+        let dz = (last_player.z - goal.z) as f32;
+        assert!(
+            dx.hypot(dz) < 100.0,
+            "the player must finish at the authored mount position, got {:?}",
+            last_player
+        );
+        assert!(
+            furthest < 25.0,
+            "the rental is a short approach to the stable, the player wandered {furthest} yalms"
+        );
+    }
 }

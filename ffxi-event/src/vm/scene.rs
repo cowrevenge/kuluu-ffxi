@@ -153,16 +153,15 @@ impl EventVm {
     /// The event entity's tracked position in the zone-interaction (RID) float
     /// space 0x82 RANGE_RECT hit-tests against
     /// (research/XiEvents/OpCodes/0x0082.md): the scene's tracked position
-    /// rescaled from event units back to the zone's native float coords. Event
-    /// units store x * 1000, wire-z * 1000 in y, and wire-y * 1000 in z, so the
-    /// inverse is [x/1000, z/1000, y/1000]. `None` when no scene is attached,
-    /// so the caller sees retail's null-entity early return.
+    /// rescaled from event units back to the zone's native float coords, the
+    /// same axes the wire carries (x, y = height, z). `None` when no scene is
+    /// attached, so the caller sees retail's null-entity early return.
     pub(super) fn event_entity_rid_position(&self) -> Option<[f32; 3]> {
         let p = self.scene.as_ref()?.player;
         Some([
             p.x as f32 / EVENT_COORD_UNITS,
-            p.z as f32 / EVENT_COORD_UNITS,
             p.y as f32 / EVENT_COORD_UNITS,
+            p.z as f32 / EVENT_COORD_UNITS,
         ])
     }
 
@@ -714,8 +713,8 @@ impl EventVm {
                 if target.is_local_player() {
                     let p = self.scene.as_ref().unwrap().player;
                     self.setworkofs(5, p.x, 0);
-                    self.setworkofs(7, p.z, 0);
-                    self.setworkofs(9, p.y, 0);
+                    self.setworkofs(7, p.y, 0);
+                    self.setworkofs(9, p.z, 0);
                 }
                 self.advance(op);
             }

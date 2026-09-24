@@ -64,14 +64,6 @@ pub struct PadEdges {
 
 #[derive(Resource, Default)]
 pub struct DispatchLocals {
-    /// The unlocked run heading, radians in the `heading_rad_of` space, with
-    /// the W/S sign it was seeded under (0 for a pure A/D run). Seeded from
-    /// the camera frame when a run starts, when the player pans the camera
-    /// himself, or on a W/S reversal; otherwise A/D rotate it at
-    /// [`STEER_RATE_RAD_PER_SEC`] and Q/E by the body-rotate units. Never
-    /// re-read from the camera while held: the camera follows the body, so a
-    /// run direction taken from the camera every tick is a feedback loop.
-    pub run_heading: Option<(i32, f32)>,
     /// Which key family currently holds the turn axis (see [`TurnAxisOwner`]).
     pub turn_owner: TurnAxisOwner,
     /// Rising-edge memory for pad stick just_pressed emulation.
@@ -102,9 +94,9 @@ pub struct CameraInputParams<'w> {
     pub transition: ResMut<'w, CameraTransition>,
 }
 use kuluu_render::{
-    heading_for_yaw, yaw_for_heading, Action, Bindings, CameraMode, CameraTransition, ChaseCamera,
-    ChatBuffer, CursorLockRequest, InputMode, IsSelf, LockOn, LockOnToggle, MenuStack,
-    OperatorCamera, PassiveCursorState, SceneState, Target, WorldEntity,
+    heading_for_yaw, Action, Bindings, CameraMode, CameraTransition, ChaseCamera, ChatBuffer,
+    CursorLockRequest, InputMode, IsSelf, LockOn, LockOnToggle, MenuStack, OperatorCamera,
+    PassiveCursorState, SceneState, Target, WorldEntity,
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 use tokio::sync::mpsc;
@@ -176,12 +168,6 @@ const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 // per tick (the radial component of a step taken off the tangent), and the
 // turn seen on screen is the visual yaw slerp (kuluu-render scene.rs
 // self_visual_yaw_system), not the logical heading.
-
-// A held A/D rotates the stored run heading at this rate: ~150-180 degrees
-// over a ~5 s held D (HorizonXI video 2026-07-20), the circle the old
-// camera-paced carve traced, now owned by the movement state instead of by
-// how fast the camera caught up.
-const STEER_RATE_RAD_PER_SEC: f32 = 0.55;
 
 #[derive(Resource, Clone)]
 pub struct CommandTx(pub mpsc::Sender<AgentCommand>);
@@ -1378,21 +1364,6 @@ pub fn dispatch_movement_system(
     let steer_in_chase = (!first_person && !locked && (pf != 0.0 || ps != 0.0))
         && !engage_transition
         && !knockback.active;
-    // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
-    // the latch only holds the run direction against the passive
-    // auto-recenter, not against the player actively steering the camera.
-    let camera_panning = bindings.pressed(Action::CameraYawLeft, keys)
-        || bindings.pressed(Action::CameraYawRight, keys)
-        || pad_cam.x != 0.0
-        || env.pointer.left
-        || env.pointer.right
-        || drive_c != 0;
-    // A run that stops forgets its heading; the next one seeds from the
-    // camera frame.
-    if !steer_in_chase {
-        locals.run_heading = None;
-    }
-
     let self_pos = state.snapshot.self_pos;
 
     let mounted = state.snapshot.self_mount.is_some();
@@ -1587,45 +1558,16 @@ pub fn dispatch_movement_system(
         heading_rad = heading_rad_of(heading_for_yaw(chase.yaw));
     }
 
-    // The unlocked run heading is state (see DispatchLocals::run_heading).
-    // Seeded from the camera frame only when the run starts, when the player
-    // pans the camera himself (the follow is off while he does), or when W/S
-    // reverse; held, A/D rotate it and Q/E add their rotate units. The camera
-    // follow reads the body this produces and never feeds back into it.
-    let mut steer_motion_rad: Option<f32> = None;
-    if steer_in_chase {
-        let pf_sign: i32 = if pf > 0.0 {
-            1
-        } else if pf < 0.0 {
-            -1
-        } else {
-            0
-        };
-        let reseed = match locals.run_heading {
-            None => true,
-            Some((sign, _)) => camera_panning || sign * pf_sign < 0,
-        };
-        let mut run = match locals.run_heading {
-            Some((_, h)) if !reseed => {
-                wrap_signed_pi(h + ps * STEER_RATE_RAD_PER_SEC * time.delta_secs())
-            }
-            _ => heading_rad_of(camera_relative_motion_heading(
-                heading_for_yaw(chase.yaw),
-                pf,
-                ps,
-            )),
-        };
-        if player_rotate_u8 != 0 {
-            run = wrap_signed_pi(run + player_rotate_u8 as f32 * std::f32::consts::TAU / 256.0);
-        }
-        let sign = if pf_sign != 0 {
-            pf_sign
-        } else {
-            locals.run_heading.map_or(0, |(s, _)| s)
-        };
-        locals.run_heading = Some((sign, run));
-        steer_motion_rad = Some(run);
-    }
+    // The unlocked run direction is the input vector in the camera frame,
+    // read every tick, and the body faces it at once
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+    // ControllableActor::HandleThirdPersonControl: the move vector is rotated
+    // by the view angle and ControlResolvedRotation is set to its angle, no
+    // turn rate). There is no loop: the camera is a leash that looks from
+    // where it was to where the player is (camera_collision.rs
+    // resolve_camera), it never turns toward the body.
+    let steer_motion_rad: Option<f32> =
+        steer_in_chase.then(|| camera_relative_motion_rad(chase.yaw, pf, ps));
 
     // The desired heading, both states: the target bearing when locked, the
     // run direction when a camera-relative run is steering. The body sits on
@@ -2007,6 +1949,15 @@ fn heading_for_angle(angle: f32) -> u8 {
     (normalized * 128.0 / std::f32::consts::PI).round() as u32 as u8
 }
 
+/// [`camera_relative_motion_heading`] in radians and from the unrounded
+/// camera yaw: `forward` along the camera's forward axis, `steer` along
+/// camera-right, as an angle in the `heading_rad_of` space. The camera's
+/// forward is `-yaw - pi/2` there (`kuluu_render::yaw_for_heading` inverted),
+/// and camera-right is a quarter turn clockwise of it.
+fn camera_relative_motion_rad(yaw: f32, forward: f32, steer: f32) -> f32 {
+    wrap_signed_pi(-yaw - std::f32::consts::FRAC_PI_2 + steer.atan2(forward))
+}
+
 /// A wire heading (u8, 256 units per turn) in the angle space
 /// `heading_to_forward` / `heading_for_angle` share, wrapped to (-pi, pi].
 fn heading_rad_of(heading: u8) -> f32 {
@@ -2166,233 +2117,26 @@ pub fn tab_cycle_invalidate_system(
     }
 }
 
-#[derive(Resource, Default)]
-pub struct CameraAutoRecenter {
-    pub forward_held_since: Option<Instant>,
-
-    /// A camera pan or yaw input holds the recenter off; any movement input
-    /// releases it. Retail's hold-off is a displacement count, not a key flag
-    /// — see [`AUTO_RECENTER_RATE`].
-    pub manual_override: bool,
-
-    /// The follow lags whatever turned the body (a Q/E rotate, an A/D carve,
-    /// an autorun steer), so the key comes up with the camera still off to the
-    /// side. It keeps closing that gap after the key lifts, until it sits
-    /// behind the character or the player takes the camera back.
-    pub settling: bool,
-}
-
-// The follow rate behind a carving character (HorizonXI video 2026-07-20:
-// the camera swings ~150-180 degrees over a ~5 s held D). The carve's circle
-// is the stored run heading turning at STEER_RATE_RAD_PER_SEC; this rate only
-// sets how far the camera trails it. Everything else follows at the chase
-// rate below.
-const CARVE_FOLLOW_RATE: f32 = 0.55;
-
-// Retail's chase camera (the Chase Cam config mode, FS_CONFIG_145) pulls the
-// eye toward the point directly behind the actor's facing by 2.5 percent of the
-// remaining offset per tick, and it runs off the actor's own rotation, not off a
-// held key - so it keeps closing after the turn key comes up
-// (research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp,
-// CameraManager::UpdatePlayerFollowingCamera). Per-tick fraction times the tick
-// rate is the continuous rate to first order.
-const RETAIL_CHASE_RECENTER_PER_TICK: f32 = 0.025;
-const AUTO_RECENTER_RATE: f32 = RETAIL_CHASE_RECENTER_PER_TICK * RETAIL_MOVE_TICKS_PER_SEC;
-
-/// Retail's window engages at 60 degrees off-centre; this one at 2.0 rad
-/// (~115 degrees) because our A/D carve is body-led — the body turns and the
-/// camera chases — where retail's turn keys are camera-led and the body
-/// follows the camera. A carve past 60 degrees would
-/// stall under retail's window until the carve matches that model. Retail
-/// plants the chase camera when the character deliberately runs toward it
-/// (unlocked S / about-face): the follow must not swing around to the
-/// character's back mid-run. A/D carves sit near ±π/2 and must still follow,
-/// so the hold only engages past this threshold.
-const RECENTER_HOLD_RAD: f32 = 2.0;
-
-pub fn recenter_follow_allowed(yaw_diff: f32) -> bool {
-    yaw_diff.abs() < RECENTER_HOLD_RAD
-}
-
-/// Retail's chase window: the pull engages only while the eye sits between
-/// this dot and 0.5 of the behind-the-actor direction (the `> 0.5 && < 0.99`
-/// engagement window, research/XIClient/src/XIClient/source/World/Camera/
-/// CameraManager.cpp UpdatePlayerFollowingCamera), about eight degrees. A
-/// follow that is not yet running starts only when the eye leaves this window;
-/// inside it the yaw holds where the player left it.
-const RETAIL_CHASE_RECENTER_SETTLED_DOT: f32 = 0.99;
-
-/// The stop for a follow that is already running: it keeps closing the gap
-/// until the yaw is within this dot of the target (well under a degree),
-/// instead of pausing at the eight-degree window above. Holding a running
-/// follow at eight degrees is what stuttered the chase camera on a turning
-/// body; retail's pull is 2.5 percent of the remaining offset per tick
-/// (UpdatePlayerFollowingCamera, `scale = 50 * 0.01 * 0.05`), which closes
-/// that last stretch before the pause reads.
-const RECENTER_DONE_DOT: f32 = 0.9999;
-
-/// The follow rate while locked on: the camera keeps the target framed as the
-/// body orbits it, so it closes faster than the behind-the-body follow. Same
-/// follow function, one more row in its rate table.
-const LOCK_FOLLOW_RATE: f32 = 12.0;
-
-/// Returns the camera yaw after one follow step and whether the follow still
-/// has ground to cover. `running` is whether the follow was stepping on the
-/// previous tick (or was just armed by a movement input): a running follow
-/// stops only at [`RECENTER_DONE_DOT`], a new one starts only outside
-/// [`RETAIL_CHASE_RECENTER_SETTLED_DOT`].
-pub fn recenter_yaw_step(
-    yaw: f32,
-    target_yaw: f32,
-    rate: f32,
-    dt: f32,
-    running: bool,
-    hold: bool,
-) -> (f32, bool) {
-    let diff = wrap_signed_pi(target_yaw - yaw);
-    if hold && !recenter_follow_allowed(diff) {
-        return (yaw, false);
-    }
-    let settled_dot = if running {
-        RECENTER_DONE_DOT
-    } else {
-        RETAIL_CHASE_RECENTER_SETTLED_DOT
-    };
-    if diff.cos() >= settled_dot {
-        return (yaw, false);
-    }
-    let alpha = 1.0 - (-rate * dt).exp();
-    (yaw + diff * alpha, true)
-}
-
 const FP_LOCK_PITCH_RATE: f32 = 3.0;
 
 const TARGET_HEAD_OFFSET_Y: f32 = 1.5;
 
-/// Chase-camera polish. Recenter tracks the character while it is moving and
-/// for the tail it takes to finish swinging behind; idle and settled, the
-/// camera holds wherever the player left it (retail behavior). Only a steer
-/// that actually owns the turn axis carves: A/D suppressed by a Q/E hold does
-/// not slow the follow below the body's rotate rate.
+/// Chase-camera polish: the first-person lock-on look-at. The chase yaw is
+/// the player's own (the mouse, the yaw keys, the Q/E orbit in
+/// dispatch_movement_system, a stair warp) plus the leash geometry in
+/// resolve_camera; nothing here pulls it toward the body.
 pub fn camera_polish_system(
-    keys: Res<ButtonInput<KeyCode>>,
-    bindings: Res<Bindings>,
-    pad: Res<super::gamepad_input::PadStickIntent>,
     time: Res<Time>,
     mode: Res<InputMode>,
     camera_mode: Res<CameraMode>,
-    state: Res<SceneState>,
     lock_on: Res<LockOn>,
-    pointer: Res<kuluu_render::MousePointer>,
-    locals: Res<DispatchLocals>,
-    prediction: Res<LocalPlayerPrediction>,
-    intent: Res<kuluu_render::combat_stance::SelfMoveIntent>,
-    hud_panels: Res<kuluu_render::hud::HudPanels>,
     mut chase: ResMut<ChaseCamera>,
-    mut recenter: ResMut<CameraAutoRecenter>,
-    // One query instead of two: Bevy's system-param tuple tops out at 16 and
-    // this system already uses them all (round 22 added HudPanels). The self
-    // entity is a wire entity (scene.rs sync_entities_system), so it carries
-    // WorldEntity and the merged query sees it.
+    // The self entity is a wire entity (scene.rs sync_entities_system), so it
+    // carries WorldEntity and the merged query sees it.
     actors_q: Query<(&WorldEntity, &Transform, Option<&IsSelf>), Without<OperatorCamera>>,
 ) {
     if !matches!(*mode, InputMode::World) {
-        recenter.forward_held_since = None;
         return;
-    }
-
-    let yaw_input = bindings.pressed(Action::CameraYawLeft, &keys)
-        || bindings.pressed(Action::CameraYawRight, &keys)
-        || pad.camera.x != 0.0;
-    let drag_active = pointer.left || pointer.right;
-    if yaw_input || drag_active {
-        recenter.manual_override = true;
-        recenter.settling = false;
-    }
-    let movement_input = bindings.pressed(Action::MoveForward, &keys)
-        || bindings.pressed(Action::MoveBackward, &keys)
-        || bindings.pressed(Action::StrafeLeft, &keys)
-        || bindings.pressed(Action::StrafeRight, &keys)
-        || bindings.pressed(Action::TurnLeft, &keys)
-        || bindings.pressed(Action::TurnRight, &keys)
-        || bindings.pressed(Action::RotateLeft, &keys)
-        || bindings.pressed(Action::RotateRight, &keys)
-        || pad.movement != Vec2::ZERO;
-    if movement_input {
-        recenter.manual_override = false;
-        recenter.settling = true;
-    }
-
-    // The one camera follow, both states, and the only writer of the follow
-    // yaw. Locked, the target is the yaw that puts the lock target ahead,
-    // measured from the predicted self position the body orbits on; unlocked,
-    // the yaw behind the body. Both read the heading this tick's movement
-    // dispatch produced, never the session's echo of it, which lands a tick
-    // late and steps.
-    let self_xy = if prediction.initialized {
-        (prediction.pos.x, prediction.pos.y)
-    } else {
-        (state.snapshot.self_pos.pos.x, state.snapshot.self_pos.pos.y)
-    };
-    let locked_target_yaw: Option<f32> = lock_on.target_id.and_then(|id| {
-        state
-            .snapshot
-            .entities
-            .iter()
-            .find(|e| e.id == id)
-            .and_then(|ent| {
-                let dx = ent.pos.x - self_xy.0;
-                let dy = ent.pos.y - self_xy.1;
-                (dx.abs() > 0.001 || dy.abs() > 0.001)
-                    .then(|| yaw_for_heading(heading_for_angle((-dy).atan2(dx))))
-            })
-    });
-    let body_heading = intent.heading.unwrap_or(state.snapshot.self_pos.heading);
-    if (movement_input || recenter.settling || locked_target_yaw.is_some())
-        && !yaw_input
-        && !drag_active
-        && !recenter.manual_override
-        && matches!(*camera_mode, CameraMode::Chase)
-    {
-        let carving = locals.turn_owner != TurnAxisOwner::Rotate
-            && (bindings.pressed(Action::TurnLeft, &keys)
-                || bindings.pressed(Action::TurnRight, &keys)
-                || pad.movement.x != 0.0);
-        // `recenter.settling` is the hysteresis state: the follow keeps its
-        // running stop (a degree, not the eight-degree start window) for as
-        // long as the body keeps turning. Locked, the follow is always
-        // running and the about-face hold does not apply.
-        let (target_yaw, rate, running, hold) = match locked_target_yaw {
-            Some(yaw) => (yaw, LOCK_FOLLOW_RATE, true, false),
-            None => {
-                let rate = if carving {
-                    CARVE_FOLLOW_RATE
-                } else {
-                    AUTO_RECENTER_RATE
-                };
-                (yaw_for_heading(body_heading), rate, recenter.settling, true)
-            }
-        };
-        // Debug Camera_smoother off: the yaw sits on its target every tick,
-        // no damped step, so a fault in the follow's state shows as "off
-        // fixes it". The target is unwrapped (locked: -bearing - pi/2), so it
-        // can sit a full turn from the accumulated chase yaw; snap via the
-        // shortest path instead of assigning raw, or the camera spins the long
-        // way around.
-        let (yaw, settling) = if hud_panels.camera_smoother_off {
-            (chase.yaw + wrap_signed_pi(target_yaw - chase.yaw), false)
-        } else {
-            recenter_yaw_step(
-                chase.yaw,
-                target_yaw,
-                rate,
-                time.delta_secs(),
-                running,
-                hold,
-            )
-        };
-        chase.yaw = yaw;
-        recenter.settling = settling && locked_target_yaw.is_none();
     }
 
     if !matches!(*camera_mode, CameraMode::FirstPerson) {
@@ -4186,10 +3930,6 @@ mod tests {
     /// Half a second of held rotate: ~40 heading units at the Q/E key rate,
     /// far past the couple of units of lerp round-trip noise.
     const ROTATE_TICKS: usize = 30;
-    /// Four seconds of movement ticks: an exponential close of the widest
-    /// followable gap finishes well inside this, so overrunning it means the
-    /// follow has stalled rather than merely being slow.
-    const SETTLE_TICK_BUDGET: u32 = 4 * RETAIL_MOVE_TICKS_PER_SEC as u32;
 
     fn turned_units(from: u8, to: u8) -> i32 {
         let raw = i32::from(to) - i32::from(from);
@@ -4328,131 +4068,37 @@ mod tests {
         }
     }
 
-    /// W then A: the run keeps its latched heading and A turns it at the
-    /// steer rate, one steady direction, no jump to a camera-relative
-    /// diagonal on the first tick.
+    /// The radian helper agrees with the u8 one to within a rounding unit.
     #[test]
-    fn unlocked_carve_turns_the_run_heading_at_the_steer_rate() {
-        let mut drive = MoveDrive::new();
-        drive.press(KeyCode::KeyW);
-        drive.run(SETTLE_TICKS);
-        let before = drive.run(1)[0].0;
-        drive.press(KeyCode::KeyA);
-        let trace = drive.run(120);
-        let first = turned_units(before, trace[0].0).abs();
-        assert!(
-            first <= 1,
-            "A must not jump the run heading, turned {first} on the first tick"
-        );
-        let total = turned_units(before, trace[119].0);
-        let expected = (STEER_RATE_RAD_PER_SEC * 2.0 * 256.0 / std::f32::consts::TAU) as i32;
-        assert!(
-            (total.abs() - expected).abs() <= 3,
-            "two seconds of A must turn ~{expected} units, turned {total}"
-        );
-        assert!(
-            total < 0,
-            "A turns left (decreasing heading), turned {total}"
-        );
-        for (i, w) in trace.windows(2).enumerate() {
-            let d = turned_units(w[0].0, w[1].0);
-            assert!(
-                d <= 0 && d >= -1,
-                "tick {i}: the turn must be steady, stepped {d}"
-            );
+    fn camera_relative_motion_rad_matches_the_heading_helper() {
+        for cam in [0u8, 17, 64, 100, 191, 250] {
+            let yaw = kuluu_render::yaw_for_heading(cam);
+            for (f, s) in [(1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, 0.0), (1.0, 1.0)] {
+                let rad = camera_relative_motion_rad(yaw, f, s);
+                let unit = camera_relative_motion_heading(cam, f, s);
+                assert!(
+                    turned_units(unit, heading_for_angle(rad)).abs() <= 1,
+                    "cam {cam} input ({f},{s}): rad helper {} vs u8 helper {unit}",
+                    heading_for_angle(rad)
+                );
+            }
         }
     }
 
-    /// D alone from standstill, with the camera follow running and
-    /// Camera_smoother off (the follow snaps behind the body every tick):
-    /// the run turns right once onto camera-right, then at the steer rate.
-    /// Before the stored heading, the snapped camera re-aimed the run 90
-    /// degrees every tick.
+    /// D alone, unlocked: the body faces camera-right on the first tick and
+    /// every tick after (the camera is still in this harness), no turn rate.
     #[test]
-    fn held_d_with_the_camera_snapping_behind_turns_at_the_steer_rate() {
+    fn held_d_faces_camera_right_every_tick() {
         let mut drive = MoveDrive::new();
-        drive
-            .app
-            .init_resource::<CameraAutoRecenter>()
-            .add_systems(Update, camera_polish_system.after(dispatch_movement_system));
-        drive
-            .app
-            .world_mut()
-            .resource_mut::<kuluu_render::hud::HudPanels>()
-            .camera_smoother_off = true;
         drive.run(1);
-        let camera_forward = heading_for_yaw(drive.camera_yaw());
+        let right = heading_for_angle(camera_relative_motion_rad(drive.camera_yaw(), 0.0, 1.0));
         drive.press(KeyCode::KeyD);
-        let trace = drive.run(120);
-        let off_right = turned_units(camera_forward.wrapping_add(64), trace[0].0);
-        assert!(
-            off_right.abs() <= 2,
-            "the run starts on camera-right, {off_right} units off it"
-        );
-        for (i, w) in trace[1..].windows(2).enumerate() {
-            let d = turned_units(w[0].0, w[1].0);
+        for (i, (h, _)) in drive.run(60).into_iter().enumerate() {
             assert!(
-                (0..=1).contains(&d),
-                "tick {i}: with the camera snapped behind, the run must turn steadily right, stepped {d}"
+                turned_units(right, h).abs() <= 1,
+                "tick {i}: heading {h}, camera-right {right}"
             );
         }
-        let total = turned_units(trace[0].0, trace[119].0);
-        let expected = (STEER_RATE_RAD_PER_SEC * 2.0 * 256.0 / std::f32::consts::TAU) as i32;
-        assert!(
-            (total - expected).abs() <= 3,
-            "two seconds of D must turn ~{expected} units past camera-right, turned {total}"
-        );
-    }
-
-    /// The recenter reads the heading the dispatch produced, not the
-    /// session's echo: with the echo frozen the camera still follows.
-    #[test]
-    fn unlocked_recenter_reads_the_dispatch_heading() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Bindings>()
-            .init_resource::<SceneState>()
-            .init_resource::<InputMode>()
-            .init_resource::<CameraMode>()
-            .init_resource::<LockOn>()
-            .init_resource::<kuluu_render::MousePointer>()
-            .init_resource::<DispatchLocals>()
-            .init_resource::<kuluu_render::hud::HudPanels>()
-            .init_resource::<LocalPlayerPrediction>()
-            .init_resource::<ChaseCamera>()
-            .init_resource::<CameraAutoRecenter>()
-            .init_resource::<super::super::gamepad_input::PadStickIntent>()
-            .insert_resource(kuluu_render::combat_stance::SelfMoveIntent {
-                moving: true,
-                forward: 1.0,
-                heading: Some(64),
-                ..default()
-            })
-            .add_systems(Update, camera_polish_system);
-        let time: Time = Time::default();
-        app.insert_resource(time);
-        app.world_mut()
-            .resource_mut::<SceneState>()
-            .snapshot
-            .self_pos
-            .heading = 0;
-        let target_yaw = yaw_for_heading(64);
-        let start = target_yaw - 1.0;
-        app.world_mut().resource_mut::<ChaseCamera>().yaw = start;
-        for _ in 0..30 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(Duration::from_secs_f32(RETAIL_MOVE_TICKS_PER_SEC.recip()));
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(KeyCode::KeyW);
-            app.update();
-        }
-        let yaw = app.world().resource::<ChaseCamera>().yaw;
-        assert!(
-            (yaw - target_yaw).abs() < (start - target_yaw).abs(),
-            "the follow must close on the dispatch heading, not the frozen echo"
-        );
     }
 
     /// The intent is the actor-frame vector in both states.
@@ -4505,13 +4151,15 @@ mod tests {
         turned_units(start, ticks.last().expect("ticks").0)
     }
 
-    /// Q held with `move_key` must turn the run at the rotate-in-place rate while
-    /// every tick still travels a full run step along the body's own heading.
+    /// Q held with `move_key`: every tick still travels a full run step along
+    /// the body's own heading, and the body does not turn on its own — it sits
+    /// on the camera's forward every tick, so the Q/E camera orbit carries it.
     fn assert_rotating_run(move_key: KeyCode) {
         let mut drive = MoveDrive::new();
         drive.press(move_key);
         let settled = drive.run(SETTLE_TICKS);
         let (start_heading, start_pos) = *settled.last().expect("settle ticks");
+        let yaw_start = drive.camera_yaw();
         drive.press(KeyCode::KeyQ);
         let ticks = drive.run(ROTATE_TICKS);
 
@@ -4533,10 +4181,10 @@ mod tests {
         }
 
         let turned = turned_units(start_heading, ticks.last().expect("ticks").0);
-        let standing = standing_rotate_units();
+        let orbit = (-(drive.camera_yaw() - yaw_start)) * 256.0 / std::f32::consts::TAU;
         assert!(
-            (turned - standing).abs() <= 2,
-            "{move_key:?}+Q turned {turned} units, rotate-in-place turns {standing}"
+            (turned - orbit.round() as i32).abs() <= 1,
+            "{move_key:?}+Q: the body must sit on the camera orbit, turned {turned} vs orbit {orbit}"
         );
     }
 
@@ -4609,12 +4257,13 @@ mod tests {
 
     /// The two retail rates are within a fifth of each other, so a ratio that
     /// missed by this much would have to be a different pairing entirely.
+    /// Measured from standstill: while a run is held the body faces the
+    /// camera-relative run direction and the Q/E orbit carries it.
     const ORBIT_RATIO_TOLERANCE: f32 = 0.05;
 
     #[test]
     fn a_held_rotate_key_orbits_the_camera_with_the_body() {
         let mut drive = MoveDrive::new();
-        drive.press(KeyCode::KeyW);
         drive.run(SETTLE_TICKS);
         let (start, _) = drive.tick();
         let yaw_start = drive.camera_yaw();
@@ -4650,10 +4299,15 @@ mod tests {
             drive.autorun_engaged(),
             "a held Q must steer the autorun, not cancel it"
         );
+        // While the autorun runs the body sits on the camera's forward, so a
+        // held Q carries it around on the camera orbit rather than turning it
+        // at the rotate-in-place rate; the point of this test is that the
+        // autorun survives the hold, not the turn rate.
         let turned = turned_units(start, turning.last().expect("ticks").0);
         assert!(
-            (turned - standing_rotate_units()).abs() <= 2,
-            "autorun+Q turned {turned} units"
+            turned.abs() > standing_rotate_units() / 2,
+            "autorun+Q must keep steering the run, turned {turned} of {}",
+            standing_rotate_units()
         );
         let (_, before_release) = *turning.last().expect("ticks");
         let (_, settled) = *after.last().expect("ticks");
@@ -4693,244 +4347,6 @@ mod tests {
                 cam.wrapping_add(128),
                 "cam={cam}"
             );
-        }
-    }
-
-    #[test]
-    fn recenter_holds_camera_when_running_toward_it() {
-        // S about-face: heading is a full π from the camera yaw — camera stays put.
-        assert!(!recenter_follow_allowed(std::f32::consts::PI));
-        assert!(!recenter_follow_allowed(-std::f32::consts::PI));
-        assert!(!recenter_follow_allowed(2.5));
-    }
-
-    #[test]
-    fn recenter_follows_carves_and_forward_travel() {
-        // A/D carves sit near ±π/2; forward travel near 0. Both must follow.
-        assert!(recenter_follow_allowed(0.0));
-        assert!(recenter_follow_allowed(std::f32::consts::FRAC_PI_2));
-        assert!(recenter_follow_allowed(-std::f32::consts::FRAC_PI_2));
-    }
-
-    /// The gap a held Q/E leaves at the moment of release: the body outruns
-    /// its own camera orbit, and the follow closes that difference.
-    #[test]
-    fn recenter_finishes_squarely_behind_after_the_turn_key_lifts() {
-        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let target = std::f32::consts::FRAC_PI_2;
-        let mut yaw = target
-            - (ROTATE_KEY_RATE_RAD_PER_SEC - ROTATE_KEY_ORBIT_RAD_PER_SEC) / AUTO_RECENTER_RATE;
-        let mut running = true;
-        let mut ticks = 0u32;
-        let settled = loop {
-            let (next, settling) =
-                recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, running, true);
-            if settling {
-                assert!(
-                    (next - target).abs() < (yaw - target).abs(),
-                    "the follow stalled at {yaw} short of {target}"
-                );
-            }
-            yaw = next;
-            running = settling;
-            ticks += 1;
-            if !settling {
-                break true;
-            }
-            if ticks > SETTLE_TICK_BUDGET {
-                break false;
-            }
-        };
-        assert!(settled, "the follow never finished: {yaw} vs {target}");
-        assert!(
-            (target - yaw).cos() >= RECENTER_DONE_DOT,
-            "the running follow must come to rest within a degree: {yaw} vs {target}"
-        );
-    }
-
-    #[test]
-    fn recenter_step_leaves_the_planted_about_face_camera_alone() {
-        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let (yaw, settling) = recenter_yaw_step(
-            0.0,
-            std::f32::consts::PI,
-            AUTO_RECENTER_RATE,
-            dt,
-            true,
-            true,
-        );
-        assert_eq!(yaw, 0.0);
-        assert!(!settling, "a planted camera has nothing left to settle");
-    }
-
-    #[test]
-    fn recenter_step_inside_the_settled_window_holds_the_yaw() {
-        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let target = std::f32::consts::FRAC_PI_2;
-        let yaw = target - 0.05;
-        assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
-        // A follow that is not running starts only outside the retail start
-        // window, so inside it the yaw holds where the player left it.
-        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, false, true);
-        assert_eq!(
-            next, yaw,
-            "a settled follow must not snap the last few degrees"
-        );
-        assert!(!settling);
-    }
-
-    /// The hysteresis: at the same off-centre yaw inside the retail start
-    /// window, a follow that is running keeps stepping (toward a degree) while
-    /// a follow that is not running holds (a new one starts only outside the
-    /// window).
-    #[test]
-    fn recenter_running_follow_keeps_stepping_inside_the_start_window() {
-        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let target = std::f32::consts::FRAC_PI_2;
-        let yaw = target - 0.05;
-        assert!((target - yaw).cos() >= RETAIL_CHASE_RECENTER_SETTLED_DOT);
-        let (next, settling) = recenter_yaw_step(yaw, target, AUTO_RECENTER_RATE, dt, true, true);
-        assert!(
-            (next - target).abs() < (yaw - target).abs(),
-            "a running follow must keep closing the last few degrees"
-        );
-        assert!(settling, "the running follow is not yet within a degree");
-    }
-
-    /// A carve that keeps turning: the follow must not pause at the settled
-    /// window. A per-frame hold inside eight degrees makes the yaw advance on
-    /// some ticks and not others (the stutter); a running follow instead keeps
-    /// running until it is within a degree of the target, so every tick the
-    /// body keeps turning, the camera keeps moving.
-    #[test]
-    fn recenter_does_not_stutter_while_the_body_keeps_turning() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Bindings>()
-            .init_resource::<SceneState>()
-            .init_resource::<InputMode>()
-            .init_resource::<CameraMode>()
-            .init_resource::<LockOn>()
-            .init_resource::<kuluu_render::MousePointer>()
-            .init_resource::<DispatchLocals>()
-            .init_resource::<kuluu_render::hud::HudPanels>()
-            .init_resource::<LocalPlayerPrediction>()
-            .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
-            .init_resource::<ChaseCamera>()
-            .init_resource::<CameraAutoRecenter>()
-            .init_resource::<super::super::gamepad_input::PadStickIntent>()
-            .add_systems(Update, camera_polish_system);
-        let time: Time = Time::default();
-        app.insert_resource(time);
-
-        // The body turns one heading unit every 40 ticks: slow enough that the
-        // carve follow (0.55 rad/s) catches up into the settled window and
-        // lingers there, fast enough that it never settles to a degree over the
-        // run. Start the camera 0.35 rad off the (decreasing) target so the
-        // follow is armed well outside the window and pulls the yaw one way for
-        // the whole run.
-        let mut heading = 0u8;
-        let target_yaw = yaw_for_heading(heading);
-        app.world_mut().resource_mut::<ChaseCamera>().yaw = target_yaw + 0.35;
-
-        // A held carve: the follow is armed by the movement input.
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyW);
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyA);
-
-        let dt = RETAIL_MOVE_TICKS_PER_SEC.recip();
-        let mut prev_yaw = app.world().resource::<ChaseCamera>().yaw;
-        let mut heading_moved = false;
-        let mut zero_deltas = 0usize;
-        let mut sign_mismatch = false;
-        let mut first_sign: i32 = 0;
-        for tick in 0..180 {
-            if tick % 40 == 0 {
-                heading = heading.wrapping_add(1);
-                heading_moved = true;
-                app.world_mut()
-                    .resource_mut::<SceneState>()
-                    .snapshot
-                    .self_pos
-                    .heading = heading;
-            }
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(Duration::from_secs_f32(dt));
-            app.update();
-            let yaw = app.world().resource::<ChaseCamera>().yaw;
-            let delta = yaw - prev_yaw;
-            if delta == 0.0 {
-                zero_deltas += 1;
-            } else {
-                let s = delta.signum() as i32;
-                if first_sign == 0 {
-                    first_sign = s;
-                } else if s != first_sign {
-                    sign_mismatch = true;
-                }
-            }
-            prev_yaw = yaw;
-        }
-        assert!(heading_moved, "the body must keep turning");
-        assert!(
-            !sign_mismatch,
-            "the follow must not reverse direction while the body keeps turning"
-        );
-        assert_eq!(
-            zero_deltas, 0,
-            "a running follow must not pause: {zero_deltas} of 180 ticks advanced no yaw"
-        );
-    }
-
-    /// The locked follow is the camera system's: with a target in the
-    /// snapshot the chase yaw closes on the yaw that puts the target ahead,
-    /// every tick, from the predicted self position.
-    #[test]
-    fn locked_camera_follows_the_target_from_the_camera_system() {
-        let mut app = App::new();
-        app.init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<Bindings>()
-            .init_resource::<SceneState>()
-            .init_resource::<InputMode>()
-            .init_resource::<CameraMode>()
-            .init_resource::<LockOn>()
-            .init_resource::<kuluu_render::MousePointer>()
-            .init_resource::<DispatchLocals>()
-            .init_resource::<kuluu_render::hud::HudPanels>()
-            .init_resource::<LocalPlayerPrediction>()
-            .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
-            .init_resource::<ChaseCamera>()
-            .init_resource::<CameraAutoRecenter>()
-            .init_resource::<super::super::gamepad_input::PadStickIntent>()
-            .add_systems(Update, camera_polish_system);
-        let time: Time = Time::default();
-        app.insert_resource(time);
-        {
-            let mut scene = app.world_mut().resource_mut::<SceneState>();
-            scene.snapshot.self_pos.heading = 64;
-            scene.snapshot.entities.push(ent(7, 5.0, 0.0));
-        }
-        // The target sits at +x of the player: bearing 0, whatever the body
-        // heading says.
-        let target_yaw = yaw_for_heading(0);
-        app.world_mut().resource_mut::<ChaseCamera>().yaw = target_yaw - 0.5;
-        app.world_mut().resource_mut::<LockOn>().target_id = Some(7);
-        let mut last = (app.world().resource::<ChaseCamera>().yaw - target_yaw).abs();
-        for _ in 0..8 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(Duration::from_secs_f32(RETAIL_MOVE_TICKS_PER_SEC.recip()));
-            app.update();
-            let gap = (app.world().resource::<ChaseCamera>().yaw - target_yaw).abs();
-            assert!(
-                gap < last,
-                "the locked follow must close on the target each tick"
-            );
-            last = gap;
         }
     }
 

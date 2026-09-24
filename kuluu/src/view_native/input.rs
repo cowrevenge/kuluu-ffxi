@@ -982,6 +982,30 @@ pub fn dispatch_movement_system(
     // Default to stopped so every early return below reports no movement.
     **move_intent = kuluu_render::combat_stance::SelfMoveIntent::default();
 
+    // Locked, the body's heading is the target bearing on every tick —
+    // including the early-return ticks below — so the visual yaw
+    // (kuluu-render scene.rs self_visual_yaw_system) never falls back to the
+    // server's echoed heading when the intent carries none; a stale or late
+    // echo faces the body away from the target. Quantized from the wire
+    // position (the predicted basis is not resolved yet at this point); the
+    // difference from the moving branch's bearing is sub-yalm.
+    let locked_heading: Option<u8> = lock_on.target_id.and_then(|id| {
+        state
+            .snapshot
+            .entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|ent| {
+                let dx = ent.pos.x - state.snapshot.self_pos.pos.x;
+                let dy = ent.pos.y - state.snapshot.self_pos.pos.y;
+                if dx.abs() <= 0.001 && dy.abs() <= 0.001 {
+                    None
+                } else {
+                    Some(heading_for_angle((-dy).atan2(dx)))
+                }
+            })
+    });
+
     let identity = (
         state.snapshot.self_char_id,
         state.snapshot.zone_id,
@@ -998,6 +1022,9 @@ pub fn dispatch_movement_system(
     if !env.floor_gate.ready() {
         *prediction = LocalPlayerPrediction::default();
         locals.walker = super::walker::Walker::default();
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -1043,6 +1070,9 @@ pub fn dispatch_movement_system(
     if mode_cancels_autorun(&mode) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -1141,6 +1171,9 @@ pub fn dispatch_movement_system(
     if kuluu_render::hud::death_prompt::is_dead(&state) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -1168,6 +1201,9 @@ pub fn dispatch_movement_system(
         }
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -1177,6 +1213,9 @@ pub fn dispatch_movement_system(
     if rest_stance.exit_blocks_movement(time.delta_secs()) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -1357,6 +1396,9 @@ pub fn dispatch_movement_system(
         .is_some_and(|id| state.snapshot.entities.iter().any(|e| e.id == id));
     if !self_present {
         prediction.initialized = false;
+        if let Some(h) = locked_heading {
+            move_intent.heading = Some(h);
+        }
         return;
     }
 
@@ -2313,9 +2355,12 @@ pub fn camera_polish_system(
         };
         // Debug Camera_smoother off: the yaw sits on its target every tick,
         // no damped step, so a fault in the follow's state shows as "off
-        // fixes it".
+        // fixes it". The target is unwrapped (locked: -bearing - pi/2), so it
+        // can sit a full turn from the accumulated chase yaw; snap via the
+        // shortest path instead of assigning raw, or the camera spins the long
+        // way around.
         let (yaw, settling) = if hud_panels.camera_smoother_off {
-            (target_yaw, false)
+            (chase.yaw + wrap_signed_pi(target_yaw - chase.yaw), false)
         } else {
             recenter_yaw_step(
                 chase.yaw,
@@ -4192,6 +4237,75 @@ mod tests {
             2,
             "the turn direction must reverse exactly once, got {signs:?}"
         );
+    }
+
+    /// Locked on a target 5 yalms ahead, a pure left strafe (A alone, no
+    /// W/S) from standstill: every tick the movement intent and the wire
+    /// echo must carry the body onto the target bearing. If either drops
+    /// out or drifts, the visual yaw falls back to the wire's stale echo
+    /// and a second writer owns the model.
+    #[test]
+    fn locked_pure_strafe_holds_the_intent_and_echo_on_the_bearing() {
+        const TARGET_ID: u32 = 7;
+        const RADIUS: f32 = 5.0;
+        const TICKS: usize = 120;
+        let (mut app, mut commands) = movement_app();
+        app.insert_resource(slab_collision(0.0));
+        app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
+        let file_id = {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(100);
+            scene.snapshot.self_pos.speed = kuluu_session::state::BASE_PACKET_SPEED;
+            kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+        };
+        app.world_mut()
+            .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+            .file_id = file_id;
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .entities
+            .push(ent(TARGET_ID, RADIUS, 0.0));
+        app.world_mut().resource_mut::<LockOn>().target_id = Some(TARGET_ID);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyA);
+
+        for i in 0..TICKS {
+            let (snap_x, snap_y) = {
+                let snap = app.world().resource::<SceneState>().snapshot.clone();
+                (snap.self_pos.pos.x, snap.self_pos.pos.y)
+            };
+            let expected = heading_for_angle((-(0.0 - snap_y)).atan2(RADIUS - snap_x));
+            app.world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(Duration::from_secs_f32(1.0 / RETAIL_MOVE_TICKS_PER_SEC));
+            app.update();
+            let intent = *app
+                .world()
+                .resource::<kuluu_render::combat_stance::SelfMoveIntent>();
+            let mut echoed = None;
+            while let Ok(cmd) = commands.try_recv() {
+                if let AgentCommand::Move { x, y, z, heading } = cmd {
+                    echoed = Some((x, y, z, heading));
+                }
+            }
+            assert_eq!(
+                intent.heading,
+                Some(expected),
+                "tick {i}: the intent left the target bearing, got {intent:?}"
+            );
+            assert_eq!(
+                echoed.map(|e| e.3),
+                Some(expected),
+                "tick {i}: the wire echo left the target bearing"
+            );
+            if let Some((x, y, z, heading)) = echoed {
+                let mut scene = app.world_mut().resource_mut::<SceneState>();
+                scene.snapshot.self_pos.pos = WireVec3 { x, y, z };
+                scene.snapshot.self_pos.heading = heading;
+            }
+        }
     }
 
     /// The body sits on the run direction the tick the steer starts: no lerp,

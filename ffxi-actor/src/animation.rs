@@ -10,6 +10,75 @@ pub fn interpolate_kf(a: &KeyFrameTransform, b: &KeyFrameTransform, t: f32) -> K
     }
 }
 
+/// Joints whose short-arc crossfade is under this angle take it without
+/// question; they vote the switch's turn sense. Above it the two arcs are
+/// close enough in length that keyframe noise picks one.
+const UNAMBIGUOUS_ARC_RAD: f32 = 150.0 * std::f32::consts::PI / 180.0;
+
+/// A joint follows the switch's turn sense only when its crossfade is mostly
+/// a twist about its local Y; a joint rotating about another axis keeps its
+/// short arc.
+const TWIST_SHARE: f32 = 0.25;
+
+fn quat_conj_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    // conj(a) * b, [x, y, z, w].
+    let (ax, ay, az, aw) = (-a[0], -a[1], -a[2], a[3]);
+    let (bx, by, bz, bw) = (b[0], b[1], b[2], b[3]);
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// This joint's vote for the switch's turn sense: its short-arc twist about Y
+/// when the arc is unambiguous, zero otherwise.
+pub fn twist_vote(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let mut d = quat_conj_mul(a, b);
+    if d[3] < 0.0 {
+        d = [-d[0], -d[1], -d[2], -d[3]];
+    }
+    let angle = 2.0 * d[3].clamp(-1.0, 1.0).acos();
+    if angle < UNAMBIGUOUS_ARC_RAD {
+        d[1]
+    } else {
+        0.0
+    }
+}
+
+/// `nlerp` from `a` to `b` turning with `sense` (+1 or -1 about the joint's
+/// local Y) when the blend is mostly a twist about Y; the plain short-arc
+/// `nlerp` otherwise.
+pub fn nlerp_with_sense(a: [f32; 4], b: [f32; 4], t: f32, sense: f32) -> [f32; 4] {
+    let d = quat_conj_mul(a, b);
+    let v = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if v < 1e-6 || d[1].abs() <= TWIST_SHARE * v {
+        return nlerp(a, b, t);
+    }
+    let r = if d[1].signum() == sense.signum() {
+        b
+    } else {
+        [-b[0], -b[1], -b[2], -b[3]]
+    };
+    // The plain component lerp with no hemisphere flip: `r` already names the arc.
+    let inv = 1.0 - t;
+    let mut q = [
+        a[0] * inv + r[0] * t,
+        a[1] * inv + r[1] * t,
+        a[2] * inv + r[2] * t,
+        a[3] * inv + r[3] * t,
+    ];
+    let mag = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if mag < 1e-6 {
+        return nlerp(a, b, t);
+    }
+    for c in q.iter_mut() {
+        *c /= mag;
+    }
+    q
+}
+
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     let inv = 1.0 - t;
     [
@@ -29,10 +98,21 @@ fn interpolate_nullable(
     a: Option<&KeyFrameTransform>,
     b: Option<&KeyFrameTransform>,
     t: f32,
+    sense: Option<f32>,
 ) -> Option<KeyFrameTransform> {
     match (a, b) {
         (None, None) => None,
-        (Some(a), Some(b)) => Some(interpolate_kf(a, b, t)),
+        (Some(a), Some(b)) => {
+            let rotation = match sense {
+                Some(s) => nlerp_with_sense(a.rotation, b.rotation, t, s),
+                None => nlerp(a.rotation, b.rotation, t),
+            };
+            Some(KeyFrameTransform {
+                rotation,
+                translation: lerp3(a.translation, b.translation, t),
+                scale: lerp3(a.scale, b.scale, t),
+            })
+        }
         _ => {
             let ar = a.map(|x| x.rotation).unwrap_or(UNIT_TRANSFORM.rotation);
             let br = b.map(|x| x.rotation).unwrap_or(UNIT_TRANSFORM.rotation);
@@ -234,6 +314,7 @@ pub struct AnimationTransition {
     pub transition_duration: f32,
     pub in_between: Option<SkeletonAnimation>,
     progress: f32,
+    pub sense: Option<f32>,
 }
 
 impl AnimationTransition {
@@ -249,6 +330,7 @@ impl AnimationTransition {
             transition_duration,
             in_between,
             progress: 0.0,
+            sense: None,
         }
     }
 
@@ -268,20 +350,39 @@ impl AnimationTransition {
             None => {
                 let prev = self.previous.get_joint_transform(joint);
                 let next = self.next.get_joint_transform(joint);
-                interpolate_nullable(prev.as_ref(), next.as_ref(), t)
+                interpolate_nullable(prev.as_ref(), next.as_ref(), t, self.sense)
             }
             Some(in_between) => {
                 if t < 0.5 {
                     let prev = self.previous.get_joint_transform(joint);
                     let next = in_between.get_joint_transform(joint as u32, 0.0);
-                    interpolate_nullable(prev.as_ref(), next.as_ref(), t * 2.0)
+                    interpolate_nullable(prev.as_ref(), next.as_ref(), t * 2.0, self.sense)
                 } else {
                     let prev = in_between.get_joint_transform(joint as u32, 0.0);
                     let next = self.next.get_joint_transform(joint);
-                    interpolate_nullable(prev.as_ref(), next.as_ref(), (t - 0.5) * 2.0)
+                    interpolate_nullable(prev.as_ref(), next.as_ref(), (t - 0.5) * 2.0, self.sense)
                 }
             }
         }
+    }
+
+    /// This transition's joints' summed twist vote (see `twist_vote`), prev
+    /// pose against the next clip's first frame.
+    pub fn twist_votes(&self) -> f32 {
+        self.next
+            .animation
+            .key_frame_sets
+            .keys()
+            .filter_map(|&j| {
+                let a = self.previous.get_joint_transform(j as usize)?;
+                let b = self.next.get_joint_transform(j as usize)?;
+                Some(twist_vote(a.rotation, b.rotation))
+            })
+            .sum()
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        self.progress == 0.0
     }
 }
 
@@ -447,6 +548,31 @@ impl SkeletonAnimationCoordinator {
     /// current clip's own transition-out window.
     pub fn register_idle_animation_eager(&mut self, animation: SkeletonAnimation) {
         self.register_animation(animation, LoopParams::low_priority_loop(), None, |_| true);
+    }
+
+    /// One turn sense for the whole body: every slot whose crossfade has not
+    /// started moving yet votes (see `twist_vote`), and they all blend with
+    /// the summed sign, so the legs and the upper body turn the same way
+    /// round on a clip switch.
+    pub fn sync_turn_sense(&mut self) {
+        let total: f32 = self
+            .animations
+            .iter()
+            .flatten()
+            .filter_map(|s| s.transition.as_ref())
+            .filter(|t| t.is_fresh())
+            .map(|t| t.twist_votes())
+            .sum();
+        let sense = (total != 0.0).then_some(total.signum());
+        for t in self
+            .animations
+            .iter_mut()
+            .flatten()
+            .filter_map(|s| s.transition.as_mut())
+            .filter(|t| t.is_fresh())
+        {
+            t.sense = sense;
+        }
     }
 
     pub fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
@@ -862,5 +988,43 @@ mod tests {
             Some(&tp),
         );
         assert!(a7.transition.as_ref().unwrap().in_between.is_none());
+    }
+
+    #[test]
+    fn a_twist_joint_takes_the_arc_its_sense_names() {
+        // A twist about Y of +170 deg: short arc is +170, long arc is -190.
+        let half = (170.0_f32.to_radians()) / 2.0;
+        let a = [0.0, 0.0, 0.0, 1.0];
+        let b = [0.0, half.sin(), 0.0, half.cos()];
+        let mid_pos = nlerp_with_sense(a, b, 0.5, 1.0);
+        let mid_neg = nlerp_with_sense(a, b, 0.5, -1.0);
+        assert!(
+            mid_pos[1] > 0.0,
+            "sense +1 must turn through +Y, got {mid_pos:?}"
+        );
+        assert!(
+            mid_neg[1] < 0.0,
+            "sense -1 must turn through -Y, got {mid_neg:?}"
+        );
+    }
+
+    #[test]
+    fn an_unambiguous_joint_votes_and_an_ambiguous_one_abstains() {
+        let a = [0.0, 0.0, 0.0, 1.0];
+        let small = (40.0_f32.to_radians()) / 2.0;
+        let near_half_turn = (175.0_f32.to_radians()) / 2.0;
+        assert!(twist_vote(a, [0.0, small.sin(), 0.0, small.cos()]) > 0.0);
+        assert_eq!(
+            twist_vote(a, [0.0, near_half_turn.sin(), 0.0, near_half_turn.cos()]),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_non_twist_joint_keeps_its_short_arc() {
+        let a = [0.0, 0.0, 0.0, 1.0];
+        let half = (60.0_f32.to_radians()) / 2.0;
+        let b = [half.sin(), 0.0, 0.0, half.cos()];
+        assert_eq!(nlerp_with_sense(a, b, 0.5, -1.0), nlerp(a, b, 0.5));
     }
 }

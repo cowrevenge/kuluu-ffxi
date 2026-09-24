@@ -698,12 +698,12 @@ pub struct GraphicsSettings {
     /// 1.0x). Applied via bevy's UiScale by apply_ui_scale_system.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
-    /// Camera slack (camera_collision.rs resolve_camera): on, the focus holds
-    /// inside a small dead zone and the eye holds anywhere between half and
-    /// all of the zoom distance, so small player motion never moves the
-    /// camera; off, a rigid boom at the zoom distance. The wall pull-in eases
-    /// either way when on. On by default, the normal client behaviour.
-    /// Persisted; a config from before the default flipped reads on.
+    /// Camera spring (camera_collision.rs resolve_camera): how fast the camera
+    /// moves once its leash says it must. On, the eye glides there (a
+    /// gap-proportional pull) and the wall pull-in eases; off, both snap. The
+    /// leash itself (the focus dead zone and the eye's slack band) is always
+    /// on. On by default, the normal client behaviour. Persisted; a config
+    /// from before the default flipped reads on.
     #[serde(default = "default_camera_spring")]
     pub camera_spring: bool,
     #[serde(default)]

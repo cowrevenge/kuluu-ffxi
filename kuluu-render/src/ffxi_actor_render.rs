@@ -1344,6 +1344,9 @@ pub struct FfxiRenderActor {
     body_armour_waist: u8,
 
     current_clip: Option<(DatId, bool)>,
+    /// A strafe-family switch in flight: the idle pose plays for `remaining`
+    /// frames before `target` registers (see `advance_actor_pose`).
+    strafe_in_between: Option<StrafeInBetween>,
 
     rest_phase: RestPlayback,
 
@@ -2087,6 +2090,7 @@ pub fn make_render_actor(
         head_neck,
         head_subtree,
         head_rot: Quat::IDENTITY,
+        strafe_in_between: None,
         last_clip: None,
         last_frame: 0.0,
         world_pose: Vec::new(),
@@ -2687,6 +2691,22 @@ fn advance_engage(
 /// end frame. No per-mob or pool gating decides this; only what the DAT resolves does. CLIP_WARN
 /// names the tier so a miss on an override (special/fishing asking for a clip the model does not
 /// ship) is distinguishable from a miss on the base tiers.
+/// A strafe-family switch (mvl?/mvr?/mvb? to another of them) in flight.
+#[derive(Clone, Copy, Debug)]
+struct StrafeInBetween {
+    target: DatId,
+    remaining: f32,
+}
+
+/// Frames the idle pose plays between two strafe families. The two families
+/// hold several joints in opposite twists and an independent per-joint blend
+/// takes the long arc for some of them, so the top half turns against the legs
+/// on a right-to-left reversal; a pass through the neutral pose is the idea
+/// research/xim ActorManager.kt `needsInBetweenFrame` uses for the same
+/// problem. Half the locomotion crossfade: long enough for the blend to land
+/// on neutral, short enough not to read as a stop.
+const STRAFE_IN_BETWEEN_FRAMES: f32 = 4.0;
+
 #[derive(Clone, Copy, PartialEq)]
 enum PoseTier {
     Death,
@@ -2707,6 +2727,7 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
     actor.rest_phase = RestPlayback::Inactive;
 
     actor.action = None;
+    actor.strafe_in_between = None;
     actor.engage = EngageMachine::NotEngaged;
     actor.knockback = None;
     actor.coordinator.clear();
@@ -2735,6 +2756,7 @@ fn advance_actor_pose(
         facing_dir,
         scale,
         current_clip,
+        strafe_in_between,
         rest_phase,
         death_phase,
         engage,
@@ -2994,6 +3016,41 @@ fn advance_actor_pose(
         }
     };
 
+    // A switch between two strafe families goes through the idle pose for
+    // STRAFE_IN_BETWEEN_FRAMES instead of crossfading the two directly (see the
+    // constant). The in-between keys on the family it is heading for, so a
+    // second reversal mid-way retargets it rather than restarting it.
+    let (selected_id, is_idle) = {
+        let from = current_clip.map(|(id, _)| id);
+        let switching = strafe_family(&selected_id)
+            && from.is_some_and(|f| strafe_family(&f) && !f.parameterized_match(&selected_id));
+        match strafe_in_between.as_mut() {
+            Some(ib) if strafe_family(&selected_id) => {
+                ib.target = selected_id;
+                ib.remaining -= elapsed_frames;
+                if ib.remaining > 0.0 {
+                    (DatId::from_str("idl?"), true)
+                } else {
+                    let target = ib.target;
+                    *strafe_in_between = None;
+                    (target, false)
+                }
+            }
+            Some(_) => {
+                *strafe_in_between = None;
+                (selected_id, is_idle)
+            }
+            None if switching => {
+                *strafe_in_between = Some(StrafeInBetween {
+                    target: selected_id,
+                    remaining: STRAFE_IN_BETWEEN_FRAMES,
+                });
+                (DatId::from_str("idl?"), true)
+            }
+            None => (selected_id, is_idle),
+        }
+    };
+
     // A chosen tier resolved to a usable chunk above, so this is non-empty unless we fell
     // through every tier and the idle family itself (ffxi-actor/src/actor_state.rs
     // idle_animation_id) is missing from the model.
@@ -3103,10 +3160,6 @@ fn advance_actor_pose(
                     .register_animation(clip.clone(), loop_params, Some(tp.clone()), |_| true);
             }
         }
-
-        // One turn direction for the whole body on this switch: every slot's
-        // fresh crossfade votes and all of them turn the same way round.
-        coordinator.sync_turn_sense();
     }
 
     *last_clip = matches
@@ -5759,42 +5812,43 @@ mod pose_resolution_tests {
         );
     }
 
-    /// A strafe reversal and a run-to-strafe switch turn every body slot the
-    /// same way round: after the switch, every fresh transition carries the
-    /// same sense, and none is left without one when the legs voted.
+    /// A right-to-left reversal registers the idle family for
+    /// STRAFE_IN_BETWEEN_FRAMES before the new strafe family, and never
+    /// crossfades mvr into mvl directly.
     #[test]
-    fn a_clip_switch_turns_the_whole_body_one_way() {
+    fn strafe_reversal_passes_through_idle() {
         let Some(loaded) = load_hume_m() else { return };
-        for (from, to) in [
-            (PoseState::StrafeRight, PoseState::StrafeLeft),
-            (PoseState::Run, PoseState::StrafeRight),
-            (PoseState::StrafeLeft, PoseState::Run),
-        ] {
-            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
-            for _ in 0..30 {
-                actor.inputs = inputs_for_pose(from, false);
-                advance_actor_pose_standalone(&mut actor, 1.0, None);
-            }
-            actor.inputs = inputs_for_pose(to, false);
-            advance_actor_pose_standalone(&mut actor, 0.0, None);
-            let senses: Vec<Option<f32>> = actor
-                .coordinator
-                .animations
-                .iter()
-                .flatten()
-                .filter_map(|s| s.transition.as_ref())
-                .map(|t| t.sense)
-                .collect();
-            assert!(
-                !senses.is_empty(),
-                "{from:?} -> {to:?}: no crossfade started"
-            );
-            assert!(
-                senses.iter().all(|s| *s == senses[0]),
-                "{from:?} -> {to:?}: slots disagree on the turn, {senses:?}"
-            );
-            assert!(senses[0].is_some(), "{from:?} -> {to:?}: nothing voted");
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let family = |actor: &FfxiRenderActor| {
+            actor
+                .current_clip
+                .map(|(id, _)| id.as_str()[..3].to_string())
+                .unwrap_or_default()
+        };
+        for _ in 0..30 {
+            actor.inputs = inputs_for_pose(PoseState::StrafeRight, false);
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
+        assert_eq!(family(&actor), "mvr");
+        let mut seen = Vec::new();
+        for _ in 0..(STRAFE_IN_BETWEEN_FRAMES as usize + 2) {
+            actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            seen.push(family(&actor));
+        }
+        assert_eq!(
+            seen[0], "idl",
+            "the switch must start on the idle pose, got {seen:?}"
+        );
+        assert_eq!(
+            seen[seen.len() - 1],
+            "mvl",
+            "the target family must register after the in-between, got {seen:?}"
+        );
+        assert!(
+            !seen.windows(2).any(|w| w[0] == "mvr" && w[1] == "mvl"),
+            "mvr must never crossfade straight into mvl, got {seen:?}"
+        );
     }
 
     #[test]

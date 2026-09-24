@@ -75,10 +75,6 @@ pub struct DispatchLocals {
     /// Rising-edge memory for pad stick just_pressed emulation.
     pub pad_edges: PadEdges,
     pub walker: super::walker::Walker,
-    /// Whether the previous tick moved the player: the first step from a
-    /// standstill faces the run direction outright, later direction changes
-    /// turn through `turn_body`.
-    was_moving: bool,
     identity: Option<(Option<u32>, Option<u16>, Option<u32>, u64)>,
 }
 
@@ -172,21 +168,12 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
-// The one body turn: onto the run direction unlocked, a framerate-independent
-// exponential. A 90 degree turn closes to within a tenth in ~0.4 s at this
-// rate (HorizonXI video 2026-07-20 showed ~0.5-0.7 s for the carve). Locked,
-// the same turn snaps: a body that lags the bearing by even 0.125 rad strafes
-// 0.0078 yalms off its orbit per tick (the radial component of a step taken
-// off the tangent), so the logical heading sits on the bearing every tick and
-// the turn seen on screen is the visual yaw slerp (kuluu-render scene.rs
-// self_visual_yaw_system). `locked_strafe_orbits_and_keeps_facing_the_target`
-// holds the orbit to 0.2 yalms over four seconds.
-const BODY_TURN_RATE_RAD_PER_SEC: f32 = 6.0;
-
-// S from a forward-facing stance is an instant about-face (HorizonXI video
-// 2026-07-20), not a carved arc; turns sharper than this snap instead of
-// turning.
-const ABOUT_FACE_SNAP_RAD: f32 = 2.0;
+// The body sits on its desired heading every tick, both states: the run
+// direction unlocked, the target bearing locked. No turn rate here: a body
+// that lags the bearing by even 0.125 rad strafes 0.0078 yalms off its orbit
+// per tick (the radial component of a step taken off the tangent), and the
+// turn seen on screen is the visual yaw slerp (kuluu-render scene.rs
+// self_visual_yaw_system), not the logical heading.
 
 #[derive(Resource, Clone)]
 pub struct CommandTx(pub mpsc::Sender<AgentCommand>);
@@ -1461,12 +1448,11 @@ pub fn dispatch_movement_system(
             .heading_rad
             .unwrap_or_else(|| heading_rad_of(self_pos.heading));
         if let Some(bearing) = locked_bearing {
-            heading_rad = turn_body(heading_rad, bearing, true, time.delta_secs());
+            heading_rad = wrap_signed_pi(bearing);
         }
         prediction.heading_rad = Some(heading_rad);
         let heading = heading_for_angle(heading_rad);
         move_intent.heading = Some(heading);
-        locals.was_moving = false;
         let res = super::walker::step(
             &env.collision,
             &env.obstacles,
@@ -1579,19 +1565,17 @@ pub fn dispatch_movement_system(
         steer_motion_h = Some(motion_h);
     }
 
-    // The one turn, both states: onto the target bearing when locked, onto the
-    // run direction when a camera-relative run is steering. A standstill
-    // start faces the run direction outright. Locked sits on the bearing
-    // every tick (see BODY_TURN_RATE_RAD_PER_SEC): a lagging body strafes off
-    // its orbit. The camera follow is camera_polish_system's.
+    // The desired heading, both states: the target bearing when locked, the
+    // run direction when a camera-relative run is steering. The body sits on
+    // it every tick (see the note above the constants); the camera follow is
+    // camera_polish_system's.
     let desired_rad: Option<f32> = match (locked_bearing, steer_motion_h) {
         (Some(bearing), _) => Some(bearing),
         (None, Some(motion_h)) => Some(heading_rad_of(motion_h)),
         (None, None) => None,
     };
     if let Some(desired) = desired_rad {
-        let snap = locked || !locals.was_moving;
-        heading_rad = turn_body(heading_rad, desired, snap, time.delta_secs());
+        heading_rad = wrap_signed_pi(desired);
     }
 
     // The movement vector is bucketed against the body's own heading, which
@@ -1684,7 +1668,6 @@ pub fn dispatch_movement_system(
 
     prediction.pos = Vec3::new(final_x, final_y, final_z);
     move_intent.heading = Some(heading);
-    locals.was_moving = moving;
     tracing::debug!(
         target: "kuluu_move",
         locked,
@@ -1966,18 +1949,6 @@ fn heading_for_angle(angle: f32) -> u8 {
 /// `heading_to_forward` / `heading_for_angle` share, wrapped to (-pi, pi].
 fn heading_rad_of(heading: u8) -> f32 {
     wrap_signed_pi(heading as f32 * std::f32::consts::TAU / 256.0)
-}
-
-/// The one body turn, both states: snap onto `desired` on a standstill start
-/// or an about-face, otherwise close the gap exponentially at
-/// [`BODY_TURN_RATE_RAD_PER_SEC`]. Radians in the `heading_rad_of` space.
-fn turn_body(current: f32, desired: f32, snap: bool, dt: f32) -> f32 {
-    let diff = wrap_signed_pi(desired - current);
-    if snap || diff.abs() >= ABOUT_FACE_SNAP_RAD {
-        return wrap_signed_pi(desired);
-    }
-    let alpha = 1.0 - (-BODY_TURN_RATE_RAD_PER_SEC * dt).exp();
-    wrap_signed_pi(current + diff * alpha)
 }
 
 fn radius_for_wire_kind(kind: EntityKind) -> f32 {
@@ -4223,11 +4194,11 @@ mod tests {
         );
     }
 
-    /// The same turn in both states: the unlocked carve and the locked orbit
-    /// both produce a heading trace `turn_body` reproduces from the desired
-    /// sequence, so there is no second turn rate anywhere.
+    /// The body sits on the run direction the tick the steer starts: no lerp,
+    /// no second turn rate anywhere. The carve's arc comes from the camera
+    /// follow rotating the run direction, not from the body lagging it.
     #[test]
-    fn unlocked_carve_turns_the_body_without_a_snap() {
+    fn unlocked_carve_faces_the_run_direction_on_the_first_tick() {
         let mut drive = MoveDrive::new();
         drive.press(KeyCode::KeyW);
         drive.run(SETTLE_TICKS);
@@ -4235,12 +4206,16 @@ mod tests {
         drive.press(KeyCode::KeyA);
         let trace = drive.run(30);
         let first = turned_units(before, trace[0].0).abs();
-        let total = turned_units(before, trace[29].0).abs();
-        assert!(total > 8, "a held carve must turn the body, turned {total}");
         assert!(
-            first < total,
-            "the carve turns over the run, it does not snap on the first tick ({first} of {total})"
+            first > 8,
+            "the steer must turn the body on its first tick, turned {first}"
         );
+        for (i, w) in trace.windows(2).enumerate() {
+            assert!(
+                turned_units(w[0].0, w[1].0).abs() <= 2,
+                "tick {i}: with the camera still, the body must not keep turning after the first tick"
+            );
+        }
     }
 
     /// The recenter reads the heading the dispatch produced, not the

@@ -64,12 +64,14 @@ pub struct PadEdges {
 
 #[derive(Resource, Default)]
 pub struct DispatchLocals {
-    /// Latched world-space run heading for pure W/S: (forward sign, motion
-    /// heading). Sampled from the camera frame when the key state changes,
-    /// then held fixed so the camera's auto-recenter can swing behind
-    /// without dragging the run direction with it. A Q/E carve rotates this
-    /// latch in place rather than resampling it.
-    pub steer_latch: Option<(i32, u8)>,
+    /// The unlocked run heading, radians in the `heading_rad_of` space, with
+    /// the W/S sign it was seeded under (0 for a pure A/D run). Seeded from
+    /// the camera frame when a run starts, when the player pans the camera
+    /// himself, or on a W/S reversal; otherwise A/D rotate it at
+    /// [`STEER_RATE_RAD_PER_SEC`] and Q/E by the body-rotate units. Never
+    /// re-read from the camera while held: the camera follows the body, so a
+    /// run direction taken from the camera every tick is a feedback loop.
+    pub run_heading: Option<(i32, f32)>,
     /// Which key family currently holds the turn axis (see [`TurnAxisOwner`]).
     pub turn_owner: TurnAxisOwner,
     /// Rising-edge memory for pad stick just_pressed emulation.
@@ -174,6 +176,12 @@ const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 // per tick (the radial component of a step taken off the tangent), and the
 // turn seen on screen is the visual yaw slerp (kuluu-render scene.rs
 // self_visual_yaw_system), not the logical heading.
+
+// A held A/D rotates the stored run heading at this rate: ~150-180 degrees
+// over a ~5 s held D (HorizonXI video 2026-07-20), the circle the old
+// camera-paced carve traced, now owned by the movement state instead of by
+// how fast the camera caught up.
+const STEER_RATE_RAD_PER_SEC: f32 = 0.55;
 
 #[derive(Resource, Clone)]
 pub struct CommandTx(pub mpsc::Sender<AgentCommand>);
@@ -1379,9 +1387,10 @@ pub fn dispatch_movement_system(
         || env.pointer.left
         || env.pointer.right
         || drive_c != 0;
-    let rotate_carve = steer_in_chase && resolved.rotate_dir != 0;
-    if !rotate_carve && (!steer_in_chase || ps != 0.0 || camera_panning) {
-        locals.steer_latch = None;
+    // A run that stops forgets its heading; the next one seeds from the
+    // camera frame.
+    if !steer_in_chase {
+        locals.run_heading = None;
     }
 
     let self_pos = state.snapshot.self_pos;
@@ -1578,42 +1587,53 @@ pub fn dispatch_movement_system(
         heading_rad = heading_rad_of(heading_for_yaw(chase.yaw));
     }
 
-    let mut steer_motion_h: Option<u8> = None;
+    // The unlocked run heading is state (see DispatchLocals::run_heading).
+    // Seeded from the camera frame only when the run starts, when the player
+    // pans the camera himself (the follow is off while he does), or when W/S
+    // reverse; held, A/D rotate it and Q/E add their rotate units. The camera
+    // follow reads the body this produces and never feeds back into it.
+    let mut steer_motion_rad: Option<f32> = None;
     if steer_in_chase {
-        let camera_forward_h = heading_for_yaw(chase.yaw);
-        let pf_sign = if pf > 0.0 { 1 } else { -1 };
-        let latched = match locals.steer_latch {
-            Some((f, h)) if f == pf_sign => Some(h),
-            _ => None,
-        };
-        let continuous = ps != 0.0 || camera_panning;
-        let motion_h = if rotate_carve {
-            let base = latched.unwrap_or_else(|| {
-                camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0)
-            });
-            let h = base.wrapping_add(player_rotate_u8.rem_euclid(256) as u8);
-            locals.steer_latch = Some((pf_sign, h));
-            h
-        } else if continuous {
-            camera_relative_motion_heading(camera_forward_h, pf, ps)
+        let pf_sign: i32 = if pf > 0.0 {
+            1
+        } else if pf < 0.0 {
+            -1
         } else {
-            latched.unwrap_or_else(|| {
-                let h = camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0);
-                locals.steer_latch = Some((pf_sign, h));
-                h
-            })
+            0
         };
-
-        steer_motion_h = Some(motion_h);
+        let reseed = match locals.run_heading {
+            None => true,
+            Some((sign, _)) => camera_panning || sign * pf_sign < 0,
+        };
+        let mut run = match locals.run_heading {
+            Some((_, h)) if !reseed => {
+                wrap_signed_pi(h + ps * STEER_RATE_RAD_PER_SEC * time.delta_secs())
+            }
+            _ => heading_rad_of(camera_relative_motion_heading(
+                heading_for_yaw(chase.yaw),
+                pf,
+                ps,
+            )),
+        };
+        if player_rotate_u8 != 0 {
+            run = wrap_signed_pi(run + player_rotate_u8 as f32 * std::f32::consts::TAU / 256.0);
+        }
+        let sign = if pf_sign != 0 {
+            pf_sign
+        } else {
+            locals.run_heading.map_or(0, |(s, _)| s)
+        };
+        locals.run_heading = Some((sign, run));
+        steer_motion_rad = Some(run);
     }
 
     // The desired heading, both states: the target bearing when locked, the
     // run direction when a camera-relative run is steering. The body sits on
     // it every tick (see the note above the constants); the camera follow is
     // camera_polish_system's.
-    let desired_rad: Option<f32> = match (locked_bearing, steer_motion_h) {
+    let desired_rad: Option<f32> = match (locked_bearing, steer_motion_rad) {
         (Some(bearing), _) => Some(bearing),
-        (None, Some(motion_h)) => Some(heading_rad_of(motion_h)),
+        (None, Some(run)) => Some(run),
         (None, None) => None,
     };
     if let Some(desired) = desired_rad {
@@ -2162,11 +2182,11 @@ pub struct CameraAutoRecenter {
     pub settling: bool,
 }
 
-// Retail's camera swings behind a carving character at ~0.55 rad/s (HorizonXI
-// video 2026-07-20: ~150-180° over a ~5s held D). This lazy follow is what
-// makes a held A/D trace a wide circle — the camera-relative run direction
-// only rotates as fast as the camera catches up. Everything else follows at
-// the retail chase rate below.
+// The follow rate behind a carving character (HorizonXI video 2026-07-20:
+// the camera swings ~150-180 degrees over a ~5 s held D). The carve's circle
+// is the stored run heading turning at STEER_RATE_RAD_PER_SEC; this rate only
+// sets how far the camera trails it. Everything else follows at the chase
+// rate below.
 const CARVE_FOLLOW_RATE: f32 = 0.55;
 
 // Retail's chase camera (the Chase Cam config mode, FS_CONFIG_145) pulls the
@@ -4308,28 +4328,80 @@ mod tests {
         }
     }
 
-    /// The body sits on the run direction the tick the steer starts: no lerp,
-    /// no second turn rate anywhere. The carve's arc comes from the camera
-    /// follow rotating the run direction, not from the body lagging it.
+    /// W then A: the run keeps its latched heading and A turns it at the
+    /// steer rate, one steady direction, no jump to a camera-relative
+    /// diagonal on the first tick.
     #[test]
-    fn unlocked_carve_faces_the_run_direction_on_the_first_tick() {
+    fn unlocked_carve_turns_the_run_heading_at_the_steer_rate() {
         let mut drive = MoveDrive::new();
         drive.press(KeyCode::KeyW);
         drive.run(SETTLE_TICKS);
         let before = drive.run(1)[0].0;
         drive.press(KeyCode::KeyA);
-        let trace = drive.run(30);
+        let trace = drive.run(120);
         let first = turned_units(before, trace[0].0).abs();
         assert!(
-            first > 8,
-            "the steer must turn the body on its first tick, turned {first}"
+            first <= 1,
+            "A must not jump the run heading, turned {first} on the first tick"
+        );
+        let total = turned_units(before, trace[119].0);
+        let expected = (STEER_RATE_RAD_PER_SEC * 2.0 * 256.0 / std::f32::consts::TAU) as i32;
+        assert!(
+            (total.abs() - expected).abs() <= 3,
+            "two seconds of A must turn ~{expected} units, turned {total}"
+        );
+        assert!(
+            total < 0,
+            "A turns left (decreasing heading), turned {total}"
         );
         for (i, w) in trace.windows(2).enumerate() {
+            let d = turned_units(w[0].0, w[1].0);
             assert!(
-                turned_units(w[0].0, w[1].0).abs() <= 2,
-                "tick {i}: with the camera still, the body must not keep turning after the first tick"
+                d <= 0 && d >= -1,
+                "tick {i}: the turn must be steady, stepped {d}"
             );
         }
+    }
+
+    /// D alone from standstill, with the camera follow running and
+    /// Camera_smoother off (the follow snaps behind the body every tick):
+    /// the run turns right once onto camera-right, then at the steer rate.
+    /// Before the stored heading, the snapped camera re-aimed the run 90
+    /// degrees every tick.
+    #[test]
+    fn held_d_with_the_camera_snapping_behind_turns_at_the_steer_rate() {
+        let mut drive = MoveDrive::new();
+        drive
+            .app
+            .init_resource::<CameraAutoRecenter>()
+            .add_systems(Update, camera_polish_system.after(dispatch_movement_system));
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .camera_smoother_off = true;
+        drive.run(1);
+        let camera_forward = heading_for_yaw(drive.camera_yaw());
+        drive.press(KeyCode::KeyD);
+        let trace = drive.run(120);
+        let off_right = turned_units(camera_forward.wrapping_add(64), trace[0].0);
+        assert!(
+            off_right.abs() <= 2,
+            "the run starts on camera-right, {off_right} units off it"
+        );
+        for (i, w) in trace[1..].windows(2).enumerate() {
+            let d = turned_units(w[0].0, w[1].0);
+            assert!(
+                (0..=1).contains(&d),
+                "tick {i}: with the camera snapped behind, the run must turn steadily right, stepped {d}"
+            );
+        }
+        let total = turned_units(trace[0].0, trace[119].0);
+        let expected = (STEER_RATE_RAD_PER_SEC * 2.0 * 256.0 / std::f32::consts::TAU) as i32;
+        assert!(
+            (total - expected).abs() <= 3,
+            "two seconds of D must turn ~{expected} units past camera-right, turned {total}"
+        );
     }
 
     /// The recenter reads the heading the dispatch produced, not the

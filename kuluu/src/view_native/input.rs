@@ -172,12 +172,15 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
-// The one body turn, both states: onto the run direction unlocked, onto the
-// target bearing locked, a framerate-independent exponential. A 90 degree turn
-// closes to within a tenth in ~0.4 s at this rate (HorizonXI video 2026-07-20
-// showed ~0.5-0.7 s for the unlocked carve). Replaces the two rates the two
-// pipelines used (2.5 unlocked, 8.0 locked); tuned by
-// `locked_strafe_orbits_and_keeps_facing_the_target`.
+// The one body turn: onto the run direction unlocked, a framerate-independent
+// exponential. A 90 degree turn closes to within a tenth in ~0.4 s at this
+// rate (HorizonXI video 2026-07-20 showed ~0.5-0.7 s for the carve). Locked,
+// the same turn snaps: a body that lags the bearing by even 0.125 rad strafes
+// 0.0078 yalms off its orbit per tick (the radial component of a step taken
+// off the tangent), so the logical heading sits on the bearing every tick and
+// the turn seen on screen is the visual yaw slerp (kuluu-render scene.rs
+// self_visual_yaw_system). `locked_strafe_orbits_and_keeps_facing_the_target`
+// holds the orbit to 0.2 yalms over four seconds.
 const BODY_TURN_RATE_RAD_PER_SEC: f32 = 6.0;
 
 // S from a forward-facing stance is an instant about-face (HorizonXI video
@@ -1458,7 +1461,7 @@ pub fn dispatch_movement_system(
             .heading_rad
             .unwrap_or_else(|| heading_rad_of(self_pos.heading));
         if let Some(bearing) = locked_bearing {
-            heading_rad = turn_body(heading_rad, bearing, false, time.delta_secs());
+            heading_rad = turn_body(heading_rad, bearing, true, time.delta_secs());
         }
         prediction.heading_rad = Some(heading_rad);
         let heading = heading_for_angle(heading_rad);
@@ -1575,15 +1578,16 @@ pub fn dispatch_movement_system(
 
     // The one turn, both states: onto the target bearing when locked, onto the
     // run direction when a camera-relative run is steering. A standstill
-    // start faces the run direction outright; locked never snaps except an
-    // about-face. The camera follow is camera_polish_system's.
+    // start faces the run direction outright. Locked sits on the bearing
+    // every tick (see BODY_TURN_RATE_RAD_PER_SEC): a lagging body strafes off
+    // its orbit. The camera follow is camera_polish_system's.
     let desired_rad: Option<f32> = match (locked_bearing, steer_motion_h) {
         (Some(bearing), _) => Some(bearing),
         (None, Some(motion_h)) => Some(heading_rad_of(motion_h)),
         (None, None) => None,
     };
     if let Some(desired) = desired_rad {
-        let snap = !locals.was_moving && !locked;
+        let snap = locked || !locals.was_moving;
         heading_rad = turn_body(heading_rad, desired, snap, time.delta_secs());
     }
 

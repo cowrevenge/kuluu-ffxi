@@ -12,6 +12,7 @@ pub(super) fn handle_world_key(
     engaged: bool,
     usable_items_available: bool,
     can_fish: bool,
+    mounted: bool,
     cmd_tx: &Sender<AgentCommand>,
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
@@ -52,6 +53,7 @@ pub(super) fn handle_world_key(
                         engaged,
                         usable_items_available,
                         can_fish,
+                        mounted,
                         cmd_tx,
                         scene_state,
                         check_target,
@@ -72,6 +74,7 @@ pub(super) fn handle_world_key(
                 engaged,
                 usable_items_available,
                 can_fish,
+                mounted,
                 cmd_tx,
                 scene_state,
                 check_target,
@@ -95,6 +98,7 @@ fn open_target_action_menu(
     engaged: bool,
     usable_items_available: bool,
     can_fish: bool,
+    mounted: bool,
     cmd_tx: &Sender<AgentCommand>,
     scene_state: &mut SceneState,
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
@@ -110,6 +114,7 @@ fn open_target_action_menu(
         engaged,
         usable_items_available,
         can_fish,
+        mounted,
     );
     let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&ctx);
     if entries.is_empty() {
@@ -393,6 +398,32 @@ pub(super) fn confirm_target_action_at_cursor(
         TargetActionId::Fish => {
             if let Err(err) = cmd_tx.try_send(AgentCommand::Fish) {
                 push_system_chat_line(scene_state, format!("[menu] Fish dispatch dropped: {err}"));
+            }
+            Some(InputMode::World)
+        }
+        TargetActionId::Dig | TargetActionId::Dismount => {
+            // Self-targeted 0x01A actions; the vendor acts on the sender and
+            // ignores the target fields (vendor/server/src/map/packets/c2s/0x01a_action.cpp
+            // GP_CLI_COMMAND_ACTION::process).
+            let kind = match entry.id {
+                TargetActionId::Dig => ActionKind::ChocoboDig,
+                _ => ActionKind::Dismount,
+            };
+            let self_id = scene_state.snapshot.self_char_id.unwrap_or(0);
+            let self_index = entities
+                .iter()
+                .find(|e| e.id == self_id)
+                .map(|e| e.act_index)
+                .unwrap_or(0);
+            if let Err(err) = cmd_tx.try_send(AgentCommand::Action {
+                target_id: self_id,
+                target_index: self_index,
+                kind,
+            }) {
+                push_system_chat_line(
+                    scene_state,
+                    format!("[menu] {} dispatch dropped: {err}", entry.label),
+                );
             }
             Some(InputMode::World)
         }

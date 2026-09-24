@@ -346,6 +346,7 @@ mod tests {
             engaged: false,
             usable_items_available: true,
             can_fish: false,
+            mounted: false,
         }
     }
 

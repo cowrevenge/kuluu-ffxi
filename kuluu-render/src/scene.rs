@@ -823,12 +823,19 @@ const SELF_VISUAL_YAW_RATE: f32 = 14.0;
 pub fn self_visual_yaw_system(
     time: Res<Time>,
     state: Res<SceneState>,
+    intent: Option<Res<crate::combat_stance::SelfMoveIntent>>,
     mut q_self: Query<&mut Transform, With<IsSelf>>,
 ) {
     let Ok(mut t) = q_self.single_mut() else {
         return;
     };
-    let target = heading_to_quat(state.snapshot.self_pos.heading);
+    // The heading the movement dispatch produced this tick; the wire's echo of
+    // it only when no dispatch ran (the viewer, a snapshot-driven tick).
+    let heading = intent
+        .as_ref()
+        .and_then(|i| i.heading)
+        .unwrap_or(state.snapshot.self_pos.heading);
+    let target = heading_to_quat(heading);
     let alpha = 1.0 - (-SELF_VISUAL_YAW_RATE * time.delta_secs()).exp();
     t.rotation = t.rotation.slerp(target, alpha);
 }

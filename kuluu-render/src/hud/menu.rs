@@ -2365,11 +2365,46 @@ mod tests {
             .filter(|s| s.header != ENHANCED_SECTION)
         {
             assert!(
-                !section.fields.contains(&GraphicsField::CameraSpring)
-                    && !section.fields.contains(&GraphicsField::DepthOfField)
+                !section.fields.contains(&GraphicsField::DepthOfField)
                     && !section.fields.contains(&GraphicsField::BloomIntensity),
                 "{} must not hold a row the original client never had",
                 section.header
+            );
+        }
+    }
+
+    /// The camera spring is the normal client's behaviour: tagged on, on in
+    /// every preset, and listed under Display, not the enhanced group.
+    #[test]
+    fn camera_spring_is_a_display_row_on_by_default() {
+        use crate::graphics_settings::{
+            BoolParity, QualityPreset, ENHANCED_SECTION, GRAPHICS_SECTIONS,
+        };
+        assert_eq!(
+            GraphicsField::CameraSpring.bool_parity(),
+            BoolParity::VanillaOn
+        );
+        let display = GRAPHICS_SECTIONS
+            .iter()
+            .find(|s| s.header == "Display")
+            .expect("a Display section");
+        assert!(display.fields.contains(&GraphicsField::CameraSpring));
+        let enhanced = GRAPHICS_SECTIONS
+            .iter()
+            .find(|s| s.header == ENHANCED_SECTION)
+            .expect("an enhanced section");
+        assert!(!enhanced.fields.contains(&GraphicsField::CameraSpring));
+        for preset in [
+            QualityPreset::Minimum,
+            QualityPreset::Low,
+            QualityPreset::Medium,
+            QualityPreset::High,
+            QualityPreset::Ultra,
+            QualityPreset::Maximum,
+        ] {
+            assert!(
+                GraphicsSettings::for_preset(preset).camera_spring,
+                "{preset:?} must ship the spring on"
             );
         }
     }

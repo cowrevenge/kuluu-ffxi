@@ -2259,7 +2259,11 @@ impl EventVm {
                         }
                         let actor1 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR1));
                         let actor2 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR2));
-                        self.cues.push(EventCue::ActorMotion { actor1, actor2, key });
+                        self.cues.push(EventCue::ActorMotion {
+                            actor1,
+                            actor2,
+                            key,
+                        });
                         n += 1;
                     }
                     self.exec_pointer += OP_DA_HEADER + n * OP_DA_RECORD;
@@ -8236,5 +8240,95 @@ mod tests {
                 "dest 0x{dest:04X} must not store"
             );
         }
+    }
+
+    /// Copy event params 0..4 into work_local 0..4 (0x03 GET_STORE, 5-byte
+    /// width): the 0x37/0x39 tests read their operands from work slots the
+    /// way the authored programs do.
+    fn store_params_to_work_local(data: &mut Vec<u8>) {
+        for i in 0..4u16 {
+            data.push(OP_GET_STORE);
+            data.extend_from_slice(&i.to_le_bytes());
+            data.extend_from_slice(&(4098u16 + i).to_le_bytes());
+        }
+    }
+
+    fn scene_player_vm(
+        data: Vec<u8>,
+        params: Vec<i32>,
+        start: crate::vm::scene::EventPosition,
+    ) -> EventVm {
+        let block = block(data, vec![]);
+        let mut e = EventVm::start(&block, 7, 5, params).unwrap();
+        e.attach_scene(
+            std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+                blocks: vec![block],
+            }),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            start,
+        );
+        e
+    }
+
+    /// 0x37 on the player: the authored position and facing become the
+    /// tracked player position at once, published as one PlayerPosition scene
+    /// action (the renderer's snap and the c2s POS ride on it); the walks
+    /// that follow start from here.
+    #[test]
+    fn set_event_pos_on_the_player_snaps_the_tracked_position() {
+        let authored = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: 1590,
+        };
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x37);
+        for i in 0..4u16 {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        data.push(OP_END);
+        let mut e = scene_player_vm(
+            data,
+            vec![authored.x, authored.z, authored.y, authored.heading],
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_scene_actions(),
+            [crate::vm::scene::SceneAction::PlayerPosition(authored)]
+        );
+        assert_eq!(e.controlled_position(), Some(authored));
+    }
+
+    /// 0x39 on the player: the authored facing becomes the tracked heading and
+    /// the position is republished so the rendered body turns onto it.
+    #[test]
+    fn set_facing_on_the_player_republishes_the_heading() {
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x39);
+        data.extend_from_slice(&3u16.to_le_bytes());
+        data.push(OP_END);
+        let start = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: 0,
+        };
+        let mut e = scene_player_vm(data, vec![start.x, start.z, start.y, 3072], start);
+        assert_eq!(e.step(), StepResult::Done);
+        let expected = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: 3072,
+        };
+        assert_eq!(
+            e.take_scene_actions(),
+            [crate::vm::scene::SceneAction::PlayerPosition(expected)]
+        );
+        assert_eq!(e.controlled_position(), Some(expected));
     }
 }

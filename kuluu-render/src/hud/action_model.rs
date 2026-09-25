@@ -208,8 +208,11 @@ pub fn build_target_action_entries(
     // While riding, retail replaces the self menu with Chat / Dig / Dismount
     // (.agents/skills/retail-observe/references/2026-09-24-chocobo-mounted-menu.md;
     // the item ids are retail's own, research/xim ActionMenu.kt Dig(38) /
-    // Dismount(39)).
-    if ctx.mounted && ctx.target_kind == TargetKindLite::SelfPc {
+    // Dismount(39)). The command menu opens on the self target, which is the
+    // no-target menu (`has_target` false) as well as an explicit self target;
+    // a Pet/Other target still reads `None` kind with `has_target` true and
+    // keeps the appended-Dismount menu.
+    if ctx.mounted && (ctx.target_kind == TargetKindLite::SelfPc || !ctx.has_target) {
         return [
             TargetActionId::Chat,
             TargetActionId::Dig,
@@ -536,9 +539,35 @@ mod tests {
         }
     }
 
+    /// The mounted no-target context: the command menu opens on the self
+    /// target, which is the no-target menu, not an explicit self target.
+    fn mounted_no_target() -> TargetActionContext {
+        TargetActionContext {
+            has_target: false,
+            target_kind: TargetKindLite::None,
+            mounted: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn mounted_self_menu_is_chat_dig_dismount() {
         let entries = build_target_action_entries(&mounted_ctx(TargetKindLite::SelfPc), &RETAIL);
+        let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                TargetActionId::Chat,
+                TargetActionId::Dig,
+                TargetActionId::Dismount
+            ]
+        );
+        assert!(entries.iter().all(|e| e.enabled));
+    }
+
+    #[test]
+    fn mounted_no_target_menu_is_chat_dig_dismount() {
+        let entries = build_target_action_entries(&mounted_no_target(), &RETAIL);
         let ids: Vec<_> = entries.iter().map(|e| e.id).collect();
         assert_eq!(
             ids,

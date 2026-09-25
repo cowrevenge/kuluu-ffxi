@@ -1423,6 +1423,24 @@ impl CutsceneScope {
                 if let CutsceneCue::CameraLock { lock } = cue {
                     self.camera_locked = lock;
                 }
+                // A 0x7E mount cue on the local player is the client-side "get on
+                // the chocobo": the server never sees it, so the session writes the
+                // mount state itself (the animation byte + mount index 0x037 would
+                // carry) or the render's self_mount stays on foot and the riding
+                // pose never plays. status_event is the GameStatus the script wrote,
+                // which is the animation byte (5 = chocobo, 85 = other mount, 0 =
+                // off); mount_id is the mount index, 0 for the chocobo.
+                if let CutsceneCue::Mount {
+                    target: CutsceneActor::LocalPlayer,
+                    status_event,
+                    mount_id,
+                } = cue
+                {
+                    let _ = event_tx.send(AgentEvent::SelfServerStatus {
+                        status: status_event,
+                        mount_id: mount_id.unwrap_or(0).min(u16::from(u8::MAX)) as u8,
+                    });
+                }
                 let _ = event_tx.send(AgentEvent::CutsceneCue { cue });
             }
             ResolvedCue::MusicVolume {

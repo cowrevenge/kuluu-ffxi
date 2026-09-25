@@ -134,6 +134,7 @@ fn cycle_npc(c: &SlashCtx, reverse: bool) -> SlashOutcome {
     }
 }
 
+#[cfg(feature = "enhanced-targetname")]
 fn target_by_name(c: &SlashCtx) -> SlashOutcome {
     let name = c.rest.trim();
     if name.is_empty() {
@@ -421,6 +422,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 summary: "cycle nearest NPC/mob/pet",
                 handler: |c| cycle_npc(c, false),
             },
+            #[cfg(feature = "enhanced-targetname")]
             Command {
                 names: &["targetname"],
                 set: CommandSet::Core,
@@ -3415,6 +3417,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "enhanced-targetname")]
     #[test]
     fn targetname_targets_the_named_entity() {
         let entities = vec![
@@ -3434,6 +3437,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "enhanced-targetname")]
     #[test]
     fn targetname_picks_the_nearest_of_same_named() {
         let entities = vec![
@@ -3447,6 +3451,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "enhanced-targetname")]
     #[test]
     fn targetname_reports_misses() {
         let entities = vec![ent(1, "Goblin", EntityKind::Mob, 3.0, 0.0)];

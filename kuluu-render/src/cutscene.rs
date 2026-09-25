@@ -15,7 +15,7 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use ffxi_dat::scheduler::Scheduler;
-use ffxi_event::{FourCc, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT};
+use ffxi_event::{FourCc, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN};
 use kuluu_snapshot::{CutsceneActor, CutsceneCue, ViewerEvent};
 
 use crate::hud_hide::{HudHidden, HudHideExempt};
@@ -558,11 +558,6 @@ fn scaled(program: &FadeProgram, ratio: f32) -> FadeProgram {
     }
 }
 
-/// The tags whose routines the renderer drives the screen with. Both live in
-/// [`SCHEDULER_FADE_DAT_ID`] — XIClient's own zone fade starts the same two out of the same
-/// file (`GameManager::CliLocalTask`, `StartSchedulerFromFile(0x78B8, '0odf'/'0idf', ...)`).
-const FADE_TAGS: [FourCc; 2] = [SCHEDULER_TAG_FADE_OUT, SCHEDULER_TAG_FADE_IN];
-
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_fade_programs(root: Res<CutsceneFadeDatRoot>, mut programs: ResMut<FadePrograms>) {
     *programs = FadePrograms::default();
@@ -582,14 +577,16 @@ pub fn load_fade_programs(root: Res<CutsceneFadeDatRoot>, mut programs: ResMut<F
     }
 }
 
-/// The fade routines of an already-read [`SCHEDULER_FADE_DAT_ID`] body.
+/// Every screen-color routine of an already-read [`SCHEDULER_FADE_DAT_ID`]
+/// body, keyed by its own tag. The DAT is the fade table: it ships fdo0/fdi0
+/// (30 frames), fdo1/fdi1 (60) and fdo2/fdi2 (120), and event scripts pick
+/// the tag — so every routine the DAT ships must register, or its cues are
+/// dropped. Routines without a screen-color stage parse to an empty program
+/// and stay out.
 pub fn fade_programs_in(dat: &[u8]) -> Vec<(FourCc, FadeProgram)> {
     ffxi_dat::walk(dat)
         .flatten()
-        .filter(|chunk| {
-            chunk.kind == ffxi_dat::kind::ChunkKind::Scheduler as u8
-                && FADE_TAGS.contains(&chunk.name)
-        })
+        .filter(|chunk| chunk.kind == ffxi_dat::kind::ChunkKind::Scheduler as u8)
         .filter_map(|chunk| {
             let routine = Scheduler::parse(chunk.name, chunk.data).ok()?;
             let program = FadeProgram::from_scheduler(&routine, 1.0);
@@ -638,6 +635,7 @@ mod tests {
     use ffxi_dat::scheduler::{
         SchedulerStage, ScreenColor, StageKind, TimedStage, SCREEN_COLOR_UNIT,
     };
+    use ffxi_event::SCHEDULER_TAG_FADE_OUT;
 
     // The DAT-authored destinations of ROM/62/110.DAT's fdo0/fdi0, asserted against the real
     // file by `real_dat_fade_tags_drive_to_black_and_back`.
@@ -1259,9 +1257,16 @@ mod tests {
         let bytes = std::fs::read(location.path_under(&root)).expect("fade scheduler DAT reads");
 
         let programs: HashMap<FourCc, FadeProgram> = fade_programs_in(&bytes).into_iter().collect();
-        for (tag, dest) in [
-            (SCHEDULER_TAG_FADE_OUT, FADE_OUT_DEST),
-            (SCHEDULER_TAG_FADE_IN, FADE_IN_DEST),
+        // The DAT's whole screen-color table: fdo0/fdi0 30 frames, fdo1/fdi1
+        // 60, fdo2/fdi2 120. Event scripts pick the tag (the Upper Jeuno
+        // rental rides fdo1/fdi1), so every one must register.
+        for (tag, dest, frames) in [
+            (SCHEDULER_TAG_FADE_OUT, FADE_OUT_DEST, FADE_FRAMES),
+            (SCHEDULER_TAG_FADE_IN, FADE_IN_DEST, FADE_FRAMES),
+            (*b"fdo1", FADE_OUT_DEST, FADE_FRAMES * 2),
+            (*b"fdi1", FADE_IN_DEST, FADE_FRAMES * 2),
+            (*b"fdo2", FADE_OUT_DEST, FADE_FRAMES * 4),
+            (*b"fdi2", FADE_IN_DEST, FADE_FRAMES * 4),
         ] {
             let program = programs
                 .get(&tag)
@@ -1270,8 +1275,8 @@ mod tests {
             assert_eq!(program.latched(), Some(ScreenColor { rgba: dest }.tint()));
             assert_eq!(
                 program.total_secs(),
-                FADE_FRAMES as f32 / ROUTINE_FPS,
-                "half a second per half at the 60Hz routine clock"
+                frames as f32 / ROUTINE_FPS,
+                "the authored {frames}-frame stage"
             );
         }
 

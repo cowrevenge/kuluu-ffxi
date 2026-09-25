@@ -807,26 +807,32 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
+    // The player's movement runs even while the event holds the camera: in
+    // that state dispatch follows the server's scripted position (the dialog
+    // walk) and drives the walk animation from it, instead of the walker being
+    // off and the player snapped. The ground-recovery and stair-capture safety
+    // nets stay off while the event owns the position: a scripted position is
+    // on the ground, and a recovery command would fight the script.
     app.add_systems(
         FixedUpdate,
         (
             input::dispatch_movement_system,
-            input::recover_self_ground_system,
             input::apply_self_prediction_system,
+        )
+            .chain()
+            .run_if(in_state(AppPhase::InGame)),
+    );
+    app.add_systems(
+        FixedUpdate,
+        (
+            input::recover_self_ground_system,
             input::stair_capture_system,
         )
             .chain()
+            .after(input::dispatch_movement_system)
+            .before(input::apply_self_prediction_system)
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
-    );
-    // The script's position while a cutscene holds the player: the chain above
-    // is off while the event holds the camera, so this snap runs on its own,
-    // after the chain, and wins over the prediction's last write.
-    app.add_systems(
-        FixedUpdate,
-        input::apply_cutscene_self_position_system
-            .after(input::apply_self_prediction_system)
-            .run_if(in_state(AppPhase::InGame)),
     );
     app.add_systems(
         Update,

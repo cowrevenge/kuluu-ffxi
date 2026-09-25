@@ -1949,51 +1949,6 @@ pub fn apply_self_prediction_system(
     }
 }
 
-/// While a running event holds the player (a cutscene that has not released
-/// control with a 0x20), the script owns the position: the rendered player is
-/// snapped to the snapshot position every tick. The walker and the prediction
-/// are off while the event holds the camera
-/// (`kuluu_render::cutscene::player_camera_allowed`), so without this the
-/// script's position changes would never reach the player through a camera-
-/// locked cutscene. A snap, not a walk: the script's positions are authored
-/// warps between fades. research/XiEvents/OpCodes/0x0020.md
-pub fn apply_cutscene_self_position_system(
-    cutscene: Res<kuluu_render::cutscene::CutsceneMode>,
-    state: Res<SceneState>,
-    mut move_intent: ResMut<kuluu_render::combat_stance::SelfMoveIntent>,
-    mut q_self: Query<
-        (
-            &mut kuluu_render::PrevRenderPos,
-            &mut kuluu_render::CurrRenderPos,
-        ),
-        (With<IsSelf>, Without<OperatorCamera>),
-    >,
-) {
-    if !cutscene.active || cutscene.player_released {
-        return;
-    }
-    // The script holds the player: no walk/strafe intent of our own, so the
-    // stance animation does not keep playing under the scripted position.
-    *move_intent = kuluu_render::combat_stance::SelfMoveIntent::default();
-    let pos = state.snapshot.self_pos.pos;
-    let wire = kuluu_snapshot::Vec3 {
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-    };
-    let target = kuluu_render::ffxi_to_bevy(wire);
-    let Ok((mut prev, mut curr)) = q_self.single_mut() else {
-        return;
-    };
-    if prev.0 == bevy::math::Vec3::ZERO && curr.0 == bevy::math::Vec3::ZERO {
-        prev.0 = target;
-        curr.0 = target;
-    } else {
-        prev.0 = curr.0;
-        curr.0 = target;
-    }
-}
-
 pub(super) fn heading_to_forward(heading: u8) -> (f32, f32) {
     let angle = (heading as f32) * std::f32::consts::TAU / 256.0;
     (angle.cos(), -angle.sin())
@@ -2771,12 +2726,15 @@ mod tests {
         assert!(commands.try_recv().is_err());
     }
 
-    /// A camera-locked cutscene owns the player's position: the movement
-    /// chain is off while the event holds the camera, so the scripted
-    /// position reaches the rendered player through the snap alone, and the
-    /// move intent stays stopped under it.
+    /// A camera-locked cutscene owns the player's position through the
+    /// walker's scripted follow: dispatch runs while the event holds the
+    /// camera, the dialog walk accepts the server's positions and walks the
+    /// player to them, and the move intent carries the walk so the animation
+    /// plays. The event VM walks at its authored speed and emits a position
+    /// every session tick, so the test steps the snapshot the same way (a
+    /// short hop every 100 ms) rather than teleporting it.
     #[test]
-    fn cutscene_holds_the_player_at_the_scripted_position() {
+    fn cutscene_walks_the_player_to_the_scripted_position() {
         use kuluu_render::combat_stance::SelfMoveIntent;
         use kuluu_render::{CurrRenderPos, PrevRenderPos};
         let dt = Duration::from_secs_f32(1.0 / 60.0);
@@ -2786,15 +2744,7 @@ mod tests {
             .world_mut()
             .spawn((IsSelf, PrevRenderPos(Vec3::ZERO), CurrRenderPos(Vec3::ZERO)))
             .id();
-        app.add_systems(Update, apply_cutscene_self_position_system);
-
-        app.world_mut()
-            .resource_mut::<SceneState>()
-            .snapshot
-            .self_pos
-            .pos
-            .x = 5.0;
-        app.update();
+        app.add_systems(Update, apply_self_prediction_system);
         {
             let mut mode = app
                 .world_mut()
@@ -2807,39 +2757,72 @@ mod tests {
             .snapshot
             .self_pos
             .pos
-            .x = 12.0;
-        for _ in 0..3 {
-            app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
-            app.world_mut().run_schedule(Update);
+            .x = 5.0;
+        app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
+        app.world_mut().run_schedule(Update);
+
+        // The scripted walk: a 0.27-yalm hop every 100 ms (2.7 yalms/s), the
+        // event VM's authored pace.
+        let mut snapshot_x = 5.0;
+        let mut saw_walk_intent = false;
+        let mut walk_speed = 0.0;
+        for step in 0..8 {
+            if step > 0 {
+                snapshot_x += 0.27;
+                app.world_mut()
+                    .resource_mut::<SceneState>()
+                    .snapshot
+                    .self_pos
+                    .pos
+                    .x = snapshot_x;
+            }
+            for _ in 0..6 {
+                app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
+                app.world_mut().run_schedule(Update);
+                let intent = app.world().resource::<SelfMoveIntent>();
+                if intent.moving {
+                    saw_walk_intent = true;
+                    walk_speed = intent.scripted_speed.unwrap_or(0.0);
+                }
+            }
         }
         let rendered = app.world().get::<CurrRenderPos>(actor).unwrap().0.x;
         assert!(
-            (rendered - 12.0).abs() < 1e-4,
-            "the snap must reach the scripted position, got {rendered}"
+            (rendered - snapshot_x).abs() < 0.5,
+            "the walk must follow the scripted position, rendered {rendered} vs {snapshot_x}"
         );
+        assert!(saw_walk_intent, "the held player must carry a walk intent");
+        // The follow speed is the authored pace (a walk, not a run catch-up).
         assert!(
-            !app.world().resource::<SelfMoveIntent>().moving,
-            "the held player must not carry a walk intent"
+            walk_speed < 3.0,
+            "the scripted follow must read as a walk, got {walk_speed} yalms/s"
         );
 
-        // A 0x20 release stops the snap: the script no longer owns the
-        // position, and the player holds where the last scripted position put
-        // them.
+        // A 0x20 release stops the scripted follow: the release tick settles
+        // the player at the last scripted position, and from the next tick on
+        // the player is input-driven and no longer follows the script. A small
+        // scripted move (inside the 5-yalm resync) must not pull the released
+        // player along.
         app.world_mut()
             .resource_mut::<kuluu_render::cutscene::CutsceneMode>()
             .player_released = true;
+        app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
+        app.world_mut().run_schedule(Update);
+        let settled = app.world().get::<CurrRenderPos>(actor).unwrap().0.x;
         app.world_mut()
             .resource_mut::<SceneState>()
             .snapshot
             .self_pos
             .pos
-            .x = 20.0;
-        app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
-        app.world_mut().run_schedule(Update);
+            .x = snapshot_x + 2.0;
+        for _ in 0..10 {
+            app.world_mut().resource_mut::<Time<Fixed>>().advance_by(dt);
+            app.world_mut().run_schedule(Update);
+        }
         let held = app.world().get::<CurrRenderPos>(actor).unwrap().0.x;
         assert!(
-            (held - 12.0).abs() < 1e-4,
-            "a released player must not keep snapping, got {held}"
+            (held - settled).abs() < 0.5,
+            "a released player must not follow the script, got {held} vs settled {settled}"
         );
     }
 

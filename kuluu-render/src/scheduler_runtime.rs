@@ -1344,6 +1344,7 @@ fn start_cutscene_camera_tasks(
     mode: &crate::camera::CameraMode,
     tasks: &mut ResMut<CutsceneCameraTasks>,
     actor_entity: Entity,
+    self_pos: &kuluu_snapshot::Position,
     q_attach: &Query<
         (&Transform, Option<&BakedActor>),
         (
@@ -1435,6 +1436,21 @@ fn start_cutscene_camera_tasks(
                         children.iter().find_map(|child| q_render.get(child).ok())
                     });
                     let locator = cam.attach_locator_index();
+                    // For the local player the event script's position/heading (the
+                    // snapshot's self_pos, updated in the same ingest before this cue is
+                    // processed) is authoritative at this instant; the rendered Transform
+                    // lags it (the walker walks to it, the heading slerps at
+                    // SELF_VISUAL_YAW_RATE), and a zero-interp attach freezes the matrix at
+                    // start, so build it from the snapshot instead of the stale Transform.
+                    let attach_xform = if q_self.get(actor).is_ok() {
+                        Transform {
+                            translation: crate::scene::ffxi_to_bevy(self_pos.pos),
+                            rotation: crate::scene::heading_to_quat(self_pos.heading),
+                            ..Default::default()
+                        }
+                    } else {
+                        *xform
+                    };
                     match crate::cutscene_camera::eid_model_point(locator, baked, render) {
                         Some(point) => {
                             attach = Some(crate::cutscene_camera::AttachStart {
@@ -1442,7 +1458,10 @@ fn start_cutscene_camera_tasks(
                                 locator,
                                 interp: cam.interp_factor as f32
                                     / ffxi_dat::camera::INTERP_FACTOR_SCALE,
-                                initial_matrix: crate::cutscene_camera::attach_matrix(xform, point),
+                                initial_matrix: crate::cutscene_camera::attach_matrix(
+                                    &attach_xform,
+                                    point,
+                                ),
                             });
                         }
                         None => {
@@ -1512,6 +1531,7 @@ pub fn poll_action_dat_tasks(
         ),
     >,
     mode: Res<crate::camera::CameraMode>,
+    state: Res<crate::snapshot::SceneState>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
@@ -1633,6 +1653,7 @@ pub fn poll_action_dat_tasks(
                         &mode,
                         &mut tasks,
                         actor_entity,
+                        &state.snapshot.self_pos,
                         &q_attach,
                         &q_children,
                         &q_actors,
@@ -1727,6 +1748,7 @@ pub fn poll_action_dat_tasks(
                         &mode,
                         &mut tasks,
                         actor_entity,
+                        &state.snapshot.self_pos,
                         &q_attach,
                         &q_children,
                         &q_actors,
@@ -7065,5 +7087,223 @@ mod tests {
             "ended must stop the fade at its current value"
         );
         assert!(app.world().resource::<CutsceneActorState>().is_empty());
+    }
+
+    /// The 0x45 camera route drives the operator camera to where the DAT
+    /// authored it: the captured chocobo-rental CS cues (camera lock, then the
+    /// 30906 c05i/c01i/c00i routines on the local player) are fed through the
+    /// real dispatch -> load -> advance pipeline, and the camera must land on
+    /// each route's authored eye/target/focal, not hold its chase position.
+    /// Self-skips without a real install (ROM/62/112.DAT).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_cutscene_camera_route_drives_the_camera_to_the_authored_points() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let root = Arc::new(root);
+
+        // The file the 0x45 cue names, through the same resolution the runtime uses.
+        let loc = root
+            .resolve(30906)
+            .expect("30906 resolves through the vtables");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("the camera route DAT reads");
+        let (schedulers, _assets, _report, cameras) = parse_action_bytes_reporting(&bytes);
+        let lookup = RoutineLookup::new().with_dat(&schedulers);
+
+        const SELF_ID: u32 = 1;
+        let player_pos = Vec3::new(10.0, 0.0, -5.0);
+
+        // The route's authored eye/target (bevy space) for a player at `player`
+        // with identity yaw: the point's model-frame coords out through the same
+        // attach the runtime builds (EID_BODY_CENTER at the fallback height).
+        let authored = |routine: &[u8; 4], player: Vec3| -> (Vec3, Vec3, f32) {
+            let name = String::from_utf8_lossy(routine);
+            let active = ActiveScheduler::from_routine(&lookup, routine)
+                .unwrap_or_else(|| panic!("routine {name} missing from the file"));
+            let cam_id = active
+                .stages
+                .iter()
+                .find(|t| t.stage.kind == StageKind::CameraRoute)
+                .map(|t| t.stage.id)
+                .unwrap_or_else(|| panic!("routine {name} carries no CameraRoute stage"));
+            let cam = cameras
+                .get(&cam_id)
+                .unwrap_or_else(|| panic!("routine {name} names no camera chunk"));
+            let pt = &cam.points[0];
+            let model_point = crate::cutscene_camera::eid_model_point(21, None, None)
+                .expect("the body-center locator resolves without a model");
+            let to_bevy = |p: [f32; 3]| {
+                crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
+                    x: p[0],
+                    y: p[1],
+                    z: p[2],
+                })
+            };
+            let offset = to_bevy([model_point.x, model_point.y, model_point.z]);
+            (
+                player + offset + to_bevy(pt.position),
+                player + offset + to_bevy(pt.target),
+                pt.focal_length,
+            )
+        };
+
+        let mut app = App::new();
+        app.add_message::<CutsceneMotionDone>();
+        app.init_resource::<Time>()
+            .init_resource::<crate::snapshot::EventLog>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<crate::cutscene::CutsceneMode>()
+            .init_resource::<crate::cutscene::FadePrograms>()
+            .init_resource::<crate::cutscene::ScreenFade>()
+            .init_resource::<crate::cutscene::EventNameOverrides>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .init_resource::<ActionDatCache>()
+            .init_resource::<CutsceneCameraTasks>()
+            .init_resource::<crate::camera::CameraMode>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .insert_resource(ActionDatRoot(Some(root.clone())));
+
+        let player = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(player_pos),
+                crate::components::WorldEntity {
+                    id: SELF_ID,
+                    act_index: 72,
+                    kind: kuluu_snapshot::EntityKind::Pc,
+                },
+                crate::components::IsSelf,
+            ))
+            .id();
+        app.world_mut().spawn((
+            Transform::from_translation(Vec3::new(0.0, 0.0, 4.0)).looking_at(Vec3::ZERO, Vec3::Y),
+            Camera::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+            crate::camera::OperatorCamera,
+        ));
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF_ID));
+        app.world_mut()
+            .resource_mut::<crate::scene::TrackedEntities>()
+            .by_id
+            .insert(SELF_ID, player);
+        // The local-player attach reads the snapshot's self_pos, not the
+        // rendered Transform: seed it so ffxi_to_bevy(self_pos.pos) is the
+        // player's position at identity heading (ffxi_to_bevy is
+        // (x, -z, -y), so bevy (10, 0, -5) is wire (10, 5, 0)).
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .self_pos = kuluu_snapshot::Position {
+            pos: kuluu_snapshot::Vec3 {
+                x: 10.0,
+                y: 5.0,
+                z: 0.0,
+            },
+            heading: 0,
+            speed: 0,
+            speed_base: 0,
+        };
+
+        app.add_systems(
+            Update,
+            (
+                adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+                crate::cutscene::drain_cutscene_events,
+                (dispatch_cutscene_motion, poll_action_dat_tasks).chain(),
+                crate::cutscene_camera::advance_cutscene_camera_task,
+            )
+                .chain(),
+        );
+
+        let step =
+            |app: &mut App, frames: u32| {
+                app.world_mut().resource_mut::<Time>().advance_by(
+                    std::time::Duration::from_secs_f32(frames as f32 / ROUTINE_FPS),
+                );
+                app.update();
+            };
+        let scheduler_cue = |tag: [u8; 4]| kuluu_snapshot::ViewerEvent::Cutscene {
+            cue: kuluu_snapshot::CutsceneCue::Scheduler {
+                dat_id: 30906,
+                actor: kuluu_snapshot::CutsceneActor::LocalPlayer,
+                partner: kuluu_snapshot::CutsceneActor::LocalPlayer,
+                tag,
+                duration: 0,
+            },
+        };
+        let camera = |app: &mut App| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Transform, With<crate::camera::OperatorCamera>>();
+            q.single(app.world())
+                .expect("one operator camera")
+                .translation
+        };
+        let focal = |app: &mut App| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Projection, With<crate::camera::OperatorCamera>>();
+            let proj = q.single(app.world()).expect("one operator camera");
+            match proj {
+                Projection::Perspective(p) => p.fov,
+                _ => panic!("the operator camera is a perspective projection"),
+            }
+        };
+
+        // Enter CS mode with the captured cues, then feed each camera routine.
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::CutsceneStarted { event_id: 10002 });
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::Cutscene {
+                cue: kuluu_snapshot::CutsceneCue::CameraLock { lock: true },
+            });
+        step(&mut app, 1);
+        assert!(
+            app.world()
+                .resource::<crate::cutscene::CutsceneMode>()
+                .camera_locked,
+            "the camera lock must hold the scene"
+        );
+
+        for routine in [b"c05i", b"c01i", b"c00i"] {
+            let name = String::from_utf8_lossy(routine);
+            app.world_mut()
+                .resource_mut::<crate::snapshot::EventLog>()
+                .push(scheduler_cue(*routine));
+            // The load is async; the route starts once the parse lands.
+            for _ in 0..120 {
+                step(&mut app, 1);
+                if app.world().resource::<CutsceneCameraTasks>().is_active() {
+                    break;
+                }
+            }
+            assert!(
+                app.world().resource::<CutsceneCameraTasks>().is_active(),
+                "routine {name} never started its camera route"
+            );
+            // The route is a single authored point: it holds it for its whole
+            // duration, so sample after the full 60 frames have run out.
+            step(&mut app, 60);
+            let (eye, _target, focal_length) = authored(routine, player_pos);
+            let got = camera(&mut app);
+            assert!(
+                (got - eye).length() < 1e-3,
+                "routine {name}: camera at {got:?}, authored eye {eye:?}"
+            );
+            let want_fov = 2.0
+                * (crate::graphics_settings::RETAIL_PROJECTION_HALF_HEIGHT / focal_length).atan();
+            assert!(
+                (focal(&mut app) - want_fov).abs() < 1e-4,
+                "routine {name}: fov {} rad, authored focal {focal_length}",
+                focal(&mut app)
+            );
+        }
     }
 }

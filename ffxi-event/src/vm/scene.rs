@@ -23,6 +23,7 @@ const OP_REQUEST_WAIT: u8 = 0x29;
 const OP_REQWAIT: u8 = 0x2A;
 const OP_MOVE: u8 = 0x1F;
 const OP_CODE_MOVE2: u8 = 0x5A;
+const OP_SMOVE: u8 = 0x31;
 const OP_POSITION_UPDATE: u8 = 0x47;
 const OP_SET_EVENT_POS: u8 = 0x37;
 const OP_SET_FACING: u8 = 0x39;
@@ -705,6 +706,12 @@ impl EventVm {
             }
             OP_SPEED => {
                 let speed = self.getworkofs(1, 0);
+                // The default-arm 0x1F/0x31 move cues for non-player actors read
+                // the VM's own speed, which only this arm writes while a scene is
+                // attached; a cue that carries 0 drops its hold and the walk is
+                // skipped (research/XiEvents/OpCodes/0x0032.md: MainSpeed is the
+                // event entity's single speed).
+                self.move_speed = speed;
                 self.scene.as_mut().unwrap().speed = speed;
                 self.advance(op);
             }
@@ -759,6 +766,32 @@ impl EventVm {
                     }
                     self.parked_on_move_hold = false;
                     self.advance(op);
+                } else {
+                    return Some(StepResult::Unimplemented(op));
+                }
+            }
+            // 0x31 SMOVE on the player: the same scene-latched walk as 0x1F —
+            // case 0 latches the goal into the session's position lerp, case 1
+            // holds until the walk lands. The MoveTime operand is a budget the
+            // DAT sets to the walk's own duration (this CS: 90 frames against a
+            // 4.4-yalm walk at 2.7 yalms/s), so the arrival hold is the
+            // faithful wait; a budget-capped hold lets the next beat race ahead
+            // of the body (research/XiEvents/OpCodes/0x0031.md: SMOVE is 0x1F
+            // with the MoveTime control). The non-player path keeps the default
+            // arm's ActorMove cue.
+            OP_SMOVE if self.scene.as_ref().unwrap().actor == ZONE_PLAYER_ACTOR => {
+                if self.byte_at(1) == 0 {
+                    let goal = self.position_operands(2, false);
+                    self.scene.as_mut().unwrap().motion = Some(goal);
+                    self.scene.as_mut().unwrap().controls_position = true;
+                    self.exec_pointer += 10;
+                } else if self.byte_at(1) == 1 {
+                    if self.scene.as_ref().unwrap().motion.is_some() {
+                        self.scene.as_mut().unwrap().held = true;
+                        return Some(StepResult::Waiting);
+                    }
+                    self.scene.as_mut().unwrap().held = false;
+                    self.exec_pointer += 2;
                 } else {
                     return Some(StepResult::Unimplemented(op));
                 }
@@ -888,6 +921,7 @@ impl EventVm {
                     | OP_GET_POSITION
                     | OP_MOVE
                     | OP_CODE_MOVE2
+                    | OP_SMOVE
                     | OP_SET_EVENT_POS
                     | OP_SET_FACING
                     | OP_DTURA

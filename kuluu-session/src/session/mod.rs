@@ -4708,7 +4708,13 @@ async fn keepalive_loop(
                 let dz = self_pos.pos.z - last_emitted_pos.z;
                 let pos_delta = (dx * dx + dy * dy + dz * dz).sqrt();
                 let heading_changed = self_pos.heading != last_emitted_heading;
-                let include_pos = self_pos_seeded
+                // Hold the position back until the zone is actually in (0x008
+                // ENTERZONE seen). Firing it on the first keepalive after the
+                // LOGIN seed lands would write the client's own position back to
+                // the server mid-login, and the server persists that to the DB —
+                // clobbering whatever the operator set before the load.
+                let include_pos = enterzone_seen
+                    && self_pos_seeded
                     && match last_move_emission {
                         None => true,
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),

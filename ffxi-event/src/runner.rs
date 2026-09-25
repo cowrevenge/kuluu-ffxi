@@ -1033,8 +1033,9 @@ mod tests {
         let block = edat.block_for_actor(MAIREE).expect("mairee block");
         let mut runner =
             DialogRunner::start(block, EVENT, 0, vec![160, 10000, 0]).expect("rental event 10002");
-        // Mairee stands at wire (-56.308, 7.999, 109.080); event units are
-        // wire coords * 1000 on the wire's own axes (x, y = height, z).
+        // Mairee stands at wire (-56.308, 109.080 ground, 7.999 height);
+        // the event VM is (x, y = height, z = ground), so the start position
+        // carries height in y and ground in z (event units = coords * 1000).
         use crate::cue::STATUS_EVENT_CHOCOBO;
         use crate::vm::scene::EventPosition;
         let start = EventPosition {

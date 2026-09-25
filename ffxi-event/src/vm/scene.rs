@@ -154,9 +154,10 @@ impl EventVm {
     /// The event entity's tracked position in the zone-interaction (RID) float
     /// space 0x82 RANGE_RECT hit-tests against
     /// (research/XiEvents/OpCodes/0x0082.md): the scene's tracked position
-    /// rescaled from event units back to the zone's native float coords, the
-    /// same axes the wire carries (x, y = height, z). `None` when no scene is
-    /// attached, so the caller sees retail's null-entity early return.
+    /// rescaled from event units back to float coords, still in the event VM's
+    /// own axes (x, y = height, z = ground) — note this is NOT the wire's
+    /// (x, y = ground, z = height). `None` when no scene is attached, so the
+    /// caller sees retail's null-entity early return.
     pub(super) fn event_entity_rid_position(&self) -> Option<[f32; 3]> {
         let p = self.scene.as_ref()?.player;
         Some([

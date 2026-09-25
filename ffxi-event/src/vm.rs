@@ -256,6 +256,20 @@ const OP_MAIN_SPEED: u8 = 0x32;
 // 0x31 SMOVE: 0x1F with a heading update and a MoveTime budget, on the
 // non-scene path (research/XiEvents/OpCodes/0x0031.md).
 const OP_SMOVE: u8 = 0x31;
+// 0xDA: a batch motion loader beyond the 0x00..=0xD9 meta range. A 6-byte
+// header followed by 28-byte records, each naming (actor1, actor2, key);
+// the VM emits one ActorMotion cue per record and advances past them all.
+// Single-site in the retail corpus (zone 112 event 68), so the layout is
+// pinned by that block's bytes, not a doc.
+const OP_DA: u8 = 0xDA;
+// 0xDA record geometry: 6-byte header, then 28-byte records; within a record
+// actor1 is the u32 at +8, actor2 at +12, the key 4cc at +16.
+const OP_DA_HEADER: usize = 6;
+const OP_DA_RECORD: usize = 28;
+const OP_DA_ACTOR1: usize = 8;
+const OP_DA_ACTOR2: usize = 12;
+const OP_DA_KEY: usize = 16;
+const OP_DA_MAX_RECORDS: usize = 64;
 // 0x72 GETWEATHER: read the global forecast table into Work_Zone[2..5).
 // Sub-byte: mode 0 is 4 bytes, mode 1 is 6 (research/XiEvents/OpCodes/0x0072.md).
 const OP_GETWEATHER: u8 = 0x72;
@@ -2228,6 +2242,27 @@ impl EventVm {
                         key,
                     });
                     self.advance(op);
+                }
+                // 0xDA: a batch motion loader (see the constant). Scan the
+                // 28-byte records and emit one ActorMotion cue per record that
+                // carries a printable 4cc key; stop at the first record whose
+                // key field is not a 4cc, so the advance lands on the next real
+                // instruction. Single-site in the corpus, so the record count
+                // comes from the scan, not a header count.
+                OP_DA => {
+                    let mut n = 0;
+                    while n < OP_DA_MAX_RECORDS {
+                        let rec = OP_DA_HEADER + n * OP_DA_RECORD;
+                        let key = self.fourcc_at(rec + OP_DA_KEY);
+                        if !key.iter().all(|&b| b != 0 && (0x20..=0x7e).contains(&b)) {
+                            break;
+                        }
+                        let actor1 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR1));
+                        let actor2 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR2));
+                        self.cues.push(EventCue::ActorMotion { actor1, actor2, key });
+                        n += 1;
+                    }
+                    self.exec_pointer += OP_DA_HEADER + n * OP_DA_RECORD;
                 }
                 OP_LOADEVENTSCHEDULER2 => {
                     let file = dat_id_helper(self.getworkofs(LOADEVENTSCHEDULER2_FILE_OFS, 0));
@@ -8141,6 +8176,46 @@ mod tests {
                 name: literal,
             }]
         );
+    }
+
+    /// 0xDA: the single retail site (zone 112 event 68) is a 6-byte header and
+    /// six 28-byte records, each naming (event entity, event entity, "senN").
+    /// The VM emits one ActorMotion cue per record and advances past all of
+    /// them, landing on the next real instruction.
+    #[test]
+    fn da_batch_motion_loader_emits_one_cue_per_record_and_advances_past_them() {
+        let actor = 0x7FFFFFF8u32.to_le_bytes();
+        let mut data = vec![0xDA, 0x0C, 0x00, 0x02, 0x0C, 0x00];
+        for i in 0..6u8 {
+            let mut rec = [0u8; 28];
+            rec[8..12].copy_from_slice(&actor);
+            rec[12..16].copy_from_slice(&actor);
+            rec[16..20].copy_from_slice(&[b's', b'e', b'n', b'0' + i]);
+            data.extend_from_slice(&rec);
+        }
+        // The scan must stop at the first record whose key is not a printable
+        // 4cc: this one's key field is 0x80 0x27 0x10 0xF0.
+        let mut term = [0u8; 28];
+        term[16..20].copy_from_slice(&[0x80, 0x27, 0x10, 0xF0]);
+        data.extend_from_slice(&term);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        let cues = e.take_cues();
+        assert_eq!(cues.len(), 6, "six records, six cues");
+        for (i, cue) in cues.iter().enumerate() {
+            match cue {
+                EventCue::ActorMotion {
+                    actor1,
+                    actor2,
+                    key,
+                } => {
+                    assert_eq!(*actor1, ActorLookup::EVENT_ENTITY);
+                    assert_eq!(*actor2, ActorLookup::EVENT_ENTITY);
+                    assert_eq!(*key, [b's', b'e', b'n', b'0' + i as u8]);
+                }
+                other => panic!("expected ActorMotion, got {other:?}"),
+            }
+        }
     }
 
     /// setworkstrofs refuses both stores: a References-flagged operand is

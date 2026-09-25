@@ -1353,10 +1353,9 @@ pub const OPCODE_META: &[OpMeta] = &[
 /// Rules transcribed from the retail pseudo-code *body* in atom0s/XiEvents
 /// `OpCodes/*.md` — never its `OpCode Size` header row, which is incomplete
 /// (0x0071.md lists `2,4,6,8,10` and omits its case 0x20's 16). Only opcodes
-/// whose dispatch is decided by the sub byte alone appear here: 0xAE, 0xB7 and
-/// 0xD8 also vary, but their width is entangled with a runtime actor lookup, as
-/// are 0x9D cases 0x07 (a jump) and 0x0C, so those are left to the wider VM work
-/// rather than guessed at.
+/// whose dispatch is decided by the sub byte alone appear here: 0x9D cases
+/// 0x07 (a jump) and 0x0C have widths entangled with a runtime value, so they
+/// are left to the wider VM work rather than guessed at.
 pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
     match op {
         // 0x0046.md: sub 2 reads a work offset (4); every other path, including
@@ -1587,6 +1586,47 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             4 => Some(8),
             _ => None,
         },
+        // 0x00B7.md: the event-entity work/name family. Case 0 writes a work
+        // slot behind a two-actor lookup and advances 10 whether or not the
+        // lookup resolves; cases 1-4 advance 8 on every path. Retail spins on
+        // any other sub, so no width is encoded for it.
+        OP_B7 => match sub {
+            0x00 => Some(10),
+            0x01..=0x04 => Some(8),
+            _ => None,
+        },
+        // 0x00D8.md: the EventDir writes. Case 0 copies the entity's last
+        // position and case 4 writes all three components (12); cases 1-3
+        // write one component each (8); an unlisted sub falls through to the
+        // trailing +6. The actor-lookup failure path also advances 6, so the
+        // success-path widths are the faithful choice, the same divergence the
+        // 0x7A case-2 arm takes.
+        OP_D8 => match sub {
+            0x00 => Some(6),
+            0x01..=0x03 => Some(8),
+            0x04 => Some(12),
+            _ => Some(6),
+        },
+        // 0x0031.md SMOVE: case 0 stores the goal and moves (10); case 1
+        // re-runs each frame while the entity walks and advances 2 on arrival,
+        // the same poll shape as 0x1F/0x5A case 1.
+        OP_SMOVE => match sub {
+            0 => Some(10),
+            1 => Some(2),
+            _ => None,
+        },
+        // 0x00AE.md: the weather / name-color / entity-link family. Every case
+        // advances by a fixed amount on both its failure and success paths:
+        // the weather set (0) and the pointer clear (6) by 6, the name-color
+        // (1, 2) and Mou4 (3, 4) cases by 8, and the pointer copy (5) and
+        // EnvironmentAreaId (7, 8) cases by 10. Retail spins on any other sub,
+        // so no width is encoded for it.
+        OP_AE => match sub {
+            0x00 | 0x06 => Some(6),
+            0x01..=0x04 => Some(8),
+            0x05 | 0x07 | 0x08 => Some(10),
+            _ => None,
+        },
         // 0x009D.md: the string/indirect-work family. The cases that consult
         // `PTR_Ptr_Work_Zone` (0x0D, 0x0E) take the branch for an unpopulated
         // slot, and the string-compare cases (0x08, 0x09) take their
@@ -1650,6 +1690,10 @@ pub(crate) const OP_REQRESET: u8 = 0x7A;
 pub(crate) const OP_NAMESET: u8 = 0xB5;
 pub(crate) const OP_SUBSCHED: u8 = 0x5F;
 pub(crate) const OP_STRINGOPS: u8 = 0x9D;
+const OP_AE: u8 = 0xAE;
+const OP_B7: u8 = 0xB7;
+const OP_D8: u8 = 0xD8;
+const OP_SMOVE: u8 = 0x31;
 pub(crate) const OP_STATUSSET: u8 = 0xAC;
 pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
 pub(crate) const OP_RANKING: u8 = 0xB3;

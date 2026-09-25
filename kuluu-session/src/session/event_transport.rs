@@ -253,14 +253,20 @@ mod tests {
         // (x, y = ground, z = height), so the conversion swaps y and z.
         let authored = EventPosition {
             x: 33_762,
-            y: -2_558, // height
+            y: -2_558,  // height
             z: -31_432, // ground
             heading: HEADING_EVENT_UNITS_PINNED,
         };
         let converted = session_position(authored, Position::default());
         assert!((converted.pos.x - 33.762).abs() < 0.001);
-        assert!((converted.pos.y + 31.432).abs() < 0.001, "wire y is the ground");
-        assert!((converted.pos.z + 2.558).abs() < 0.001, "wire z is the height");
+        assert!(
+            (converted.pos.y + 31.432).abs() < 0.001,
+            "wire y is the ground"
+        );
+        assert!(
+            (converted.pos.z + 2.558).abs() < 0.001,
+            "wire z is the height"
+        );
         assert_eq!(converted.heading, 192);
         assert_eq!(event_position(converted), authored);
     }

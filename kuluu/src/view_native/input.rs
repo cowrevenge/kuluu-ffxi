@@ -52,6 +52,11 @@ pub struct MoveEnvParams<'w, 's> {
     /// The running server event: retail locks the player from its first frame
     /// to EVENT_END, dialog frame on screen or not.
     pub cutscene: Res<'w, kuluu_render::cutscene::CutsceneMode>,
+    /// Outstanding zone/interior loads. While the interior the player stands in
+    /// is still streaming, its floor is not in the collision set yet, so the
+    /// walker must hold the server-seeded height rather than fall (the
+    /// sub-area case).
+    pub mzb_in_flight: Res<'w, kuluu_render::dat_mzb::LoadMzbInFlight>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1398,7 +1403,23 @@ pub fn dispatch_movement_system(
     // mapping (effective id None) also holds: with no geometry there is nothing
     // to fall onto, so standing at the server's z is the retail answer.
     let geometry_ready = kuluu_render::snapshot::effective_zone_file_id(&state.snapshot)
-        .is_some_and(|file| env.collision.source_file_id() == Some(file));
+        .is_some_and(|file| env.collision.source_file_id() == Some(file))
+        // The main block is loaded, but the interior the player stands in may
+        // still be streaming: its floor is not in the collision set yet, and the
+        // main block's placeholder for it is already suppressed. Falling now
+        // outruns the landing band (the clobber), so hold the server-seeded
+        // height until the floor is actually under the feet (the sub-area
+        // case). Only when there is genuinely no floor in reach;
+        // a grounded player on the street keeps walking while an interior loads
+        // elsewhere.
+        && !(env.mzb_in_flight.pending_in_slot(kuluu_render::dat_mzb::ZONE_SLOT_SUB_AREA)
+            && env.collision
+                .ground_step(
+                    bevy::math::Vec2::new(basis_pos.x, -basis_pos.y),
+                    -basis_pos.z,
+                    kuluu_render::dat_mzb::MAX_GROUND_STEP_UP,
+                )
+                .is_none());
 
     let locked_bearing: Option<f32> = lock_on.target_id.and_then(|id| {
         state

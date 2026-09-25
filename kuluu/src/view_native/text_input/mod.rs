@@ -44,7 +44,10 @@ mod slash_apply;
 use slash_apply::apply_slash_outcome;
 
 mod target_action;
-use target_action::{confirm_target_action_at_cursor, handle_target_action_key, handle_world_key};
+use target_action::{
+    answer_dismount_confirm, confirm_target_action_at_cursor, handle_target_action_key,
+    handle_world_key,
+};
 
 /// The one key map for every amount the game asks for — auction price, shop and
 /// bazaar quantity, delivery quantity and gil. Up/Down step the active digit,
@@ -1875,9 +1878,23 @@ pub fn mouse_nav_dispatch_system(
 
     for ev in events.target_action.read() {
         if let InputMode::TargetAction(state) = &mut *mode {
+            let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&state.ctx);
+            if state.dismount_confirm {
+                // The pane shows Yes/No, not the rows: slot 0 is Yes.
+                if let Some(next) = answer_dismount_confirm(
+                    state,
+                    &entries,
+                    ev.slot == 0,
+                    &mut scene_state,
+                    &entities,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+                continue;
+            }
             state.cursor = ev.slot;
 
-            let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&state.ctx);
             if let Some(next) = confirm_target_action_at_cursor(
                 state,
                 &entries,

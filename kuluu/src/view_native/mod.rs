@@ -819,6 +819,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
+    // The script's position while a cutscene holds the player: the chain above
+    // is off while the event holds the camera, so this snap runs on its own,
+    // after the chain, and wins over the prediction's last write.
+    app.add_systems(
+        FixedUpdate,
+        input::apply_cutscene_self_position_system
+            .after(input::apply_self_prediction_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
     app.add_systems(
         Update,
         input::reset_interaction_flags_on_zone_change.run_if(in_state(AppPhase::InGame)),

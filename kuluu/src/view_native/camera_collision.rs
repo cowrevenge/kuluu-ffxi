@@ -137,6 +137,14 @@ const INWARD_LERP: f32 = 0.45;
 /// lock look-at behind the player, and the wall pull-in against the zone MZB
 /// BVH, with one transform write at the end.
 ///
+/// While a running event holds the camera (CutsceneMode::camera_locked) this
+/// system writes nothing: the cutscene camera route (kuluu-render's
+/// advance_cutscene_camera_task, registered after this one) owns the operator
+/// camera, and a chase write would pull the scripted view back behind the
+/// player every frame. The leash resets while held, so on release the chase
+/// re-seats behind the player from a clean state (retail's DEFCAMERA release
+/// re-seats the chase the same way).
+///
 /// The camera is a world point (the eye) on a leash from a focus point. The
 /// focus is what the camera looks at: the player's anchor. It holds still
 /// while the pivot moves inside FOCUS_DEADZONE and is dragged to exactly
@@ -180,6 +188,7 @@ pub fn resolve_camera(
     step: Res<kuluu_render::camera::CameraStepSmoothing>,
     time: Res<Time>,
     scene_state: Res<SceneState>,
+    cutscene: Res<kuluu_render::cutscene::CutsceneMode>,
     zone_bvh: Res<ZoneCollisionBvh>,
     self_q: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut cam_q: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
@@ -192,6 +201,14 @@ pub fn resolve_camera(
     mut leash_state: Local<LeashState>,
 ) {
     if !matches!(*mode, CameraMode::Chase) {
+        *smoothed_effective = None;
+        *leash_state = LeashState::default();
+        return;
+    }
+    // A running event holding the camera owns the operator camera (the
+    // cutscene camera route advances or freezes it after this system): the
+    // chase must not attach to the player while the script owns the view.
+    if cutscene.camera_locked {
         *smoothed_effective = None;
         *leash_state = LeashState::default();
         return;
@@ -467,6 +484,7 @@ mod tests {
             .insert_resource(SceneState::default())
             .init_resource::<ZoneCollisionBvh>()
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
+            .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<kuluu_render::lock_on::LockOn>()
             .init_resource::<ZoneCollisionBvh>()
             .insert_resource(ChaseCamera {
@@ -520,6 +538,42 @@ mod tests {
         assert!(
             (look - want).length() < 1e-4,
             "camera faces along the player's heading: {look:?} != {want:?}"
+        );
+    }
+
+    /// While a running event holds the camera, the chase writes nothing: the
+    /// scripted view (frozen or routed by the cutscene camera task) is not
+    /// pulled back behind the player on every frame.
+    #[test]
+    fn cutscene_camera_lock_holds_the_chase_off_the_camera() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(CameraMode::Chase)
+            .insert_resource(kuluu_render::GraphicsSettings::default())
+            .insert_resource(SceneState::default())
+            .init_resource::<ZoneCollisionBvh>()
+            .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
+            .insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked())
+            .init_resource::<kuluu_render::lock_on::LockOn>()
+            .insert_resource(ChaseCamera::default())
+            .add_systems(Update, resolve_camera);
+
+        let player_pos = Vec3::new(10.0, 1.0, -4.0);
+        app.world_mut()
+            .spawn((IsSelf, Transform::from_translation(player_pos)));
+        let cam = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::from_xyz(999.0, 500.0, -999.0)))
+            .id();
+
+        for _ in 0..5 {
+            app.update();
+        }
+        let cam_t = *app.world().get::<Transform>(cam).unwrap();
+        assert_eq!(
+            cam_t.translation,
+            Vec3::new(999.0, 500.0, -999.0),
+            "the event-held camera must not be touched by the chase"
         );
     }
 

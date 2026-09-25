@@ -798,15 +798,29 @@ impl EventVm {
                 }
             }
             // `OP_SET_EVENT_POS` on a non-player actor: set the event entity's
-            // position (research/XiEvents/OpCodes/0x0037.md). The
-            // player-actor version keeps its width skip (the server round trip
-            // owns that path).
+            // position (research/XiEvents/OpCodes/0x0037.md).
             OP_SET_EVENT_POS if self.scene.as_ref().unwrap().actor != ZONE_PLAYER_ACTOR => {
                 let position = self.position_operands(SET_EVENT_POS_X_OFS, true);
                 self.cues.push(EventCue::ActorPlace {
                     actor: ActorLookup::EVENT_ENTITY,
                     position,
                 });
+                self.advance(op);
+            }
+            // `OP_SET_EVENT_POS` on the player: the authored position and
+            // facing become the tracked player position at once (retail's
+            // CopyAllPosEvent snaps the entity, no round-trip hold).
+            // Publishing it as a scene action snaps the rendered player and
+            // sends the c2s POS; the walks that follow start from here, and
+            // the camera routines the script loads after this opcode build
+            // their orbit around this position and facing.
+            OP_SET_EVENT_POS => {
+                let position = self.position_operands(SET_EVENT_POS_X_OFS, true);
+                let scene = self.scene.as_mut().unwrap();
+                scene.player = position;
+                scene.controls_position = true;
+                self.scene_actions
+                    .push(SceneAction::PlayerPosition(position));
                 self.advance(op);
             }
             // `OP_SET_FACING` on a non-player actor: set the event entity's
@@ -817,6 +831,18 @@ impl EventVm {
                     actor: ActorLookup::EVENT_ENTITY,
                     heading,
                 });
+                self.advance(op);
+            }
+            // `OP_SET_FACING` on the player: the authored facing becomes the
+            // tracked heading; republish the position so the rendered body
+            // turns onto it (the body's yaw follows the snapshot heading).
+            OP_SET_FACING => {
+                let heading = self.getworkofs(SET_FACING_OFS, 0);
+                let scene = self.scene.as_mut().unwrap();
+                scene.player.heading = heading;
+                scene.controls_position = true;
+                self.scene_actions
+                    .push(SceneAction::PlayerPosition(scene.player));
                 self.advance(op);
             }
             // `OP_DTURA`: turn the first named actor toward the second

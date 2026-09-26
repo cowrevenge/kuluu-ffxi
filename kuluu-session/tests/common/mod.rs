@@ -100,15 +100,27 @@ fn fixture_login_pattern() -> String {
 /// just-freed port, so a back-to-back live test gets matched to the previous
 /// run's session and its 0x00A is rejected with "Player ID mismatch"
 /// (vendor/server/src/map/packets/c2s/0x00a_login.cpp). A random high port
-/// avoids that. Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
+/// avoids that. Windows may exclude random sub-ranges of the port space from
+/// user binds (Hyper-V/WinNAT; `netsh int ipv4 show excludedportrange
+/// protocol=udp`), so each candidate is probe-bound before it is pinned.
+/// Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
 pub fn pin_unique_local_port() {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let port = LOCAL_PORT_BASE + (nanos % LOCAL_PORT_SPAN) as u16;
-    std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
-    eprintln!("[live] pinned local UDP port {port}");
+    for offset in 0..LOCAL_PORT_SPAN {
+        let port = LOCAL_PORT_BASE + ((nanos + offset) % LOCAL_PORT_SPAN) as u16;
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
+            eprintln!("[live] pinned local UDP port {port}");
+            return;
+        }
+    }
+    panic!(
+        "no bindable local UDP port in {LOCAL_PORT_BASE}..={}",
+        LOCAL_PORT_BASE + LOCAL_PORT_SPAN as u16
+    );
 }
 
 pub struct EphemeralChar {

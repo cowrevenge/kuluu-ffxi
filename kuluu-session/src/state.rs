@@ -992,6 +992,12 @@ pub struct DialogState {
     /// manual (the addon's "sentences that contain items will not be skipped").
     #[serde(default)]
     pub contains_item: bool,
+    /// Seconds the retail message box holds this frame before dismissing it on
+    /// its own — the entry's `7F 34/35/36 NN` auto-prompt code
+    /// (research/cexi-docs/dialog/format.md); `None` waits for a key press.
+    /// The session counts it down and advances exactly like a key press.
+    #[serde(default)]
+    pub auto_advance: Option<u8>,
 }
 
 fn cancel_armed_default() -> bool {

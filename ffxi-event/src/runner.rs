@@ -2,7 +2,7 @@
 //! dialog frames — the bridge the session holds across player interactions.
 
 use ffxi_dat::dmsg::{
-    StringDat, AUTO_MARKER_PREFIX, CHOICE_MARKER_PREFIX, SET_COLOR_MARKER_PREFIX,
+    DialogPrompt, StringDat, AUTO_MARKER_PREFIX, CHOICE_MARKER_PREFIX, SET_COLOR_MARKER_PREFIX,
 };
 use ffxi_dat::event_dat::EventBlock;
 
@@ -29,6 +29,12 @@ pub struct DialogFrame {
     /// the render layer substitutes `{Num:N}` with `params[N]`. Empty for a
     /// 0x32 trigger.
     pub params: Vec<i32>,
+    /// How the retail message box waits past this frame's text — the
+    /// continue-prompt code ending the entry (research/cexi-docs/dialog/
+    /// format.md). Choice frames are always [`DialogPrompt::Manual`]: a menu
+    /// is a branch the player must pick, and the zone-235 census found no
+    /// auto-prompt menu among its 560.
+    pub prompt: DialogPrompt,
 }
 
 /// Result of advancing the dialog one step. Not `Eq`: [`PendingTag::SendXzy`]
@@ -326,6 +332,9 @@ impl DialogRunner {
                         text: message_text(strings, m.message_id, &m.params),
                         choices: Vec::new(),
                         params: m.params,
+                        prompt: strings
+                            .prompt(m.message_id as usize)
+                            .unwrap_or(DialogPrompt::Manual),
                     });
                 }
                 StepResult::AwaitMessageAck => self.vm.dismiss_message(),
@@ -337,6 +346,7 @@ impl DialogRunner {
                         text,
                         choices,
                         params: c.params,
+                        prompt: DialogPrompt::Manual,
                     });
                 }
                 StepResult::Done => {
@@ -503,6 +513,66 @@ mod tests {
         ));
     }
 
+    /// A message frame carries the continue-prompt code of its entry: the
+    /// Bastok narration's `7F 34 NN` auto-advances after NN seconds, while a
+    /// `7F 31` line and a line with no prompt code wait for a key press
+    /// (research/cexi-docs/dialog/format.md).
+    #[test]
+    fn message_frames_carry_the_entry_prompt() {
+        let strings = strings_with(&[
+            b"The year is 1156.\x7f\x34\x05\x00",
+            b"Will you come with me?\x7f\x31\x00",
+            b"no prompt code at all\x00",
+        ]);
+        let data = vec![
+            OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_MESSAGE, 0x01, 0x80, OP_MESWAIT, OP_MESSAGE,
+            0x02, 0x80, OP_MESWAIT, OP_END,
+        ];
+        let mut r =
+            DialogRunner::start(&one_event_block(data, vec![0, 1, 2]), 1, 0, vec![]).unwrap();
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the auto-prompt line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Auto { seconds: 5 });
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the manual line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the prompt-less line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        assert!(matches!(
+            r.advance(None, &strings),
+            DialogStep::Ended { .. }
+        ));
+    }
+
+    /// A choice frame is a branch the player must pick: even when the menu
+    /// entry carries an auto-prompt code, the frame waits manually (the
+    /// zone-235 census found no auto-prompt menu among its 560).
+    #[test]
+    fn choice_frames_wait_manually_even_with_an_auto_prompt_entry() {
+        let strings = strings_with(&[b"Choose?\x0bYes\x07No\x7f\x34\x05\x00"]);
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT,
+            OP_END,
+        ];
+        let mut r = DialogRunner::start(&one_event_block(data, vec![0, 0]), 1, 0, vec![]).unwrap();
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the menu should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        assert_eq!(frame.choices, vec!["Yes".to_string(), "No".to_string()]);
+    }
+
     /// A scene that opens on a fade: `advance` yields `Waiting`, the host
     /// clock carries it to the frame, and the player's answer ends it. Pins
     /// the runner plumbing between [`EventVm::tick`] and the session.
@@ -639,6 +709,26 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
         buf.extend_from_slice(&(4u32 ^ ffxi_dat::dmsg::OFFSET_XOR).to_le_bytes());
+        StringDat::parse(&buf).expect("synthetic DialogTable")
+    }
+
+    /// A synthetic DialogTable with per-entry plain text bytes, same header
+    /// layout as [`empty_strings`] plus the text XOR 0x80.
+    fn strings_with(entries: &[&[u8]]) -> StringDat {
+        const DMSG_MAGIC_BASE: u32 = 0x1000_0000;
+        const DMSG_TEXT_XOR: u8 = 0x80;
+        let table_size = 4 * entries.len();
+        let data_len = table_size as u32 + entries.iter().map(|e| e.len() as u32).sum::<u32>();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
+        let mut running = table_size as u32;
+        for e in entries {
+            buf.extend_from_slice(&((running ^ ffxi_dat::dmsg::OFFSET_XOR).to_le_bytes()));
+            running += e.len() as u32;
+        }
+        for e in entries {
+            buf.extend(e.iter().map(|b| b ^ DMSG_TEXT_XOR));
+        }
         StringDat::parse(&buf).expect("synthetic DialogTable")
     }
 

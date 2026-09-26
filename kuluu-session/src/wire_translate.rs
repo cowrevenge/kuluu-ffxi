@@ -353,6 +353,7 @@ pub fn dialog_to_wire(d: &DialogState) -> wire::DialogState {
         cancel_armed: d.cancel_armed,
         speaker_index: d.speaker_index,
         contains_item: d.contains_item,
+        auto_advance: d.auto_advance,
     }
 }
 

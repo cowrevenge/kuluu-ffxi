@@ -13,8 +13,6 @@ use ffxi_dat::dmsg::{
     MARKER_PLAYER_NAME, MARKER_SPEAKER_NAME,
 };
 use ffxi_dat::event_dat::{EventBlockSource, EventDat};
-use ffxi_dat::kind::ChunkKind;
-use ffxi_dat::scheduler::Scheduler;
 use ffxi_dat::DatRoot;
 use ffxi_event::{
     ActorLookup, DialogRunner, DialogStep, EventCue, FourCc, PendingTag, SOUND_TYPE_MASTER,
@@ -201,10 +199,6 @@ pub struct DialogSession {
     /// Per-zone fishing-era reconciliation state, built lazily on the first
     /// TALKNUM-family message of the zone.
     fishing: std::collections::HashMap<u16, FishingEra>,
-    /// Authored routine lengths the WAIT* holds arm from, cached per (dat id,
-    /// tag) with misses included so a re-issued routine does not re-read its
-    /// file.
-    routine_lengths: std::collections::HashMap<(u32, FourCc), Option<f32>>,
     /// The emote-file base for the lens race, cached: `None` unattempted,
     /// `Some(None)` no DLL, `Some(Some(base))` read. The emote hold timer
     /// reads routine lengths from this race's DATs (race-uniform lengths).
@@ -229,8 +223,9 @@ pub struct DialogSession {
     /// lookup (for the release), the count of outstanding issues for the pair
     /// (a repeat issue re-arms before the first finishes), the arm time the
     /// deadline sweep measures from, and the deadline itself: the DAT-authored
-    /// routine length when the session can read it, so a renderer-less session
-    /// times out on the authored length itself, else [`PENDING_MOTION_HOLD_MAX`].
+    /// routine length the event system reads from the motion DAT when it can,
+    /// so a renderer-less session times out on the authored length itself,
+    /// else [`PENDING_MOTION_HOLD_MAX`].
     pending_motion_holds: std::collections::HashMap<
         (CutsceneActor, FourCc),
         (ActorLookup, u32, std::time::Instant, std::time::Duration),
@@ -250,10 +245,16 @@ pub struct DialogSession {
     /// Per-zone dialog-numbering skew between the server and this install,
     /// learned from the messages themselves.
     skew: std::collections::HashMap<u16, ZoneTextSkew>,
-    /// The last-observed liveness tuple `(park, exec pointer, wait units)`
-    /// and the instant it was first seen: a stall is the same tuple held
-    /// across the park-specific grace.
-    liveness: Option<(ffxi_event::Park, usize, f32, std::time::Instant)>,
+    /// The last-observed liveness tuple `(park, exec pointer, wait units,
+    /// move units)` and the instant it was first seen: a stall is the same
+    /// tuple held across the park-specific grace.
+    liveness: Option<(
+        ffxi_event::Park,
+        usize,
+        f32,
+        f32,
+        std::time::Instant,
+    )>,
 }
 
 impl DialogSession {
@@ -274,7 +275,6 @@ impl DialogSession {
             active: None,
             cues: Vec::new(),
             fishing: std::collections::HashMap::new(),
-            routine_lengths: std::collections::HashMap::new(),
             emote_base_index: None,
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
@@ -424,6 +424,10 @@ impl DialogSession {
             runner.set_zone_rects(rects);
         }
         runner.set_current_zone(event_zone as i32);
+        // The event system reads the motion DATs itself to time its WAIT* holds
+        // off the authored routine lengths (research/XiEvents/OpCodes/0x0045.md),
+        // so it gets the same install the event DAT came from.
+        runner.set_dat_root(self.dat_root.clone());
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event
@@ -450,7 +454,6 @@ impl DialogSession {
             &mut runner,
             &raw_cues,
             self.dat_root.as_deref(),
-            &mut self.routine_lengths,
             unique_no,
             event_zone,
             emote_base,
@@ -571,12 +574,13 @@ impl DialogSession {
         self.check_liveness(advance)
     }
 
-    /// The liveness check: the event's `(park, exec pointer, wait units)`
-    /// tuple must change on every tick while it is parked; the same tuple
-    /// held across the park's grace is a stall, and the event cancels itself
-    /// with an error in chat instead of pinning the player. A frame is never
-    /// stale (it waits on the player), and a timed wait the session ticks
-    /// moves every tick, so only the release-bound parks can stall.
+    /// The liveness check: the event's `(park, exec pointer, wait units,
+    /// move units)` tuple must change on every tick while it is parked; the
+    /// same tuple held across the park's grace is a stall, and the event
+    /// cancels itself with an error in chat instead of pinning the player. A
+    /// frame is never stale (it waits on the player), a timed wait the
+    /// session ticks and a moving walk both change their units every tick, so
+    /// only the release-bound parks can stall.
     fn check_liveness(&mut self, advance: Advance) -> Advance {
         if matches!(advance, Advance::Ended { .. }) {
             self.liveness = None;
@@ -589,15 +593,17 @@ impl DialogSession {
         let park = runner.park();
         let ep = runner.exec_pointer();
         let wait_units = runner.wait_units_remaining();
+        let move_units = runner.move_units_remaining();
         let now = std::time::Instant::now();
         match self.liveness.as_mut() {
-            Some((p, e, w, _)) if *p == park && *e == ep && *w == wait_units => {}
+            Some((p, e, w, m, _))
+                if *p == park && *e == ep && *w == wait_units && *m == move_units => {}
             _ => {
-                self.liveness = Some((park, ep, wait_units, now));
+                self.liveness = Some((park, ep, wait_units, move_units, now));
                 return advance;
             }
         }
-        let since = self.liveness.as_ref().expect("set above").3;
+        let since = self.liveness.as_ref().expect("set above").4;
         let reason = match park {
             ffxi_event::Park::None | ffxi_event::Park::Frame => return advance,
             ffxi_event::Park::TimedWait => {
@@ -697,7 +703,7 @@ impl DialogSession {
     /// tick sees the park's grace as elapsed without waiting in real time.
     #[cfg(test)]
     pub(crate) fn age_liveness_for_test(&mut self, by: std::time::Duration) {
-        if let Some((_, _, _, since)) = self.liveness.as_mut() {
+        if let Some((_, _, _, _, since)) = self.liveness.as_mut() {
             *since -= by;
         }
     }
@@ -790,6 +796,10 @@ impl DialogSession {
         };
         let event_entity = active.unique_no;
         runner.set_actor_types(&types);
+        // The event system reads the motion DATs itself to time its WAIT* holds
+        // off the authored routine lengths, so every drive re-injects the
+        // install (a fresh runner started between drives would not have it).
+        runner.set_dat_root(self.dat_root.clone());
         let outcome = step(runner, strings);
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
@@ -799,7 +809,6 @@ impl DialogSession {
             runner,
             &raw_cues,
             self.dat_root.as_deref(),
-            &mut self.routine_lengths,
             event_entity,
             zone,
             emote_base,
@@ -2128,10 +2137,6 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
     }
 }
 
-// 0x45 duration operand: 0 and this value mean "play the authored timing";
-// kuluu-render/src/cutscene.rs scheduler_speed_ratio treats both as ratio 1.
-const SCHEDULER_DURATION_LOOP: u16 = 1;
-
 /// The VM's wait clock: one hold unit per 1/60 s (ffxi-event vm.rs
 /// WAIT_UNITS_PER_SEC).
 const WAIT_UNITS_PER_SEC: f32 = 60.0;
@@ -2236,12 +2241,13 @@ fn arm_move_holds(
 /// is its deadline, so a renderer-less session times out on the authored
 /// length itself (the deadline sweep in [`DialogSession::tick`] is the last
 /// resort). Only the 0x45 fades, which cutscene.rs plays without reporting,
-/// keep a timed hold.
+/// keep a timed hold. The lengths come from the event system's own DAT read
+/// ([`DialogRunner::routine_length`]); `root` is passed only for the 0x2D
+/// file-id lookup, which the cue's zone id (not a DAT id) names.
 fn arm_motion_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
     root: Option<&DatRoot>,
-    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
     event_entity: u32,
     zone: u16,
     emote_base: Option<u32>,
@@ -2272,7 +2278,9 @@ fn arm_motion_holds(
                 duration,
                 ..
             } => {
-                let units = routine_units(root, cache, dat_id, tag, duration);
+                let units = runner
+                    .routine_length(dat_id, tag, duration)
+                    .map(|units| units as f32);
                 if dat_id == ffxi_event::SCHEDULER_FADE_DAT_ID {
                     // The fade plays in cutscene.rs, which reports no finish:
                     // its hold stays timed from the DAT length.
@@ -2309,19 +2317,16 @@ fn arm_motion_holds(
                 let Some(file_id) = file_id else {
                     continue;
                 };
+                let units = runner
+                    .routine_length(file_id, key, ffxi_event::SCHEDULER_DURATION_FROM_DAT)
+                    .map(|units| units as f32);
                 arm_pending_motion_hold(
                     runner,
                     pending,
                     actor1,
                     resolve_actor(actor1, event_entity),
                     key,
-                    routine_units(
-                        root,
-                        cache,
-                        file_id,
-                        key,
-                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                    ),
+                    units,
                 );
             }
             // 0x2D: retail runs the routine out of the CURRENT zone's own model DAT
@@ -2335,14 +2340,9 @@ fn arm_motion_holds(
                 let units = root
                     .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone, key))
                     .and_then(|file_id| {
-                        routine_units(
-                            root,
-                            cache,
-                            file_id,
-                            key,
-                            ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                        )
-                    });
+                        runner.routine_length(file_id, key, ffxi_event::SCHEDULER_DURATION_FROM_DAT)
+                    })
+                    .map(|units| units as f32);
                 arm_pending_motion_hold(
                     runner,
                     pending,
@@ -2371,13 +2371,13 @@ fn arm_motion_holds(
                 else {
                     continue;
                 };
-                let units = routine_units(
-                    root,
-                    cache,
-                    base + file_offset,
-                    routine,
-                    ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                );
+                let units = runner
+                    .routine_length(
+                        base + file_offset,
+                        routine,
+                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                    )
+                    .map(|units| units as f32);
                 if let Some(units) = units {
                     runner.hold_action(actor, ffxi_event::EMOTE_ANIMATION_KEY, units);
                 }
@@ -2416,120 +2416,6 @@ fn arm_pending_motion_hold(
             .or_insert((lookup, 0, std::time::Instant::now(), deadline));
     entry.1 += 1;
     entry.2 = std::time::Instant::now();
-}
-
-/// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT* hold
-/// units (1/60 s each; the routine clock and the VM's wait clock are both 60
-/// fps). `duration_override` is the 0x45 operand: 0 or 1 means play the
-/// authored timing, anything else IS the total frame count. Cached per
-/// (dat_id, tag) with misses included so a re-issued routine does not
-/// re-read its file; a missing DAT arms nothing and the wait falls through.
-/// research/XiEvents/OpCodes/0x0045.md
-fn routine_units(
-    root: Option<&DatRoot>,
-    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
-    dat_id: u32,
-    tag: FourCc,
-    duration_override: u16,
-) -> Option<f32> {
-    let units = if let Some(units) = cache.get(&(dat_id, tag)) {
-        *units
-    } else {
-        let units = routine_units_uncached(root, dat_id, tag, duration_override);
-        cache.insert((dat_id, tag), units);
-        units
-    };
-    if let Some(units) = &units {
-        tracing::debug!(
-            target: "kuluu_session::event_dialog",
-            dat_id,
-            tag = %String::from_utf8_lossy(&tag),
-            hold_secs = units / WAIT_UNITS_PER_SEC,
-            "armed the WAIT* hold from the DAT-authored routine length"
-        );
-    }
-    units
-}
-
-fn routine_units_uncached(
-    root: Option<&DatRoot>,
-    dat_id: u32,
-    tag: FourCc,
-    duration_override: u16,
-) -> Option<f32> {
-    let miss = |reason: &str| {
-        tracing::debug!(
-            target: "kuluu_session::event_dialog",
-            dat_id,
-            tag = %String::from_utf8_lossy(&tag),
-            reason,
-            "no authored routine length; the WAIT* hold falls through"
-        );
-    };
-    let Some(root) = root else {
-        miss("no DAT root");
-        return None;
-    };
-    let loc = match root.resolve(dat_id) {
-        Ok(loc) => loc,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                error = %e,
-                "failed to resolve the motion DAT; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let path = loc.path_under(root);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                path = %path.display(),
-                error = %e,
-                "failed to read the motion DAT; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let chunk = ffxi_dat::chunk::walk(&bytes).find_map(|c| match c {
-        Ok(c) if c.kind == ChunkKind::Scheduler as u8 && c.name == tag => Some(c),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                error = %e,
-                "truncated chunk while scanning the motion DAT"
-            );
-            None
-        }
-    })?;
-    let scheduler = match Scheduler::parse(chunk.name, chunk.data) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                error = %e,
-                "failed to parse the scheduler chunk; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let frames = if duration_override <= SCHEDULER_DURATION_LOOP {
-        scheduler.end_frame()
-    } else {
-        u32::from(duration_override)
-    };
-    Some(frames as f32)
 }
 
 fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
@@ -3820,7 +3706,7 @@ pub(crate) mod tests {
             .liveness
             .as_mut()
             .expect("the parked tick recorded the tuple");
-        liveness.3 =
+        liveness.4 =
             std::time::Instant::now() - (STALL_GRACE_DEAD + std::time::Duration::from_secs(1));
         // The next tick: the event cancels itself.
         let Advance::Ended {
@@ -3840,6 +3726,71 @@ pub(crate) mod tests {
         assert!(line.contains("no opcode can advance"), "{line}");
         assert!(line.ends_with("; cancelled."), "{line}");
         assert!(session.active_end().is_none());
+    }
+
+    /// A player walk parked on its MOVE case-1 hold is not a stall: the
+    /// liveness tuple's move-units term drops every tick, so a walk longer
+    /// than the hold grace runs to its goal instead of cancelling mid-walk
+    /// (research/XiEvents/OpCodes/0x001F.md).
+    #[test]
+    fn a_walk_longer_than_the_hold_grace_runs_to_its_goal_instead_of_stalling() {
+        const ZONE: u16 = 248;
+        const EVENT: u16 = 9004;
+        // Speed 13 (1.3 yalms/s) over a 13-yalm goal: a 10 s walk, well past
+        // HOLD_FINISH_GRACE (5 s).
+        const SPEED_REF: u32 = 13;
+        const GOAL_X_REF: u32 = 13_000; // 13 yalms in event units
+        let ref16 = |i: u32| (i as u16).to_le_bytes();
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![SPEED_REF, GOAL_X_REF, 0, 0],
+            event_data: vec![
+                0x32, ref16(0)[0], ref16(0)[1], // SPEED = refs[0]
+                0x1F, 0x00, ref16(1)[0], ref16(1)[1], ref16(2)[0], ref16(2)[1], ref16(3)[0],
+                ref16(3)[1], // MOVE case 0: goal x=refs[1], z=refs[2], y=refs[3]
+                0x1F, 0x01, // MOVE case 1 (park on the walk)
+                0x21, // EXECEND
+            ],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        session.set_player_position(ffxi_event::vm::scene::EventPosition::default());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(matches!(session.begin(trigger), Begin::Waiting));
+        // Tick past the walk's 10 s duration (and the 5 s hold grace): the
+        // event must end at its goal, not cancel mid-walk.
+        let mut ended = false;
+        for _ in 0..22 {
+            match session.tick(0.5) {
+                Advance::Ended { end_para, .. } => {
+                    assert_ne!(
+                        end_para,
+                        ffxi_event::EVENT_CANCELLED_END_PARA,
+                        "the walk must not stall-cancel"
+                    );
+                    ended = true;
+                    break;
+                }
+                Advance::Waiting => {}
+                _ => panic!("the walk parks until it finishes"),
+            }
+        }
+        assert!(ended, "the walk must finish");
     }
 
     /// A 0x43 tag with no s2c ack: past the tag grace the session cancels the
@@ -3884,7 +3835,7 @@ pub(crate) mod tests {
             .liveness
             .as_mut()
             .expect("the parked tick recorded the tuple");
-        liveness.3 =
+        liveness.4 =
             std::time::Instant::now() - (TAG_ACK_GRACE + std::time::Duration::from_secs(1));
         // The next tick: the event cancels itself.
         let Advance::Ended {

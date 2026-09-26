@@ -4,7 +4,7 @@ use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 
 use crate::cue::EventCue;
 
-use super::{ActorLookup, EventVm, PendingTag, StepResult};
+use super::{ActorLookup, EventVm, PendingTag, StepResult, WAIT_UNITS_PER_SEC};
 
 // research/XiEvents/OpCodes/0x001F.md CodeMOVE; 0x005A.md CodeMOVE2;
 // 0x0032.md MainSpeed; 0x0047.md FUNC_XiEvent_OpCode_0x0047.
@@ -123,8 +123,36 @@ pub(super) struct Scene {
     dialog_child: Option<(u32, usize)>,
 }
 
+impl Scene {
+    /// The scene-latched walk's remaining units (1/60 s, the [`EventVm::tick`]
+    /// clock), 0 when no walk is latched or its speed is 0: a zero-speed walk
+    /// never arrives, and the host's liveness check reads a constant as a
+    /// stall. The lerp in [`EventVm::tick_scene`] travels
+    /// `speed * EVENT_SPEED_SCALE * EVENT_COORD_UNITS` event units per second.
+    fn motion_units_remaining(&self) -> f32 {
+        if !self.held {
+            return 0.0;
+        }
+        let Some(goal) = self.motion else { return 0.0 };
+        let dx = (goal.x - self.player.x) as f32;
+        let dz = (goal.z - self.player.z) as f32;
+        let distance = dx.hypot(dz);
+        let travel_per_sec = self.speed as f32 * EVENT_SPEED_SCALE * EVENT_COORD_UNITS;
+        if travel_per_sec <= 0.0 {
+            return 0.0;
+        }
+        distance / travel_per_sec * WAIT_UNITS_PER_SEC
+    }
+}
+
 impl EventVm {
     pub fn attach_scene(&mut self, dat: Arc<EventDat>, actor: u32, player: EventPosition) {
+        // The zone block owns the local player's position: seed the shared
+        // cell every sibling VM reads so a walk child starts from the snapped
+        // position, not its own zeroed scene.
+        if actor == ZONE_PLAYER_ACTOR {
+            self.shared_player = Some(Arc::new(std::sync::Mutex::new(player)));
+        }
         self.scene = Some(Scene {
             dat,
             actor,
@@ -138,6 +166,21 @@ impl EventVm {
             stacks: Vec::new(),
             dialog_child: None,
         });
+    }
+
+    /// The local player's shared position, or None when this event carries no
+    /// zone-block scene to own it.
+    pub(super) fn shared_player_position(&self) -> Option<EventPosition> {
+        self.shared_player.as_ref().map(|p| *p.lock().unwrap())
+    }
+
+    /// Update the shared local-player cell: the zone block's 0x37/0x39 snaps
+    /// write here so every sibling VM that walks or reads the local player
+    /// sees the new position.
+    pub(super) fn set_shared_player_position(&mut self, position: EventPosition) {
+        if let Some(p) = &self.shared_player {
+            *p.lock().unwrap() = position;
+        }
     }
 
     pub fn controls_player_position(&self) -> bool {
@@ -339,6 +382,20 @@ impl EventVm {
             .push(SceneAction::PlayerPosition(scene.player));
     }
 
+    /// The remaining units (1/60 s, the [`EventVm::tick`] clock) of the moves
+    /// this VM's scene tree is parked on: the scene-latched player walk plus
+    /// every descendant child's own moves. 0 when nothing is running.
+    pub(super) fn scene_move_units(&self) -> f32 {
+        let Some(scene) = &self.scene else { return 0.0 };
+        let mut max = scene.motion_units_remaining();
+        for stack in &scene.stacks {
+            for request in &stack.requests {
+                max = max.max(request.vm.move_units_remaining());
+            }
+        }
+        max
+    }
+
     /// Step one child once and bubble its cues, scene actions and zone writes.
     /// The child is reached through the `scene` field alone so the cue and
     /// zone bubbling can borrow the sibling fields while it lives. Host-armed
@@ -484,9 +541,9 @@ impl EventVm {
     /// the actor's own block. Returns false when nothing was pushed: the tag is
     /// already queued there (ReqSet returns 0), or the actor has no block or no
     /// entry at that index. A child for the local player starts from the
-    /// master's tracked position; NPC children start at zero and their
-    /// ActorMove cues carry the goal only, so the renderer walks from where
-    /// the entity stands.
+    /// shared player cell (the zone block's live position, which a 0x37 snap
+    /// may have moved); NPC children start at zero and their ActorMove cues
+    /// carry the goal only, so the renderer walks from where the entity stands.
     fn push_request(&mut self, actor: u32, priority: u8, tag: u8) -> bool {
         if self.request_queued(actor, tag) {
             return false;
@@ -513,8 +570,10 @@ impl EventVm {
             }
         };
         let dat = scene.dat.clone();
+        // A player child reads the shared cell (the zone block's live
+        // position); an NPC child keeps its own zeroed origin.
         let player = if actor == ZONE_PLAYER_ACTOR {
-            scene.player
+            self.shared_player_position().unwrap_or(scene.player)
         } else {
             EventPosition::default()
         };
@@ -529,6 +588,8 @@ impl EventVm {
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
         child.current_zone = self.current_zone;
+        child.dat_root = self.dat_root.clone();
+        child.shared_player = self.shared_player.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -572,8 +633,10 @@ impl EventVm {
         let Some(scene) = &self.scene else { return };
         let actor = block.actor;
         let dat = scene.dat.clone();
+        // A player owner reads the shared cell (the zone block's live
+        // position); an NPC owner keeps its own zeroed origin.
         let player = if actor == ZONE_PLAYER_ACTOR {
-            scene.player
+            self.shared_player_position().unwrap_or(scene.player)
         } else {
             EventPosition::default()
         };
@@ -588,6 +651,8 @@ impl EventVm {
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
         child.current_zone = self.current_zone;
+        child.dat_root = self.dat_root.clone();
+        child.shared_player = self.shared_player.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -816,6 +881,9 @@ impl EventVm {
             // their orbit around this position and facing.
             OP_SET_EVENT_POS => {
                 let position = self.position_operands(SET_EVENT_POS_X_OFS, true);
+                // The snap moves the shared local-player cell so every sibling
+                // VM that walks or reads the local player sees it.
+                self.set_shared_player_position(position);
                 let scene = self.scene.as_mut().unwrap();
                 scene.player = position;
                 scene.controls_position = true;
@@ -838,11 +906,17 @@ impl EventVm {
             // turns onto it (the body's yaw follows the snapshot heading).
             OP_SET_FACING => {
                 let heading = self.getworkofs(SET_FACING_OFS, 0);
-                let scene = self.scene.as_mut().unwrap();
-                scene.player.heading = heading;
-                scene.controls_position = true;
+                let updated = {
+                    let scene = self.scene.as_mut().unwrap();
+                    scene.player.heading = heading;
+                    scene.controls_position = true;
+                    scene.player
+                };
+                // The turn moves the shared cell's heading too, so a sibling
+                // VM that walks from here faces the authored direction.
+                self.set_shared_player_position(updated);
                 self.scene_actions
-                    .push(SceneAction::PlayerPosition(scene.player));
+                    .push(SceneAction::PlayerPosition(updated));
                 self.advance(op);
             }
             // `OP_DTURA`: turn the first named actor toward the second

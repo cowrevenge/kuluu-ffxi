@@ -11,7 +11,11 @@ use crate::scene::BakedActor;
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
-use ffxi_dat::scheduler::{ModelVisibility, Scheduler, StageKind, TimedStage};
+use ffxi_dat::scheduler::{
+    is_control_flow_opcode, ModelVisibility, Scheduler, StageKind, TimedStage, CF_COMPARE_VALUE_OP,
+    CF_FIELD_SELECTOR_OP, CONTROL_FLOW_BLOCK_CLOSE, CONTROL_FLOW_BLOCK_OPEN,
+    CONTROL_FLOW_BRANCH_FALSE, CONTROL_FLOW_BRANCH_TRUE, CONTROL_FLOW_CONDITION,
+};
 use ffxi_dat::sep::Sep;
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_event::vm::scene::{EVENT_COORD_UNITS, EVENT_HEADING_UNITS, EVENT_SPEED_SCALE};
@@ -1538,12 +1542,14 @@ pub fn poll_action_dat_tasks(
     >,
     mode: Res<crate::camera::CameraMode>,
     state: Res<crate::snapshot::SceneState>,
+    trace: Option<Res<VfxTrace>>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut motion_done: MessageWriter<CutsceneMotionDone>,
 ) {
     use bevy::tasks::futures_lite::future;
+    let tracing = trace.is_some_and(|t| t.0);
     if cache.tasks.is_empty() && cache.pending.is_empty() {
         return;
     }
@@ -1615,11 +1621,17 @@ pub fn poll_action_dat_tasks(
                             actor,
                             key: routine,
                         });
+                    } else if tracing {
+                        info!(
+                            "animationtest trace: file {} `{}` unresolved — actor 0x{actor_id:08X} not tracked",
+                            file_id,
+                            String::from_utf8_lossy(&routine),
+                        );
                     }
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                // A spell DAT's `main` links the caster's own invoke routine (0x3C `shwh`,
+                // A spell DAT's `main` links the caster's own invoke routine (`shwh`,
                 // research/xim DatResource.kt invokeWhiteMagic) out of the caster's skeleton
                 // DAT, which in turn links global-dir routines — so the flatten spans the
                 // same three tiers apply_action_dispatch uses: the file's schedulers, then
@@ -1670,6 +1682,19 @@ pub fn poll_action_dat_tasks(
                 }
                 active.cutscene_motion_actor = cutscene_actor;
                 if !active.stages.is_empty() {
+                    if tracing {
+                        info!(
+                            "animationtest trace: file {} `{}` resolved — {} stages ({} particle) on actor 0x{actor_id:08X}",
+                            file_id,
+                            String::from_utf8_lossy(&routine),
+                            active.stages.len(),
+                            active
+                                .stages
+                                .iter()
+                                .filter(|t| t.stage.kind == StageKind::Particle)
+                                .count(),
+                        );
+                    }
                     queue_routine_on_actor(
                         &parsed,
                         active,
@@ -1720,6 +1745,13 @@ pub fn poll_action_dat_tasks(
                             key: routine,
                         });
                     } else {
+                        if tracing {
+                            info!(
+                                "animationtest trace: file {} `{}` unresolved for actor 0x{actor_id:08X} — falling back to a local clip",
+                                file_id,
+                                String::from_utf8_lossy(&routine),
+                            );
+                        }
                         play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
                     }
                     continue;
@@ -3220,6 +3252,9 @@ pub fn dispatch_cast_routine_started(
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingHitReaction {
     pub resolution: ffxi_proto::melee::ActionResolution,
+    /// The result's swing-animation bits (dam0's [`HIT_FIELD_ANIMATION`] selector); the server
+    /// sends none for a basic attack, in which case dam0's sb00..sb09 blocks simply do not match.
+    pub animation: u16,
     pub outcome: ffxi_proto::melee::ResultOutcome,
     /// The scheduler whose DamageCallback stage is allowed to fire this reaction. Every
     /// completion routine ends at its DamageCallback stage (a spell's `mdam` among them), so an
@@ -3262,44 +3297,173 @@ pub fn settle_dead_from_action(
     }
 }
 
-// The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
-// the ranged chain `ldad` uses `daml` instead). Its cases select on `context.hitTypeFlag`
-// (research/xim EffectRoutineInstance.kt resolveControlFlowVariable) and their branch order is byte-for-byte the
-// ActionResolution values in vendor/server/src/map/enums/action/resolution.h. The Hit branches
-// are `damh`/`damg`, and BOTH carry a FlinchOnCaster stage (ROM/0/0.DAT: damh = chih + sdam
-// + flinch + vdam; damg = chit + sdam + flinch + vdam) - retail ALWAYS flinches on a hit. `sdam`
-// is never a top-level reaction choice: it is only the internal sound call inside dam*/ldam, so
-// picking it for models that ship it (as this table used to) made normal hits sound-only with no
-// flinch - the "animations not playing" symptom. research/xim leaves the `damh`-vs-`damg`
-// selector (var 0x3B) unhandled (EffectRoutineInstance.kt resolveControlFlowVariable warns and defaults to 0),
-// which is the `damg` branch - so every non-crit Hit routes to `damg`. A crit routes to `ldam`
-// when the lookup resolves it, else back to `damg`; lookup still resolves victim-own-first,
-// then global.
-pub fn hit_reaction_routine(
-    resolution: ffxi_proto::melee::ActionResolution,
-    outcome: ffxi_proto::melee::ResultOutcome,
-    model_has: impl Fn(&[u8; 4]) -> bool,
-) -> Vec<[u8; 4]> {
-    use ffxi_proto::melee::ActionResolution;
-    let out = match resolution {
-        // The crit rides the VICTIM's result block as `info & CriticalHit`
-        // (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack). LSB's
-        // hitDistortion is the damage share of max HP (action.cpp action_result_t::recordDamage),
-        // so it cannot stand in for the flag. None/Light/Medium/Heavy non-crits all play `damg`
-        // per retail's dam0 branch table - never sdam, which flinches nothing on its own.
-        ActionResolution::Hit if outcome.is_critical() && model_has(b"ldam") => *b"ldam",
-        ActionResolution::Hit => *b"damg",
-        ActionResolution::Miss => *b"sway",
-        ActionResolution::Guard => *b"gurd",
-        ActionResolution::Parry => *b"pary",
-        ActionResolution::Block if model_has(b"shld") => *b"shld",
-        ActionResolution::Block => *b"gur1",
-    };
-    let mut routines = vec![out];
-    if outcome.knockback > 0 && out != *b"sway" {
-        routines.push(*b"sway");
+// ROM/0/0.DAT dam0/daml switch-test field selectors, as carried by CF_FIELD_SELECTOR_OP words.
+pub const HIT_FIELD_RESOLUTION: u32 = 0x28;
+pub const HIT_FIELD_ANIMATION: u32 = 0x33;
+pub const HIT_FIELD_INFO: u32 = 0x3B;
+
+// Per-result fields a control-flow switch (ROM/0/0.DAT dam0/daml) can test, keyed by the selector
+// word its condition stages carry.
+pub struct HitContext {
+    pub resolution: u32,
+    pub animation: u32,
+    pub info: u32,
+}
+
+impl HitContext {
+    pub fn from_pending(pending: &PendingHitReaction) -> Self {
+        Self {
+            resolution: pending.resolution.to_wire() as u32,
+            animation: pending.animation as u32,
+            info: pending.outcome.info as u32,
+        }
     }
-    routines
+
+    /// The value a selector word names. Selectors that name no wire field (crtl's variant
+    /// picks) are client-side registers, not result fields.
+    pub fn field(&self, selector: u32) -> Option<u32> {
+        Some(match selector {
+            HIT_FIELD_RESOLUTION => self.resolution,
+            HIT_FIELD_ANIMATION => self.animation,
+            HIT_FIELD_INFO => self.info,
+            _ => return None,
+        })
+    }
+}
+
+// How a switch test on an unknown (client-register) selector evaluates; only ROM/0/0.DAT crtl's
+// nested test names such selectors, and Match makes it take its first arm.
+pub enum UnknownFieldPolicy {
+    Random,
+    Match,
+}
+
+// Runs one control-flow switch routine from its own DAT stages and returns the sub-routine names
+// its matched blocks call, in order. The grammar is byte-for-byte what dam0/daml/crtl ship
+// (ROM/0/0.DAT): a test is a run of CONTROL_FLOW_CONDITION words (CF_FIELD_SELECTOR_OP,
+// optional CF_COMPARE_VALUE_OP, terminator word) and the following BranchTrue pushes that
+// test's frame;
+// the next BlockOpen opens that same frame as its body rather than pushing. A bare BlockOpen
+// after an inner test's close is that test's ELSE (dam0's Hit arm:
+// BranchTrue/BlockOpen/damh/BlockClose/BranchFalse/BlockOpen/damg) and runs only when the test
+// failed. Blocks are independent - every matching block fires, so a hit plays both its swing
+// effect and its reaction. The compiled switch emits more
+// BlockClose words than opens (dam0: eight after sb09, six at the end); extra closes no-op.
+pub fn evaluate_switch(
+    lookup: &RoutineLookup,
+    name: &[u8; 4],
+    ctx: &HitContext,
+    unknown_fields: UnknownFieldPolicy,
+) -> Vec<[u8; 4]> {
+    let Some(sched) = lookup.get(name) else {
+        return Vec::new();
+    };
+
+    struct Frame {
+        pass: bool,
+        opened: bool,
+        inner_closed: bool,
+        last_inner: bool,
+        is_test: bool,
+    }
+
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut pending_field: Option<u32> = None;
+    let mut pending_value: Option<Option<u32>> = None;
+    let mut out = Vec::new();
+
+    for t in &sched.stages {
+        match t.stage.raw_type {
+            CONTROL_FLOW_CONDITION => {
+                if let Some(cf) = t.stage.control_flow {
+                    match cf.op {
+                        CF_FIELD_SELECTOR_OP => pending_field = cf.operand,
+                        CF_COMPARE_VALUE_OP => pending_value = Some(cf.operand),
+                        _ => {} // terminator word
+                    }
+                }
+            }
+            // BranchTrue: the test just completed - push its frame; its body is this same
+            // frame, opened by the next BlockOpen. The compare value word is optional: crtl's
+            // nested test carries only the field word (a non-zero test on a client register).
+            CONTROL_FLOW_BRANCH_TRUE => {
+                if let Some(field) = pending_field.take() {
+                    let value = pending_value.take().flatten();
+                    let matched = match (ctx.field(field), value) {
+                        (Some(x), Some(want)) => x == want,
+                        (Some(x), None) => x != 0,
+                        (None, _) => match unknown_fields {
+                            UnknownFieldPolicy::Match => true,
+                            UnknownFieldPolicy::Random => {
+                                let want = value
+                                    .map(|v| v as usize)
+                                    .unwrap_or_else(|| next_random_pick(2));
+                                next_random_pick(4) == want
+                            }
+                        },
+                    };
+                    frames.push(Frame {
+                        pass: matched,
+                        opened: false,
+                        inner_closed: false,
+                        last_inner: false,
+                        is_test: true,
+                    });
+                }
+            }
+            // BlockOpen: the just-pushed test's own body, that test's ELSE after an inner
+            // close (inverted result), or a plain wrapper block.
+            CONTROL_FLOW_BLOCK_OPEN => {
+                let new_frame_pass = match frames.last_mut() {
+                    Some(f) if !f.opened => {
+                        f.opened = true;
+                        None
+                    }
+                    Some(f) if f.inner_closed => Some(!f.last_inner),
+                    _ => Some(true),
+                };
+                if let Some(pass) = new_frame_pass {
+                    frames.push(Frame {
+                        pass,
+                        opened: true,
+                        inner_closed: false,
+                        last_inner: false,
+                        is_test: false,
+                    });
+                }
+            }
+            // BlockClose: pop one frame; closing a test flags its parent for ELSE. The
+            // compiled switch over-closes, so popping an empty stack no-ops.
+            CONTROL_FLOW_BLOCK_CLOSE => {
+                if let Some(popped) = frames.pop() {
+                    if popped.is_test {
+                        if let Some(top) = frames.last_mut() {
+                            top.inner_closed = true;
+                            top.last_inner = popped.pass;
+                        }
+                    }
+                }
+            }
+            // BranchFalse (EndMark): no pop - the structural marker between an inner close and its ELSE.
+            CONTROL_FLOW_BRANCH_FALSE => {}
+            _ => {}
+        }
+
+        // Content stage inside an all-passing frame chain: collect the sub-routine it calls.
+        let is_control_flow = is_control_flow_opcode(t.stage.raw_type);
+        if !is_control_flow
+            && frames.iter().all(|f| f.pass)
+            && matches!(
+                t.stage.kind,
+                StageKind::SubRoutine
+                    | StageKind::BlockingSubRoutine
+                    | StageKind::SubRoutineOnTarget
+            )
+        {
+            out.push(t.stage.id);
+        }
+    }
+    out
 }
 
 // research/xim Actor.kt displayAutoAttack: the swing routine is chosen by which limb struck.
@@ -3400,6 +3564,7 @@ pub fn dispatch_melee_action_started(
             lookup = lookup.with_dat(&g.schedulers);
         }
         let raw_result = result;
+        let swing_animation = raw_result.map(|(_, animation)| animation).unwrap_or(0);
         let result = raw_result.and_then(|(resolution, animation)| {
             Some((
                 ffxi_proto::melee::ActionResolution::from_wire(resolution)?,
@@ -3431,6 +3596,7 @@ pub fn dispatch_melee_action_started(
             Some(resolution) => {
                 entity.try_insert(PendingHitReaction {
                     resolution,
+                    animation: swing_animation,
                     outcome,
                     armed_by,
                 });
@@ -3556,9 +3722,13 @@ pub fn dispatch_damage_callback_stages(
         if let Some(g) = global.as_ref() {
             lookup = lookup.with_dat(&g.schedulers);
         }
-        let chosen = hit_reaction_routine(pending.resolution, pending.outcome, |name| {
-            lookup.get(name).is_some()
-        });
+        // The reaction is whatever the global effect dir's `dam0` switch selects from this
+        // result - no hand-transcribed table. It runs on the VICTIM with target = attacker:
+        // the victim's own damg shadows the global one and links chit back onto the attacker,
+        // whose ef h sparks (TargetActor) land on the victim again; FlinchOnCaster flinches
+        // the victim.
+        let ctx = HitContext::from_pending(pending);
+        let chosen = evaluate_switch(&lookup, b"dam0", &ctx, UnknownFieldPolicy::Random);
         for routine in &chosen {
             tracing::debug!(target: "combat", "COMBAT_RX victim={} res={:?} outcome={:?} routine={} found={}",
                     victim.index(),
@@ -3577,6 +3747,26 @@ pub fn dispatch_damage_callback_stages(
                 global.as_deref(),
                 &mut commands,
             );
+        }
+        // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
+        // context (target = victim): its g14*/g29* spark defs are TargetActor-attached and land
+        // on the struck actor only when the spark's target IS the victim.
+        if pending.outcome.is_critical() {
+            for routine in evaluate_switch(&lookup, b"crtl", &ctx, UnknownFieldPolicy::Match) {
+                tracing::debug!(target: "combat", "COMBAT_RX_CRIT attacker={} routine={}",
+                        ev.actor.index(), fourcc(routine));
+                run_routine_on(
+                    ev.actor,
+                    &routine,
+                    Some(victim),
+                    &q_children,
+                    &q_render,
+                    &mut q_active,
+                    &mut pending_inserts,
+                    global.as_deref(),
+                    &mut commands,
+                );
+            }
         }
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
@@ -3952,6 +4142,92 @@ pub fn dispatch_level_up(
     }
 }
 
+// //animationtest — the VFX verification harness. `weapon hit1|hit2` loops a global-dir effect
+// routine on the local player (re-deferred once a second while armed, dispatch_level_up above
+// is the one-shot form of the same PendingActionDispatch::Routine); `player levelup` fires the
+// level-up effect DAT once. While a case is live, VfxTrace makes every step of the dispatch
+// funnel log at info! so a silent miss pins to its stage.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct AnimationTestState {
+    /// The global-dir routine looping on the local player (hit1/hit2), if any.
+    pub loop_routine: Option<[u8; 4]>,
+    /// One-shot level-up effect pending dispatch (ROM/13/35.DAT `main`).
+    pub levelup_pending: bool,
+}
+
+/// Armed while an animationtest case is live; the dispatch funnel logs at info! instead of
+/// staying silent on a miss. The tick disarms it once no case is pending.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct VfxTrace(pub bool);
+
+const ANIMATION_TEST_LOOP_INTERVAL_FRAMES: f32 = 60.0;
+// A one-shot's trace window: long enough to cover the load + dispatch + first burst.
+const ANIMATION_TEST_TRACE_SECS: f32 = 15.0;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn animation_test_tick(
+    time: Res<Time>,
+    state: Res<crate::snapshot::SceneState>,
+    mut test: ResMut<AnimationTestState>,
+    mut trace: ResMut<VfxTrace>,
+    mut cache: ResMut<ActionDatCache>,
+    mut loop_elapsed: Local<f32>,
+    mut one_shot_secs: Local<Option<f32>>,
+) {
+    let Some(self_id) = state.snapshot.self_char_id else {
+        return;
+    };
+
+    if test.levelup_pending {
+        *one_shot_secs = Some(0.0);
+        info!(
+            "animationtest: firing level-up effect (file {} `main`) on self 0x{self_id:08X}",
+            LEVEL_UP_EFFECT_DAT_ID,
+        );
+        cache.defer(
+            LEVEL_UP_EFFECT_DAT_ID,
+            PendingActionDispatch::Routine {
+                actor_id: self_id,
+                target_id: 0,
+                routine: *b"main",
+                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                cutscene_actor: None,
+            },
+        );
+        test.levelup_pending = false;
+    }
+
+    if let Some(routine) = test.loop_routine {
+        *loop_elapsed += time.delta_secs() * ROUTINE_FPS;
+        if *loop_elapsed >= ANIMATION_TEST_LOOP_INTERVAL_FRAMES {
+            *loop_elapsed = 0.0;
+            info!(
+                "animationtest: firing {} on self 0x{self_id:08X}",
+                String::from_utf8_lossy(&routine),
+            );
+            cache.defer(
+                GLOBAL_EFFECT_DIR_FILE_ID,
+                PendingActionDispatch::Routine {
+                    actor_id: self_id,
+                    target_id: 0,
+                    routine,
+                    duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                    cutscene_actor: None,
+                },
+            );
+        }
+    }
+
+    // A one-shot's trace window closes on its own; a live loop keeps the trace armed.
+    if let Some(secs) = one_shot_secs.as_mut() {
+        *secs += time.delta_secs();
+        if *secs > ANIMATION_TEST_TRACE_SECS && test.loop_routine.is_none() {
+            *one_shot_secs = None;
+            trace.0 = false;
+        }
+    }
+}
+
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
 // play the actor's own em0N clip when it has one; silent no-op
 // otherwise (XIM findLocalAnimationRoutine, Actor.kt).
@@ -4003,6 +4279,8 @@ impl Plugin for SchedulerRuntimePlugin {
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
             app.init_resource::<ActionDatCache>();
+            app.init_resource::<AnimationTestState>();
+            app.init_resource::<VfxTrace>();
             // The running cutscene camera route; the advance system
             // (advance_cutscene_camera_task) registers in kuluu's view native module
             // (kuluu/src/view_native/mod.rs), after resolve_camera.
@@ -4031,6 +4309,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_melee_action_started,
                     dispatch_entity_emoted,
                     dispatch_level_up,
+                    animation_test_tick,
                     dispatch_cutscene_motion,
                     poll_action_dat_tasks,
                 )
@@ -4408,8 +4687,32 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                control_flow: None,
             },
         }
+    }
+
+    // One control-flow stage of a switch routine: CONTROL_FLOW_CONDITION carries the condition
+    // word (op + optional operand); the branch/block opcodes are argument-less markers.
+    fn cf_stage(
+        frame: u32,
+        raw_type: u8,
+        op: Option<u32>,
+        operand: Option<Option<u32>>,
+    ) -> TimedStage {
+        let mut t = stage(
+            frame,
+            StageKind::Unknown,
+            raw_type,
+            ffxi_dat::scheduler::NO_STAGE_ID,
+        );
+        if let Some(op) = op {
+            t.stage.control_flow = Some(ffxi_dat::scheduler::ControlFlowArg {
+                op,
+                operand: operand.flatten(),
+            });
+        }
+        t
     }
 
     fn make_scheduler(name: [u8; 4], stages: Vec<TimedStage>) -> Scheduler {
@@ -4867,6 +5170,7 @@ mod tests {
     fn pending_hit_reaction_is_bound_to_the_scheduler_that_armed_it() {
         let pending = PendingHitReaction {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
+            animation: 0,
             outcome: ffxi_proto::melee::ResultOutcome::default(),
             armed_by: *b"atk0",
         };
@@ -4920,81 +5224,284 @@ mod tests {
         );
     }
 
+    // The switch grammar daml ships (ROM/0/0.DAT @0x80be0): one wrapper open, then sibling
+    // cases of [field word, value word, terminator, BranchTrue, body open, call, close,
+    // endmark], trailing over-closes. evaluate_switch must pick exactly the matching case's
+    // call.
     #[test]
-    fn hit_reaction_routine_table() {
-        use ffxi_proto::melee::ActionResolution as R;
-        use ffxi_proto::melee::{ResultOutcome, INFO_CRITICAL_HIT};
-        let has = |names: Vec<[u8; 4]>| move |name: &[u8; 4]| names.iter().any(|n| n == name);
-        let o = |info: u8, hit_distortion: u8, knockback: u8| {
-            ResultOutcome::from_wire(info, hit_distortion, knockback)
+    fn evaluate_switch_runs_the_dat_branch_table() {
+        let mut stages = vec![cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None)];
+        for (value, name) in [
+            (0u32, *b"ldam"),
+            (1, *b"sway"),
+            (2, *b"gurd"),
+            (3, *b"pary"),
+        ] {
+            stages.push(cf_stage(
+                0,
+                CONTROL_FLOW_CONDITION,
+                Some(CF_FIELD_SELECTOR_OP),
+                Some(Some(HIT_FIELD_RESOLUTION)),
+            ));
+            stages.push(cf_stage(
+                0,
+                CONTROL_FLOW_CONDITION,
+                Some(CF_COMPARE_VALUE_OP),
+                Some(Some(value)),
+            ));
+            stages.push(cf_stage(0, CONTROL_FLOW_CONDITION, Some(0x0C), None));
+            stages.push(cf_stage(0, CONTROL_FLOW_BRANCH_TRUE, None, None));
+            stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None));
+            stages.push(stage(0, StageKind::SubRoutineOnTarget, 0x09, name));
+            stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_CLOSE, None, None));
+            stages.push(cf_stage(0, CONTROL_FLOW_BRANCH_FALSE, None, None));
+        }
+        for _ in 0..5 {
+            stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_CLOSE, None, None)); // trailing closes
+        }
+        let scheds = vec![make_scheduler(*b"daml", stages)];
+        let lookup = RoutineLookup::new().with_dat(&scheds);
+        let ctx = |resolution: u32| HitContext {
+            resolution,
+            animation: 0,
+            info: 0,
         };
-        let crit = |knockback: u8| o(INFO_CRITICAL_HIT, 3, knockback);
 
         assert_eq!(
-            hit_reaction_routine(R::Hit, crit(0), has(vec![*b"ldam"])),
+            evaluate_switch(&lookup, b"daml", &ctx(0), UnknownFieldPolicy::Random),
             vec![*b"ldam"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Hit, crit(0), has(vec![])),
-            vec![*b"damg"]
-        );
-        // hitDistortion is the damage share of max HP, not the flag: a Heavy non-crit stays on
-        // damg and a Light crit still plays ldam (ffxi-proto/src/melee.rs hit_distortion).
-        assert_eq!(
-            hit_reaction_routine(R::Hit, o(0, 3, 0), has(vec![*b"ldam"])),
-            vec![*b"damg"]
+            evaluate_switch(&lookup, b"daml", &ctx(1), UnknownFieldPolicy::Random),
+            vec![*b"sway"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Hit, o(INFO_CRITICAL_HIT, 1, 0), has(vec![*b"ldam"])),
-            vec![*b"ldam"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, o(0, 0, 0), has(vec![*b"sdam"])),
-            vec![*b"damg"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, o(0, 1, 0), has(vec![*b"sdam"])),
-            vec![*b"damg"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, o(0, 0, 0), has(vec![])),
-            vec![*b"damg"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, o(0, 2, 0), has(vec![*b"sdam"])),
-            vec![*b"damg"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Guard, o(0, 0, 0), has(vec![])),
+            evaluate_switch(&lookup, b"daml", &ctx(2), UnknownFieldPolicy::Random),
             vec![*b"gurd"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Parry, o(0, 0, 0), has(vec![])),
+            evaluate_switch(&lookup, b"daml", &ctx(3), UnknownFieldPolicy::Random),
+            vec![*b"pary"]
+        );
+        // No case matches: an out-of-range resolution plays nothing.
+        assert!(evaluate_switch(&lookup, b"daml", &ctx(7), UnknownFieldPolicy::Random).is_empty());
+    }
+
+    // A nested test with a bare-BlockOpen ELSE (dam0's Hit arm: info==1 -> damh, else damg):
+    // the inner case and its else are mutually exclusive, and both sit under the outer test.
+    #[test]
+    fn evaluate_switch_nested_test_with_else() {
+        let mut stages = vec![cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None)];
+        stages.push(cf_stage(
+            0,
+            CONTROL_FLOW_CONDITION,
+            Some(CF_FIELD_SELECTOR_OP),
+            Some(Some(HIT_FIELD_RESOLUTION)),
+        ));
+        stages.push(cf_stage(
+            0,
+            CONTROL_FLOW_CONDITION,
+            Some(CF_COMPARE_VALUE_OP),
+            Some(Some(0)), // resolution == Hit
+        ));
+        stages.push(cf_stage(0, CONTROL_FLOW_CONDITION, Some(0x0C), None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BRANCH_TRUE, None, None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None));
+        stages.push(cf_stage(
+            0,
+            CONTROL_FLOW_CONDITION,
+            Some(CF_FIELD_SELECTOR_OP),
+            Some(Some(HIT_FIELD_INFO)),
+        ));
+        stages.push(cf_stage(
+            0,
+            CONTROL_FLOW_CONDITION,
+            Some(CF_COMPARE_VALUE_OP),
+            Some(Some(1)), // info == Defeated
+        ));
+        stages.push(cf_stage(0, CONTROL_FLOW_CONDITION, Some(0x0C), None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BRANCH_TRUE, None, None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None));
+        stages.push(stage(0, StageKind::SubRoutineOnTarget, 0x09, *b"damh"));
+        stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_CLOSE, None, None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BRANCH_FALSE, None, None));
+        stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_OPEN, None, None)); // ELSE of the inner test
+        stages.push(stage(0, StageKind::SubRoutineOnTarget, 0x09, *b"damg"));
+        stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_CLOSE, None, None));
+        for _ in 0..3 {
+            stages.push(cf_stage(0, CONTROL_FLOW_BLOCK_CLOSE, None, None));
+        }
+        let scheds = vec![make_scheduler(*b"dam0", stages)];
+        let lookup = RoutineLookup::new().with_dat(&scheds);
+
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 0,
+                    animation: 0,
+                    info: 1
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"damh"]
+        );
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 0,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"damg"]
+        );
+        // A non-Hit resolution skips the whole arm.
+        assert!(evaluate_switch(
+            &lookup,
+            b"dam0",
+            &HitContext {
+                resolution: 1,
+                animation: 0,
+                info: 0
+            },
+            UnknownFieldPolicy::Random
+        )
+        .is_empty());
+    }
+
+    // Retail-byte guard (skips without an install): the real ROM/0/0.DAT `dam0` selects exactly
+    // the reaction its branch table names, and `crtl` lands on one of its two spark variants.
+    #[test]
+    fn real_dat_dam0_selects_the_retail_reaction() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let loc = match root.resolve(GLOBAL_EFFECT_DIR_FILE_ID) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let bytes = match std::fs::read(loc.path_under(&root)) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let (schedulers, _assets, _report, _cameras) = parse_action_bytes_reporting(&bytes);
+        let lookup = RoutineLookup::new().with_dat(&schedulers);
+
+        // Hit: the nested info test sees no Defeated bit -> damg.
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 0,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"damg"]
+        );
+        // The killing blow: info bit 1 (Defeated) -> damh.
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 0,
+                    animation: 0,
+                    info: 1
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"damh"]
+        );
+        // Miss/Guard/Parry/Block -> sway/gurd/pary/gur1.
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 1,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"sway"]
+        );
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 2,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"gurd"]
+        );
+        assert_eq!(
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 3,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
             vec![*b"pary"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Block, o(0, 0, 0), has(vec![*b"shld"])),
-            vec![*b"shld"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Block, o(0, 0, 0), has(vec![])),
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 4,
+                    animation: 0,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
             vec![*b"gur1"]
         );
+        // A swing-animation value (retail sends 1..=10) fires its sb block AND the Hit arm.
         assert_eq!(
-            hit_reaction_routine(R::Miss, o(0, 0, 0), has(vec![])),
-            vec![*b"sway"]
+            evaluate_switch(
+                &lookup,
+                b"dam0",
+                &HitContext {
+                    resolution: 0,
+                    animation: 5,
+                    info: 0
+                },
+                UnknownFieldPolicy::Random
+            ),
+            vec![*b"sb04", *b"damg"]
         );
-        assert_eq!(
-            hit_reaction_routine(R::Miss, o(0, 0, 2), has(vec![])),
-            vec![*b"sway"]
+        // crtl's variant pick is a client register: with Match it must land on exactly one of
+        // the two spark routines.
+        let crit = evaluate_switch(
+            &lookup,
+            b"crtl",
+            &HitContext {
+                resolution: 0,
+                animation: 0,
+                info: 2,
+            },
+            UnknownFieldPolicy::Match,
         );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, crit(1), has(vec![*b"ldam"])),
-            vec![*b"ldam", *b"sway"]
-        );
-        assert_eq!(
-            hit_reaction_routine(R::Hit, crit(1), has(vec![])),
-            vec![*b"damg", *b"sway"]
+        assert!(
+            crit == vec![*b"hi14"] || crit == vec![*b"hi29"],
+            "crtl picked {crit:?}"
         );
     }
 
@@ -6283,35 +6790,6 @@ mod tests {
         assert_eq!(active.stages.len(), 1);
         assert_eq!(active.stages[0].stage.kind, StageKind::SubRoutineOnTarget);
         assert_eq!(&active.stages[0].stage.id, b"damg");
-    }
-
-    // vendor/server/src/map/enums/action/resolution.h ordering, pinned to the branch order the
-    // retail MELEE `dam0` chunk dispatches in (ffxi_dat guard
-    // real_dat_dam0_switches_hit_type_to_melee_reaction_routines). `ldam` is the RANGED chain's
-    // Hit branch (`ldad` -> `daml`) and links `lhit` -> eflg/selg, which no melee weapon DAT has.
-    #[test]
-    fn hit_reaction_routines_follow_lsb_resolution_order() {
-        use ffxi_proto::melee::ActionResolution;
-        let order: Vec<Vec<[u8; 4]>> = [
-            ActionResolution::Hit,
-            ActionResolution::Miss,
-            ActionResolution::Guard,
-            ActionResolution::Parry,
-            ActionResolution::Block,
-        ]
-        .into_iter()
-        .map(|r| hit_reaction_routine(r, ffxi_proto::melee::ResultOutcome::default(), |_| false))
-        .collect();
-        assert_eq!(
-            order,
-            vec![
-                vec![*b"damg"],
-                vec![*b"sway"],
-                vec![*b"gurd"],
-                vec![*b"pary"],
-                vec![*b"gur1"],
-            ]
-        );
     }
 
     // research/xim EffectRoutineInstance.kt createChild newSequences — createChild for a 0x09 link builds

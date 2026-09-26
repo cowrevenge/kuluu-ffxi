@@ -98,6 +98,13 @@ pub struct SlashWriters<'w, 's> {
 
     pub sfx_event: MessageWriter<'w, kuluu_render::audio::SfxEvent>,
 
+    /// //animationtest's latches: the looping routine and the pending one-shot
+    /// (kuluu_render::scheduler_runtime re-fires them while set).
+    pub animation_test:
+        ResMut<'w, kuluu_render::scheduler_runtime::AnimationTestState>,
+    /// Armed while an animationtest case is live; the VFX dispatch funnel logs at info!.
+    pub vfx_trace: ResMut<'w, kuluu_render::scheduler_runtime::VfxTrace>,
+
     pub screenshot: MessageWriter<'w, super::screenshot::ScreenshotRequest>,
 
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,

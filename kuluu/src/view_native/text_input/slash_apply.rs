@@ -747,6 +747,32 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::NavInfo => {
             report_nav_info(navmesh_state, self_pos, scene_state);
         }
+        SlashOutcome::AnimationTest {
+            loop_routine,
+            levelup,
+        } => {
+            if let Some(routine) = &loop_routine {
+                let mut name = [0u8; 4];
+                for (slot, byte) in name.iter_mut().zip(routine.bytes()) {
+                    *slot = byte;
+                }
+                let on = slash_writers.animation_test.loop_routine != Some(name);
+                slash_writers.animation_test.loop_routine = if on { Some(name) } else { None };
+                slash_writers.vfx_trace.0 = on;
+                push_system_chat_line(
+                    scene_state,
+                    format!("//animationtest: {} loop {}", routine, if on { "ON" } else { "OFF" }),
+                );
+            }
+            if levelup {
+                slash_writers.animation_test.levelup_pending = true;
+                slash_writers.vfx_trace.0 = true;
+                push_system_chat_line(
+                    scene_state,
+                    "//animationtest: level-up effect armed".into(),
+                );
+            }
+        }
         SlashOutcome::AgentControl(op) => {
             #[cfg(unix)]
             apply_agent_control(op, agent_paused, session_event_tx, scene_state);

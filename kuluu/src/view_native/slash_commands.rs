@@ -283,6 +283,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |_| SlashOutcome::NavInfo,
             },
             Command {
+                names: &["animationtest"],
+                set: CommandSet::Dev,
+                usage: "weapon hit1|hit2 | player levelup",
+                summary: "VFX harness: loop a hit effect on yourself (repeat stops it) or fire the level-up once",
+                handler: |c| parse_animation_test(c),
+            },
+            Command {
                 names: &["whereami", "pos"],
                 set: CommandSet::Dev,
                 usage: "",
@@ -1106,6 +1113,14 @@ pub enum SlashOutcome {
     Widescan,
 
     NavInfo,
+
+    /// //animationtest — the VFX verification harness (kuluu_render::scheduler_runtime):
+    /// `weapon hit1|hit2` loops that global-dir effect on the local player (a repeat stops
+    /// it); `player levelup` fires the level-up effect DAT once.
+    AnimationTest {
+        loop_routine: Option<String>,
+        levelup: bool,
+    },
 
     AgentControl(AgentControlOp),
 
@@ -3096,6 +3111,25 @@ fn parse_u32_auto_radix(s: &str) -> Option<u32> {
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => s.parse().ok(),
+    }
+}
+
+/// //animationtest's two-word cases; anything else reports usage.
+fn parse_animation_test(c: &SlashCtx) -> SlashOutcome {
+    let rest = c.rest;
+    let mut words = rest.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("weapon"), Some(r)) if r == "hit1" || r == "hit2" => SlashOutcome::AnimationTest {
+            loop_routine: Some(r.to_string()),
+            levelup: false,
+        },
+        (Some("player"), Some("levelup")) => SlashOutcome::AnimationTest {
+            loop_routine: None,
+            levelup: true,
+        },
+        _ => SlashOutcome::SystemMessage(
+            "//animationtest: usage — `weapon hit1`, `weapon hit2` or `player levelup`".into(),
+        ),
     }
 }
 

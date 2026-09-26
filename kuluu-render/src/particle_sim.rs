@@ -591,12 +591,14 @@ pub fn spawn_particle_generators(
     q_children: Query<&Children>,
     q_render: Query<&FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
 ) {
+    let tracing = trace.is_some_and(|t| t.0);
     for ev in events.read() {
         if ev.stage.stage.kind != StageKind::Particle {
             continue;
@@ -616,17 +618,40 @@ pub fn spawn_particle_generators(
             global.as_ref().map(|g| &g.assets),
             |a| a.particle_def(local_dir, &ev.stage.stage.id).is_some(),
         ) else {
+            if tracing {
+                info!(
+                    "animationtest trace: particle stage {} [{}] unresolved — no tier holds the def",
+                    String::from_utf8_lossy(&ev.stage.stage.id),
+                    String::from_utf8_lossy(&local_dir),
+                );
+            }
             continue;
         };
         let Some((def_dir, def)) = assets
             .particle_def_scoped(local_dir, &ev.stage.stage.id)
             .map(|(dir, def)| (dir, *def))
         else {
+            if tracing {
+                info!(
+                    "animationtest trace: particle stage {} [{}] — scoped lookup missed",
+                    String::from_utf8_lossy(&ev.stage.stage.id),
+                    String::from_utf8_lossy(&local_dir),
+                );
+            }
             continue;
         };
         let Some((template, sprite_frames, tex)) =
             resolve_mesh(assets, def_dir, &def, &mut images, false)
         else {
+            if tracing {
+                info!(
+                    "animationtest trace: particle stage {} [{}] — def found but mesh {} [{}] missing",
+                    String::from_utf8_lossy(&ev.stage.stage.id),
+                    String::from_utf8_lossy(&local_dir),
+                    String::from_utf8_lossy(&def.mesh_id),
+                    String::from_utf8_lossy(&def_dir),
+                );
+            }
             continue;
         };
         let target = q_action_target.get(ev.actor).ok().and_then(|t| t.0);
@@ -648,12 +673,21 @@ pub fn spawn_particle_generators(
             ))
             .id();
 
-        debug!(
-            "spawned particle generator {} mesh {} life {}",
-            String::from_utf8_lossy(&ev.stage.stage.id),
-            String::from_utf8_lossy(&def.mesh_id),
-            def.max_life_frames
-        );
+        if tracing {
+            info!(
+                "animationtest trace: spawned particle generator {} mesh {} life {}",
+                String::from_utf8_lossy(&ev.stage.stage.id),
+                String::from_utf8_lossy(&def.mesh_id),
+                def.max_life_frames
+            );
+        } else {
+            debug!(
+                "spawned particle generator {} mesh {} life {}",
+                String::from_utf8_lossy(&ev.stage.stage.id),
+                String::from_utf8_lossy(&def.mesh_id),
+                def.max_life_frames
+            );
+        }
 
         let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
             id.and_then(|i| assets.keyframes.get(&i).cloned())
@@ -5817,6 +5851,7 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                control_flow: None,
             },
         }
     }

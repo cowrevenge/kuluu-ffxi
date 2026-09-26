@@ -6489,6 +6489,7 @@ mod pose_resolution_tests {
                             flinch_duration: None,
                             model_visibility: None,
                             spell_effect: None,
+                            control_flow: None,
                         },
                     }],
                 },
@@ -6539,6 +6540,7 @@ mod pose_resolution_tests {
                             flinch_duration: None,
                             model_visibility: None,
                             spell_effect: None,
+                            control_flow: None,
                         },
                     })
                     .collect(),

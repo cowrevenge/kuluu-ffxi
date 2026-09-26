@@ -396,6 +396,7 @@ mod tests {
                     rotation: 0.0,
                 }),
                 screen_color: None,
+                control_flow: None,
                 random_group: None,
                 local_dir: [0; 4],
             },

@@ -3,9 +3,9 @@
 //! Drives a deterministic Bevy app with the real `SchedulerRuntimePlugin` plus the pose path,
 //! feeds hand-packed BATTLE2 bytes through the real session decoder, and asserts what the
 //! retail DATs say should happen: swing clips on the attacker, victim reactions AT the inlined
-//! DamageCallback impact frame (not packet arrival), flinch on idle hosts (dfm? for PCs / dfi? for mobs,
-//! D3/D4), death fall-over on Defeated (D5), and limb selection from BATTLE2's animation field
-//! with the ati0 fallback (D6).
+//! DamageCallback impact frame (not packet arrival) - damg flash for normal hits, damh + flinch
+//! when Defeated, crtl spark variant on crits (ROM/0/0.DAT dam0's branch table), death fall-over
+//! on Defeated (D5), and limb selection from BATTLE2's animation field with the ati0 fallback (D6).
 //!
 //! Ground truth: the retail DATs - Rarab = 1569 =
 //! ROM/4/109.DAT (zone 115 entity 17248272, no weapon; ships dfi?/dfm?, wlk0/idl0/run0/ded0/cor0,
@@ -53,8 +53,8 @@ const LIMB_MODEL_FILE: u32 = 101806;
 const WORM_FILE: u32 = 1724;
 /// ROM/172/67.DAT - one of exactly three retail models that ship `damg` without `ldam`
 /// (verified against the install: routines shot/damg/chit/cate/cast/pop0/init/corp/dead/setr/
-/// kil0/bom0/kil1/efon). The S6c/S6d victim: a crit on it must fall back to damg, and only
-/// when the global dir's ldam is out of reach.
+/// kil0/bom0/kil1/efon). The S6c/S6d victim: its local `damg` must not be selected by name -
+/// selection comes from the global dir's dam0 switch.
 const NOLDA_FILE: u32 = 52087;
 /// ROM/4/106.DAT - flying bat; its Info chunk carries movement byte 3 (Flying) and
 /// scale byte 85, so the live pipeline must load it at 85 percent with no wire stride scale.
@@ -558,16 +558,17 @@ fn s4_run_gait_selects_run_clip() {
 
 /// S5/S5b - swing impact hands off to the victim reaction AT the inlined DamageCallback
 /// frame. Rarab swings RightAttack at HumeM (Hit, dist=0, kb=0). Expect: at0? on the attacker from
-/// ~frame 1; at the inlined DamageCallback impact (~36 for ati0) HumeM runs `damg` (it ships no sdam of
-/// its own - the reaction table falls through to damg) and its flinch stage starts dfm? on the PC host.
+/// ~frame 1; at the inlined DamageCallback impact (~36 for ati0) the victim runs `damg` - ROM/0/0.DAT
+/// dam0's Hit arm names only damg when info bit 1 (Defeated) is unset, and damg IS the flash: its
+/// g14* particle stages. A normal melee hit carries no flinch stage and no sound link.
 #[test]
-fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
+fn s5_swing_impact_runs_damg_on_the_pc() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
         return;
     };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 0, 0, 0)));
@@ -579,46 +580,40 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
-         packet arrival",
+        "victim reaction (damg) fired at the inlined-0x2B frame (~36), not on packet arrival",
     );
 }
 
-/// S5b: same swing, victim = a second Rarab. Retail's dam0 branch table routes every non-crit
-/// Hit to damg/damh - both carry the 0x21 flinch stage (research/xim
-/// EffectRoutineInterpolatedEffects.kt), so the mob victim runs its own `damg` and flinches
-/// with dfi? on a normal hit. This is the "animations not playing" case: sdam-shipping models
-/// like Rarab must get a visible flinch on normal hits (sdam is sound-only).
+/// S5b: same swing, victim = a second Rarab. dam0's Hit arm routes every non-Defeated hit to
+/// damg regardless of host kind, so the mob victim runs `damg` (the g14* flash) at the impact
+/// frame - no flinch stage on a normal melee hit.
 #[test]
-fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
+fn s5b_mob_victim_normal_hit_runs_damg() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 0, 0, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "normal hit runs damg + dfi? flinch on the mob victim"
+        "normal hit runs damg on the mob victim"
     );
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
 /// S5c - bugfix-brief item 4 ("player hit graphic"): the silver flash on a successful hit is
-/// generic, not per-race — the victim's damg links chit back onto the ATTACKER, whose ef h runs
-/// hit1 out of the shared ROM/0/0.DAT library and lands it on the victim via TargetActor. PC
-/// attacker -> mob victim: pin every link of that chain; a silent miss at any step reads as
-/// "no flash" in live play (the field report).
+/// generic, not per-race — dam0's Hit arm runs `damg` ON THE VICTIM and damg IS the flash: its
+/// g14* particle stages spawn on the struck actor. PC attacker -> mob victim: pin that the flash
+/// lands at the victim; a silent miss reads as "no flash" in live play (the field report).
 #[test]
 fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
@@ -626,7 +621,7 @@ fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
     };
     let mut app = build_app();
     let (atk_parent, atk_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     // The particle path reads the wire entity's Transform for its origin; separate the two so
     // the TargetActor landing is distinguishable from an attacker-local one.
     app.world_mut()
@@ -646,17 +641,15 @@ fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
-            && routines(w, atk_parent).iter().any(|r| r == b"chit")
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "damg + flinch on the mob AND chit running on the PC attacker at the impact frame"
+        "damg running on the mob victim at the impact frame"
     );
 
-    // The flash itself: a particle generator spawned, anchored to the VICTIM (TargetActor),
-    // not the attacker. A few steps let it emit and settle before we read where it landed;
-    // the burst's particles are still alive when we check.
+    // The flash itself: damg's g14* generators spawn anchored to the VICTIM (the host that runs
+    // it), not the attacker. A few steps let them emit and settle before we read where they
+    // landed; the burst's particles are still alive when we check.
     for _ in 0..4 {
         step(&mut app);
     }
@@ -670,17 +663,17 @@ fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
         let d_vic = (o - vic_t.translation).length();
         assert!(
             d_vic < 2.0,
-            "a flash generator sits {d_vic} from the victim; TargetActor should anchor it there"
+            "a damg flash generator sits {d_vic} from the victim; it should anchor there"
         );
         landed += 1;
     }
     assert!(landed > 0, "the hit flash spawns a particle generator");
 }
 
-/// S7 - bugfix-brief item 4 (crit half): a PC crit runs ldam on the victim, whose ref09 link
-/// fires lhit ON THE ATTACKER; lhit links eflg/selg from the per-weapon-type effect sibling,
-/// and eflg's sho1 sparks land on the victim. Pins the load gap: without that sibling in the
-/// PC's routine set, eflg never resolves and the crit flash silently no-ops.
+/// S7 - bugfix-brief item 4 (crit half): a melee crit runs dam0's Hit arm (damg) PLUS dada's
+/// crtl spark variant on the victim. ROM/0/0.DAT dam0's branch table names only
+/// damh/damg/sway/gurd/pary/gur1/sbNN/cnt0, so no ldam/lhit runs; the melee crit flash is
+/// damg's g14* burst with the crtl spark (hi14/hi29) on top.
 #[test]
 fn s7_pc_crit_flash_lands_on_the_mob_victim() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
@@ -688,7 +681,7 @@ fn s7_pc_crit_flash_lands_on_the_mob_victim() {
     };
     let mut app = build_app();
     let (atk_parent, atk_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     // The particle path reads the wire entity's Transform for its origin; separate the two so
     // the TargetActor landing is distinguishable from an attacker-local one.
     app.world_mut()
@@ -707,16 +700,27 @@ fn s7_pc_crit_flash_lands_on_the_mob_victim() {
     assert!(swing_at.is_some(), "the PC plays the at0? swing");
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
-            && routines(w, atk_parent).iter().any(|r| r == b"lhit")
+        routines(w, vic_parent).contains(b"damg")
+            && (routines(w, atk_parent).contains(b"hi14")
+                || routines(w, atk_parent).contains(b"hi29"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "ldam + flinch on the mob AND lhit running on the PC attacker at the impact frame"
+        "damg on the mob + the crtl spark variant on the attacker at the impact frame"
+    );
+    let vic_r = routines(app.world(), vic_parent);
+    assert!(
+        !vic_r.contains(b"ldam"),
+        "melee crits never run ldam (the ranged chain)"
+    );
+    assert!(
+        !routines(app.world(), atk_parent)
+            .iter()
+            .any(|r| r == b"lhit"),
+        "no lhit on the attacker for a melee crit"
     );
 
-    // The crit flash itself: sho1's generators, anchored to the VICTIM. A few steps let them
+    // The crit flash itself: damg's g14* burst, anchored to the VICTIM. A few steps let them
     // emit and settle before we read where they landed.
     for _ in 0..4 {
         step(&mut app);
@@ -731,34 +735,36 @@ fn s7_pc_crit_flash_lands_on_the_mob_victim() {
         let d_vic = (o - vic_t.translation).length();
         assert!(
             d_vic < 2.0,
-            "a crit flash generator sits {d_vic} from the victim; sho1 should anchor it there"
+            "a crit flash generator sits {d_vic} from the victim; damg should anchor it there"
         );
         landed += 1;
     }
     assert!(landed > 0, "the crit flash spawns a particle generator");
 }
 
-/// S6/S6b - crits: ldam + flinch, no sway at kb=0. S6: Hit with info=CriticalHit runs `ldam`
-/// on HumeM and its flinch stage starts dfm?; kb=0 adds no sway.
+/// S6/S6b - crits: damg + crtl spark, no sway at kb=0. S6: Hit with info=CriticalHit runs
+/// `damg` on HumeM (dam0's Hit arm; the Defeated bit is set too, so info != 1 and damh stays
+/// out) plus dada's crtl spark variant; kb=0 adds no sway.
 #[test]
-fn s6_crit_runs_ldam_and_flinches_the_pc() {
+fn s6_crit_runs_damg_on_the_pc() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
         return;
     };
     let mut app = build_app();
-    let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    let (atk_parent, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 2, 3, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
+        routines(w, vic_parent).contains(b"damg")
+            && (routines(w, atk_parent).contains(b"hi14")
+                || routines(w, atk_parent).contains(b"hi29"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "crit runs ldam + dfm? flinch at the impact frame"
+        "crit runs damg on the victim + the crtl spark variant on the attacker"
     );
 
     let sway = routines(app.world(), vic_parent).contains(b"sway");
@@ -766,63 +772,34 @@ fn s6_crit_runs_ldam_and_flinches_the_pc() {
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6b: same crit on a Rarab victim - ldam's flinch stage starts dfi? on the mob host. This is
+/// S6b: same crit on a Rarab victim - damg (the g14* flash) runs on the mob host. This is
 /// the "crits animations do not play" case from the field report.
 #[test]
-fn s6b_crit_flinches_the_mob_with_dfi() {
+fn s6b_crit_runs_damg_on_the_mob() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 2, 3, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
-            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
+        routines(w, vic_parent).contains(b"damg")
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "crit flinches the mob victim with dfi?"
+        "crit runs damg on the mob victim"
     );
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6c: crit on a victim whose DAT ships no `ldam` of its own (ROM/172/67.DAT), with the global
-/// effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The crit guard must fall back to
-/// the normal `damg` reaction instead of arming an unresolvable ldam, which would fall
-/// through to nothing. All eight retail PC skeletons ship their own ldam (verified against the
-/// install), so this fallback is reachable only on mob victims; S6 covers the PC side of the
-/// matrix.
+/// S6c: with the global effect dir removed, `dam0` itself is out of reach - the switch has
+/// nothing to select from and NO reaction routine may run (graceful degradation; production
+/// lookups resolve ROM/0/0.DAT as the global tier). The victim's own DAT (ROM/172/67.DAT) ships a
+/// `damg`, so this also pins that selection is dam0-driven, not name-sniffing.
 #[test]
-fn s6c_crit_without_ldam_falls_back_to_damg() {
-    let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
-        return;
-    };
-    let mut app = build_app();
-    let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (vic_parent, _) = spawn_actor(&mut app, NOLDA_W, EntityKind::Mob, &nolda);
-    step_n(&mut app, 10);
-    drop_global_effect_dir(&mut app);
-
-    push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 2, 3, 0)));
-
-    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"damg") && !routines(w, vic_parent).contains(b"ldam")
-    });
-    assert!(
-        impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "crit on a no-ldam victim runs the damg fallback at the impact frame, not an \
-         unresolvable ldam"
-    );
-    assert!(active_clip(app.world(), atk_child).is_some());
-}
-
-/// S6d: same rig (no ldam anywhere), non-crit Medium hit still routes to damg - the crit guard
-/// must not leak into the None/Light/Medium cases.
-#[test]
-fn s6d_medium_hit_without_ldam_still_runs_damg() {
+fn s6c_no_global_dir_runs_no_reaction() {
     let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
         return;
     };
@@ -832,6 +809,32 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     step_n(&mut app, 10);
     drop_global_effect_dir(&mut app);
 
+    push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 2, 3, 0)));
+
+    let (_, frames) = watch(&mut app, 45, |_i, w| {
+        [b"damg", b"damh", b"ldam", b"sway", b"hi14", b"hi29"]
+            .iter()
+            .any(|r| routines(w, vic_parent).contains(r))
+    });
+    assert!(
+        !frames.iter().any(|&hit| hit),
+        "no dam0 in the lookup means no reaction routine runs at all"
+    );
+}
+
+/// S6d: non-crit Medium hit on a victim whose own DAT ships `damg` (ROM/172/67.DAT) - dam0's
+/// Hit arm still selects damg from the global dir; the victim's local copy is irrelevant to
+/// selection.
+#[test]
+fn s6d_medium_hit_runs_damg() {
+    let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
+        return;
+    };
+    let mut app = build_app();
+    spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _) = spawn_actor(&mut app, NOLDA_W, EntityKind::Mob, &nolda);
+    step_n(&mut app, 10);
+
     push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 0, 2, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
@@ -839,8 +842,7 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "non-crit hits on a no-ldam victim still run damg (the crit guard does not leak into \
-         dist 0/1/2)"
+        "non-crit hits run damg at the impact frame"
     );
 }
 
@@ -1026,11 +1028,11 @@ fn s7c_parry_plays_gud_clip() {
     );
 }
 
-/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside. The
-/// victim is fresh - no ActiveSchedulers yet - so both routines land in one same-batch insert;
-/// this pins the merge fix that kept the sway insert from overwriting the damage reaction.
+/// S7d: Hit with knockback level 2. dam0's Hit arm names only damg/damh - there is no
+/// sway provision on a hit, so kb>0 runs the damage reaction alone (the same-batch merge of
+/// two routines is pinned by s7's crit pair, damg + crtl spark).
 #[test]
-fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
+fn s7d_knockback_hit_runs_the_damage_reaction() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
@@ -1040,11 +1042,11 @@ fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 0, 0, 2)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"damg") && routines(w, vic_parent).contains(b"sway")
+        routines(w, vic_parent).contains(b"damg")
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "kb>0 runs the damage reaction and sway together (F52)"
+        "kb>0 hit runs the damage reaction at the impact frame"
     );
 }
 

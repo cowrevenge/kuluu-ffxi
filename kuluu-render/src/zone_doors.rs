@@ -797,6 +797,7 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                control_flow: None,
                 random_group: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
             },

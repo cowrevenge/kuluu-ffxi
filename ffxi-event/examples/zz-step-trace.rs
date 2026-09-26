@@ -54,14 +54,24 @@ fn main() {
                 StepResult::Unimplemented(op) => {
                     println!(
                         "  refuse 0x{op:02X} @ {after}: {}",
-                        hex(data, after.saturating_sub(8), (after + 24).min(data.len()), Some(after))
+                        hex(
+                            data,
+                            after.saturating_sub(8),
+                            (after + 24).min(data.len()),
+                            Some(after)
+                        )
                     );
                     "refused"
                 }
                 StepResult::Spun(op) => {
                     println!(
                         "  spun 0x{op:02X} @ {after}: {}",
-                        hex(data, after.saturating_sub(8), (after + 24).min(data.len()), Some(after))
+                        hex(
+                            data,
+                            after.saturating_sub(8),
+                            (after + 24).min(data.len()),
+                            Some(after)
+                        )
                     );
                     "spun"
                 }
@@ -69,9 +79,7 @@ fn main() {
                 StepResult::AwaitServerAck(_) => "pending",
             };
             if step <= 40 || summary == "refused" || summary == "spun" {
-                println!(
-                    "step {step:3}: {before:>7} -> {after:>7} ({summary})"
-                );
+                println!("step {step:3}: {before:>7} -> {after:>7} ({summary})");
             }
             match result {
                 StepResult::AwaitMessage(_) | StepResult::AwaitMessageAck => vm.dismiss_message(),

@@ -31,7 +31,13 @@ fn main() {
             let hex: String = row.iter().map(|b| format!("{b:02X} ")).collect();
             let ascii: String = row
                 .iter()
-                .map(|b| if b.is_ascii_graphic() { *b as char } else { '.' })
+                .map(|b| {
+                    if b.is_ascii_graphic() {
+                        *b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
             println!("{off:6}: {hex:<48} {ascii}");
         }

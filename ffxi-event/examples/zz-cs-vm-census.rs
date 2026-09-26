@@ -90,21 +90,16 @@ fn main() {
                     for cue in vm.take_cues() {
                         match cue {
                             EventCue::Scheduler { dat_id, tag, .. } => {
-                                let e = sched_refs
-                                    .entry((dat_id, tag))
-                                    .or_insert((0, site.clone()));
+                                let e =
+                                    sched_refs.entry((dat_id, tag)).or_insert((0, site.clone()));
                                 e.0 += 1;
                             }
                             EventCue::ZoneScheduler { key, .. } => {
-                                let e = zone_refs
-                                    .entry((zone, key))
-                                    .or_insert((0, site.clone()));
+                                let e = zone_refs.entry((zone, key)).or_insert((0, site.clone()));
                                 e.0 += 1;
                             }
                             EventCue::ActorMotion { key, .. } => {
-                                let e = actor_motion_keys
-                                    .entry(key)
-                                    .or_insert((0, site.clone()));
+                                let e = actor_motion_keys.entry(key).or_insert((0, site.clone()));
                                 e.0 += 1;
                             }
                             EventCue::ExtScheduler { motion, key, .. } => {
@@ -113,9 +108,7 @@ fn main() {
                                     Some(ExtSchedulerMotion::Tpc(_)) => u32::MAX,
                                     None => u32::MAX,
                                 };
-                                let e = ext_refs
-                                    .entry((dat_id, key))
-                                    .or_insert((0, site.clone()));
+                                let e = ext_refs.entry((dat_id, key)).or_insert((0, site.clone()));
                                 e.0 += 1;
                             }
                             _ => {}
@@ -171,12 +164,8 @@ fn main() {
                             *spun.entry(op).or_default() += 1;
                             break;
                         }
-                        StepResult::Waiting => {
-                            vm.tick(OFFLINE_WAIT_SKIP_SECS)
-                        }
-                        StepResult::AwaitServerAck(_) => {
-                            vm.ack_server()
-                        }
+                        StepResult::Waiting => vm.tick(OFFLINE_WAIT_SKIP_SECS),
+                        StepResult::AwaitServerAck(_) => vm.ack_server(),
                     }
                 }
             }

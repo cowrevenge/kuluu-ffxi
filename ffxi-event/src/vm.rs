@@ -5626,9 +5626,9 @@ mod tests {
     }
 
     use crate::cue::{
-        ExtSchedulerMotion, FourCc, TpcMotionPackages, LOOKUP_TARGET_INDEX_MASK,
-        SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
-        SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
+        ExtSchedulerMotion, FourCc, TpcMotionPackages, EVENT_MOTION_BAND_4,
+        LOOKUP_TARGET_INDEX_MASK, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+        SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
     };
 
     /// Run one choreography opcode (padded to its documented width) to END and
@@ -8317,13 +8317,17 @@ mod tests {
             z: 109_070,
             heading: 0,
         };
-        let mut e = scene_player_vm(data, vec![start.x, start.z, start.y, 3072], start);
+        let mut e = scene_player_vm(
+            data,
+            vec![start.x, start.z, start.y, EVENT_MOTION_BAND_4],
+            start,
+        );
         assert_eq!(e.step(), StepResult::Done);
         let expected = crate::vm::scene::EventPosition {
             x: -56_030,
             y: 8_000,
             z: 109_070,
-            heading: 3072,
+            heading: EVENT_MOTION_BAND_4,
         };
         assert_eq!(
             e.take_scene_actions(),

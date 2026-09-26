@@ -1121,7 +1121,7 @@ mod tests {
             cues.iter().any(|c| matches!(
                 c,
                 EventCue::Mount {
-                    target: ActorLookup(2_147_483_632),
+                    target: ActorLookup(ZONE_PLAYER_ACTOR),
                     status_event: STATUS_EVENT_CHOCOBO,
                     mount_id: None
                 }

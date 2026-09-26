@@ -48,6 +48,12 @@ impl ParticleSimulator {
         self.generators.drain(..).map(|g| g.entity).collect()
     }
 
+    // World-space emit origins of the live generators (the mesh entity itself stays at identity;
+    // world-space generators bake their position into the vertices).
+    pub fn generator_origins(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.generators.iter().map(|g| g.origin)
+    }
+
     pub fn set_celestial_clock(&mut self, clock: CelestialClock) {
         self.clock = clock;
     }
@@ -653,7 +659,14 @@ pub fn spawn_particle_generators(
             id.and_then(|i| assets.keyframes.get(&i).cloned())
         };
 
-        let emit_window_frames = ev.stage.stage.duration_frames as f32;
+        // A stage with no timing word emits for the generator's full life; retail hit flashes
+        // carry zero timing (s5c_pc_hit_flash_lands_on_the_mob_victim pins the visible result).
+        let duration_frames = ev.stage.stage.duration_frames;
+        let emit_window_frames = if duration_frames == 0 {
+            def.max_life_frames
+        } else {
+            duration_frames as f32
+        };
         sim.generators.push(LiveGenerator {
             scale_x: resolve(def.scale_x_track),
             scale_y: resolve(def.scale_y_track),

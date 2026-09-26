@@ -199,6 +199,27 @@ impl DialogRunner {
         self.vm.set_current_zone(zone);
     }
 
+    /// Install the install's DAT root the VM resolves motion DATs against to
+    /// read authored routine lengths; see [`EventVm::set_dat_root`]. The
+    /// session shares its `Arc<DatRoot>` across every runner it drives so the
+    /// VM reads the same install the event DAT came from.
+    pub fn set_dat_root(&mut self, root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) {
+        self.vm.set_dat_root(root);
+    }
+
+    /// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT*
+    /// hold units (1/60 s); see [`EventVm::routine_length`]. This is the event
+    /// system reading the motion DATs itself: the session no longer measures
+    /// routine lengths on the VM's behalf.
+    pub fn routine_length(
+        &mut self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        self.vm.routine_length(dat_id, tag, duration_override)
+    }
+
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
     /// reports the routine finished; see [`EventVm::hold_action_pending`]. The
     /// session calls this when it publishes a SCHEDULOR motion cue, whose
@@ -284,6 +305,12 @@ impl DialogRunner {
     /// liveness check watches it move on every tick.
     pub fn wait_units_remaining(&self) -> f32 {
         self.vm.wait_units_remaining()
+    }
+
+    /// The remaining units of the move this event is parked on; see
+    /// [`EventVm::move_units_remaining`].
+    pub fn move_units_remaining(&self) -> f32 {
+        self.vm.move_units_remaining()
     }
 
     /// Force-cancel the event from the host side (the liveness stall): the
@@ -1238,5 +1265,60 @@ mod tests {
             furthest < 25.0,
             "the rental is a short approach to the stable, the player wandered {furthest} yalms"
         );
+    }
+
+    /// The event system reads the motion DATs itself: the authored routine
+    /// lengths of the rental cutscene's scheduler chunks as this install lays
+    /// them out, the 0x45 duration-operand semantics (0/1 play the authored
+    /// timing, anything else IS the total frame count), and the fall-through
+    /// on a tag or file the install does not carry. Self-skips without an
+    /// install. research/XiEvents/OpCodes/0x0045.md
+    #[test]
+    fn routine_length_reads_the_authored_end_frame_from_the_install() {
+        let Some(root) = install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: 1,
+            event_ids: vec![7],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: vec![0x21], // END
+        };
+        let mut runner = DialogRunner::start(&block, 7, 0, vec![]).expect("END block");
+        runner.set_dat_root(Some(std::sync::Arc::new(root)));
+
+        // The rental's motion DATs and the frame counts their schedulers
+        // author (the 0x45 cues of zone 230's rental, event 599).
+        for (dat_id, tag, frames) in [
+            (30_834u32, *b"s082", 5u32),
+            (30_834, *b"s026", 180),
+            (30_906, *b"c00i", 60),
+            (30_904, *b"fdo1", 60),
+            (30_904, *b"fdi0", 30),
+            (30_904, *b"fdo0", 30),
+            (30_905, *b"chco", 40),
+        ] {
+            assert_eq!(
+                runner.routine_length(dat_id, tag, 0),
+                Some(frames),
+                "dat {dat_id} tag {tag:?}"
+            );
+            assert_eq!(
+                runner.routine_length(dat_id, tag, 1),
+                Some(frames),
+                "duration 1 also plays the authored timing: dat {dat_id} tag {tag:?}"
+            );
+        }
+
+        // A duration operand past 1 IS the total frame count the host
+        // overrides; it does not re-measure the routine.
+        assert_eq!(runner.routine_length(30_834, *b"s082", 120), Some(120));
+
+        // A tag no scheduler in the file carries, and a file id the install
+        // does not carry, measure nothing: the WAIT* hold falls through.
+        assert_eq!(runner.routine_length(30_834, *b"zzzz", 0), None);
+        assert_eq!(runner.routine_length(0xDEAD_0001, *b"s082", 0), None);
     }
 }

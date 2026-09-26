@@ -667,6 +667,13 @@ pub struct EventVm {
     /// 0x00B4.md).
     pending_strings: [[u8; 16]; 4],
     work_zone: SharedWorkZone,
+    /// The local player's position, one shared cell across every VM in the
+    /// event: retail keeps a single position for the zone block's entity, and
+    /// every VM that walks or reads the local player references it
+    /// (research/XiEvents/Event VM Functions.md). Set on the zone block's
+    /// scene and shared to owner and request children, so a walk child starts
+    /// from the snapped position rather than a sibling's zeroed scene.
+    shared_player: Option<std::sync::Arc<std::sync::Mutex<scene::EventPosition>>>,
     exec_pointer: usize,
     jump_table: [u16; JUMP_STACK_LEN],
     jump_index: usize,
@@ -792,6 +799,20 @@ pub struct EventVm {
     /// [`Self::set_current_zone`] before driving
     /// (research/XiEvents/OpCodes/0x00D4.md).
     current_zone: i32,
+    /// The install's DAT root the VM resolves motion DATs against to read the
+    /// authored routine lengths its WAIT* holds wait out: retail times those
+    /// holds off the routine still running on the actor, and the routine's
+    /// authored length is the one number the DATs pin down. Injected by the
+    /// host via [`Self::set_dat_root`]; `None` in a host that never injects it,
+    /// where [`Self::routine_length`] returns nothing and the WAIT* hold falls
+    /// through instead of holding on a guessed length.
+    dat_root: Option<Arc<ffxi_dat::DatRoot>>,
+    /// Authored routine lengths keyed by `(dat_id, tag, duration_override)`,
+    /// misses included so a re-issued routine does not re-read its file. The
+    /// `duration_override` is part of the key: the 0x45 operand 0/1 means
+    /// "play the authored timing" while any other value IS the total frame
+    /// count, so the same `(dat_id, tag)` can measure two different lengths.
+    routine_lengths: std::collections::HashMap<(u32, FourCc, u16), Option<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -946,6 +967,7 @@ impl EventVm {
             work_local_str: [[0u8; 16]; WORK_LOCAL_LEN],
             pending_strings: [[0u8; 16]; 4],
             work_zone,
+            shared_player: None,
             exec_pointer,
             jump_table: [0; JUMP_STACK_LEN],
             jump_index: 0,
@@ -981,6 +1003,8 @@ impl EventVm {
             weather_forecast: None,
             zone_rects: Arc::new(Vec::new()),
             current_zone: 0,
+            dat_root: None,
+            routine_lengths: std::collections::HashMap::new(),
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -1059,6 +1083,21 @@ impl EventVm {
     /// 0 when no wait is held: the host's liveness check watches it move.
     pub fn wait_units_remaining(&self) -> f32 {
         self.wait.as_ref().map_or(0.0, |w| w.remaining_units)
+    }
+
+    /// The remaining units (1/60 s, the [`Self::tick`] clock) of a move this
+    /// VM or one of its descendants is parked on, 0 when no move is running:
+    /// the host's liveness check watches it move the way it watches the timed
+    /// wait's. A scene-latched player walk and a host-armed move hold both
+    /// count (research/XiEvents/OpCodes/0x001F.md: case 1 holds while the
+    /// move still has frames left).
+    pub fn move_units_remaining(&self) -> f32 {
+        let holds = self
+            .move_holds
+            .iter()
+            .map(|h| h.remaining_units)
+            .fold(0.0f32, f32::max);
+        self.scene_move_units().max(holds)
     }
 
     /// Why the VM is not advancing right now, for the host's liveness check:
@@ -1237,6 +1276,128 @@ impl EventVm {
         self.current_zone = zone;
         let mut land = |child: &mut EventVm| child.set_current_zone(zone);
         self.for_each_child_vm(&mut land);
+    }
+
+    /// Install the install's DAT root the VM resolves motion DATs against to
+    /// read authored routine lengths ([`Self::routine_length`]). The host loads
+    /// it once and shares the same `Arc` across every VM it drives, so the root
+    /// is read, not copied, per event. Child VMs inherit it, so a REQSET child
+    /// reads the same install as its master. A host that never injects a root
+    /// leaves the default `None`, where [`Self::routine_length`] returns nothing
+    /// and the WAIT* holds fall through instead of holding on a guessed length.
+    pub fn set_dat_root(&mut self, root: Option<Arc<ffxi_dat::DatRoot>>) {
+        self.dat_root = root.clone();
+        let mut land = |child: &mut EventVm| child.set_dat_root(root.clone());
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT*
+    /// hold units (1/60 s each; the routine clock and the VM's wait clock are
+    /// both 60 fps): the routine's `end_frame`, the half-open bound at which
+    /// its effects finish. `duration_override` is the 0x45 operand: 0 or 1
+    /// means play the authored timing, anything else IS the total frame count
+    /// (research/XiEvents/OpCodes/0x0045.md). Cached per
+    /// `(dat_id, tag, duration_override)` with misses included, so a re-issued
+    /// routine does not re-read its file. `None` when the host injected no DAT
+    /// root, the file id does not resolve, the file or its scheduler chunk is
+    /// unreadable, or the tag is absent — the caller's WAIT* hold then falls
+    /// through instead of holding on a guessed length.
+    pub fn routine_length(
+        &mut self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        let key = (dat_id, tag, duration_override);
+        let units = match self.routine_lengths.get(&key) {
+            Some(&units) => units,
+            None => {
+                let units = self.routine_length_uncached(dat_id, tag, duration_override);
+                self.routine_lengths.insert(key, units);
+                units
+            }
+        };
+        if let Some(units) = units {
+            tracing::debug!(
+                dat_id,
+                tag = %String::from_utf8_lossy(&tag),
+                units,
+                "read the DAT-authored routine length the WAIT* hold arms from"
+            );
+        }
+        units
+    }
+
+    /// The uncached half of [`Self::routine_length`]: resolve `dat_id` under the
+    /// injected root, read the file, find the scheduler chunk named `tag`, and
+    /// measure its authored length. `None` on any miss, logged so a WAIT* hold
+    /// that falls through to its deadline names the reason.
+    fn routine_length_uncached(
+        &self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        let root = self.dat_root.as_deref()?;
+        let loc = match root.resolve(dat_id) {
+            Ok(loc) => loc,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    error = %e,
+                    "failed to resolve the motion DAT; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        let path = loc.path_under(root);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read the motion DAT; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        let chunk = ffxi_dat::chunk::walk(&bytes).find_map(|c| match c {
+            Ok(c) if c.kind == ffxi_dat::kind::ChunkKind::Scheduler as u8 && c.name == tag => {
+                Some(c)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    error = %e,
+                    "truncated chunk while scanning the motion DAT"
+                );
+                None
+            }
+        })?;
+        let scheduler = match ffxi_dat::scheduler::Scheduler::parse(chunk.name, chunk.data) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    error = %e,
+                    "failed to parse the scheduler chunk; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        // 0 and 1 both mean "play the authored timing" (the 0x45 duration
+        // operand); anything else is the total frame count the host overrides.
+        Some(if duration_override <= 1 {
+            scheduler.end_frame()
+        } else {
+            u32::from(duration_override)
+        })
     }
 
     /// 0x82's hit test: whether the event entity's tracked position falls inside
@@ -8307,6 +8468,139 @@ mod tests {
             [crate::vm::scene::SceneAction::PlayerPosition(authored)]
         );
         assert_eq!(e.controlled_position(), Some(authored));
+    }
+
+    /// 0x37 on the player moves the shared local-player cell every sibling VM
+    /// reads: a walk child spawned after the snap starts from the snapped
+    /// position, not its own zeroed scene
+    /// (research/XiEvents/Event VM Functions.md).
+    #[test]
+    fn set_event_pos_on_the_player_moves_the_shared_cell_a_walk_child_reads() {
+        let authored = crate::vm::scene::EventPosition {
+            x: -365_250,
+            y: -10_501,
+            z: -184_858,
+            heading: 3584,
+        };
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x37);
+        for i in 0..4u16 {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        data.push(OP_END);
+        let mut e = scene_player_vm(
+            data,
+            vec![authored.x, authored.z, authored.y, authored.heading],
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.shared_player_position(),
+            Some(authored),
+            "the snap moves the shared cell a later walk child reads"
+        );
+    }
+
+    /// A walk child REQSET'd after a 0x37 snap starts from the snapped
+    /// position (the shared cell), not the zeroed origin its sibling owner
+    /// scene carries: the first lerp step is a small move off the snap, not a
+    /// jump from the world origin (research/XiEvents/Event VM Functions.md).
+    #[test]
+    fn a_reqset_walk_child_starts_from_the_snapped_shared_position() {
+        use crate::vm::scene::SceneAction;
+        const P: crate::vm::scene::EventPosition = crate::vm::scene::EventPosition {
+            x: -365_250,
+            y: -10_501,
+            z: -184_858,
+            heading: 3584,
+        };
+        const G: crate::vm::scene::EventPosition = crate::vm::scene::EventPosition {
+            x: -356_714,
+            y: -10_000,
+            z: -176_372,
+            heading: 0,
+        };
+        const SPEED: u32 = 13;
+        // The 0x8000 reference flag selects the block's References table.
+        let ref16 = |i: u32| ((i | 0x8000) as u16).to_le_bytes();
+        let mut event0 = vec![
+            0x37,
+            ref16(0)[0],
+            ref16(0)[1],
+            ref16(1)[0],
+            ref16(1)[1],
+            ref16(2)[0],
+            ref16(2)[1],
+            ref16(3)[0],
+            ref16(3)[1],
+        ];
+        event0.push(0x27);
+        event0.extend_from_slice(&reqset_operands(
+            0,
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            3,
+        ));
+        event0.push(OP_END);
+        let walk_offset = event0.len();
+        let walk = vec![
+            0x32,
+            ref16(4)[0],
+            ref16(4)[1],
+            0x1F,
+            0x00,
+            ref16(5)[0],
+            ref16(5)[1],
+            ref16(6)[0],
+            ref16(6)[1],
+            ref16(7)[0],
+            ref16(7)[1],
+            0x1F,
+            0x01,
+            OP_END,
+        ];
+        let mut event_data = event0;
+        event_data.extend_from_slice(&walk);
+        let block = EventBlock {
+            actor: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            event_ids: vec![0, 0, 0, 0],
+            event_offsets: vec![0, 0, 0, walk_offset as u16],
+            references: vec![
+                P.x as u32,
+                P.z as u32,
+                P.y as u32,
+                P.heading as u32,
+                SPEED,
+                G.x as u32,
+                G.z as u32,
+                G.y as u32,
+            ],
+            event_data,
+        };
+        let mut e = EventVm::start(&block, 0, 0, vec![]).expect("event 0 entry");
+        e.attach_scene(
+            std::sync::Arc::new(ffxi_dat::event_dat::EventDat { blocks: vec![block] }),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        // Master: 0x37 snap (shared cell -> P), REQSET (walk child starts at P), END.
+        e.step();
+        // Tick the walk child: it lerps one step off the snapped start.
+        e.tick(0.1);
+        let first = e
+            .take_scene_actions()
+            .into_iter()
+            .find_map(|a| match a {
+                SceneAction::PlayerPosition(p) => Some(p),
+                _ => None,
+            })
+            .expect("the walk publishes its position");
+        let dx = (first.x - P.x).abs();
+        let dz = (first.z - P.z).abs();
+        assert!(
+            dx < 1_000 && dz < 1_000,
+            "the walk starts at the snap ({first:?}), not the origin"
+        );
     }
 
     /// 0x39 on the player: the authored facing becomes the tracked heading and

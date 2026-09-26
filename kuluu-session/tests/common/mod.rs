@@ -307,6 +307,57 @@ impl EphemeralChar {
 
         Ok(())
     }
+
+    /// Grant `amount` gil: gil is the currency item (id 0) of the main
+    /// inventory (vendor/server/src/map/lua/lua_base_entity.cpp getGil reads
+    /// getStorage(LOC_INVENTORY)->GetItem(0)). The fixture's char-creation
+    /// trigger already inserts an empty (itemId 65535) row at the currency
+    /// slot, so upsert it.
+    pub async fn add_gil(&self, amount: u32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for gil")?;
+        "INSERT INTO char_inventory(charid, location, slot, itemId, quantity) \
+         VALUES (?, 0, 0, 0, ?) \
+         ON DUPLICATE KEY UPDATE itemId = 0, quantity = VALUES(quantity)"
+            .with((self.charid, amount))
+            .ignore(&mut conn)
+            .await
+            .context("upserting gil into char_inventory")?;
+        Ok(())
+    }
+
+    /// Grant a key item by its id (vendor/server/scripts/enum/key_item.lua),
+    /// e.g. 138 = CHOCOBO_LICENSE. The keyitems column is a fixed blob of
+    /// little-endian uint16 ids; an empty slot is 0.
+    pub async fn add_key_item(&self, id: u16) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for key item")?;
+        // A fresh fixture char's keyitems is NULL; start from an empty blob of
+        // the column's width (512 uint16s) in that case.
+        let blob: Option<Vec<u8>> = "SELECT keyitems FROM chars WHERE charid = ?"
+            .with((self.charid,))
+            .first(&mut conn)
+            .await
+            .context("reading keyitems blob")?
+            .ok_or_else(|| anyhow!("chars row {charid} not found", charid = self.charid))?;
+        let blob = blob.unwrap_or_else(|| vec![0u8; 512 * 2]);
+        let mut ids: Vec<u16> = blob
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // Find a free slot (0) or reuse the last one; the blob is large enough
+        // that a free slot always exists for a fresh fixture char.
+        let slot = ids.iter().position(|&v| v == 0).unwrap_or(ids.len() - 1);
+        ids[slot] = id;
+        let mut new_blob = Vec::with_capacity(ids.len() * 2);
+        for &v in &ids {
+            new_blob.extend_from_slice(&v.to_le_bytes());
+        }
+        "UPDATE chars SET keyitems = ? WHERE charid = ?"
+            .with((&new_blob, self.charid))
+            .ignore(&mut conn)
+            .await
+            .context("UPDATE chars keyitems")?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

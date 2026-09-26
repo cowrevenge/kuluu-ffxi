@@ -1471,14 +1471,16 @@ impl CutsceneScope {
                 // carry) or the render's self_mount stays on foot and the riding
                 // pose never plays. status_event is the GameStatus the script wrote,
                 // which is the animation byte (5 = chocobo, 85 = other mount, 0 =
-                // off); mount_id is the mount index, 0 for the chocobo.
+                // off); mount_id is the mount index, 0 for the chocobo. The write
+                // arms `cs_mount_armed` so a stale on-foot 0x037 cannot clobber it
+                // until the server re-asserts the mount of its own.
                 if let CutsceneCue::Mount {
                     target: CutsceneActor::LocalPlayer,
                     status_event,
                     mount_id,
                 } = cue
                 {
-                    let _ = event_tx.send(AgentEvent::SelfServerStatus {
+                    let _ = event_tx.send(AgentEvent::CsMountArmed {
                         status: status_event,
                         mount_id: mount_id.unwrap_or(0).min(u16::from(u8::MAX)) as u8,
                     });

@@ -6766,6 +6766,7 @@ fn decode_event_0x032(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 
@@ -6817,6 +6818,7 @@ fn decode_event_0x033(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 
@@ -6857,6 +6859,7 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 

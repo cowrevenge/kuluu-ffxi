@@ -239,6 +239,14 @@ pub struct DialogSession {
     /// [`take_frame_closed`](Self::take_frame_closed) fires exactly once per
     /// up→down transition instead of on every tick parked after it.
     frame_was_up: bool,
+    /// Seconds left on the current frame's retail auto-advance clock — the
+    /// entry's `7F 34/35/36 NN` continue-prompt code
+    /// (research/cexi-docs/dialog/format.md). While a frame with an auto
+    /// prompt is up, [`tick`](Self::tick) counts this down and dismisses the
+    /// frame exactly like a key press at zero. `None` while the box waits on
+    /// the player (manual prompt), while no frame is up, or after the event
+    /// ends.
+    auto_advance_remaining: Option<f32>,
     /// Per-zone dialog-numbering skew between the server and this install,
     /// learned from the messages themselves.
     skew: std::collections::HashMap<u16, ZoneTextSkew>,
@@ -273,6 +281,7 @@ impl DialogSession {
             weather_forecast: None,
             pending_motion_holds: std::collections::HashMap::new(),
             frame_was_up: false,
+            auto_advance_remaining: None,
             skew: std::collections::HashMap::new(),
             liveness: None,
         }
@@ -429,6 +438,11 @@ impl DialogSession {
             }
         }
         let step = runner.advance(None, strings);
+        let auto = match &step {
+            DialogStep::Frame(frame) => frame.prompt.auto_seconds(),
+            _ => None,
+        };
+        self.arm_auto_advance(auto);
         self.scene_actions.extend(runner.take_scene_actions());
         let raw_cues = runner.take_cues();
         let emote_base = self.emote_base();
@@ -523,14 +537,37 @@ impl DialogSession {
         self.drive(|runner, strings| runner.cancel(strings))
     }
 
-    /// Run the host clock into a scene holding on a timed wait; a no-op
-    /// ([`Advance::Waiting`]) while a frame is displayed instead. Call only
-    /// while [`active_end`] is `Some` — like [`advance`](Self::advance), a
-    /// desynced call releases the event rather than wedging it open.
+    /// Arm or clear the auto-advance clock from a frame's retail continue
+    /// prompt: an auto-prompt frame (`7F 34/35/36 NN`) dismisses itself after
+    /// `NN` seconds, exactly like a key press; every other step (manual frame,
+    /// wait, tag, end) clears any running clock.
+    fn arm_auto_advance(&mut self, auto: Option<u8>) {
+        self.auto_advance_remaining = auto.map(f32::from);
+    }
+
+    /// Run the host clock into the scene: a frame with a retail auto-prompt
+    /// counts down on this host clock and dismisses itself exactly like a key
+    /// press when it reaches zero (the `7F 34/35/36 NN` continue-prompt code,
+    /// research/cexi-docs/dialog/format.md); while that clock runs the VM is
+    /// parked on the frame, so the runner's own tick is a no-op. Every other
+    /// park advances the scene's timed waits; a manual frame is a no-op
+    /// ([`Advance::Waiting`]) instead. Call only while [`active_end`] is
+    /// `Some` — like [`advance`](Self::advance), a desynced call releases the
+    /// event rather than wedging it open.
     ///
     /// [`active_end`]: Self::active_end
     fn tick(&mut self, dt_secs: f32) -> Advance {
         self.sweep_pending_motion_holds();
+        if let Some(remaining) = self.auto_advance_remaining {
+            let next = remaining - dt_secs;
+            if next <= 0.0 {
+                self.auto_advance_remaining = None;
+                let advance = self.advance(None);
+                return self.check_liveness(advance);
+            }
+            self.auto_advance_remaining = Some(next);
+            return Advance::Waiting;
+        }
         let advance = self.drive(|runner, strings| runner.tick(dt_secs, strings));
         self.check_liveness(advance)
     }
@@ -809,6 +846,10 @@ impl DialogSession {
             DialogStep::Waiting => Advance::Waiting,
             DialogStep::AwaitServerAck(tag) => Advance::AwaitServerAck(tag),
         };
+        match &advance {
+            Advance::Frame(dialog) => self.arm_auto_advance(dialog.auto_advance),
+            _ => self.arm_auto_advance(None),
+        }
         self.cues.extend(cues);
         if matches!(advance, Advance::Ended { .. }) {
             self.finish();
@@ -905,6 +946,7 @@ impl DialogSession {
         self.runner = None;
         self.active = None;
         self.frame_was_up = false;
+        self.auto_advance_remaining = None;
         self.pending_motion_holds.clear();
         self.liveness = None;
     }
@@ -1828,7 +1870,7 @@ fn frame_to_dialog(
         text,
         choices,
         params,
-        ..
+        prompt,
     } = frame;
     let substitute = |text: String| {
         substitute_entity_names(
@@ -1866,6 +1908,7 @@ fn frame_to_dialog(
         cancel_armed,
         speaker_index,
         contains_item,
+        auto_advance: prompt.auto_seconds(),
     }
 }
 
@@ -3037,6 +3080,110 @@ pub(crate) mod tests {
         );
     }
 
+    /// Retail's auto-prompt frames (the `7F 34/35/36 NN` continue-prompt code,
+    /// research/cexi-docs/dialog/format.md) dismiss themselves on the session
+    /// clock after NN seconds, exactly like a key press: the Bastok intro
+    /// narration advances with no player input, while the manual line that
+    /// follows it still waits for one.
+    #[test]
+    fn auto_prompt_frames_advance_on_the_session_clock() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        fn session_with(entries: &[&[u8]]) -> (DialogSession, EventTrigger) {
+            let block = ffxi_dat::event_dat::EventBlock {
+                actor: NPC,
+                event_ids: vec![EVENT],
+                event_offsets: vec![0],
+                references: vec![0, 1],
+                // Two chat lines, each gated on MESWAIT.
+                event_data: vec![0x1D, 0x00, 0x80, 0x23, 0x1D, 0x01, 0x80, 0x23, 0x21],
+            };
+            let mut session = DialogSession::new(None, "Test".into());
+            session.loaded_event_zone = Some(ZONE);
+            session.loaded_string_zone = Some(ZONE);
+            session.event_dat = Some(Arc::new(EventDat {
+                blocks: vec![block],
+            }));
+            session.strings = Some(StringDat::parse(&synth_dat(entries)).unwrap());
+            let trigger = EventTrigger {
+                event_zone: ZONE,
+                text_zone: ZONE,
+                unique_no: NPC,
+                act_index: 54,
+                event_id: EVENT,
+                params: vec![],
+                npc_name: None,
+            };
+            (session, trigger)
+        }
+
+        let (mut session, trigger) =
+            session_with(&[b"narration line\x7f\x34\x05\x00", b"npc line\x7f\x31\x00"]);
+        let Begin::Frame(dialog) = session.begin(trigger) else {
+            panic!("the narration should open on a frame");
+        };
+        assert_eq!(dialog.auto_advance, Some(5));
+
+        assert!(
+            matches!(session.tick(2.0), Advance::Waiting),
+            "3 s of the 5 s remain"
+        );
+        let Advance::Frame(dialog) = session.tick(3.0) else {
+            panic!("the auto line must dismiss itself at 5 s");
+        };
+        assert_eq!(dialog.auto_advance, None, "the npc line is manual");
+        assert!(
+            matches!(session.tick(100.0), Advance::Waiting),
+            "a manual frame outlives any tick"
+        );
+        assert!(
+            matches!(session.advance(Some(0)), Advance::Ended { .. }),
+            "the player's key press ends the event"
+        );
+    }
+
+    /// A manual frame's clock is never armed: ticking it for far longer than
+    /// any authored auto-advance leaves the frame up.
+    #[test]
+    fn manual_frames_never_advance_on_the_session_clock() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![0],
+            event_data: vec![0x1D, 0x00, 0x80, 0x23, 0x21],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"npc line\x7f\x31\x00"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 54,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        let Begin::Frame(dialog) = session.begin(trigger) else {
+            panic!("the manual line should open on a frame");
+        };
+        assert_eq!(dialog.auto_advance, None);
+        for _ in 0..10 {
+            assert!(matches!(session.tick(60.0), Advance::Waiting));
+        }
+        assert!(session.active_end().is_some(), "the frame is still up");
+    }
+
     /// 0x31 SMOVE: the session arms the move hold from its own entity position
     /// and the authored speed, and moves the tracked position to the goal
     /// (research/XiEvents/OpCodes/0x0031.md).
@@ -3913,6 +4060,7 @@ pub(crate) mod tests {
             text: "{SpeakerName}: {Num:1} gil, {PlayerName}.".to_string(),
             choices: vec!["Pay {Num:1}.".to_string(), "Decline.".to_string()],
             params: vec![0, 250],
+            prompt: ffxi_dat::dmsg::DialogPrompt::Manual,
         };
         let dialog = frame_to_dialog(&active, frame, "Zeid", true);
         assert_eq!(dialog.nums, vec![0, 250]);

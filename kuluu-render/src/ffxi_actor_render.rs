@@ -1005,6 +1005,28 @@ pub fn load_pc(
         if let Some(dir) = read_dat(root, base).map(ResourceDir::from_bytes) {
             battle_dirs.push(dir);
         }
+
+        // The per-weapon-type effect sibling: same directory as the amot base, file index =
+        // weapon_anim_type (HumeM: ROM/32/{0..12} next to base 9672 = ROM/32/13). It carries
+        // eflg/selg — what lhit links on a crit (lhit -> eflg -> sho1) — and without it the PC's
+        // crit flash silently no-ops. Guarded on the eflg routine so races with a different
+        // family layout load nothing extra.
+        // .agents/skills/retail-observe/references/2026-09-27-pc-crit-effect-dat.md
+        let slot = if weapon_anim_type == CIB_MOTION_INDEX_NONE {
+            0u8
+        } else {
+            (weapon_anim_type as u8).min(12)
+        };
+        if let Ok(base_loc) = root.resolve(base) {
+            if let Some(id) = root.id_at(&base_loc.rom_dir, base_loc.sub_path.dir, slot) {
+                if let Some(dir) = read_dat(root, id)
+                    .map(ResourceDir::from_bytes)
+                    .filter(|d| d.collect_schedulers().iter().any(|s| s.name == *b"eflg"))
+                {
+                    battle_dirs.push(dir);
+                }
+            }
+        }
     }
     if battle_dirs.is_empty() {
         warn!("load_pc race={race}: no battle dir resolved — stance/swings unavailable");
@@ -5668,6 +5690,33 @@ mod pose_resolution_tests {
         let root = ffxi_dat::archive::open_test_install()?;
 
         Some(load_pc(&root, 1, false, &[], None, None, None).expect("load Hume M"))
+    }
+
+    /// (skips without an install): a PC's crit chain must resolve end to end — lhit (skeleton
+    /// base) links eflg/selg, and only the per-weapon-type effect sibling defines those; if
+    /// load_pc drops it, the crit flash silently no-ops.
+    #[test]
+    fn real_dat_pc_crit_links_resolve_through_the_effect_sibling() {
+        const HUME_M: u8 = 1;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll =
+            crate::scheduler_runtime::main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        let main_weapon = crate::look_resolver::equipment_dat_id(&dll, 6, 0, HUME_M)
+            .expect("HumeM main-hand model 0");
+        let loaded = load_pc(&root, HUME_M, false, &[], None, Some(main_weapon), None)
+            .expect("load Hume M with a main-hand weapon");
+        let routines = loaded.all_routines();
+        for name in [b"lhit", b"eflg", b"selg"] {
+            assert!(
+                routines
+                    .get(&ffxi_dat::datid::DatId::from_name(name))
+                    .is_some(),
+                "the load set must resolve {:?} (crit chain lhit -> eflg/selg)",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 
     /// The engaged strafe keeps its clip family in one set: the upper body must

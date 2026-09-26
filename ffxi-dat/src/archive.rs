@@ -418,6 +418,18 @@ impl DatRoot {
         }
         Err(DatError::FileNotPresent { file_id })
     }
+
+    /// Reverse of [`Self::resolve`]: the lowest claimed id `rom_dir`'s tables assign to a
+    /// `(dir/file)` slot — ids are not contiguous within a directory, so sibling files cannot
+    /// be reached by arithmetic on a resolved id. research/XIClient/src/XIClient/source/
+    /// System/FileIO/FileIOVirtualFileSystem.cpp GetNumFileName decodes one entry per id.
+    pub fn id_at(&self, rom_dir: &str, dir: u16, file: u8) -> Option<u32> {
+        let app = self.apps.iter().rev().find(|a| a.rom_dir == rom_dir)?;
+        let target = crate::ftable::SubPath { dir, file };
+        (0..app.ftable.len())
+            .filter(|&id| app.vtable.contains(id, app.rom_index))
+            .find(|&id| app.ftable.sub_path(id).is_ok_and(|p| p == target))
+    }
 }
 
 /// Test-support entry point, `pub` only so real-DAT guards in sibling crates can

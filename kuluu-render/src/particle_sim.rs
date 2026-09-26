@@ -659,14 +659,11 @@ pub fn spawn_particle_generators(
             id.and_then(|i| assets.keyframes.get(&i).cloned())
         };
 
-        // A stage with no timing word emits for the generator's full life; retail hit flashes
-        // carry zero timing (s5c_pc_hit_flash_lands_on_the_mob_victim pins the visible result).
-        let duration_frames = ev.stage.stage.duration_frames;
-        let emit_window_frames = if duration_frames == 0 {
-            def.max_life_frames
-        } else {
-            duration_frames as f32
-        };
+        // The accumulator is primed to one full period below: research/xim ParticleGenerator.kt
+        // emit starts framesUntilNextParticle at 0, so a generator's first burst lands on its
+        // first tick. A zero-duration stage (hit1's g01x) then emits exactly that one burst —
+        // the flash — and stops; its particles live out their own max_life.
+        let emit_window_frames = ev.stage.stage.duration_frames as f32;
         sim.generators.push(LiveGenerator {
             scale_x: resolve(def.scale_x_track),
             scale_y: resolve(def.scale_y_track),
@@ -680,7 +677,7 @@ pub fn spawn_particle_generators(
             def,
             origin,
             particles: Vec::new(),
-            emit_accum: 0.0,
+            emit_accum: def.frames_per_emission,
             age_frames: 0.0,
             emit_window_frames,
             mesh,
@@ -776,7 +773,7 @@ pub fn spawn_actor_auto_run_particles(
                 sprite_frames,
                 origin: Vec3::from_array(def.base_position),
                 particles: Vec::new(),
-                emit_accum: 0.0,
+                emit_accum: def.frames_per_emission,
                 age_frames: 0.0,
                 emit_window_frames: 0.0,
                 mesh,
@@ -856,7 +853,7 @@ pub fn spawn_zone_particle_generator(
         sprite_frames,
         origin,
         particles: Vec::new(),
-        emit_accum: 0.0,
+        emit_accum: def.frames_per_emission,
         age_frames: 0.0,
         emit_window_frames: 0.0,
         mesh,
@@ -5644,6 +5641,29 @@ mod tests {
 
     // Directory-scoped, because ROM/0/0.DAT defines `g010` several times over and only the `hit1`
     // copy is the spark (scheduler_runtime.rs tests).
+    // research/xim ParticleGenerator.kt emit — framesUntilNextParticle starts at 0, so a
+    // scheduled generator's first burst lands on its first tick. hit1's g01x stages all carry
+    // zero duration: their flash IS that one immediate burst (s5c/s7 pin the landing).
+    #[test]
+    fn real_dat_hit_sparks_burst_on_their_first_tick() {
+        let Some(defs) = retail_hit_spark_defs() else {
+            return;
+        };
+        for (name, def) in &defs {
+            if def.particles_per_emission == 0 {
+                continue; // g011 emits nothing by design
+            }
+            let mut g = live(*def, 0.0);
+            g.emit_accum = def.frames_per_emission;
+            advance(&mut g, 1.0);
+            assert!(
+                !g.particles.is_empty(),
+                "{} must burst on its first tick",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
     fn retail_hit_spark_defs() -> Option<Vec<([u8; 4], ParticleGeneratorDef)>> {
         let assets = retail_global_effect_assets()?;
         Some(

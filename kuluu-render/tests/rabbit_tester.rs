@@ -656,7 +656,7 @@ fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
 
     // The flash itself: a particle generator spawned, anchored to the VICTIM (TargetActor),
     // not the attacker. A few steps let it emit and settle before we read where it landed;
-    // under the pre-fix 1-frame window these generators were already reaped here.
+    // the burst's particles are still alive when we check.
     for _ in 0..4 {
         step(&mut app);
     }
@@ -675,6 +675,67 @@ fn s5c_pc_hit_flash_lands_on_the_mob_victim() {
         landed += 1;
     }
     assert!(landed > 0, "the hit flash spawns a particle generator");
+}
+
+/// S7 - bugfix-brief item 4 (crit half): a PC crit runs ldam on the victim, whose ref09 link
+/// fires lhit ON THE ATTACKER; lhit links eflg/selg from the per-weapon-type effect sibling,
+/// and eflg's sho1 sparks land on the victim. Pins the load gap: without that sibling in the
+/// PC's routine set, eflg never resolves and the crit flash silently no-ops.
+#[test]
+fn s7_pc_crit_flash_lands_on_the_mob_victim() {
+    let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
+        return;
+    };
+    let mut app = build_app();
+    let (atk_parent, atk_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    // The particle path reads the wire entity's Transform for its origin; separate the two so
+    // the TargetActor landing is distinguishable from an attacker-local one.
+    app.world_mut()
+        .entity_mut(atk_parent)
+        .insert(Transform::from_xyz(0.0, 0.0, 0.0));
+    app.world_mut()
+        .entity_mut(vic_parent)
+        .insert(Transform::from_xyz(5.0, 0.0, 0.0));
+    step_n(&mut app, 10);
+
+    push_battle2(&mut app, HUMEM_W, 1, Some(RARAB_W), Some((0, 0, 2, 3, 0)));
+
+    let (swing_at, _) = watch(&mut app, 5, |i, w| {
+        i >= 1 && active_clip(w, atk_child).is_some_and(|c| c.starts_with("at0"))
+    });
+    assert!(swing_at.is_some(), "the PC plays the at0? swing");
+
+    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
+        routines(w, vic_parent).contains(b"ldam")
+            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
+            && routines(w, atk_parent).iter().any(|r| r == b"lhit")
+    });
+    assert!(
+        impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
+        "ldam + flinch on the mob AND lhit running on the PC attacker at the impact frame"
+    );
+
+    // The crit flash itself: sho1's generators, anchored to the VICTIM. A few steps let them
+    // emit and settle before we read where they landed.
+    for _ in 0..4 {
+        step(&mut app);
+    }
+    let vic_t = *app.world().entity(vic_parent).get::<Transform>().unwrap();
+    let mut landed = 0;
+    for o in app
+        .world()
+        .resource::<kuluu_render::particle_sim::ParticleSimulator>()
+        .generator_origins()
+    {
+        let d_vic = (o - vic_t.translation).length();
+        assert!(
+            d_vic < 2.0,
+            "a crit flash generator sits {d_vic} from the victim; sho1 should anchor it there"
+        );
+        landed += 1;
+    }
+    assert!(landed > 0, "the crit flash spawns a particle generator");
 }
 
 /// S6/S6b - crits: ldam + flinch, no sway at kb=0. S6: Hit with info=CriticalHit runs `ldam`

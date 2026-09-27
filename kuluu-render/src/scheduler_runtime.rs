@@ -3615,32 +3615,15 @@ pub fn dispatch_melee_action_started(
         }
         // Info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP packet
         // (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"),
-        // so start the victim's death path now instead of waiting for the next 0x0E.
+        // so latch the death path now; the pose pass holds idle until the fall-over motion fires.
+        // The `dead` routine itself starts at impact (fire_hit_reaction): the model falls over
+        // as the weapon lands, not while it is still winding up.
         if outcome.defeated() {
             if combat_log_enabled() {
                 tracing::debug!(target: "combat", "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
                         actor_id, victim, outcome.info);
             }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);
-            // retail's onDisplayDeath enqueues the model's `dead` routine with
-            // displayDead=true on the Defeated frame (research/xim Actor.kt onDisplayDeath):
-            // ded? fall-over at its first Motion stage, cor0 hold after. Play mode so those
-            // Motion stages fire through dispatch_motion_stages; models without a `dead`
-            // routine keep the instant-corpse fallback (run_routine_on no-ops on an
-            // unresolvable name).
-            if let Some(victim) = victim {
-                run_routine_on(
-                    victim,
-                    b"dead",
-                    None,
-                    &q_children,
-                    &q_render,
-                    &mut q_scheds,
-                    &mut pending_inserts,
-                    global.as_deref(),
-                    &mut commands,
-                );
-            }
         }
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
@@ -3732,6 +3715,23 @@ fn fire_hit_reaction(
             }
             report.victim_stages.push_str(&summary);
         }
+    }
+    // A killing blow's fall-over starts on this impact frame, not on the Defeated packet: dam0
+    // selects only the flinch/sound pair for info=defeated, so run the model's `dead` routine
+    // here (ded? fall-over at its first Motion stage, cor0 hold after). Models without a `dead`
+    // routine keep the instant-corpse fallback (run_routine_on no-ops on an unresolvable name).
+    if ctx.info & ffxi_proto::melee::INFO_DEFEATED as u32 != 0 {
+        run_routine_on(
+            victim,
+            b"dead",
+            Some(attacker),
+            q_children,
+            q_render,
+            q_active,
+            pending_inserts,
+            global,
+            commands,
+        );
     }
     // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
     // context (target = victim): its g14*/g29* spark defs are TargetActor-attached and land

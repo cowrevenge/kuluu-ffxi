@@ -724,6 +724,8 @@ fn run_pending_case(
             &tracked,
             &q_root,
             &mut q_vis,
+            &q_children,
+            &mut commands,
         ),
         Case::LevelUp => fire_level_up(
             &root,
@@ -795,6 +797,8 @@ fn respawn_worm(
     tracked: &TrackedEntities,
     q_root: &Query<&kuluu_render::ffxi_actor_render::FfxiRenderRoot>,
     q_vis: &mut Query<&mut Visibility>,
+    q_children: &Query<&Children>,
+    commands: &mut Commands,
 ) {
     let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
         return;
@@ -802,6 +806,18 @@ fn respawn_worm(
     if let Ok(root) = q_root.get(worm) {
         if let Ok(mut vis) = q_vis.get_mut(root.0) {
             *vis = Visibility::Visible;
+        }
+    }
+    // Cancel the death path so the pose falls back to idle: drop the Defeated latch and any
+    // running `dead` scheduler (its cor0 hold is what keeps a respawned worm on the ground).
+    if let Ok(children) = q_children.get(worm) {
+        for child in children {
+            commands
+                .entity(*child)
+                .remove::<kuluu_render::scheduler_runtime::DeadFromAction>();
+            commands
+                .entity(*child)
+                .remove::<kuluu_render::scheduler_runtime::ActiveSchedulers>();
         }
     }
     worm_state.dead_at = None;

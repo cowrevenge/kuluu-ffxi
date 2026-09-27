@@ -6789,7 +6789,7 @@ mod pose_resolution_tests {
     /// death state again, so tick_live_ffxi_actors clears the Defeated latch that a killing
     /// result started (DeadFromAction) and the pose falls back to idle. Self's raise arrives
     /// through the party row / homepoint timer channel instead of an entity hp_pct. The `dead`
-    /// routine is dispatched only by dispatch_melee_action_started on INFO_DEFEATED, so a raise
+    /// routine is dispatched only by fire_hit_reaction on an INFO_DEFEATED impact, so a raise
     /// must not re-fire it: no ActiveScheduler named `dead` may exist after the raise tick.
     #[test]
     fn a_raise_clears_the_defeated_latch_and_returns_to_idle() {

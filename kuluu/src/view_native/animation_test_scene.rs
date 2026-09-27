@@ -93,8 +93,21 @@ struct WormState {
 #[derive(Component)]
 struct TestSceneScoped;
 
-#[derive(Component)]
-struct EntryChip;
+/// The launcher entry only exists in enhanced builds; vanilla parity is the project default.
+pub(crate) const ENHANCED_GATE_ON: bool = cfg!(feature = "enhanced-buff-tooltips")
+    || cfg!(feature = "enhanced-buff-timers")
+    || cfg!(feature = "enhanced-cast-bar")
+    || cfg!(feature = "enhanced-death-countdown")
+    || cfg!(feature = "enhanced-engage-move-lock-off")
+    || cfg!(feature = "enhanced-job-display")
+    || cfg!(feature = "enhanced-mob-hp-under")
+    || cfg!(feature = "enhanced-neural-uplift")
+    || cfg!(feature = "enhanced-shutdown-counter")
+    || cfg!(feature = "enhanced-targetname");
+
+/// Set by the launcher's AnimationTest titlebar button; consumed by handle_toggle.
+#[derive(Resource, Default)]
+pub(crate) struct PendingToggle(pub bool);
 
 #[derive(Component)]
 struct CaseButton(Case);
@@ -109,12 +122,12 @@ impl Plugin for AnimationTestScenePlugin {
         app.init_resource::<TestLog>()
             .init_resource::<PendingCase>()
             .init_resource::<WormState>()
-            .add_systems(OnEnter(super::AppPhase::Launcher), spawn_entry_chip)
+            .init_resource::<PendingToggle>()
             .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
                 Update,
                 (
-                    handle_entry_press,
+                    handle_toggle,
                     handle_case_presses,
                     run_pending_case,
                     worm_death_watch,
@@ -126,34 +139,8 @@ impl Plugin for AnimationTestScenePlugin {
     }
 }
 
-fn spawn_entry_chip(mut commands: Commands) {
-    commands
-        .spawn((
-            TestSceneScoped,
-            EntryChip,
-            Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(12.0),
-                top: Val::Px(8.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
-                ..default()
-            },
-            GlobalZIndex(6),
-            BackgroundColor(Color::srgba(0.05, 0.06, 0.10, 0.85)),
-            bevy::ui::widget::Button,
-        ))
-        .with_child((
-            Text::new("animationtest"),
-            TextFont {
-                font_size: 12.0.into(),
-                ..default()
-            },
-            TextColor(Color::srgb(0.75, 0.85, 0.9)),
-        ));
-}
-
-fn handle_entry_press(
-    q_chip: Query<&Interaction, (With<EntryChip>, With<bevy::ui::widget::Button>)>,
+fn handle_toggle(
+    mut pending: ResMut<PendingToggle>,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -165,15 +152,12 @@ fn handle_entry_press(
     actor_root: Res<ActionDatRoot>,
     mut log: ResMut<TestLog>,
 ) {
-    let Ok(interaction) = q_chip.single() else {
-        return;
-    };
-    if !matches!(interaction, Interaction::Pressed) {
+    if !pending.0 {
         return;
     }
+    pending.0 = false;
 
-    // The chip itself is scoped, so "already up" means more than one scoped entity exists.
-    if q_scoped.iter().count() > 1 {
+    if q_scoped.iter().next().is_some() {
         tear_down(&mut commands, &q_scoped, &mut tracked, &mut scene);
         log_line(&mut log, "scene down".into());
         return;

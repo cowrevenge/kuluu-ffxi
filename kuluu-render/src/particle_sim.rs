@@ -1678,17 +1678,16 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         .as_ref()
         .map(|t| t.sample_from(progress, Some(p.scale_seed.y)))
         .unwrap_or(p.scale.y);
-    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp HandleOne
-    // initializes field_F8 from opcode 0x16; persistent effects retain its authored alpha.
+    // research/XIClient CMoElem.cpp VirtOt1: the element's draw colour is field_F8 (the 0x16
+    // ColorSetup RGBA, CYyGenerator.cpp ElemGenerate) with alpha scaled by field_138 * field_134.
+    // field_138 is set to 1.0 in ElemIdle and field_134 is initialised to 1.0 (CMoElem ctor)
+    // and never written, so retail applies no life-based fade: the authored alpha holds for the
+    // whole element life; fades come from explicit keyframe tracks, sampled above.
     let alpha = g
         .alpha
         .as_ref()
         .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
-        .unwrap_or(if g.def.continuous || g.def.is_singleton() {
-            g.def.init_color[3]
-        } else {
-            1.0 - progress
-        });
+        .unwrap_or(g.def.init_color[3]);
     // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — 0x3C/0x3D/0x3E
     // assign the particle's colour channel from a time-of-day curve, 0x3F multiplies alpha.
     // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
@@ -3170,7 +3169,8 @@ mod tests {
             }
         }
 
-        // One particle at half life, where the untracked alpha curve gives F.a = 0.5.
+        // One particle at half life; a trackless generator holds its authored init_color[3]
+        // (1.0 here) as F.a for the whole element life — retail has no life-based fade.
         fn half_life_gen(blend: ffxi_dat::particle_gen::ParticleBlend, byte: u8) -> LiveGenerator {
             let mut d = def(100.0, 1.0, 1);
             d.blend = blend;
@@ -3206,12 +3206,15 @@ mod tests {
             }
         }
 
+        // The stage-1 alpha gain (MODULATE4X with F.a) scales the template's vertex alpha;
+        // F.a is the authored init_color[3] held constant over life, so at half life the
+        // 0.25 vertex alpha lands on 0.25 * 1.0 * 4 = 1.0.
         #[test]
         fn blended_particle_alpha_scales_with_vertex_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Blend, 0x03);
             set_template_color(&mut g, Vec3::ONE.extend(0.25));
             for c in vertex_colors(&g) {
-                assert_eq!(c[3], 0.5);
+                assert_eq!(c[3], 1.0);
             }
         }
 
@@ -3219,6 +3222,8 @@ mod tests {
         #[test]
         fn blend_byte_44_promotes_the_particle_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Blend, 0x44);
+            // The authored alpha (retail's constant field_F8.a) the promotion acts on.
+            g.def.init_color[3] = 0.5;
             set_template_color(&mut g, Vec3::ONE.extend(0.125));
             let promoted = vertex_colors(&g)[0][3];
             g.def.blend_byte = 0x03;
@@ -3227,16 +3232,17 @@ mod tests {
             assert_eq!(unpromoted, 0.25);
         }
 
-        // An additive element hands the life curve to the blend state as src alpha instead of
+        // An additive element hands its alpha to the blend state as src alpha instead of
         // pre-multiplying it into rgb, so the shader's premultiply applies it to the colour
-        // stage 1 already saturated — retail's order.
+        // stage 1 already saturated — retail's order. The alpha is the authored 0x16 value,
+        // held constant mid-life (CMoElem.cpp VirtOt1: no life-based fade).
         #[test]
-        fn additive_particle_carries_the_life_curve_as_src_alpha() {
+        fn additive_particle_carries_the_authored_alpha_as_src_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Additive, 0x48);
             set_template_color(&mut g, Vec3::splat(0.25).extend(0.5));
             for c in vertex_colors(&g) {
                 assert_eq!([c[0], c[1], c[2]], [0.5, 0.5, 0.5]);
-                assert_eq!(c[3], 0.5);
+                assert_eq!(c[3], 1.0);
             }
         }
 
@@ -3269,14 +3275,16 @@ mod tests {
             );
         }
 
-        // The life curve is the raw one, not the saturating stage-1 alpha — that would hold an
-        // additive spray at full brightness until the last quarter of its life.
+        // Retail applies no life-based fade: VirtOt1 scales field_F8's alpha by field_138 *
+        // field_134, both 1.0 (CYyGenerator.cpp ElemIdle sets field_138; the CMoElem ctor
+        // initialises field_134 and nothing writes it), so a trackless additive spray holds its
+        // authored brightness to end of life.
         #[test]
-        fn additive_brightness_still_fades_late_in_life() {
+        fn additive_brightness_holds_the_authored_alpha_to_end_of_life() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Additive, 0x48);
             g.particles[0].age_frames = 90.0;
             let late = vertex_colors(&g)[0][3];
-            assert!((late - (1.0 - 0.9f32)).abs() < 1e-6, "{late}");
+            assert_eq!(late, 1.0, "no life fade: the authored alpha holds");
         }
     }
 
@@ -3796,11 +3804,15 @@ mod tests {
             ));
         }
 
-        // Ageing feeds the untracked additive life curve through tfactor_alpha and the D3m
-        // stage chain into the key's colour, so an alpha change alone dirties the mesh.
+        // The D3m stage chain folds the element's alpha into the key's colour, so an alpha
+        // change alone dirties the mesh. Retail fades come from an explicit keyframe track
+        // (CMoElem.cpp VirtOt1 has no life-based fade), so drive the change through one.
         #[test]
         fn alpha_stage_change_rebuilds() {
             let mut g = one_particle_gen();
+            g.alpha = Some(ffxi_dat::particle_gen::KeyFrameTrack {
+                points: vec![(0.0, 1.0), (1.0, 0.25)],
+            });
             let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             g.particles[0].age_frames = 90.0;
             assert!(needs_rebuild(
@@ -5109,8 +5121,8 @@ mod tests {
         base.blend = ParticleBlend::Blend;
         base.init_color = [1.0, 1.0, 1.0, 0.8];
 
-        // Vertex alpha well under the D3m stage clamp, so the two curves stay distinguishable
-        // after the 4x TEXTUREFACTOR alpha gain instead of both saturating at 1.
+        // Vertex alpha well under the D3m stage clamp, so the authored opacity stays
+        // distinguishable after the 4x TEXTUREFACTOR alpha gain instead of saturating at 1.
         const VERT_ALPHA: f32 = 0.125;
         let mut cont = live(base, 1.0);
         cont.def.continuous = true;
@@ -5157,8 +5169,8 @@ mod tests {
             "continuous body keeps authored opacity"
         );
         assert!(
-            (alpha_of(&spray) - expected(0.25)).abs() < 1e-4,
-            "a transient spray still fades 1.0-progress over life"
+            (alpha_of(&spray) - expected(base.init_color[3])).abs() < 1e-4,
+            "a transient spray holds the authored alpha too — retail has no life fade"
         );
     }
 

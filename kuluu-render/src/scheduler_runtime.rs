@@ -120,14 +120,6 @@ impl<'a> RoutineLookup<'a> {
     }
 
     pub fn get(&self, name: &[u8; 4]) -> Option<&'a Scheduler> {
-        // TEMP diagnostic (revert after the flash test): while an animationtest case is live,
-        // route `hit1` through `hit2`'s payload — tells a broken chain apart from a broken
-        // particle set. Armed/cleared by the pre-server test box.
-        let name = if HIT_REMAP_TEST.load(std::sync::atomic::Ordering::Relaxed) && name == b"hit1" {
-            b"hit2"
-        } else {
-            name
-        };
         self.tiers.iter().find_map(|tier| match tier {
             RoutineSource::Dat(list) => list.iter().find(|s| &s.name == name),
             RoutineSource::Actor(map) => map.get(&ffxi_dat::datid::DatId::from_name(name)),
@@ -4286,11 +4278,6 @@ impl WeaponHitCase {
 /// staying silent on a miss. The tick disarms it once no case is pending.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct VfxTrace(pub bool);
-
-// TEMP diagnostic companion to VfxTrace (see RoutineLookup::get): the hit1->hit2 remap flag,
-// settable from plain functions that have no Bevy resource access.
-pub static HIT_REMAP_TEST: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 const ANIMATION_TEST_LOOP_INTERVAL_FRAMES: f32 = 60.0;
 // A one-shot's trace window: long enough to cover the load + dispatch + first burst.

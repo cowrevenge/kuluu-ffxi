@@ -14,7 +14,7 @@ use kuluu_render::ffxi_actor_render::{
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
     enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir, RoutineLookup,
-    VfxTrace, HIT_REMAP_TEST, LEVEL_UP_EFFECT_DAT_ID,
+    VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
@@ -55,6 +55,7 @@ enum Case {
     MobChit,
     MobRespawn,
     LevelUp,
+    Hit1,
 }
 
 impl Case {
@@ -67,6 +68,7 @@ impl Case {
             Self::MobChit => "mob crit hit",
             Self::MobRespawn => "mob respawn",
             Self::LevelUp => "player level up",
+            Self::Hit1 => "hit1",
         }
     }
 
@@ -219,7 +221,6 @@ fn handle_toggle(
         // The dispatch funnel's info! traces (routine resolution, particle defs/meshes) are
         // gated on this; the box is where they earn their keep.
         commands.insert_resource(VfxTrace(false));
-        HIT_REMAP_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
         log_line(&mut log, "scene down".into());
         return;
     }
@@ -230,8 +231,6 @@ fn handle_toggle(
     hp.hume = TEST_MAX_HP;
     hp.worm = TEST_MAX_HP;
     commands.insert_resource(VfxTrace(true));
-    // TEMP diagnostic: hit1 -> hit2 while the box is up (see RoutineLookup::get).
-    HIT_REMAP_TEST.store(true, std::sync::atomic::Ordering::Relaxed);
     activate_test_scene(
         &mut commands,
         &mut meshes,
@@ -673,6 +672,7 @@ fn spawn_panel(commands: &mut Commands) {
         Case::MobChit,
         Case::MobRespawn,
         Case::LevelUp,
+        Case::Hit1,
     ] {
         let button = commands
             .spawn((
@@ -729,6 +729,7 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::PlayerChit | Case::MobChit => std::time::Duration::from_millis(1500),
         Case::PlayerDhit => std::time::Duration::from_millis(2000),
         Case::LevelUp => std::time::Duration::from_millis(3500),
+        Case::Hit1 => std::time::Duration::from_millis(2500),
         Case::MobRespawn => std::time::Duration::from_millis(300),
     }
 }
@@ -815,6 +816,7 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
+        Case::Hit1 => fire_hit1(&tracked, global.as_deref(), &mut log, &mut commands),
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
 
@@ -990,6 +992,36 @@ fn fire_level_up(
         }
         None => log_line(log, "lvup `main` UNRESOLVED".into()),
     }
+}
+
+// Plays ROM/0/0.DAT's hit1 routine straight on the worm — no dam0, no chit, no ef h: the four
+// SpawnGenerator stages as written (delays 0/0/0/10), each with a one-frame emit window.
+fn fire_hit1(
+    tracked: &TrackedEntities,
+    global: Option<&GlobalEffectDir>,
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
+        log_line(log, "worm not loaded yet".into());
+        return;
+    };
+    let Some(g) = global else {
+        log_line(log, "no global effect dir wired".into());
+        return;
+    };
+    let lookup = RoutineLookup::new().with_dat(&g.schedulers);
+    let Some(mut active) = ActiveScheduler::from_routine(&lookup, b"hit1") else {
+        log_line(log, "hit1 UNRESOLVED in the global effect dir".into());
+        return;
+    };
+    for t in &mut active.stages {
+        if t.stage.kind == ffxi_dat::scheduler::StageKind::Particle {
+            t.stage.duration_frames = 1;
+        }
+    }
+    log_line(log, format!("hit1 on worm: {}", stage_summary(&active)));
+    enqueue_routine(commands, worm, active);
 }
 
 fn worm_death_watch(

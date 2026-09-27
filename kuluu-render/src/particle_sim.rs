@@ -1032,9 +1032,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
 
     // research/xim: a maxLifeSpan of 0 marks a singleton — emit one particle once.
     let singleton = g.def.is_singleton();
-    let emitting = !g.stopped
-        && !g.emit_culled
-        && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0));
+    let emitting = !g.stopped && !g.emit_culled && !emit_done(g);
     if singleton {
         // `age_frames <= frames` already pins this to the first tick, so the emit window must not
         // gate it: a long frame (the blocking action-DAT read precedes these) makes age_frames
@@ -1140,8 +1138,16 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     }
 }
 
+// research/xim ParticleGenerator.kt isDoneEmitting — a scheduled generator stops once its
+// emit window has elapsed AND it has emitted at least one burst; the primed accumulator gives
+// that first burst on the generator's first tick whatever that frame's length (a 30 fps tick
+// advances two frames and would otherwise skip past a dur=0/1 window before ever emitting).
+fn emit_done(g: &LiveGenerator) -> bool {
+    !g.auto_run && g.age_frames > g.emit_window_frames && g.elements_emitted > 0
+}
+
 fn continuous_active(g: &LiveGenerator) -> bool {
-    !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0))
+    !g.stopped && !emit_done(g)
 }
 
 // research/xim ParticleUpdaters.kt OscillationApplier — the position delta the applier adds
@@ -3915,6 +3921,26 @@ mod tests {
         }
         // window 3 -> ~3 emitted, each lives 2 frames, all expired by frame 10.
         assert!(g.particles.is_empty());
+    }
+
+    // A dur=0 stage (hit1's g01x) must land its primed burst on the first tick even when that
+    // tick advances more than one frame — at 30 fps every tick is two frames.
+    #[test]
+    fn zero_window_emits_first_burst_on_a_long_first_tick() {
+        let mut g = live(def(20.0, 5.0, 3), 0.0);
+        g.emit_accum = def(20.0, 5.0, 3).frames_per_emission;
+        advance(&mut g, 2.0); // one 30 fps tick
+        assert_eq!(
+            g.particles.len(),
+            3,
+            "the primed burst lands on the first tick"
+        );
+        advance(&mut g, 2.0);
+        assert_eq!(
+            g.particles.len(),
+            3,
+            "a dur=0 generator emits exactly one burst"
+        );
     }
 
     // research/xim EffectRoutineParser.kt parseSection2 StopParticleGeneratorRoutine: the cast aura's

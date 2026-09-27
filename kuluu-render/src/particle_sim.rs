@@ -616,6 +616,7 @@ pub fn spawn_particle_generators(
     alpha_override: Option<Res<TestAlphaOverride>>,
     trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
     mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
+    mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -642,7 +643,32 @@ pub fn spawn_particle_generators(
             global.as_ref().map(|g| &g.assets),
             |a| a.particle_def(local_dir, &ev.stage.stage.id).is_some(),
         ) else {
-            if tracing {
+            // A SpawnGenerator whose target links a Sep (not a mesh) is a sound cue, not a
+            // particle: play its sep at the impact point. g14s in hit1/hi14 is the crit SFX —
+            // without this it was silently dropped and only the generic damg SE heard.
+            let se_id = [
+                local_assets,
+                actor_assets,
+                global.as_ref().map(|g| &g.assets),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(|a| {
+                a.sound_defs
+                    .get(&ev.stage.stage.id)
+                    .and_then(|s| a.seps.get(&s.sep_id).map(|sep| sep.se_id))
+            });
+            if let Some(se_id) = se_id {
+                let origin = q_action_target
+                    .get(ev.actor)
+                    .ok()
+                    .and_then(|t| t.0)
+                    .unwrap_or(ev.actor);
+                match q_xf.get(origin) {
+                    Ok(xf) => sfx_writer.write(crate::audio::SfxEvent::at(se_id, xf.translation)),
+                    Err(_) => sfx_writer.write(crate::audio::SfxEvent::new(se_id)),
+                };
+            } else if tracing {
                 info!(
                     "animationtest trace: particle stage {} [{}] unresolved — no tier holds the def",
                     String::from_utf8_lossy(&ev.stage.stage.id),
@@ -6165,6 +6191,7 @@ mod tests {
             .init_resource::<ParticleSimulator>()
             .add_message::<crate::scheduler_runtime::SchedulerStageEvent>()
             .add_message::<crate::scheduler_runtime::ParticleSpawnTrace>()
+            .add_message::<crate::audio::SfxEvent>()
             .add_systems(Update, spawn_particle_generators);
 
         let attacker = spawn_posed_actor(&mut app, skeleton, pose, attacker_world);

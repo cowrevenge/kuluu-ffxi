@@ -545,6 +545,8 @@ pub struct ActionAssets {
     /// Generators whose setup links a Sep instead of a mesh (the Home Point's `snd0` ambient
     /// loop).
     pub sound_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::SoundGeneratorDef>,
+    /// Generators whose setup links a Distortion (0x22) — a screen-space haze/smear element.
+    pub distortion_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::DistortionGeneratorDef>,
     // The same defs keyed by (containing directory, name). ROM/0/0.DAT defines four different
     // generators called `g010`, one per effect directory; the flat map keeps only the last.
     pub particle_defs_by_dir:
@@ -876,6 +878,11 @@ pub fn parse_action_tree_reporting(
                     ffxi_dat::particle_gen::SoundGeneratorDef::parse_reporting(c.data, &mut sink)
                 {
                     assets.sound_defs.insert(c.name, d);
+                }
+                if let Ok(Some(d)) = ffxi_dat::particle_gen::DistortionGeneratorDef::parse_reporting(
+                    c.data, &mut sink,
+                ) {
+                    assets.distortion_defs.insert(c.name, d);
                 }
             }
             ChunkKind::KeyFrame => {

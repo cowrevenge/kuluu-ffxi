@@ -28,6 +28,8 @@ pub enum GeneratorSection {
     ElementDie,
     /// `SoundGeneratorDef`'s section 2.
     SoundSetup,
+    /// `DistortionGeneratorDef`'s section 2.
+    DistortionSetup,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
@@ -2026,6 +2028,119 @@ impl SoundGeneratorDef {
     /// elem and re-emits only once it is gone, instead of running the timed emission loop.
     pub fn is_singleton(&self) -> bool {
         self.continuous || self.max_life_frames == 0.0
+    }
+}
+
+// research/xim ParticleGeneratorSettings.kt LinkedDataType — 0x22 is a screen-space distortion
+// (haze/smear) element, not a mesh particle. [`ParticleGeneratorDef::parse`] rejects the same chunks.
+pub const LINKED_DATA_DISTORTION: u8 = 0x22;
+
+/// sec2 0x32 HazeOffsetInitializer — two floats of which retail applies only the second as the
+/// horizontal smear bias (research/xim ParticleInitializers.kt HazeOffsetInitializer).
+const HAZE_OFFSET_OPCODE: u8 = 0x32;
+
+/// A 0x05 Generator whose setup links a 0x22 `Distortion` — a screen-space haze/smear element
+/// rather than a particle. [`ParticleGeneratorDef::parse`] rejects the same chunks, so the two
+/// views never overlap (mirrors [`SoundGeneratorDef`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DistortionGeneratorDef {
+    pub base_position: [f32; 3],
+
+    /// CYyGenerator.cpp Idle — re-emission period `frames_per_emission + uirand(emission_variance)`.
+    pub frames_per_emission: f32,
+    pub emission_variance: f32,
+
+    pub auto_run: bool,
+    pub continuous: bool,
+    pub max_life_frames: f32,
+
+    /// sec2 0x32 HazeOffsetInitializer horizontal offset — biases the smear direction.
+    pub haze_offset_x: f32,
+
+    pub attach_type: AttachType,
+}
+
+impl DistortionGeneratorDef {
+    pub fn parse(body: &[u8]) -> Result<Option<Self>> {
+        Self::parse_reporting(body, &mut |_, _, _| {})
+    }
+
+    pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
+        if body.len() < HEADER_LEN {
+            return Err(DatError::TruncatedChunk {
+                offset: 0,
+                needed: HEADER_LEN,
+                available: body.len(),
+            });
+        }
+
+        let attach_flags = u16_le(body, 0x00);
+        let flags = u32_le(body, GEN_FLAGS_OFFSET);
+
+        let sec2_raw = u32_le(body, 0x74) as usize;
+        if sec2_raw < CHUNK_HEADER_LEN || sec2_raw - CHUNK_HEADER_LEN >= body.len() {
+            return Ok(None);
+        }
+        let mut cursor = sec2_raw - CHUNK_HEADER_LEN;
+
+        let mut is_distortion = false;
+        let mut base_position = [0.0f32; 3];
+        let mut max_life_frames = 0.0f32;
+        let mut haze_offset_x = 0.0f32;
+
+        while cursor + 4 <= body.len() {
+            let cfg = u32_le(body, cursor);
+            let opcode = (cfg & OPCODE_MASK) as u8;
+            let size_words = ((cfg >> 8) & u32::from(SIZE_WORDS_MASK)) as usize;
+            if opcode == OPCODE_END || size_words == 0 {
+                break;
+            }
+            let block_len = size_words * 4;
+            let payload = cursor + 4;
+            if cursor + block_len > body.len() {
+                break;
+            }
+            let mut decoded = true;
+            match opcode {
+                0x01 if payload + 32 <= body.len() => {
+                    base_position = [
+                        f32_le(body, payload + 16),
+                        f32_le(body, payload + 20),
+                        f32_le(body, payload + 24),
+                    ];
+                    is_distortion = body[payload + 29] == LINKED_DATA_DISTORTION;
+                    max_life_frames = u16_le(body, payload + 30) as f32;
+                }
+                HAZE_OFFSET_OPCODE if payload + 8 <= body.len() => {
+                    // two floats; retail applies only the second (horizontalOffset).
+                    haze_offset_x = f32_le(body, payload + 4);
+                }
+                _ => decoded = false,
+            }
+            blocks.push((GeneratorSection::DistortionSetup, opcode, decoded));
+            cursor += block_len;
+        }
+
+        if !is_distortion {
+            return Ok(None);
+        }
+
+        flush_blocks(sink, &blocks);
+        Ok(Some(Self {
+            base_position,
+            frames_per_emission: u16_le(body, 0x66) as f32 + 1.0,
+            emission_variance: u16_le(body, 0x64) as f32,
+            auto_run: flags & GEN_FLAG_AUTO_RUN != 0,
+            continuous: flags & GEN_FLAG_CONTINUOUS != 0,
+            max_life_frames,
+            haze_offset_x,
+            attach_type: AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default(),
+        }))
+    }
+
+    pub fn is_placed(&self) -> bool {
+        self.base_position != [0.0, 0.0, 0.0]
     }
 }
 

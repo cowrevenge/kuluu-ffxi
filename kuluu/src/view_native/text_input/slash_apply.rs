@@ -748,29 +748,32 @@ pub(super) fn apply_slash_outcome(
             report_nav_info(navmesh_state, self_pos, scene_state);
         }
         SlashOutcome::AnimationTest {
-            loop_routine,
+            weapon_case,
             levelup,
         } => {
-            if let Some(routine) = &loop_routine {
-                let mut name = [0u8; 4];
-                for (slot, byte) in name.iter_mut().zip(routine.bytes()) {
-                    *slot = byte;
-                }
-                let on = slash_writers.animation_test.loop_routine != Some(name);
-                slash_writers.animation_test.loop_routine = if on { Some(name) } else { None };
+            use kuluu_render::scheduler_runtime::WeaponHitCase;
+            if let Some(case_name) = &weapon_case {
+                let case = match case_name.as_str() {
+                    "nhit" => WeaponHitCase::Normal,
+                    "chit" => WeaponHitCase::Critical,
+                    _ => WeaponHitCase::Death,
+                };
+                let on = slash_writers.animation_test.weapon_case != Some(case);
+                slash_writers.animation_test.weapon_case = if on { Some(case) } else { None };
                 slash_writers.vfx_trace.0 = on;
                 push_system_chat_line(
                     scene_state,
-                    format!("//animationtest: {} loop {}", routine, if on { "ON" } else { "OFF" }),
+                    format!(
+                        "//animationtest: {} {}",
+                        case_name,
+                        if on { "ON" } else { "OFF" }
+                    ),
                 );
             }
             if levelup {
                 slash_writers.animation_test.levelup_pending = true;
                 slash_writers.vfx_trace.0 = true;
-                push_system_chat_line(
-                    scene_state,
-                    "//animationtest: level-up effect armed".into(),
-                );
+                push_system_chat_line(scene_state, "//animationtest: level-up effect armed".into());
             }
         }
         SlashOutcome::AgentControl(op) => {

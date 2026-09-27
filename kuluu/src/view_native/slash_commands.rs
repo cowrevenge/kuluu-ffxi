@@ -285,8 +285,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
             Command {
                 names: &["animationtest"],
                 set: CommandSet::Dev,
-                usage: "weapon hit1|hit2 | player levelup",
-                summary: "VFX harness: loop a hit effect on yourself (repeat stops it) or fire the level-up once",
+                usage: "weapon nhit|chit|dhit | player levelup",
+                summary: "VFX harness: loop a real hit reaction on yourself through dam0 (repeat stops it) or fire the level-up once",
                 handler: |c| parse_animation_test(c),
             },
             Command {
@@ -1115,10 +1115,11 @@ pub enum SlashOutcome {
     NavInfo,
 
     /// //animationtest — the VFX verification harness (kuluu_render::scheduler_runtime):
-    /// `weapon hit1|hit2` loops that global-dir effect on the local player (a repeat stops
-    /// it); `player levelup` fires the level-up effect DAT once.
+    /// `weapon nhit|chit|dhit` loops that melee resolution on the local player through
+    /// ROM/0/0.DAT's dam0 switch (a repeat stops it); `player levelup` fires the level-up
+    /// effect DAT once.
     AnimationTest {
-        loop_routine: Option<String>,
+        weapon_case: Option<String>,
         levelup: bool,
     },
 
@@ -3119,16 +3120,18 @@ fn parse_animation_test(c: &SlashCtx) -> SlashOutcome {
     let rest = c.rest;
     let mut words = rest.split_whitespace();
     match (words.next(), words.next()) {
-        (Some("weapon"), Some(r)) if r == "hit1" || r == "hit2" => SlashOutcome::AnimationTest {
-            loop_routine: Some(r.to_string()),
-            levelup: false,
-        },
+        (Some("weapon"), Some(r)) if r == "nhit" || r == "chit" || r == "dhit" => {
+            SlashOutcome::AnimationTest {
+                weapon_case: Some(r.to_string()),
+                levelup: false,
+            }
+        }
         (Some("player"), Some("levelup")) => SlashOutcome::AnimationTest {
-            loop_routine: None,
+            weapon_case: None,
             levelup: true,
         },
         _ => SlashOutcome::SystemMessage(
-            "//animationtest: usage — `weapon hit1`, `weapon hit2` or `player levelup`".into(),
+            "//animationtest: usage — `weapon nhit`, `weapon chit`, `weapon dhit` or `player levelup`".into(),
         ),
     }
 }

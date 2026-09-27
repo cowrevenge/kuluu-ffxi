@@ -3672,6 +3672,91 @@ fn latch_dead_from_action(
     }
 }
 
+// What fire_hit_reaction ran, for //animationtest's one-shot chat report.
+#[cfg(not(target_arch = "wasm32"))]
+struct HitReactionReport {
+    dam0: Vec<String>,
+    victim_stages: String,
+    crtl: Vec<String>,
+}
+
+// The frame the damage callback fires: run whatever ROM/0/0.DAT's `dam0` switch selects for this
+// result on the VICTIM with target = attacker (the victim's own damg shadows the global one and
+// links chit back onto the attacker, whose ef h sparks land on the victim again), plus crtl's
+// spark on the ATTACKER for a crit. //animationtest reuses it to loop a hit on the local player.
+#[cfg(not(target_arch = "wasm32"))]
+fn fire_hit_reaction(
+    attacker: Entity,
+    victim: Entity,
+    ctx: &HitContext,
+    q_children: &Query<&Children>,
+    q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_active: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+    global: Option<&GlobalEffectDir>,
+    commands: &mut Commands,
+) -> HitReactionReport {
+    let mut report = HitReactionReport {
+        dam0: Vec::new(),
+        victim_stages: String::new(),
+        crtl: Vec::new(),
+    };
+    let Some(victim_routines) = actor_render_routines(victim, q_children, q_render) else {
+        return report;
+    };
+    let mut lookup = RoutineLookup::new().with_actor(victim_routines);
+    if let Some(g) = global {
+        lookup = lookup.with_dat(&g.schedulers);
+    }
+    for routine in &evaluate_switch(&lookup, b"dam0", ctx, UnknownFieldPolicy::Random) {
+        tracing::debug!(target: "combat", "COMBAT_RX victim={} res={} info=0x{:X} routine={} found={}",
+                victim.index(),
+                ctx.resolution,
+                ctx.info,
+                fourcc(*routine),
+                lookup.get(routine).is_some());
+        report.dam0.push(fourcc(*routine));
+        if let Some(summary) = run_routine_on(
+            victim,
+            routine,
+            Some(attacker),
+            q_children,
+            q_render,
+            q_active,
+            pending_inserts,
+            global,
+            commands,
+        ) {
+            if !report.victim_stages.is_empty() {
+                report.victim_stages.push_str("; ");
+            }
+            report.victim_stages.push_str(&summary);
+        }
+    }
+    // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
+    // context (target = victim): its g14*/g29* spark defs are TargetActor-attached and land
+    // on the struck actor only when the spark's target IS the victim.
+    if ctx.info & ffxi_proto::melee::INFO_CRITICAL_HIT as u32 != 0 {
+        for routine in evaluate_switch(&lookup, b"crtl", ctx, UnknownFieldPolicy::Match) {
+            tracing::debug!(target: "combat", "COMBAT_RX_CRIT attacker={} routine={}",
+                    attacker.index(), fourcc(routine));
+            report.crtl.push(fourcc(routine));
+            run_routine_on(
+                attacker,
+                &routine,
+                Some(victim),
+                q_children,
+                q_render,
+                q_active,
+                pending_inserts,
+                global,
+                commands,
+            );
+        }
+    }
+    report
+}
+
 // research/xim EffectRoutineInstance.kt handleDamageCallbackRoutine — the 0x2B stage is where retail hands control
 // to the damage callback. That is the frame the victim's reaction routine starts, so the flinch
 // and impact SE line up with the swing instead of with packet arrival.
@@ -3714,60 +3799,17 @@ pub fn dispatch_damage_callback_stages(
             tracing::debug!(target: "combat", "COMBAT_CB actor={} no-victim", ev.actor.index());
             continue;
         };
-        let Some(victim_routines) = actor_render_routines(victim, &q_children, &q_render) else {
-            tracing::debug!(target: "combat", "COMBAT_CB victim={} no-victim-routines", victim.index());
-            continue;
-        };
-        let mut lookup = RoutineLookup::new().with_actor(victim_routines);
-        if let Some(g) = global.as_ref() {
-            lookup = lookup.with_dat(&g.schedulers);
-        }
-        // The reaction is whatever the global effect dir's `dam0` switch selects from this
-        // result - no hand-transcribed table. It runs on the VICTIM with target = attacker:
-        // the victim's own damg shadows the global one and links chit back onto the attacker,
-        // whose ef h sparks (TargetActor) land on the victim again; FlinchOnCaster flinches
-        // the victim.
-        let ctx = HitContext::from_pending(pending);
-        let chosen = evaluate_switch(&lookup, b"dam0", &ctx, UnknownFieldPolicy::Random);
-        for routine in &chosen {
-            tracing::debug!(target: "combat", "COMBAT_RX victim={} res={:?} outcome={:?} routine={} found={}",
-                    victim.index(),
-                    pending.resolution,
-                    pending.outcome,
-                    fourcc(*routine),
-                    lookup.get(routine).is_some());
-            run_routine_on(
-                victim,
-                routine,
-                Some(ev.actor),
-                &q_children,
-                &q_render,
-                &mut q_active,
-                &mut pending_inserts,
-                global.as_deref(),
-                &mut commands,
-            );
-        }
-        // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
-        // context (target = victim): its g14*/g29* spark defs are TargetActor-attached and land
-        // on the struck actor only when the spark's target IS the victim.
-        if pending.outcome.is_critical() {
-            for routine in evaluate_switch(&lookup, b"crtl", &ctx, UnknownFieldPolicy::Match) {
-                tracing::debug!(target: "combat", "COMBAT_RX_CRIT attacker={} routine={}",
-                        ev.actor.index(), fourcc(routine));
-                run_routine_on(
-                    ev.actor,
-                    &routine,
-                    Some(victim),
-                    &q_children,
-                    &q_render,
-                    &mut q_active,
-                    &mut pending_inserts,
-                    global.as_deref(),
-                    &mut commands,
-                );
-            }
-        }
+        fire_hit_reaction(
+            ev.actor,
+            victim,
+            &HitContext::from_pending(pending),
+            &q_children,
+            &q_render,
+            &mut q_active,
+            &mut pending_inserts,
+            global.as_deref(),
+            &mut commands,
+        );
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
@@ -3831,17 +3873,18 @@ fn run_routine_on(
     pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     global: Option<&GlobalEffectDir>,
     commands: &mut Commands,
-) {
+) -> Option<String> {
     let Some(routines) = actor_render_routines(entity, q_children, q_render) else {
-        return;
+        return None;
     };
     let mut lookup = RoutineLookup::new().with_actor(routines);
     if let Some(g) = global {
         lookup = lookup.with_dat(&g.schedulers);
     }
     let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
-        return;
+        return None;
     };
+    let summary = stage_summary(&active);
     match q_active.get_mut(entity) {
         Ok(mut scheds) => scheds.push(active),
         Err(_) => pending_inserts.entry(entity).or_default().push(active),
@@ -3853,6 +3896,29 @@ fn run_routine_on(
     commands
         .entity(entity)
         .try_insert(ActionTarget(flipped_target));
+    Some(summary)
+}
+
+// The VFX-relevant stages of a resolved routine, for the animationtest chat report: particle
+// generator names plus their sound/flinch companions.
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_summary(active: &ActiveScheduler) -> String {
+    let mut parts = Vec::new();
+    for t in &active.stages {
+        match t.stage.kind {
+            StageKind::Particle => parts.push(fourcc(t.stage.id)),
+            StageKind::SoundOnCaster | StageKind::SoundOnTarget => {
+                parts.push(format!("sfx {}", fourcc(t.stage.id)))
+            }
+            StageKind::FlinchOnCaster | StageKind::FlinchOnTarget => parts.push("flinch".into()),
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        "no particle/sound/flinch stages".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4142,17 +4208,48 @@ pub fn dispatch_level_up(
     }
 }
 
-// //animationtest — the VFX verification harness. `weapon hit1|hit2` loops a global-dir effect
-// routine on the local player (re-deferred once a second while armed, dispatch_level_up above
-// is the one-shot form of the same PendingActionDispatch::Routine); `player levelup` fires the
-// level-up effect DAT once. While a case is live, VfxTrace makes every step of the dispatch
-// funnel log at info! so a silent miss pins to its stage.
+// //animationtest — the VFX verification harness. The weapon cases loop a real melee hit
+// reaction on the local player (self attacks self, routed through ROM/0/0.DAT's dam0 switch):
+// nhit = plain hit, chit = crit (+crtl spark), dhit = killing blow (damh, VFX only); `player
+// levelup` fires the level-up effect DAT once. The first fire of a case reports its path and
+// particles to chat; while a case is live, VfxTrace makes every step of the dispatch funnel log
+// at info! so a silent miss pins to its stage.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct AnimationTestState {
-    /// The global-dir routine looping on the local player (hit1/hit2), if any.
-    pub loop_routine: Option<[u8; 4]>,
+    /// The weapon hit case looping on the local player (nhit/chit/dhit), if any.
+    pub weapon_case: Option<WeaponHitCase>,
     /// One-shot level-up effect pending dispatch (ROM/13/35.DAT `main`).
     pub levelup_pending: bool,
+}
+
+/// The melee resolutions //animationtest can loop; info_bits is what dam0's [`HIT_FIELD_INFO`] test sees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WeaponHitCase {
+    /// nhit — a plain hit (damg).
+    Normal,
+    /// chit — a critical hit (damg + crtl spark).
+    Critical,
+    /// dhit — the killing blow (damh); VFX only, no death latch.
+    Death,
+}
+
+impl WeaponHitCase {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "nhit",
+            Self::Critical => "chit",
+            Self::Death => "dhit",
+        }
+    }
+
+    /// The result.info bits dam0's [`HIT_FIELD_INFO`] test sees for this case.
+    pub const fn info_bits(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Critical => ffxi_proto::melee::INFO_CRITICAL_HIT,
+            Self::Death => ffxi_proto::melee::INFO_DEFEATED,
+        }
+    }
 }
 
 /// Armed while an animationtest case is live; the dispatch funnel logs at info! instead of
@@ -4167,12 +4264,20 @@ const ANIMATION_TEST_TRACE_SECS: f32 = 15.0;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn animation_test_tick(
     time: Res<Time>,
-    state: Res<crate::snapshot::SceneState>,
+    mut state: ResMut<crate::snapshot::SceneState>,
+    tracked: Res<crate::scene::TrackedEntities>,
     mut test: ResMut<AnimationTestState>,
     mut trace: ResMut<VfxTrace>,
     mut cache: ResMut<ActionDatCache>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    mut q_active: Query<&mut ActiveSchedulers>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
+    mut commands: Commands,
     mut loop_elapsed: Local<f32>,
     mut one_shot_secs: Local<Option<f32>>,
+    mut reported_case: Local<Option<WeaponHitCase>>,
 ) {
     let Some(self_id) = state.snapshot.self_char_id else {
         return;
@@ -4197,31 +4302,56 @@ pub fn animation_test_tick(
         test.levelup_pending = false;
     }
 
-    if let Some(routine) = test.loop_routine {
+    if let Some(case) = test.weapon_case {
         *loop_elapsed += time.delta_secs() * ROUTINE_FPS;
         if *loop_elapsed >= ANIMATION_TEST_LOOP_INTERVAL_FRAMES {
             *loop_elapsed = 0.0;
+            let Some(self_entity) = tracked.by_id.get(&self_id).copied() else {
+                return;
+            };
             info!(
                 "animationtest: firing {} on self 0x{self_id:08X}",
-                String::from_utf8_lossy(&routine),
+                case.name()
             );
-            cache.defer(
-                GLOBAL_EFFECT_DIR_FILE_ID,
-                PendingActionDispatch::Routine {
-                    actor_id: self_id,
-                    target_id: 0,
-                    routine,
-                    duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                    cutscene_actor: None,
-                },
+            let ctx = HitContext {
+                resolution: 0,
+                animation: 0,
+                info: u32::from(case.info_bits()),
+            };
+            let report = fire_hit_reaction(
+                self_entity,
+                self_entity,
+                &ctx,
+                &q_children,
+                &q_render,
+                &mut q_active,
+                &mut pending_inserts,
+                global.as_deref(),
+                &mut commands,
             );
+            if reported_case.as_ref() != Some(&case) {
+                *reported_case = Some(case);
+                let chosen = if report.dam0.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    report.dam0.join(", ")
+                };
+                let mut line = format!("//animationtest {} ON — dam0 → {}", case.name(), chosen);
+                if !report.victim_stages.is_empty() {
+                    line.push_str(&format!("; on self: {}", report.victim_stages));
+                }
+                for spark in &report.crtl {
+                    line.push_str(&format!("; crtl → {} (spark)", spark));
+                }
+                state.push_local_toast(crate::snapshot::system_chat_line(line));
+            }
         }
     }
 
     // A one-shot's trace window closes on its own; a live loop keeps the trace armed.
     if let Some(secs) = one_shot_secs.as_mut() {
         *secs += time.delta_secs();
-        if *secs > ANIMATION_TEST_TRACE_SECS && test.loop_routine.is_none() {
+        if *secs > ANIMATION_TEST_TRACE_SECS && test.weapon_case.is_none() {
             *one_shot_secs = None;
             trace.0 = false;
         }

@@ -55,6 +55,9 @@ enum Case {
     MobChit,
     MobRespawn,
     LevelUp,
+    Gen141,
+    Gen144,
+    Hit1Full,
 }
 
 impl Case {
@@ -67,6 +70,9 @@ impl Case {
             Self::MobChit => "mob crit hit",
             Self::MobRespawn => "mob respawn",
             Self::LevelUp => "player level up",
+            Self::Gen141 => "g141 (alpha 1)",
+            Self::Gen144 => "g144 (alpha 1)",
+            Self::Hit1Full => "hit1 full (141/144 alpha 1)",
         }
     }
 
@@ -672,6 +678,9 @@ fn spawn_panel(commands: &mut Commands) {
         Case::MobChit,
         Case::MobRespawn,
         Case::LevelUp,
+        Case::Gen141,
+        Case::Gen144,
+        Case::Hit1Full,
     ] {
         let button = commands
             .spawn((
@@ -729,6 +738,8 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::PlayerDhit => std::time::Duration::from_millis(2000),
         Case::LevelUp => std::time::Duration::from_millis(3500),
         Case::MobRespawn => std::time::Duration::from_millis(300),
+        Case::Gen141 | Case::Gen144 => std::time::Duration::from_millis(2000),
+        Case::Hit1Full => std::time::Duration::from_millis(2500),
     }
 }
 
@@ -812,6 +823,11 @@ fn run_pending_case(
     };
     log_line(&mut log, format!("case: {}", case.label()));
 
+    // Reset the tester alpha override each case so a prior g141/g144 inspection doesn't leak.
+    commands.insert_resource(kuluu_render::particle_sim::TestAlphaOverride(
+        Default::default(),
+    ));
+
     // A dead worm can neither swing nor react: bring it back before the hit so the impact
     // lands on a live model.
     if matches!(
@@ -854,6 +870,21 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
+        Case::Gen141 => fire_single_gen(
+            &tracked,
+            global.as_deref(),
+            *b"g141",
+            &mut log,
+            &mut commands,
+        ),
+        Case::Gen144 => fire_single_gen(
+            &tracked,
+            global.as_deref(),
+            *b"g144",
+            &mut log,
+            &mut commands,
+        ),
+        Case::Hit1Full => fire_hit1_full(&tracked, global.as_deref(), &mut log, &mut commands),
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
 
@@ -1028,6 +1059,102 @@ fn fire_level_up(
             enqueue_routine(commands, hume, active);
         }
         None => log_line(log, "lvup `main` UNRESOLVED".into()),
+    }
+}
+
+// Tester-only: spawn a single named generator on the worm (as target) with its alpha forced to 1,
+// so an a=0 additive flash can be seen in isolation. The def is resolved from the global effect
+// dir at spawn time (spawn_particle_generators), independent of this synthetic one-stage routine.
+fn fire_single_gen(
+    tracked: &TrackedEntities,
+    _global: Option<&GlobalEffectDir>,
+    gen: [u8; 4],
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
+        log_line(log, "worm not loaded yet".into());
+        return;
+    };
+    let stage = ffxi_dat::scheduler::SchedulerStage {
+        kind: ffxi_dat::scheduler::StageKind::Particle,
+        raw_type: 0x02, // SpawnGenerator
+        stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
+        delay_frames: 0,
+        duration_frames: 0, // one burst; the particle lives out its own max_life
+        id: gen,
+        max_loops: 0,
+        transition_in: 0,
+        transition_out: 0,
+        model_transform: None,
+        follow_points: None,
+        screen_color: None,
+        actor_fade: None,
+        idle_transition_time: None,
+        flinch_duration: None,
+        model_visibility: None,
+        spell_effect: None,
+        control_flow: None,
+        random_group: None,
+        local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
+    };
+    let sched = ffxi_dat::scheduler::Scheduler {
+        name: *b"tst1",
+        stages: vec![ffxi_dat::scheduler::TimedStage { frame: 0, stage }],
+    };
+    let scheds = [sched];
+    let lookup = RoutineLookup::new().with_dat(&scheds);
+    match ActiveScheduler::from_routine(&lookup, b"tst1") {
+        Some(active) => {
+            commands.insert_resource(kuluu_render::particle_sim::TestAlphaOverride(
+                std::collections::HashSet::from([gen]),
+            ));
+            log_line(
+                log,
+                format!(
+                    "{} on worm (alpha 1): {}",
+                    String::from_utf8_lossy(&gen),
+                    stage_summary(&active)
+                ),
+            );
+            enqueue_routine(commands, worm, active);
+        }
+        None => log_line(log, "single-gen routine UNRESOLVED".into()),
+    }
+}
+
+// Tester-only: play the full ROM/0/0.DAT hit1 routine on the worm (as target) with g141/g144's
+// alpha forced to 1 so their a=0 additive flashes are visible alongside the rest of the chain.
+fn fire_hit1_full(
+    tracked: &TrackedEntities,
+    global: Option<&GlobalEffectDir>,
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
+        log_line(log, "worm not loaded yet".into());
+        return;
+    };
+    let Some(g) = global else {
+        log_line(log, "no global effect dir wired".into());
+        return;
+    };
+    let lookup = RoutineLookup::new().with_dat(&g.schedulers);
+    match ActiveScheduler::from_routine(&lookup, b"hit1") {
+        Some(active) => {
+            commands.insert_resource(kuluu_render::particle_sim::TestAlphaOverride(
+                std::collections::HashSet::from([*b"g141", *b"g144"]),
+            ));
+            log_line(
+                log,
+                format!(
+                    "hit1 full on worm (g141/g144 alpha 1): {}",
+                    stage_summary(&active)
+                ),
+            );
+            enqueue_routine(commands, worm, active);
+        }
+        None => log_line(log, "hit1 UNRESOLVED in the global effect dir".into()),
     }
 }
 

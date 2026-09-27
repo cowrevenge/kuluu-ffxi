@@ -600,6 +600,11 @@ fn attached_origin(
 /// frame, but Bevy computes the frustum-culling Aabb once from the initially-empty mesh and
 /// does not recompute it, so the entity would be culled permanently. `sync_particle_meshes`
 /// owns the draw gate instead.
+/// Tester-only: generator names whose authored alpha is forced to 1.0 at spawn, so an a=0
+/// additive flash (g141/g144) can be inspected in isolation. Absent/empty in production.
+#[derive(Resource, Default)]
+pub struct TestAlphaOverride(pub std::collections::HashSet<[u8; 4]>);
+
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<(&Transform, Option<&ActionAssets>)>,
@@ -608,6 +613,7 @@ pub fn spawn_particle_generators(
     q_children: Query<&Children>,
     q_render: Query<&FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    alpha_override: Option<Res<TestAlphaOverride>>,
     trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
     mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -645,7 +651,7 @@ pub fn spawn_particle_generators(
             }
             continue;
         };
-        let Some((def_dir, def)) = assets
+        let Some((def_dir, mut def)) = assets
             .particle_def_scoped(local_dir, &ev.stage.stage.id)
             .map(|(dir, def)| (dir, *def))
         else {
@@ -658,6 +664,13 @@ pub fn spawn_particle_generators(
             }
             continue;
         };
+        // Tester-only alpha override: force an a=0 additive flash to opaque for inspection.
+        if alpha_override
+            .as_ref()
+            .is_some_and(|o| o.0.contains(&ev.stage.stage.id))
+        {
+            def.init_color[3] = 1.0;
+        }
         let Some((template, sprite_frames, tex)) =
             resolve_mesh(assets, def_dir, &def, &mut images, false)
         else {

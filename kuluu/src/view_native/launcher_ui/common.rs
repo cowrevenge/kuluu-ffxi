@@ -790,7 +790,8 @@ fn spawn_titlebar(
                         next.set(LauncherState::Settings);
                     },
                 );
-                if crate::view_native::animation_test_scene::ENHANCED_GATE_ON {
+                #[cfg(feature = "enhanced-animationtest")]
+                {
                     bar.spawn(button_bundle(
                         ButtonBundleProps::default(),
                         (),

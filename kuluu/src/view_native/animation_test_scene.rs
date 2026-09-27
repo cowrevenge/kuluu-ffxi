@@ -93,19 +93,8 @@ struct WormState {
 #[derive(Component)]
 struct TestSceneScoped;
 
-/// The launcher entry only exists in enhanced builds; vanilla parity is the project default.
-pub(crate) const ENHANCED_GATE_ON: bool = cfg!(feature = "enhanced-buff-tooltips")
-    || cfg!(feature = "enhanced-buff-timers")
-    || cfg!(feature = "enhanced-cast-bar")
-    || cfg!(feature = "enhanced-death-countdown")
-    || cfg!(feature = "enhanced-engage-move-lock-off")
-    || cfg!(feature = "enhanced-job-display")
-    || cfg!(feature = "enhanced-mob-hp-under")
-    || cfg!(feature = "enhanced-neural-uplift")
-    || cfg!(feature = "enhanced-shutdown-counter")
-    || cfg!(feature = "enhanced-targetname");
-
-/// Set by the launcher's AnimationTest titlebar button; consumed by handle_toggle.
+/// Set by the launcher's AnimationTest titlebar button (gated on the
+/// `enhanced-animationtest` feature); consumed by handle_toggle.
 #[derive(Resource, Default)]
 pub(crate) struct PendingToggle(pub bool);
 

@@ -429,9 +429,8 @@ mod tests {
         }
         let plain = bound_alpha(&plain_mats, &plain_images);
         assert!(
-            plain.contains(&ffxi_alpha_remap(DITHER_LO))
-                && plain.contains(&ffxi_alpha_remap(DITHER_HI)),
-            "every other generator set must keep the stipple"
+            plain.contains(&DITHER_LO) && plain.contains(&DITHER_HI),
+            "every other generator set must pass the stored alpha through as-is"
         );
     }
 }

@@ -4915,18 +4915,14 @@ mod tests {
         }
     }
 
-    // The alpha lattice a decoded-then-remapped DXT3 texture can sit on: the 4-bit plane holds
-    // multiples of the dither step, and `apply_ffxi_alpha_remap` doubles with saturation
-    // (ffxi-dat/src/texture.rs DXT3_ALPHA_DITHER_STEP, ffxi_alpha_remap). Any other value is a
-    // neighbourhood mean, i.e. proof the undither ran.
+    // The alpha lattice a decoded DXT3 texture sits on before conversion: the 4-bit plane holds
+    // multiples of the dither step (ffxi-dat/src/texture.rs DXT3_ALPHA_DITHER_STEP), so any other
+    // value is a neighbourhood mean, i.e. proof the undither ran.
     fn off_nibble_lattice(alpha: &[u8]) -> usize {
-        use ffxi_dat::texture::{ffxi_alpha_remap, DXT3_ALPHA_DITHER_STEP};
+        use ffxi_dat::texture::DXT3_ALPHA_DITHER_STEP;
 
-        let lattice: Vec<u8> = (0..=u8::MAX)
-            .step_by(DXT3_ALPHA_DITHER_STEP as usize)
-            .map(ffxi_alpha_remap)
-            .collect();
-        alpha.iter().filter(|a| !lattice.contains(a)).count()
+        let step = DXT3_ALPHA_DITHER_STEP as usize;
+        alpha.iter().filter(|a| **a as usize % step != 0).count()
     }
 
     fn image_alpha(images: &Assets<Image>, handle: &Handle<Image>) -> Vec<u8> {
@@ -4941,9 +4937,9 @@ mod tests {
 
     // Read off the shipped f_ro DAT: the lunar halo sheet `kasa` is a DXT3 whose alpha is
     // entirely the nibble 7/8 dithered-opaque pair (ffxi-dat/examples/dat-sky-alpha-histogram.rs
-    // on zone files 210/331), so the plain particle converter hands the GPU a 238/255
-    // per-texel stipple and only the celestial converter averages it back to the authored
-    // half-step. Skips without a retail install.
+    // on zone files 210/331), so the plain particle converter hands the GPU the stored 119/136
+    // per-texel stipple as-is and only the celestial converter undithers and expands it to the
+    // authored half-step. Skips without a retail install.
     #[test]
     fn zone_210_halo_sheet_is_dithered_and_only_the_celestial_converter_resolves_it() {
         const F_RO: u32 = 210;
@@ -4978,16 +4974,16 @@ mod tests {
         let sky = images.add(decoded_sky_texture_to_image(&tex));
 
         let plain_alpha = image_alpha(&images, &plain);
-        let lo = ffxi_dat::texture::ffxi_alpha_remap(DITHER_LO);
-        let hi = ffxi_dat::texture::ffxi_alpha_remap(DITHER_HI);
         assert!(
-            plain_alpha.contains(&lo) && plain_alpha.contains(&hi),
-            "the shared particle converter keeps the stipple"
+            plain_alpha.contains(&DITHER_LO) && plain_alpha.contains(&DITHER_HI),
+            "the shared particle converter passes the stored stipple through as-is"
         );
 
         let sky_alpha = image_alpha(&images, &sky);
         let spread =
             sky_alpha.iter().max().expect("non-empty") - sky_alpha.iter().min().expect("non-empty");
+        // The celestial path still expands: the undithered mean 127.5 doubles to a 254/255 split.
+        let lo = ffxi_dat::texture::ffxi_alpha_remap(DITHER_LO);
         assert!(
             spread <= RESOLVED_RESIDUAL_MAX && *sky_alpha.iter().min().expect("non-empty") > lo,
             "the celestial converter left alpha spread {spread}"
@@ -5025,7 +5021,7 @@ mod tests {
         assert_eq!(
             off_nibble_lattice(&alpha(false)),
             0,
-            "the shared particle converter only ever emits remapped nibble alpha"
+            "the shared particle converter passes stored nibble alpha through as-is"
         );
         assert!(
             off_nibble_lattice(&alpha(true)) > 0,

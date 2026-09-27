@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use kuluu_render::components::WorldEntity;
 use kuluu_render::ffxi_actor_render::{ActorSubject, FfxiRenderActor, LoadActorRequest};
-use kuluu_render::scene::{EntityMesh, TrackedEntities};
+use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
     enqueue_routine, evaluate_switch, stage_summary, ActionDatRoot, ActionTarget, ActiveScheduler,
     GlobalEffectDir, HitContext, RoutineLookup, UnknownFieldPolicy, LEVEL_UP_EFFECT_DAT_ID,
@@ -134,8 +134,10 @@ fn handle_toggle(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    moon_materials: ResMut<Assets<kuluu_render::moon_material::MoonMaterial>>,
+    images: ResMut<Assets<Image>>,
+    settings: Res<kuluu_render::graphics_settings::GraphicsSettings>,
     mut load_tx: MessageWriter<LoadActorRequest>,
-    mesh_exists: Option<Res<EntityMesh>>,
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
     actor_root: Res<ActionDatRoot>,
@@ -157,20 +159,31 @@ fn handle_toggle(
         &mut meshes,
         &mut materials,
         &mut load_tx,
-        mesh_exists.is_none(),
         &mut tracked,
         &mut scene,
         &actor_root,
         &mut log,
     );
+
+    // Last: it consumes the owned params. poll_load_actor_tasks parks tasks without EntityMesh,
+    // and the Update chain that resource unlocks (sync_entities_system & co.) reads the world
+    // resources setup_world inserts on InGame entry — so run it here: real orb meshes/materials
+    // for the wire placeholders, no defaults.
+    kuluu_render::setup_world(
+        commands,
+        meshes,
+        materials,
+        moon_materials,
+        images,
+        settings,
+    );
 }
 
 fn activate_test_scene(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
     load_tx: &mut MessageWriter<LoadActorRequest>,
-    insert_mesh: bool,
     tracked: &mut TrackedEntities,
     scene: &mut SceneState,
     actor_root: &ActionDatRoot,
@@ -184,25 +197,15 @@ fn activate_test_scene(
         return;
     }
 
-    // poll_load_actor_tasks parks tasks without EntityMesh, which setup_world only inserts on
-    // InGame entry. The default handles are enough for the load path; ViewerCorePlugin's
-    // Update chain that this unlocks is a no-op here (no IsSelf entity, no game camera).
-    if insert_mesh {
-        commands.insert_resource(EntityMesh {
-            default: Handle::default(),
-            pc: Handle::default(),
-            mob: Handle::default(),
-            pet: Handle::default(),
-        });
-    }
-
     // Camera + light + ground. The camera clears its own color so the launcher backdrop zone
     // does not show around the test floor.
     commands.spawn((
         TestSceneScoped,
         Camera3d::default(),
+        // Order 3: above the launcher backdrop (-2) and any default-order (gizmo) camera;
+        // 1-2 are the in-game nameplate overlay/composite slots.
         Camera {
-            order: 0,
+            order: 3,
             clear_color: ClearColorConfig::Custom(Color::srgb(0.05, 0.06, 0.08)),
             ..default()
         },
@@ -292,6 +295,8 @@ fn spawn_wire(
     kind: EntityKind,
     pos: Vec3,
 ) {
+    // Visibility on the wire (as in sync_entities_system's spawn): Bevy then attaches
+    // InheritedVisibility to the parent, so the model children don't trip B0004.
     let parent = commands
         .spawn((
             TestSceneScoped,
@@ -301,6 +306,7 @@ fn spawn_wire(
                 kind,
             },
             Transform::from_translation(pos),
+            Visibility::default(),
         ))
         .id();
     tracked.by_id.insert(id, parent);

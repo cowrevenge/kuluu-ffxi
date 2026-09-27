@@ -283,8 +283,10 @@ fn activate_test_scene(
 
     // Worm left, sworded Hume right, facing each other. The snapshot entries keep the wires
     // alive: sync_entities_system despawns any tracked wire missing from the snapshot.
-    // The two skeletons face opposite ways locally (live check): the worm's forward is local
-    // -X, the HumeM's is local +X — so both take a PI turn to square onto each other.
+    // Heading is the system's orientation source of truth (sync re-derives the wire quat from
+    // it on respawn), so both the spawn transform and the heading agree. Both are 128 (= a PI
+    // turn, live-checked): the two skeletons are authored facing opposite local ways — the
+    // worm's forward is -X, the HumeM's +X — so equal headings square them onto each other.
     // Both are engaged so they stand in battle stance with weapons out, not rest pose.
     spawn_wire(
         commands,
@@ -293,7 +295,7 @@ fn activate_test_scene(
         WORM_ID,
         EntityKind::Mob,
         Vec3::new(-1.0, 0.0, 0.0),
-        Quat::from_rotation_y(std::f32::consts::PI),
+        128,
         ffxi_proto::decode::animation::ATTACK,
         HUME_ID,
     );
@@ -304,7 +306,7 @@ fn activate_test_scene(
         HUME_ID,
         EntityKind::Pc,
         Vec3::new(1.0, 0.0, 0.0),
-        Quat::from_rotation_y(std::f32::consts::PI),
+        128,
         ffxi_proto::decode::animation::ATTACK,
         WORM_ID,
     );
@@ -316,10 +318,20 @@ fn activate_test_scene(
         Some(face_file) => equipment.push(face_file),
         None => log_line(log, "face file unresolved — head will not render".into()),
     }
-    equipment.extend(
-        (1u16..=5)
-            .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
-    );
+    for slot in 1..=5u16 {
+        match kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
+            Some(file_id) => equipment.push(file_id),
+            None => log_line(
+                log,
+                format!("slot {slot} unresolved — that body part will not render"),
+            ),
+        }
+    }
+    let equip_list = equipment
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
     load_tx.write(LoadActorRequest {
         entity_id: WORM_ID,
         subject: ActorSubject::Npc {
@@ -368,7 +380,7 @@ fn activate_test_scene(
     log_line(
         log,
         format!(
-            "scene up — worm (file {WORM_FILE}) left, HumeM + sword ({HUME_MAIN_WEAPON}) right; models loading"
+            "scene up — worm (file {WORM_FILE}) left, HumeM + sword ({HUME_MAIN_WEAPON}) right; equipment [{equip_list}]; models loading"
         ),
     );
 }
@@ -380,7 +392,7 @@ fn spawn_wire(
     id: u32,
     kind: EntityKind,
     pos: Vec3,
-    rot: Quat,
+    heading: u8,
     animation: u8,
     bt_target_id: u32,
 ) {
@@ -391,6 +403,8 @@ fn spawn_wire(
         y: -pos.z,
         z: -pos.y,
     };
+    // Same formula as scene.rs heading_to_quat, so a sync respawn cannot re-orient the wire.
+    let rot = Quat::from_rotation_y(-(heading as f32) * std::f32::consts::TAU / 256.0);
     // Visibility on the wire (as in sync_entities_system's spawn): Bevy then attaches
     // InheritedVisibility to the parent, so the model children don't trip B0004.
     let parent = commands
@@ -412,7 +426,7 @@ fn spawn_wire(
         kind,
         name: None,
         pos: wire_pos,
-        heading: 0,
+        heading,
         hp_pct: Some(100),
         bt_target_id,
         face_target: 0,
@@ -620,6 +634,33 @@ fn fire_hit(
         );
         return;
     };
+    // The attacker's own swing, mirroring dispatch_melee_action_started: atk0 voice merged with
+    // the ati0 motion from the attacker's routines; target = victim so the pose faces them.
+    if let Some(att_routines) = actor_routines(attacker, q_children, q_render) {
+        let mut att_lookup = RoutineLookup::new().with_actor(&att_routines);
+        if let Some(g) = global {
+            att_lookup = att_lookup.with_dat(&g.schedulers);
+        }
+        match ActiveScheduler::effects_only_merged(&att_lookup, &[*b"atk0", *b"ati0"]) {
+            Some(active) => {
+                log_line(
+                    log,
+                    format!("swing on attacker: {}", stage_summary(&active)),
+                );
+                enqueue_routine(commands, attacker, active);
+                commands
+                    .entity(attacker)
+                    .try_insert(ActionTarget(Some(victim)));
+            }
+            None => log_line(log, "no atk0/ati0 swing routine on the attacker".into()),
+        }
+    } else {
+        log_line(
+            log,
+            "attacker has no routines yet — model still loading".into(),
+        );
+    }
+
     let mut lookup = RoutineLookup::new().with_actor(&victim_routines);
     if let Some(g) = global {
         lookup = lookup.with_dat(&g.schedulers);

@@ -1968,6 +1968,25 @@ fn axial_camera_rotation(particle_world: Vec3, cam_pos: Vec3, vel_basis: Vec3) -
     Quat::from_axis_angle(left, angle) * Quat::from_rotation_y(-m.z.atan2(m.x))
 }
 
+// research/xim Particle.kt applyMovementOrientation — the Movement billboard's world basis from its
+// velocity (identity while the element stands still). The rotateY post-multiply lands leftmost in
+// column convention because GLDrawer uploads xim's row-major matrices untransposed. `vel_basis` is an
+// involution, so a Bevy-space velocity folds into the DAT frame the template lives in.
+fn movement_orientation(movement: Vec3) -> Quat {
+    const AXIS_ALIGNED_Y: f32 = 0.999;
+    if movement.length_squared() == 0.0 {
+        return Quat::IDENTITY;
+    }
+    let m = movement.normalize();
+    if m.y.abs() >= AXIS_ALIGNED_Y {
+        return Quat::from_rotation_z(m.y.signum() * std::f32::consts::FRAC_PI_2);
+    }
+    let left = Vec3::Y.cross(m).normalize();
+    let up = m.cross(left).normalize();
+    let angle = -up.dot(Vec3::Y).clamp(-1.0, 1.0).acos() * m.y.signum();
+    Quat::from_rotation_y(-m.z.atan2(m.x)) * Quat::from_axis_angle(left, angle)
+}
+
 fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh: &mut Mesh) {
     let verts_per = g.template.positions.len();
     let n = g.particles.len();
@@ -1981,16 +2000,29 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         let draw = particle_draw(g, p, clock);
         let tpl = flipbook_template(g, draw.flipbook_frame);
 
+        // research/xim Particle.kt applyMovementOrientation — a Movement billboard keeps its world
+        // orientation (identity while the element stands still) and carries the full per-particle
+        // Euler; hi14's g140 authors a ±π x-variance, so its burst fans out into retail's crit flash.
+        let movement_bb = matches!(
+            g.def.billboard,
+            ParticleBillboard::Movement | ParticleBillboard::MovementHorizontal
+        );
         let rot = if axial {
             axial_camera_rotation(draw.world, cam.pos, g.vel_basis)
         } else if g.orientation.is_some() {
             particle_rotation(p)
+        } else if movement_bb {
+            let mut vel_dat = p.vel * g.vel_basis;
+            if g.def.billboard == ParticleBillboard::MovementHorizontal {
+                vel_dat.y = 0.0;
+            }
+            movement_orientation(vel_dat) * particle_rotation(p)
         } else {
-            // A screen billboard re-faces the camera every frame; what survives of the
-            // element's own rotation is its spin about the view axis (local Z). hit1's g010
-            // authors a ±π variance on all axes, so a burst of 11 streaks fans out into the
-            // retail starburst; without it every particle of a burst lies along the same line.
-            cam.rot * Quat::from_rotation_z(p.rotation.z)
+            // A screen billboard re-faces the camera every frame and keeps the element's full Euler in
+            // the view basis (research/xim GLDrawer.kt drawXimParticle XYZ branch). hit1's g010 authors
+            // a ±π z-variance, so its burst fans out into retail's starburst; without it every particle
+            // of a burst lies along the same line.
+            cam.rot * particle_rotation(p)
         };
         // Billboard sprites are flat (z unused); a 3-D particle mesh — a fixed-orientation
         // one, or an axial camera billboard, which stays a world-oriented solid — keeps its
@@ -2005,13 +2037,13 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         // dat_mzb.rs to_bevy) so a falling water sheet hangs down into the basin
         // instead of standing up above the emitter. Actor-local generators integrate in the
         // actor frame, whose parent transform already carries the dat_mzb.rs to_bevy basis.
-        let world_basis = (g.orientation.is_some() || axial) && !g.actor_local;
+        let world_basis = (g.orientation.is_some() || axial || movement_bb) && !g.actor_local;
         // A screen billboard's template is DAT-frame geometry too (Y down: the campfire flame
         // `hi12` rises toward negative y). An actor-local generator inherits the FFXI->Bevy basis
         // from its parent transform; a world-space one folds it into the template before the
         // view rotation, or the flame hangs below its wick (the same flip dat_mzb.rs to_bevy
         // applies to zone origins).
-        let screen_basis = g.orientation.is_none() && !axial && !g.actor_local;
+        let screen_basis = g.orientation.is_none() && !axial && !movement_bb && !g.actor_local;
         let base = positions.len() as u32;
         for ((tp, uv), vertex) in tpl.positions.iter().zip(&tpl.uvs).zip(&tpl.colors) {
             let local = Vec3::new(tp.x * draw.scale.x, tp.y * draw.scale.y, tp.z * sz);
@@ -4747,6 +4779,45 @@ mod tests {
         let mut screen = axial_celestial([1.0; 3], Vec3::X);
         screen.def.billboard = ParticleBillboard::Xyz;
         assert_eq!(at(&screen, 10.0), at(&screen, 20.0));
+    }
+
+    // research/xim Particle.kt applyMovementOrientation through GLDrawer's untransposed upload — pin
+    // the full basis by its images of the local axes so both order and sign show up.
+    #[test]
+    fn movement_orientation_matches_the_viewers_fold() {
+        assert_eq!(movement_orientation(Vec3::ZERO), Quat::IDENTITY);
+        let vertical = movement_orientation(Vec3::new(0.0, -1.0, 0.0));
+        assert!((vertical - Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2)).length() < 1e-5);
+        let q = movement_orientation(Vec3::new(0.0, -0.4472136, 0.8944272));
+        assert!((q * Vec3::X - Vec3::Z).length() < 1e-4);
+        assert!((q * Vec3::Y - Vec3::new(-0.4472136, 0.8944272, 0.0)).length() < 1e-4);
+        assert!((q * Vec3::Z - Vec3::new(-0.8944272, -0.4472136, 0.0)).length() < 1e-4);
+    }
+
+    // hi14's g140 shape: a Movement billboard whose ±π x-variance must fan the burst out of one ray —
+    // the screen-billboard fold stacked every band on the same line (the single-ray crit).
+    #[test]
+    fn movement_billboard_fans_the_rotation_variance_out() {
+        let mut d = def(10.0, 1.0, 3);
+        d.billboard = ParticleBillboard::Movement;
+        d.camera_billboard = false;
+        d.init_velocity = [0.0; 3];
+        d.rotation_variance = Some([std::f32::consts::PI, 0.0, 0.0]);
+        let mut g = live(d, 100.0);
+        g.template.positions = vec![
+            Vec3::new(-1.0, -0.5, 0.0),
+            Vec3::new(1.0, -0.5, 0.0),
+            Vec3::new(0.0, 0.5, 0.0),
+        ];
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 4);
+        let (pos, _) = rebuilt(&g, view(Quat::IDENTITY));
+        // First vertex of each band: the x-rotation tilts it out of the XY plane by -0.05·sin(θ).
+        let zs: Vec<f32> = pos.iter().step_by(3).map(|p| p.z).collect();
+        let spread = (zs.iter().cloned().fold(f32::INFINITY, f32::min)
+            - zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+        .abs();
+        assert!(spread > 1e-3, "the bands fan out: {zs:?}");
     }
 
     // The sun/moon domes are untextured meshes whose whole shape is a vertex-alpha ramp (128 at

@@ -78,6 +78,15 @@ impl Case {
             _ => 0,
         }
     }
+
+    fn damage(self) -> u32 {
+        match self {
+            Self::PlayerNhIt | Self::MobNhIt => 5,
+            Self::PlayerChit | Self::MobChit => 10,
+            Self::PlayerDhit => TEST_MAX_HP * 2,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -87,6 +96,16 @@ struct PendingCase(Option<Case>);
 #[derive(Resource, Default)]
 struct WormState {
     dead_at: Option<Instant>,
+}
+
+const TEST_MAX_HP: u32 = 10_000;
+
+/// Absolute-HP bookkeeping for the simulated combat flushes: the snapshot only carries a
+/// percentage (the 0x0E wire shape), so damage is tracked here and converted on each hit.
+#[derive(Resource, Default)]
+struct TestHp {
+    hume: u32,
+    worm: u32,
 }
 
 // One-shot per activation: exp_* are the buffer counts from the load-time check; *_done mark
@@ -126,6 +145,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<DrawnCheck>()
             .init_resource::<PendingCase>()
             .init_resource::<WormState>()
+            .init_resource::<TestHp>()
             .init_resource::<PendingToggle>()
             .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
@@ -180,6 +200,7 @@ fn handle_toggle(
     mut scene: ResMut<SceneState>,
     actor_root: Res<ActionDatRoot>,
     mut log: ResMut<TestLog>,
+    mut hp: ResMut<TestHp>,
 ) {
     if !pending.0 {
         return;
@@ -195,6 +216,8 @@ fn handle_toggle(
     drawn_check.hume_done = false;
     drawn_check.worm_done = false;
     drawn_check.parts_ok = true;
+    hp.hume = TEST_MAX_HP;
+    hp.worm = TEST_MAX_HP;
     activate_test_scene(
         &mut commands,
         &mut meshes,
@@ -710,6 +733,7 @@ fn run_pending_case(
     mut q_vis: Query<&mut Visibility>,
     mut commands: Commands,
     mut events: ResMut<EventLog>,
+    mut hp: ResMut<TestHp>,
 ) {
     let Some(case) = pending.0.take() else {
         return;
@@ -726,6 +750,7 @@ fn run_pending_case(
             &mut q_vis,
             &q_children,
             &mut commands,
+            &mut hp,
         ),
         Case::LevelUp => fire_level_up(
             &root,
@@ -736,7 +761,7 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
-        _ => fire_hit(case, &tracked, &mut log, &mut events),
+        _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
 }
 
@@ -757,7 +782,14 @@ fn actor_routines(
 // reacts from there — dispatch_action_overlay plays the attacker's swing clip (ati0), and
 // dispatch_melee_action_started enqueues the effects and arms the victim reaction that the
 // swing's DamageCallback fires at its impact frame.
-fn fire_hit(case: Case, tracked: &TrackedEntities, log: &mut TestLog, events: &mut EventLog) {
+fn fire_hit(
+    case: Case,
+    tracked: &TrackedEntities,
+    log: &mut TestLog,
+    events: &mut EventLog,
+    scene: &mut SceneState,
+    hp: &mut TestHp,
+) {
     let (attacker_id, victim_id) = match case {
         Case::PlayerNhIt | Case::PlayerChit | Case::PlayerDhit => (HUME_ID, WORM_ID),
         _ => (WORM_ID, HUME_ID),
@@ -775,17 +807,35 @@ fn fire_hit(case: Case, tracked: &TrackedEntities, log: &mut TestLog, events: &m
         animation: Some(0),
         outcome: Some((case.info_bits(), 0, 0)),
     });
+    // The 0x0E ships in the same flush as BATTLE2: apply the damage to the tracked HP and
+    // publish the percentage, so death rides on wire state like real combat.
+    let victim_hp = if victim_id == WORM_ID {
+        &mut hp.worm
+    } else {
+        &mut hp.hume
+    };
+    *victim_hp = victim_hp.saturating_sub(case.damage());
+    let pct = ((*victim_hp as u128) * 100 / TEST_MAX_HP as u128).min(100) as u8;
+    if let Some(e) = scene
+        .snapshot
+        .entities
+        .iter_mut()
+        .find(|e| e.id == victim_id)
+    {
+        e.hp_pct = Some(pct);
+    }
     log_line(
         log,
         format!(
-            "action started: {} -> {} ({})",
+            "action started: {} -> {} ({}): hp {}",
             if attacker_id == HUME_ID {
                 "hume"
             } else {
                 "worm"
             },
             if victim_id == WORM_ID { "worm" } else { "hume" },
-            case.label()
+            case.label(),
+            *victim_hp
         ),
     );
 }
@@ -799,6 +849,7 @@ fn respawn_worm(
     q_vis: &mut Query<&mut Visibility>,
     q_children: &Query<&Children>,
     commands: &mut Commands,
+    hp: &mut TestHp,
 ) {
     let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
         return;
@@ -821,6 +872,7 @@ fn respawn_worm(
         }
     }
     worm_state.dead_at = None;
+    hp.worm = TEST_MAX_HP;
     if let Some(e) = scene.snapshot.entities.iter_mut().find(|e| e.id == WORM_ID) {
         e.hp_pct = Some(100);
     }

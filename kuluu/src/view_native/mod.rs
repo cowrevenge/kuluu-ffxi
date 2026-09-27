@@ -1,3 +1,4 @@
+pub mod animation_test_scene;
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;
@@ -717,6 +718,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         MousePlugin,
         navmesh_overlay::NavmeshOverlayPlugin,
         launcher_backdrop::LauncherBackdropPlugin,
+        animation_test_scene::AnimationTestScenePlugin,
         zone_transition::ZoneTransitionOverlayPlugin,
     ))
     .insert_resource(ZoneNameResolver::new(kuluu_nav::zone_name))

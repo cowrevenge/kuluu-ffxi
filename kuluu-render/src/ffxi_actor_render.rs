@@ -1442,7 +1442,8 @@ impl FfxiRenderActor {
         &self.instance_slots
     }
 
-    pub(crate) fn routines(&self) -> &HashMap<DatId, Scheduler> {
+    /// The actor's own routine tier (the standalone animationtester box builds its dam0 lookup from this).
+    pub fn routines(&self) -> &HashMap<DatId, Scheduler> {
         &self.routines
     }
 

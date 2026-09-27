@@ -3899,10 +3899,10 @@ fn run_routine_on(
     Some(summary)
 }
 
-// The VFX-relevant stages of a resolved routine, for the animationtest chat report: particle
-// generator names plus their sound/flinch companions.
+// The VFX-relevant stages of a resolved routine (animationtest's chat report and the standalone
+// animationtester box): particle generator names plus their sound/flinch companions.
 #[cfg(not(target_arch = "wasm32"))]
-fn stage_summary(active: &ActiveScheduler) -> String {
+pub fn stage_summary(active: &ActiveScheduler) -> String {
     let mut parts = Vec::new();
     for t in &active.stages {
         match t.stage.kind {

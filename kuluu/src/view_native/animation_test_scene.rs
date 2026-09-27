@@ -314,31 +314,32 @@ fn activate_test_scene(
     // Production order: the face file first (head/hair), then slots 1..8 — load_pc reads
     // equipment[0] as the head. A weapon in that slot leaves the Hume headless.
     let mut equipment = Vec::new();
+    let mut loaded_parts: Vec<String> = Vec::new();
     match kuluu_render::look_resolver::resolve_face(0, 1) {
-        Some(face_file) => equipment.push(face_file),
-        None => log_line(log, "face file unresolved — head will not render".into()),
+        Some(face_file) => {
+            equipment.push(face_file);
+            loaded_parts.push(format!("face={face_file}"));
+        }
+        None => log_line(
+            log,
+            "ERROR: face file unresolved — head will not render".into(),
+        ),
     }
     // Slots 1..6: head..main hand. Slot 6 is the sword mesh itself — main_weapon only drives
     // the motion selector, so without it in equipment the Hume fights bare-handed.
-    for slot in 1..=6u16 {
+    const SLOT_NAMES: [&str; 6] = ["head", "body", "hands", "legs", "feet", "main_hand(sword)"];
+    for (slot, name) in (1u16..=6).zip(SLOT_NAMES) {
         match kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
-            Some(file_id) => equipment.push(file_id),
+            Some(file_id) => {
+                equipment.push(file_id);
+                loaded_parts.push(format!("{name}={file_id}"));
+            }
             None => log_line(
                 log,
-                format!("slot {slot} unresolved — that body part will not render"),
+                format!("ERROR: slot {slot} ({name}) unresolved — that body part will not render"),
             ),
         }
     }
-    let equip_list = equipment
-        .iter()
-        .map(|f| f.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    log_line(
-        log,
-        "headings: worm 0 (faces +X), hume 128 (faces -X) — opposite, squared onto each other"
-            .into(),
-    );
     load_tx.write(LoadActorRequest {
         entity_id: WORM_ID,
         subject: ActorSubject::Npc {
@@ -386,9 +387,7 @@ fn activate_test_scene(
 
     log_line(
         log,
-        format!(
-            "scene up — worm (file {WORM_FILE}) left, HumeM + sword ({HUME_MAIN_WEAPON}) right; equipment [{equip_list}]; models loading"
-        ),
+        format!("loaded: worm={WORM_FILE} hume=[{}]", loaded_parts.join(" ")),
     );
 }
 

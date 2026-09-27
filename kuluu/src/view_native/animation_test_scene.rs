@@ -14,7 +14,7 @@ use kuluu_render::ffxi_actor_render::{
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
     enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir, RoutineLookup,
-    VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
+    VfxTrace, HIT_REMAP_TEST, LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
@@ -219,6 +219,7 @@ fn handle_toggle(
         // The dispatch funnel's info! traces (routine resolution, particle defs/meshes) are
         // gated on this; the box is where they earn their keep.
         commands.insert_resource(VfxTrace(false));
+        HIT_REMAP_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
         log_line(&mut log, "scene down".into());
         return;
     }
@@ -229,6 +230,8 @@ fn handle_toggle(
     hp.hume = TEST_MAX_HP;
     hp.worm = TEST_MAX_HP;
     commands.insert_resource(VfxTrace(true));
+    // TEMP diagnostic: hit1 -> hit2 while the box is up (see RoutineLookup::get).
+    HIT_REMAP_TEST.store(true, std::sync::atomic::Ordering::Relaxed);
     activate_test_scene(
         &mut commands,
         &mut meshes,

@@ -127,13 +127,15 @@ impl AttachType {
     }
 }
 
-// research/xim ParticleGeneratorParser.kt — attachFlags bit layout, then
-// additionalAttachFlags bit 0x0001 = attachSourceOriented.
+// research/XIClient Attachment.cpp MakeAttachMatrix — the attach word carries ONE EID index,
+// not two joint fields: bits 4-9 of attachFlags plus bit 18 (bit 2 of additionalAttachFlags)
+// as its top bit. The index resolves through the actor's locator table with special semantics
+// at 48..=53 (ground/nearest/floor/water) — EID_INDEX.h.
 const ATTACH_TYPE_MASK: u16 = 0x000F;
-pub const ATTACH_JOINT0_MASK: u16 = 0x03F0;
-pub const ATTACH_JOINT0_SHIFT: u32 = 4;
-pub const ATTACH_JOINT1_MASK: u16 = 0xFC00;
-pub const ATTACH_JOINT1_SHIFT: u32 = 10;
+pub const ATTACH_EID_LOW_MASK: u16 = 0x03F0;
+pub const ATTACH_EID_LOW_SHIFT: u32 = 4;
+// Bit 18 of the combined attach word, i.e. bit 2 of additionalAttachFlags.
+const ADDITIONAL_ATTACH_EID_TOP_BIT: u16 = 0x0004;
 const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 
 // research/xim ParticleInitializers.kt — the StandardParticleSetup renderStateFlags u16
@@ -387,8 +389,9 @@ pub struct ParticleGeneratorDef {
     pub batched: bool,
 
     pub attach_type: AttachType,
-    pub attach_joint_source: u8,
-    pub attach_joint_target: u8,
+    // research/XIClient Attachment.cpp MakeAttachMatrix — the single EID locator index
+    // (bits 4-9 + bit 18 of the attach word); see ATTACH_EID_LOW_MASK.
+    pub attach_eid: u8,
     pub attach_source_oriented: bool,
 
     pub init_scale: [f32; 3],
@@ -941,10 +944,9 @@ impl ParticleGeneratorDef {
         let additional_attach = u16_le(body, 0x02);
         let attach_type =
             AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default();
-        let attach_joint_source =
-            ((attach_flags & ATTACH_JOINT0_MASK) >> ATTACH_JOINT0_SHIFT) as u8;
-        let attach_joint_target =
-            ((attach_flags & ATTACH_JOINT1_MASK) >> ATTACH_JOINT1_SHIFT) as u8;
+        let attach_eid = (((attach_flags & ATTACH_EID_LOW_MASK) >> ATTACH_EID_LOW_SHIFT)
+            | ((additional_attach & ADDITIONAL_ATTACH_EID_TOP_BIT) >> 2) << 6)
+            as u8;
         let attach_source_oriented = additional_attach & ATTACH_SOURCE_ORIENTED != 0;
 
         let frames_per_emission = u16_le(body, 0x66) as f32 + 1.0;
@@ -1780,8 +1782,7 @@ impl ParticleGeneratorDef {
             auto_run,
             batched,
             attach_type,
-            attach_joint_source,
-            attach_joint_target,
+            attach_eid,
             attach_source_oriented,
             init_scale,
             single_scale_variance,
@@ -4426,29 +4427,40 @@ mod tests {
         assert!(def.is_singleton());
     }
 
-    // Pins the XIM attachFlags bit layout (ParticleGeneratorParser.kt) against the
-    // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020).
+    // Pins the retail attach-word layout (Attachment.cpp MakeAttachMatrix) against the
+    // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020): type in the low
+    // nibble, ONE EID index in bits 4-9 plus bit 18 — bits 10-15 are not an index.
     #[test]
-    fn attach_flags_split_type_and_joints() {
+    fn attach_flags_carry_type_and_one_eid_index() {
         let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
 
+        // 0x5402: type TargetActor, EID low bits 0; the word's bits 10-15 (21) are reserved.
         let body = build_attached(&setup, 1, 1, 0x5402, ATTACH_SOURCE_ORIENTED);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.attach_type, AttachType::TargetActor);
-        assert_eq!(def.attach_joint_source, 0);
-        assert_eq!(def.attach_joint_target, 21);
+        assert_eq!(def.attach_eid, 0);
         assert!(def.attach_source_oriented);
 
         let body = build_attached(&setup, 1, 1, 0x5402, 0);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(!def.attach_source_oriented);
 
-        // Joint 0 lives in bits 4..10, joint 1 in bits 10..16, type in the low nibble.
-        let body = build_attached(&setup, 1, 1, 0x0409 | (7 << ATTACH_JOINT0_SHIFT), 0);
+        // EID low bits in 4..10, type in the low nibble; bit 18 (additional word bit 2) is the top.
+        let body = build_attached(&setup, 1, 1, 0x0409 | (7 << ATTACH_EID_LOW_SHIFT), 0);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.attach_type, AttachType::SourceActorWeapon);
-        assert_eq!(def.attach_joint_source, 7);
-        assert_eq!(def.attach_joint_target, 1);
+        assert_eq!(def.attach_eid, 7);
+
+        // Bit 18 lifts the index past the low six bits: 0x40 in the additional word is bit 2.
+        let body = build_attached(
+            &setup,
+            1,
+            1,
+            0x0409 | (5 << ATTACH_EID_LOW_SHIFT),
+            ADDITIONAL_ATTACH_EID_TOP_BIT,
+        );
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.attach_eid, 69);
 
         // 0x7 / 0x8 / 0xD are not AttachType flags; XIM warns and falls back to None.
         for unknown in [0x7u16, 0x8, 0xD] {
@@ -4460,7 +4472,9 @@ mod tests {
     }
 
     // Real-DAT guard: every generator in Poison's completion-effect file attaches to the
-    // target actor at joint 21, which is what makes the venom cloud land on the victim.
+    // target actor with EID index 0 (the word's bits 10-15 read as a phantom 21; Attachment.cpp
+    // MakeAttachMatrix only takes bits 4-9 + bit 18), so the venom cloud lands on the victim's
+    // locator 0.
     #[test]
     fn real_dat_poison_generators_attach_to_target() {
         const POISON_EFFECT_FILE_ID: u32 = 3020;
@@ -4488,7 +4502,7 @@ mod tests {
                 "generator {}",
                 String::from_utf8_lossy(&c.name)
             );
-            assert_eq!(def.attach_joint_target, 21);
+            assert_eq!(def.attach_eid, 0);
         }
         assert!(seen > 0, "no particle generators parsed from file 3020");
     }

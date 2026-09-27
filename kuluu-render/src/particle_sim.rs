@@ -444,12 +444,15 @@ const MOUNT_FOOTSTEP_REFERENCE: usize = 0;
 // model -- and FfxiRenderActor carries no PC-model flag to branch on. Resolving the raw field would
 // place a PC weapon trail on whatever else that reference happens to be filed as, so weapon
 // attachments keep the plain root origin until that flag exists.
+// research/XIClient Attachment.cpp MakeAttachMatrix — every attach type resolves the def's
+// single EID index (AttachmentInfo bits 4-9 + bit 18); the mount footstep indices are remapped
+// to reference 0 before resolution.
 fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
     use ffxi_dat::particle_gen::AttachType;
-    let source = if MOUNT_FOOTSTEP_JOINTS.contains(&def.attach_joint_source) {
+    let reference = if MOUNT_FOOTSTEP_JOINTS.contains(&def.attach_eid) {
         MOUNT_FOOTSTEP_REFERENCE
     } else {
-        def.attach_joint_source as usize
+        def.attach_eid as usize
     };
     match def.attach_type {
         AttachType::SourceActor
@@ -457,10 +460,10 @@ fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
         | AttachType::SourceToTargetBasis
         | AttachType::ZoneActorA
         | AttachType::ZoneActorB
-        | AttachType::ZoneActorC => Some(source),
-        AttachType::TargetActor
+        | AttachType::ZoneActorC
+        | AttachType::TargetActor
         | AttachType::TargetActorSourceFacing
-        | AttachType::TargetToSourceBasis => Some(def.attach_joint_target as usize),
+        | AttachType::TargetToSourceBasis => Some(reference),
         AttachType::SourceActorWeapon | AttachType::None | AttachType::Sun | AttachType::Moon => {
             None
         }
@@ -2264,8 +2267,7 @@ mod tests {
             tod_color_tracks: [None; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
             tod_color_driven: [false; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
             moon_phase_sprite: false,
-            attach_joint_source: 0,
-            attach_joint_target: 0,
+            attach_eid: 0,
             attach_source_oriented: false,
             init_scale: [0.1, 0.1, 1.0],
             single_scale_variance: None,
@@ -5602,17 +5604,13 @@ mod tests {
         }
     }
 
-    // research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition jointRefIdx,103,111,125 — which of the def's two joint
-    // fields an attach type reads is fixed by the type, and the celestial/unattached ones read
-    // neither.
+    // research/XIClient Attachment.cpp MakeAttachMatrix — every actor attach type resolves the
+    // def's single EID index; the celestial/unattached ones read none.
     #[test]
-    fn attach_joint_reference_follows_the_attach_type() {
+    fn attach_joint_reference_reads_the_single_eid_index() {
         use ffxi_dat::particle_gen::AttachType;
-        const SOURCE_JOINT: u8 = 48;
-        const TARGET_JOINT: u8 = 49;
         let mut d = def(1.0, 1.0, 1);
-        d.attach_joint_source = SOURCE_JOINT;
-        d.attach_joint_target = TARGET_JOINT;
+        d.attach_eid = 49;
 
         for attach in [
             AttachType::SourceActor,
@@ -5621,25 +5619,12 @@ mod tests {
             AttachType::ZoneActorA,
             AttachType::ZoneActorB,
             AttachType::ZoneActorC,
-        ] {
-            d.attach_type = attach;
-            assert_eq!(
-                attach_joint_reference(&d),
-                Some(SOURCE_JOINT as usize),
-                "{attach:?}"
-            );
-        }
-        for attach in [
             AttachType::TargetActor,
             AttachType::TargetActorSourceFacing,
             AttachType::TargetToSourceBasis,
         ] {
             d.attach_type = attach;
-            assert_eq!(
-                attach_joint_reference(&d),
-                Some(TARGET_JOINT as usize),
-                "{attach:?}"
-            );
+            assert_eq!(attach_joint_reference(&d), Some(49), "{attach:?}");
         }
         for attach in [
             AttachType::None,
@@ -5661,7 +5646,7 @@ mod tests {
         let mut d = def(1.0, 1.0, 1);
         d.attach_type = AttachType::SourceActor;
         for joint in MOUNT_FOOTSTEP_JOINTS {
-            d.attach_joint_source = joint;
+            d.attach_eid = joint;
             assert_eq!(
                 attach_joint_reference(&d),
                 Some(MOUNT_FOOTSTEP_REFERENCE),
@@ -5671,7 +5656,7 @@ mod tests {
 
         d.attach_type = AttachType::SourceActorWeapon;
         for joint in [31u8, 32, 33, 34, 35, 36, 37, 54, 55, 56, 57, 58, 59, 60] {
-            d.attach_joint_source = joint;
+            d.attach_eid = joint;
             assert_eq!(attach_joint_reference(&d), None, "weapon joint {joint}");
         }
     }
@@ -5691,10 +5676,11 @@ mod tests {
     }
 
     // ROM/0/0.DAT as shipped (scheduler_runtime.rs parse_action_bytes,
-    // GLOBAL_EFFECT_DIR_FILE_ID): the melee hit sparks the `chit` chain reaches, each attaching
-    // to the victim at a nearest-joint selector.
+    // GLOBAL_EFFECT_DIR_FILE_ID): the melee hit sparks the `chit` chain reaches. Pinned against
+    // Attachment.cpp MakeAttachMatrix's index formula: every one of them carries EID 0, and the
+    // word's bits 10-15 (which read as a phantom "joint 49") are not part of the index.
     const HIT_SPARK_DIR: [u8; 4] = *b"hit1";
-    const HIT_SPARK_JOINT_REFERENCE: u8 = 49;
+    const HIT_SPARK_EID_INDEX: u8 = 0;
     const HIT_SPARK_GENERATORS: [([u8; 4], ffxi_dat::particle_gen::AttachType); 4] = [
         (*b"g010", ffxi_dat::particle_gen::AttachType::TargetActor),
         (*b"g011", ffxi_dat::particle_gen::AttachType::TargetActor),
@@ -5754,33 +5740,31 @@ mod tests {
         )
     }
 
-    // Pinned against the install: every `hit1` spark generator attaches to the TARGET actor and
-    // names a nearest-joint selector there (ffxi-dat/src/particle_gen.rs
-    // ParticleGeneratorDef attach fields), so the spawn origin cannot be the victim's root
-    // transform alone.
+    // Pinned against the install: every `hit1` spark generator attaches to the TARGET actor
+    // with EID index 0 (Attachment.cpp MakeAttachMatrix formula), so the spawn origin is the
+    // victim's locator 0, not a phantom joint.
     #[test]
-    fn real_dat_hit_sparks_name_a_target_joint_reference() {
+    fn real_dat_hit_sparks_carry_the_retail_eid_index() {
         let Some(defs) = retail_hit_spark_defs() else {
             return;
         };
         for ((name, def), (_, attach)) in defs.iter().zip(HIT_SPARK_GENERATORS) {
             let name = String::from_utf8_lossy(name).to_string();
             assert_eq!(def.attach_type, attach, "{name}");
-            assert_eq!(def.attach_joint_target, HIT_SPARK_JOINT_REFERENCE, "{name}");
+            assert_eq!(def.attach_eid, HIT_SPARK_EID_INDEX, "{name}");
             assert_eq!(
                 attach_joint_reference(def),
-                Some(HIT_SPARK_JOINT_REFERENCE as usize),
-                "{name} reads the target-side joint field"
+                Some(HIT_SPARK_EID_INDEX as usize),
+                "{name} resolves the single EID index"
             );
             assert_eq!(def.base_position, [0.0; 3], "{name}");
         }
     }
 
-    // The joint the def names is resolved in the actor's pose frame (FFXI axes, -Y up) and must
-    // arrive in Bevy world space (ffxi-actor/src/skeleton_instance.rs pose_world), i.e. ABOVE
-    // the victim's feet and on the side the attacker stands on.
+    // EID 0 resolves to the victim's locator 0 — its root — with no directional selection:
+    // the offset is zero at every attacker bearing (Attachment.cpp MakeEIDPoint default case).
     #[test]
-    fn real_dat_hit_spark_offset_lands_on_the_struck_side_in_bevy_space() {
+    fn real_dat_hit_spark_offset_is_the_victim_root() {
         let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
         else {
             return;
@@ -5793,21 +5777,6 @@ mod tests {
         );
         const VICTIM_WORLD: Vec3 = Vec3::new(30.0, 2.0, -14.0);
         const ATTACKER_REACH: f32 = 3.0;
-        // Read off the same install the pose came from; the ring geometry itself is pinned by
-        // ffxi-actor's `real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring`
-        // (ffxi-actor/src/skeleton_instance.rs). Pose space is -Y up, so the Bevy-space height is
-        // its negation; anything at or below 0 is the feet bug.
-        let ring_height_above_root = -ffxi_actor::skeleton_instance::standard_joint_world_position(
-            &pose,
-            &skeleton,
-            *ffxi_actor::skeleton_instance::RING_JOINT_REFERENCES.start(),
-        )
-        .expect("the retail HumeM skeleton files its ring references")
-        .y;
-        assert!(
-            ring_height_above_root > 0.0,
-            "the ring must sit above the root, not at the feet: {ring_height_above_root}"
-        );
 
         for victim_facing in [0.0, 1.0, 2.5, -2.0] {
             let root = Transform {
@@ -5833,12 +5802,8 @@ mod tests {
                     );
                     let name = String::from_utf8_lossy(name).to_string();
                     assert!(
-                        (offset.y - ring_height_above_root).abs() < 1e-3,
-                        "{name} spawned {offset:?}, not {ring_height_above_root} above the root"
-                    );
-                    assert!(
-                        offset.dot(toward) > 0.0,
-                        "{name} spawned {offset:?} away from the attacker at {attacker:?}"
+                        offset.length() < 1e-3,
+                        "{name} spawned {offset:?}, not at the victim's root"
                     );
                 }
             }
@@ -5942,12 +5907,12 @@ mod tests {
     /// The whole wiring, driven through the real system rather than through
     /// `attach_joint_offset` alone: the actor root carrying the pose is a CHILD of the wire
     /// entity the stage fires on and PostUpdate has propagated nothing on the frame it is
-    /// inserted, so the child descent, the local-transform composition, the source/target side
-    /// of the selector and the `+ joint_offset` at the spawn site all have to hold for the
-    /// spark to leave the victim's feet.
+    /// inserted, so the child descent, the local-transform composition and the
+    /// `+ joint_offset` at the spawn site all have to hold for the spark to land on the
+    /// victim's locator 0 (EID 0 — Attachment.cpp MakeEIDPoint default case).
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn real_dat_hit_spark_spawns_on_the_victims_ring_not_its_root() {
+    fn real_dat_hit_spark_spawns_at_the_victims_locator_zero() {
         let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
         else {
             return;
@@ -5961,13 +5926,6 @@ mod tests {
             ffxi_actor::skeleton_instance::RootTransform::identity(),
             &[],
         );
-        let ring_height_above_root = -ffxi_actor::skeleton_instance::standard_joint_world_position(
-            &pose,
-            &skeleton,
-            *ffxi_actor::skeleton_instance::RING_JOINT_REFERENCES.start(),
-        )
-        .expect("the retail HumeM skeleton files its ring references")
-        .y;
 
         const VICTIM_WORLD: Vec3 = Vec3::new(30.0, 2.0, -14.0);
         const ATTACKER_WORLD: Vec3 = Vec3::new(33.0, 2.0, -14.0);
@@ -5983,16 +5941,11 @@ mod tests {
             )
             .unwrap_or_else(|| panic!("{name} spawned no generator"));
             assert!(
-                (origin.y - (VICTIM_WORLD.y + ring_height_above_root)).abs() < 1e-3,
-                "{name} spawned at {origin:?}, not {ring_height_above_root} above the victim"
-            );
-            assert!(
-                origin.x > VICTIM_WORLD.x,
-                "{name} spawned at {origin:?}, not on the attacker's side of the victim"
+                (origin - VICTIM_WORLD).length() < 1e-3,
+                "{name} spawned at {origin:?}, not at the victim's locator 0"
             );
 
-            // research/xim SkeletonInstance.kt getStandardJointExtended runs the same selector when source and target
-            // are one actor (a self-cast Cure), so a self-targeted def still leaves the feet.
+            // A self-targeted def resolves against the same actor: still locator 0.
             let self_origin = run_hit_spark_stage(
                 &skeleton,
                 &pose,
@@ -6003,8 +5956,8 @@ mod tests {
             )
             .unwrap_or_else(|| panic!("{name} spawned no self-targeted generator"));
             assert!(
-                (self_origin.y - (VICTIM_WORLD.y + ring_height_above_root)).abs() < 1e-3,
-                "self-targeted {name} spawned at {self_origin:?}, not on the ring"
+                (self_origin - VICTIM_WORLD).length() < 1e-3,
+                "self-targeted {name} spawned at {self_origin:?}, not at locator 0"
             );
         }
     }
@@ -6025,8 +5978,7 @@ mod tests {
         );
         let mut d = def(1.0, 1.0, 1);
         d.attach_type = ffxi_dat::particle_gen::AttachType::TargetActor;
-        d.attach_joint_target =
-            *ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.start() as u8;
+        d.attach_eid = *ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.start() as u8;
 
         assert_eq!(attach_joint_offset(&d, None, Some(Vec3::X)), Vec3::ZERO);
         assert_eq!(

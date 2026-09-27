@@ -99,6 +99,9 @@ struct TestSceneScoped;
 pub(crate) struct PendingToggle(pub bool);
 
 #[derive(Component)]
+struct CloseBox;
+
+#[derive(Component)]
 struct CaseButton(Case);
 
 #[derive(Component)]
@@ -117,6 +120,7 @@ impl Plugin for AnimationTestScenePlugin {
                 Update,
                 (
                     handle_toggle,
+                    handle_close_press,
                     handle_case_presses,
                     run_pending_case,
                     worm_death_watch,
@@ -128,9 +132,28 @@ impl Plugin for AnimationTestScenePlugin {
     }
 }
 
+fn set_launcher_ui_visibility(
+    commands: &mut Commands,
+    q_ui: &Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
+    visible: bool,
+) {
+    for (e, parent) in q_ui.iter() {
+        if parent.is_some() {
+            continue;
+        }
+        let vis = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(e).insert(vis);
+    }
+}
+
 fn handle_toggle(
     mut pending: ResMut<PendingToggle>,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
+    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -149,7 +172,7 @@ fn handle_toggle(
     pending.0 = false;
 
     if q_scoped.iter().next().is_some() {
-        tear_down(&mut commands, &q_scoped, &mut tracked, &mut scene);
+        tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
         log_line(&mut log, "scene down".into());
         return;
     }
@@ -165,6 +188,10 @@ fn handle_toggle(
         &mut log,
     );
 
+    // Hide the launcher menu while the box is up; the X button (or leaving the Launcher phase)
+    // restores it.
+    set_launcher_ui_visibility(&mut commands, &q_ui, false);
+
     // Last: it consumes the owned params. poll_load_actor_tasks parks tasks without EntityMesh,
     // and the Update chain that resource unlocks (sync_entities_system & co.) reads the world
     // resources setup_world inserts on InGame entry — so run it here: real orb meshes/materials
@@ -177,6 +204,25 @@ fn handle_toggle(
         images,
         settings,
     );
+}
+
+fn handle_close_press(
+    q_close: Query<&Interaction, (With<CloseBox>, With<bevy::ui::widget::Button>)>,
+    q_scoped: Query<Entity, With<TestSceneScoped>>,
+    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
+    mut commands: Commands,
+    mut tracked: ResMut<TrackedEntities>,
+    mut scene: ResMut<SceneState>,
+    mut log: ResMut<TestLog>,
+) {
+    let Ok(interaction) = q_close.single() else {
+        return;
+    };
+    if !matches!(interaction, Interaction::Pressed) {
+        return;
+    }
+    tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
+    log_line(&mut log, "scene down".into());
 }
 
 fn activate_test_scene(
@@ -237,13 +283,19 @@ fn activate_test_scene(
 
     // Worm left, sworded Hume right, facing each other. The snapshot entries keep the wires
     // alive: sync_entities_system despawns any tracked wire missing from the snapshot.
+    // Model forward is local -X on both skeletons (live check): only the worm needs a PI turn;
+    // identity already points the Hume back at it. Both are engaged so they stand in battle
+    // stance with weapons out, not rest pose.
     spawn_wire(
         commands,
         tracked,
         scene,
         WORM_ID,
         EntityKind::Mob,
-        Vec3::new(-2.6, 0.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Quat::from_rotation_y(std::f32::consts::PI),
+        ffxi_proto::decode::animation::ATTACK,
+        HUME_ID,
     );
     spawn_wire(
         commands,
@@ -251,10 +303,19 @@ fn activate_test_scene(
         scene,
         HUME_ID,
         EntityKind::Pc,
-        Vec3::new(2.6, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Quat::IDENTITY,
+        ffxi_proto::decode::animation::ATTACK,
+        WORM_ID,
     );
 
-    let mut equipment = vec![HUME_MAIN_WEAPON];
+    // Production order: the face file first (head/hair), then slots 1..8 — load_pc reads
+    // equipment[0] as the head. A weapon in that slot leaves the Hume headless.
+    let mut equipment = Vec::new();
+    match kuluu_render::look_resolver::resolve_face(0, 1) {
+        Some(face_file) => equipment.push(face_file),
+        None => log_line(log, "face file unresolved — head will not render".into()),
+    }
     equipment.extend(
         (1u16..=5)
             .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
@@ -279,6 +340,31 @@ fn activate_test_scene(
     });
 
     spawn_panel(commands);
+
+    // X in the top-right corner closes the box back to the launcher menu.
+    commands
+        .spawn((
+            TestSceneScoped,
+            CloseBox,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(12.0),
+                top: Val::Px(8.0),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.35, 0.12, 0.12, 0.9)),
+            bevy::ui::widget::Button,
+        ))
+        .with_child((
+            Text::new("X"),
+            TextFont {
+                font_size: 14.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ));
+
     log_line(
         log,
         format!(
@@ -294,7 +380,17 @@ fn spawn_wire(
     id: u32,
     kind: EntityKind,
     pos: Vec3,
+    rot: Quat,
+    animation: u8,
+    bt_target_id: u32,
 ) {
+    // The snapshot pos is FFXI space and the prediction tween pulls wires toward it, so it must
+    // agree with the bevy-space wire transform (inverse of ffxi_to_bevy).
+    let wire_pos = kuluu_snapshot::Vec3 {
+        x: pos.x,
+        y: -pos.z,
+        z: -pos.y,
+    };
     // Visibility on the wire (as in sync_entities_system's spawn): Bevy then attaches
     // InheritedVisibility to the parent, so the model children don't trip B0004.
     let parent = commands
@@ -305,7 +401,7 @@ fn spawn_wire(
                 act_index: 0,
                 kind,
             },
-            Transform::from_translation(pos),
+            Transform::from_translation(pos).with_rotation(rot),
             Visibility::default(),
         ))
         .id();
@@ -315,16 +411,16 @@ fn spawn_wire(
         act_index: 0,
         kind,
         name: None,
-        pos: kuluu_snapshot::Vec3::default(),
+        pos: wire_pos,
         heading: 0,
         hp_pct: Some(100),
-        bt_target_id: 0,
+        bt_target_id,
         face_target: 0,
         claim_id: 0,
         speed: 0,
         speed_base: 0,
         look: None,
-        animation: 0,
+        animation,
         animationsub: 0,
         mount: None,
         status: 0,
@@ -719,6 +815,7 @@ fn sync_log_text(log: Res<TestLog>, mut node: Query<&mut Text, With<LogText>>) {
 fn tear_down(
     commands: &mut Commands,
     q_scoped: &Query<Entity, With<TestSceneScoped>>,
+    q_ui: &Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     tracked: &mut TrackedEntities,
     scene: &mut SceneState,
 ) {
@@ -727,6 +824,7 @@ fn tear_down(
         // already freed this entity (same fix as launcher_backdrop's teardown).
         commands.entity(e).try_despawn();
     }
+    set_launcher_ui_visibility(commands, q_ui, true);
     tracked.by_id.remove(&WORM_ID);
     tracked.by_id.remove(&HUME_ID);
     scene
@@ -738,8 +836,9 @@ fn tear_down(
 fn tear_down_test_scene(
     mut commands: Commands,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
+    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
 ) {
-    tear_down(&mut commands, &q_scoped, &mut tracked, &mut scene);
+    tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
 }

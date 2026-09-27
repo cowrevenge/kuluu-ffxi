@@ -1235,12 +1235,13 @@ fn oscillation_delta(
 }
 
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle counter — the emit loop
-// runs `for counter in 0..=floor(v161)` over `v161 = (flags & 0x1FF) * scale`, i.e. floor + 1. That
-// trailing +1 is deliberately not reproduced: it would raise every already-tuned non-weather
-// population (10740 shipped generators author a non-zero count) by one particle, so the floor of 1
-// below stands in for it and keeps an authored count of 0 emitting the single particle retail
-// gives it.
+// runs `for counter in 0..=floor(v161)` over `v161 = (flags & 0x1FF) * scale`, i.e. floor + 1: a ppe=0 def
+// (hit2's g020/g022 spark emitters) fires one particle every period, and every other burst carries its full
+// authored count plus the loop's closing iteration.
 fn emission_count(g: &LiveGenerator) -> u32 {
+    if g.emit_scale == UNSCALED_EMISSION {
+        return g.def.particles_per_emission + 1;
+    }
     ((g.def.particles_per_emission as f32 * g.emit_scale) as u32).max(1)
 }
 
@@ -2527,7 +2528,11 @@ mod tests {
         assert_eq!(g.age_frames, 30.0, "but the clock still runs");
         g.emit_culled = false;
         advance(&mut g, 30.0);
-        assert_eq!(g.particles.len(), 30, "back in band: emits again");
+        assert_eq!(
+            g.particles.len(),
+            60,
+            "back in band: emits again (two per period)"
+        );
     }
 
     #[test]
@@ -2804,7 +2809,8 @@ mod tests {
         };
         assert_eq!(ambient.age_frames, frames);
         assert_eq!(ambient.age_frames, routine.age_frames);
-        assert_eq!(ambient.particles.len(), frames as usize);
+        // ppe=1 emits two per period (authored count plus retail's closing iteration).
+        assert_eq!(ambient.particles.len(), (frames * 2.0) as usize);
         assert_eq!(ambient.particles.len(), routine.particles.len());
     }
 
@@ -2918,13 +2924,13 @@ mod tests {
         assert_eq!(g.particles.len(), 2 * SCALED);
     }
 
-    // Everything outside weat/ keeps its authored count exactly, and an authored count of 0 still
-    // emits the one particle retail's `floor(count) + 1` loop gives it.
+    // Everything outside weat/ emits its authored count plus retail's closing iteration, and an
+    // authored count of 0 still emits the one particle that loop gives it.
     #[test]
     fn non_weather_emission_counts_are_unscaled() {
         let mut g = live(def(600.0, 1.0, 5), f32::MAX);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 5);
+        assert_eq!(g.particles.len(), 6);
 
         let mut g = live(def(600.0, 1.0, 0), f32::MAX);
         advance(&mut g, 1.0);
@@ -2935,7 +2941,7 @@ mod tests {
     #[test]
     fn position_variance_spreads_emissions_through_the_sphere() {
         const RADIUS: f32 = 20.0;
-        let mut d = def(60.0, 1.0, 200);
+        let mut d = def(60.0, 1.0, 199);
         d.init_velocity = [0.0; 3];
         d.position_variance = Some(ffxi_dat::particle_gen::PositionVariance {
             radius_variance: RADIUS,
@@ -2963,7 +2969,8 @@ mod tests {
     #[test]
     fn spherical_full_stepped_azimuth_walks_the_ring() {
         const STEPS: u32 = 6;
-        let mut d = def(60.0, 1.0, STEPS);
+        // Authored count plus retail's closing iteration lands exactly one particle per step.
+        let mut d = def(60.0, 1.0, STEPS - 1);
         d.init_velocity = [0.0; 3];
         d.spherical_full = Some(ffxi_dat::particle_gen::SphericalPositionVarianceFull {
             radius_variance: 0.0,
@@ -3369,7 +3376,7 @@ mod tests {
     // would otherwise add behind them.
     #[test]
     fn rotation_velocity_variance_spreads_the_spin_per_particle() {
-        let mut d = def(120.0, 1.0, 8);
+        let mut d = def(120.0, 1.0, 7);
         d.camera_billboard = false;
         d.rotation_velocity = Some([0.0, 0.01, 0.0]);
         d.rotation_velocity_variance = Some([0.0, 0.005, 0.0]);
@@ -3411,7 +3418,7 @@ mod tests {
     // original eight, not the re-emissions it would otherwise add behind them.
     #[test]
     fn scale_velocity_variance_spreads_the_rate_per_particle() {
-        let mut d = def(120.0, 1.0, 8);
+        let mut d = def(120.0, 1.0, 7);
         d.scale_velocity = Some([0.0, 0.01, 0.0]);
         d.scale_velocity_variance = Some([0.0, 0.005, 0.0]);
         d.scale_updater = true;
@@ -3449,7 +3456,7 @@ mod tests {
     // — scale += posRand(v); retail's ElemGenerate case 0x11 adds a single ufrand to x, y, z).
     #[test]
     fn single_scale_variance_spreads_the_scale_per_particle() {
-        let mut d = def(120.0, 1.0, 8);
+        let mut d = def(120.0, 1.0, 7);
         d.single_scale_variance = Some(0.05);
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
@@ -3475,7 +3482,7 @@ mod tests {
     // CYyGenerator::ElemGenerate case 0x10 — field_EC.x/y/z += ufrand(payload)).
     #[test]
     fn scale_variance_spreads_each_axis_independently() {
-        let mut d = def(120.0, 1.0, 16);
+        let mut d = def(120.0, 1.0, 15);
         d.scale_variance = Some([0.2, 0.1, 0.0]);
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
@@ -3529,7 +3536,7 @@ mod tests {
     // would otherwise add behind them.
     #[test]
     fn scale_velocity_grows_the_scale_per_frame() {
-        let mut d = def(120.0, 1.0, 8);
+        let mut d = def(120.0, 1.0, 7);
         d.scale_velocity = Some([0.0, 0.01, 0.0]);
         d.scale_updater = true;
         let mut g = live(d, 1000.0);
@@ -3653,7 +3660,11 @@ mod tests {
         d.oscillation_applier_x = Some([2.0, 0.0, 0.0]);
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 1, "one particle");
+        assert_eq!(
+            g.particles.len(),
+            2,
+            "one per period plus retail's closing iteration"
+        );
         g.stopped = true;
         for _ in 0..90 {
             advance(&mut g, 1.0);
@@ -3679,7 +3690,11 @@ mod tests {
         d.oscillation_applier_z = Some([2.0, 0.0, 0.0]);
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 1, "one particle");
+        assert_eq!(
+            g.particles.len(),
+            2,
+            "one per period plus retail's closing iteration"
+        );
         g.stopped = true;
         for _ in 0..90 {
             advance(&mut g, 1.0);
@@ -3707,7 +3722,11 @@ mod tests {
         d.oscillation_applier_y = Some([2.0, 0.0, 0.0]);
         let mut g = live(d, 1000.0);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 1, "one particle");
+        assert_eq!(
+            g.particles.len(),
+            2,
+            "one per period plus retail's closing iteration"
+        );
         g.stopped = true;
         for _ in 0..90 {
             advance(&mut g, 1.0);
@@ -3965,11 +3984,12 @@ mod tests {
     #[test]
     fn emits_one_per_period_over_window() {
         let mut g = live(def(100.0, 5.0, 1), 20.0);
-        // 20 frames at 1/frame, period 5 -> 4 emits within window (the emit at accum reset).
+        // 20 frames at 1/frame, period 5 -> 4 emits within window (the emit at accum reset),
+        // two particles each.
         for _ in 0..20 {
             advance(&mut g, 1.0);
         }
-        assert_eq!(g.particles.len(), 4);
+        assert_eq!(g.particles.len(), 8);
     }
 
     #[test]
@@ -3991,13 +4011,13 @@ mod tests {
         advance(&mut g, 2.0); // one 30 fps tick
         assert_eq!(
             g.particles.len(),
-            3,
+            4,
             "the primed burst lands on the first tick"
         );
         advance(&mut g, 2.0);
         assert_eq!(
             g.particles.len(),
-            3,
+            4,
             "a dur=0 generator emits exactly one burst"
         );
     }
@@ -4237,7 +4257,11 @@ mod tests {
         d.velocity_variance = Some([0.001, 0.002, 0.003]);
         let mut g = live(d, 30.0);
         advance(&mut g, 5.0);
-        assert_eq!(g.particles.len(), 5, "one draw per particle");
+        assert_eq!(
+            g.particles.len(),
+            10,
+            "one draw per particle (two per period)"
+        );
         for p in &g.particles {
             assert!(
                 (-0.001..=0.001).contains(&p.vel.x)
@@ -4293,7 +4317,7 @@ mod tests {
         d.relative_velocity = Some(0.5);
         let mut g = live(d, 30.0);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles.len(), 2);
         let p = &g.particles[0];
         let extra = p.vel - Vec3::from_array([0.0, 0.01, 0.0]);
         let offset = p.pos;
@@ -4330,7 +4354,7 @@ mod tests {
         d.relative_velocity_variance = Some(0.2);
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
-        assert_eq!(g.particles.len(), 3);
+        assert_eq!(g.particles.len(), 6);
         for p in &g.particles {
             let dir = p.pos.normalize();
             let extra = p.vel - Vec3::from_array([0.0, 0.01, 0.0]);
@@ -4356,7 +4380,7 @@ mod tests {
         d.color_variance = Some([0.5, 0.25, 0.125, 0.0]);
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
-        assert_eq!(g.particles.len(), 3);
+        assert_eq!(g.particles.len(), 6);
         for p in &g.particles {
             let c = p.rgb;
             assert!(
@@ -4383,6 +4407,7 @@ mod tests {
         d.relative_velocity_variance = Some(0.2);
         let mut g = live(d, 30.0);
         advance(&mut g, 1.0);
+        // life=0 is retail's singleton marker: one particle, not the ppe+1 burst.
         assert_eq!(g.particles.len(), 1);
         assert_eq!(g.particles[0].vel, Vec3::from_array([0.0, 0.01, 0.0]));
     }
@@ -4397,7 +4422,7 @@ mod tests {
         d.reverse_displacement = Some(0.0);
         let mut g = live(d, 30.0);
         advance(&mut g, 1.0);
-        assert_eq!(g.particles.len(), 1);
+        assert_eq!(g.particles.len(), 2);
         let p = &g.particles[0];
         assert_eq!(p.vel, Vec3::from_array([0.0, -0.1, 0.0]));
         assert_eq!(p.pos, Vec3::from_array([0.0, 1.0, 0.0]));
@@ -4415,7 +4440,7 @@ mod tests {
         d.incremental_rotation = Some([0.0, 0.1, 0.0]);
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
-        assert_eq!(g.particles.len(), 3);
+        assert_eq!(g.particles.len(), 6);
         for (i, p) in g.particles.iter().enumerate() {
             let y = 0.05 + 0.1 * (i + 1) as f32;
             assert_eq!(p.rotation, Vec3::new(0.0, y, 0.0));
@@ -4437,7 +4462,7 @@ mod tests {
         d.rotation_variance = Some([0.05, 0.1, 0.15]);
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
-        assert_eq!(g.particles.len(), 3);
+        assert_eq!(g.particles.len(), 6);
         let bounds = [
             (0.1f32 - 0.05f32, 0.1f32 + 0.05f32),
             (0.2f32 - 0.1f32, 0.2f32 + 0.1f32),
@@ -5232,8 +5257,8 @@ mod tests {
     #[test]
     fn particle_expires_at_life() {
         let mut g = live(def(3.0, 1.0, 1), 1.0);
-        advance(&mut g, 1.0); // emit one at age 0
-        assert_eq!(g.particles.len(), 1);
+        advance(&mut g, 1.0); // emit the period's pair at age 0
+        assert_eq!(g.particles.len(), 2);
         advance(&mut g, 5.0); // past life
         assert!(g.particles.is_empty());
     }
@@ -5749,9 +5774,6 @@ mod tests {
             return;
         };
         for (name, def) in &defs {
-            if def.particles_per_emission == 0 {
-                continue; // g011 emits nothing by design
-            }
             let mut g = live(*def, 0.0);
             g.emit_accum = def.frames_per_emission;
             advance(&mut g, 1.0);

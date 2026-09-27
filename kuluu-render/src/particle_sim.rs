@@ -2421,6 +2421,23 @@ mod tests {
         advance_generator(g, frames);
     }
 
+    // The scheduled spawn path's wiring for a real def (spawn_particle_generators): the
+    // world-space velocity basis plus the keyframe tracks resolved against the DAT, so a test
+    // drives a shipped generator exactly as the live client does.
+    fn live_scheduled(
+        def: ParticleGeneratorDef,
+        window: f32,
+        assets: &crate::scheduler_runtime::ActionAssets,
+    ) -> LiveGenerator {
+        let mut g = live(def, window);
+        g.vel_basis = WORLD_PARTICLE_VEL_BASIS;
+        let resolve = |id: Option<[u8; 4]>| id.and_then(|i| assets.keyframes.get(&i).cloned());
+        g.scale_x = resolve(def.scale_x_track);
+        g.scale_y = resolve(def.scale_y_track);
+        g.alpha = resolve(def.alpha_track);
+        g
+    }
+
     // 0x1E ParticleDampen: emission stops and the already-live particles are force-expired
     // at once (research/xim EffectRoutineInstance.kt handleParticleEffectDampen), unlike
     // StopParticle which lets them play out.
@@ -5751,11 +5768,13 @@ mod tests {
     // +Y drift settles toward the ground. With the old unit basis it rose — the vertical arc.
     #[test]
     fn world_space_velocity_integrates_through_the_mzb_bevy_basis() {
+        let Some(assets) = retail_global_effect_assets() else {
+            return;
+        };
         let mut d = def(1.0, 1.0, 1);
         d.init_velocity = [0.0, 0.5, 0.0];
         d.position_updater = true;
-        let mut g = live(d, 60.0);
-        g.vel_basis = WORLD_PARTICLE_VEL_BASIS;
+        let mut g = live_scheduled(d, 60.0, &assets);
         emit(&mut g, 60.0);
         advance(&mut g, 10.0);
         assert!(
@@ -5767,23 +5786,21 @@ mod tests {
 
     // Pinned against the install: hit1's g010 authors a ±π rotation variance on all axes — each
     // streak of the 11-particle burst fans out at its own angle into retail's starburst. A screen
-    // billboard must keep that per-particle spin about the view axis; dropping it stacks every
-    // particle along one line (the single-ray regression).
+    // billboard must keep that per-particle spin about the view axis; without it every particle
+    // of a burst lies along the same line.
     #[test]
     fn real_dat_hit_spark_streaks_fan_out_per_particle() {
-        let Some(defs) = retail_hit_spark_defs() else {
+        let Some(assets) = retail_global_effect_assets() else {
             return;
         };
-        let def = defs
-            .iter()
-            .find(|(name, _)| *name == *b"g010")
-            .expect("hit1 defines g010")
-            .1;
+        let def = assets
+            .particle_def(HIT_SPARK_DIR, b"g010")
+            .expect("hit1 defines g010");
         assert!(
             def.rotation_variance.is_some(),
             "the DAT authors a per-particle rotation variance"
         );
-        let mut g = live(def, 60.0);
+        let mut g = live_scheduled(*def, 60.0, &assets);
         // A horizontal streak: with identity camera the only thing that can turn it is the
         // particle's own spin about the view axis.
         g.template.positions = vec![
@@ -5791,10 +5808,9 @@ mod tests {
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(0.0, 0.0, 0.0),
         ];
-        emit(&mut g, 60.0);
-        // The def's init scale is (0,0) — its size comes from keyframe tracks this harness does
-        // not resolve; give the streak a unit scale so only the spin can move it.
-        g.particles[0].scale = Vec2::ONE;
+        emit(&mut g, def.max_life_frames);
+        // Mid-life: the resolved scale tracks are non-zero here (init scale is (0,0)).
+        advance(&mut g, def.max_life_frames * 0.5);
         let view = CameraView {
             rot: Quat::IDENTITY,
             pos: Vec3::ZERO,
@@ -5821,6 +5837,36 @@ mod tests {
         assert_ne!(
             a, b,
             "the per-particle spin must turn the streak about the view axis"
+        );
+    }
+
+    // Pinned against the install: the crit burst's gs11 (sho1) rides the same eis1 streak sheet
+    // as g010, but is fixed-orientation with no per-particle rotation — its 19 particles stack
+    // into one streak that the scale velocity grows wide and thin over life.
+    #[test]
+    fn real_dat_crit_spark_streak_is_fixed_orientation() {
+        let Some(assets) = retail_global_effect_assets() else {
+            return;
+        };
+        // Directory-scoped: ROM/0/0.DAT defines these generator names in several directories.
+        let def = assets
+            .particle_def_scoped(*b"sho1", b"gs11")
+            .expect("sho1 defines gs11")
+            .1;
+        assert_eq!(
+            def.mesh_id, *b"eis1",
+            "the crit streak rides the same sheet as g010"
+        );
+        assert!(
+            def.rotation_variance.is_none(),
+            "no per-particle rotation: the burst is one stacked streak"
+        );
+        let Some(vel) = def.scale_velocity else {
+            panic!("the streak's growth is authored as a scale velocity");
+        };
+        assert!(
+            vel[0] > 0.0 && vel[1] < 0.0,
+            "it grows wide and thin: {vel:?}"
         );
     }
 

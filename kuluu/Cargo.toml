@@ -79,6 +79,8 @@ enhanced-job-display = ["kuluu-render?/enhanced-job-display"]
 enhanced-shutdown-counter = ["kuluu-render?/enhanced-shutdown-counter"]
 # Enhanced (non-retail) free movement during the weapon draw/sheathe. See kuluu-render.
 enhanced-engage-move-lock-off = ["kuluu-render?/enhanced-engage-move-lock-off"]
+# Enhanced (non-retail) +20% particle alpha (clamped). See kuluu-render for details.
+enhanced-particle-alpha-20 = ["kuluu-render?/enhanced-particle-alpha-20"]
 # Enhanced (non-retail) `//targetname` slash command: target the nearest
 # NPC/mob/pet by exact name. Kuluu-local (no render side), so no sub-features;
 # the local build (build_cowland.bat) enables it. Vanilla builds omit it.

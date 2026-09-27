@@ -65,6 +65,11 @@ enhanced-shutdown-counter = []
 # row does not exist.
 enhanced-engage-move-lock-off = []
 
+# Enhanced (non-retail): lifts every particle's final alpha by 20% (clamped to 1.0) — a
+# brightness tuning for the hit flashes retail authors at ~50%. Applied once, at the end of
+# particle_draw's alpha chain.
+enhanced-particle-alpha-20 = []
+
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
 # holds by construction; dev/test builds pass `--features debug-menu` explicitly.

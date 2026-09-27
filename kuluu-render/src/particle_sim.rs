@@ -1744,6 +1744,11 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         alpha = (alpha * table[TOD_ALPHA_CHANNEL] * CELESTIAL_MODULATE).min(1.0);
     }
 
+    // Enhanced build only: lift every particle's final alpha by 20% (clamped) — a deliberate
+    // non-retail brightness tuning for the hit flashes retail authors at ~50%.
+    #[cfg(feature = "enhanced-particle-alpha-20")]
+    let alpha = (alpha * ENHANCED_ALPHA_GAIN).min(1.0);
+
     ParticleDraw {
         flipbook_frame,
         scale: Vec2::new(sx, sy),
@@ -1753,6 +1758,9 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         world: particle_origin(g, p) + p.pos,
     }
 }
+
+#[cfg(feature = "enhanced-particle-alpha-20")]
+const ENHANCED_ALPHA_GAIN: f32 = 1.2;
 
 fn particle_origin(g: &LiveGenerator, p: &Particle) -> Vec3 {
     if g.def.camera_attached_base {

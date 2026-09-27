@@ -1985,7 +1985,11 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         } else if g.orientation.is_some() {
             particle_rotation(p)
         } else {
-            cam.rot
+            // A screen billboard re-faces the camera every frame; what survives of the
+            // element's own rotation is its spin about the view axis (local Z). hit1's g010
+            // authors a ±π variance on all axes, so a burst of 11 streaks fans out into the
+            // retail starburst; without it every particle of a burst lies along the same line.
+            cam.rot * Quat::from_rotation_z(p.rotation.z)
         };
         // Billboard sprites are flat (z unused); a 3-D particle mesh — a fixed-orientation
         // one, or an axial camera billboard, which stays a world-oriented solid — keeps its
@@ -5758,6 +5762,65 @@ mod tests {
             (g.particles[0].pos.y - (-5.0)).abs() < 1e-3,
             "the +Y DAT drift must integrate downward in Bevy space: {:?}",
             g.particles[0].pos
+        );
+    }
+
+    // Pinned against the install: hit1's g010 authors a ±π rotation variance on all axes — each
+    // streak of the 11-particle burst fans out at its own angle into retail's starburst. A screen
+    // billboard must keep that per-particle spin about the view axis; dropping it stacks every
+    // particle along one line (the single-ray regression).
+    #[test]
+    fn real_dat_hit_spark_streaks_fan_out_per_particle() {
+        let Some(defs) = retail_hit_spark_defs() else {
+            return;
+        };
+        let def = defs
+            .iter()
+            .find(|(name, _)| *name == *b"g010")
+            .expect("hit1 defines g010")
+            .1;
+        assert!(
+            def.rotation_variance.is_some(),
+            "the DAT authors a per-particle rotation variance"
+        );
+        let mut g = live(def, 60.0);
+        // A horizontal streak: with identity camera the only thing that can turn it is the
+        // particle's own spin about the view axis.
+        g.template.positions = vec![
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        ];
+        emit(&mut g, 60.0);
+        // The def's init scale is (0,0) — its size comes from keyframe tracks this harness does
+        // not resolve; give the streak a unit scale so only the spin can move it.
+        g.particles[0].scale = Vec2::ONE;
+        let view = CameraView {
+            rot: Quat::IDENTITY,
+            pos: Vec3::ZERO,
+        };
+        let clock = ParticleSimulator::default().clock;
+
+        g.particles[0].rotation.z = 0.0;
+        let mut mesh_a = empty_mesh();
+        rebuild_mesh(&g, view, &clock, &mut mesh_a);
+        g.particles[0].rotation.z = std::f32::consts::FRAC_PI_4;
+        let mut mesh_b = empty_mesh();
+        rebuild_mesh(&g, view, &clock, &mut mesh_b);
+
+        let a: Vec<[f32; 3]> = mesh_a
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|v| v.as_float3())
+            .expect("positions")
+            .to_vec();
+        let b: Vec<[f32; 3]> = mesh_b
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|v| v.as_float3())
+            .expect("positions")
+            .to_vec();
+        assert_ne!(
+            a, b,
+            "the per-particle spin must turn the streak about the view axis"
         );
     }
 

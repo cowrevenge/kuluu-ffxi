@@ -108,6 +108,12 @@ struct TestHp {
     worm: u32,
 }
 
+/// One case at a time: while set, presses are rejected until the animation window elapses.
+#[derive(Resource, Default)]
+struct CaseLock {
+    until: Option<Instant>,
+}
+
 // One-shot per activation: exp_* are the buffer counts from the load-time check; *_done mark
 // the post-spawn drawn count already logged.
 #[derive(Resource, Default)]
@@ -146,6 +152,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<PendingCase>()
             .init_resource::<WormState>()
             .init_resource::<TestHp>()
+            .init_resource::<CaseLock>()
             .init_resource::<PendingToggle>()
             .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
@@ -707,12 +714,30 @@ fn spawn_panel(commands: &mut Commands) {
     commands.entity(panel).add_child(log_node);
 }
 
+// Per-case animation windows: swing + impact reaction; death adds the fall-over, level-up
+// runs to its frame-170 tail (lvup `main` in effect DAT 3310), respawn is near-instant.
+fn case_duration(case: Case) -> std::time::Duration {
+    match case {
+        Case::PlayerNhIt | Case::MobNhIt => std::time::Duration::from_millis(1200),
+        Case::PlayerChit | Case::MobChit => std::time::Duration::from_millis(1500),
+        Case::PlayerDhit => std::time::Duration::from_millis(2000),
+        Case::LevelUp => std::time::Duration::from_millis(3500),
+        Case::MobRespawn => std::time::Duration::from_millis(300),
+    }
+}
+
 fn handle_case_presses(
     q_buttons: Query<(&CaseButton, &Interaction)>,
     mut pending: ResMut<PendingCase>,
+    lock: Res<CaseLock>,
+    mut log: ResMut<TestLog>,
 ) {
     for (case_button, interaction) in q_buttons.iter() {
         if !matches!(interaction, Interaction::Pressed) {
+            continue;
+        }
+        if lock.until.is_some_and(|until| Instant::now() < until) {
+            log_line(&mut log, "busy — wait for the animation to finish".into());
             continue;
         }
         pending.0 = Some(case_button.0);
@@ -734,11 +759,33 @@ fn run_pending_case(
     mut commands: Commands,
     mut events: ResMut<EventLog>,
     mut hp: ResMut<TestHp>,
+    mut lock: ResMut<CaseLock>,
 ) {
     let Some(case) = pending.0.take() else {
         return;
     };
     log_line(&mut log, format!("case: {}", case.label()));
+
+    // A dead worm can neither swing nor react: bring it back before the hit so the impact
+    // lands on a live model.
+    if matches!(
+        case,
+        Case::PlayerNhIt | Case::PlayerChit | Case::PlayerDhit | Case::MobNhIt | Case::MobChit
+    ) && hp.worm == 0
+    {
+        log_line(&mut log, "worm dead — respawning before hit".into());
+        respawn_worm(
+            &mut worm_state,
+            &mut scene,
+            &mut log,
+            &tracked,
+            &q_root,
+            &mut q_vis,
+            &q_children,
+            &mut commands,
+            &mut hp,
+        );
+    }
 
     match case {
         Case::MobRespawn => respawn_worm(
@@ -763,6 +810,8 @@ fn run_pending_case(
         ),
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
+
+    lock.until = Some(Instant::now() + case_duration(case));
 }
 
 fn actor_routines(

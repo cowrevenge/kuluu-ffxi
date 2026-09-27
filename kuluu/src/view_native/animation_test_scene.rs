@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use kuluu_render::components::WorldEntity;
-use kuluu_render::ffxi_actor_render::{ActorSubject, FfxiRenderActor, LoadActorRequest};
+use kuluu_render::ffxi_actor_render::{
+    ActorSubject, FfxiActorMeshChild, FfxiRenderActor, FfxiRenderRoot, LoadActorRequest,
+};
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
     enqueue_routine, evaluate_switch, stage_summary, ActionDatRoot, ActionTarget, ActiveScheduler,
@@ -89,6 +91,16 @@ struct WormState {
     dead_at: Option<Instant>,
 }
 
+// One-shot per activation: exp_* are the buffer counts from the load-time check; *_done mark
+// the post-spawn drawn count already logged.
+#[derive(Resource, Default)]
+struct DrawnCheck {
+    hume_done: bool,
+    worm_done: bool,
+    exp_hume: usize,
+    exp_worm: usize,
+}
+
 /// Everything the test scene spawns (3D + UI), so teardown takes it all down at once.
 #[derive(Component)]
 struct TestSceneScoped;
@@ -112,6 +124,7 @@ pub struct AnimationTestScenePlugin;
 impl Plugin for AnimationTestScenePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TestLog>()
+            .init_resource::<DrawnCheck>()
             .init_resource::<PendingCase>()
             .init_resource::<WormState>()
             .init_resource::<PendingToggle>()
@@ -123,6 +136,7 @@ impl Plugin for AnimationTestScenePlugin {
                     handle_close_press,
                     handle_case_presses,
                     run_pending_case,
+                    verify_drawn,
                     worm_death_watch,
                     sync_log_text,
                 )
@@ -152,6 +166,7 @@ fn set_launcher_ui_visibility(
 
 fn handle_toggle(
     mut pending: ResMut<PendingToggle>,
+    mut drawn_check: ResMut<DrawnCheck>,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
     q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut commands: Commands,
@@ -177,6 +192,8 @@ fn handle_toggle(
         return;
     }
 
+    drawn_check.hume_done = false;
+    drawn_check.worm_done = false;
     activate_test_scene(
         &mut commands,
         &mut meshes,
@@ -186,6 +203,7 @@ fn handle_toggle(
         &mut scene,
         &actor_root,
         &mut log,
+        &mut drawn_check,
     );
 
     // Hide the launcher menu while the box is up; the X button (or leaving the Launcher phase)
@@ -234,14 +252,15 @@ fn activate_test_scene(
     scene: &mut SceneState,
     actor_root: &ActionDatRoot,
     log: &mut TestLog,
+    check: &mut DrawnCheck,
 ) {
-    if actor_root.0.is_none() {
+    let Some(dat_root) = actor_root.0.as_ref() else {
         log_line(
             log,
             "no retail install wired — pick one in Settings first".into(),
         );
         return;
-    }
+    };
 
     // Camera + light + ground. The camera clears its own color so the launcher backdrop zone
     // does not show around the test floor.
@@ -271,7 +290,8 @@ fn activate_test_scene(
         brightness: 400.0,
         ..default()
     });
-    let plane: Mesh = Plane3d::new(Vec3::Z, Vec2::splat(40.0)).into();
+    // +Y normal: a +Z plane is a vertical wall at z=0 that hides everything behind it.
+    let plane: Mesh = Plane3d::new(Vec3::Y, Vec2::splat(40.0)).into();
     commands.spawn((
         TestSceneScoped,
         Mesh3d(meshes.add(plane)),
@@ -314,11 +334,11 @@ fn activate_test_scene(
     // Production order: the face file first (head/hair), then slots 1..8 — load_pc reads
     // equipment[0] as the head. A weapon in that slot leaves the Hume headless.
     let mut equipment = Vec::new();
-    let mut loaded_parts: Vec<String> = Vec::new();
+    let mut parts: Vec<(&str, u32)> = Vec::new();
     match kuluu_render::look_resolver::resolve_face(0, 1) {
         Some(face_file) => {
             equipment.push(face_file);
-            loaded_parts.push(format!("face={face_file}"));
+            parts.push(("face", face_file));
         }
         None => log_line(
             log,
@@ -327,12 +347,12 @@ fn activate_test_scene(
     }
     // Slots 1..6: head..main hand. Slot 6 is the sword mesh itself — main_weapon only drives
     // the motion selector, so without it in equipment the Hume fights bare-handed.
-    const SLOT_NAMES: [&str; 6] = ["head", "body", "hands", "legs", "feet", "main_hand(sword)"];
+    const SLOT_NAMES: [&str; 6] = ["head", "body", "hands", "legs", "feet", "sword"];
     for (slot, name) in (1u16..=6).zip(SLOT_NAMES) {
         match kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
             Some(file_id) => {
                 equipment.push(file_id);
-                loaded_parts.push(format!("{name}={file_id}"));
+                parts.push((name, file_id));
             }
             None => log_line(
                 log,
@@ -358,6 +378,15 @@ fn activate_test_scene(
             sub_weapon: None,
         },
     });
+
+    verify_parts(
+        dat_root,
+        &parts,
+        kuluu_render::dat_vos2::skeleton_file_id_for_race(None, 1),
+        WORM_FILE,
+        log,
+        check,
+    );
 
     spawn_panel(commands);
 
@@ -387,8 +416,119 @@ fn activate_test_scene(
 
     log_line(
         log,
-        format!("loaded: worm={WORM_FILE} hume=[{}]", loaded_parts.join(" ")),
+        format!(
+            "loaded: worm={WORM_FILE} hume=[{}]",
+            parts
+                .iter()
+                .map(|(name, file_id)| format!("{name}={file_id}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     );
+}
+
+// Non-empty mesh buffers in a DAT: what load_pc turns into drawn mesh entities. None = unreadable.
+fn part_mesh_count(dat_root: &ffxi_dat::DatRoot, file_id: u32) -> Option<usize> {
+    let loc = dat_root.resolve(file_id).ok()?;
+    let bytes = std::fs::read(loc.path_under(dat_root)).ok()?;
+    Some(
+        ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes)
+            .collect_skel_meshes()
+            .iter()
+            .flat_map(|m| m.meshes.iter())
+            .filter(|b| !b.vertices.is_empty())
+            .count(),
+    )
+}
+
+// Every part file must be readable with mesh buffers, else load_pc drops it and the part
+// never renders; also seeds DrawnCheck's expected counts for verify_drawn.
+fn verify_parts(
+    dat_root: &ffxi_dat::DatRoot,
+    parts: &[(&str, u32)],
+    skel_file: Option<u32>,
+    worm_file: u32,
+    log: &mut TestLog,
+    check: &mut DrawnCheck,
+) {
+    let mut ok_bits = Vec::new();
+    for (name, file_id) in parts {
+        match part_mesh_count(dat_root, *file_id) {
+            Some(n) if n > 0 => ok_bits.push(format!("{name}={file_id}({n})")),
+            _ => log_line(
+                log,
+                format!("ERROR: {name}={file_id} unreadable or 0 mesh buffers — will not render"),
+            ),
+        }
+    }
+    if !ok_bits.is_empty() {
+        log_line(log, format!("check ok: {}", ok_bits.join(" ")));
+    }
+
+    check.exp_hume = skel_file
+        .and_then(|f| part_mesh_count(dat_root, f))
+        .unwrap_or(0)
+        + parts
+            .iter()
+            .map(|(_, file_id)| part_mesh_count(dat_root, *file_id).unwrap_or(0))
+            .sum::<usize>();
+    check.exp_worm = part_mesh_count(dat_root, worm_file).unwrap_or(0);
+    if check.exp_worm == 0 {
+        log_line(
+            log,
+            format!("ERROR: worm={worm_file} unreadable or 0 mesh buffers — will not render"),
+        );
+    }
+}
+
+fn verify_drawn(
+    mut check: ResMut<DrawnCheck>,
+    tracked: Res<TrackedEntities>,
+    q_root: Query<&FfxiRenderRoot>,
+    q_children: Query<&Children>,
+    q_mesh: Query<Entity, With<FfxiActorMeshChild>>,
+    mut log: ResMut<TestLog>,
+) {
+    let count_drawn = |wire: Entity| -> Option<usize> {
+        let root = q_root.get(wire).ok()?.0;
+        let children = q_children.get(root).ok()?;
+        Some(children.iter().filter(|&c| q_mesh.get(c).is_ok()).count())
+    };
+
+    if !check.hume_done {
+        if let Some(hume) = tracked.by_id.get(&HUME_ID).copied() {
+            if let Some(n) = count_drawn(hume) {
+                check.hume_done = true;
+                if n == 0 {
+                    log_line(&mut log, "ERROR: hume drew no mesh parts".into());
+                } else if n < check.exp_hume {
+                    let exp = check.exp_hume;
+                    log_line(
+                        &mut log,
+                        format!("ERROR: hume drew {n} of {exp} expected mesh parts"),
+                    );
+                } else {
+                    log_line(
+                        &mut log,
+                        format!("drawn on player: {n} mesh parts (sword included)"),
+                    );
+                }
+            }
+        }
+    }
+
+    if !check.worm_done {
+        if let Some(worm) = tracked.by_id.get(&WORM_ID).copied() {
+            if let Some(n) = count_drawn(worm) {
+                check.worm_done = true;
+                if n == 0 {
+                    log_line(&mut log, "ERROR: worm drew no mesh parts".into());
+                } else {
+                    log_line(&mut log, format!("drawn: worm {n} mesh parts"));
+                }
+            }
+        }
+    }
 }
 
 fn spawn_wire(

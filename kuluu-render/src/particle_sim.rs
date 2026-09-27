@@ -1,4 +1,5 @@
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -668,12 +669,42 @@ pub fn spawn_particle_generators(
                     Ok(xf) => sfx_writer.write(crate::audio::SfxEvent::at(se_id, xf.translation)),
                     Err(_) => sfx_writer.write(crate::audio::SfxEvent::new(se_id)),
                 };
-            } else if tracing {
-                info!(
-                    "animationtest trace: particle stage {} [{}] unresolved — no tier holds the def",
-                    String::from_utf8_lossy(&ev.stage.stage.id),
-                    String::from_utf8_lossy(&local_dir),
-                );
+            } else {
+                // A SpawnGenerator whose target links a 0x22 Distortion def is a screen-space
+                // haze cue, not a particle: arm the distortion pass for the generator's life.
+                // g142 in hi14 (the crit chain) is retail's motion smear — without this it was
+                // silently dropped with the mesh particles.
+                let dist = [
+                    local_assets,
+                    actor_assets,
+                    global.as_ref().map(|g| &g.assets),
+                ]
+                .into_iter()
+                .flatten()
+                .find_map(|a| a.distortion_defs.get(&ev.stage.stage.id));
+                if let Some(dist) = dist {
+                    commands.insert_resource(crate::distortion_pass::ActiveDistortion {
+                        haze_offset_x: dist.haze_offset_x,
+                        expires_at: Some(
+                            Instant::now() + Duration::from_secs_f32(dist.max_life_frames / 60.0),
+                        ),
+                    });
+                    if tracing {
+                        info!(
+                            "animationtest trace: particle stage {} [{}] — DISTORTION armed haze_x={:.3} life {:.1}s",
+                            String::from_utf8_lossy(&ev.stage.stage.id),
+                            String::from_utf8_lossy(&local_dir),
+                            dist.haze_offset_x,
+                            dist.max_life_frames / 60.0,
+                        );
+                    }
+                } else if tracing {
+                    info!(
+                        "animationtest trace: particle stage {} [{}] unresolved — no tier holds the def",
+                        String::from_utf8_lossy(&ev.stage.stage.id),
+                        String::from_utf8_lossy(&local_dir),
+                    );
+                }
             }
             continue;
         };

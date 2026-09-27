@@ -25,6 +25,7 @@ pub mod dat_root;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;
+pub mod distortion_pass;
 pub mod element_sort;
 pub mod entity_table;
 pub mod env_flags;
@@ -226,6 +227,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_plugins(lens_flare::LensFlarePlugin);
 
         app.add_plugins(nameplate_final_pass::NameplateFinalPassPlugin);
+
+        app.add_plugins(distortion_pass::DistortionPassPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_point_lights::ZonePointLightsPlugin);

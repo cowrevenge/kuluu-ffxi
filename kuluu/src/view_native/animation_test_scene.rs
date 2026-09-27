@@ -14,7 +14,7 @@ use kuluu_render::ffxi_actor_render::{
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
     enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir, RoutineLookup,
-    LEVEL_UP_EFFECT_DAT_ID,
+    VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
@@ -216,6 +216,9 @@ fn handle_toggle(
 
     if q_scoped.iter().next().is_some() {
         tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
+        // The dispatch funnel's info! traces (routine resolution, particle defs/meshes) are
+        // gated on this; the box is where they earn their keep.
+        commands.insert_resource(VfxTrace(false));
         log_line(&mut log, "scene down".into());
         return;
     }
@@ -225,6 +228,7 @@ fn handle_toggle(
     drawn_check.parts_ok = true;
     hp.hume = TEST_MAX_HP;
     hp.worm = TEST_MAX_HP;
+    commands.insert_resource(VfxTrace(true));
     activate_test_scene(
         &mut commands,
         &mut meshes,

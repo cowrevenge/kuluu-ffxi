@@ -3839,15 +3839,17 @@ pub fn dispatch_target_routine_stages(
     mut q_active: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     global: Option<Res<GlobalEffectDir>>,
+    trace: Option<Res<VfxTrace>>,
     mut commands: Commands,
 ) {
+    let tracing = trace.is_some_and(|t| t.0);
     for ev in events.read() {
         if ev.stage.stage.kind != StageKind::SubRoutineOnTarget {
             continue;
         }
         let (host, flipped_target) =
             target_link_context(ev.actor, q_target.get(ev.actor).ok().and_then(|t| t.0));
-        run_routine_on(
+        match run_routine_on(
             host,
             &ev.stage.stage.id,
             flipped_target,
@@ -3857,7 +3859,27 @@ pub fn dispatch_target_routine_stages(
             &mut pending_inserts,
             global.as_deref(),
             &mut commands,
-        );
+        ) {
+            Some(summary) => {
+                if tracing {
+                    info!(
+                        "animationtest trace: target-link `{}` on actor {:#X}: {}",
+                        fourcc(ev.stage.stage.id),
+                        host.to_bits(),
+                        summary
+                    );
+                }
+            }
+            None => {
+                if tracing {
+                    info!(
+                        "animationtest trace: target-link `{}` UNRESOLVED for actor {:#X}",
+                        fourcc(ev.stage.stage.id),
+                        host.to_bits()
+                    );
+                }
+            }
+        }
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }

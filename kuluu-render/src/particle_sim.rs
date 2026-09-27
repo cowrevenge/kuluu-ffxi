@@ -675,9 +675,13 @@ pub fn spawn_particle_generators(
 
         if tracing {
             info!(
-                "animationtest trace: spawned particle generator {} mesh {} life {}",
+                "animationtest trace: route {} spawned particle generator {} mesh {} frame={} delay={} win={} life {}",
+                String::from_utf8_lossy(&ev.scheduler),
                 String::from_utf8_lossy(&ev.stage.stage.id),
                 String::from_utf8_lossy(&def.mesh_id),
+                ev.stage.frame,
+                ev.stage.stage.delay_frames,
+                ev.stage.stage.duration_frames,
                 def.max_life_frames
             );
         } else {

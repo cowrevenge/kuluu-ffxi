@@ -446,7 +446,10 @@ const MOUNT_FOOTSTEP_REFERENCE: usize = 0;
 // attachments keep the plain root origin until that flag exists.
 // research/XIClient Attachment.cpp MakeAttachMatrix — every attach type resolves the def's
 // single EID index (AttachmentInfo bits 4-9 + bit 18); the mount footstep indices are remapped
-// to reference 0 before resolution.
+// to reference 0 before resolution. A target-side attach carrying a plain index resolves it
+// through the nearest-ring selector instead: retail places those effects at the contact point,
+// the victim's ring locator nearest the attacker
+// (.agents/skills/retail-observe/references/2026-09-27-hit-effect-contact-point.md).
 fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
     use ffxi_dat::particle_gen::AttachType;
     let reference = if MOUNT_FOOTSTEP_JOINTS.contains(&def.attach_eid) {
@@ -460,10 +463,16 @@ fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
         | AttachType::SourceToTargetBasis
         | AttachType::ZoneActorA
         | AttachType::ZoneActorB
-        | AttachType::ZoneActorC
-        | AttachType::TargetActor
+        | AttachType::ZoneActorC => Some(reference),
+        AttachType::TargetActor
         | AttachType::TargetActorSourceFacing
-        | AttachType::TargetToSourceBasis => Some(reference),
+        | AttachType::TargetToSourceBasis => {
+            if ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.contains(&reference) {
+                Some(reference)
+            } else {
+                Some(*ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.start())
+            }
+        }
         AttachType::SourceActorWeapon | AttachType::None | AttachType::Sun | AttachType::Moon => {
             None
         }
@@ -5741,8 +5750,10 @@ mod tests {
     }
 
     // Pinned against the install: every `hit1` spark generator attaches to the TARGET actor
-    // with EID index 0 (Attachment.cpp MakeAttachMatrix formula), so the spawn origin is the
-    // victim's locator 0, not a phantom joint.
+    // with EID index 0 (Attachment.cpp MakeAttachMatrix formula). Placement resolves that plain
+    // index through the nearest-ring selector — retail puts the flash at the contact point, not
+    // the victim's root
+    // (.agents/skills/retail-observe/references/2026-09-27-hit-effect-contact-point.md).
     #[test]
     fn real_dat_hit_sparks_carry_the_retail_eid_index() {
         let Some(defs) = retail_hit_spark_defs() else {
@@ -5754,17 +5765,19 @@ mod tests {
             assert_eq!(def.attach_eid, HIT_SPARK_EID_INDEX, "{name}");
             assert_eq!(
                 attach_joint_reference(def),
-                Some(HIT_SPARK_EID_INDEX as usize),
-                "{name} resolves the single EID index"
+                Some(*ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.start()),
+                "{name} resolves through the nearest-ring selector"
             );
             assert_eq!(def.base_position, [0.0; 3], "{name}");
         }
     }
 
-    // EID 0 resolves to the victim's locator 0 — its root — with no directional selection:
-    // the offset is zero at every attacker bearing (Attachment.cpp MakeEIDPoint default case).
+    // The plain EID index resolves through the nearest-ring selector toward the attacker: the
+    // offset is a ring locator at torso height on the struck side, at every victim facing and
+    // attacker bearing
+    // (.agents/skills/retail-observe/references/2026-09-27-hit-effect-contact-point.md).
     #[test]
-    fn real_dat_hit_spark_offset_is_the_victim_root() {
+    fn real_dat_hit_spark_offset_is_the_contact_point() {
         let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
         else {
             return;
@@ -5802,9 +5815,16 @@ mod tests {
                     );
                     let name = String::from_utf8_lossy(name).to_string();
                     assert!(
-                        offset.length() < 1e-3,
-                        "{name} spawned {offset:?}, not at the victim's root"
+                        offset.y.abs() > 0.5,
+                        "{name} offset {offset:?} is not at torso height"
                     );
+                    let horizontal = Vec3::new(offset.x, 0.0, offset.z);
+                    if horizontal.length_squared() > 1e-6 {
+                        assert!(
+                            horizontal.normalize().dot(toward) > 0.5,
+                            "{name} offset {offset:?} does not face the attacker at bearing {a:.2}"
+                        );
+                    }
                 }
             }
         }
@@ -5908,11 +5928,12 @@ mod tests {
     /// `attach_joint_offset` alone: the actor root carrying the pose is a CHILD of the wire
     /// entity the stage fires on and PostUpdate has propagated nothing on the frame it is
     /// inserted, so the child descent, the local-transform composition and the
-    /// `+ joint_offset` at the spawn site all have to hold for the spark to land on the
-    /// victim's locator 0 (EID 0 — Attachment.cpp MakeEIDPoint default case).
+    /// `+ joint_offset` at the spawn site all have to hold for the spark to land at the
+    /// contact point — the victim's ring locator nearest the attacker
+    /// (.agents/skills/retail-observe/references/2026-09-27-hit-effect-contact-point.md).
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn real_dat_hit_spark_spawns_at_the_victims_locator_zero() {
+    fn real_dat_hit_spark_spawns_at_the_contact_point() {
         let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
         else {
             return;
@@ -5929,6 +5950,7 @@ mod tests {
 
         const VICTIM_WORLD: Vec3 = Vec3::new(30.0, 2.0, -14.0);
         const ATTACKER_WORLD: Vec3 = Vec3::new(33.0, 2.0, -14.0);
+        let toward_attacker = (ATTACKER_WORLD - VICTIM_WORLD).normalize();
         for (gen_id, _) in &defs {
             let name = String::from_utf8_lossy(gen_id).to_string();
             let origin = run_hit_spark_stage(
@@ -5940,12 +5962,21 @@ mod tests {
                 VICTIM_WORLD,
             )
             .unwrap_or_else(|| panic!("{name} spawned no generator"));
+            let offset = origin - VICTIM_WORLD;
             assert!(
-                (origin - VICTIM_WORLD).length() < 1e-3,
-                "{name} spawned at {origin:?}, not at the victim's locator 0"
+                offset.y.abs() > 0.5,
+                "{name} spawned at {origin:?}, not at torso height"
             );
+            let horizontal = Vec3::new(offset.x, 0.0, offset.z);
+            if horizontal.length_squared() > 1e-6 {
+                assert!(
+                    horizontal.normalize().dot(toward_attacker) > 0.5,
+                    "{name} spawned at {origin:?}, not on the attacker's side"
+                );
+            }
 
-            // A self-targeted def resolves against the same actor: still locator 0.
+            // A self-targeted def resolves against the same actor: the ring point nearest its own
+            // origin, torso height above the root.
             let self_origin = run_hit_spark_stage(
                 &skeleton,
                 &pose,
@@ -5956,8 +5987,8 @@ mod tests {
             )
             .unwrap_or_else(|| panic!("{name} spawned no self-targeted generator"));
             assert!(
-                (self_origin - VICTIM_WORLD).length() < 1e-3,
-                "self-targeted {name} spawned at {self_origin:?}, not at locator 0"
+                (self_origin - VICTIM_WORLD).y.abs() > 0.5,
+                "self-targeted {name} spawned at {self_origin:?}, not at torso height"
             );
         }
     }

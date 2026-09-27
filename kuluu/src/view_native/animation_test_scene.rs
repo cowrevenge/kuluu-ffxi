@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
-use kuluu_render::components::WorldEntity;
+use kuluu_render::components::{InGameEntity, WorldEntity};
 use kuluu_render::ffxi_actor_render::{
     ActorSubject, FfxiActorMeshChild, FfxiRenderActor, FfxiRenderRoot, LoadActorRequest,
 };
@@ -21,11 +21,9 @@ use kuluu_snapshot::EntityKind;
 
 /// Carrion Worm family model (kuluu-render/tests/rabbit_tester.rs S12 load).
 const WORM_FILE: u32 = 1724;
-// The equipment table's default head (7112) and main-hand (8392) rows are bare-head/bare-hand
-// stubs: their VertexOs2 chunks carry joint-mapped vertices but no polygon instructions, so
-// nothing draws from them. Production fills those slots from equipped items; the box pins real
-// files with geometry.
-const TEST_HEAD_FILE: u32 = 7082;
+// The equipment table's main-hand (8392) row is a bare-hand stub: its VertexOs2 chunk carries
+// joint-mapped vertices but no polygon instructions, so nothing draws from it. Production fills
+// the slot from the equipped item; the box pins a real sword file with geometry.
 const TEST_SWORD_FILE: u32 = 8397;
 
 const WORM_ID: u32 = 1;
@@ -143,6 +141,7 @@ impl Plugin for AnimationTestScenePlugin {
                     run_pending_case,
                     verify_drawn,
                     worm_death_watch,
+                    zone_backdrop_visibility,
                     sync_log_text,
                 )
                     .chain()
@@ -277,7 +276,7 @@ fn activate_test_scene(
         // 1-2 are the in-game nameplate overlay/composite slots.
         Camera {
             order: 3,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.05, 0.06, 0.08)),
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
         Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
@@ -351,12 +350,15 @@ fn activate_test_scene(
             "ERROR: face file unresolved — head will not render".into(),
         ),
     }
-    // Slots 2..5 come from the race's default equipment table (real geometry); slots 1/6 are
-    // pinned to real files because the table rows there are bare stubs.
+    // Slots 2..5 come from the race's default equipment table (real geometry); slot 6 is pinned
+    // to a real sword because its table row is a bare stub; slot 1 stays empty — the face file
+    // carries hair and face, so no headgear.
     const SLOT_NAMES: [&str; 6] = ["head", "body", "hands", "legs", "feet", "sword"];
     for (slot, name) in (1u16..=6).zip(SLOT_NAMES) {
+        if slot == 1 {
+            continue;
+        }
         let file_id = match slot {
-            1 => Some(TEST_HEAD_FILE),
             6 => Some(TEST_SWORD_FILE),
             _ => kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1),
         };
@@ -1006,6 +1008,46 @@ fn worm_death_watch(
         }
     }
     worm_state.dead_at = None;
+}
+
+// The launcher backdrop mirrors a live zone into the same world space; its meshes carry
+// InGameEntity and would show through around the test floor. While the box is up, hide every
+// InGameEntity not under it — effect particles are children of the test actors, so they stay.
+// Restores visibility on teardown.
+fn zone_backdrop_visibility(
+    q_scoped: Query<Entity, With<TestSceneScoped>>,
+    mut q_vis: Query<
+        (&mut Visibility, Option<&ChildOf>),
+        (With<InGameEntity>, Without<TestSceneScoped>),
+    >,
+    q_anc: Query<(Option<&ChildOf>, Has<TestSceneScoped>)>,
+) {
+    let active = q_scoped.iter().next().is_some();
+    for (mut vis, parent) in &mut q_vis {
+        if active {
+            if matches!(*vis, Visibility::Hidden) {
+                continue;
+            }
+            let mut under_test = false;
+            let mut cur = parent.map(|p| p.parent());
+            while let Some(p) = cur {
+                let (next, scoped) = match q_anc.get(p) {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                if scoped {
+                    under_test = true;
+                    break;
+                }
+                cur = next.map(|n| n.parent());
+            }
+            if !under_test {
+                *vis = Visibility::Hidden;
+            }
+        } else if matches!(*vis, Visibility::Hidden) {
+            *vis = Visibility::default();
+        }
+    }
 }
 
 fn sync_log_text(log: Res<TestLog>, mut node: Query<&mut Text, With<LogText>>) {

@@ -21,8 +21,12 @@ use kuluu_snapshot::EntityKind;
 
 /// Carrion Worm family model (kuluu-render/tests/rabbit_tester.rs S12 load).
 const WORM_FILE: u32 = 1724;
-/// HumeM main-hand weapon row (kuluu-render/tests/rabbit_tester.rs load_humem).
-const HUME_MAIN_WEAPON: u32 = 8392;
+// The equipment table's default head (7112) and main-hand (8392) rows are bare-head/bare-hand
+// stubs: their VertexOs2 chunks carry joint-mapped vertices but no polygon instructions, so
+// nothing draws from them. Production fills those slots from equipped items; the box pins real
+// files with geometry.
+const TEST_HEAD_FILE: u32 = 7082;
+const TEST_SWORD_FILE: u32 = 8397;
 
 const WORM_ID: u32 = 1;
 const HUME_ID: u32 = 2;
@@ -97,6 +101,7 @@ struct WormState {
 struct DrawnCheck {
     hume_done: bool,
     worm_done: bool,
+    parts_ok: bool,
     exp_hume: usize,
     exp_worm: usize,
 }
@@ -194,6 +199,7 @@ fn handle_toggle(
 
     drawn_check.hume_done = false;
     drawn_check.worm_done = false;
+    drawn_check.parts_ok = true;
     activate_test_scene(
         &mut commands,
         &mut meshes,
@@ -345,11 +351,16 @@ fn activate_test_scene(
             "ERROR: face file unresolved — head will not render".into(),
         ),
     }
-    // Slots 1..6: head..main hand. Slot 6 is the sword mesh itself — main_weapon only drives
-    // the motion selector, so without it in equipment the Hume fights bare-handed.
+    // Slots 2..5 come from the race's default equipment table (real geometry); slots 1/6 are
+    // pinned to real files because the table rows there are bare stubs.
     const SLOT_NAMES: [&str; 6] = ["head", "body", "hands", "legs", "feet", "sword"];
     for (slot, name) in (1u16..=6).zip(SLOT_NAMES) {
-        match kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
+        let file_id = match slot {
+            1 => Some(TEST_HEAD_FILE),
+            6 => Some(TEST_SWORD_FILE),
+            _ => kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1),
+        };
+        match file_id {
             Some(file_id) => {
                 equipment.push(file_id);
                 parts.push((name, file_id));
@@ -374,7 +385,7 @@ fn activate_test_scene(
             mounted: false,
             equipment,
             body: None,
-            main_weapon: Some(HUME_MAIN_WEAPON),
+            main_weapon: Some(TEST_SWORD_FILE),
             sub_weapon: None,
         },
     });
@@ -455,10 +466,15 @@ fn verify_parts(
     for (name, file_id) in parts {
         match part_mesh_count(dat_root, *file_id) {
             Some(n) if n > 0 => ok_bits.push(format!("{name}={file_id}({n})")),
-            _ => log_line(
-                log,
-                format!("ERROR: {name}={file_id} unreadable or 0 mesh buffers — will not render"),
-            ),
+            _ => {
+                check.parts_ok = false;
+                log_line(
+                    log,
+                    format!(
+                        "ERROR: {name}={file_id} unreadable or 0 mesh buffers — will not render"
+                    ),
+                );
+            }
         }
     }
     if !ok_bits.is_empty() {
@@ -507,11 +523,15 @@ fn verify_drawn(
                         &mut log,
                         format!("ERROR: hume drew {n} of {exp} expected mesh parts"),
                     );
-                } else {
+                } else if check.parts_ok {
                     log_line(
                         &mut log,
-                        format!("drawn on player: {n} mesh parts (sword included)"),
+                        format!(
+                            "drawn on player: {n} mesh parts (all checked parts, sword included)"
+                        ),
                     );
+                } else {
+                    log_line(&mut log, format!("drawn on player: {n} mesh parts"));
                 }
             }
         }

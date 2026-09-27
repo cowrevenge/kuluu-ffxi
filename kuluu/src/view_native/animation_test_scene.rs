@@ -284,9 +284,9 @@ fn activate_test_scene(
     // Worm left, sworded Hume right, facing each other. The snapshot entries keep the wires
     // alive: sync_entities_system despawns any tracked wire missing from the snapshot.
     // Heading is the system's orientation source of truth (sync re-derives the wire quat from
-    // it on respawn), so both the spawn transform and the heading agree. Both are 128 (= a PI
-    // turn, live-checked): the two skeletons are authored facing opposite local ways — the
-    // worm's forward is -X, the HumeM's +X — so equal headings square them onto each other.
+    // it on respawn), so both the spawn transform and the heading agree. Both skeletons face
+    // local +X at identity (live-checked), so opposite headings square them onto each other:
+    // worm 0 faces +X toward the Hume, Hume 128 faces -X back.
     // Both are engaged so they stand in battle stance with weapons out, not rest pose.
     spawn_wire(
         commands,
@@ -295,7 +295,7 @@ fn activate_test_scene(
         WORM_ID,
         EntityKind::Mob,
         Vec3::new(-1.0, 0.0, 0.0),
-        128,
+        0,
         ffxi_proto::decode::animation::ATTACK,
         HUME_ID,
     );
@@ -318,7 +318,9 @@ fn activate_test_scene(
         Some(face_file) => equipment.push(face_file),
         None => log_line(log, "face file unresolved — head will not render".into()),
     }
-    for slot in 1..=5u16 {
+    // Slots 1..6: head..main hand. Slot 6 is the sword mesh itself — main_weapon only drives
+    // the motion selector, so without it in equipment the Hume fights bare-handed.
+    for slot in 1..=6u16 {
         match kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
             Some(file_id) => equipment.push(file_id),
             None => log_line(
@@ -332,6 +334,11 @@ fn activate_test_scene(
         .map(|f| f.to_string())
         .collect::<Vec<_>>()
         .join(" ");
+    log_line(
+        log,
+        "headings: worm 0 (faces +X), hume 128 (faces -X) — opposite, squared onto each other"
+            .into(),
+    );
     load_tx.write(LoadActorRequest {
         entity_id: WORM_ID,
         subject: ActorSubject::Npc {

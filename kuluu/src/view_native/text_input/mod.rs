@@ -2877,6 +2877,10 @@ mod cs_input_lock_tests {
         app.insert_resource(crate::view_native::navmesh_overlay::NavmeshState::default());
         app.insert_resource(bevy_framepace::FramepaceSettings::default());
         app.insert_resource(CaptureMode::default());
+        // SlashWriters reads both unconditionally (//animationtest); the full app gets them
+        // from SchedulerRuntimePlugin, these minimal apps do not.
+        app.insert_resource(kuluu_render::scheduler_runtime::AnimationTestState::default());
+        app.insert_resource(kuluu_render::scheduler_runtime::VfxTrace::default());
         app.insert_resource(kuluu_render::EventLog::default());
         app.insert_resource(kuluu_render::GraphicsSettings::default());
         app.insert_resource(kuluu_render::hud::HudVerbosity::default());

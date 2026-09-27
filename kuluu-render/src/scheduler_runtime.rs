@@ -3678,6 +3678,7 @@ fn fire_hit_reaction(
     pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     global: Option<&GlobalEffectDir>,
     commands: &mut Commands,
+    death_path_started: bool,
 ) -> HitReactionReport {
     let mut report = HitReactionReport {
         dam0: Vec::new(),
@@ -3691,47 +3692,55 @@ fn fire_hit_reaction(
     if let Some(g) = global {
         lookup = lookup.with_dat(&g.schedulers);
     }
-    for routine in &evaluate_switch(&lookup, b"dam0", ctx, UnknownFieldPolicy::Random) {
-        tracing::debug!(target: "combat", "COMBAT_RX victim={} res={} info=0x{:X} routine={} found={}",
-                victim.index(),
-                ctx.resolution,
-                ctx.info,
-                fourcc(*routine),
-                lookup.get(routine).is_some());
-        report.dam0.push(fourcc(*routine));
-        if let Some(summary) = run_routine_on(
-            victim,
-            routine,
-            Some(attacker),
-            q_children,
-            q_render,
-            q_active,
-            pending_inserts,
-            global,
-            commands,
-        ) {
-            if !report.victim_stages.is_empty() {
-                report.victim_stages.push_str("; ");
+    if death_path_started {
+        // The victim's death path is already running (DeadFromAction latched + snapshot hp 0):
+        // the corpse is collapsing, so a late DamageCallback must not pull it back up for its
+        // flinch frames. The attacker-side crtl spark below still fires.
+        tracing::debug!(target: "combat", "COMBAT_RX_SKIP victim={} death path already running — no flinch over the corpse",
+                victim.index());
+    } else {
+        for routine in &evaluate_switch(&lookup, b"dam0", ctx, UnknownFieldPolicy::Random) {
+            tracing::debug!(target: "combat", "COMBAT_RX victim={} res={} info=0x{:X} routine={} found={}",
+                    victim.index(),
+                    ctx.resolution,
+                    ctx.info,
+                    fourcc(*routine),
+                    lookup.get(routine).is_some());
+            report.dam0.push(fourcc(*routine));
+            if let Some(summary) = run_routine_on(
+                victim,
+                routine,
+                Some(attacker),
+                q_children,
+                q_render,
+                q_active,
+                pending_inserts,
+                global,
+                commands,
+            ) {
+                if !report.victim_stages.is_empty() {
+                    report.victim_stages.push_str("; ");
+                }
+                report.victim_stages.push_str(&summary);
             }
-            report.victim_stages.push_str(&summary);
         }
-    }
-    // A killing blow's fall-over starts on this impact frame, not on the Defeated packet: dam0
-    // selects only the flinch/sound pair for info=defeated, so run the model's `dead` routine
-    // here (ded? fall-over at its first Motion stage, cor0 hold after). Models without a `dead`
-    // routine keep the instant-corpse fallback (run_routine_on no-ops on an unresolvable name).
-    if ctx.info & ffxi_proto::melee::INFO_DEFEATED as u32 != 0 {
-        run_routine_on(
-            victim,
-            b"dead",
-            Some(attacker),
-            q_children,
-            q_render,
-            q_active,
-            pending_inserts,
-            global,
-            commands,
-        );
+        // A killing blow's fall-over starts on this impact frame, not on the Defeated packet: dam0
+        // selects only the flinch/sound pair for info=defeated, so run the model's `dead` routine
+        // here (ded? fall-over at its first Motion stage, cor0 hold after). Models without a `dead`
+        // routine keep the instant-corpse fallback (run_routine_on no-ops on an unresolvable name).
+        if ctx.info & ffxi_proto::melee::INFO_DEFEATED as u32 != 0 {
+            run_routine_on(
+                victim,
+                b"dead",
+                Some(attacker),
+                q_children,
+                q_render,
+                q_active,
+                pending_inserts,
+                global,
+                commands,
+            );
+        }
     }
     // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
     // context (target = victim): its g14*/g29* spark defs are TargetActor-attached and land
@@ -3766,6 +3775,8 @@ pub fn dispatch_damage_callback_stages(
     q_pending: Query<(&PendingHitReaction, &ActionTarget)>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_dead_latch: Query<Option<&DeadFromAction>>,
+    state: Res<crate::snapshot::SceneState>,
     mut q_active: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     global: Option<Res<GlobalEffectDir>>,
@@ -3799,6 +3810,18 @@ pub fn dispatch_damage_callback_stages(
             tracing::debug!(target: "combat", "COMBAT_CB actor={} no-victim", ev.actor.index());
             continue;
         };
+        let death_path_started = q_children.get(victim).is_ok_and(|children| {
+            children.iter().any(|child| {
+                q_dead_latch.get(child).ok().flatten().is_some()
+                    && q_render.get(child).ok().is_some_and(|render| {
+                        state
+                            .snapshot
+                            .entities
+                            .iter()
+                            .any(|e| e.id == render.world_id && e.hp_pct == Some(0))
+                    })
+            })
+        });
         fire_hit_reaction(
             ev.actor,
             victim,
@@ -3809,6 +3832,7 @@ pub fn dispatch_damage_callback_stages(
             &mut pending_inserts,
             global.as_deref(),
             &mut commands,
+            death_path_started,
         );
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
@@ -4355,6 +4379,7 @@ pub fn animation_test_tick(
                 &mut pending_inserts,
                 global.as_deref(),
                 &mut commands,
+                false,
             );
             if reported_case.as_ref() != Some(&case) {
                 *reported_case = Some(case);

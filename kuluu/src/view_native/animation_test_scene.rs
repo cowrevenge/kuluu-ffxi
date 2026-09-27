@@ -13,10 +13,10 @@ use kuluu_render::ffxi_actor_render::{
 };
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
-    enqueue_routine, evaluate_switch, stage_summary, ActionDatRoot, ActionTarget, ActiveScheduler,
-    GlobalEffectDir, HitContext, RoutineLookup, UnknownFieldPolicy, LEVEL_UP_EFFECT_DAT_ID,
+    enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir, RoutineLookup,
+    LEVEL_UP_EFFECT_DAT_ID,
 };
-use kuluu_render::snapshot::SceneState;
+use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
 
 /// Carrion Worm family model (kuluu-render/tests/rabbit_tester.rs S12 load).
@@ -77,10 +77,6 @@ impl Case {
             Self::PlayerDhit => ffxi_proto::melee::INFO_DEFEATED,
             _ => 0,
         }
-    }
-
-    fn is_crit(self) -> bool {
-        matches!(self, Self::PlayerChit | Self::MobChit)
     }
 }
 
@@ -713,6 +709,7 @@ fn run_pending_case(
     q_root: Query<&kuluu_render::ffxi_actor_render::FfxiRenderRoot>,
     mut q_vis: Query<&mut Visibility>,
     mut commands: Commands,
+    mut events: ResMut<EventLog>,
 ) {
     let Some(case) = pending.0.take() else {
         return;
@@ -737,16 +734,7 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
-        _ => fire_hit(
-            case,
-            &tracked,
-            &q_children,
-            &q_render,
-            global.as_deref(),
-            &mut worm_state,
-            &mut log,
-            &mut commands,
-        ),
+        _ => fire_hit(case, &tracked, &mut log, &mut events),
     }
 }
 
@@ -763,148 +751,41 @@ fn actor_routines(
         .map(|a| a.routines().clone())
 }
 
-fn fourcc(name: &[u8; 4]) -> String {
-    std::str::from_utf8(name).unwrap_or("????").to_string()
-}
-
-fn fire_hit(
-    case: Case,
-    tracked: &TrackedEntities,
-    q_children: &Query<&Children>,
-    q_render: &Query<&FfxiRenderActor>,
-    global: Option<&GlobalEffectDir>,
-    worm_state: &mut WormState,
-    log: &mut TestLog,
-    commands: &mut Commands,
-) {
+// The button is the server: one BATTLE2-shaped ActionStarted into the EventLog. Production
+// reacts from there — dispatch_action_overlay plays the attacker's swing clip (ati0), and
+// dispatch_melee_action_started enqueues the effects and arms the victim reaction that the
+// swing's DamageCallback fires at its impact frame.
+fn fire_hit(case: Case, tracked: &TrackedEntities, log: &mut TestLog, events: &mut EventLog) {
     let (attacker_id, victim_id) = match case {
         Case::PlayerNhIt | Case::PlayerChit | Case::PlayerDhit => (HUME_ID, WORM_ID),
         _ => (WORM_ID, HUME_ID),
     };
-    let Some(attacker) = tracked.by_id.get(&attacker_id).copied() else {
-        log_line(
-            log,
-            "attacker not loaded yet — try again in a second".into(),
-        );
+    if tracked.by_id.get(&attacker_id).is_none() || tracked.by_id.get(&victim_id).is_none() {
+        log_line(log, "actors not loaded yet — try again in a second".into());
         return;
-    };
-    let Some(victim) = tracked.by_id.get(&victim_id).copied() else {
-        log_line(log, "victim not loaded yet — try again in a second".into());
-        return;
-    };
-
-    // The reaction runs on the VICTIM with target = attacker (production semantics: the victim's
-    // own damg shadows the global one and links chit back onto the attacker).
-    let Some(victim_routines) = actor_routines(victim, q_children, q_render) else {
-        log_line(
-            log,
-            "victim has no routines yet — model still loading".into(),
-        );
-        return;
-    };
-    // The attacker's own swing, mirroring dispatch_melee_action_started: atk0 voice merged with
-    // the ati0 motion from the attacker's routines; target = victim so the pose faces them.
-    if let Some(att_routines) = actor_routines(attacker, q_children, q_render) {
-        let mut att_lookup = RoutineLookup::new().with_actor(&att_routines);
-        if let Some(g) = global {
-            att_lookup = att_lookup.with_dat(&g.schedulers);
-        }
-        match ActiveScheduler::effects_only_merged(&att_lookup, &[*b"atk0", *b"ati0"]) {
-            Some(active) => {
-                log_line(
-                    log,
-                    format!("swing on attacker: {}", stage_summary(&active)),
-                );
-                enqueue_routine(commands, attacker, active);
-                commands
-                    .entity(attacker)
-                    .try_insert(ActionTarget(Some(victim)));
-            }
-            None => log_line(log, "no atk0/ati0 swing routine on the attacker".into()),
-        }
-    } else {
-        log_line(
-            log,
-            "attacker has no routines yet — model still loading".into(),
-        );
     }
-
-    let mut lookup = RoutineLookup::new().with_actor(&victim_routines);
-    if let Some(g) = global {
-        lookup = lookup.with_dat(&g.schedulers);
-    }
-
-    let ctx = HitContext {
-        resolution: 0,
-        animation: 0,
-        info: u32::from(case.info_bits()),
-    };
+    events.push(kuluu_snapshot::ViewerEvent::ActionStarted {
+        actor_id: attacker_id,
+        action_id: u32::from_le_bytes(*b"atk0"),
+        action_kind: ffxi_proto::melee::CATEGORY_BASIC_ATTACK,
+        target_id: Some(victim_id),
+        result: Some((0, 0)), // resolution Hit, animation RightAttack
+        animation: Some(0),
+        outcome: Some((case.info_bits(), 0, 0)),
+    });
     log_line(
         log,
         format!(
-            "dam0 switch on victim (res=Hit, info={:#x}) — {}",
-            case.info_bits(),
-            if global.is_some() {
-                "global effect dir present"
+            "action started: {} -> {} ({})",
+            if attacker_id == HUME_ID {
+                "hume"
             } else {
-                "NO global effect dir loaded!"
-            }
+                "worm"
+            },
+            if victim_id == WORM_ID { "worm" } else { "hume" },
+            case.label()
         ),
     );
-
-    for name in evaluate_switch(&lookup, b"dam0", &ctx, UnknownFieldPolicy::Random) {
-        let fourcc = fourcc(&name);
-        match ActiveScheduler::from_routine(&lookup, &name) {
-            Some(active) => {
-                log_line(log, format!("dam0 -> {fourcc}: {}", stage_summary(&active)));
-                enqueue_routine(commands, victim, active);
-                commands
-                    .entity(victim)
-                    .try_insert(ActionTarget(Some(attacker)));
-            }
-            None => log_line(
-                log,
-                format!("dam0 -> {fourcc}: UNRESOLVED (no such routine in victim+global)"),
-            ),
-        }
-    }
-
-    if case.is_crit() {
-        for name in evaluate_switch(&lookup, b"crtl", &ctx, UnknownFieldPolicy::Match) {
-            let fourcc = fourcc(&name);
-            match ActiveScheduler::from_routine(&lookup, &name) {
-                Some(active) => {
-                    log_line(
-                        log,
-                        format!(
-                            "crtl -> {fourcc} (spark on attacker): {}",
-                            stage_summary(&active)
-                        ),
-                    );
-                    enqueue_routine(commands, attacker, active);
-                    commands
-                        .entity(attacker)
-                        .try_insert(ActionTarget(Some(victim)));
-                }
-                None => log_line(log, format!("crtl -> {fourcc}: UNRESOLVED")),
-            }
-        }
-    }
-
-    if case == Case::PlayerDhit {
-        // Production's Defeated frame also runs the victim's `dead` fall-over; mirror it.
-        match ActiveScheduler::from_routine(&lookup, b"dead") {
-            Some(active) => {
-                log_line(
-                    log,
-                    format!("defeated -> dead (fall-over): {}", stage_summary(&active)),
-                );
-                enqueue_routine(commands, victim, active);
-            }
-            None => log_line(log, "defeated: no `dead` routine on the victim".into()),
-        }
-        worm_state.dead_at = Some(Instant::now());
-    }
 }
 
 fn respawn_worm(

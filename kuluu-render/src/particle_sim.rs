@@ -300,8 +300,8 @@ struct LiveGenerator {
     // template UV so a scrolling water sheet/cascade slides its texture.
     tex_translate: Vec2,
     // Per-axis sign applied to init_velocity/accel. Actor-local generators integrate
-    // in the DAT frame (ONE); world-space zone generators build positions directly in
-    // Bevy space, so velocity gets the same mzb->bevy basis (x,-y,-z) as the origin.
+    // in the DAT frame (ONE); world-space generators build positions directly in Bevy
+    // space, so velocity gets the same mzb->bevy basis (x,-y,-z) as the origin.
     vel_basis: Vec3,
     origin_routine: Option<RoutineOrigin>,
     stopped: bool,
@@ -431,6 +431,11 @@ struct Oscillation {
 // one of a mount's two footstep points is rewritten to reference 0 before it is ever resolved.
 const MOUNT_FOOTSTEP_JOINTS: std::ops::RangeInclusive<u8> = 52..=53;
 const MOUNT_FOOTSTEP_REFERENCE: usize = 0;
+
+// The mzb->bevy axis mapping (dat_mzb.rs to_bevy) for world-space particle math: FFXI's -Y up
+// becomes Bevy +Y up and Z mirrors, so a DAT velocity/spread authored in the FFXI frame lands
+// where retail puts it.
+const WORLD_PARTICLE_VEL_BASIS: Vec3 = Vec3::new(1.0, -1.0, -1.0);
 
 // research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition jointRefIdx,103,111,125 updateAssociatedPosition — an
 // actor-attached generator emits from the attach actor's position PLUS the position of the joint
@@ -739,7 +744,10 @@ pub fn spawn_particle_generators(
             orientation: None,
             actor_local: false,
             tex_translate: Vec2::ZERO,
-            vel_basis: Vec3::ONE,
+            // World-space origin, so DAT velocities integrate through the mzb->bevy basis:
+            // retail steps elements in FFXI space (CYyGenerator.cpp ElemIdle case 0x02) and
+            // the attach matrix carries them to world at draw time.
+            vel_basis: WORLD_PARTICLE_VEL_BASIS,
             origin_routine: Some(RoutineOrigin {
                 owner: ev.actor,
                 gen_id: ev.stage.stage.id,
@@ -915,7 +923,7 @@ pub fn spawn_zone_particle_generator(
         orientation: particle_orientation(&def),
         actor_local: false,
         tex_translate: Vec2::ZERO,
-        vel_basis: Vec3::new(1.0, -1.0, -1.0),
+        vel_basis: WORLD_PARTICLE_VEL_BASIS,
         origin_routine: None,
         stopped: false,
         camera_relative: opts.camera_relative,
@@ -5732,6 +5740,41 @@ mod tests {
                 String::from_utf8_lossy(name)
             );
         }
+    }
+
+    // Retail steps elements in FFXI space, where -Y is up (CYyGenerator.cpp ElemIdle case 0x02):
+    // a world-space generator's DAT velocity integrates through WORLD_PARTICLE_VEL_BASIS, so a
+    // +Y drift settles toward the ground. With the old unit basis it rose — the vertical arc.
+    #[test]
+    fn world_space_velocity_integrates_through_the_mzb_bevy_basis() {
+        let mut d = def(1.0, 1.0, 1);
+        d.init_velocity = [0.0, 0.5, 0.0];
+        d.position_updater = true;
+        let mut g = live(d, 60.0);
+        g.vel_basis = WORLD_PARTICLE_VEL_BASIS;
+        emit(&mut g, 60.0);
+        advance(&mut g, 10.0);
+        assert!(
+            (g.particles[0].pos.y - (-5.0)).abs() < 1e-3,
+            "the +Y DAT drift must integrate downward in Bevy space: {:?}",
+            g.particles[0].pos
+        );
+    }
+
+    // Pinned against the install: hit1's dust g012 authors a +Y base drift — settling from the
+    // contact point toward the ground in retail's -Y-up frame (its spherical scatter rides on
+    // top, so per-particle motion is not monotonic).
+    #[test]
+    fn real_dat_hit_dust_authors_a_downward_drift() {
+        let Some(defs) = retail_hit_spark_defs() else {
+            return;
+        };
+        let def = defs
+            .iter()
+            .find(|(name, _)| *name == *b"g012")
+            .expect("hit1 defines g012")
+            .1;
+        assert!(def.init_velocity[1] > 0.0, "the DAT authors a +Y drift");
     }
 
     fn retail_hit_spark_defs() -> Option<Vec<([u8; 4], ParticleGeneratorDef)>> {

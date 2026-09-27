@@ -13,8 +13,8 @@ use kuluu_render::ffxi_actor_render::{
 };
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
-    enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir, RoutineLookup,
-    VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
+    enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir,
+    ParticleSpawnTrace, RoutineLookup, VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
@@ -167,6 +167,8 @@ impl Plugin for AnimationTestScenePlugin {
                     verify_drawn,
                     worm_death_watch,
                     zone_backdrop_visibility,
+                    collect_spawn_traces,
+                    sync_case_buttons,
                     sync_log_text,
                 )
                     .chain()
@@ -738,17 +740,57 @@ fn handle_case_presses(
     q_buttons: Query<(&CaseButton, &Interaction)>,
     mut pending: ResMut<PendingCase>,
     lock: Res<CaseLock>,
-    mut log: ResMut<TestLog>,
 ) {
     for (case_button, interaction) in q_buttons.iter() {
         if !matches!(interaction, Interaction::Pressed) {
             continue;
         }
+        // Bevy holds Pressed for the whole mouse-down, so a locked press is ignored silently
+        // (the buttons grey out while the case window runs) instead of logging per frame.
         if lock.until.is_some_and(|until| Instant::now() < until) {
-            log_line(&mut log, "busy — wait for the animation to finish".into());
             continue;
         }
         pending.0 = Some(case_button.0);
+    }
+}
+
+// The dispatch funnel's per-generator trace lines (route + timing), mirrored into the panel so
+// they sit next to the case log instead of only in stderr.
+fn collect_spawn_traces(
+    mut traces: MessageReader<ParticleSpawnTrace>,
+    q_scoped: Query<Entity, With<TestSceneScoped>>,
+    mut log: ResMut<TestLog>,
+) {
+    if q_scoped.iter().next().is_none() {
+        return;
+    }
+    for t in traces.read() {
+        log_line(&mut log, t.0.clone());
+    }
+}
+
+// Grey the case buttons out while a case window runs; restore them when it elapses.
+fn sync_case_buttons(
+    lock: Res<CaseLock>,
+    mut q_btns: Query<(&mut BackgroundColor, &Children), With<CaseButton>>,
+    mut q_text: Query<&mut TextColor>,
+) {
+    let locked = lock.until.is_some_and(|until| Instant::now() < until);
+    for (mut bg, children) in &mut q_btns {
+        *bg = if locked {
+            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
+        } else {
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3))
+        };
+        for child in children {
+            if let Ok(mut tc) = q_text.get_mut(*child) {
+                *tc = TextColor(if locked {
+                    Color::srgb(0.45, 0.48, 0.55)
+                } else {
+                    Color::WHITE
+                });
+            }
+        }
     }
 }
 

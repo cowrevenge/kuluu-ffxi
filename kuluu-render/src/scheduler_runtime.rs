@@ -4279,6 +4279,11 @@ impl WeaponHitCase {
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct VfxTrace(pub bool);
 
+// One trace line per spawned particle generator (route + timing), mirrored out of the render
+// crate so the pre-server test box can show it in its on-screen panel next to stderr.
+#[derive(Message, Debug, Clone)]
+pub struct ParticleSpawnTrace(pub String);
+
 const ANIMATION_TEST_LOOP_INTERVAL_FRAMES: f32 = 60.0;
 // A one-shot's trace window: long enough to cover the load + dispatch + first burst.
 const ANIMATION_TEST_TRACE_SECS: f32 = 15.0;
@@ -4416,6 +4421,8 @@ impl Plugin for SchedulerRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SchedulerStageEvent>();
         app.add_message::<CutsceneMotionDone>();
+        // The test box's panel mirrors these lines (kuluu animation_test_scene collect_spawn_traces).
+        app.add_message::<ParticleSpawnTrace>();
         // Prediction and grounding read this on every target (combat_stance.rs
         // predict_entities_system, ground_remote_movers_system); only the native cutscene
         // systems write it.

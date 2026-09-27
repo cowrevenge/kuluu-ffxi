@@ -592,6 +592,7 @@ pub fn spawn_particle_generators(
     q_render: Query<&FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
     trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
+    mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -674,8 +675,8 @@ pub fn spawn_particle_generators(
             .id();
 
         if tracing {
-            info!(
-                "animationtest trace: route {} spawned particle generator {} mesh {} frame={} delay={} win={} life {}",
+            let line = format!(
+                "route {} spawned particle generator {} mesh {} frame={} delay={} win={} life {}",
                 String::from_utf8_lossy(&ev.scheduler),
                 String::from_utf8_lossy(&ev.stage.stage.id),
                 String::from_utf8_lossy(&def.mesh_id),
@@ -684,6 +685,8 @@ pub fn spawn_particle_generators(
                 ev.stage.stage.duration_frames,
                 def.max_life_frames
             );
+            info!("animationtest trace: {line}");
+            trace_writer.write(crate::scheduler_runtime::ParticleSpawnTrace(line));
         } else {
             debug!(
                 "spawned particle generator {} mesh {} life {}",
@@ -5902,6 +5905,7 @@ mod tests {
             .init_asset::<FfxiParticleMaterial>()
             .init_resource::<ParticleSimulator>()
             .add_message::<crate::scheduler_runtime::SchedulerStageEvent>()
+            .add_message::<crate::scheduler_runtime::ParticleSpawnTrace>()
             .add_systems(Update, spawn_particle_generators);
 
         let attacker = spawn_posed_actor(&mut app, skeleton, pose, attacker_world);

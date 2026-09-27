@@ -283,9 +283,9 @@ fn activate_test_scene(
 
     // Worm left, sworded Hume right, facing each other. The snapshot entries keep the wires
     // alive: sync_entities_system despawns any tracked wire missing from the snapshot.
-    // Model forward is local -X on both skeletons (live check): only the worm needs a PI turn;
-    // identity already points the Hume back at it. Both are engaged so they stand in battle
-    // stance with weapons out, not rest pose.
+    // The two skeletons face opposite ways locally (live check): the worm's forward is local
+    // -X, the HumeM's is local +X — so both take a PI turn to square onto each other.
+    // Both are engaged so they stand in battle stance with weapons out, not rest pose.
     spawn_wire(
         commands,
         tracked,
@@ -304,7 +304,7 @@ fn activate_test_scene(
         HUME_ID,
         EntityKind::Pc,
         Vec3::new(1.0, 0.0, 0.0),
-        Quat::IDENTITY,
+        Quat::from_rotation_y(std::f32::consts::PI),
         ffxi_proto::decode::animation::ATTACK,
         WORM_ID,
     );

@@ -135,6 +135,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "vsync") {
         s.vsync = x;
     }
+    if let Some(x) = take(&v, "vibration") {
+        s.vibration = x;
+    }
     if let Some(x) = take(&v, "fps_cap") {
         s.fps_cap = x;
     }

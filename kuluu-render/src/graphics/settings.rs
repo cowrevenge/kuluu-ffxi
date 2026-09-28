@@ -449,6 +449,8 @@ pub enum GraphicsField {
     FogStepCount,
     DrawDistanceScale,
     VSync,
+    /// Gamepad vibration for DAT rumble generators (kuluu-render/src/rumble.rs).
+    Vibration,
     FrameRateCap,
     Fov,
     UiScale,
@@ -512,6 +514,7 @@ impl GraphicsField {
             GraphicsField::FogStepCount => "Fog Quality",
             GraphicsField::DrawDistanceScale => "Draw Distance",
             GraphicsField::VSync => "VSync",
+            GraphicsField::Vibration => "Vibration",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
             GraphicsField::UiScale => "UI Scale",
@@ -566,7 +569,8 @@ impl GraphicsField {
             // per-model shadow decal, so shadowed models are faithful here.
             GraphicsField::CharacterShadowReceive
             | GraphicsField::CharacterShadowCast
-            | GraphicsField::CameraSpring => BoolParity::VanillaOn,
+            | GraphicsField::CameraSpring
+            | GraphicsField::Vibration => BoolParity::VanillaOn,
             GraphicsField::VolumetricFog
             | GraphicsField::ZoneShadowCast
             | GraphicsField::DepthOfField
@@ -590,6 +594,10 @@ impl GraphicsField {
 }
 
 fn default_camera_spring() -> bool {
+    true
+}
+
+fn default_vibration() -> bool {
     true
 }
 
@@ -690,6 +698,12 @@ pub struct GraphicsSettings {
     /// zone_draw_distance, weather.rs zone_distance_fog).
     pub draw_distance_scale: f32,
     pub vsync: bool,
+
+    /// Gamepad vibration for DAT rumble generators (kuluu-render/src/rumble.rs). Retail's
+    /// config carries a Vibration toggle; on by default — with no pad connected the system
+    /// is a silent no-op.
+    #[serde(default = "default_vibration")]
+    pub vibration: bool,
     /// 0 disables the cap (framepace Auto); RETAIL_FPS-adjacent slots otherwise.
     #[serde(default)]
     pub fps_cap: u32,
@@ -974,6 +988,7 @@ impl GraphicsSettings {
                 fog_step_count: 32,
                 draw_distance_scale: 0.5,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1019,6 +1034,7 @@ impl GraphicsSettings {
                 fog_step_count: 32,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1064,6 +1080,7 @@ impl GraphicsSettings {
                 fog_step_count: 64,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1109,6 +1126,7 @@ impl GraphicsSettings {
                 fog_step_count: 64,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1158,6 +1176,7 @@ impl GraphicsSettings {
                 fog_step_count: 96,
                 draw_distance_scale: 1.5,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1204,6 +1223,7 @@ impl GraphicsSettings {
                 fog_step_count: 128,
                 draw_distance_scale: 2.0,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
@@ -1291,6 +1311,7 @@ impl GraphicsSettings {
                 }
             }
             GraphicsField::VSync => self.toggle_label(field, self.vsync),
+            GraphicsField::Vibration => self.toggle_label(field, self.vibration),
             GraphicsField::Fullscreen => self.toggle_label(field, self.fullscreen),
             GraphicsField::Windowed => self.toggle_label(field, self.windowed_fullscreen),
             GraphicsField::FrameRateCap => match self.fps_cap {
@@ -1428,6 +1449,7 @@ impl GraphicsSettings {
                 let debug_chat = self.debug_chat;
                 let ui_scale = self.ui_scale;
                 let vsync = self.vsync;
+                let vibration = self.vibration;
                 let fps_cap = self.fps_cap;
                 let was_dlss = matches!(self.anti_aliasing, AaMode::Dlss);
                 let dlss_quality = self.dlss_quality;
@@ -1453,6 +1475,7 @@ impl GraphicsSettings {
                 self.chat_layout = chat_layout;
                 self.debug_chat = debug_chat;
                 self.vsync = vsync;
+                self.vibration = vibration;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
                 self.dlss_supported = dlss_supported;
@@ -1514,6 +1537,10 @@ impl GraphicsSettings {
             }
             GraphicsField::VSync => {
                 self.vsync = !self.vsync;
+            }
+            GraphicsField::Vibration => {
+                // Display preference like VSync — toggling it must not reset the quality preset.
+                self.vibration = !self.vibration;
             }
             GraphicsField::Fullscreen => {
                 // A quality preset shouldn't be reset just because the user
@@ -1873,6 +1900,7 @@ pub const GRAPHICS_SECTIONS: &[GraphicsSection] = &[
             GraphicsField::Fullscreen,
             GraphicsField::Windowed,
             GraphicsField::VSync,
+            GraphicsField::Vibration,
             GraphicsField::FrameRateCap,
             GraphicsField::RenderScale,
             GraphicsField::Fov,

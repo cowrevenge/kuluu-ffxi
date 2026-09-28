@@ -71,22 +71,84 @@ const ALLOCATION_MASK: u32 = 0x3F;
 pub(crate) const OPCODE_END: u8 = 0x00;
 pub(crate) const OPCODE_STANDARD_SETUP: u8 = 0x01;
 pub(crate) const SIZE_WORDS_MASK: u8 = 0x1F;
-// research/xim ParticleGeneratorSettings.kt LinkedDataType — the StandardParticleSetup linked_data_type
-// (setup byte payload+29) selects the particle's mesh source: 0x0B StaticMesh (a D3M billboard),
-// 0x0E SpriteSheet (a 0x21 flipbook quad). 0x57 Null / 0x47 PointLight and any other value are
-// non-visual particle types and are rejected (parse returns None).
-const LINKED_DATA_STATIC_MESH: u8 = 0x0B;
-const LINKED_DATA_SPRITE_SHEET: u8 = 0x0E;
+// research/xim ParticleGeneratorSettings.kt LinkedDataType — the StandardParticleSetup
+// linked_data_type (setup byte payload+29) is EXPLICIT in the data and selects what the generator
+// links. It must be read, not inferred from which resource names happen to exist: names collide
+// across chunk types (hit3 exists as dir, routine 0x07, mesh 0x1F, texture 0x20 and sheet 0x21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedDataKind {
+    /// 0x01 — links an actor; no resource lookup.
+    Actor,
+    /// 0x0B — a type-0x1F quad/mesh named linkedDataId (per-vertex colour + uv); its texture is
+    /// the type-0x20 chunk of the same name.
+    StaticMesh,
+    /// 0x0E — a type-0x21 flipbook named linkedDataId; texture type 0x20 same name.
+    SpriteSheet,
+    /// 0x1D — weighted mesh: resolved exactly like StaticMesh (multiple weights).
+    WeightedMesh,
+    /// 0x22 — screen-space distortion. linkedDataId is the placeholder string `dist`; no chunk
+    /// exists and none must be looked up.
+    Distortion,
+    /// 0x24 — generated ring mesh; nothing to resolve.
+    RingMesh,
+    /// 0x39 — lens flare; nothing to resolve.
+    LensFlare,
+    /// 0x3D — a type-0x3D sound pointer named linkedDataId (e.g. `5008` -> se/005/005008.spw).
+    Audio,
+    /// 0x47 — point light; nothing to resolve.
+    PointLight,
+    /// 0x57 — null particle; nothing to resolve.
+    Null,
+}
+
+impl LinkedDataKind {
+    pub const ACTOR: u8 = 0x01;
+    pub const STATIC_MESH: u8 = 0x0B;
+    pub const SPRITE_SHEET: u8 = 0x0E;
+    pub const WEIGHTED_MESH: u8 = 0x1D;
+    pub const DISTORTION: u8 = 0x22;
+    pub const RING_MESH: u8 = 0x24;
+    pub const LENS_FLARE: u8 = 0x39;
+    pub const AUDIO: u8 = 0x3D;
+    pub const POINT_LIGHT: u8 = 0x47;
+    pub const NULL_PARTICLE: u8 = 0x57;
+
+    /// `None` for a byte no shipped kind uses — the caller must hard-error, not guess.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            Self::ACTOR => Some(Self::Actor),
+            Self::STATIC_MESH => Some(Self::StaticMesh),
+            Self::SPRITE_SHEET => Some(Self::SpriteSheet),
+            Self::WEIGHTED_MESH => Some(Self::WeightedMesh),
+            Self::DISTORTION => Some(Self::Distortion),
+            Self::RING_MESH => Some(Self::RingMesh),
+            Self::LENS_FLARE => Some(Self::LensFlare),
+            Self::AUDIO => Some(Self::Audio),
+            Self::POINT_LIGHT => Some(Self::PointLight),
+            Self::NULL_PARTICLE => Some(Self::Null),
+            _ => None,
+        }
+    }
+
+    /// Kinds that own a dedicated def parser and decline the mesh path cleanly (no lookup, no
+    /// warning): sound and distortion chunks are claimed by SoundGeneratorDef /
+    /// DistortionGeneratorDef.
+    pub fn is_deferred(&self) -> bool {
+        matches!(self, Self::Audio | Self::Distortion)
+    }
+}
 
 // research/xim ParticleGeneratorSettings.kt LinkedDataType (mesh source) + Particle.kt Particle spriteSheetIndex (the per-particle
 // spriteSheetIndex cursor) + ParticleUpdaters.kt (SpriteSheetFrameUpdater advances it over
-// life). StaticMesh binds a D3M; SpriteSheet binds a 0x21 sprite-sheet whose frames flipbook
-// across the particle's lifetime.
+// life). StaticMesh/WeightedMesh bind a type-0x1F mesh; SpriteSheet binds a 0x21 sprite-sheet
+// whose frames flipbook across the particle's lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParticleMeshKind {
     #[default]
     StaticMesh,
     SpriteSheet,
+    /// LinkedDataKind::WeightedMesh — resolved through the same type-0x1F path as StaticMesh.
+    WeightedMesh,
 }
 // research/xim ParticleGeneratorSettings.kt `enum class AttachType(val flag: Int)` — which
 // actor (and whose facing) a generator's emission origin is bound to.
@@ -662,16 +724,16 @@ pub struct ParticleGeneratorDef {
     // inputs only).
     pub specular_rot_y_track: Option<[u8; 4]>,
     // sec2 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32, unk1 f32,
-    // unk2 u32] — the keyframe DAT id the section-3 0x5F CameraShakeUpdater samples at the
-    // particle's progress (research/xim ParticleInitializers.kt CameraShakeSetup). Parsed
-    // but not applied until the section-3 updater lands.
-    pub camera_shake_track: Option<[u8; 4]>,
+    // unk2 u32] — the keyframe DAT id the section-3 0x5F updater samples at the particle's
+    // progress (research/xim ParticleInitializers.kt CameraShakeSetup). xim labels this pair
+    // "camera shake"; retail applies it as gamepad vibration, and kuluu-render/src/rumble.rs
+    // update_rumble_system drives bevy's rumble pipeline from the track.
+    pub rumble_track: Option<[u8; 4]>,
     // sec3 0x5F CameraShakeUpdater: near, far, and — only in the 4-word form — shakeFactor
-    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch). The
-    // runtime application (sampling the sec2 0x82 track at the particle's progress with the
-    // distance falloff × 1000×progress×distance×shakeFactor capped at 0.33, then
-    // camera.applyShake) is unmodeled, so parse-only.
-    pub camera_shake: Option<[f32; 3]>,
+    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch).
+    // Rumble intensity falloff by camera-to-particle distance: full inside `near`, zero
+    // beyond `far` (kuluu-render/src/rumble.rs update_rumble_system).
+    pub rumble_falloff: Option<[f32; 3]>,
 
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
     // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
@@ -1021,7 +1083,7 @@ impl ParticleGeneratorDef {
         let mut specular_rot_y_track = None;
         let mut specular_rot_z_track = None;
         let mut specular_color_a_track = None;
-        let mut camera_shake_track = None;
+        let mut rumble_track = None;
         let mut haze_offset_x = None;
         let mut parent_rotate = false;
         let mut parent_rotate_2 = false;
@@ -1090,10 +1152,34 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 20),
                         f32_le(body, payload + 24),
                     ];
-                    (is_particle, mesh_kind) = match body[payload + 29] {
-                        LINKED_DATA_STATIC_MESH => (true, ParticleMeshKind::StaticMesh),
-                        LINKED_DATA_SPRITE_SHEET => (true, ParticleMeshKind::SpriteSheet),
-                        _ => (false, ParticleMeshKind::StaticMesh),
+                    // The kind byte is explicit data: resolve exactly what it names. Mesh kinds
+                    // claim the particle path; Audio/Distortion are claimed by their own def
+                    // parsers; Actor/RingMesh/LensFlare/PointLight/Null are non-visual with no
+                    // resource to look up — all of those decline cleanly (no lookup, no warning).
+                    // A byte no shipped kind uses is a hard error: refuse the chunk and name it,
+                    // never fall back to "StaticMesh".
+                    let kind_byte = body[payload + 29];
+                    match LinkedDataKind::from_byte(kind_byte) {
+                        Some(LinkedDataKind::StaticMesh) => {
+                            is_particle = true;
+                            mesh_kind = ParticleMeshKind::StaticMesh;
+                        }
+                        Some(LinkedDataKind::WeightedMesh) => {
+                            is_particle = true;
+                            mesh_kind = ParticleMeshKind::WeightedMesh;
+                        }
+                        Some(LinkedDataKind::SpriteSheet) => {
+                            is_particle = true;
+                            mesh_kind = ParticleMeshKind::SpriteSheet;
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err(DatError::UnknownLinkedDataType {
+                                name: mesh_id,
+                                kind: kind_byte,
+                                linked_id: mesh_id,
+                            });
+                        }
                     };
                     max_life_frames = u16_le(body, payload + 30) as f32;
                 }
@@ -1269,7 +1355,7 @@ impl ParticleGeneratorDef {
                 // the keyframe track SEC3_OPCODE_CAMERA_SHAKE_UPDATER samples at the
                 // particle's progress; the block's other words are consumed, not kept.
                 SEC2_OPCODE_CAMERA_SHAKE_SETUP if payload + 8 <= body.len() => {
-                    camera_shake_track = track_id(body, payload + 4);
+                    rumble_track = track_id(body, payload + 4);
                 }
                 // research/xim ParticleInitializers.kt HazeOffsetInitializer: xim applies
                 // only the second float, as particle.hazeOffset.x.
@@ -1490,7 +1576,7 @@ impl ParticleGeneratorDef {
         let mut moon_phase_sprite = false;
         let mut rotation_updater = false;
         let mut position_updater = false;
-        let mut camera_shake = None;
+        let mut rumble_falloff = None;
         let mut velocity_dampener = None;
         let mut velocity_rotator = None;
         let mut color_transform_modifier = None;
@@ -1687,7 +1773,7 @@ impl ParticleGeneratorDef {
                         } else {
                             0.0
                         };
-                        camera_shake = Some([
+                        rumble_falloff = Some([
                             f32_le(body, payload),
                             f32_le(body, payload + 4),
                             shake_factor,
@@ -1849,8 +1935,8 @@ impl ParticleGeneratorDef {
             specular_element,
             specular,
             specular_rot_y_track,
-            camera_shake_track,
-            camera_shake,
+            rumble_track,
+            rumble_falloff,
             haze_offset_x,
             parent_rotate,
             parent_color,
@@ -2057,6 +2143,11 @@ pub struct DistortionGeneratorDef {
     /// sec2 0x32 HazeOffsetInitializer horizontal offset — biases the smear direction.
     pub haze_offset_x: f32,
 
+    /// sec2 0x2D KeyFrameValueSetup — the strength/alpha envelope over life (g142 binds k143:
+    /// 0 -> 0.48 hold -> 0.01). The screen-space pass scales its haze by this curve; a PS2
+    /// half-scale value like 0.502 is full strength.
+    pub envelope_track: Option<[u8; 4]>,
+
     pub attach_type: AttachType,
 }
 
@@ -2088,6 +2179,7 @@ impl DistortionGeneratorDef {
         let mut base_position = [0.0f32; 3];
         let mut max_life_frames = 0.0f32;
         let mut haze_offset_x = 0.0f32;
+        let mut envelope_track = None;
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -2116,6 +2208,10 @@ impl DistortionGeneratorDef {
                     // two floats; retail applies only the second (horizontalOffset).
                     haze_offset_x = f32_le(body, payload + 4);
                 }
+                // KeyFrameValueSetup: the strength/alpha envelope track over life.
+                0x2D if payload + 8 <= body.len() => {
+                    envelope_track = track_id(body, payload + 4);
+                }
                 _ => decoded = false,
             }
             blocks.push((GeneratorSection::DistortionSetup, opcode, decoded));
@@ -2135,6 +2231,7 @@ impl DistortionGeneratorDef {
             continuous: flags & GEN_FLAG_CONTINUOUS != 0,
             max_life_frames,
             haze_offset_x,
+            envelope_track,
             attach_type: AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default(),
         }))
     }
@@ -2142,6 +2239,15 @@ impl DistortionGeneratorDef {
     pub fn is_placed(&self) -> bool {
         self.base_position != [0.0, 0.0, 0.0]
     }
+}
+
+/// PS2 colour convention for particle colour/alpha bytes: they are authored at half scale,
+/// 0x80 is full, not 0xFF. Raw bytes decode as `min(1, b / 128)`; keyframe chunks store the
+/// byte/255 float form of the same values (0.502 == full), so a stored value rescales as
+/// `min(1, v * 255 / 128)`. Apply at every colour/alpha consumption — scale tracks are genuine
+/// floats and must NOT go through this.
+pub fn ps2_float_rescale(v: f32) -> f32 {
+    (v * 255.0 / 128.0).min(1.0)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2284,7 +2390,7 @@ pub(crate) mod test_support {
         day_of_week: &[[u8; 4]; DAYS_OF_WEEK],
         moon_phase: &[[u8; 4]; MOON_PHASES],
     ) -> Vec<u8> {
-        let sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut body = build(&sec2, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_at = body.len();
@@ -2318,7 +2424,7 @@ mod tests {
 
     #[test]
     fn parses_particle_generator_header_and_setup() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         // billboard XYZ
         setup[4] = 0x01;
         // mesh id at payload+8 (payload = cursor+4 = setup index 4)
@@ -2371,7 +2477,7 @@ mod tests {
     fn parses_section3_uv_scroll_and_accel() {
         // Minimal particle setup in section 2, terminated, then a section-3 stream at
         // body[0x78] with TextureCoordinateUpdater 0x27/0x28 and VelocityAccelerator 0x03.
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&SEC2_TERMINATOR);
         let sec3_body_index = body.len();
@@ -2407,7 +2513,7 @@ mod tests {
             block[..4].copy_from_slice(&cfg.to_le_bytes());
             block
         };
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         setup.extend(allocated(0x02, 1, &[0; 12]));
         setup.extend(allocated(0x0B, 2, &[0; 12]));
         setup.extend(allocated(SEC2_OPCODE_SCALE_VELOCITY, 3, &[0; 12]));
@@ -2455,7 +2561,7 @@ mod tests {
     // real DAT, which is what left the moon on hand-tuned fallback tints.
     #[test]
     fn celestial_updaters_come_from_section3_only() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
 
         let dow = |base: u8| {
             let mut p = vec![0u8; 4];
@@ -2504,7 +2610,7 @@ mod tests {
     // time-of-day RGBA curves; the section-3 ClockValueUpdater 0x3C..0x3F arms each channel.
     #[test]
     fn tod_color_tracks_pair_setup_with_updater() {
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         for (opcode, id) in [(0x60u8, b"ksr1"), (0x61, b"ksg1"), (0x62, b"ksb1")] {
             let mut p = vec![0u8; 4];
             p.extend_from_slice(id);
@@ -2579,7 +2685,7 @@ mod tests {
 
     #[test]
     fn no_section3_leaves_defaults() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.uv_scroll, [0.0, 0.0]);
@@ -2588,7 +2694,7 @@ mod tests {
 
     #[test]
     fn gen_flags_decode_auto_run_and_continuous() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let body = build(&setup, 1, GEN_FLAG_AUTO_RUN | GEN_FLAG_CONTINUOUS | 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(def.auto_run);
@@ -2611,7 +2717,7 @@ mod tests {
     // curtains: La Theine's `~1ra` authors 299 and an 8-bit read yields 43.
     #[test]
     fn particle_count_is_nine_bits_wide() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let def = ParticleGeneratorDef::parse(&build(&setup, 30, 0x2000_112B))
             .unwrap()
             .unwrap();
@@ -2632,11 +2738,11 @@ mod tests {
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
     }
 
-    /// Poison's venom cloud pin: a `LINKED_DATA_SPRITE_SHEET` generator parses to Some with
-    /// `mesh_kind == SpriteSheet`, not just the `LINKED_DATA_STATIC_MESH` kind.
+    /// Poison's venom cloud pin: a `LinkedDataKind::SPRITE_SHEET` generator parses to Some with
+    /// `mesh_kind == SpriteSheet`, not just the `LinkedDataKind::STATIC_MESH` kind.
     #[test]
     fn sprite_sheet_setup_parses_with_mesh_kind() {
-        let mut setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let mut setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         setup[4 + 8..4 + 12].copy_from_slice(b"fir ");
         setup[4 + 30..4 + 32].copy_from_slice(&24u16.to_le_bytes());
         let body = build(&setup, 1, 1);
@@ -2652,7 +2758,7 @@ mod tests {
     // the blocks after it.
     #[test]
     fn sprite_sheet_initializer_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup;
         sec2.extend(op(SEC2_OPCODE_SPRITE_SHEET_INIT, 2, &0u32.to_le_bytes()));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2688,7 +2794,7 @@ mod tests {
     // advances the frame, so the arm only consumes the block.
     #[test]
     fn sprite_sheet_frame_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2722,7 +2828,7 @@ mod tests {
     // as for 0x0D.
     #[test]
     fn no_op_particle_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2754,7 +2860,7 @@ mod tests {
     // The flag is set only while the block is present, so a generator without it stays off.
     #[test]
     fn position_updater_flag_arms_only_with_the_block() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2795,7 +2901,7 @@ mod tests {
     // nothing and only consumes.
     #[test]
     fn alpha_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -2827,7 +2933,7 @@ mod tests {
     // sprite-sheet initializer and the end of section 2.
     #[test]
     fn foot_mark_setup_sets_the_flag_without_payload() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup;
         sec2.extend(op(SEC2_OPCODE_FOOT_MARK, 1, &[]));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2863,7 +2969,7 @@ mod tests {
     // OscillationSetup), ahead of its 0x3E/0x40 acceleration setup in the section-2 stream.
     #[test]
     fn oscillation_setup_sets_the_flag_without_payload() {
-        let setup = setup_with_link(LINKED_DATA_SPRITE_SHEET);
+        let setup = setup_with_link(LinkedDataKind::SPRITE_SHEET);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let vel: [f32; 3] = [1.0, 2.0, 3.0];
@@ -2903,7 +3009,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_z_reads_the_two_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2925,7 +3031,7 @@ mod tests {
     // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_x_reads_the_two_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2947,7 +3053,7 @@ mod tests {
     // ParticleInitializers.kt OscillationAccelerationSetup), behind a 0x3D marker.
     #[test]
     fn oscillation_accel_y_reads_the_two_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(SEC2_OPCODE_OSCILLATION_SETUP, 1, &[]));
         let mut p = Vec::new();
@@ -2971,7 +3077,7 @@ mod tests {
     // 0x3E acceleration, behind the 0x3D marker.
     #[test]
     fn oscillation_applier_x_reads_the_three_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.44f32.to_le_bytes());
         p.extend_from_slice(&0.6f32.to_le_bytes());
@@ -3005,7 +3111,7 @@ mod tests {
     // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_z_reads_the_three_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.9f32.to_le_bytes());
         p.extend_from_slice(&0.5f32.to_le_bytes());
@@ -3039,7 +3145,7 @@ mod tests {
     // behind the 0x3D marker.
     #[test]
     fn oscillation_applier_y_reads_the_three_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&0.44f32.to_le_bytes());
         p.extend_from_slice(&0.6f32.to_le_bytes());
@@ -3073,7 +3179,7 @@ mod tests {
     // VelocityVarianceSetup), after its generator's 0x02.
     #[test]
     fn velocity_variance_reads_the_three_axis_bounds() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let axis = |values: [f32; 3], block: &mut Vec<u8>, opcode: u8| {
             let mut bytes = Vec::new();
@@ -3102,7 +3208,7 @@ mod tests {
     // RelativeVelocitySetup), after its generator's 0x02 base-velocity block.
     #[test]
     fn relative_velocity_reads_the_single_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.5f32, -0.25, 0.0] {
@@ -3125,7 +3231,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup).
     #[test]
     fn relative_velocity_variance_reads_the_single_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x41, 2, &0.2f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3143,7 +3249,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ReverseDisplacementSetup).
     #[test]
     fn reverse_displacement_reads_the_single_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x67, 2, &0.0f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3161,7 +3267,7 @@ mod tests {
     // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x29).
     #[test]
     fn scale_z_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x29, 4, &[0, 0, 0, 0, b'k', b'1', b'z', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3180,7 +3286,7 @@ mod tests {
     // a 0x55 SpecularParams record in the same generator.
     #[test]
     fn specular_rot_y_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5A, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'y']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3197,8 +3303,8 @@ mod tests {
     // u32] (research/xim ParticleInitializers.kt CameraShakeSetup); the generator also
     // carries the section-3 0x5F CameraShakeUpdater.
     #[test]
-    fn camera_shake_setup_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+    fn rumble_setup_reads_the_keyframe_id() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 20];
         payload[4..8].copy_from_slice(b"shak");
@@ -3206,19 +3312,19 @@ mod tests {
         sec2.extend(op(OPCODE_END, 0, &[]));
         let body = build(&sec2, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.camera_shake_track, Some(*b"shak"));
+        assert_eq!(def.rumble_track, Some(*b"shak"));
         let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
             .unwrap()
             .unwrap();
-        assert_eq!(plain.camera_shake_track, None);
+        assert_eq!(plain.rumble_track, None);
     }
 
     // sec3 0x5F CameraShakeUpdater: near, far, and shakeFactor only in the 4-word form
     // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch,
     // behind a sec2 0x82).
     #[test]
-    fn camera_shake_updater_reads_the_payload_shape() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+    fn rumble_updater_reads_the_payload_shape() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let vec3 = |x: f32, y: f32, z: f32| -> [u8; 12] {
             let mut p = [0u8; 12];
             p[0..4].copy_from_slice(&x.to_le_bytes());
@@ -3233,7 +3339,7 @@ mod tests {
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x5F, 4, &vec3(2.0, 8.0, 0.001)));
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.camera_shake, Some([2.0, 8.0, 0.001]));
+        assert_eq!(def.rumble_falloff, Some([2.0, 8.0, 0.001]));
 
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&2.0f32.to_le_bytes());
@@ -3244,12 +3350,12 @@ mod tests {
         body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(&op(0x5F, 3, &payload));
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.camera_shake, Some([2.0, 8.0, 0.0]));
+        assert_eq!(def.rumble_falloff, Some([2.0, 8.0, 0.0]));
 
         let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
             .unwrap()
             .unwrap();
-        assert_eq!(plain.camera_shake, None);
+        assert_eq!(plain.rumble_falloff, None);
     }
 
     // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the
@@ -3257,7 +3363,7 @@ mod tests {
     // HazeOffsetInitializer).
     #[test]
     fn haze_offset_reads_the_second_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&0.5f32.to_le_bytes());
@@ -3277,7 +3383,7 @@ mod tests {
     // ParticleInitializers.kt ParentRotateConfig).
     #[test]
     fn parent_rotate_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x47, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3294,7 +3400,7 @@ mod tests {
     // class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn parent_rotate_twin_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x79, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3312,7 +3418,7 @@ mod tests {
     // BatchingSetup).
     #[test]
     fn batching_setup_is_a_single_word_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x56, 2, &[0, 0, 0, 0]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3329,7 +3435,7 @@ mod tests {
     // ParticleInitializers.kt ParentTexCoordConfig).
     #[test]
     fn parent_tex_coord_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x4A, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3346,7 +3452,7 @@ mod tests {
     // point list DAT id] (research/xim ParticleInitializers.kt PointListPositionSetup).
     #[test]
     fn point_list_position_reads_the_two_dat_ids() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u32.to_le_bytes());
@@ -3372,7 +3478,7 @@ mod tests {
     // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn velocity_y_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x51,
@@ -3393,7 +3499,7 @@ mod tests {
     // ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_rot_x_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x59,
@@ -3414,7 +3520,7 @@ mod tests {
     // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn specular_color_g_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(
             0x5D,
@@ -3435,7 +3541,7 @@ mod tests {
     // ParticleInitializers.kt ParentColorConfig).
     #[test]
     fn parent_color_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x48, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3452,7 +3558,7 @@ mod tests {
     // ParticleInitializers.kt ParentScaleConfig).
     #[test]
     fn parent_scale_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x49, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3469,7 +3575,7 @@ mod tests {
     // the element's velocity dampener (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn velocity_dampener_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x69, 4, &[0, 0, 0, 0, b'v', b'd', b'm', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3486,7 +3592,7 @@ mod tests {
     // ParticleUpdaters.kt VelocityDampener).
     #[test]
     fn velocity_dampener_reads_the_two_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&0.9f32.to_le_bytes());
         payload[4..8].copy_from_slice(&0.25f32.to_le_bytes());
@@ -3507,7 +3613,7 @@ mod tests {
     // ParticleUpdaters.kt VelocityRotator).
     #[test]
     fn velocity_rotator_reads_the_three_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = [0u8; 12];
         payload[0..4].copy_from_slice(&0.1f32.to_le_bytes());
         payload[4..8].copy_from_slice(&(-0.2f32).to_le_bytes());
@@ -3529,7 +3635,7 @@ mod tests {
     // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44), behind a sec2 0x69.
     #[test]
     fn dampening_factor_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3562,7 +3668,7 @@ mod tests {
     // sec3Handler), behind their sec2 scale track.
     #[test]
     fn scale_progress_updaters_consume_the_blocks_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3598,7 +3704,7 @@ mod tests {
     // track.
     #[test]
     fn color_rgb_progress_updaters_consume_the_blocks_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3634,7 +3740,7 @@ mod tests {
     // behind their sec2 specular track.
     #[test]
     fn specular_progress_updaters_consume_the_blocks_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3669,7 +3775,7 @@ mod tests {
     // ParticleUpdaters.kt ColorTransformApplier).
     #[test]
     fn color_transform_applier_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3701,7 +3807,7 @@ mod tests {
     // their sec2 child link.
     #[test]
     fn child_generator_updaters_consume_the_blocks_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3735,7 +3841,7 @@ mod tests {
     // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater).
     #[test]
     fn velocity_rotation_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3767,7 +3873,7 @@ mod tests {
     // PointListPositionUpdater), paired with the sec2 0x54 setup.
     #[test]
     fn point_list_position_updater_consumes_the_block_without_state() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
         let mut body = build(&sec2, 1, 1);
@@ -3797,7 +3903,7 @@ mod tests {
     // (0, 1)] (research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup).
     #[test]
     fn fixed_point_position_variance_reads_the_point_list_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 12];
         payload[4..8].copy_from_slice(b"pts0");
@@ -3817,7 +3923,7 @@ mod tests {
     // the same class (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn fixed_point_position_variance_twin_reads_the_point_list_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut payload = [0u8; 12];
         payload[4..8].copy_from_slice(b"pts1");
@@ -3838,7 +3944,7 @@ mod tests {
     // (research/xim ParticleGeneratorParser.kt sec2Handler).
     #[test]
     fn child_generator_twin_reads_the_child_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x53, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'2']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3856,7 +3962,7 @@ mod tests {
     // element's rotation z (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_rot_z_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5B, 4, &[0, 0, 0, 0, b'n', b'0', b'r', b'z']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3873,7 +3979,7 @@ mod tests {
     // element's color alpha (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn specular_color_a_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x5F, 4, &[0, 0, 0, 0, b's', b'p', b'a', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3891,7 +3997,7 @@ mod tests {
     // a child by a sec2 0x44 link.
     #[test]
     fn parent_position_copy_is_a_no_payload_marker() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x45, 1, &[]));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3908,7 +4014,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ParentVelocityConfig).
     #[test]
     fn parent_velocity_reads_the_single_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x46, 2, &2.5f32.to_le_bytes()));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3925,7 +4031,7 @@ mod tests {
     // ParticleInitializers.kt ChildGeneratorSetup).
     #[test]
     fn child_generator_setup_reads_the_child_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x44, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'0']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3942,7 +4048,7 @@ mod tests {
     // element's red channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_r_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2A, 4, &[0, 0, 0, 0, b'c', b'r', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3959,7 +4065,7 @@ mod tests {
     // element's green channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_g_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2B, 4, &[0, 0, 0, 0, b'c', b'g', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3976,7 +4082,7 @@ mod tests {
     // element's blue channel (research/xim ParticleGeneratorParser.kt).
     #[test]
     fn color_b_track_reads_the_keyframe_id() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x2C, 4, &[0, 0, 0, 0, b'c', b'b', b'0', b'1']));
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -3994,7 +4100,7 @@ mod tests {
     // radian angles.
     #[test]
     fn incremental_rotation_reads_the_three_floats() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(0x3B, 4, &{
             let mut p = Vec::new();
@@ -4018,7 +4124,7 @@ mod tests {
     // RotationVarianceInitializer); the payloads are radian angles.
     #[test]
     fn rotation_variance_reads_the_three_axis_bounds() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.1f32, 0.2, 0.3] {
@@ -4046,7 +4152,7 @@ mod tests {
     // allocationOffset binds it to the rotation transform).
     #[test]
     fn rotation_velocity_variance_reads_the_three_axis_bounds() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut rate: Vec<u8> = Vec::new();
         for f in [0.0f32, 0.01, 0.0] {
@@ -4073,7 +4179,7 @@ mod tests {
     // axis per particle (research/xim ParticleInitializers.kt — scale += posRand(v)).
     #[test]
     fn single_scale_variance_reads_the_single_float() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         let mut base: Vec<u8> = Vec::new();
         for f in [0.1f32, 0.2, 0.3] {
@@ -4097,7 +4203,7 @@ mod tests {
     // field_EC.x/y/z += ufrand(payload)), behind a 0x0F base scale.
     #[test]
     fn scale_variance_reads_the_three_floats() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = Vec::new();
         for f in [0.5f32, 0.25, 0.125] {
             payload.extend_from_slice(&f.to_le_bytes());
@@ -4106,10 +4212,13 @@ mod tests {
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.scale_variance, Some([0.5, 0.25, 0.125]));
-        let plain =
-            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
-                .unwrap()
-                .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
+            1,
+            1,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.scale_variance, None);
     }
 
@@ -4127,7 +4236,7 @@ mod tests {
             p.extend_from_slice(&raw_steps.to_le_bytes());
             p
         };
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         sec2.extend(op(0x1F, 12, &payload(1, 4)));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
             .unwrap()
@@ -4143,7 +4252,7 @@ mod tests {
         assert!(sp.camera_oriented);
         assert_eq!(sp.azimuth_steps, 5);
 
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         sec2.extend(op(0x1F, 12, &payload(0, 0)));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
             .unwrap()
@@ -4152,10 +4261,13 @@ mod tests {
         assert!(!sp.camera_oriented);
         assert_eq!(sp.azimuth_steps, 0, "raw 0 is the random-azimuth case");
 
-        let plain =
-            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
-                .unwrap()
-                .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
+            1,
+            1,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.spherical_full, None);
     }
 
@@ -4164,7 +4276,7 @@ mod tests {
     // elapsedFrames; retail's ElemGenerate shares the 0x0B/0x12 memcpy case).
     #[test]
     fn scale_velocity_reads_the_three_axis_rate() {
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         sec2.extend(op(0x12, 4, &vec3_payload([0.0, 0.01, 0.0])));
         let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
@@ -4185,14 +4297,14 @@ mod tests {
     // adds frand(bounds) to the transform's velocity).
     #[test]
     fn scale_velocity_variance_reads_the_three_floats() {
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         sec2.extend(op(0x13, 4, &vec3_payload([0.0, 0.005, 0.0])));
         let def = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
             .unwrap();
         assert_eq!(def.scale_velocity_variance, Some([0.0, 0.005, 0.0]));
         let plain = ParticleGeneratorDef::parse(&build(
-            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
             120,
             0x1400,
         ))
@@ -4206,7 +4318,7 @@ mod tests {
     #[test]
     fn render_state_flag_selects_ignore_texture_alpha_element() {
         let element = |render_state: u16| {
-            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+            let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
             let body = build(&setup, 1, 1);
             ParticleGeneratorDef::parse(&body)
@@ -4224,7 +4336,7 @@ mod tests {
     #[test]
     fn render_state_flag_0x0200_disables_fog() {
         let fogged = |render_state: u16| {
-            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+            let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
             let body = build(&setup, 1, 1);
             ParticleGeneratorDef::parse(&body)
@@ -4244,7 +4356,7 @@ mod tests {
     #[test]
     fn render_state_and_billboard_words_select_draw_priority_and_depth_write() {
         let parsed = |billboard: u16, render_state: u16| {
-            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+            let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
             setup[4..4 + 2].copy_from_slice(&billboard.to_le_bytes());
             setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
             let body = build(&setup, 1, 1);
@@ -4264,12 +4376,12 @@ mod tests {
     // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — one float, the sort offset.
     #[test]
     fn opcode_0x30_sets_the_sort_offset() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         setup.extend(op(0x30, 2, &7.5f32.to_le_bytes()));
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, 7.5);
-        let plain = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let plain = setup_with_link(LinkedDataKind::STATIC_MESH);
         let body = build(&plain, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, 0.0);
@@ -4280,7 +4392,7 @@ mod tests {
     // (research/xim ParticleInitializers.kt ProjectionBiasInitializer); no 0x30 co-occurrence.
     #[test]
     fn projection_bias_reads_the_two_floats() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = Vec::new();
         for f in [-0.5f32, 2.0] {
             payload.extend_from_slice(&f.to_le_bytes());
@@ -4290,10 +4402,13 @@ mod tests {
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.sort_offset, -0.5);
         assert_eq!(def.projection_bias, Some([-0.5, 2.0]));
-        let plain =
-            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
-                .unwrap()
-                .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
+            1,
+            1,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.sort_offset, 0.0);
         assert_eq!(plain.projection_bias, None);
     }
@@ -4303,7 +4418,7 @@ mod tests {
     // behind a 0x16 base color.
     #[test]
     fn color_variance_reads_the_four_bytes() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         setup.extend(op(0x17, 2, &[20u8, 10, 5, 0]));
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4311,10 +4426,13 @@ mod tests {
             def.color_variance,
             Some([20.0 / 255.0, 10.0 / 255.0, 5.0 / 255.0, 0.0])
         );
-        let plain =
-            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
-                .unwrap()
-                .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
+            1,
+            1,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.color_variance, None);
     }
 
@@ -4324,7 +4442,7 @@ mod tests {
     // 0x16 base color.
     #[test]
     fn color_transform_reads_the_four_i16s() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = Vec::new();
         for v in [-160i16, -160, 0, 0] {
             payload.extend_from_slice(&v.to_le_bytes());
@@ -4333,10 +4451,13 @@ mod tests {
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.color_transform, Some([-160, -160, 0, 0]));
-        let plain =
-            ParticleGeneratorDef::parse(&build(&setup_with_link(LINKED_DATA_STATIC_MESH), 1, 1))
-                .unwrap()
-                .unwrap();
+        let plain = ParticleGeneratorDef::parse(&build(
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
+            1,
+            1,
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(plain.color_transform, None);
     }
 
@@ -4344,7 +4465,7 @@ mod tests {
     // color transform (research/xim ParticleUpdaters.kt ColorTransformModifier).
     #[test]
     fn color_transform_modifier_reads_the_four_i16s() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut payload = Vec::new();
         for v in [1i16, -2, 3, 0] {
             payload.extend_from_slice(&v.to_le_bytes());
@@ -4380,7 +4501,7 @@ mod tests {
     #[test]
     fn rotation_velocity_spins_only_with_the_sec3_updater() {
         const BND0_YAW_PER_FRAME: f32 = -0.015_707_5;
-        let mut sec2 = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut sec2 = setup_with_link(LinkedDataKind::STATIC_MESH);
         sec2.extend(op(0x0B, 4, &vec3_payload([0.0, BND0_YAW_PER_FRAME, 0.0])));
         let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
             .unwrap()
@@ -4398,7 +4519,7 @@ mod tests {
         assert_eq!(spinning.spin(), Some([0.0, BND0_YAW_PER_FRAME, 0.0]));
 
         let updater_only = ParticleGeneratorDef::parse(&with_section(
-            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            build(&setup_with_link(LinkedDataKind::STATIC_MESH), 120, 0x1400),
             0x78,
             &op(0x05, 1, &[]),
         ))
@@ -4416,7 +4537,7 @@ mod tests {
     #[test]
     fn section_4_relife_opcode_is_read() {
         let plain = ParticleGeneratorDef::parse(&build(
-            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
             120,
             0x1400,
         ))
@@ -4425,7 +4546,7 @@ mod tests {
         assert!(!plain.relife_on_expiry);
 
         let body = with_section(
-            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            build(&setup_with_link(LinkedDataKind::STATIC_MESH), 120, 0x1400),
             0x7C,
             &op(0x05, 1, &[]),
         );
@@ -4433,7 +4554,7 @@ mod tests {
         assert!(relife.relife_on_expiry);
 
         let other = with_section(
-            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            build(&setup_with_link(LinkedDataKind::STATIC_MESH), 120, 0x1400),
             0x7C,
             &op(0x04, 1, &[]),
         );
@@ -4451,7 +4572,7 @@ mod tests {
     #[test]
     fn section_4_emit_child_opcode_is_read() {
         let body = with_section(
-            build(&setup_with_link(LINKED_DATA_STATIC_MESH), 120, 0x1400),
+            build(&setup_with_link(LinkedDataKind::STATIC_MESH), 120, 0x1400),
             0x7C,
             &op(
                 SEC4_OPCODE_EMIT_CHILD,
@@ -4476,7 +4597,7 @@ mod tests {
     /// `bnd0`'s StandardSetup carries the specular selector in the high u16 of its setup dword.
     #[test]
     fn specular_selector_and_params_are_read() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         setup[4 + 2..4 + 4].copy_from_slice(&0x0101u16.to_le_bytes());
         let mut payload = vec3_payload([0.0349, -0.5410, 0.6108]);
         payload.extend_from_slice(b"nami");
@@ -4498,7 +4619,7 @@ mod tests {
         assert_eq!(spec.flags, 3);
 
         let common = ParticleGeneratorDef::parse(&build(
-            &setup_with_link(LINKED_DATA_STATIC_MESH),
+            &setup_with_link(LinkedDataKind::STATIC_MESH),
             120,
             0x1400,
         ))
@@ -4513,7 +4634,7 @@ mod tests {
     #[test]
     fn blend_byte_survives_the_blend_func_collapse() {
         let parsed = |p0: u8| {
-            let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+            let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
             setup.extend(op(0x1E, 2, &[p0, 0, 0, 0]));
             let body = build(&setup, 1, 1);
             let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -4526,7 +4647,7 @@ mod tests {
 
     #[test]
     fn static_mesh_setup_reports_static_mesh_kind() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.mesh_kind, ParticleMeshKind::StaticMesh);
@@ -4534,7 +4655,7 @@ mod tests {
 
     #[test]
     fn singleton_when_max_life_zero() {
-        let mut setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         setup[4 + 8..4 + 12].copy_from_slice(b"sea0");
         // max life left at 0
         let body = build(&setup, 1, 1);
@@ -4547,7 +4668,7 @@ mod tests {
     // nibble, ONE EID index in bits 4-9 plus bit 18 — bits 10-15 are not an index.
     #[test]
     fn attach_flags_carry_type_and_one_eid_index() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
 
         // 0x5402: type TargetActor, EID low bits 0; the word's bits 10-15 (21) are reserved.
         let body = build_attached(&setup, 1, 1, 0x5402, ATTACH_SOURCE_ORIENTED);
@@ -4766,7 +4887,7 @@ mod tests {
 
     #[test]
     fn emit_cull_reads_max_then_min_then_unlink_bit_from_section_1() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut p = Vec::new();
         p.extend_from_slice(&40.0f32.to_le_bytes());
         p.extend_from_slice(&(-1.0f32).to_le_bytes());
@@ -4796,7 +4917,7 @@ mod tests {
     // ParticleGeneratorUpdaters.kt AssociationUpdater read.
     #[test]
     fn association_follow_reads_the_flags_and_factor_from_section_1() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let parse_cfg = |cfg: u32| {
             let mut sec1 = op(0x04, 2, &[0, 0, 0, 0]);
             sec1.extend(op(SEC1_OPCODE_ASSOCIATION, 2, &cfg.to_le_bytes()));
@@ -4854,7 +4975,7 @@ mod tests {
 
     #[test]
     fn particle_setups_are_not_sound_generators() {
-        let setup = setup_with_link(LINKED_DATA_STATIC_MESH);
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let body = build(&setup, 1, 1);
         assert!(SoundGeneratorDef::parse(&body).unwrap().is_none());
     }

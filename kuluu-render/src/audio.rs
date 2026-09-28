@@ -619,6 +619,15 @@ pub struct SfxEvent {
 
     // World-space emitter. `None` is a 2D cue (UI, system, zone ambient bed) that mixes dry.
     pub emitter: Option<Vec3>,
+
+    /// The generator's sec2 0x4C AudioRangeSetup `(near, far)` — when present the mix uses the
+    /// retail Calc3D law (full inside near, linear to silence at far, hard cull past it) instead
+    /// of the client-tuned 1/r model. Authored zeros fall back to the class defaults inside that
+    /// function, exactly as retail's Calc3D does.
+    pub range: Option<(f32, f32)>,
+
+    /// Calc3D vertical weighting: 3x for attached emitters, 1x for zone-static (attach code 0).
+    pub vertical_weight: f32,
 }
 
 impl SfxEvent {
@@ -627,12 +636,24 @@ impl SfxEvent {
             se_id,
             volume: 1.0,
             emitter: None,
+            range: None,
+            vertical_weight: UNATTACHED_VERTICAL_WEIGHT,
         }
     }
 
     pub fn at(se_id: u32, emitter: Vec3) -> Self {
         Self {
             emitter: Some(emitter),
+            ..Self::new(se_id)
+        }
+    }
+
+    /// A generator sound with its authored AudioRangeSetup falloff.
+    pub fn at_ranged(se_id: u32, emitter: Vec3, near: f32, far: f32, vertical_weight: f32) -> Self {
+        Self {
+            emitter: Some(emitter),
+            range: Some((near, far)),
+            vertical_weight,
             ..Self::new(se_id)
         }
     }
@@ -697,6 +718,12 @@ pub fn sfx_debug_line(ev: &SfxEvent, listener: Option<Vec3>, volume: f32) -> Str
 // than silent.
 pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     let attenuation = match (ev.emitter, listener) {
+        // A generator sound carrying its AudioRangeSetup mixes through the retail Calc3D law;
+        // everything else keeps the client-tuned 1/r model.
+        (Some(emitter), Some(listener)) if ev.range.is_some() => {
+            let (near, far) = ev.range.expect("checked above");
+            sfx_attenuation_calc3d(listener, emitter, near, far, ev.vertical_weight)
+        }
         (Some(emitter), Some(listener)) => sfx_attenuation(listener, emitter),
         _ => 1.0,
     };

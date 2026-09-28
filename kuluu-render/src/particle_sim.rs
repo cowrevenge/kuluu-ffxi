@@ -647,55 +647,90 @@ pub fn spawn_particle_generators(
             // A SpawnGenerator whose target links a Sep (not a mesh) is a sound cue, not a
             // particle: play its sep at the impact point. g14s in hit1/hi14 is the crit SFX —
             // without this it was silently dropped and only the generic damg SE heard.
-            let se_id = [
+            let sound_pair = [
                 local_assets,
                 actor_assets,
                 global.as_ref().map(|g| &g.assets),
             ]
             .into_iter()
             .flatten()
-            .find_map(|a| {
-                a.sound_defs
-                    .get(&ev.stage.stage.id)
-                    .and_then(|s| a.seps.get(&s.sep_id).map(|sep| sep.se_id))
-            });
-            if let Some(se_id) = se_id {
-                let origin = q_action_target
-                    .get(ev.actor)
-                    .ok()
-                    .and_then(|t| t.0)
-                    .unwrap_or(ev.actor);
-                match q_xf.get(origin) {
-                    Ok(xf) => sfx_writer.write(crate::audio::SfxEvent::at(se_id, xf.translation)),
-                    Err(_) => sfx_writer.write(crate::audio::SfxEvent::new(se_id)),
-                };
-            } else {
+            .find_map(|a| a.sound_defs.get(&ev.stage.stage.id).map(|s| (a, s)));
+            let mut played_sound = false;
+            if let Some((sound_assets, sound)) = sound_pair {
+                if let Some(se_id) = sound_assets.seps.get(&sound.sep_id).map(|sep| sep.se_id) {
+                    // sec2 0x4C AudioRangeSetup: full inside near, linear to silence at far. The
+                    // vertical weight follows the generator's attachment (retail sets the
+                    // unattached flag exactly when the attach code is 0).
+                    let vertical_weight =
+                        if sound.attach_type == ffxi_dat::particle_gen::AttachType::None {
+                            crate::audio::UNATTACHED_VERTICAL_WEIGHT
+                        } else {
+                            crate::audio::ATTACHED_VERTICAL_WEIGHT
+                        };
+                    let origin = q_action_target
+                        .get(ev.actor)
+                        .ok()
+                        .and_then(|t| t.0)
+                        .unwrap_or(ev.actor);
+                    match q_xf.get(origin) {
+                        Ok(xf) => sfx_writer.write(crate::audio::SfxEvent::at_ranged(
+                            se_id,
+                            xf.translation,
+                            sound.near,
+                            sound.far,
+                            vertical_weight,
+                        )),
+                        Err(_) => sfx_writer.write(crate::audio::SfxEvent::new(se_id)),
+                    };
+                    played_sound = true;
+                }
+            }
+            if !played_sound {
                 // A SpawnGenerator whose target links a 0x22 Distortion def is a screen-space
                 // haze cue, not a particle: arm the distortion pass for the generator's life.
                 // g142 in hi14 (the crit chain) is retail's motion smear — without this it was
                 // silently dropped with the mesh particles.
-                let dist = [
+                let dist_pair = [
                     local_assets,
                     actor_assets,
                     global.as_ref().map(|g| &g.assets),
                 ]
                 .into_iter()
                 .flatten()
-                .find_map(|a| a.distortion_defs.get(&ev.stage.stage.id));
-                if let Some(dist) = dist {
+                .find_map(|a| a.distortion_defs.get(&ev.stage.stage.id).map(|d| (a, d)));
+                if let Some((dist_assets, dist)) = dist_pair {
+                    // sec2 0x2D strength/alpha envelope: resolve the track against the owning
+                    // tier + global and PS2-rescale its points (authored at half scale).
+                    let envelope = keyframe(
+                        dist_assets,
+                        global.as_ref().map(|g| &g.assets),
+                        dist.envelope_track,
+                    )
+                    .map(|t| ffxi_dat::particle_gen::KeyFrameTrack {
+                        points: t
+                            .points
+                            .iter()
+                            .map(|&(time, v)| (time, ffxi_dat::particle_gen::ps2_float_rescale(v)))
+                            .collect(),
+                    });
+                    let life_secs = dist.max_life_frames / 60.0;
+                    let envelope_pts = envelope.as_ref().map(|t| t.points.len()).unwrap_or(0);
                     commands.insert_resource(crate::distortion_pass::ActiveDistortion {
                         haze_offset_x: dist.haze_offset_x,
-                        expires_at: Some(
-                            Instant::now() + Duration::from_secs_f32(dist.max_life_frames / 60.0),
-                        ),
+                        expires_at: Some(Instant::now() + Duration::from_secs_f32(life_secs)),
+                        envelope,
+                        started_at: Instant::now(),
+                        duration_secs: life_secs,
+                        strength: 1.0,
                     });
                     if tracing {
                         info!(
-                            "animationtest trace: particle stage {} [{}] — DISTORTION armed haze_x={:.3} life {:.1}s",
+                            "animationtest trace: particle stage {} [{}] — DISTORTION armed haze_x={:.3} life {:.1}s envelope={} pts",
                             String::from_utf8_lossy(&ev.stage.stage.id),
                             String::from_utf8_lossy(&local_dir),
                             dist.haze_offset_x,
-                            dist.max_life_frames / 60.0,
+                            life_secs,
+                            envelope_pts,
                         );
                     }
                 } else if tracing {
@@ -727,6 +762,41 @@ pub fn spawn_particle_generators(
             .is_some_and(|o| o.0.contains(&ev.stage.stage.id))
         {
             def.init_color[3] = 1.0;
+        }
+        // sec2 0x82 + sec3 0x5F: a rumble generator never draws — it drives gamepad
+        // vibration (kuluu-render/src/rumble.rs). Skip the mesh path entirely.
+        if let (Some(track_id), Some([near, far, _])) = (def.rumble_track, def.rumble_falloff) {
+            let envelope = keyframe(assets, global.as_ref().map(|g| &g.assets), Some(track_id))
+                .map(|t| ffxi_dat::particle_gen::KeyFrameTrack {
+                    points: t
+                        .points
+                        .iter()
+                        .map(|&(time, v)| (time, ffxi_dat::particle_gen::ps2_float_rescale(v)))
+                        .collect(),
+                })
+                .unwrap_or_else(|| ffxi_dat::particle_gen::KeyFrameTrack {
+                    points: vec![(0.0, 1.0), (1.0, 0.0)],
+                });
+            let target = q_action_target.get(ev.actor).ok().and_then(|t| t.0);
+            let origin = attached_origin(&def, ev.actor, target, &q_xf, &q_children, &q_render)
+                .unwrap_or(actor_xf.translation + Vec3::Y * def.base_position[1]);
+            commands.spawn((
+                InGameEntity,
+                Transform::from_translation(origin),
+                crate::rumble::RumbleSource::new(envelope.clone(), near, far, def.max_life_frames),
+            ));
+            if tracing {
+                info!(
+                    "animationtest trace: particle stage {} [{}] — RUMBLE armed envelope={} pts near={:.1} far={:.1} life {:.1}s",
+                    String::from_utf8_lossy(&ev.stage.stage.id),
+                    String::from_utf8_lossy(&local_dir),
+                    envelope.points.len(),
+                    near,
+                    far,
+                    def.max_life_frames / 60.0,
+                );
+            }
+            continue;
         }
         let Some((template, sprite_frames, tex)) =
             resolve_mesh(assets, def_dir, &def, &mut images, false)
@@ -1478,6 +1548,8 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // 0x17 ColorVarianceSetup: each rgb channel gains its bound times one [0, 1) draw, on top
     // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup — the shipped
     // alpha byte is always 0 and the engine's alpha comes from the 0x16 base / alpha track).
+    // Both are PS2 half-scale colour bytes: sum in raw space, rescale once (the clamp makes the
+    // scale non-linear over addition).
     let mut rgb = Vec3::from_slice(&g.def.init_color[..3]);
     if let Some(var) = g.def.color_variance {
         rgb += Vec3::new(
@@ -1486,6 +1558,11 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             var[2] * next_unit(&mut g.emit_rng),
         );
     }
+    rgb = Vec3::new(
+        ffxi_dat::particle_gen::ps2_float_rescale(rgb.x),
+        ffxi_dat::particle_gen::ps2_float_rescale(rgb.y),
+        ffxi_dat::particle_gen::ps2_float_rescale(rgb.z),
+    );
     // sec2 0x3D OscillationSetup + 0x3E/0x3F/0x40 OscillationAccelerationSetup: the
     // per-particle oscillation state — each present axis gets acceleration + one [−1, 1)
     // variance draw, absent axes stay 0 (research/xim ParticleInitializers.kt
@@ -1774,11 +1851,15 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     // field_138 is set to 1.0 in ElemIdle and field_134 is initialised to 1.0 (CMoElem ctor)
     // and never written, so retail applies no life-based fade: the authored alpha holds for the
     // whole element life; fades come from explicit keyframe tracks, sampled above.
-    let alpha = g
-        .alpha
-        .as_ref()
-        .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
-        .unwrap_or(g.def.init_color[3]);
+    // Alpha is a PS2 half-scale byte: the 0x16 base and the alpha track's points are both in
+    // raw byte/255 space, so interpolate there and rescale once (the seed must stay raw for the
+    // opening-segment override to land in the same space as the track).
+    let alpha = ffxi_dat::particle_gen::ps2_float_rescale(
+        g.alpha
+            .as_ref()
+            .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
+            .unwrap_or(g.def.init_color[3]),
+    );
     // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — 0x3C/0x3D/0x3E
     // assign the particle's colour channel from a time-of-day curve, 0x3F multiplies alpha.
     // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
@@ -2267,8 +2348,10 @@ fn resolve_mesh(
     images: &mut Assets<Image>,
     undither: bool,
 ) -> Option<(SpriteTemplate, Vec<SpriteTemplate>, Option<Handle<Image>>)> {
+    // research/xim ParticleGeneratorSettings.kt LinkedDataType: WeightedMesh(0x1D) resolves like
+    // StaticMesh; the draw path is identical.
     match def.mesh_kind {
-        ParticleMeshKind::StaticMesh => {
+        ParticleMeshKind::StaticMesh | ParticleMeshKind::WeightedMesh => {
             let d3m = assets.d3m(local_dir, &def.mesh_id)?;
             let template = sprite_template(d3m)?;
             let (namespace, local) = d3m.texture_name_tokens();
@@ -2461,8 +2544,8 @@ mod tests {
             specular_element: false,
             specular: None,
             specular_rot_y_track: None,
-            camera_shake_track: None,
-            camera_shake: None,
+            rumble_track: None,
+            rumble_falloff: None,
             haze_offset_x: None,
             parent_rotate: false,
             parent_color: false,
@@ -3385,8 +3468,18 @@ mod tests {
             let promoted = vertex_colors(&g)[0][3];
             g.def.blend_byte = 0x03;
             let unpromoted = vertex_colors(&g)[0][3];
+            // The raw alpha byte is PS2 half-scale (ffxi-dat/src/particle_gen.rs
+            // ps2_float_rescale): the promoted path saturates to 1.0 before the stage gain,
+            // the plain path keeps the rescaled value.
             assert_eq!(promoted, 0.5);
-            assert_eq!(unpromoted, 0.25);
+            assert!(
+                (unpromoted
+                    - 0.125
+                        * ffxi_dat::particle_gen::ps2_float_rescale(0.5)
+                        * D3M_STAGE1_ALPHA_GAIN)
+                    .abs()
+                    < 1e-6
+            );
         }
 
         // An additive element hands its alpha to the blend state as src alpha instead of
@@ -4482,28 +4575,31 @@ mod tests {
     }
 
     // 0x17 ColorVarianceSetup: each rgb channel gains its bound times one [0, 1) draw on top
-    // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup).
+    // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup). Both are PS2
+    // half-scale colour bytes — the sum rescales through ffxi-dat/src/particle_gen.rs
+    // ps2_float_rescale, so a raw 0.2 base reads 0.398, not 0.2.
     #[test]
     fn color_variance_spreads_each_channel_upward() {
         let mut d = def(10.0, 1.0, 1);
-        d.init_color = [0.5, 0.5, 0.5, 1.0];
-        d.color_variance = Some([0.5, 0.25, 0.125, 0.0]);
+        d.init_color = [0.2, 0.2, 0.2, 1.0];
+        d.color_variance = Some([0.3, 0.15, 0.075, 0.0]);
         let mut g = live(d, 30.0);
         advance(&mut g, 3.0);
         assert_eq!(g.particles.len(), 6);
         for p in &g.particles {
             let c = p.rgb;
+            // raw [base, base + bound) through min(1, v * 255 / 128).
             assert!(
-                (0.5..1.0).contains(&c.x),
-                "the red channel stays in [base, base + bound): {c:?}"
+                (0.398..0.997).contains(&c.x),
+                "the red channel stays in the rescaled [base, base + bound): {c:?}"
             );
             assert!(
-                (0.5..0.75).contains(&c.y),
-                "the green channel stays in [base, base + bound): {c:?}"
+                (0.398..0.698).contains(&c.y),
+                "the green channel stays in the rescaled [base, base + bound): {c:?}"
             );
             assert!(
-                (0.5..0.625).contains(&c.z),
-                "the blue channel stays in [base, base + bound): {c:?}"
+                (0.398..0.548).contains(&c.z),
+                "the blue channel stays in the rescaled [base, base + bound): {c:?}"
             );
         }
     }
@@ -4904,7 +5000,6 @@ mod tests {
     #[test]
     fn mmb_additive_keeps_the_vertex_alpha_gradient() {
         const VERTEX_ALPHAS: [f32; 3] = [1.0, 0.75, 0.0];
-        const HALF_LIFE_ALPHA: f32 = 0.5;
         let mut g = axial_celestial([1.0; 3], Vec3::X);
         g.template.positions = vec![Vec3::X; VERTEX_ALPHAS.len()];
         g.template.uvs = vec![[0.0, 0.0]; VERTEX_ALPHAS.len()];
@@ -4913,7 +5008,9 @@ mod tests {
             .iter()
             .map(|&a| Vec4::new(1.0, 1.0, 1.0, a))
             .collect();
-        g.particles[0].age_frames = HALF_LIFE_ALPHA;
+        // No alpha track: the factor is the def()'s raw alpha byte (0.5), PS2 half-scale,
+        // rescaled once at draw time — independent of progress.
+        let factor = ffxi_dat::particle_gen::ps2_float_rescale(0.5);
 
         let cam = CameraView {
             rot: Quat::IDENTITY,
@@ -4923,17 +5020,13 @@ mod tests {
         g.draw_path = D3mDrawPath::Mmb;
         let (_, colors) = rebuilt(&g, cam);
         for (c, a) in colors.iter().zip(VERTEX_ALPHAS) {
-            assert!(
-                (c.w - HALF_LIFE_ALPHA * a).abs() < 1e-6,
-                "mmb alpha {}",
-                c.w
-            );
+            assert!((c.w - factor * a).abs() < 1e-6, "mmb alpha {}", c.w);
         }
 
         g.draw_path = D3mDrawPath::D3m;
         let (_, colors) = rebuilt(&g, cam);
         for c in &colors {
-            assert!((c.w - HALF_LIFE_ALPHA).abs() < 1e-6, "d3m alpha {}", c.w);
+            assert!((c.w - factor).abs() < 1e-6, "d3m alpha {}", c.w);
         }
     }
 
@@ -5089,8 +5182,10 @@ mod tests {
         // `kasa`'s 0x4F alpha lane as shipped, dumped byte-for-byte from f_ro.
         const HALO_PHASE_ALPHA_BYTE: [u8; ffxi_dat::particle_gen::MOON_PHASES] =
             [0, 0, 0, 0, 0, 60, 128, 60, 0, 0, 0, 0];
-        /// DAT 210 kasa: initializer alpha 128/255 and weekday/phase modulation gain 160/255.
-        const HALO_CHAIN_GAIN: f32 = (128.0 / 255.0) * (160.0 / 255.0);
+        // DAT 210 kasa: initializer alpha byte 128 — PS2 full, so ps2_float_rescale(128/255)
+        // is exactly 1.0 at draw time (ffxi-dat/src/particle_gen.rs); the weekday/phase
+        // modulation gain stays 160/255.
+        const HALO_CHAIN_GAIN: f32 = 160.0 / 255.0;
         const ALPHA_EPS: f32 = 1e-6;
 
         let Some(bytes) = zone_bytes(F_RO) else {
@@ -5329,7 +5424,9 @@ mod tests {
         use ffxi_dat::particle_gen::ParticleBlend;
         let mut base = def(4.0, 1.0, 1);
         base.blend = ParticleBlend::Blend;
-        base.init_color = [1.0, 1.0, 1.0, 0.8];
+        // Raw alpha below the PS2 saturation point (raw >= ~0.502 rescales to 1), so the
+        // authored opacity stays distinguishable after rescale + the 4x TEXTUREFACTOR gain.
+        base.init_color = [1.0, 1.0, 1.0, 0.25];
 
         // Vertex alpha well under the D3m stage clamp, so the authored opacity stays
         // distinguishable after the 4x TEXTUREFACTOR alpha gain instead of saturating at 1.
@@ -5373,7 +5470,11 @@ mod tests {
             }
         };
 
-        let expected = |curve: f32| VERT_ALPHA * curve * D3M_STAGE1_ALPHA_GAIN;
+        // The authored byte is PS2 half-scale: it rescales at spawn (ffxi-dat/src/particle_gen.rs
+        // ps2_float_rescale) before the draw multiplies vertex alpha and the stage gain.
+        let expected = |curve: f32| {
+            VERT_ALPHA * ffxi_dat::particle_gen::ps2_float_rescale(curve) * D3M_STAGE1_ALPHA_GAIN
+        };
         assert!(
             (alpha_of(&cont) - expected(base.init_color[3])).abs() < 1e-4,
             "continuous body keeps authored opacity"
@@ -5384,6 +5485,9 @@ mod tests {
         );
     }
 
+    // The authored byte 50/255 is PS2 half-scale: particle_draw rescales it once
+    // (ffxi-dat/src/particle_gen.rs ps2_float_rescale). Pinned here is that the value holds for
+    // the whole life — retail has no life-based fade.
     #[test]
     fn real_dat_monument_shaft_retains_authored_alpha() {
         const LOWER_JEUNO_DAT: u32 = 345;
@@ -5394,12 +5498,13 @@ mod tests {
         let def = *assets.particle_defs.get(b"SPLT").expect("monument shaft");
         assert!(def.is_singleton());
         assert_eq!(def.init_color[3], SHAFT_ALPHA);
+        let expected = ffxi_dat::particle_gen::ps2_float_rescale(SHAFT_ALPHA);
         let mut g = celestial(def);
         g.particles[0].life_frames = f32::INFINITY;
         for age in [0.0, 300.0, 30_000.0] {
             g.particles[0].age_frames = age;
             let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
-            assert_eq!(draw.factor_alpha, SHAFT_ALPHA);
+            assert_eq!(draw.factor_alpha, expected);
         }
     }
 

@@ -64,6 +64,7 @@ pub mod nameplate_overlay;
 pub mod particle_sim;
 pub mod perf_probe;
 pub mod picking;
+pub mod rumble;
 pub mod scene;
 pub mod scheduler_runtime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -229,6 +230,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_plugins(nameplate_final_pass::NameplateFinalPassPlugin);
 
         app.add_plugins(distortion_pass::DistortionPassPlugin);
+
+        app.add_plugins(rumble::RumblePlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_point_lights::ZonePointLightsPlugin);

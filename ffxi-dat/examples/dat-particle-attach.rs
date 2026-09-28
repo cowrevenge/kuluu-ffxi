@@ -1,14 +1,6 @@
 use std::process::ExitCode;
 
-use ffxi_dat::{
-    chunk::walk,
-    kind::ChunkKind,
-    particle_gen::{
-        ParticleGeneratorDef, ATTACH_JOINT0_MASK, ATTACH_JOINT0_SHIFT, ATTACH_JOINT1_MASK,
-        ATTACH_JOINT1_SHIFT,
-    },
-    DatRoot,
-};
+use ffxi_dat::{chunk::walk, kind::ChunkKind, particle_gen::ParticleGeneratorDef, DatRoot};
 
 fn attach_name(flag: u16) -> &'static str {
     match flag & 0x0F {
@@ -67,11 +59,10 @@ fn main() -> ExitCode {
             let extra = u16::from_le_bytes([c.data[2], c.data[3]]);
             let parsed = ParticleGeneratorDef::parse(c.data).ok().flatten();
             println!(
-                "  {name:<6} attach=0x{:04X} -> {:<24} j0={} j1={} extra=0x{extra:04X}",
+                "  {name:<6} attach=0x{:04X} -> {:<24} eid={} extra=0x{extra:04X}",
                 attach_flags,
                 attach_name(attach_flags),
-                (attach_flags & ATTACH_JOINT0_MASK) >> ATTACH_JOINT0_SHIFT,
-                (attach_flags & ATTACH_JOINT1_MASK) >> ATTACH_JOINT1_SHIFT,
+                parsed.map(|d| d.attach_eid).unwrap_or(0),
             );
             if let Some(d) = parsed {
                 println!(

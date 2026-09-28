@@ -35,12 +35,35 @@ use bevy::render::{Extract, RenderApp, RenderStartup};
 
 /// Main-world: a distortion generator is alive. Written by `spawn_particle_generators` when a
 /// SpawnGenerator stage targets a 0x22 Distortion def; the render pass extracts it each frame.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ActiveDistortion {
     /// sec2 0x32 HazeOffsetInitializer horizontal offset — biases the smear direction.
     pub haze_offset_x: f32,
     /// When the generator's life ends; `None` means never active.
     pub expires_at: Option<Instant>,
+    /// The sec2 0x2D strength/alpha envelope over life, PS2-rescaled at spawn (g142 binds k143:
+    /// 0 -> full hold -> ~0). `None` = constant strength.
+    pub envelope: Option<ffxi_dat::particle_gen::KeyFrameTrack>,
+    /// When the generator's life started — progress runs from here over [`Self::duration_secs`].
+    pub started_at: Instant,
+    /// The generator's maxLifeSpan in seconds (life frames / 60).
+    pub duration_secs: f32,
+    /// Envelope value at this frame, maintained by `update_distortion_strength`; the render
+    /// pass scales both the offset and the ghost intensity by it.
+    pub strength: f32,
+}
+
+impl Default for ActiveDistortion {
+    fn default() -> Self {
+        Self {
+            haze_offset_x: 0.0,
+            expires_at: None,
+            envelope: None,
+            started_at: Instant::now(),
+            duration_secs: 0.0,
+            strength: 0.0,
+        }
+    }
 }
 
 impl ActiveDistortion {
@@ -49,11 +72,36 @@ impl ActiveDistortion {
     }
 }
 
+/// Ghost alpha at full envelope strength — the authored k143 peak (PS2-rescaled ~0.95) lands
+/// just under this, so a constant-strength generator looks like the old fixed value.
+const GHOST_BASE_INTENSITY: f32 = 0.25;
+
+/// Main-world Update: advance the envelope while a distortion generator is alive. The render
+/// pass only reads `strength`, so the curve lives on this side of the extract.
+fn update_distortion_strength(mut d: ResMut<ActiveDistortion>) {
+    let Some(exp) = d.expires_at else {
+        d.strength = 0.0;
+        return;
+    };
+    if Instant::now() >= exp {
+        d.strength = 0.0;
+        return;
+    }
+    let progress =
+        ((Instant::now() - d.started_at).as_secs_f32() / d.duration_secs.max(1e-6)).clamp(0.0, 1.0);
+    d.strength = d
+        .envelope
+        .as_ref()
+        .map(|t| t.sample(progress))
+        .unwrap_or(1.0);
+}
+
 /// Render-world snapshot of the live distortion (extracted from [`ActiveDistortion`]).
 #[derive(Resource, Default)]
 struct DistortionPassData {
     active: bool,
     haze_offset_x: f32,
+    strength: f32,
     /// The operator camera's main-world entity — only its primary view is distorted.
     operator_cam: Option<Entity>,
 }
@@ -65,6 +113,7 @@ fn extract_distortion(
 ) {
     data.active = src.is_active();
     data.haze_offset_x = src.haze_offset_x;
+    data.strength = src.strength;
     data.operator_cam = operator_cameras.iter().next();
 }
 
@@ -283,14 +332,15 @@ fn draw_distortion_pass(
 
     let bgl = pipeline_cache.get_bind_group_layout(&gpu.bgl_descriptor);
 
-    // Pass A: ghost — sample last frame (prev) with the horizontal bias over the current target.
+    // Pass A: ghost — sample last frame (prev) with the horizontal bias over the current
+    // target. Both the offset and the ghost alpha scale by the sec2 0x2D envelope strength.
     if !first_frame {
         queue.write_buffer(
             &gpu.uniform_buffer,
             0,
             &distortion_uniform_bytes(DistortionUniform {
-                offset: Vec2::new(data.haze_offset_x, 0.0),
-                intensity: 0.25,
+                offset: Vec2::new(data.haze_offset_x * data.strength, 0.0),
+                intensity: GHOST_BASE_INTENSITY * data.strength,
                 copy_mode: 0.0,
             }),
         );
@@ -379,7 +429,8 @@ pub struct DistortionPassPlugin;
 impl Plugin for DistortionPassPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "distortion.wgsl");
-        app.init_resource::<ActiveDistortion>();
+        app.init_resource::<ActiveDistortion>()
+            .add_systems(Update, update_distortion_strength);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<DistortionPassData>()

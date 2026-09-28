@@ -797,6 +797,9 @@ pub struct EffectCoverageReport {
         u8,
         ffxi_dat::particle_gen::GeneratorOpcodeOutcome,
     )>,
+    /// (generator name, raw kind byte, linked data id) for chunks whose StandardParticleSetup
+    /// names a kind the reader does not recognise — refused outright, nothing renders.
+    pub unknown_linked_data_kinds: Vec<([u8; 4], u8, [u8; 4])>,
 }
 
 impl EffectCoverageReport {
@@ -867,12 +870,30 @@ pub fn parse_action_tree_reporting(
                 if let Ok(Some(e)) = Generator::parse_particle_emitter(c.data) {
                     assets.emitters.insert(c.name, e);
                 }
-                if let Ok(Some(d)) =
-                    ffxi_dat::particle_gen::ParticleGeneratorDef::parse_reporting(c.data, &mut sink)
-                {
-                    assets.particle_defs.insert(c.name, d);
-                    assets.particle_def_dirs.insert(c.name, dir);
-                    assets.particle_defs_by_dir.insert((dir, c.name), d);
+                match ffxi_dat::particle_gen::ParticleGeneratorDef::parse_reporting(
+                    c.data, &mut sink,
+                ) {
+                    Ok(Some(d)) => {
+                        assets.particle_defs.insert(c.name, d);
+                        assets.particle_def_dirs.insert(c.name, dir);
+                        assets.particle_defs_by_dir.insert((dir, c.name), d);
+                    }
+                    Err(ffxi_dat::DatError::UnknownLinkedDataType {
+                        name,
+                        kind,
+                        linked_id,
+                    }) => {
+                        // Hard error per the reader contract: refuse the chunk and say exactly
+                        // what it was — no stand-in render, no silent drop.
+                        report
+                            .unknown_linked_data_kinds
+                            .push((name, kind, linked_id));
+                        tracing::error!(
+                            "generator {:?}: unknown linked_data_type {kind:#04x} (linked id {:?}) — chunk refused",
+                            name, linked_id,
+                        );
+                    }
+                    _ => {}
                 }
                 if let Ok(Some(d)) =
                     ffxi_dat::particle_gen::SoundGeneratorDef::parse_reporting(c.data, &mut sink)

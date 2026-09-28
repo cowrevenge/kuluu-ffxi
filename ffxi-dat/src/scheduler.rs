@@ -101,6 +101,14 @@ const MODEL_TRANSFORM_SUBCHUNK_OFFSET: usize = 20;
 const FLINCH_ANIMATION_DURATION_OFFSET: usize = 24;
 const FLINCH_PAYLOAD_LEN: usize = FLINCH_ANIMATION_DURATION_OFFSET + 4;
 
+// research/xim EffectRoutineParser.kt parseSoundEffectEmitter — after id(+8) come a zero32(+12),
+// an unused u32(+16), far f32(+20), near f32(+24) and an unused f32(+28): the emitter's own
+// AudioRangeSetup. A stage shorter than this ships no authored range; Calc3D substitutes its
+// class defaults for a 0.0 (CYySepRes.cpp CYySepRes::Calc3D).
+const SOUND_FAR_OFFSET: usize = ID_OFFSET + 12;
+const SOUND_NEAR_OFFSET: usize = ID_OFFSET + 16;
+const SOUND_EMITTER_PAYLOAD_LEN: usize = SOUND_NEAR_OFFSET + 4;
+
 // research/xim EffectRoutineParser.kt parseSection2, 0x5E / 0xBF: after delay/duration the
 // knockback payload is u16, u16, f32 animationDuration, f32, u32. The duration is how long
 // the victim's bf0? knock-down plays before the bf1? stand-up
@@ -254,6 +262,12 @@ pub struct SchedulerStage {
     // DatId (research/xim EffectRoutineParser.kt parseSection2 0x19); `id` is
     // `NO_STAGE_ID` there.
     pub spell_effect: Option<u32>,
+
+    // `Some` for the sound-emitter kinds when the stage carries the full emitter payload:
+    // the authored AudioRangeSetup `(far, near)` floats (research/xim EffectRoutineParser.kt
+    // parseSoundEffectEmitter). A shipped 0.0 is not "silent" — Calc3D substitutes its class
+    // defaults for it (CYySepRes.cpp CYySepRes::Calc3D).
+    pub sound_range: Option<(f32, f32)>,
 
     // `Some` for CONTROL_FLOW_CONDITION stages (ROM/0/0.DAT dam0/daml/crtl switch tests); payload, not a DatId.
     pub control_flow: Option<ControlFlowArg>,
@@ -704,6 +718,22 @@ impl Scheduler {
                 let spell_effect = payload
                     .filter(|_| kind == StageKind::SpellEffect)
                     .map(u32::from_le_bytes);
+                // research/xim EffectRoutineParser.kt parseSoundEffectEmitter — id(+8),
+                // zero32(+12), unused u32(+16), far f32(+20), near f32(+24). A short stage
+                // ships no range; Calc3D substitutes the class defaults for a 0.0.
+                let sound_range = (stage_bytes >= SOUND_EMITTER_PAYLOAD_LEN
+                    && matches!(
+                        kind,
+                        StageKind::SoundOnCaster
+                            | StageKind::SoundOnTarget
+                            | StageKind::SoundNonPositional
+                    ))
+                .then(|| {
+                    (
+                        f32::from_bits(read_u32(SOUND_FAR_OFFSET)),
+                        f32::from_bits(read_u32(SOUND_NEAR_OFFSET)),
+                    )
+                });
                 // Switch-test words are payload, not a DatId.
                 let control_flow = (raw_type == CONTROL_FLOW_CONDITION).then(|| ControlFlowArg {
                     op: read_u32(ID_OFFSET),
@@ -779,6 +809,7 @@ impl Scheduler {
                         flinch_duration,
                         model_visibility,
                         spell_effect,
+                        sound_range,
                         control_flow,
                         random_group: open_group,
                         local_dir,

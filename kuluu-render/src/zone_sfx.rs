@@ -344,9 +344,8 @@ fn update_zone_sfx(
     let Some(install) = slots.install_root.clone() else {
         return;
     };
-    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D), not from
-    // the player — unlike the entity-swing cues, whose cutoff is LSB's player-measured
-    // streaming radius (see `sfx_attenuation`).
+    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D),
+    // the same law and ear as the routine-swing cues (`audio.rs sfx_mix_volume`).
     let Some(eye) = listener.iter().next().map(|t| t.translation()) else {
         return;
     };

@@ -383,6 +383,7 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                sound_range: None,
                 delay_frames: 0,
                 duration_frames: 60,
                 id,

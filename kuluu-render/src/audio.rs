@@ -620,10 +620,10 @@ pub struct SfxEvent {
     // World-space emitter. `None` is a 2D cue (UI, system, zone ambient bed) that mixes dry.
     pub emitter: Option<Vec3>,
 
-    /// The generator's sec2 0x4C AudioRangeSetup `(near, far)` — when present the mix uses the
-    /// retail Calc3D law (full inside near, linear to silence at far, hard cull past it) instead
-    /// of the client-tuned 1/r model. Authored zeros fall back to the class defaults inside that
-    /// function, exactly as retail's Calc3D does.
+    /// The emitter's authored AudioRangeSetup `(near, far)` — routine stages carry it in their
+    /// payload (research/xim EffectRoutineParser.kt parseSoundEffectEmitter), generator sounds
+    /// in the sec2 0x4C block. `None`, like a shipped 0.0, falls to the Calc3D class defaults
+    /// inside [`sfx_attenuation_calc3d`], exactly as retail's does.
     pub range: Option<(f32, f32)>,
 
     /// Calc3D vertical weighting: 3x for attached emitters, 1x for zone-static (attach code 0).
@@ -659,47 +659,6 @@ impl SfxEvent {
     }
 }
 
-// Client tuning: retail SE DATs ship no falloff curve, so the near field is ours. Sized to hold
-// a melee exchange dry — the player and whatever it is trading blows with stand a few yalms
-// apart, and their swing/impact SE must not wobble as the two shuffle.
-pub const SFX_DRY_RADIUS_YALMS: f32 = 8.0;
-
-// LSB stops streaming an entity to a client past this radius, so past it there is no entity in
-// our world model to have made the sound.
-pub const SFX_CUTOFF_YALMS: f32 = ffxi_proto::entity_stream::ENTITY_RENDER_DISTANCE_YALMS;
-
-// Amplitude follows a point source's 1/r pressure law outside the dry radius, windowed
-// linearly to exactly zero at the cutoff so culling a far emitter can never click.
-//
-// Sole authority for SE loudness — do NOT also set `PlaybackSettings::with_spatial(true)`.
-// That routes through rodio's Spatial (rodio-0.22.2 src/source/spatial.rs:56-67), whose per-ear
-// gain is `(1/dist_sq).min(1)` times a pan term anti-correlated with azimuth, i.e. a second
-// distance law stacked on this one. Stereo placement, if it is ever wanted, has to come from
-// the pan term alone with the emitter expressed relative to the camera.
-pub fn sfx_attenuation(listener: Vec3, emitter: Vec3) -> f32 {
-    let dist = listener.distance(emitter);
-    if dist <= SFX_DRY_RADIUS_YALMS {
-        return 1.0;
-    }
-    if dist >= SFX_CUTOFF_YALMS {
-        return 0.0;
-    }
-    let pressure = SFX_DRY_RADIUS_YALMS / dist;
-    let window = 1.0 - (dist - SFX_DRY_RADIUS_YALMS) / (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS);
-    pressure * window
-}
-
-// Distance is measured from the PLAYER, never the chase camera. LSB's streaming radius — the
-// bound SFX_CUTOFF_YALMS is — is itself measured player-to-entity
-// (vendor/server/src/map/zone_entities.cpp CZoneEntities::TryAddToNearbySpawnLists isInRange), and a camera-anchored distance would swing SE
-// loudness with the mouse wheel and silence on-screen emitters at full pullback. The camera is
-// still the correct ear for left/right placement, but this function carries no pan term (see
-// `sfx_attenuation`), so nothing here reads it. Falls back to the camera where there is no
-// player at all — model viewer, launcher backdrop, pre-spawn frames.
-pub fn sfx_listener_pos(player: Option<Vec3>, camera: Option<Vec3>) -> Option<Vec3> {
-    player.or(camera)
-}
-
 // The debug toast is the only surface where SE distance mixing is observable at runtime —
 // without the distance and gain, a world emitter is indistinguishable from a 2D UI beep.
 pub fn sfx_debug_line(ev: &SfxEvent, listener: Option<Vec3>, volume: f32) -> String {
@@ -714,17 +673,20 @@ pub fn sfx_debug_line(ev: &SfxEvent, listener: Option<Vec3>, volume: f32) -> Str
     }
 }
 
+// Sole authority for SE loudness — do NOT also set `PlaybackSettings::with_spatial(true)`.
+// That routes through rodio's Spatial (rodio-0.22.2 src/source/spatial.rs:56-67), whose per-ear
+// gain is `(1/dist_sq).min(1)` times a pan term anti-correlated with azimuth, i.e. a second
+// distance law stacked on this one. Stereo placement, if it is ever wanted, has to come from
+// the pan term alone with the emitter expressed relative to the camera.
 // A world emitter with no listener yet (the self actor spawns a frame later) mixes dry rather
-// than silent.
+// than silent; every positional cue follows the retail Calc3D law, an unauthored range falling
+// to its class defaults inside that function.
 pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     let attenuation = match (ev.emitter, listener) {
-        // A generator sound carrying its AudioRangeSetup mixes through the retail Calc3D law;
-        // everything else keeps the client-tuned 1/r model.
-        (Some(emitter), Some(listener)) if ev.range.is_some() => {
-            let (near, far) = ev.range.expect("checked above");
+        (Some(emitter), Some(listener)) => {
+            let (near, far) = ev.range.unwrap_or((0.0, 0.0));
             sfx_attenuation_calc3d(listener, emitter, near, far, ev.vertical_weight)
         }
-        (Some(emitter), Some(listener)) => sfx_attenuation(listener, emitter),
         _ => 1.0,
     };
     (ev.volume * attenuation).clamp(0.0, 1.0)
@@ -746,7 +708,7 @@ pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
 // full inside `near`, a linear ramp to silence at `far`, and a hard cull past it. The
 // shipped `near > far` generators fall out of the ordering — everything inside far is
 // full volume. Retail's pan term is not reproduced: this mixer carries no pan (see
-// `sfx_attenuation`).
+// `sfx_mix_volume`).
 pub fn sfx_attenuation_calc3d(
     listener: Vec3,
     emitter: Vec3,
@@ -844,7 +806,6 @@ pub fn play_sfx_system(
     mut events: MessageReader<SfxEvent>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
-    listener_player: Query<&Transform, With<crate::components::IsSelf>>,
     listener_camera: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
@@ -870,10 +831,9 @@ pub fn play_sfx_system(
         }
         return;
     };
-    let listener_pos = sfx_listener_pos(
-        listener_player.iter().next().map(|xf| xf.translation),
-        listener_camera.iter().next().map(|xf| xf.translation()),
-    );
+    // Retail measures SE distance from the camera eye (CYySepRes.cpp CYySepRes::Calc3D reads
+    // CameraManager::CachedEyePosition); there is no player-listener fallback.
+    let listener_pos = listener_camera.iter().next().map(|xf| xf.translation());
     for ev in events.read() {
         let volume = sfx_mix_volume(ev, listener_pos) * mute.master;
         if volume <= 0.0 {
@@ -2014,6 +1974,8 @@ mod tests {
     #[test]
     fn sfx_debug_line_reports_distance_only_for_world_emitters() {
         let listener = Vec3::new(100.0, -8.0, -250.0);
+        // Unauthored range: the Calc3D class defaults (near 3 / far 30) put 12 yalms at
+        // 1 - 9/27 of full volume.
         let world = SfxEvent::at(42, listener + Vec3::X * 12.0);
         let line = sfx_debug_line(
             &world,
@@ -2022,50 +1984,13 @@ mod tests {
         );
         assert!(line.contains("#42"), "{line}");
         assert!(line.contains("12y"), "{line}");
-        assert!(line.contains("vol 0.60"), "{line}");
+        assert!(line.contains("vol 0.67"), "{line}");
 
         let ui = SfxEvent::new(42);
         assert_eq!(
             sfx_debug_line(&ui, Some(listener), sfx_mix_volume(&ui, Some(listener))),
             "✦ SFX #42"
         );
-    }
-
-    #[test]
-    fn sfx_is_dry_inside_the_near_field_and_silent_past_the_cutoff() {
-        let listener = Vec3::new(100.0, -8.0, -250.0);
-
-        assert_eq!(sfx_attenuation(listener, listener), 1.0);
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::X * SFX_DRY_RADIUS_YALMS),
-            1.0,
-            "a melee exchange must mix dry rather than wobble as the two actors shuffle"
-        );
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::Z * SFX_CUTOFF_YALMS),
-            0.0,
-            "the cull must reach exactly zero at the cutoff so it cannot click"
-        );
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::Z * (SFX_CUTOFF_YALMS * 10.0)),
-            0.0
-        );
-    }
-
-    #[test]
-    fn sfx_attenuation_falls_monotonically_across_the_rolloff() {
-        let listener = Vec3::ZERO;
-        let steps = 64;
-        let mut prev = 1.0_f32;
-        for i in 0..=steps {
-            let d = SFX_DRY_RADIUS_YALMS
-                + (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS) * (i as f32 / steps as f32);
-            let gain = sfx_attenuation(listener, Vec3::X * d);
-            assert!(gain <= prev, "gain rose from {prev} to {gain} at {d} yalms");
-            assert!((0.0..=1.0).contains(&gain), "gain {gain} out of range");
-            prev = gain;
-        }
-        assert_eq!(prev, 0.0);
     }
 
     #[test]
@@ -2081,17 +2006,18 @@ mod tests {
         );
         assert_eq!(sfx_mix_volume(&ui, None), 1.0);
 
+        // Inside the Calc3D class-default near field: full volume.
         let near = SfxEvent::at(7001, listener + Vec3::X);
         assert_eq!(sfx_mix_volume(&near, Some(listener)), 1.0);
 
-        let far = SfxEvent::at(7001, listener + Vec3::X * SFX_CUTOFF_YALMS);
+        let far = SfxEvent::at(7001, listener + Vec3::X * SOUND_FAR_DEFAULT);
         assert_eq!(
             sfx_mix_volume(&far, Some(listener)),
             0.0,
-            "a swing past the cutoff must be culled, not mixed at full volume"
+            "a swing past the class-default far must be culled, not mixed at full volume"
         );
 
-        let mid = SfxEvent::at(7001, listener + Vec3::X * SFX_DRY_RADIUS_YALMS * 1.5);
+        let mid = SfxEvent::at(7001, listener + Vec3::X * 12.0);
         let mid_volume = sfx_mix_volume(&mid, Some(listener));
         assert!(
             mid_volume > 0.0 && mid_volume < 1.0,
@@ -2099,25 +2025,30 @@ mod tests {
         );
     }
 
+    // CYySepRes.cpp CYySepRes::Calc3D reads CameraManager::CachedEyePosition — the ear is the
+    // camera, and an authored range rides on the event (g14s: far 30 / near 0 -> default 3).
     #[test]
-    fn the_player_outranks_the_camera_as_the_attenuation_listener() {
-        let player = Vec3::new(100.0, -8.0, -250.0);
-        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
+    fn a_ranged_emitter_mixes_through_its_authored_range_from_the_eye() {
+        let eye = Vec3::new(100.0, -8.0, -250.0);
 
-        assert_eq!(sfx_listener_pos(Some(player), Some(camera)), Some(player));
-        assert_eq!(sfx_listener_pos(None, Some(camera)), Some(camera));
-        assert_eq!(sfx_listener_pos(Some(player), None), Some(player));
-        assert_eq!(sfx_listener_pos(None, None), None);
-
-        // A mob just inside LSB's streaming radius, straight in front of the player and plainly
-        // on screen. Measured from the fully pulled-back camera it is past the cutoff.
-        let mob = player + Vec3::Z * (SFX_CUTOFF_YALMS - 1.0);
-        let swing = SfxEvent::at(7001, mob);
-        assert!(
-            sfx_mix_volume(&swing, sfx_listener_pos(Some(player), Some(camera))) > 0.0,
-            "an on-screen mob's swing must not be silenced by how far the camera is pulled back"
+        // g14s-shaped: near 0 (class default 3), far 30.
+        let crit = SfxEvent::at_ranged(
+            5008,
+            eye + Vec3::Z * 5.0,
+            0.0,
+            30.0,
+            ATTACHED_VERTICAL_WEIGHT,
         );
-        assert_eq!(sfx_mix_volume(&swing, Some(camera)), 0.0);
+        assert!(sfx_mix_volume(&crit, Some(eye)) > 0.9);
+
+        let beyond = SfxEvent::at_ranged(
+            5008,
+            eye + Vec3::Z * 35.0,
+            0.0,
+            30.0,
+            ATTACHED_VERTICAL_WEIGHT,
+        );
+        assert_eq!(sfx_mix_volume(&beyond, Some(eye)), 0.0);
     }
 
     fn spawned_sfx_volumes(app: &mut App) -> Vec<f32> {
@@ -2129,8 +2060,8 @@ mod tests {
     }
 
     // The bead's headline failure: a distant mob's swing reached the mixer at full volume.
-    // The camera sits a full pullback behind the player, so this also pins that the cull is
-    // measured from the player — from the camera the near emitter would itself be culled.
+    // Retail measures from the camera eye (CYySepRes.cpp CYySepRes::Calc3D), so this pins
+    // that an unauthored-range emitter is culled past the class-default far, measured there.
     #[test]
     fn play_sfx_culls_a_distant_emitter_with_real_install() {
         const REAL_SE_ID: u32 = 1;
@@ -2154,25 +2085,20 @@ mod tests {
             .init_resource::<SfxCache>()
             .add_systems(Update, play_sfx_system);
 
-        let player = Vec3::new(12.0, 1.0, -30.0);
-        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
-        app.world_mut().spawn((
-            crate::components::IsSelf,
-            Transform::from_translation(player),
-        ));
+        let camera = Vec3::new(12.0, 1.0, -30.0);
         app.world_mut().spawn((
             crate::camera::OperatorCamera,
             Transform::from_translation(camera),
             GlobalTransform::from_translation(camera),
         ));
 
-        // Dead ahead of the player, inside the streaming radius but past it from the camera.
-        let near = player + Vec3::Z * (SFX_CUTOFF_YALMS - crate::camera::ChaseCamera::DIST_MAX);
+        // Mid-rolloff from the eye (class defaults: near 3 / far 30).
         app.world_mut()
-            .write_message(SfxEvent::at(REAL_SE_ID, near));
+            .write_message(SfxEvent::at(REAL_SE_ID, camera + Vec3::Z * 16.0));
+        // Past the class-default far: culled.
         app.world_mut().write_message(SfxEvent::at(
             REAL_SE_ID,
-            player + Vec3::Z * SFX_CUTOFF_YALMS,
+            camera + Vec3::Z * SOUND_FAR_DEFAULT + Vec3::Z,
         ));
         app.update();
 
@@ -2180,11 +2106,11 @@ mod tests {
         assert_eq!(
             volumes.len(),
             1,
-            "exactly the on-screen emitter may reach the mixer, got {volumes:?}"
+            "exactly the in-range emitter may reach the mixer, got {volumes:?}"
         );
         assert!(
             volumes[0] > 0.0 && volumes[0] < 1.0,
-            "the surviving emitter is mid-rolloff from the player, got {volumes:?}"
+            "the surviving emitter is mid-rolloff from the eye, got {volumes:?}"
         );
     }
 

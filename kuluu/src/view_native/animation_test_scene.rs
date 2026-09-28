@@ -1094,6 +1094,7 @@ fn fire_single_gen(
         flinch_duration: None,
         model_visibility: None,
         spell_effect: None,
+        sound_range: None,
         control_flow: None,
         random_group: None,
         local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,

@@ -6305,6 +6305,7 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                sound_range: None,
                 control_flow: None,
             },
         }

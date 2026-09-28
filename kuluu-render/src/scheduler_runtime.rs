@@ -1876,8 +1876,15 @@ pub fn dispatch_sound_stages(
             actor_assets,
             global.as_ref().map(|g| &g.assets),
         ];
-        let Some((se_id, on_caster)) = tiers.into_iter().flatten().find_map(|a| {
-            ffxi_dat::action::resolve_stage_to_se(&ev.stage.stage.id, kind, &a.generators, &a.seps)
+        let Some(res) = tiers.into_iter().flatten().find_map(|a| {
+            ffxi_dat::action::resolve_stage_to_se(
+                &ev.stage.stage.id,
+                kind,
+                &a.generators,
+                &a.sound_defs,
+                &a.seps,
+                ev.stage.stage.sound_range,
+            )
         }) else {
             continue;
         };
@@ -1885,14 +1892,28 @@ pub fn dispatch_sound_stages(
         // A 0x4A/0x60 stage has no world emitter: it mixes dry, like a UI or
         // weather cue, so it must not be sited on an actor and attenuated.
         if kind == StageKind::SoundNonPositional {
-            sfx_writer.write(crate::audio::SfxEvent::new(se_id));
+            sfx_writer.write(crate::audio::SfxEvent::new(res.se_id));
             continue;
         }
         let target = q_target.get(ev.actor).ok().and_then(|t| t.0);
-        let origin = sound_origin_entity(on_caster, ev.actor, target);
+        let origin = sound_origin_entity(res.on_caster, ev.actor, target);
+        // The emitter's authored AudioRangeSetup (stage payload or the generator's 0x4C
+        // block) drives the retail Calc3D law; an unauthored range falls to its class
+        // defaults inside that function.
+        let weight = if res.attached {
+            crate::audio::ATTACHED_VERTICAL_WEIGHT
+        } else {
+            crate::audio::UNATTACHED_VERTICAL_WEIGHT
+        };
         sfx_writer.write(match q_transform.get(origin) {
-            Ok(xf) => crate::audio::SfxEvent::at(se_id, xf.translation),
-            Err(_) => crate::audio::SfxEvent::new(se_id),
+            Ok(xf) => crate::audio::SfxEvent::at_ranged(
+                res.se_id,
+                xf.translation,
+                res.near,
+                res.far,
+                weight,
+            ),
+            Err(_) => crate::audio::SfxEvent::new(res.se_id),
         });
     }
 }
@@ -4737,24 +4758,42 @@ mod tests {
     fn resolve_stage_to_se_reports_on_caster_from_the_stage_kind() {
         let seps = HashMap::from([(*b"se01", Sep::parse(*b"se01", &[0u8; 12]).unwrap())]);
         let generators = HashMap::new();
+        let sound_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::SoundGeneratorDef> =
+            HashMap::new();
 
         assert_eq!(
             ffxi_dat::action::resolve_stage_to_se(
                 b"se01",
                 StageKind::SoundOnCaster,
                 &generators,
-                &seps
+                &sound_defs,
+                &seps,
+                None
             ),
-            Some((0, true))
+            Some(ffxi_dat::action::ResolvedSe {
+                se_id: 0,
+                on_caster: true,
+                far: 0.0,
+                near: 0.0,
+                attached: true,
+            })
         );
         assert_eq!(
             ffxi_dat::action::resolve_stage_to_se(
                 b"se01",
                 StageKind::SoundOnTarget,
                 &generators,
-                &seps
+                &sound_defs,
+                &seps,
+                Some((50.0, 2.0))
             ),
-            Some((0, false))
+            Some(ffxi_dat::action::ResolvedSe {
+                se_id: 0,
+                on_caster: false,
+                far: 50.0,
+                near: 2.0,
+                attached: true,
+            })
         );
     }
 
@@ -4899,6 +4938,7 @@ mod tests {
                 flinch_duration: None,
                 model_visibility: None,
                 spell_effect: None,
+                sound_range: None,
                 control_flow: None,
             },
         }
@@ -6300,10 +6340,12 @@ mod tests {
                     &t.stage.id,
                     t.stage.kind,
                     &assets.generators,
+                    &assets.sound_defs,
                     &assets.seps,
+                    t.stage.sound_range,
                 )
             })
-            .map(|(se, _)| se)
+            .map(|r| r.se_id)
             .collect();
         assert_eq!(sounds, vec![ACTIVATION_SE]);
         assert!(

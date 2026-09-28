@@ -6490,6 +6490,7 @@ mod pose_resolution_tests {
                             flinch_duration: None,
                             model_visibility: None,
                             spell_effect: None,
+                            sound_range: None,
                             control_flow: None,
                         },
                     }],
@@ -6541,6 +6542,7 @@ mod pose_resolution_tests {
                             flinch_duration: None,
                             model_visibility: None,
                             spell_effect: None,
+                            sound_range: None,
                             control_flow: None,
                         },
                     })

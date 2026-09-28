@@ -59,6 +59,12 @@ impl ParticleSimulator {
         self.clock = clock;
     }
 
+    /// The Vana'diel day fraction the time-of-day tracks sample at (the zone lighting's clock —
+    /// the ambient mixer multiplies its ToD volume track by this, as retail's ClockValueUpdater does).
+    pub fn clock(&self) -> CelestialClock {
+        self.clock
+    }
+
     // research/xi-model-viewer/ui/js/particle/runtime.js updateAssociatedPosition:
     // cameraAttachedBasePosition adds the base in fixed world axes, while followCamera anchors at
     // the camera itself. Both refresh every frame, but a cameraAttachedBasePosition particle reads
@@ -273,6 +279,12 @@ struct LiveGenerator {
     sprite_frames: Vec<SpriteTemplate>,
     scale_x: Option<KeyFrameTrack>,
     scale_y: Option<KeyFrameTrack>,
+    // sec2 0x21..0x23 position tracks — each frame the bound track replaces the particle's
+    // channel, key 0 seeded from its spawn-time value (research/xim ParticleUpdaters.kt
+    // ProgressValueUpdater initialValueOverride; CYyGenerator.cpp ElemIdle cases 0x0F..0x11).
+    position_x: Option<KeyFrameTrack>,
+    position_y: Option<KeyFrameTrack>,
+    position_z: Option<KeyFrameTrack>,
     alpha: Option<KeyFrameTrack>,
     // The 0x60..0x63 time-of-day RGBA curves, resolved against the DAT's keyframe chunks.
     // Sampled at the Vana'diel day fraction, so unlike `alpha` above they do not advance
@@ -385,6 +397,10 @@ pub struct ActorAutoRunEffects {
 
 struct Particle {
     pos: Vec3,
+    // The spawn-time offset from the generator origin: the sec2 0x21..0x23 position tracks
+    // seed their opening segment from it (research/xim ParticleUpdaters.kt ProgressValueUpdater
+    // — initialValueOverride is captured once, while null).
+    spawn_pos: Vec3,
     // research/xim Particle.kt updateAssociatedPosition — cameraAttachedBasePosition resolves the offset from the
     // camera only while `age == 0`, so the particle is placed in front of the viewer once and
     // then lives in world space. Carrying the live generator origin instead glues the whole
@@ -870,6 +886,9 @@ pub fn spawn_particle_generators(
         sim.generators.push(LiveGenerator {
             scale_x: resolve(def.scale_x_track),
             scale_y: resolve(def.scale_y_track),
+            position_x: resolve(def.position_x_track),
+            position_y: resolve(def.position_y_track),
+            position_z: resolve(def.position_z_track),
             alpha: resolve(def.alpha_track),
             tod_color: resolve_tod_tracks(&def, assets),
             solid_mesh: is_solid_mesh(&template),
@@ -971,6 +990,9 @@ pub fn spawn_actor_auto_run_particles(
             sim.generators.push(LiveGenerator {
                 scale_x: resolve(def.scale_x_track),
                 scale_y: resolve(def.scale_y_track),
+                position_x: resolve(def.position_x_track),
+                position_y: resolve(def.position_y_track),
+                position_z: resolve(def.position_z_track),
                 alpha: resolve(def.alpha_track),
                 tod_color: resolve_tod_tracks(&def, &fx.assets),
                 solid_mesh: is_solid_mesh(&template),
@@ -1052,6 +1074,9 @@ pub fn spawn_zone_particle_generator(
     sim.generators.push(LiveGenerator {
         scale_x: resolve(def.scale_x_track),
         scale_y: resolve(def.scale_y_track),
+        position_x: resolve(def.position_x_track),
+        position_y: resolve(def.position_y_track),
+        position_z: resolve(def.position_z_track),
         alpha: resolve(def.alpha_track),
         tod_color: def.tod_color_tracks.map(|id| keyframe(assets, global, id)),
         solid_mesh: is_solid_mesh(&template),
@@ -1593,6 +1618,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     });
     g.particles.push(Particle {
         pos,
+        spawn_pos: pos,
         spawn_origin: g.origin,
         vel: vel * g.vel_basis,
         age_frames: 0.0,
@@ -1909,13 +1935,28 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     #[cfg(feature = "enhanced-particle-alpha-20")]
     let alpha = (alpha * ENHANCED_ALPHA_GAIN).min(1.0);
 
+    // sec3 0x0F..0x11 ProgressValueUpdater (research/xim ParticleUpdaters.kt — p.position.x = v):
+    // a bound track replaces the channel each frame; key 0 is seeded from the particle's
+    // spawn-time value, so the curve starts where the element was emitted.
+    let origin = particle_origin(g, p);
+    let mut world = origin + p.pos;
+    if let Some(t) = &g.position_x {
+        world.x = origin.x + t.sample_from(progress, Some(p.spawn_pos.x));
+    }
+    if let Some(t) = &g.position_y {
+        world.y = origin.y + t.sample_from(progress, Some(p.spawn_pos.y));
+    }
+    if let Some(t) = &g.position_z {
+        world.z = origin.z + t.sample_from(progress, Some(p.spawn_pos.z));
+    }
+
     ParticleDraw {
         flipbook_frame,
         scale: Vec2::new(sx, sy),
         factor_rgb: rgb,
         factor_alpha: tfactor_alpha(&g.def, g.draw_path, alpha),
         life_alpha: alpha,
-        world: particle_origin(g, p) + p.pos,
+        world,
     }
 }
 
@@ -2582,6 +2623,11 @@ mod tests {
             rumble_falloff: None,
             draw_distance_near: None,
             draw_distance_far: None,
+            position_x_track: None,
+            position_y_track: None,
+            position_z_track: None,
+            weighted_mesh_weight_tracks: [None; ffxi_dat::particle_gen::WEIGHTED_MESH_WEIGHTS],
+            tod_volume_track: None,
             haze_offset_x: None,
             parent_rotate: false,
             parent_color: false,
@@ -2618,6 +2664,9 @@ mod tests {
             tod_color: [None, None, None, None],
             scale_x: None,
             scale_y: None,
+            position_x: None,
+            position_y: None,
+            position_z: None,
             alpha: None,
             origin: Vec3::ZERO,
             particles: Vec::new(),
@@ -2665,6 +2714,9 @@ mod tests {
         let resolve = |id: Option<[u8; 4]>| id.and_then(|i| assets.keyframes.get(&i).cloned());
         g.scale_x = resolve(def.scale_x_track);
         g.scale_y = resolve(def.scale_y_track);
+        g.position_x = resolve(def.position_x_track);
+        g.position_y = resolve(def.position_y_track);
+        g.position_z = resolve(def.position_z_track);
         g.alpha = resolve(def.alpha_track);
         g
     }
@@ -3457,6 +3509,7 @@ mod tests {
             set_template_color(&mut g, Vec3::ONE.extend(0.5));
             g.particles.push(Particle {
                 pos: Vec3::ZERO,
+                spawn_pos: Vec3::ZERO,
                 spawn_origin: Vec3::ZERO,
                 vel: Vec3::ZERO,
                 age_frames: 50.0,
@@ -3944,6 +3997,37 @@ mod tests {
         assert_eq!(mesh.count_vertices(), HIDDEN_PRIMITIVE_VERTS);
     }
 
+    // sec2 0x21..0x23 + sec3 0x0F..0x11: a bound track replaces the position channel each
+    // frame, key 0 seeded from the spawn-time value (research/xim ParticleUpdaters.kt
+    // ProgressValueUpdater — p.position.x = v).
+    #[test]
+    fn position_tracks_replace_the_channel() {
+        let make = |track: Option<ffxi_dat::particle_gen::KeyFrameTrack>| -> LiveGenerator {
+            let mut d = def(120.0, 1.0, 1);
+            d.camera_billboard = false;
+            d.continuous = true;
+            let mut g = live(d, 1000.0);
+            g.position_x = track;
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            // Pin the element at half life: progress is what the track samples.
+            g.particles[0].age_frames = g.particles[0].life_frames * 0.5;
+            g
+        };
+        let cam = view(Quat::IDENTITY);
+        let x_at = |g: &LiveGenerator| rebuilt(g, cam).0[0].x;
+
+        // No track: the channel keeps its spawn value.
+        assert_eq!(x_at(&make(None)), 0.0);
+
+        // Track (0 -> 5): key 0 is overridden by the spawn value 0, so at half life the
+        // channel is halfway to 5.
+        let g = make(Some(ffxi_dat::particle_gen::KeyFrameTrack {
+            points: vec![(0.0, 99.0), (1.0, 5.0)],
+        }));
+        assert!((x_at(&g) - 2.5).abs() < 1e-6);
+    }
+
     // sec2 0x3D + 0x3E with the sec3 0x29 applier: the particle's x position sways with the
     // applier's amplitude curve (research/xim ParticleUpdaters.kt OscillationApplier —
     // rate = 180f / 2 = 90, baseOffset 0, so the amplitude peaks at half a period, 90 frames,
@@ -4064,6 +4148,7 @@ mod tests {
         g.stopped = true;
         g.particles.push(Particle {
             pos: Vec3::ZERO,
+            spawn_pos: Vec3::ZERO,
             spawn_origin: Vec3::ZERO,
             vel: Vec3::ZERO,
             age_frames: 0.0,
@@ -4103,6 +4188,7 @@ mod tests {
             let mut g = live(def(100.0, 1.0, 1), 100.0);
             g.particles.push(Particle {
                 pos: Vec3::new(1.0, 2.0, 3.0),
+                spawn_pos: Vec3::new(1.0, 2.0, 3.0),
                 spawn_origin: Vec3::ZERO,
                 vel: Vec3::ZERO,
                 age_frames: 50.0,
@@ -4814,6 +4900,7 @@ mod tests {
         g.auto_run = true;
         g.particles.push(Particle {
             pos: Vec3::ZERO,
+            spawn_pos: Vec3::ZERO,
             spawn_origin: Vec3::ZERO,
             vel: Vec3::ZERO,
             age_frames: 0.0,
@@ -5537,6 +5624,7 @@ mod tests {
 
         let particle = |age: f32| Particle {
             pos: Vec3::ZERO,
+            spawn_pos: Vec3::ZERO,
             spawn_origin: Vec3::ZERO,
             vel: Vec3::ZERO,
             age_frames: age,

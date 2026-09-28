@@ -126,6 +126,12 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         (GeneratorSection::Updaters, 0x36 | 0x37 | 0x3B) => {
             "specular progress updater: specular element not modelled"
         }
+        (GeneratorSection::Initializers, 0x33..=0x37) => {
+            "weighted-mesh weight track: draw path deferred"
+        }
+        (GeneratorSection::Updaters, 0x1E..=0x22) => {
+            "weighted-mesh weight applier: draw path deferred"
+        }
         (GeneratorSection::ElementDie, 0x01) => "emit child on expiry: no child-particle path",
         _ => return None,
     })
@@ -133,6 +139,19 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
 
 pub fn is_inert_opcode(section: GeneratorSection, opcode: u8) -> bool {
     inert_reason(section, opcode).is_some()
+}
+
+/// Decoded opcodes the engine deliberately does not model — XIM reads and discards them, or
+/// the engine's sprite has no axis for them (research/xim ParticleGeneratorParser.kt). They are
+/// parsed correctly by design, so they stay out of ParsedButInert.
+pub fn known_inert(section: GeneratorSection, opcode: u8) -> bool {
+    matches!(
+        (section, opcode),
+        // XIM reads the sprite-sheet init word and ignores it.
+        (GeneratorSection::Initializers, 0x1D)
+            // The engine's sprite is 2-D; scale.z has no axis to drive.
+            | (GeneratorSection::Initializers, 0x29)
+    )
 }
 
 /// The route a particle def goes down at spawn, mirroring `spawn_particle_generators`: rumble
@@ -363,7 +382,10 @@ pub fn analyze(assets: &ActionAssets, report: &EffectCoverageReport) -> Particle
     }
 
     for &(name, section, opcode, outcome) in &report.generator_opcodes {
-        if outcome == GeneratorOpcodeOutcome::Decoded && is_inert_opcode(section, opcode) {
+        if outcome == GeneratorOpcodeOutcome::Decoded
+            && is_inert_opcode(section, opcode)
+            && !known_inert(section, opcode)
+        {
             let dir = assets
                 .particle_def_dirs
                 .get(&name)
@@ -562,7 +584,7 @@ pub fn trace_routine(
             .fold((0u32, 0u32, 0u32), |(h, i, d), (_, sec, op, outcome)| {
                 if *outcome == GeneratorOpcodeOutcome::Dropped {
                     (h, i, d + 1)
-                } else if is_inert_opcode(*sec, *op) {
+                } else if is_inert_opcode(*sec, *op) && !known_inert(*sec, *op) {
                     (h, i + 1, d)
                 } else {
                     (h + 1, i, d)

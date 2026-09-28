@@ -49,6 +49,10 @@ pub struct ZonePlacedSfx {
     countdown_frames: f32,
     rng: u64,
     audio: Option<Entity>,
+    // sec2 0x68 KeyFrameValueSetup ("ToD Volume") + section-3 ClockValueUpdater 0x43 — the
+    // keyframe track sampled at the Vana'diel day fraction that multiplies this emitter's gain
+    // (research/xim ParticleGeneratorParser.kt — audioConfiguration.volumeMultiplier).
+    tod_volume: Option<ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
 /// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition activates the generators
@@ -81,6 +85,25 @@ fn is_zone_placed(def: &SoundGeneratorDef) -> bool {
 // 308 Sep names in West Ronfaure alone bind to more than one se id. Measured over every
 // shipped zone DAT, 5,832 of 5,895 generators resolve in their own directory and the
 // remaining 63 only through a whole-file name lookup.
+// The keyframe chunks a generator's ToD volume track (sec2 0x68) resolves against — the same
+// 0x19 chunks the scheduler indexes for its particle tracks.
+fn flat_keyframe_index(
+    node: &ChunkNode<'_>,
+    out: &mut HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
+) {
+    for child in &node.children {
+        if ffxi_dat::kind::ChunkKind::from_u8(child.chunk.kind)
+            == Some(ffxi_dat::kind::ChunkKind::KeyFrame)
+        {
+            out.insert(
+                child.chunk.name,
+                ffxi_dat::particle_gen::KeyFrameTrack::parse(child.chunk.data),
+            );
+        }
+        flat_keyframe_index(child, out);
+    }
+}
+
 fn flat_sep_index(node: &ChunkNode<'_>, out: &mut HashMap<[u8; 4], Sep>) {
     for child in &node.children {
         if ffxi_dat::kind::ChunkKind::from_u8(child.chunk.kind)
@@ -149,6 +172,7 @@ fn emitter(
     origin: Vec3,
     attached: bool,
     index: usize,
+    keyframes: &HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 ) -> ZonePlacedSfx {
     let mut rng = SFX_RNG_SEED ^ (index as u64).wrapping_mul(SFX_RNG_STRIDE);
     let countdown_frames = next_unit(&mut rng) * (def.frames_per_emission + def.emission_variance);
@@ -165,6 +189,9 @@ fn emitter(
         countdown_frames,
         rng,
         audio: None,
+        tod_volume: def
+            .tod_volume_track
+            .and_then(|id| keyframes.get(&id).cloned()),
     }
 }
 
@@ -172,6 +199,7 @@ fn spawn_emitters(
     defs: &[(SoundGeneratorDef, Sep)],
     commands: &mut Commands,
     out: &mut Vec<Entity>,
+    keyframes: &HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 ) {
     for (index, (def, sep)) in defs.iter().enumerate() {
         let bp = def.base_position;
@@ -182,7 +210,10 @@ fn spawn_emitters(
         });
         out.push(
             commands
-                .spawn((InGameEntity, emitter(def, sep, origin, false, index)))
+                .spawn((
+                    InGameEntity,
+                    emitter(def, sep, origin, false, index, keyframes),
+                ))
                 .id(),
         );
     }
@@ -222,7 +253,7 @@ fn spawn_actor_auto_run_sounds(
                 InGameEntity,
                 ChildOf(actor_root),
                 Transform::from_translation(local),
-                emitter(def, sep, local, true, index),
+                emitter(def, sep, local, true, index, &fx.assets.keyframes),
             ));
         }
     }
@@ -283,11 +314,13 @@ fn sync_zone_sfx(
     let tree = ffxi_dat::chunk::walk_tree(&bytes);
     let mut flat = HashMap::new();
     flat_sep_index(&tree, &mut flat);
+    let mut keyframes = HashMap::new();
+    flat_keyframe_index(&tree, &mut keyframes);
 
     if zone_stale {
         let mut defs = Vec::new();
         collect_placed_sounds(&tree, &flat, true, &mut defs);
-        spawn_emitters(&defs, &mut commands, &mut store.zone_entities);
+        spawn_emitters(&defs, &mut commands, &mut store.zone_entities, &keyframes);
         info!(
             "zone_sfx: DAT {file_id:?} → {} placed emitter(s)",
             store.zone_entities.len()
@@ -297,7 +330,12 @@ fn sync_zone_sfx(
         if let Some(weat) = find_weat_type(&tree, weather) {
             let mut defs = Vec::new();
             collect_placed_sounds(weat, &flat, false, &mut defs);
-            spawn_emitters(&defs, &mut commands, &mut store.weather_entities);
+            spawn_emitters(
+                &defs,
+                &mut commands,
+                &mut store.weather_entities,
+                &keyframes,
+            );
             if !store.weather_entities.is_empty() {
                 info!(
                     "zone_sfx: DAT {file_id:?} weat/{} → {} placed emitter(s)",
@@ -330,6 +368,7 @@ pub fn zone_sfx_gain(
 
 fn update_zone_sfx(
     time: Res<Time>,
+    sim: Res<crate::particle_sim::ParticleSimulator>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
     sfx_debug: Res<crate::audio::SfxDebug>,
@@ -367,7 +406,15 @@ fn update_zone_sfx(
         } else {
             (em.origin, UNATTACHED_VERTICAL_WEIGHT)
         };
-        let gain = zone_sfx_gain(&mute, eye, origin, em.near, em.far, vertical_weight);
+        // sec3 0x43 ClockValueUpdater: the ToD volume track multiplies the gain at the
+        // full-day interpolation (research/xim ParticleUpdaters.kt — audioConfiguration.
+        // volumeMultiplier), so a river swells and dries with the Vana'diel day.
+        let tod_volume = em
+            .tod_volume
+            .as_ref()
+            .map(|t| t.sample(sim.clock().day_fraction))
+            .unwrap_or(1.0);
+        let gain = zone_sfx_gain(&mute, eye, origin, em.near, em.far, vertical_weight) * tod_volume;
 
         // The ambient readout exists for finding the next loud thing: on while /sfxdebug is set
         // or the gain knob is off unity. One toast per emitter per second.

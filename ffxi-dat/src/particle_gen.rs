@@ -402,6 +402,10 @@ pub const MOON_PHASES: usize = 12;
 // RGBA — one time-of-day keyframe track per channel (0x60 r .. 0x63 a).
 pub const TOD_COLOR_CHANNELS: usize = 4;
 
+/// The blend weights a weighted mesh carries (research/xim ParticleGeneratorParser.kt
+/// sec2Handler — Weight Mesh[0..4]).
+pub const WEIGHTED_MESH_WEIGHTS: usize = 5;
+
 fn rgba_u8(b: &[u8], o: usize) -> [f32; 4] {
     std::array::from_fn(|i| b[o + i] as f32 / 255.0)
 }
@@ -571,6 +575,17 @@ pub struct ParticleGeneratorDef {
     pub depth_write: bool,
 
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
+    // sec2 0x21/0x22/0x23 KeyFrameValueSetup: a keyframe track on the element's position
+    // x/y/z; the section-3 ProgressValueUpdater 0x0F/0x10/0x11 replaces the channel each
+    // frame, key 0 overridden by the particle's spawn-time value (research/xim
+    // ParticleGeneratorParser.kt sec2Handler/sec3Handler — p.position.x = v).
+    pub position_x_track: Option<[u8; 4]>,
+    pub position_y_track: Option<[u8; 4]>,
+    pub position_z_track: Option<[u8; 4]>,
+    // sec2 0x33..0x37 KeyFrameValueSetup (Weight Mesh[0..4]): the weighted-mesh blend-weight
+    // tracks, read back by the section-3 ProgressValueUpdater 0x1E..0x22. Parsed but not
+    // applied until the weighted-mesh draw path lands.
+    pub weighted_mesh_weight_tracks: [Option<[u8; 4]>; WEIGHTED_MESH_WEIGHTS],
     pub scale_x_track: Option<[u8; 4]>,
     pub scale_y_track: Option<[u8; 4]>,
     // sec2 0x29 KeyFrameValueSetup (scale.z): retail captures field_EC.z, the element's
@@ -606,6 +621,12 @@ pub struct ParticleGeneratorDef {
     // research/xim ParticleGeneratorParser.kt sec2Handler,431-434
     pub tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
     pub tod_color_driven: [bool; TOD_COLOR_CHANNELS],
+
+    // sec2 0x68 KeyFrameValueSetup ("ToD Volume") + section-3 ClockValueUpdater 0x43: a
+    // keyframe track sampled at the full-day interpolation that multiplies the element's
+    // volume — on sound generators this is the ambient gain (research/xim
+    // ParticleGeneratorParser.kt sec2Handler/sec3Handler — audioConfiguration.volumeMultiplier).
+    pub tod_volume_track: Option<[u8; 4]>,
 
     // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater (0x45): the
     // sprite-sheet frame is the current moon phase, not the particle's life progress.
@@ -940,11 +961,20 @@ const SEC2_OPCODE_COLOR_VARIANCE: u8 = 0x17;
 const SEC2_OPCODE_COLOR_TRANSFORM_SETUP: u8 = 0x19;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC2_OPCODE_SPHERICAL_VARIANCE_FULL: u8 = 0x1F;
+// research/xim ParticleGeneratorParser.kt sec2Handler — KeyFrameValueSetup bound to the
+// element's position channels, read back by the section-3 ProgressValueUpdater 0x0F..0x11.
+const SEC2_OPCODE_POSITION_X_TRACK: u8 = 0x21;
+const SEC2_OPCODE_POSITION_Y_TRACK: u8 = 0x22;
+const SEC2_OPCODE_POSITION_Z_TRACK: u8 = 0x23;
 const SEC2_OPCODE_SCALE_Z_TRACK: u8 = 0x29;
 const SEC2_OPCODE_COLOR_R_TRACK: u8 = 0x2A;
 const SEC2_OPCODE_COLOR_G_TRACK: u8 = 0x2B;
 const SEC2_OPCODE_COLOR_B_TRACK: u8 = 0x2C;
 const SEC2_OPCODE_HAZE_OFFSET: u8 = 0x32;
+// research/xim ParticleGeneratorParser.kt sec2Handler — Weight Mesh[0..4] KeyFrameValueSetup,
+// read back by the section-3 ProgressValueUpdater 0x1E..0x22.
+const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST: u8 = 0x33;
+const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_LAST: u8 = 0x37;
 const SEC2_OPCODE_INCREMENTAL_ROTATION: u8 = 0x3B;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC2_OPCODE_OSCILLATION_ACCEL_X: u8 = 0x3E;
@@ -989,6 +1019,13 @@ const SEC3_OPCODE_SCALE_PROGRESS_LAST: u8 = 0x17;
 const SEC3_OPCODE_COLOR_RGB_PROGRESS_FIRST: u8 = 0x18;
 const SEC3_OPCODE_COLOR_RGB_PROGRESS_LAST: u8 = 0x1A;
 const SEC3_OPCODE_ALPHA_UPDATER: u8 = 0x1B;
+// research/xim ParticleGeneratorParser.kt sec3Handler — ProgressValueUpdater position.x/y/z.
+const SEC3_OPCODE_POSITION_X_APPLIER: u8 = 0x0F;
+const SEC3_OPCODE_POSITION_Y_APPLIER: u8 = 0x10;
+const SEC3_OPCODE_POSITION_Z_APPLIER: u8 = 0x11;
+// research/xim ParticleGeneratorParser.kt sec3Handler — weighted-mesh weight appliers.
+const SEC3_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST: u8 = 0x1E;
+const SEC3_OPCODE_WEIGHTED_MESH_WEIGHT_LAST: u8 = 0x22;
 const SEC3_OPCODE_CHILD_GENERATOR_BASIC: u8 = 0x25;
 const SEC3_OPCODE_VELOCITY_ROTATOR: u8 = 0x26;
 const SEC3_OPCODE_OSCILLATION_APPLIER_X: u8 = 0x29;
@@ -1003,6 +1040,10 @@ const SEC3_OPCODE_CHILD_GENERATOR: u8 = 0x33;
 const SEC3_OPCODE_POINT_LIST_POSITION: u8 = 0x34;
 const SEC3_OPCODE_SPECULAR_ROT_Y_PROGRESS: u8 = 0x36;
 const SEC3_OPCODE_SPECULAR_ROT_Z_PROGRESS: u8 = 0x37;
+// research/xim ParticleGeneratorParser.kt sec2Handler ("ToD Volume") + sec3Handler
+// ClockValueUpdater — the time-of-day volume track on sound generators.
+pub const SEC2_OPCODE_TOD_VOLUME_TRACK: u8 = 0x68;
+pub const SEC3_OPCODE_TOD_VOLUME_APPLIER: u8 = 0x43;
 const SEC3_OPCODE_SPECULAR_COLOR_A_PROGRESS: u8 = 0x3B;
 const SEC3_OPCODE_DAMPENING_FACTOR: u8 = 0x44;
 const SEC3_OPCODE_CAMERA_SHAKE_UPDATER: u8 = 0x5F;
@@ -1160,6 +1201,10 @@ pub(crate) struct GeneratorSections {
     pub(crate) depth_write: bool,
 
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
+    pub(crate) position_x_track: Option<[u8; 4]>,
+    pub(crate) position_y_track: Option<[u8; 4]>,
+    pub(crate) position_z_track: Option<[u8; 4]>,
+    pub(crate) weighted_mesh_weight_tracks: [Option<[u8; 4]>; WEIGHTED_MESH_WEIGHTS],
     pub(crate) scale_x_track: Option<[u8; 4]>,
     pub(crate) scale_y_track: Option<[u8; 4]>,
     // sec2 0x29 KeyFrameValueSetup (scale.z): retail captures field_EC.z, the element's
@@ -1195,6 +1240,7 @@ pub(crate) struct GeneratorSections {
     // research/xim ParticleGeneratorParser.kt sec2Handler,431-434
     pub(crate) tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
     pub(crate) tod_color_driven: [bool; TOD_COLOR_CHANNELS],
+    pub(crate) tod_volume_track: Option<[u8; 4]>,
 
     // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater (0x45): the
     // sprite-sheet frame is the current moon phase, not the particle's life progress.
@@ -1549,6 +1595,10 @@ impl ParticleGeneratorDef {
             sort_offset: s.sort_offset,
             projection_bias: s.projection_bias,
             depth_write: s.depth_write,
+            position_x_track: s.position_x_track,
+            position_y_track: s.position_y_track,
+            position_z_track: s.position_z_track,
+            weighted_mesh_weight_tracks: s.weighted_mesh_weight_tracks,
             scale_x_track: s.scale_x_track,
             scale_y_track: s.scale_y_track,
             scale_z_track: s.scale_z_track,
@@ -1560,6 +1610,7 @@ impl ParticleGeneratorDef {
             moon_phase_color: s.moon_phase_color,
             tod_color_tracks: s.tod_color_tracks,
             tod_color_driven: s.tod_color_driven,
+            tod_volume_track: s.tod_volume_track,
             moon_phase_sprite: s.moon_phase_sprite,
             uv_scroll: s.uv_scroll,
             accel: s.accel,
@@ -1699,6 +1750,12 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut rotation_variance = None;
     let mut init_rotation = [0.0f32; 3];
     let mut incremental_rotation = None;
+    let mut position_x_track = None;
+    let mut position_y_track = None;
+    let mut position_z_track = None;
+    let mut weighted_mesh_weight_tracks: [Option<[u8; 4]>; WEIGHTED_MESH_WEIGHTS] =
+        [None; WEIGHTED_MESH_WEIGHTS];
+    let mut tod_volume_track = None;
     let mut scale_x_track = None;
     let mut scale_y_track = None;
     let mut scale_z_track = None;
@@ -1985,6 +2042,14 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             SEC2_OPCODE_HAZE_OFFSET if payload + 8 <= body.len() => {
                 haze_offset_x = Some(f32_le(body, payload + 4));
             }
+            // research/xim ParticleGeneratorParser.kt sec2Handler — Weight Mesh[0..4].
+            SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST..=SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_LAST
+                if payload + 8 <= body.len() =>
+            {
+                weighted_mesh_weight_tracks
+                    [(opcode - SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST) as usize] =
+                    track_id(body, payload + 4);
+            }
             0x30 if payload + 4 <= body.len() => sort_offset = f32_le(body, payload),
             // research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup: the
             // bound of the random magnitude added to the relative velocity.
@@ -2029,6 +2094,15 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 ]);
             }
             // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
+            SEC2_OPCODE_POSITION_X_TRACK if payload + 8 <= body.len() => {
+                position_x_track = track_id(body, payload + 4)
+            }
+            SEC2_OPCODE_POSITION_Y_TRACK if payload + 8 <= body.len() => {
+                position_y_track = track_id(body, payload + 4)
+            }
+            SEC2_OPCODE_POSITION_Z_TRACK if payload + 8 <= body.len() => {
+                position_z_track = track_id(body, payload + 4)
+            }
             0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
             0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
             SEC2_OPCODE_SCALE_Z_TRACK if payload + 8 <= body.len() => {
@@ -2055,6 +2129,10 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             // the section-3 ClockValueUpdater 0x3C..0x3F.
             0x60..=0x63 if payload + 8 <= body.len() => {
                 tod_color_tracks[(opcode - 0x60) as usize] = track_id(body, payload + 4);
+            }
+            // research/xim ParticleGeneratorParser.kt sec2Handler — "ToD Volume".
+            SEC2_OPCODE_TOD_VOLUME_TRACK if payload + 8 <= body.len() => {
+                tod_volume_track = track_id(body, payload + 4)
             }
             // research/xim ParticleInitializers.kt ReverseDisplacementSetup: parsed,
             // never read by the effect.
@@ -2304,6 +2382,10 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK. The engine does not model the
                 // dampener, so the block arms nothing and only consumes.
                 SEC3_OPCODE_DAMPENING_FACTOR => {}
+                // research/xim ParticleGeneratorParser.kt sec3Handler — ClockValueUpdater ToD
+                // volume: no payload; the ambient mixer samples the sec2 0x68 track at the
+                // full-day interpolation (zone_sfx.rs).
+                SEC3_OPCODE_TOD_VOLUME_APPLIER => {}
                 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp
                 // CYyGenerator::ElemIdle case 0x2E: [near, far, kill-flag] — the third word is
                 // 0 in every shipped DAT (research/xim ParticleUpdaters.kt DrawDistanceUpdater
@@ -2328,6 +2410,12 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 // life progress, which the render path already does from
                 // def.scale_x_track/scale_y_track; the engine's 2D sprite has no z axis,
                 // so the blocks arm nothing and only consume.
+                // research/xim ParticleGeneratorParser.kt sec3Handler — ProgressValueUpdater
+                // position.x/y/z: no payload; each frame the bound sec2 0x21..0x23 track replaces
+                // the channel (particle_draw applies it, key 0 seeded from the spawn value).
+                SEC3_OPCODE_POSITION_X_APPLIER
+                | SEC3_OPCODE_POSITION_Y_APPLIER
+                | SEC3_OPCODE_POSITION_Z_APPLIER => {}
                 SEC3_OPCODE_SCALE_PROGRESS_FIRST..=SEC3_OPCODE_SCALE_PROGRESS_LAST => {}
                 // research/xim ParticleGeneratorParser.kt sec3Handler: the color.r/g/b
                 // ProgressValueUpdaters: no payload, they sample the sec2 color tracks at
@@ -2393,6 +2481,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 // life progress, which particle_draw already does from def.alpha_track, so
                 // the block arms nothing and only consumes.
                 SEC3_OPCODE_ALPHA_UPDATER => {}
+                // research/xim ParticleGeneratorParser.kt sec3Handler — weighted-mesh weight
+                // appliers: no payload, they sample the sec2 0x33..0x37 tracks. The engine does
+                // not model the weighted-mesh draw path, so the blocks arm nothing and only
+                // consume.
+                SEC3_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST..=SEC3_OPCODE_WEIGHTED_MESH_WEIGHT_LAST => {}
                 // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: the zero u32
                 // is at payload+0, then 8 RGBA quads (u8x4, 0..=255).
                 0x4E if payload + 4 + 4 * DAYS_OF_WEEK <= body.len() => {
@@ -2567,6 +2660,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             sort_offset,
             projection_bias,
             depth_write,
+            position_x_track,
+            position_y_track,
+            position_z_track,
+            weighted_mesh_weight_tracks,
+            tod_volume_track,
             scale_x_track,
             scale_y_track,
             scale_z_track,
@@ -2677,6 +2775,11 @@ pub struct SoundGeneratorDef {
     pub max_life_frames: f32,
 
     pub attach_type: AttachType,
+
+    /// sec2 0x68 KeyFrameValueSetup ("ToD Volume") + section-3 ClockValueUpdater 0x43 — the
+    /// keyframe track sampled at the full-day interpolation that multiplies the emitter's gain
+    /// (research/xim ParticleGeneratorParser.kt — audioConfiguration.volumeMultiplier).
+    pub tod_volume_track: Option<[u8; 4]>,
 }
 
 impl SoundGeneratorDef {
@@ -2713,6 +2816,7 @@ impl SoundGeneratorDef {
             continuous: s.continuous,
             max_life_frames: s.max_life_frames,
             attach_type: s.attach_type,
+            tod_volume_track: s.tod_volume_track,
         }
     }
 
@@ -3939,6 +4043,66 @@ mod tests {
             .unwrap();
         assert_eq!(plain.draw_distance_near, None);
         assert_eq!(plain.draw_distance_far, None);
+    }
+
+    // sec2 0x21/0x22/0x23 KeyFrameValueSetup (position.x/y/z) + the section-3 ProgressValueUpdater
+    // 0x0F..0x11 — the shipped sakura sway track is 'gjpx' on position.x.
+    #[test]
+    fn position_tracks_read_the_keyframe_ids() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut sec2 = setup.clone();
+        for (opcode, id) in [(0x21u8, b"gjpx"), (0x22, b"gjpy"), (0x23, b"gjpz")] {
+            let mut payload = [0u8; 12];
+            payload[4..8].copy_from_slice(id);
+            sec2.extend(op(opcode, 4, &payload));
+        }
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&SEC2_TERMINATOR);
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        for opcode in [0x0Fu8, 0x10, 0x11] {
+            body.extend_from_slice(&op(opcode, 1, &[]));
+        }
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.position_x_track, Some(*b"gjpx"));
+        assert_eq!(def.position_y_track, Some(*b"gjpy"));
+        assert_eq!(def.position_z_track, Some(*b"gjpz"));
+
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.position_x_track, None);
+        assert_eq!(plain.position_y_track, None);
+        assert_eq!(plain.position_z_track, None);
+    }
+
+    // sec2 0x68 KeyFrameValueSetup ("ToD Volume") + the section-3 ClockValueUpdater 0x43 —
+    // the shipped river sound authors 'kota'.
+    #[test]
+    fn tod_volume_track_reads_the_keyframe_id() {
+        let mut setup = setup_with_link(LINKED_DATA_SOUND);
+        setup[4 + 8..4 + 12].copy_from_slice(b"5008");
+        let mut payload = [0u8; 12];
+        payload[4..8].copy_from_slice(b"kota");
+        setup.extend(op(SEC2_OPCODE_TOD_VOLUME_TRACK, 4, &payload));
+
+        let body = build(&setup, 30, GEN_FLAG_AUTO_RUN);
+        let def = SoundGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.tod_volume_track, Some(*b"kota"));
+        assert!(
+            ParticleGeneratorDef::parse(&body).unwrap().is_none(),
+            "a sound generator must never reach the particle sim"
+        );
+
+        let plain = SoundGeneratorDef::parse(&build(
+            &setup_with_link(LINKED_DATA_SOUND),
+            30,
+            GEN_FLAG_AUTO_RUN,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(plain.tod_volume_track, None);
     }
 
     // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the

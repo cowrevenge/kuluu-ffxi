@@ -115,13 +115,9 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
             "specular element not modelled"
         }
         (GeneratorSection::Initializers, 0x56) => "batching_setup: retail walk has no case",
-        (GeneratorSection::Initializers, 0x69) => "velocity_dampener_track: dampener unmodelled",
         (GeneratorSection::Initializers, 0x8E) => "foot_mark: spawn-snap not implemented",
         (GeneratorSection::Updaters, 0x0B | 0x0C) => "color transform applier/modifier unmodelled",
         (GeneratorSection::Updaters, 0x25 | 0x33) => "child-generator updater: no child path",
-        (GeneratorSection::Updaters, 0x26) => "velocity_rotator: velocityRotation unmodelled",
-        (GeneratorSection::Updaters, 0x2C) => "velocity dampener unmodelled",
-        (GeneratorSection::Updaters, 0x2F) => "velocity rotation updater unmodelled",
         (GeneratorSection::Updaters, 0x34) => "point-list position updater: no spline runtime",
         (GeneratorSection::Updaters, 0x36 | 0x37 | 0x3B) => {
             "specular progress updater: specular element not modelled"

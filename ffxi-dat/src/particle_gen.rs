@@ -801,21 +801,33 @@ pub struct ParticleGeneratorDef {
     pub parent_scale: bool,
 
     // sec2 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape
-    // bound to the element's velocity dampener (research/xim ParticleGeneratorParser.kt
-    // sec2Handler 0x69; retail's keyframe pre-load pass references the same blocks as
-    // Keyframe resources). Parsed but not applied: the engine does not model the velocity
-    // dampener.
+    // bound to the element's velocity dampener, sampled per frame by the sec3 0x44
+    // applier and overriding the 0x2C base factor (research/xim
+    // ParticleGeneratorParser.kt sec2Handler 0x69; retail's keyframe pre-load pass
+    // references the same blocks as Keyframe resources).
     pub velocity_dampener_track: Option<[u8; 4]>,
+    // sec3 0x44 ProgressValueUpdater (dampening factor): no payload — arms the per-frame
+    // sampling of the sec2 0x69 track into VelocityDampener's factor (research/xim
+    // ParticleGeneratorParser.kt sec3Handler).
+    pub dampening_factor_applier: bool,
     // sec3 0x2C VelocityDampener: [dampen, unk] — velocity ×= dampeningFactor^dt, the
     // factor coming from the sec2 0x69 track when present, else dampen (research/xim
-    // ParticleUpdaters.kt VelocityDampener). The engine does not model the velocity
-    // dampener, so parse-only.
+    // ParticleUpdaters.kt VelocityDampener).
     pub velocity_dampener: Option<[f32; 2]>,
     // sec3 0x26 VelocityRotator: three floats, the rotateAmount added to the velocity
     // rotation × (0.5 × dt) per frame (research/xim ParticleUpdaters.kt VelocityRotator —
-    // the actor-space axis hack and the 0.5 factor are unmodeled). The engine has no
-    // velocityRotation, so parse-only.
+    // the actor-space axis swap and the 0.5 factor are kept as named consts in
+    // particle_sim.rs, flagged for retail verification).
     pub velocity_rotator: Option<[f32; 3]>,
+    // sec3 0x2F VelocityRotationUpdater: no payload — collapses all velocity into +x and
+    // copies the particle rotation into the velocity rotation (research/xim
+    // ParticleUpdaters.kt VelocityRotationUpdater).
+    pub velocity_rotation_updater: bool,
+    // sec2 0x31 RandomVelocitySetup: one float bound; each emitted element's base velocity
+    // is replaced by value × rand() on all three axes — the relative-velocity portion is a
+    // separate transform and survives (research/xim ParticleInitializers.kt
+    // RandomVelocitySetup).
+    pub random_velocity: Option<f32>,
 
     // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
     // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
@@ -975,6 +987,8 @@ const SEC2_OPCODE_HAZE_OFFSET: u8 = 0x32;
 // read back by the section-3 ProgressValueUpdater 0x1E..0x22.
 const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST: u8 = 0x33;
 const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_LAST: u8 = 0x37;
+// research/xim ParticleGeneratorParser.kt sec2Handler — RandomVelocitySetup.
+const SEC2_OPCODE_RANDOM_VELOCITY: u8 = 0x31;
 const SEC2_OPCODE_INCREMENTAL_ROTATION: u8 = 0x3B;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC2_OPCODE_OSCILLATION_ACCEL_X: u8 = 0x3E;
@@ -1408,21 +1422,33 @@ pub(crate) struct GeneratorSections {
     pub(crate) parent_scale: bool,
 
     // sec2 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape
-    // bound to the element's velocity dampener (research/xim ParticleGeneratorParser.kt
-    // sec2Handler 0x69; retail's keyframe pre-load pass references the same blocks as
-    // Keyframe resources). Parsed but not applied: the engine does not model the velocity
-    // dampener.
+    // bound to the element's velocity dampener, sampled per frame by the sec3 0x44
+    // applier and overriding the 0x2C base factor (research/xim
+    // ParticleGeneratorParser.kt sec2Handler 0x69; retail's keyframe pre-load pass
+    // references the same blocks as Keyframe resources).
     pub(crate) velocity_dampener_track: Option<[u8; 4]>,
+    // sec3 0x44 ProgressValueUpdater (dampening factor): no payload — arms the per-frame
+    // sampling of the sec2 0x69 track into VelocityDampener's factor (research/xim
+    // ParticleGeneratorParser.kt sec3Handler).
+    pub(crate) dampening_factor_applier: bool,
     // sec3 0x2C VelocityDampener: [dampen, unk] — velocity ×= dampeningFactor^dt, the
     // factor coming from the sec2 0x69 track when present, else dampen (research/xim
-    // ParticleUpdaters.kt VelocityDampener). The engine does not model the velocity
-    // dampener, so parse-only.
+    // ParticleUpdaters.kt VelocityDampener).
     pub(crate) velocity_dampener: Option<[f32; 2]>,
     // sec3 0x26 VelocityRotator: three floats, the rotateAmount added to the velocity
     // rotation × (0.5 × dt) per frame (research/xim ParticleUpdaters.kt VelocityRotator —
-    // the actor-space axis hack and the 0.5 factor are unmodeled). The engine has no
-    // velocityRotation, so parse-only.
+    // the actor-space axis swap and the 0.5 factor are kept as named consts in
+    // particle_sim.rs, flagged for retail verification).
     pub(crate) velocity_rotator: Option<[f32; 3]>,
+    // sec3 0x2F VelocityRotationUpdater: no payload — collapses all velocity into +x and
+    // copies the particle rotation into the velocity rotation (research/xim
+    // ParticleUpdaters.kt VelocityRotationUpdater).
+    pub(crate) velocity_rotation_updater: bool,
+    // sec2 0x31 RandomVelocitySetup: one float bound; each emitted element's base velocity
+    // is replaced by value × rand() on all three axes — the relative-velocity portion is a
+    // separate transform and survives (research/xim ParticleInitializers.kt
+    // RandomVelocitySetup).
+    pub(crate) random_velocity: Option<f32>,
 
     // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
     // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
@@ -1648,8 +1674,11 @@ impl ParticleGeneratorDef {
             parent_color: s.parent_color,
             parent_scale: s.parent_scale,
             velocity_dampener_track: s.velocity_dampener_track,
+            dampening_factor_applier: s.dampening_factor_applier,
             velocity_dampener: s.velocity_dampener,
             velocity_rotator: s.velocity_rotator,
+            velocity_rotation_updater: s.velocity_rotation_updater,
+            random_velocity: s.random_velocity,
             fixed_point_position_variance: s.fixed_point_position_variance,
             fixed_point_position_variance_2: s.fixed_point_position_variance_2,
             child_generator_2: s.child_generator_2,
@@ -1795,6 +1824,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut parent_color = false;
     let mut parent_scale = false;
     let mut velocity_dampener_track = None;
+    let mut random_velocity = None;
     let mut fixed_point_position_variance = None;
     let mut fixed_point_position_variance_2 = None;
     let mut foot_mark = false;
@@ -2214,6 +2244,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             SEC2_OPCODE_VELOCITY_DAMPENER_TRACK if payload + 8 <= body.len() => {
                 velocity_dampener_track = track_id(body, payload + 4);
             }
+            // research/xim ParticleInitializers.kt RandomVelocitySetup: one float bound;
+            // each emitted element's base velocity becomes value × rand() on all axes.
+            SEC2_OPCODE_RANDOM_VELOCITY if payload + 4 <= body.len() => {
+                random_velocity = Some(f32_le(body, payload));
+            }
             // research/xim ParticleInitializers.kt FixedPointPositionVarianceSetup: the
             // point list a per-emitted-particle position offset cycles through.
             SEC2_OPCODE_FIXED_POINT_POSITION_VARIANCE if payload + 12 <= body.len() => {
@@ -2291,6 +2326,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut draw_distance_far = None;
     let mut velocity_dampener = None;
     let mut velocity_rotator = None;
+    let mut dampening_factor_applier = false;
+    let mut velocity_rotation_updater = false;
     let mut color_transform_modifier = None;
     let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
     let sec3_raw = u32_le(body, 0x78) as usize;
@@ -2372,16 +2409,16 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 }
                 // research/xim ParticleUpdaters.kt VelocityDampener: velocity is scaled
                 // by dampeningFactor^dt, the factor from
-                // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK when present. The engine does not
-                // model the dampener, so parse-only.
+                // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK when present (particle_sim.rs).
                 SEC3_OPCODE_VELOCITY_DAMPENER if payload + 8 <= body.len() => {
                     velocity_dampener = Some([f32_le(body, payload), f32_le(body, payload + 4)]);
                 }
                 // research/xim ParticleGeneratorParser.kt sec3Handler: the dampening-factor
                 // ProgressValueUpdater: no payload, it samples
-                // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK. The engine does not model the
-                // dampener, so the block arms nothing and only consumes.
-                SEC3_OPCODE_DAMPENING_FACTOR => {}
+                // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK per frame (particle_sim.rs).
+                SEC3_OPCODE_DAMPENING_FACTOR => {
+                    dampening_factor_applier = true;
+                }
                 // research/xim ParticleGeneratorParser.kt sec3Handler — ClockValueUpdater ToD
                 // volume: no payload; the ambient mixer samples the sec2 0x68 track at the
                 // full-day interpolation (zone_sfx.rs).
@@ -2440,19 +2477,19 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 // generator per particle. The engine has no child-particle path, so the
                 // blocks arm nothing and only consume.
                 SEC3_OPCODE_CHILD_GENERATOR_BASIC | SEC3_OPCODE_CHILD_GENERATOR => {}
-                // research/xim ParticleUpdaters.kt VelocityRotationUpdater: no payload
-                // converts all velocity into the +x axis and copies the particle's
-                // rotation into the velocity rotation. The engine has no velocityRotation,
-                // so the block arms nothing and only consumes.
-                SEC3_OPCODE_VELOCITY_ROTATION_UPDATER => {}
+                // research/xim ParticleUpdaters.kt VelocityRotationUpdater: no payload —
+                // collapses all velocity into +x and copies the particle's rotation into
+                // the velocity rotation (particle_sim.rs).
+                SEC3_OPCODE_VELOCITY_ROTATION_UPDATER => {
+                    velocity_rotation_updater = true;
+                }
                 // research/xim ParticleUpdaters.kt PointListPositionUpdater: no payload
                 // samples the SEC2_OPCODE_POINT_LIST_POSITION spline at the particle's
                 // progress and copies it to the position. The engine has no point-list
                 // spline runtime, so the block arms nothing and only consumes.
                 SEC3_OPCODE_POINT_LIST_POSITION => {}
                 // research/xim ParticleUpdaters.kt VelocityRotator: the rotateAmount
-                // added to the velocity rotation * (0.5 * dt) per frame. The engine has
-                // no velocityRotation, so parse-only.
+                // added to the velocity rotation * (0.5 * dt) per frame (particle_sim.rs).
                 SEC3_OPCODE_VELOCITY_ROTATOR if payload + 12 <= body.len() => {
                     velocity_rotator = Some([
                         f32_le(body, payload),
@@ -2714,8 +2751,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             parent_color,
             parent_scale,
             velocity_dampener_track,
+            dampening_factor_applier,
             velocity_dampener,
             velocity_rotator,
+            velocity_rotation_updater,
+            random_velocity,
             fixed_point_position_variance,
             fixed_point_position_variance_2,
             child_generator_2,
@@ -4378,10 +4418,11 @@ mod tests {
         assert_eq!(plain.velocity_rotator, None);
     }
 
-    // sec3 0x44 dampening-factor ProgressValueUpdater: no payload, it samples the sec2 0x69
-    // track (research/xim ParticleGeneratorParser.kt sec3Handler 0x44), behind a sec2 0x69.
+    // sec3 0x44 dampening-factor ProgressValueUpdater: no payload — arms the per-frame
+    // sampling of the sec2 0x69 track (research/xim ParticleGeneratorParser.kt
+    // sec3Handler 0x44), behind a sec2 0x69.
     #[test]
-    fn dampening_factor_updater_consumes_the_block_without_state() {
+    fn dampening_factor_updater_arms_the_track_sampling() {
         let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -4399,6 +4440,11 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(def.velocity_dampener, None);
+        assert!(def.dampening_factor_applier, "sec3 0x44 arms the applier");
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.dampening_factor_applier);
         assert!(
             outcomes.iter().any(|(s, op, o)| {
                 *s == GeneratorSection::Updaters
@@ -4407,6 +4453,25 @@ mod tests {
             }),
             "sec3 0x44 must report decoded: {outcomes:?}"
         );
+    }
+
+    // sec2 0x31 RandomVelocitySetup: one float bound (research/xim
+    // ParticleInitializers.kt RandomVelocitySetup).
+    #[test]
+    fn random_velocity_reads_the_bound() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut sec2 = setup.clone();
+        let payload = 1.5f32.to_le_bytes();
+        sec2.extend(op(SEC2_OPCODE_RANDOM_VELOCITY, 2, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(def.random_velocity, Some(1.5));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.random_velocity, None);
     }
 
     // sec3 0x15/0x16/0x17 scale.x/y/z ProgressValueUpdaters: no payload — they sample the
@@ -4583,11 +4648,11 @@ mod tests {
         }
     }
 
-    // sec3 0x2F VelocityRotationUpdater: no payload — converts all velocity into the +x
-    // axis and copies the particle's rotation into the velocity rotation; the engine has
-    // no velocityRotation (research/xim ParticleUpdaters.kt VelocityRotationUpdater).
+    // sec3 0x2F VelocityRotationUpdater: no payload — arms the per-frame collapse of all
+    // velocity into +x and the copy of the particle's rotation into the velocity rotation
+    // (particle_sim.rs; research/xim ParticleUpdaters.kt VelocityRotationUpdater).
     #[test]
-    fn velocity_rotation_updater_consumes_the_block_without_state() {
+    fn velocity_rotation_updater_arms_the_collapse() {
         let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -4599,11 +4664,16 @@ mod tests {
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
-        ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
             outcomes.push((s, op, o));
         })
         .unwrap()
         .unwrap();
+        assert!(def.velocity_rotation_updater, "sec3 0x2F arms the updater");
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.velocity_rotation_updater);
         assert!(
             outcomes.iter().any(|(s, o, outcome)| {
                 *s == GeneratorSection::Updaters

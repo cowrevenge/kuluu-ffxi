@@ -285,6 +285,10 @@ struct LiveGenerator {
     position_x: Option<KeyFrameTrack>,
     position_y: Option<KeyFrameTrack>,
     position_z: Option<KeyFrameTrack>,
+    // The sec2 0x69 velocity-dampener track, resolved only while the sec3 0x44 applier is
+    // present — without it nothing samples the track (research/xim ParticleUpdaters.kt
+    // VelocityDampener getDampeningFactor: transform.dampeningFactor ?: dampen).
+    dampening_factor: Option<KeyFrameTrack>,
     alpha: Option<KeyFrameTrack>,
     // The 0x60..0x63 time-of-day RGBA curves, resolved against the DAT's keyframe chunks.
     // Sampled at the Vana'diel day fraction, so unlike `alpha` above they do not advance
@@ -435,6 +439,10 @@ struct Particle {
     // getOscillationDirection reads ParticleTransform.relativeVelocity, not the total
     // velocity; Particle.kt getTotalVelocity keeps the two transforms separate).
     rel_vel: Vec3,
+    // Euler radians of the particle transform's velocityRotation: accumulated by the sec3
+    // 0x26 VelocityRotator and replaced wholesale by the sec3 0x2F VelocityRotationUpdater.
+    // Zero while neither block is present, so the integration path stays a plain add.
+    vel_rot: Vec3,
     // Some while the generator carries the sec2 0x3D marker (research/xim
     // ParticleGeneratorSettings.kt OscillationParams): the per-axis acceleration (0x3E/0x3F/
     // 0x40 base plus one variance draw) and the applier's last-amplitude memory.
@@ -458,6 +466,20 @@ const MOUNT_FOOTSTEP_REFERENCE: usize = 0;
 // becomes Bevy +Y up and Z mirrors, so a DAT velocity/spread authored in the FFXI frame lands
 // where retail puts it.
 const WORLD_PARTICLE_VEL_BASIS: Vec3 = Vec3::new(1.0, -1.0, -1.0);
+
+// research/xim ParticleUpdaters.kt VelocityRotator — "TODO - 0.5 is needed for Ice Spikes to
+// work": the rotateAmount accumulates into the velocity rotation at half the authored rate per
+// frame. No XIClient symbol found; flagged for retail verification.
+const VELOCITY_ROTATOR_RATE_HALF: f32 = 0.5;
+
+// research/xim Particle.kt getTotalVelocity — the velocityRotation rotates the total velocity
+// before integration, negate_rotation_y flipping the y angle sign (yRotationMultiplier). xim's
+// Matrix4f.rotateZYXInPlace builds the transpose of the standard ZYX Euler product,
+// Rx(−x)·Ry(−y)·Rz(−z), which is glam's intrinsic XYZ euler order at negated angles.
+fn velocity_rotation(vel_rot: Vec3, negate_y: bool) -> Quat {
+    let y = if negate_y { -vel_rot.y } else { vel_rot.y };
+    Quat::from_euler(EulerRot::XYZ, -vel_rot.x, -y, -vel_rot.z)
+}
 
 // research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition jointRefIdx,103,111,125 updateAssociatedPosition — an
 // actor-attached generator emits from the attach actor's position PLUS the position of the joint
@@ -889,6 +911,11 @@ pub fn spawn_particle_generators(
             position_x: resolve(def.position_x_track),
             position_y: resolve(def.position_y_track),
             position_z: resolve(def.position_z_track),
+            dampening_factor: if def.dampening_factor_applier {
+                resolve(def.velocity_dampener_track)
+            } else {
+                None
+            },
             alpha: resolve(def.alpha_track),
             tod_color: resolve_tod_tracks(&def, assets),
             solid_mesh: is_solid_mesh(&template),
@@ -993,6 +1020,11 @@ pub fn spawn_actor_auto_run_particles(
                 position_x: resolve(def.position_x_track),
                 position_y: resolve(def.position_y_track),
                 position_z: resolve(def.position_z_track),
+                dampening_factor: if def.dampening_factor_applier {
+                    resolve(def.velocity_dampener_track)
+                } else {
+                    None
+                },
                 alpha: resolve(def.alpha_track),
                 tod_color: resolve_tod_tracks(&def, &fx.assets),
                 solid_mesh: is_solid_mesh(&template),
@@ -1077,6 +1109,11 @@ pub fn spawn_zone_particle_generator(
         position_x: resolve(def.position_x_track),
         position_y: resolve(def.position_y_track),
         position_z: resolve(def.position_z_track),
+        dampening_factor: if def.dampening_factor_applier {
+            resolve(def.velocity_dampener_track)
+        } else {
+            None
+        },
         alpha: resolve(def.alpha_track),
         tod_color: def.tod_color_tracks.map(|id| keyframe(assets, global, id)),
         solid_mesh: is_solid_mesh(&template),
@@ -1294,8 +1331,48 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         if let Some(a) = accel {
             p.vel += a;
         }
+        // sec3 0x26 VelocityRotator: rotateAmount × (0.5 × dt) into the velocity rotation; an
+        // actor-attached generator authors it in actor space, where z is forward — xim swaps
+        // the axes to (-z, y, x) for those (research/xim ParticleUpdaters.kt VelocityRotator,
+        // flagged for retail verification).
+        if let Some(amount) = g.def.velocity_rotator {
+            let hacked = if g.actor_local {
+                Vec3::new(-amount[2], amount[1], amount[0])
+            } else {
+                Vec3::from_array(amount)
+            };
+            p.vel_rot += hacked * (VELOCITY_ROTATOR_RATE_HALF * frames);
+        }
+        // sec3 0x2F VelocityRotationUpdater: collapse all velocity into +x and copy the
+        // particle rotation into the velocity rotation (research/xim ParticleUpdaters.kt
+        // VelocityRotationUpdater).
+        if g.def.velocity_rotation_updater {
+            let magnitude = p.vel.length() + p.rel_vel.length();
+            p.vel = Vec3::new(magnitude, 0.0, 0.0);
+            p.rel_vel = Vec3::ZERO;
+            p.vel_rot = p.rotation;
+        }
+        // sec3 0x2C VelocityDampener: velocity ×= factor^dt, the per-frame-sampled sec2 0x69
+        // track overriding the authored base (research/xim ParticleUpdaters.kt
+        // VelocityDampener getDampeningFactor).
+        if let Some([dampen, _]) = g.def.velocity_dampener {
+            let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
+            let factor = g
+                .dampening_factor
+                .as_ref()
+                .map(|t| t.sample(progress))
+                .unwrap_or(dampen);
+            let f = factor.powf(frames);
+            p.vel *= f;
+            p.rel_vel *= f;
+        }
         if position_updater {
-            p.pos += p.vel * frames;
+            let step = if p.vel_rot == Vec3::ZERO {
+                p.vel
+            } else {
+                velocity_rotation(p.vel_rot, p.negate_rotation_y) * p.vel
+            };
+            p.pos += step * frames;
         }
         // sec3 0x29/0x2A/0x2B OscillationApplier (X/Y/Z): after the base position step, add
         // the amplitude change over the tick per active axis (research/xim
@@ -1470,6 +1547,12 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * var[2],
         );
     }
+    // sec2 0x31 RandomVelocitySetup: one [0, v) draw written to every axis — replaces the
+    // base-plus-variance velocity transform; the relative-velocity portion is a separate
+    // transform and survives (research/xim ParticleInitializers.kt RandomVelocitySetup).
+    if let Some(v) = g.def.random_velocity {
+        vel = Vec3::splat(v * next_unit(&mut g.emit_rng));
+    }
     // 0x08 RelativeVelocitySetup: the payload speed along the spawn offset's direction; with
     // no offset there is no direction and the block contributes nothing (research/xim
     // ParticleInitializers.kt RelativeVelocitySetup — normalize of the initial position
@@ -1631,6 +1714,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         spin,
         negate_rotation_y,
         rel_vel: rel_vel * g.vel_basis,
+        vel_rot: Vec3::ZERO,
         osc,
     });
 }
@@ -2633,8 +2717,11 @@ mod tests {
             parent_color: false,
             parent_scale: false,
             velocity_dampener_track: None,
+            dampening_factor_applier: false,
             velocity_dampener: None,
             velocity_rotator: None,
+            velocity_rotation_updater: false,
+            random_velocity: None,
             fixed_point_position_variance: None,
             fixed_point_position_variance_2: None,
             child_generator_2: None,
@@ -2667,6 +2754,7 @@ mod tests {
             position_x: None,
             position_y: None,
             position_z: None,
+            dampening_factor: None,
             alpha: None,
             origin: Vec3::ZERO,
             particles: Vec::new(),
@@ -3522,6 +3610,7 @@ mod tests {
                 spin: Vec3::ZERO,
                 negate_rotation_y: false,
                 rel_vel: Vec3::ZERO,
+                vel_rot: Vec3::ZERO,
                 osc: None,
             });
             g
@@ -4028,6 +4117,145 @@ mod tests {
         assert!((x_at(&g) - 2.5).abs() < 1e-6);
     }
 
+    // sec3 0x2C VelocityDampener: each frame the velocity is scaled by dampen^dt before the
+    // position step, so the displacement is a geometric series (research/xim
+    // ParticleUpdaters.kt VelocityDampener).
+    #[test]
+    fn velocity_dampener_decays_the_velocity() {
+        let make = |dampen: Option<f32>| -> LiveGenerator {
+            let mut d = def(100.0, 1.0, 1);
+            d.continuous = true;
+            d.init_velocity = [1.0, 0.0, 0.0];
+            d.velocity_dampener = dampen.map(|v| [v, 0.0]);
+            let mut g = live(d, 1000.0);
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            g.stopped = true;
+            for _ in 0..3 {
+                advance(&mut g, 1.0);
+            }
+            g
+        };
+        // No dampener: three unit steps.
+        let plain = make(None);
+        assert!((plain.particles[0].pos.x - 3.0).abs() < 1e-6);
+        // Dampen 0.5: the step halves each tick — 0.5 + 0.25 + 0.125.
+        let damped = make(Some(0.5));
+        assert!((damped.particles[0].pos.x - 0.875).abs() < 1e-6);
+    }
+
+    // sec2 0x69 + sec3 0x44: the bound track overrides the authored base factor per frame —
+    // a constant-1.0 track disables the decay entirely (research/xim ParticleUpdaters.kt
+    // VelocityDampener getDampeningFactor).
+    #[test]
+    fn dampening_factor_track_overrides_the_base() {
+        let mut d = def(100.0, 1.0, 1);
+        d.continuous = true;
+        d.init_velocity = [1.0, 0.0, 0.0];
+        d.velocity_dampener = Some([0.5, 0.0]);
+        d.dampening_factor_applier = true;
+        let mut g = live(d, 1000.0);
+        g.dampening_factor = Some(ffxi_dat::particle_gen::KeyFrameTrack {
+            points: vec![(0.0, 1.0), (1.0, 1.0)],
+        });
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        g.stopped = true;
+        for _ in 0..3 {
+            advance(&mut g, 1.0);
+        }
+        assert!((g.particles[0].pos.x - 3.0).abs() < 1e-6);
+    }
+
+    // sec3 0x26 VelocityRotator: the rotateAmount accumulates into the velocity rotation at
+    // half rate per frame and turns the trajectory; an actor-local generator authors it in
+    // actor space, where z is forward — xim swaps the axes to (-z, y, x) for those
+    // (research/xim ParticleUpdaters.kt VelocityRotator).
+    #[test]
+    fn velocity_rotator_turns_the_trajectory() {
+        let make = |actor_local: bool| -> LiveGenerator {
+            let mut d = def(100.0, 1.0, 1);
+            d.continuous = true;
+            if actor_local {
+                d.init_velocity = [0.0, 1.0, 0.0];
+            } else {
+                d.init_velocity = [1.0, 0.0, 0.0];
+            }
+            d.velocity_rotator = Some([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
+            let mut g = live(d, 1000.0);
+            g.actor_local = actor_local;
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            g.stopped = true;
+            for _ in 0..4 {
+                advance(&mut g, 1.0);
+            }
+            g
+        };
+        // World-space: the authored z amount rotates about z — four half-rate quarter-turns
+        // land the +x velocity on −x.
+        let world = make(false);
+        assert!((world.particles[0].pos.x - (-1.0)).abs() < 1e-5);
+        // Actor-local: the same authored z amount becomes a negative x rotation — the y
+        // velocity swings through +z and ends on −y.
+        let local = make(true);
+        assert!((local.particles[0].pos.y - (-1.0)).abs() < 1e-5);
+        assert!(
+            (local.particles[0].pos.z - (std::f32::consts::SQRT_2 + 1.0)).abs() < 1e-5,
+            "actor-local z sweep: {}",
+            local.particles[0].pos.z
+        );
+    }
+
+    // sec3 0x2F VelocityRotationUpdater: all velocity collapses into +x and the particle's
+    // rotation becomes the velocity rotation (research/xim ParticleUpdaters.kt
+    // VelocityRotationUpdater).
+    #[test]
+    fn velocity_rotation_updater_collapses_into_x() {
+        let mut d = def(100.0, 1.0, 1);
+        d.continuous = true;
+        d.init_velocity = [3.0, 4.0, 0.0];
+        d.velocity_rotation_updater = true;
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        g.stopped = true;
+        advance(&mut g, 1.0);
+        let p = &g.particles[0];
+        // |vel| + |rel_vel| = 5 on +x; the zero rotation keeps it there.
+        assert!((p.vel.x - 5.0).abs() < 1e-6 && p.vel.y.abs() < 1e-6);
+        assert!((p.pos.x - 5.0).abs() < 1e-6);
+    }
+
+    // sec2 0x31 RandomVelocitySetup: the base velocity is replaced by one [0, v) draw shared
+    // by all three axes (research/xim ParticleInitializers.kt RandomVelocitySetup).
+    #[test]
+    fn random_velocity_replaces_the_base() {
+        let make = |random: Option<f32>| -> LiveGenerator {
+            let mut d = def(100.0, 1.0, 1);
+            d.init_velocity = [9.0, 9.0, 9.0];
+            d.random_velocity = random;
+            let mut g = live(d, 1000.0);
+            advance(&mut g, 1.0);
+            // One burst: ppe plus retail's closing iteration.
+            assert_eq!(g.particles.len(), 2);
+            g
+        };
+        // Without the block the base survives.
+        for p in &make(None).particles {
+            assert!((p.vel - Vec3::new(9.0, 9.0, 9.0)).length() < 1e-6);
+        }
+        // With it, every axis carries the same draw in [0, v).
+        for p in &make(Some(2.0)).particles {
+            assert!((p.vel.x - p.vel.y).abs() < 1e-6 && (p.vel.y - p.vel.z).abs() < 1e-6);
+            assert!(
+                p.vel.x >= 0.0 && p.vel.x < 2.0,
+                "draw out of range: {}",
+                p.vel.x
+            );
+        }
+    }
+
     // sec2 0x3D + 0x3E with the sec3 0x29 applier: the particle's x position sways with the
     // applier's amplitude curve (research/xim ParticleUpdaters.kt OscillationApplier —
     // rate = 180f / 2 = 90, baseOffset 0, so the amplitude peaks at half a period, 90 frames,
@@ -4161,6 +4389,7 @@ mod tests {
             spin: Vec3::ZERO,
             negate_rotation_y: false,
             rel_vel: Vec3::Y,
+            vel_rot: Vec3::ZERO,
             osc: Some(Oscillation {
                 accel: [0.5, 0.0, 0.0],
                 prev_amplitude: [0.0; 3],
@@ -4201,6 +4430,7 @@ mod tests {
                 spin: Vec3::ZERO,
                 negate_rotation_y: false,
                 rel_vel: Vec3::ZERO,
+                vel_rot: Vec3::ZERO,
                 osc: None,
             });
             g
@@ -4913,6 +5143,7 @@ mod tests {
             spin: Vec3::ZERO,
             negate_rotation_y: false,
             rel_vel: Vec3::ZERO,
+            vel_rot: Vec3::ZERO,
             osc: None,
         });
         g
@@ -5637,6 +5868,7 @@ mod tests {
             spin: Vec3::ZERO,
             negate_rotation_y: false,
             rel_vel: Vec3::ZERO,
+            vel_rot: Vec3::ZERO,
             osc: None,
         };
         cont.particles = vec![particle(3.0)];

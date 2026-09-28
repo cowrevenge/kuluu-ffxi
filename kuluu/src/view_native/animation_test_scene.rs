@@ -1289,6 +1289,12 @@ fn fire_single_gen(
         log_line(log, "worm not loaded yet".into());
         return;
     };
+    // Same production semantics as fire_named_routine: the generator sits where it does in
+    // hi14/hit1 — on the victim with target = attacker. insert (not try_insert): a stale
+    // target from an earlier case must not win first-writer.
+    if let Some(hume) = tracked.by_id.get(&HUME_ID).copied() {
+        commands.entity(worm).insert(ActionTarget(Some(hume)));
+    }
     let stage = ffxi_dat::scheduler::SchedulerStage {
         kind: ffxi_dat::scheduler::StageKind::Particle,
         raw_type: 0x02, // SpawnGenerator
@@ -1349,6 +1355,11 @@ fn fire_hit1_full(
         log_line(log, "worm not loaded yet".into());
         return;
     };
+    // Production semantics: hit1 runs on the victim with target = attacker (see
+    // fire_named_routine); insert so a stale target from an earlier case cannot win.
+    if let Some(hume) = tracked.by_id.get(&HUME_ID).copied() {
+        commands.entity(worm).insert(ActionTarget(Some(hume)));
+    }
     let Some(g) = global else {
         log_line(log, "no global effect dir wired".into());
         return;

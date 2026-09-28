@@ -28,8 +28,8 @@ use kuluu_snapshot::EntityKind;
 
 /// Carrion Worm family - ROM/5/64.DAT (rabbit_tester's S12 model).
 const WORM_FILE: u32 = 1724;
-/// HumeM main-hand weapon model 0 (same row as rabbit_tester's load_humem).
-const HUME_MAIN_WEAPON: u32 = 8392;
+/// Pinned sword file — the race table's slot-6 row is a bare stub, so the panel pins this.
+const HUME_MAIN_WEAPON: u32 = 8397;
 
 const WORM_ID: u32 = 1;
 const HUME_ID: u32 = 2;
@@ -169,6 +169,12 @@ fn main() {
     app.add_plugins(kuluu_render::audio::AudioPlugin);
 
     // Resources the pipeline reads (rabbit_tester's rig + the actor-load task pair).
+    // The production plugins below read these from the host app (kuluu wires them in its own
+    // camera/input/debug-chat plugins); a bare App must provide them or their systems panic.
+    app.add_message::<LoadActorRequest>();
+    app.add_message::<kuluu_render::snapshot::ToastEvent>();
+    app.init_resource::<kuluu_render::input_mode::InputMode>();
+    app.init_resource::<kuluu_render::camera::CameraMode>();
     app.init_resource::<EventLog>()
         .init_resource::<TrackedEntities>()
         .init_resource::<kuluu_render::ffxi_actor_render::SpellSuffixCache>()
@@ -184,6 +190,24 @@ fn main() {
         .init_resource::<TestLog>()
         .init_resource::<PendingCase>()
         .init_resource::<WormState>();
+    app.init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
+        .init_resource::<kuluu_render::weather::ZoneDirectionalLighting>()
+        .init_resource::<kuluu_render::weather::ZoneWeather>()
+        .init_resource::<kuluu_render::dat_mzb::MzbCollisionGeometry>()
+        .init_resource::<kuluu_render::vana_time::VanaClock>()
+        .init_resource::<kuluu_render::audio::BgmPlaybackState>();
+    app.insert_resource(kuluu_render::scene::EntityMaterials {
+        pc: Handle::default(),
+        self_pc: Handle::default(),
+        npc: Handle::default(),
+        mob: Handle::default(),
+        pet: Handle::default(),
+        other: Handle::default(),
+        aggro: Handle::default(),
+        mob_claimed_self: Handle::default(),
+        mob_claimed_other: Handle::default(),
+        invis_orb: Handle::default(),
+    });
     // ANIMTEST_AUTO=hi26,sb00 — fire the named cases on a fixed schedule with no input, so an
     // external capture can sync to the "AUTO fired" log lines.
     let auto_cases: Vec<Case> = std::env::var("ANIMTEST_AUTO")
@@ -204,7 +228,7 @@ fn main() {
     }
     app.insert_resource(AutoFire {
         queue: VecDeque::from(auto_cases),
-        next_at: None,
+        next_at: Some(Instant::now() + Duration::from_secs_f32(AUTO_FIRST_DELAY_SECS)),
     });
     app.insert_resource(kuluu_render::EntityTable::default());
     app.insert_resource(EntityMesh {
@@ -220,6 +244,7 @@ fn main() {
         (
             kick_load_actor_tasks,
             poll_load_actor_tasks,
+            kuluu_render::ffxi_actor_render::tick_morph_in,
             dispatch_action_overlay.before(tick_live_ffxi_actors),
             apply_invis_flag_system.before(tick_live_ffxi_actors),
             tick_live_ffxi_actors,
@@ -242,7 +267,20 @@ fn spawn_wire(
     id: u32,
     kind: EntityKind,
     pos: Vec3,
+    heading: u8,
+    animation: u8,
+    bt_target_id: u32,
 ) {
+    // The snapshot pos is FFXI space and the prediction tween pulls wires toward it, so it must
+    // agree with the bevy-space wire transform (inverse of ffxi_to_bevy).
+    let wire_pos = kuluu_snapshot::Vec3 {
+        x: pos.x,
+        y: -pos.z,
+        z: -pos.y,
+    };
+    // Same formula as scene.rs heading_to_quat. Both skeletons face local +X at identity, so
+    // worm 0 faces +X toward the Hume and Hume 128 faces -X back.
+    let rot = Quat::from_rotation_y(-(heading as f32) * std::f32::consts::TAU / 256.0);
     let parent = commands
         .spawn((
             WorldEntity {
@@ -250,7 +288,8 @@ fn spawn_wire(
                 act_index: 0,
                 kind,
             },
-            Transform::from_translation(pos),
+            Transform::from_translation(pos).with_rotation(rot),
+            Visibility::default(),
         ))
         .id();
     tracked.by_id.insert(id, parent);
@@ -259,16 +298,16 @@ fn spawn_wire(
         act_index: 0,
         kind,
         name: None,
-        pos: kuluu_snapshot::Vec3::default(),
-        heading: 0,
+        pos: wire_pos,
+        heading,
         hp_pct: Some(100),
-        bt_target_id: 0,
+        bt_target_id,
         face_target: 0,
         claim_id: 0,
         speed: 0,
         speed_base: 0,
         look: None,
-        animation: 0,
+        animation,
         animationsub: 0,
         mount: None,
         status: 0,
@@ -299,7 +338,8 @@ fn setup_scene(
         ..default()
     });
     app_ambient(&mut commands);
-    let plane: Mesh = bevy::prelude::Plane3d::new(Vec3::Z, Vec2::splat(40.0)).into();
+    // +Y normal: a +Z plane is a vertical wall at z=0 that hides everything behind it.
+    let plane: Mesh = bevy::prelude::Plane3d::new(Vec3::Y, Vec2::splat(40.0)).into();
     commands.spawn((
         Mesh3d(meshes.add(plane)),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -308,16 +348,17 @@ fn setup_scene(
         })),
     ));
 
-    // Worm left, sworded Hume right, facing each other.
-    let worm_pos = Vec3::new(-2.6, 0.0, 0.0);
-    let hume_pos = Vec3::new(2.6, 0.0, 0.0);
+    // Worm left, sworded Hume right, facing each other in battle stance (weapons out).
     spawn_wire(
         &mut commands,
         &mut tracked,
         &mut state,
         WORM_ID,
         EntityKind::Mob,
-        worm_pos,
+        Vec3::new(-1.0, 0.0, 0.0),
+        0,
+        ffxi_proto::decode::animation::ATTACK,
+        HUME_ID,
     );
     spawn_wire(
         &mut commands,
@@ -325,14 +366,29 @@ fn setup_scene(
         &mut state,
         HUME_ID,
         EntityKind::Pc,
-        hume_pos,
+        Vec3::new(1.0, 0.0, 0.0),
+        128,
+        ffxi_proto::decode::animation::ATTACK,
+        WORM_ID,
     );
 
-    let mut equipment = vec![HUME_MAIN_WEAPON];
-    equipment.extend(
-        (1u16..=5)
-            .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
-    );
+    // Production order: the face file first (head/hair), then slots 2..5 from the race table;
+    // slot 6 is pinned to a real sword because its table row is a bare stub.
+    let mut equipment = Vec::new();
+    if let Some(face_file) = kuluu_render::look_resolver::resolve_face(0, 1) {
+        equipment.push(face_file);
+    } else {
+        log_line(
+            &mut log,
+            "ERROR: face file unresolved — head will not render".into(),
+        );
+    }
+    for slot in 2u16..=5 {
+        if let Some(file_id) = kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1) {
+            equipment.push(file_id);
+        }
+    }
+    equipment.push(HUME_MAIN_WEAPON);
     load_tx.write(LoadActorRequest {
         entity_id: WORM_ID,
         subject: ActorSubject::Npc {
@@ -761,6 +817,10 @@ fn fire_named_routine(
         log_line(log, "worm not loaded yet".into());
         return;
     };
+    let Some(hume) = tracked.by_id.get(&HUME_ID).copied() else {
+        log_line(log, "hume not loaded yet".into());
+        return;
+    };
     let Some(g) = global else {
         log_line(log, "no global effect dir wired".into());
         return;
@@ -771,12 +831,15 @@ fn fire_named_routine(
             log_line(
                 log,
                 format!(
-                    "{} on worm: {}",
+                    "{} on worm (target hume): {}",
                     String::from_utf8_lossy(routine),
                     stage_summary(&active)
                 ),
             );
+            // Production semantics: the routine runs on the victim with ActionTarget = attacker,
+            // so target-facing generators place off the Hume, not at the worm's feet.
             enqueue_routine(commands, worm, active);
+            commands.entity(worm).try_insert(ActionTarget(Some(hume)));
         }
         None => log_line(
             log,
@@ -817,16 +880,13 @@ fn auto_fire_cases(
     mut pending: ResMut<PendingCase>,
     mut log: ResMut<TestLog>,
 ) {
-    let Some(case) = auto.queue.front().copied() else {
-        return;
-    };
     let now = Instant::now();
-    let due_at = auto
-        .next_at
-        .unwrap_or_else(|| now + Duration::from_secs_f32(AUTO_FIRST_DELAY_SECS));
-    if now < due_at {
+    if now < auto.next_at.unwrap_or_else(Instant::now) {
         return;
     }
+    let Some(case) = auto.queue.pop_front() else {
+        return;
+    };
     auto.next_at = Some(now + Duration::from_secs_f32(AUTO_SPACING_SECS));
     log_line(&mut log, format!("AUTO fired {}", case.label()));
     pending.0 = Some(case);

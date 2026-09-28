@@ -309,9 +309,9 @@ fn sync_zone_sfx(
     }
 }
 
-// Mixer A's per-frame gain: retail Calc3D × master — the same law `play_sfx_system`
-// applies to routine cues, so lowering master quiets ambient with everything else;
-// the sfx mute still hard-overrides.
+// Mixer A's per-frame gain: retail Calc3D × master × ambient gain — the same law
+// `play_sfx_system` applies to routine cues; the sfx mute and the ambient gate
+// hard-override.
 pub fn zone_sfx_gain(
     mute: &AudioMuteState,
     eye: Vec3,
@@ -320,16 +320,19 @@ pub fn zone_sfx_gain(
     far: f32,
     vertical_weight: f32,
 ) -> f32 {
-    if mute.sfx {
+    if mute.sfx || !mute.ambient {
         return 0.0;
     }
-    sfx_attenuation_calc3d(eye, origin, near, far, vertical_weight) * mute.master
+    sfx_attenuation_calc3d(eye, origin, near, far, vertical_weight)
+        * mute.master
+        * mute.ambient_gain
 }
 
 fn update_zone_sfx(
     time: Res<Time>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
+    sfx_debug: Res<crate::audio::SfxDebug>,
     listener: Query<&GlobalTransform, With<OperatorCamera>>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
@@ -337,6 +340,8 @@ fn update_zone_sfx(
     mut sinks: Query<&mut bevy::audio::AudioSink>,
     playing: Query<(), With<AudioPlayer<PcmAudio>>>,
     mut commands: Commands,
+    mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
+    mut last_amb_toast: Local<std::collections::HashMap<Entity, std::time::Instant>>,
 ) {
     if emitters.is_empty() {
         return;
@@ -363,6 +368,33 @@ fn update_zone_sfx(
             (em.origin, UNATTACHED_VERTICAL_WEIGHT)
         };
         let gain = zone_sfx_gain(&mute, eye, origin, em.near, em.far, vertical_weight);
+
+        // The ambient readout exists for finding the next loud thing: on while /sfxdebug is set
+        // or the gain knob is off unity. One toast per emitter per second.
+        if sfx_debug.0 || mute.ambient_gain != 1.0 {
+            let now = std::time::Instant::now();
+            let due = last_amb_toast
+                .get(&emitter)
+                .is_none_or(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1));
+            if due {
+                toasts.write(crate::snapshot::ToastEvent::debug(format!(
+                    "✦ amb #{} near {:.0} far {:.0} dist {:.1}y gain {:.2} {}",
+                    em.se_id,
+                    em.near,
+                    em.far,
+                    eye.distance(origin),
+                    gain,
+                    if em.loops {
+                        "loop"
+                    } else if em.singleton {
+                        "singleton"
+                    } else {
+                        "repeat"
+                    },
+                )));
+                last_amb_toast.insert(emitter, now);
+            }
+        }
 
         if em.loops {
             match (em.audio, gain > 0.0) {
@@ -496,7 +528,8 @@ mod tests {
     }
 
     // Master at 50% halves an ambient emitter exactly as it does a routine cue;
-    // the sfx mute overrides master to silence.
+    // the sfx mute and the ambient gate override everything to silence; the
+    // ambient gain knob scales on top of master.
     #[test]
     fn ambient_gain_follows_master_and_mute_overrides() {
         let eye = Vec3::ZERO;
@@ -524,6 +557,26 @@ mod tests {
         assert_eq!(
             zone_sfx_gain(&muted, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
             0.0
+        );
+        let mut amb_off = AudioMuteState::default();
+        amb_off.ambient = false;
+        assert_eq!(
+            zone_sfx_gain(&amb_off, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.0,
+            "the ambient gate silences mixer A regardless of master/gain"
+        );
+        let mut doubled = AudioMuteState::default();
+        doubled.ambient_gain = 2.0;
+        assert_eq!(
+            zone_sfx_gain(&doubled, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            1.0,
+            "gain clamps at full volume"
+        );
+        doubled.master = 0.5;
+        assert_eq!(
+            zone_sfx_gain(&doubled, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.5,
+            "gain multiplies into master"
         );
     }
 

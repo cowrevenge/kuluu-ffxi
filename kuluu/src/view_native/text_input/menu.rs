@@ -477,7 +477,7 @@ fn toggle_debug_panel(
     #[cfg(feature = "enhanced-engage-move-lock-off")]
     use kuluu_render::hud::menu::DEBUG_ENGAGE_ANIM_LOCK;
     use kuluu_render::hud::menu::{
-        DEBUG_AUTO_ENTER_CS, DEBUG_BODY_SMOOTHER, DEBUG_ENTITY_LIST, DEBUG_FOG,
+        DEBUG_AMBIENT, DEBUG_AUTO_ENTER_CS, DEBUG_BODY_SMOOTHER, DEBUG_ENTITY_LIST, DEBUG_FOG,
         DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP,
         DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW,
         DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
@@ -573,6 +573,11 @@ fn toggle_debug_panel(
             audio_mute.bgm = was_on;
             audio_mute.sfx = was_on;
             !was_on
+        }
+        DEBUG_AMBIENT => {
+            // Enable flag (default on): a click flips the ambience emitters.
+            audio_mute.ambient = !audio_mute.ambient;
+            audio_mute.ambient
         }
         other => {
             push_system_chat_line(scene_state, format!("[menu] Debug: unknown `{other}`"));
@@ -813,6 +818,16 @@ pub(super) fn handle_menu_key(
             }
             if bindings.matches_logical(Action::NavRight, key) {
                 audio_mute.cycle_master(1);
+                return None;
+            }
+        }
+        if label == kuluu_render::hud::menu::DEBUG_AMBIENT_GAIN {
+            if bindings.matches_logical(Action::NavLeft, key) {
+                audio_mute.cycle_ambient_gain(-1);
+                return None;
+            }
+            if bindings.matches_logical(Action::NavRight, key) {
+                audio_mute.cycle_ambient_gain(1);
                 return None;
             }
         }

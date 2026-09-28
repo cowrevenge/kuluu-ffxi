@@ -743,6 +743,20 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 summary: "mute sound effects; survives logout",
                 handler: |c| parse_mute(c.rest, SoundOp::SetSfx),
             },
+            Command {
+                names: &["muteambient"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "mute ambient/zone sound (chocobos, waterfalls); survives logout",
+                handler: |c| parse_mute(c.rest, SoundOp::SetAmbient),
+            },
+            Command {
+                names: &["ambientgain"],
+                set: CommandSet::Retail,
+                usage: "<0..200>",
+                summary: "set the ambient/zone sound gain in percent of unity",
+                handler: |c| parse_ambient_gain(c.rest),
+            },
         ],
     ),
     (
@@ -869,6 +883,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "<max>",
                 summary: "set target frame rate",
                 handler: |c| parse_fps(c.rest),
+            },
+            Command {
+                names: &["sfxdebug"],
+                set: CommandSet::Dev,
+                usage: "[on|off]",
+                summary: "runtime SE-mixing readout (ambient emitter toasts + routine cue lines)",
+                handler: |c| parse_sfx_debug(c.rest),
             },
             Command {
                 names: &["capture"],
@@ -1173,6 +1194,12 @@ pub enum SlashOutcome {
 
     SetSound(SoundOp),
 
+    /// `/ambientgain <0..200>` — the ambient (mixer A) gain, percent of unity.
+    SetAmbientGain(u32),
+
+    /// `/sfxdebug [on|off]` — toggle the runtime SE-mixing readout.
+    SetSfxDebug(Option<bool>),
+
     Overlay(OverlayOp),
 
     SetTargetFps(Option<u32>),
@@ -1279,6 +1306,8 @@ pub enum SoundOp {
     SetBgm(Option<bool>),
 
     SetSfx(Option<bool>),
+
+    SetAmbient(Option<bool>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2514,6 +2543,29 @@ fn nearby_entities(
     scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
     scored
+}
+
+/// `/sfxdebug [on|off]` — bare toggles the runtime SE-mixing readout.
+fn parse_sfx_debug(rest: &str) -> SlashOutcome {
+    let on = match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => None,
+        "on" | "1" => Some(true),
+        "off" | "0" => Some(false),
+        other => return SlashOutcome::SystemMessage(format!("bad arg `{other}` (use on|off)")),
+    };
+    SlashOutcome::SetSfxDebug(on)
+}
+
+/// `/ambientgain <0..200>` — percent of unity for the ambient emitters; 100 is
+/// the default, 200 doubles them.
+fn parse_ambient_gain(rest: &str) -> SlashOutcome {
+    let arg = rest.trim();
+    match arg.parse::<u32>() {
+        Ok(n) if n <= 200 => SlashOutcome::SetAmbientGain(n),
+        _ => {
+            SlashOutcome::SystemMessage(format!("/ambientgain: `{arg}` is not a number in 0..=200"))
+        }
+    }
 }
 
 /// `/mutebgm` / `/mutese`. Bare toggles, matching the switch the Config menu

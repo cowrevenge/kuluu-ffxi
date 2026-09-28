@@ -126,6 +126,8 @@ pub struct SlashWriters<'w, 's> {
 
     pub audio_mute: ResMut<'w, kuluu_render::audio::AudioMuteState>,
 
+    pub sfx_debug: ResMut<'w, kuluu_render::audio::SfxDebug>,
+
     pub minimap_zoom: ResMut<'w, kuluu_render::minimap::MinimapZoom>,
 
     pub minimap_view: ResMut<'w, kuluu_render::minimap::MinimapView>,
@@ -2892,6 +2894,7 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::minimap::MinimapVisible::default());
         app.insert_resource(kuluu_render::minimap::topdown::TopdownCullPolicy::default());
         app.insert_resource(kuluu_render::audio::AudioMuteState::default());
+        app.insert_resource(kuluu_render::audio::SfxDebug::default());
         app.insert_resource(kuluu_render::minimap::MinimapZoom::default());
         app.insert_resource(kuluu_render::minimap::MinimapView::default());
         app.insert_resource(kuluu_render::minimap::MinimapState::default());

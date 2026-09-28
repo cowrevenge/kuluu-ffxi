@@ -677,8 +677,28 @@ pub(super) fn apply_slash_outcome(
                     apply(&mut mute.sfx, target);
                     format!("/mutese: {}", if mute.sfx { "on" } else { "off" })
                 }
+                // `ambient` is an enable flag (default on), not a mute flag:
+                // `/muteambient on` silences the ambience.
+                SoundOp::SetAmbient(target) => {
+                    let muted = target.unwrap_or(mute.ambient);
+                    mute.ambient = !muted;
+                    format!("/muteambient: {}", if mute.ambient { "off" } else { "on" })
+                }
             };
             push_system_chat_line(scene_state, chat);
+        }
+        SlashOutcome::SetAmbientGain(pct) => {
+            let mute = &mut *slash_writers.audio_mute;
+            mute.ambient_gain = (pct as f32 / 100.0).clamp(0.0, 2.0);
+            push_system_chat_line(scene_state, format!("/ambientgain: {}", pct));
+        }
+        SlashOutcome::SetSfxDebug(on) => {
+            let sfx_debug = &mut *slash_writers.sfx_debug;
+            sfx_debug.0 = on.unwrap_or(!sfx_debug.0);
+            push_system_chat_line(
+                scene_state,
+                format!("/sfxdebug: {}", if sfx_debug.0 { "on" } else { "off" }),
+            );
         }
         SlashOutcome::SetDrawDistance(op) => {
             use crate::view_native::slash_commands::DrawDistanceOp;

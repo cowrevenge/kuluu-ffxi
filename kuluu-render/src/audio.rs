@@ -236,6 +236,17 @@ pub struct AudioMuteState {
     /// full volume instead of silent.
     #[serde(default = "default_master_volume")]
     pub master: f32,
+
+    /// Mixer A only (zone-placed + actor auto-run emitters): off mutes those
+    /// looping/repeating cues immediately; routine one-shots are unaffected.
+    /// An enable flag, not a mute flag — the default is on.
+    #[serde(default = "default_ambient_on")]
+    pub ambient: bool,
+
+    /// Mixer A gain multiplier, 0.0..=2.0 — the balance knob between ambience
+    /// and routine SEs (retail has separate BGM/SE buses; kuluu has one master).
+    #[serde(default = "default_ambient_gain")]
+    pub ambient_gain: f32,
 }
 
 impl Default for AudioMuteState {
@@ -246,6 +257,8 @@ impl Default for AudioMuteState {
             bgm: false,
             sfx: false,
             master: default_master_volume(),
+            ambient: true,
+            ambient_gain: 1.0,
         }
     }
 }
@@ -255,8 +268,21 @@ fn default_master_volume() -> f32 {
     1.0
 }
 
+/// Ambience on by default; old audio.json files load with it enabled.
+fn default_ambient_on() -> bool {
+    true
+}
+
+/// Unity ambience gain; old audio.json files load at 1.0.
+fn default_ambient_gain() -> f32 {
+    1.0
+}
+
 /// Volume menu step: 0..=100 in fives, stored as 0.0..=1.0.
 pub const VOLUME_STEP: i32 = 5;
+
+/// Ambient-gain menu step: 0..=200 in fives, stored as 0.0..=2.0.
+pub const AMBIENT_GAIN_STEP: i32 = 5;
 
 impl AudioMuteState {
     /// Master volume as an integer 0..=100 for menu display.
@@ -270,7 +296,24 @@ impl AudioMuteState {
         let pct = (self.master_pct() + delta * VOLUME_STEP).clamp(0, 100);
         self.master = pct as f32 / 100.0;
     }
+
+    /// Ambient gain as an integer 0..=200 for menu display.
+    pub fn ambient_gain_pct(&self) -> i32 {
+        (self.ambient_gain * 100.0).round().clamp(0.0, 200.0) as i32
+    }
+
+    /// Nudge the ambient gain by `delta` steps of [`AMBIENT_GAIN_STEP`] percent,
+    /// clamped to 0..=200.
+    pub fn cycle_ambient_gain(&mut self, delta: i32) {
+        let pct = (self.ambient_gain_pct() + delta * AMBIENT_GAIN_STEP).clamp(0, 200);
+        self.ambient_gain = pct as f32 / 100.0;
+    }
 }
+
+/// Runtime SE-mixing readout: per-emitter ambient toasts plus the routine-cue line.
+/// Off by default; `/sfxdebug` toggles it for finding the next loud thing.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SfxDebug(pub bool);
 
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct BgmPlaybackState {
@@ -1217,6 +1260,7 @@ impl Plugin for AudioPlugin {
         app.init_resource::<BgmSlots>()
             .init_resource::<BgmPlaybackState>()
             .init_resource::<AudioMuteState>()
+            .init_resource::<SfxDebug>()
             .init_resource::<SeRegistry>()
             .init_resource::<SfxCache>()
             .init_resource::<SystemSfxTable>()

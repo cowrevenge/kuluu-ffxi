@@ -316,6 +316,12 @@ pub const DEBUG_BODY_SMOOTHER: &str = "Body_smoother";
 pub const DEBUG_ENTITY_LIST: &str = "Entity List";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
+/// Debug Ambient row: [on]/[off] for the zone/actor ambience emitters (mixer A);
+/// routine one-shots are unaffected. Toggles `AudioMuteState::ambient`.
+pub const DEBUG_AMBIENT: &str = "Ambient";
+/// Debug Ambient Gain row: 0..=200 percent of unity, adjusted with Left/Right
+/// like Volume. Nudges `AudioMuteState::ambient_gain`.
+pub const DEBUG_AMBIENT_GAIN: &str = "Ambient Gain";
 pub const DEBUG_PRINT_POS: &str = "Print POS";
 pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
 pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
@@ -355,6 +361,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_ENTITY_LIST,
     DEBUG_SOUND,
     DEBUG_VOLUME,
+    DEBUG_AMBIENT,
+    DEBUG_AMBIENT_GAIN,
     DEBUG_PRINT_POS,
     DEBUG_STAIR_DRAW,
     DEBUG_STAIR_STATUS,
@@ -1328,9 +1336,14 @@ pub fn update_main_menu(
                 .to_string()
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let (sound_on, master_pct) = (!(audio_mute.bgm && audio_mute.sfx), audio_mute.master_pct());
+        let (sound_on, master_pct, ambient_on, ambient_gain_pct) = (
+            !(audio_mute.bgm && audio_mute.sfx),
+            audio_mute.master_pct(),
+            audio_mute.ambient,
+            audio_mute.ambient_gain_pct(),
+        );
         #[cfg(target_arch = "wasm32")]
-        let (sound_on, master_pct) = (false, 0);
+        let (sound_on, master_pct, ambient_on, ambient_gain_pct) = (false, 0, true, 100);
         let body = format_row_body(
             view.kind,
             list_idx,
@@ -1340,6 +1353,8 @@ pub fn update_main_menu(
             net_status.0,
             sound_on,
             master_pct,
+            ambient_on,
+            ambient_gain_pct,
             &scene.snapshot,
         );
 
@@ -1473,6 +1488,8 @@ fn format_row_body(
     net_status_on: bool,
     sound_on: bool,
     master_pct: i32,
+    ambient_on: bool,
+    ambient_gain_pct: i32,
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
@@ -1489,6 +1506,10 @@ fn format_row_body(
         MenuKind::Debug => {
             if label == DEBUG_VOLUME {
                 format!("{label:<14}[{master_pct:>3}]")
+            } else if label == DEBUG_AMBIENT_GAIN {
+                format!("{label:<14}[{ambient_gain_pct:>3}]")
+            } else if label == DEBUG_AMBIENT {
+                format!("{label:<14}[{}]", if ambient_on { "on" } else { "off" })
             } else if label == DEBUG_PRINT_POS {
                 format!("{label:<14}[enter]")
             } else if label == DEBUG_RETAIL_SEPARATOR || label == DEBUG_RETAIL_LABEL {

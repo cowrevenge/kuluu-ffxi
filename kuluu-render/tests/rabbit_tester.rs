@@ -36,7 +36,7 @@ use kuluu_render::scene::{
     apply_invis_flag_system, EntityMaterials, EntityMesh, Target, TrackedEntities,
 };
 use kuluu_render::scheduler_runtime::{
-    ActionDatRoot, ActiveSchedulers, GlobalEffectDir, SchedulerRuntimePlugin,
+    ActionDatRoot, ActiveSchedulers, DeadFromAction, GlobalEffectDir, SchedulerRuntimePlugin,
 };
 use kuluu_render::skinned_ffxi_material::{FfxiSkinRegistry, FfxiSkinnedMaterialCache};
 use kuluu_render::snapshot::{EventLog, SceneState};
@@ -1076,12 +1076,13 @@ fn s8b_resultless_body_arms_nothing() {
 }
 
 /// S9 - Defeated: the dead routine falls over instead of popping to a corpse. Hit with
-/// info=Defeated on a Rarab victim. The `dead` routine runs immediately:
-/// ded? fall-over at its first Motion stage, and the pose pass holds idle across the gap -
-/// without flashing cor? before ded? owns the pose (D5). build_app pins the pose pass between
+/// info=Defeated on a Rarab victim. The death path LATCHES on the packet frame (DeadFromAction)
+/// and the `dead` routine starts at the inlined DamageCallback impact frame — ded? fall-over at
+/// its first Motion stage, and the pose pass holds idle across the gap - without flashing cor?
+/// before ded? owns the pose (D5). build_app pins the pose pass between
 /// dispatch_melee_action_started and tick_active_schedulers so the D5 hold path runs on the
 /// event frame itself; dead_fall_over_pending() closes intra-update when the tick fires the
-/// fall-over, so it is asserted through its observable effects (queued + ded? start + no cor?
+/// fall-over, so it is asserted through its observable effects (latch + ded? start + no cor?
 /// flash) rather than sampled directly.
 #[test]
 fn s9_defeated_runs_dead_routine_and_holds_idle_across_the_gap() {
@@ -1093,12 +1094,21 @@ fn s9_defeated_runs_dead_routine_and_holds_idle_across_the_gap() {
 
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 1, 0, 0)));
 
-    let (queued_at, _) = watch(&mut app, 3, |i, w| {
-        i >= 1 && routines(w, vic_parent).contains(b"dead")
+    // The latch lands on the packet frame; the fall-over itself waits for impact.
+    let (latched_at, _) = watch(&mut app, 3, |_i, w| {
+        w.entity(vic_child).get::<DeadFromAction>().is_some()
     });
     assert!(
-        queued_at.is_some(),
-        "Defeated latches the death path on this frame (F49)"
+        latched_at.is_some(),
+        "Defeated latches the death path on this frame"
+    );
+
+    let (dead_at, _) = watch(&mut app, 50, |_i, w| {
+        routines(w, vic_parent).contains(b"dead")
+    });
+    assert!(
+        dead_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
+        "the dead routine starts at the impact frame, not on packet arrival"
     );
 
     let mut cor_flashed = false;

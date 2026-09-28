@@ -269,6 +269,63 @@ fn d3m_stage_chain(
     )
 }
 
+// The parent particle's state a child generator copies when its own def carries the sec2
+// 0x45..0x49 parent-copy blocks (research/xim ParticleInitializers.kt Parent*Config). World
+// space: `pos` is the anchor particle's, `vel` its total velocity.
+#[derive(Clone, Copy)]
+struct AnchorState {
+    pos: Vec3,
+    vel: Vec3,
+    rotation: Vec3,
+    rgb: Vec3,
+    scale: Vec2,
+}
+
+impl AnchorState {
+    // research/xim Particle.kt getTotalVelocity — the velocityRotation rotates the total
+    // velocity; the anchor captures what this engine integrates.
+    fn from_particle(origin: Vec3, p: &Particle) -> Self {
+        let total = p.vel + p.rel_vel;
+        let vel = if p.vel_rot == Vec3::ZERO {
+            total
+        } else {
+            velocity_rotation(p.vel_rot, p.negate_rotation_y) * total
+        };
+        AnchorState {
+            pos: origin + p.pos,
+            vel,
+            rotation: p.rotation,
+            rgb: p.rgb,
+            scale: p.scale,
+        }
+    }
+}
+
+// A child generator resolved at parent spawn time (research/xim ParticleInitializers.kt
+// ChildGeneratorSetup / OnceChildGeneratorSetup): the def plus everything its mesh path needs,
+// so per-particle instantiation never touches the DAT again. `once` marks a sec2 0x3C binding —
+// one burst at init; `on_expiry` marks a sec4 0x01 binding — one burst when the parent particle
+// dies (research/xim ParticleExpirationHandlers.kt EmitChildHandler). `children` are this def's
+// own bindings, resolved recursively.
+#[derive(Clone)]
+struct ChildFactory {
+    once: bool,
+    on_expiry: bool,
+    def: ParticleGeneratorDef,
+    template: SpriteTemplate,
+    sprite_frames: Vec<SpriteTemplate>,
+    mat: Handle<FfxiParticleMaterial>,
+    scale_x: Option<KeyFrameTrack>,
+    scale_y: Option<KeyFrameTrack>,
+    position_x: Option<KeyFrameTrack>,
+    position_y: Option<KeyFrameTrack>,
+    position_z: Option<KeyFrameTrack>,
+    dampening_factor: Option<KeyFrameTrack>,
+    alpha: Option<KeyFrameTrack>,
+    tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+    children: Vec<ChildFactory>,
+}
+
 struct LiveGenerator {
     def: ParticleGeneratorDef,
     template: SpriteTemplate,
@@ -352,6 +409,25 @@ struct LiveGenerator {
     // camera-to-particle in true world space, so the particle's local-frame position passes
     // through it before the distance is taken.
     entity_world: GlobalTransform,
+    // The owning parent of a child generator: index into ParticleSimulator::generators plus the
+    // id of the parent particle. None for top-level generators (research/xim Particle.kt —
+    // children live on their parent particle and die with it).
+    parent: Option<(usize, u64)>,
+    // The anchor particle's state at the last sync; refreshed every frame while `parent` is
+    // Some. None for top-level generators.
+    anchor: Option<AnchorState>,
+    // This def's child bindings, resolved at spawn (research/xim ParticleInitializers.kt
+    // ChildGeneratorSetup / OnceChildGeneratorSetup + sec4 EmitChildHandler).
+    child_factories: Vec<ChildFactory>,
+    // Next unique id for a particle of this generator (child generators reference their parent
+    // particle by it; ids only need to be unique within one generator).
+    next_particle_id: u64,
+    // Child-generator indices whose parent particle was reaped this tick, drained by the tick
+    // system after advance.
+    dead_child_gens: Vec<usize>,
+    // (world position, factory index) pairs queued by reap for sec4 0x01 emit-on-expiry, drained
+    // by the tick system after advance.
+    pending_expiry_spawns: Vec<(Vec3, usize)>,
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
@@ -454,6 +530,13 @@ struct Particle {
     // ParticleGeneratorSettings.kt OscillationParams): the per-axis acceleration (0x3E/0x3F/
     // 0x40 base plus one variance draw) and the applier's last-amplitude memory.
     osc: Option<Oscillation>,
+    // Unique within its generator; child generators reference their parent particle by it
+    // (research/xim Particle.kt — children live on the parent particle).
+    id: u64,
+    // Indices into ParticleSimulator::generators of this particle's child generators.
+    child_gens: Vec<usize>,
+    // Child-factory indices awaiting entity spawn, drained by the tick system after emit.
+    pending_child_factories: Vec<usize>,
 }
 
 // research/xim ParticleGeneratorSettings.kt OscillationParams — the per-particle oscillation
@@ -918,6 +1001,14 @@ pub fn spawn_particle_generators(
         let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
             id.and_then(|i| assets.keyframes.get(&i).cloned())
         };
+        let child_factories = resolve_child_factories(
+            &def,
+            assets,
+            global.as_ref().map(|g| &g.assets),
+            def_dir,
+            &mut images,
+            &mut mats,
+        );
 
         // The accumulator is primed to one full period below: research/xim ParticleGenerator.kt
         // emit starts framesUntilNextParticle at 0, so a generator's first burst lands on its
@@ -972,6 +1063,12 @@ pub fn spawn_particle_generators(
             cam_view: Quat::IDENTITY,
             actor_rot: Quat::IDENTITY,
             entity_world: GlobalTransform::IDENTITY,
+            parent: None,
+            anchor: None,
+            child_factories,
+            next_particle_id: 0,
+            dead_child_gens: Vec::new(),
+            pending_expiry_spawns: Vec::new(),
             built_key: MeshKey::Empty,
         });
     }
@@ -984,6 +1081,7 @@ pub fn spawn_particle_generators(
 // and despawns with the actor.
 pub fn spawn_actor_auto_run_particles(
     q_added: Query<(Entity, &ActorAutoRunEffects), Added<ActorAutoRunEffects>>,
+    global: Option<Res<GlobalEffectDir>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -1033,6 +1131,14 @@ pub fn spawn_actor_auto_run_particles(
             let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
                 id.and_then(|i| fx.assets.keyframes.get(&i).cloned())
             };
+            let child_factories = resolve_child_factories(
+                &def,
+                &fx.assets,
+                global.as_ref().map(|g| &g.assets),
+                def_dir,
+                &mut images,
+                &mut mats,
+            );
             sim.generators.push(LiveGenerator {
                 scale_x: resolve(def.scale_x_track),
                 scale_y: resolve(def.scale_y_track),
@@ -1073,6 +1179,12 @@ pub fn spawn_actor_auto_run_particles(
                 cam_view: Quat::IDENTITY,
                 actor_rot: Quat::IDENTITY,
                 entity_world: GlobalTransform::IDENTITY,
+                parent: None,
+                anchor: None,
+                child_factories,
+                next_particle_id: 0,
+                dead_child_gens: Vec::new(),
+                pending_expiry_spawns: Vec::new(),
                 built_key: MeshKey::Empty,
                 def,
             });
@@ -1122,6 +1234,7 @@ pub fn spawn_zone_particle_generator(
         .id();
 
     let resolve = |id: Option<[u8; 4]>| keyframe(assets, global, id);
+    let child_factories = resolve_child_factories(&def, assets, global, NO_LOCAL_DIR, images, mats);
     sim.generators.push(LiveGenerator {
         scale_x: resolve(def.scale_x_track),
         scale_y: resolve(def.scale_y_track),
@@ -1162,6 +1275,12 @@ pub fn spawn_zone_particle_generator(
         cam_view: Quat::IDENTITY,
         actor_rot: Quat::IDENTITY,
         entity_world: GlobalTransform::IDENTITY,
+        parent: None,
+        anchor: None,
+        child_factories,
+        next_particle_id: 0,
+        dead_child_gens: Vec::new(),
+        pending_expiry_spawns: Vec::new(),
         built_key: MeshKey::Empty,
         def,
     });
@@ -1265,11 +1384,441 @@ pub fn track_attached_origins(
     }
 }
 
-pub fn tick_particle_simulator(time: Res<Time>, mut sim: ResMut<ParticleSimulator>) {
+pub fn tick_particle_simulator(
+    time: Res<Time>,
+    mut sim: ResMut<ParticleSimulator>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
     let frames = time.delta_secs() * ROUTINE_FPS;
+    // research/xim Particle.kt update — children read the parent's state before anything ages.
+    let orphans = anchor_children(&mut sim);
     for g in &mut sim.generators {
         advance_generator(g, frames);
     }
+    remove_dead_generators(&mut sim, &mut commands, orphans);
+    instantiate_child_generators(&mut sim, &mut commands, &mut meshes);
+}
+
+// research/xim Particle.kt update — a child generator's origin is its parent particle's current
+// world position; the anchor state also carries what the sec2 0x45..0x49 copies read. A child
+// whose parent particle is gone is orphaned (research/xim removes children with their parent).
+fn anchor_children(sim: &mut ParticleSimulator) -> std::collections::BTreeSet<usize> {
+    let mut anchors = Vec::with_capacity(sim.generators.len());
+    let mut orphans = std::collections::BTreeSet::new();
+    for (gi, g) in sim.generators.iter().enumerate() {
+        if let Some((pgi, pid)) = g.parent {
+            match sim
+                .generators
+                .get(pgi)
+                .and_then(|pg| pg.particles.iter().find(|p| p.id == pid))
+            {
+                Some(p) => anchors.push(Some(AnchorState::from_particle(
+                    sim.generators[pgi].origin,
+                    p,
+                ))),
+                None => {
+                    anchors.push(None);
+                    orphans.insert(gi);
+                }
+            }
+        } else {
+            anchors.push(None);
+        }
+    }
+    // research/xim ParticleUpdaters.kt ChildGeneratorUpdater — the child emits from the parent
+    // particle's current position every frame, so the origin follows it.
+    for (g, a) in sim.generators.iter_mut().zip(anchors) {
+        if let Some(a) = a {
+            g.origin = a.pos;
+            g.anchor = Some(a);
+        }
+    }
+    orphans
+}
+
+// research/xim Particle.kt update — children are removed with their parent particle, so the
+// removal cascades through every nesting level; surviving references remap across compaction.
+fn remove_dead_generators(
+    sim: &mut ParticleSimulator,
+    commands: &mut Commands,
+    mut set: std::collections::BTreeSet<usize>,
+) {
+    for g in &mut sim.generators {
+        set.extend(std::mem::take(&mut g.dead_child_gens));
+    }
+    loop {
+        let mut added = Vec::new();
+        for &gi in set.iter() {
+            if let Some(g) = sim.generators.get(gi) {
+                for p in &g.particles {
+                    for &ci in &p.child_gens {
+                        if !set.contains(&ci) {
+                            added.push(ci);
+                        }
+                    }
+                }
+            }
+        }
+        if added.is_empty() {
+            break;
+        }
+        set.extend(added);
+    }
+    let old_len = sim.generators.len();
+    for (i, g) in sim.generators.iter().enumerate() {
+        if set.contains(&i) {
+            commands.entity(g.entity).despawn();
+        }
+    }
+    let mut remap: Vec<Option<usize>> = vec![None; old_len];
+    {
+        let mut ni = 0usize;
+        for (oi, _) in (0..old_len).enumerate() {
+            if !set.contains(&oi) {
+                remap[oi] = Some(ni);
+                ni += 1;
+            }
+        }
+    }
+    let mut idx = 0usize;
+    sim.generators.retain(|_| {
+        let keep = !set.contains(&idx);
+        idx += 1;
+        keep
+    });
+    for g in &mut sim.generators {
+        if let Some((pgi, pid)) = g.parent {
+            if let Some(n) = remap.get(pgi).copied().flatten() {
+                g.parent = Some((n, pid));
+            }
+        }
+        for p in &mut g.particles {
+            p.child_gens
+                .retain(|ci| remap.get(*ci).copied().flatten().is_some());
+            for ci in &mut p.child_gens {
+                *ci = remap[*ci].unwrap();
+            }
+        }
+    }
+}
+
+// research/xim ParticleInitializers.kt ChildGeneratorSetup / OnceChildGeneratorSetup + sec4
+// EmitChildHandler — each parent particle gets its own child generator instance; a child is an
+// ordinary LiveGenerator anchored to the parent, so nothing new in the draw path.
+fn instantiate_child_generators(
+    sim: &mut ParticleSimulator,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+) {
+    struct SpawnReq {
+        // The generator that holds child_factories[factory_idx].
+        factory_owner: usize,
+        // (generator index, particle id) the child is anchored to; None for an independent
+        // sec4 expiry spawn.
+        owner: Option<(usize, u64)>,
+        pos: Vec3,
+        anchor: Option<AnchorState>,
+        factory_idx: usize,
+        window: f32,
+    }
+    let mut reqs: Vec<SpawnReq> = Vec::new();
+    for (gi, g) in sim.generators.iter().enumerate() {
+        for &(pos, fidx) in &g.pending_expiry_spawns {
+            if g.child_factories.get(fidx).is_some_and(|f| f.on_expiry) {
+                reqs.push(SpawnReq {
+                    factory_owner: gi,
+                    owner: None,
+                    pos,
+                    anchor: None,
+                    factory_idx: fidx,
+                    // research/xim ParticleExpirationHandlers.kt EmitChildHandler — one burst at
+                    // expiry, never again (nothing re-emits the child afterwards).
+                    window: 0.0,
+                });
+            }
+        }
+        for p in &g.particles {
+            if p.pending_child_factories.is_empty() {
+                continue;
+            }
+            let anchor = AnchorState::from_particle(g.origin, p);
+            // research/xim ParticleInitializers.kt ChildGeneratorSetup — the child's max emit
+            // time is the parent particle's life (infinite for a continuous-singleton parent).
+            let window = if g.def.continuous {
+                f32::INFINITY
+            } else {
+                p.life_frames
+            };
+            for &fidx in &p.pending_child_factories {
+                if g.child_factories.get(fidx).is_some_and(|f| !f.on_expiry) {
+                    reqs.push(SpawnReq {
+                        factory_owner: gi,
+                        owner: Some((gi, p.id)),
+                        pos: g.origin + p.pos,
+                        anchor: Some(anchor),
+                        factory_idx: fidx,
+                        // research/xim ParticleInitializers.kt OnceChildGeneratorSetup — one
+                        // burst at init.
+                        window: if g.child_factories[fidx].once {
+                            0.0
+                        } else {
+                            window
+                        },
+                    });
+                }
+            }
+        }
+    }
+    for g in &mut sim.generators {
+        g.pending_expiry_spawns.clear();
+        for p in &mut g.particles {
+            p.pending_child_factories.clear();
+        }
+    }
+    for r in reqs {
+        let Some(f) = sim
+            .generators
+            .get(r.factory_owner)
+            .and_then(|g| g.child_factories.get(r.factory_idx))
+        else {
+            continue;
+        };
+        // Clone the factory's payload out before pushing: the push shifts every index.
+        let (def, template, sprite_frames, mat) = (
+            f.def,
+            f.template.clone(),
+            f.sprite_frames.clone(),
+            f.mat.clone(),
+        );
+        let (
+            scale_x,
+            scale_y,
+            position_x,
+            position_y,
+            position_z,
+            dampening_factor,
+            alpha,
+            tod_color,
+            children,
+        ) = (
+            f.scale_x.clone(),
+            f.scale_y.clone(),
+            f.position_x.clone(),
+            f.position_y.clone(),
+            f.position_z.clone(),
+            f.dampening_factor.clone(),
+            f.alpha.clone(),
+            f.tod_color.clone(),
+            f.children.clone(),
+        );
+        let mesh = meshes.add(empty_mesh());
+        let entity = commands
+            .spawn((
+                InGameEntity,
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat),
+                Transform::IDENTITY,
+                Visibility::default(),
+                bevy::camera::visibility::NoFrustumCulling,
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
+            ))
+            .id();
+        let new_idx = sim.generators.len();
+        sim.generators.push(LiveGenerator {
+            def,
+            solid_mesh: is_solid_mesh(&template),
+            bound_radius: template_bound_radius(&template, &sprite_frames),
+            template,
+            draw_path: D3mDrawPath::D3m,
+            sprite_frames,
+            scale_x,
+            scale_y,
+            position_x,
+            position_y,
+            position_z,
+            dampening_factor,
+            alpha,
+            tod_color,
+            origin: r.pos,
+            particles: Vec::new(),
+            emit_accum: def.frames_per_emission,
+            age_frames: 0.0,
+            emit_window_frames: r.window,
+            mesh,
+            entity,
+            auto_run: false,
+            orientation: None,
+            actor_local: false,
+            tex_translate: Vec2::ZERO,
+            vel_basis: WORLD_PARTICLE_VEL_BASIS,
+            origin_routine: None,
+            stopped: false,
+            camera_relative: false,
+            emit_culled: false,
+            emit_scale: UNSCALED_EMISSION,
+            emit_rng: emit_seed(entity),
+            elements_emitted: 0,
+            cam_view: Quat::IDENTITY,
+            actor_rot: Quat::IDENTITY,
+            entity_world: GlobalTransform::IDENTITY,
+            parent: r.owner,
+            anchor: r.anchor,
+            child_factories: children,
+            next_particle_id: 0,
+            dead_child_gens: Vec::new(),
+            pending_expiry_spawns: Vec::new(),
+            built_key: MeshKey::Empty,
+        });
+        if let Some((ogi, pid)) = r.owner {
+            if let Some(p) = sim
+                .generators
+                .get_mut(ogi)
+                .and_then(|g| g.particles.iter_mut().find(|p| p.id == pid))
+            {
+                p.child_gens.push(new_idx);
+            }
+        }
+    }
+}
+
+// research/xim ParticleInitializers.kt ChildGeneratorSetup — localDir.getNullableChildRecursivelyAs,
+// then root().getNullableChildRecursivelyAs. DAT directories are flat 4-char names, so the
+// recursion degenerates to a scoped lookup (own dir first, then any dir of the same tier).
+// OnceChildGeneratorSetup resolves its direct child against the parent's tier and falls through
+// to the global effect dir.
+fn resolve_child_factories(
+    def: &ParticleGeneratorDef,
+    assets: &ActionAssets,
+    global: Option<&ActionAssets>,
+    def_dir: [u8; 4],
+    images: &mut Assets<Image>,
+    mats: &mut Assets<FfxiParticleMaterial>,
+) -> Vec<ChildFactory> {
+    let mut visited = std::collections::HashSet::new();
+    resolve_child_bindings(def, assets, global, def_dir, images, mats, &mut visited)
+}
+
+fn resolve_child_bindings(
+    def: &ParticleGeneratorDef,
+    assets: &ActionAssets,
+    global: Option<&ActionAssets>,
+    def_dir: [u8; 4],
+    images: &mut Assets<Image>,
+    mats: &mut Assets<FfxiParticleMaterial>,
+    visited: &mut std::collections::HashSet<([u8; 4], [u8; 4])>,
+) -> Vec<ChildFactory> {
+    // (id, once, on_expiry): the sec2 per-particle bindings in authored order, then the sec4
+    // expiry binding.
+    let mut out = Vec::new();
+    for (id_opt, once, on_expiry) in [
+        (def.child_generator, false, false),
+        (def.child_generator_2, false, false),
+        (def.child_generator_3, false, false),
+        (def.once_child_generator, true, false),
+        (def.emit_child_id, false, true),
+    ] {
+        let Some(id) = id_opt else { continue };
+        // research/xim ParticleInitializers.kt — the 0x44 family stays in the parent's tier;
+        // 0x3C falls through to the global effect dir.
+        let resolved = if on_expiry || !once {
+            assets
+                .particle_def_scoped(def_dir, &id)
+                .map(|(dir, d)| (assets, dir, d))
+        } else {
+            assets
+                .particle_defs_by_dir
+                .get(&(def_dir, id))
+                .map(|d| (assets, def_dir, d))
+                .or_else(|| {
+                    global.and_then(|g| {
+                        g.particle_def_scoped(def_dir, &id)
+                            .map(|(dir, d)| (g, dir, d))
+                    })
+                })
+        };
+        let Some((tier, child_dir, child_def)) = resolved else {
+            // The chunk may exist under a kind this engine has no child path for (ai90 in the
+            // zone DATs is a 0x22 distortion bound by i900's sec2 0x44).
+            let other_kind = assets
+                .sound_defs
+                .contains_key(&id)
+                .then_some("sound")
+                .or_else(|| {
+                    assets
+                        .distortion_defs
+                        .contains_key(&id)
+                        .then_some("distortion")
+                })
+                .or_else(|| {
+                    global.and_then(|g| {
+                        g.sound_defs
+                            .contains_key(&id)
+                            .then_some("sound")
+                            .or_else(|| g.distortion_defs.contains_key(&id).then_some("distortion"))
+                    })
+                });
+            error!(
+                "child generator '{}' of gen '{}' [{}] unresolved — {} tier holds no particle def ({}); parent keeps running",
+                String::from_utf8_lossy(&id),
+                String::from_utf8_lossy(&def.mesh_id),
+                String::from_utf8_lossy(&def_dir),
+                if on_expiry || !once { "own" } else { "own/global" },
+                other_kind.map(|k| format!("a {k} def exists")).unwrap_or_default(),
+            );
+            continue;
+        };
+        // A cycle in the binding chain would recurse forever; retail data has none.
+        if !visited.insert((child_dir, id)) {
+            error!(
+                "child generator '{}' of gen '{}' [{}] forms a binding cycle — chain dropped",
+                String::from_utf8_lossy(&id),
+                String::from_utf8_lossy(&def.mesh_id),
+                String::from_utf8_lossy(&def_dir),
+            );
+            continue;
+        }
+        let Some((template, sprite_frames, tex)) =
+            resolve_mesh(tier, child_dir, child_def, images, false)
+        else {
+            error!(
+                "child generator '{}' of gen '{}' [{}] has no drawable mesh — binding dropped",
+                String::from_utf8_lossy(&id),
+                String::from_utf8_lossy(&def.mesh_id),
+                String::from_utf8_lossy(&def_dir),
+            );
+            continue;
+        };
+        let mat = mats.add(FfxiParticleMaterial::for_def(child_def, tex, NO_DAT_ORDER));
+        let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
+            id.and_then(|i| tier.keyframes.get(&i).cloned())
+        };
+        out.push(ChildFactory {
+            children: resolve_child_bindings(
+                child_def, tier, global, child_dir, images, mats, visited,
+            ),
+            once,
+            on_expiry,
+            def: *child_def,
+            template,
+            sprite_frames,
+            mat,
+            scale_x: resolve(child_def.scale_x_track),
+            scale_y: resolve(child_def.scale_y_track),
+            position_x: resolve(child_def.position_x_track),
+            position_y: resolve(child_def.position_y_track),
+            position_z: resolve(child_def.position_z_track),
+            dampening_factor: if child_def.dampening_factor_applier {
+                resolve(child_def.velocity_dampener_track)
+            } else {
+                None
+            },
+            alpha: resolve(child_def.alpha_track),
+            tod_color: resolve_tod_tracks(child_def, tier),
+        });
+    }
+    out
 }
 
 fn advance_generator(g: &mut LiveGenerator, frames: f32) {
@@ -1753,11 +2302,39 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
             prev_amplitude: [0.0; 3],
         }
     });
+    // sec2 0x45..0x49 parent-copy blocks (research/xim ParticleInitializers.kt Parent*Config):
+    // a child particle copies its anchor's state at init. World space, applied after every
+    // other initializer so the copy wins.
+    let mut vel_world = vel * g.vel_basis;
+    if let Some(a) = g.anchor {
+        if g.def.parent_position_copy {
+            pos = a.pos - g.origin;
+        }
+        if let Some(mult) = g.def.parent_velocity {
+            vel_world += a.vel * mult;
+        }
+        if g.def.parent_rotate {
+            rotation = a.rotation;
+        }
+        if g.def.parent_color {
+            rgb = a.rgb;
+        }
+        if g.def.parent_scale {
+            scale = a.scale;
+        }
+    }
+    let id = g.next_particle_id;
+    g.next_particle_id += 1;
+    // research/xim ParticleInitializers.kt ChildGeneratorSetup / OnceChildGeneratorSetup — each
+    // particle gets its own child generator instance at init; the tick system spawns it.
+    let pending_child_factories: Vec<usize> = (0..g.child_factories.len())
+        .filter(|i| !g.child_factories[*i].on_expiry)
+        .collect();
     g.particles.push(Particle {
         pos,
         spawn_pos: pos,
         spawn_origin: g.origin,
-        vel: vel * g.vel_basis,
+        vel: vel_world,
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
         rgb,
@@ -1771,12 +2348,18 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         rel_vel: rel_vel * g.vel_basis,
         vel_rot: Vec3::ZERO,
         osc,
+        id,
+        child_gens: Vec::new(),
+        pending_child_factories,
     });
 }
 
 // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator resets an expiring element's
 // life and keeps it (its rotation, position and UV state carry on); any other generator's
 // expired particles are swept.
+// research/xim Particle.kt update — children live on the parent particle and die with it, so a
+// reaped particle takes its child generators with it; sec4 0x01 (research/xim
+// ParticleExpirationHandlers.kt EmitChildHandler) queues one burst at the death position.
 fn reap_expired(g: &mut LiveGenerator) {
     if g.def.relife_on_expiry {
         for p in &mut g.particles {
@@ -1784,9 +2367,23 @@ fn reap_expired(g: &mut LiveGenerator) {
                 p.age_frames = p.age_frames.rem_euclid(p.life_frames);
             }
         }
-    } else {
-        g.particles.retain(|p| p.age_frames < p.life_frames);
+        return;
     }
+    let dead: Vec<&Particle> = g
+        .particles
+        .iter()
+        .filter(|p| p.age_frames >= p.life_frames)
+        .collect();
+    for p in &dead {
+        g.dead_child_gens.extend_from_slice(&p.child_gens);
+        for (fidx, f) in g.child_factories.iter().enumerate() {
+            if f.on_expiry {
+                g.pending_expiry_spawns.push((g.origin + p.pos, fidx));
+            }
+        }
+    }
+    let dead_ids: std::collections::HashSet<u64> = dead.iter().map(|p| p.id).collect();
+    g.particles.retain(|p| !dead_ids.contains(&p.id));
 }
 
 fn trace_celestial() -> bool {
@@ -2782,6 +3379,12 @@ mod tests {
             fixed_point_position_variance: None,
             fixed_point_position_variance_2: None,
             child_generator_2: None,
+            child_generator_3: None,
+            once_child_generator: None,
+            emit_child_id: None,
+            child_emit_basic: false,
+            child_emit_full: false,
+            child_emit_billboard: false,
             specular_rot_z_track: None,
             specular_color_a_track: None,
             parent_rotate_2: false,
@@ -2836,6 +3439,12 @@ mod tests {
             cam_view: Quat::IDENTITY,
             actor_rot: Quat::IDENTITY,
             entity_world: GlobalTransform::IDENTITY,
+            parent: None,
+            anchor: None,
+            child_factories: Vec::new(),
+            next_particle_id: 0,
+            dead_child_gens: Vec::new(),
+            pending_expiry_spawns: Vec::new(),
             built_key: MeshKey::Empty,
             bound_radius: 0.0,
         }
@@ -3226,6 +3835,7 @@ mod tests {
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_secs_f32(TICK_SECS));
         world.insert_resource(time);
+        world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(sim);
         world.run_system_once(tick_particle_simulator).unwrap();
 
@@ -3670,6 +4280,9 @@ mod tests {
                 rel_vel: Vec3::ZERO,
                 vel_rot: Vec3::ZERO,
                 osc: None,
+                id: 0,
+                child_gens: Vec::new(),
+                pending_child_factories: Vec::new(),
             });
             g
         }
@@ -4529,6 +5142,9 @@ mod tests {
                 accel: [0.5, 0.0, 0.0],
                 prev_amplitude: [0.0; 3],
             }),
+            id: 0,
+            child_gens: Vec::new(),
+            pending_child_factories: Vec::new(),
         });
         for _ in 0..90 {
             advance(&mut g, 1.0);
@@ -4568,6 +5184,9 @@ mod tests {
                 rel_vel: Vec3::ZERO,
                 vel_rot: Vec3::ZERO,
                 osc: None,
+                id: 0,
+                child_gens: Vec::new(),
+                pending_child_factories: Vec::new(),
             });
             g
         }
@@ -5282,6 +5901,9 @@ mod tests {
             rel_vel: Vec3::ZERO,
             vel_rot: Vec3::ZERO,
             osc: None,
+            id: 0,
+            child_gens: Vec::new(),
+            pending_child_factories: Vec::new(),
         });
         g
     }
@@ -6008,6 +6630,9 @@ mod tests {
             rel_vel: Vec3::ZERO,
             vel_rot: Vec3::ZERO,
             osc: None,
+            id: 0,
+            child_gens: Vec::new(),
+            pending_child_factories: Vec::new(),
         };
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];
@@ -7010,5 +7635,208 @@ mod tests {
             ),
             Vec3::ZERO
         );
+    }
+
+    fn child_factory(once: bool, on_expiry: bool) -> ChildFactory {
+        ChildFactory {
+            once,
+            on_expiry,
+            // fpe=30: only the primed first burst fires within the test's few ticks.
+            def: def(30.0, 30.0, 1),
+            template: SpriteTemplate {
+                positions: vec![Vec3::ZERO; 3],
+                uvs: vec![[0.0, 0.0]; 3],
+                indices: vec![0, 1, 2],
+                colors: vec![Vec4::ONE; 3],
+            },
+            sprite_frames: Vec::new(),
+            mat: Handle::default(),
+            scale_x: None,
+            scale_y: None,
+            position_x: None,
+            position_y: None,
+            position_z: None,
+            dampening_factor: None,
+            alpha: None,
+            tod_color: std::array::from_fn(|_| None),
+            children: Vec::new(),
+        }
+    }
+
+    // One full tick (anchor, advance, reap-removal, child instantiation) through the real system.
+    fn tick_world(world: &mut World, secs: f32) {
+        use bevy::ecs::system::RunSystemOnce;
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(secs));
+        world.run_system_once(tick_particle_simulator).unwrap();
+    }
+
+    fn child_test_world(sim: ParticleSimulator) -> World {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(sim);
+        world
+    }
+
+    // The production spawn path primes the accumulator to one full period; `live()` does not.
+    fn prime(g: &mut LiveGenerator) {
+        g.emit_accum = g.def.frames_per_emission;
+    }
+
+    // research/xim ParticleInitializers.kt ChildGeneratorSetup — each parent particle gets its own
+    // child generator instance, anchored at the particle's position. fpe=30 keeps emission to the
+    // primed first burst so one frame tick emits exactly ppe+1 = 2 particles.
+    #[test]
+    fn child_generator_spawns_per_parent_particle() {
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(def(60.0, 30.0, 1), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(child_factory(false, false));
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0);
+
+        let sim = world.resource::<ParticleSimulator>();
+        assert_eq!(sim.generators.len(), 3);
+        for (ci, g) in sim.generators.iter().enumerate().skip(1) {
+            let Some((pgi, pid)) = g.parent else {
+                panic!("child {ci} has no parent")
+            };
+            assert_eq!(pgi, 0);
+            let p = &sim.generators[0]
+                .particles
+                .iter()
+                .find(|p| p.id == pid)
+                .expect("parent particle exists");
+            assert_eq!(g.origin, sim.generators[0].origin + p.pos);
+        }
+    }
+
+    // research/xim Particle.kt update — children are removed with their parent particle.
+    #[test]
+    fn child_generator_dies_with_its_parent_particle() {
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(def(1.0, 30.0, 1), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(child_factory(false, false));
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // emit + spawn children
+        assert!(world.resource::<ParticleSimulator>().generators.len() > 1);
+        tick_world(&mut world, 1.0 / 60.0); // particles expire (life 1 frame) -> children die
+
+        let sim = world.resource::<ParticleSimulator>();
+        assert_eq!(
+            sim.generators.len(),
+            1,
+            "children must die with their parent particle"
+        );
+    }
+
+    // research/xim ParticleInitializers.kt OnceChildGeneratorSetup — one burst at init, never again.
+    #[test]
+    fn once_child_emits_exactly_one_burst() {
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(def(60.0, 30.0, 1), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(child_factory(true, false));
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // children spawn
+        tick_world(&mut world, 1.0 / 60.0); // first (and only) burst
+        let count = world.resource::<ParticleSimulator>().generators[1]
+            .particles
+            .len();
+        assert_eq!(
+            count,
+            emission_count(&world.resource::<ParticleSimulator>().generators[1]) as usize
+        );
+        tick_world(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            world.resource::<ParticleSimulator>().generators[1]
+                .particles
+                .len(),
+            count,
+            "a once-child must not re-emit"
+        );
+    }
+
+    // research/xim ParticleExpirationHandlers.kt EmitChildHandler — one burst at the parent's
+    // death position, independent of it.
+    #[test]
+    fn expiry_child_spawns_at_the_death_position() {
+        let mut sim = ParticleSimulator::default();
+        // ppe=0: the primed burst emits exactly one particle, so one death position.
+        let mut parent = live(def(1.0, 30.0, 0), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(child_factory(false, true));
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // emit
+        tick_world(&mut world, 1.0 / 60.0); // particle expires -> expiry spawn
+
+        let sim = world.resource::<ParticleSimulator>();
+        assert_eq!(sim.generators.len(), 2);
+        let child = &sim.generators[1];
+        assert!(
+            child.parent.is_none(),
+            "an expiry child is independent of the dead particle"
+        );
+        assert_eq!(child.emit_window_frames, 0.0);
+    }
+
+    // sec2 0x45..0x49 (research/xim ParticleInitializers.kt Parent*Config) — a child particle
+    // copies its anchor's state at init.
+    #[test]
+    fn parent_copy_blocks_copy_the_anchor_state() {
+        let mut pd = def(60.0, 30.0, 1);
+        pd.init_velocity = [2.0, 0.0, 0.0];
+        pd.init_color = [0.5, 0.25, 0.125, 1.0];
+        pd.init_scale = [0.3, 0.4, 1.0];
+        pd.init_rotation = [0.1, 0.2, 0.3];
+
+        let mut cd = def(30.0, 30.0, 1);
+        // The child's own init velocity would pass through the world basis; zero it so the
+        // assertion isolates the anchor copy.
+        cd.init_velocity = [0.0; 3];
+        cd.parent_position_copy = true;
+        cd.parent_velocity = Some(1.0);
+        cd.parent_rotate = true;
+        cd.parent_color = true;
+        cd.parent_scale = true;
+
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(pd, f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(ChildFactory {
+            def: cd,
+            ..child_factory(false, false)
+        });
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // parent emits; children spawn with the anchor
+        tick_world(&mut world, 1.0 / 60.0); // children emit through the copy blocks
+
+        let sim = world.resource::<ParticleSimulator>();
+        let p = &sim.generators[0].particles[0];
+        let c = &sim.generators[1].particles;
+        assert!(!c.is_empty(), "the child must have emitted");
+        let cp = &c[0];
+        // 0x45: the particle spawns exactly at the anchor (zero local offset).
+        assert_eq!(cp.pos, Vec3::ZERO);
+        // 0x46: the parent's total velocity is added through the multiplier.
+        assert_eq!(cp.vel, p.vel + p.rel_vel);
+        // 0x47/0x48/0x49: rotation, color and scale are copied wholesale (the anchor carries
+        // the parent's rescaled rgb).
+        assert_eq!(cp.rotation, p.rotation);
+        assert_eq!(cp.rgb, p.rgb);
+        assert_eq!(cp.scale, Vec2::new(0.3, 0.4));
     }
 }

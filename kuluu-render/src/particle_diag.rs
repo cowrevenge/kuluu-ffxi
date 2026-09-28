@@ -98,13 +98,8 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         (GeneratorSection::Initializers, 0x32) => {
             "haze_offset_x on a mesh def: only distortion defs consume it"
         }
-        (GeneratorSection::Initializers, 0x44 | 0x53) => "child_generator: no child-particle path",
-        (GeneratorSection::Initializers, 0x45) => "parent_position_copy: no child-particle path",
-        (GeneratorSection::Initializers, 0x46) => "parent_velocity: no child-particle path",
-        (GeneratorSection::Initializers, 0x47 | 0x79) => "parent_rotate: no child-particle path",
-        (GeneratorSection::Initializers, 0x48) => "parent_color: no child-particle path",
-        (GeneratorSection::Initializers, 0x49) => "parent_scale: no child-particle path",
-        (GeneratorSection::Initializers, 0x4A) => "parent_tex_coord: no child-particle path",
+        // The engine's sprite has no per-particle tex-coord state to copy.
+        (GeneratorSection::Initializers, 0x4A) => "parent_tex_coord: no per-particle uv state",
         (GeneratorSection::Initializers, 0x4E | 0x4F) => {
             "fixed_point_position_variance: reconstruction only"
         }
@@ -115,7 +110,6 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         }
         (GeneratorSection::Initializers, 0x56) => "batching_setup: retail walk has no case",
         (GeneratorSection::Initializers, 0x8E) => "foot_mark: spawn-snap not implemented",
-        (GeneratorSection::Updaters, 0x25 | 0x33) => "child-generator updater: no child path",
         (GeneratorSection::Updaters, 0x34) => "point-list position updater: no spline runtime",
         (GeneratorSection::Updaters, 0x36 | 0x37 | 0x3B) => {
             "specular progress updater: specular element not modelled"
@@ -126,7 +120,6 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         (GeneratorSection::Updaters, 0x1E..=0x22) => {
             "weighted-mesh weight applier: draw path deferred"
         }
-        (GeneratorSection::ElementDie, 0x01) => "emit child on expiry: no child-particle path",
         _ => return None,
     })
 }
@@ -356,7 +349,13 @@ fn kind_byte(def: &ffxi_dat::particle_gen::ParticleGeneratorDef) -> u8 {
 /// spawn-time-only facts (a rumble that never fired because no pad was present) are reported as
 /// such in the Rumble rows.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn analyze(assets: &ActionAssets, report: &EffectCoverageReport) -> ParticleDiag {
+// `global` is the global effect dir's assets (ROM/0/0.DAT): a sec2 0x3C once-child binding
+// falls through to it, exactly as resolve_child_bindings does at runtime.
+pub fn analyze(
+    assets: &ActionAssets,
+    global: Option<&ActionAssets>,
+    report: &EffectCoverageReport,
+) -> ParticleDiag {
     use ffxi_dat::particle_gen::ps2_float_rescale;
 
     let mut diag = ParticleDiag::default();
@@ -470,6 +469,65 @@ pub fn analyze(assets: &ActionAssets, report: &EffectCoverageReport) -> Particle
                 *dir,
                 String::new(),
             );
+        }
+    }
+
+    // Child generator bindings must resolve the way resolve_child_bindings does at runtime:
+    // the 0x44/0x53/0x6A family and sec4 stay in this tier, a 0x3C once-child falls through to
+    // the global effect dir.
+    for ((dir, name), def) in &assets.particle_defs_by_dir {
+        for (id, once) in [
+            (def.child_generator, false),
+            (def.child_generator_2, false),
+            (def.child_generator_3, false),
+            (def.once_child_generator, true),
+            (def.emit_child_id, false),
+        ] {
+            let Some(id) = id else { continue };
+            let found = if once {
+                assets.particle_defs_by_dir.contains_key(&(*dir, id))
+                    || global.is_some_and(|g| g.particle_def_scoped(*dir, &id).is_some())
+            } else {
+                assets.particle_def_scoped(*dir, &id).is_some()
+            };
+            if !found {
+                // The chunk may exist under a kind with no child path (ai90 is a 0x22
+                // distortion bound by i900's sec2 0x44 in the zone DATs).
+                let other_kind = assets
+                    .sound_defs
+                    .contains_key(&id)
+                    .then_some("sound")
+                    .or_else(|| {
+                        assets
+                            .distortion_defs
+                            .contains_key(&id)
+                            .then_some("distortion")
+                    })
+                    .or_else(|| {
+                        global.and_then(|g| {
+                            g.sound_defs
+                                .contains_key(&id)
+                                .then_some("sound")
+                                .or_else(|| {
+                                    g.distortion_defs.contains_key(&id).then_some("distortion")
+                                })
+                        })
+                    });
+                bump(
+                    &mut diag.missing_resource,
+                    format!(
+                        "child generator '{}' (dir {} + flat{})",
+                        id4(id),
+                        id4(*dir),
+                        if once { " + global" } else { "" }
+                    ),
+                    *name,
+                    *dir,
+                    other_kind
+                        .map(|k| format!("a {k} def exists; no child path for that kind"))
+                        .unwrap_or_default(),
+                );
+            }
         }
     }
 

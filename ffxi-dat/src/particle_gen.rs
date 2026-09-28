@@ -687,6 +687,31 @@ pub struct ParticleGeneratorDef {
     // child updaters).
     pub child_generator: Option<[u8; 4]>,
 
+    // sec2 0x6A — the third block of the child-generator family (see SEC2_OPCODE_CHILD_GENERATOR_3):
+    // a per-particle child like `child_generator`.
+    pub child_generator_3: Option<[u8; 4]>,
+
+    // sec2 0x3C OnceChildGeneratorSetup: [expectZero32, child generator DAT id] — the sibling
+    // emitted once at each particle's init (research/xim ParticleInitializers.kt
+    // OnceChildGeneratorSetup).
+    pub once_child_generator: Option<[u8; 4]>,
+
+    // sec4 0x01 EmitChildHandler: [expectZero32, child generator DAT id] — the sibling emitted
+    // once at each particle's expiry (research/xim ParticleExpirationHandlers.kt
+    // EmitChildHandler).
+    pub emit_child_id: Option<[u8; 4]>,
+
+    // sec3 0x25 ChildGeneratorBasicUpdater: per frame the sec2 child generator emits with the
+    // parent particle's position only (research/xim ParticleUpdaters.kt
+    // ChildGeneratorBasicUpdater).
+    pub child_emit_basic: bool,
+    // sec3 0x33 ChildGeneratorUpdater at BillBoardType.None: per-frame emission with the parent
+    // particle's full transform.
+    pub child_emit_full: bool,
+    // sec3 0x46 — the same updater at BillBoardType.XYZ (research/xim ParticleUpdaters.kt
+    // ChildGeneratorUpdater).
+    pub child_emit_billboard: bool,
+
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
@@ -997,6 +1022,10 @@ const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST: u8 = 0x33;
 const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_LAST: u8 = 0x37;
 // research/xim ParticleGeneratorParser.kt sec2Handler — RandomVelocitySetup.
 const SEC2_OPCODE_RANDOM_VELOCITY: u8 = 0x31;
+// research/XIClient CYyGenerator.cpp ElemGenerate — 0x3C/0x44/0x53/0x6A share one case
+// (InitiateAllContainerSearch Generater): a sibling generator chunk bound by id. xim splits the
+// family into OnceChildGeneratorSetup (this opcode, emit once at init) and ChildGeneratorSetup.
+const SEC2_OPCODE_ONCE_CHILD_GENERATOR: u8 = 0x3C;
 const SEC2_OPCODE_INCREMENTAL_ROTATION: u8 = 0x3B;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC2_OPCODE_OSCILLATION_ACCEL_X: u8 = 0x3E;
@@ -1022,7 +1051,11 @@ const SEC2_OPCODE_SPECULAR_ROT_Z_TRACK: u8 = 0x5B;
 const SEC2_OPCODE_SPECULAR_COLOR_G_TRACK: u8 = 0x5D;
 const SEC2_OPCODE_SPECULAR_COLOR_A_TRACK: u8 = 0x5F;
 const SEC2_OPCODE_REVERSE_DISPLACEMENT: u8 = 0x67;
+// research/XIClient CYyGenerator.cpp ElemGenerate case 0x6A — the third block of the
+// child-generator family (see SEC2_OPCODE_ONCE_CHILD_GENERATOR); xim maps it to
+// ChildGeneratorSetup.
 const SEC2_OPCODE_VELOCITY_DAMPENER_TRACK: u8 = 0x69;
+const SEC2_OPCODE_CHILD_GENERATOR_3: u8 = 0x6A;
 const SEC2_OPCODE_PROJECTION_BIAS: u8 = 0x72;
 const SEC2_OPCODE_PARENT_ROTATE_2: u8 = 0x79;
 const SEC2_OPCODE_CAMERA_SHAKE_SETUP: u8 = 0x82;
@@ -1068,6 +1101,9 @@ pub const SEC2_OPCODE_TOD_VOLUME_TRACK: u8 = 0x68;
 pub const SEC3_OPCODE_TOD_VOLUME_APPLIER: u8 = 0x43;
 const SEC3_OPCODE_SPECULAR_COLOR_A_PROGRESS: u8 = 0x3B;
 const SEC3_OPCODE_DAMPENING_FACTOR: u8 = 0x44;
+// research/xim ParticleUpdaters.kt ChildGeneratorUpdater — the sec3 child-emission updater with
+// BillBoardType.XYZ (SEC3_OPCODE_CHILD_GENERATOR is the same updater at BillBoardType.None).
+const SEC3_OPCODE_CHILD_GENERATOR_BILLBOARD: u8 = 0x46;
 const SEC3_OPCODE_CAMERA_SHAKE_UPDATER: u8 = 0x5F;
 const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
@@ -1322,6 +1358,11 @@ pub(crate) struct GeneratorSections {
     // Parsed but not applied until the child-generator runtime lands (the sec3 0x25/0x33
     // child updaters).
     pub(crate) child_generator: Option<[u8; 4]>,
+    pub(crate) child_generator_3: Option<[u8; 4]>,
+    pub(crate) once_child_generator: Option<[u8; 4]>,
+    pub(crate) child_emit_basic: bool,
+    pub(crate) child_emit_full: bool,
+    pub(crate) child_emit_billboard: bool,
 
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
@@ -1665,6 +1706,12 @@ impl ParticleGeneratorDef {
             parent_position_copy: s.parent_position_copy,
             parent_velocity: s.parent_velocity,
             child_generator: s.child_generator,
+            child_generator_3: s.child_generator_3,
+            once_child_generator: s.once_child_generator,
+            emit_child_id: s.emit_child_id,
+            child_emit_basic: s.child_emit_basic,
+            child_emit_full: s.child_emit_full,
+            child_emit_billboard: s.child_emit_billboard,
             oscillation_accel_z: s.oscillation_accel_z,
             oscillation_accel_x: s.oscillation_accel_x,
             oscillation_accel_y: s.oscillation_accel_y,
@@ -1850,6 +1897,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut parent_velocity = None;
     let mut child_generator = None;
     let mut child_generator_2 = None;
+    let mut child_generator_3 = None;
+    let mut once_child_generator = None;
     let mut oscillation_accel_z = None;
     let mut oscillation_accel_x = None;
     let mut oscillation_accel_y = None;
@@ -2226,6 +2275,17 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             SEC2_OPCODE_CHILD_GENERATOR_2 if payload + 8 <= body.len() => {
                 child_generator_2 = track_id(body, payload + 4);
             }
+            // research/XIClient CYyGenerator.cpp ElemGenerate case 0x6A — the third block of
+            // the shared child-generator family; xim maps it to ChildGeneratorSetup.
+            SEC2_OPCODE_CHILD_GENERATOR_3 if payload + 8 <= body.len() => {
+                child_generator_3 = track_id(body, payload + 4);
+            }
+            // research/XIClient CYyGenerator.cpp ElemGenerate case 0x3C — the once-at-init
+            // member of the family (research/xim ParticleInitializers.kt
+            // OnceChildGeneratorSetup: expectZero32 then the child id).
+            SEC2_OPCODE_ONCE_CHILD_GENERATOR if payload + 8 <= body.len() => {
+                once_child_generator = track_id(body, payload + 4);
+            }
             // research/xim ParticleInitializers.kt ParentRotateConfig: the marker that
             // makes a child particle copy its parent's rotation.
             SEC2_OPCODE_PARENT_ROTATE => parent_rotate = true,
@@ -2357,6 +2417,9 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut dampening_factor_applier = false;
     let mut velocity_rotation_updater = false;
     let mut color_transform_applier = false;
+    let mut child_emit_basic = false;
+    let mut child_emit_full = false;
+    let mut child_emit_billboard = false;
     let mut color_transform_modifier = None;
     let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
     let sec3_raw = u32_le(body, 0x78) as usize;
@@ -2500,11 +2563,21 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {
                     color_transform_applier = true;
                 }
-                // research/xim ParticleGeneratorParser.kt sec3Handler: ChildGeneratorBasicUpdater
-                // / ChildGeneratorUpdater: no payload, they emit/update the sec2 child
-                // generator per particle. The engine has no child-particle path, so the
-                // blocks arm nothing and only consume.
-                SEC3_OPCODE_CHILD_GENERATOR_BASIC | SEC3_OPCODE_CHILD_GENERATOR => {}
+                // research/xim ParticleUpdaters.kt ChildGeneratorBasicUpdater: no payload —
+                // per frame the sec2 child generator emits with the parent particle's
+                // position only (particle_sim.rs).
+                SEC3_OPCODE_CHILD_GENERATOR_BASIC => {
+                    child_emit_basic = true;
+                }
+                // research/xim ParticleUpdaters.kt ChildGeneratorUpdater at BillBoardType.None:
+                // per-frame emission with the parent particle's full transform.
+                SEC3_OPCODE_CHILD_GENERATOR => {
+                    child_emit_full = true;
+                }
+                // research/xim ParticleUpdaters.kt ChildGeneratorUpdater at BillBoardType.XYZ.
+                SEC3_OPCODE_CHILD_GENERATOR_BILLBOARD => {
+                    child_emit_billboard = true;
+                }
                 // research/xim ParticleUpdaters.kt VelocityRotationUpdater: no payload —
                 // collapses all velocity into +x and copies the particle's rotation into
                 // the velocity rotation (particle_sim.rs).
@@ -2755,6 +2828,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             parent_position_copy,
             parent_velocity,
             child_generator,
+            child_generator_3,
+            once_child_generator,
+            child_emit_basic,
+            child_emit_full,
+            child_emit_billboard,
             oscillation_accel_z,
             oscillation_accel_x,
             oscillation_accel_y,
@@ -4916,6 +4994,64 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.child_generator, None);
+    }
+
+    // 0x6A — the third block of the child-generator family (research/XIClient CYyGenerator.cpp
+    // ElemGenerate case 0x6A; research/xim ParticleInitializers.kt ChildGeneratorSetup).
+    #[test]
+    fn child_generator_third_block_reads_the_child_id() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x6A, 3, &[0, 0, 0, 0, b'k', b'i', b'd', b'3']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.child_generator_3, Some(*b"kid3"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.child_generator_3, None);
+    }
+
+    // 0x3C OnceChildGeneratorSetup: [expectZero32, child generator DAT id] (research/xim
+    // ParticleInitializers.kt OnceChildGeneratorSetup).
+    #[test]
+    fn once_child_generator_reads_the_child_id() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut sec2 = setup.clone();
+        sec2.extend(op(0x3C, 3, &[0, 0, 0, 0, b'a', b'8', b'0', b'2']));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let body = build(&sec2, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.once_child_generator, Some(*b"a802"));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.once_child_generator, None);
+    }
+
+    // sec3 0x25/0x33/0x46 child-emission updaters: no-payload markers (research/xim
+    // ParticleUpdaters.kt ChildGeneratorBasicUpdater / ChildGeneratorUpdater).
+    #[test]
+    fn child_emit_updaters_arm_their_flags() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        for opcode in [0x25u8, 0x33, 0x46] {
+            let mut body = build(&setup, 1, 1);
+            body.extend_from_slice(&SEC2_TERMINATOR);
+            let sec3_body_index = body.len();
+            body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+            body.extend_from_slice(&op(opcode, 1, &[]));
+            let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+            match opcode {
+                0x25 => assert!(def.child_emit_basic),
+                0x33 => assert!(def.child_emit_full),
+                _ => assert!(def.child_emit_billboard),
+            }
+        }
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.child_emit_basic && !plain.child_emit_full && !plain.child_emit_billboard);
     }
 
     // 0x2A KeyFrameValueSetup (color.r): the 0x27/0x28/0x29 track shape bound to the

@@ -3080,8 +3080,11 @@ impl DistortionGeneratorDef {
 /// PS2 colour convention for particle colour/alpha bytes: they are authored at half scale,
 /// 0x80 is full, not 0xFF. Raw bytes decode as `min(1, b / 128)`; keyframe chunks store the
 /// byte/255 float form of the same values (0.502 == full), so a stored value rescales as
-/// `min(1, v * 255 / 128)`. Apply at every colour/alpha consumption — scale tracks are genuine
-/// floats and must NOT go through this.
+/// `min(1, v * 255 / 128)`. This is for consumers OUTSIDE the fixed-function stage chain —
+/// the rumble intensity envelope (k144's 0x80 byte must read as full) and the distortion
+/// strength track. Rendered particle colour/alpha goes through ffxi_particle.wgsl's stages,
+/// which do this doubling themselves, so those stay raw byte/255 end to end. Scale tracks are
+/// genuine floats and must NOT go through this.
 pub fn ps2_float_rescale(v: f32) -> f32 {
     (v * 255.0 / 128.0).min(1.0)
 }

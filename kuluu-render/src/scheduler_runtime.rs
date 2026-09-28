@@ -504,9 +504,11 @@ pub struct MmbSpriteMesh {
     pub positions: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
-    // Stage 0's D argument per `positions` entry, /128-normalised like a D3m vertex colour so
-    // both particle mesh sources feed `SpriteTemplate::colors` on the same scale.
+    // Stage 0's D argument per `positions` entry, raw D3DCOLOR byte/255 — DoD3mDraw runs its
+    // tables against the un-doubled upload colour (unlike the D3m path, whose /128 normalise
+    // folds stage 0's MODULATE2X in), so ffxi_particle.wgsl's MMB tables expect this scale.
     pub colors: Vec<[f32; 4]>,
+
     pub texture_name: String,
 }
 
@@ -1036,7 +1038,7 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
             uvs.push(v.uv);
             colors.push(
                 v.rgba
-                    .map(|c| c as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR),
+                    .map(|c| c as f32 / ffxi_dat::mmb::VERTEX_COLOR_DIVISOR),
             );
         }
         for tri in m.indices.chunks_exact(3) {

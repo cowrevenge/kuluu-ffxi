@@ -163,6 +163,37 @@ struct TestSceneScoped;
 #[derive(Resource, Default)]
 pub(crate) struct PendingToggle(pub bool);
 
+// ANIMTEST_AUTO schedule: the first case fires after the actors have loaded, then one per
+// spacing — long enough for each effect's particles to live out their life between shots.
+const AUTO_FIRST_DELAY_SECS: f32 = 4.0;
+const AUTO_SPACING_SECS: f32 = 7.0;
+
+#[derive(Resource, Default)]
+struct AutoFire {
+    queue: std::collections::VecDeque<Case>,
+    next_at: Option<Instant>,
+}
+
+fn case_from_name(s: &str) -> Option<Case> {
+    Some(match s {
+        "nhit" => Case::PlayerNhIt,
+        "chit" => Case::PlayerChit,
+        "dhit" => Case::PlayerDhit,
+        "mobnhit" => Case::MobNhIt,
+        "mobchit" => Case::MobChit,
+        "respawn" => Case::MobRespawn,
+        "levelup" => Case::LevelUp,
+        "g141" => Case::Gen141,
+        "g144" => Case::Gen144,
+        "hit1full" => Case::Hit1Full,
+        "hi26" => Case::Hi26,
+        "sb00" => Case::Sb00,
+        "zone" => Case::LoadZone,
+        "weather" => Case::LoadWeather,
+        _ => return None,
+    })
+}
+
 // True while a real zone block is loaded into the box: zone_backdrop_visibility exists to
 // hide the launcher backdrop's own geometry and would swallow the test zone too.
 #[derive(Resource, Default)]
@@ -207,13 +238,36 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<CaseLock>()
             .init_resource::<PendingToggle>()
             .init_resource::<TestZoneActive>()
-            .init_resource::<FloorHidden>()
-            .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
+            .init_resource::<FloorHidden>();
+        // ANIMTEST_AUTO=nhit,chit,... — fire the named cases on a fixed clock with no input
+        // (standalone tester parity); opening the box too, so the whole run is hands-free.
+        let auto_cases: Vec<Case> = std::env::var("ANIMTEST_AUTO")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| case_from_name(s.trim()))
+            .collect();
+        if !auto_cases.is_empty() {
+            eprintln!(
+                "[animationtest] ANIMTEST_AUTO: {}",
+                auto_cases
+                    .iter()
+                    .map(|c| c.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            app.world_mut().resource_mut::<PendingToggle>().0 = true;
+        }
+        app.insert_resource(AutoFire {
+            queue: std::collections::VecDeque::from(auto_cases),
+            next_at: Some(Instant::now() + Duration::from_secs_f32(AUTO_FIRST_DELAY_SECS)),
+        });
+        app.add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
                 Update,
                 (
                     handle_toggle,
                     handle_close_press,
+                    auto_fire_cases,
                     handle_case_presses,
                     run_pending_case,
                     apply_floor_hidden,
@@ -221,6 +275,7 @@ impl Plugin for AnimationTestScenePlugin {
                     worm_death_watch,
                     zone_backdrop_visibility,
                     collect_spawn_traces,
+                    watch_wires,
                     sync_case_buttons,
                     sync_log_text,
                 )
@@ -371,10 +426,9 @@ fn activate_test_scene(
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
-        // Faces zone west (bevy -X/-Z) with the aim above the horizon so the cloud canopy
-        // shares the frame with the ground — the standalone tester's proven framing.
-        Transform::from_translation(Vec3::new(7.5, 2.6, 7.5))
-            .looking_at(Vec3::new(0.0, 4.0, 0.0), Vec3::Y),
+        // Right angle to both actors (worm -X / Hume +X): the box's intended framing.
+        Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
+            .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
     commands.spawn((
         TestSceneScoped,
@@ -809,6 +863,46 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::LoadZone => std::time::Duration::from_millis(2000),
         Case::LoadWeather => std::time::Duration::from_millis(500),
     }
+}
+
+// Pop the ANIMTEST_AUTO queue on schedule; run_pending_case consumes it the same frame.
+fn auto_fire_cases(
+    mut auto: ResMut<AutoFire>,
+    mut pending: ResMut<PendingCase>,
+    mut log: ResMut<TestLog>,
+) {
+    let now = Instant::now();
+    if now < auto.next_at.unwrap_or_else(Instant::now) {
+        return;
+    }
+    let Some(case) = auto.queue.pop_front() else {
+        return;
+    };
+    auto.next_at = Some(now + Duration::from_secs_f32(AUTO_SPACING_SECS));
+    log_line(&mut log, format!("AUTO fired {}", case.label()));
+    pending.0 = Some(case);
+}
+
+// The box's actors must survive every case; a silent despawn (zone load, sync sweep) is the
+// class of bug that leaves an empty scene with no log line to explain it.
+fn watch_wires(
+    tracked: Res<TrackedEntities>,
+    mut last: Local<Option<(bool, bool)>>,
+    mut log: ResMut<TestLog>,
+) {
+    let now = (
+        tracked.by_id.contains_key(&WORM_ID),
+        tracked.by_id.contains_key(&HUME_ID),
+    );
+    if let Some(prev) = *last {
+        if prev.0 && !now.0 {
+            log_line(&mut log, "wire lost: worm".into());
+        }
+        if prev.1 && !now.1 {
+            log_line(&mut log, "wire lost: hume".into());
+        }
+    }
+    *last = Some(now);
 }
 
 fn handle_case_presses(
@@ -1292,8 +1386,9 @@ fn fire_named_routine(
     };
     // Production semantics: the routine runs on the victim with ActionTarget = attacker, so
     // target-facing generators place off the Hume like a real hit instead of at the worm's feet.
+    // insert (not try_insert): a stale target from an earlier case must not win first-writer.
     if let Some(hume) = tracked.by_id.get(&HUME_ID).copied() {
-        commands.entity(worm).try_insert(ActionTarget(Some(hume)));
+        commands.entity(worm).insert(ActionTarget(Some(hume)));
     }
     let Some(g) = global else {
         log_line(log, "no global effect dir wired".into());

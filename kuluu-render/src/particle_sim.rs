@@ -978,14 +978,17 @@ pub fn spawn_particle_generators(
 
         if tracing {
             let line = format!(
-                "route {} spawned particle generator {} mesh {} frame={} delay={} win={} life {}",
+                "route {} spawned particle generator {} mesh {} frame={} delay={} win={} life {} origin=({:.2},{:.2},{:.2})",
                 String::from_utf8_lossy(&ev.scheduler),
                 String::from_utf8_lossy(&ev.stage.stage.id),
                 String::from_utf8_lossy(&def.mesh_id),
                 ev.stage.frame,
                 ev.stage.stage.delay_frames,
                 ev.stage.stage.duration_frames,
-                def.max_life_frames
+                def.max_life_frames,
+                origin.x,
+                origin.y,
+                origin.z
             );
             info!("animationtest trace: {line}");
             trace_writer.write(crate::scheduler_runtime::ParticleSpawnTrace(line));

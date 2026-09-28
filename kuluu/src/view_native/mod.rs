@@ -416,6 +416,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             // whatever the user is doing instead of yanking them out of a
             // full-screen app.
             focused: !unfocused,
+            // KULUU_WINDOW_HIDDEN=1 — verification runs: no visible window, not even a
+            // taskbar entry; rendering continues on the hidden surface and the logs carry
+            // the evidence.
+            visible: std::env::var_os("KULUU_WINDOW_HIDDEN").is_none(),
             ..default()
         }),
         ..default()
@@ -536,7 +540,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
 
     app.add_systems(Startup, configure_gizmo_render_layer);
-
     app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
 
     // FFXI_NO_FRAMEPACE bisects pacing-induced stutter: if a periodic hitch vanishes without the

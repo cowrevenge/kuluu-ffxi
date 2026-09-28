@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use kuluu_render::combat_stance::{EntityMotion, RestStance, SelfMoveIntent, WalkMode};
 use kuluu_render::components::WorldEntity;
+use kuluu_render::dat_root::SharedDatRoot;
 use kuluu_render::ffxi_actor_render::{
-    dispatch_action_overlay, kick_load_actor_tasks, poll_load_actor_tasks, tick_live_ffxi_actors,
-    ActorDatRoot, ActorLoadInFlight, ActorSubject, FfxiRenderRoot, LoadActorRequest,
+    dispatch_action_overlay, tick_live_ffxi_actors, ActorDatRoot, ActorLoadInFlight, ActorSubject,
+    FfxiRenderRoot, LoadActorRequest,
 };
 use kuluu_render::scene::{apply_invis_flag_system, EntityMesh, Target, TrackedEntities};
 use kuluu_render::scheduler_runtime::{
@@ -31,11 +32,32 @@ const WORM_FILE: u32 = 1724;
 /// Pinned sword file — the race table's slot-6 row is a bare stub, so the panel pins this.
 const HUME_MAIN_WEAPON: u32 = 8397;
 
+/// LSB zone id for West Ronfaure (zone table maps it to mzb file 200, ROM/0/120.DAT).
+const WEST_RONFAURE_ZONE_ID: u16 = 100;
+
+/// MZB/DAT file id the zone table resolves West Ronfaure to.
+const WEST_RONFAURE_MZB_FILE_ID: u32 = 200;
+
+// Retail reference standing point (in-game debug readout x=-238.241 y=139.944 z=-49.754,
+// wire order: z is height) — mid-zone open grass, tree line west, campfire at (-293, 137),
+// the yama_2/5 mountains east behind the camera. Placements spawn at
+// mzb_to_bevy(zone_pos) + world_pos, so world_pos is the negation of that conversion:
+// -(-238.241, 49.754, -139.944).
+const WR_ENTRY_OFFSET: Vec3 = Vec3::new(238.241, -49.754, 139.944);
+
 const WORM_ID: u32 = 1;
 const HUME_ID: u32 = 2;
 
 /// The test box window size.
 const WINDOW_SIZE: (u32, u32) = (800, 600);
+
+/// Camera eye height; ANIMTEST_CAM_H raises it for zone inspection from above.
+fn cam_height() -> f32 {
+    std::env::var("ANIMTEST_CAM_H")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2.6)
+}
 
 #[derive(Resource, Default)]
 struct TestLog {
@@ -62,6 +84,8 @@ enum Case {
     LevelUp,
     Hi26,
     Sb00,
+    LoadZone,
+    LoadWeather,
 }
 
 impl Case {
@@ -76,6 +100,8 @@ impl Case {
             Self::LevelUp => "player level up",
             Self::Hi26 => "hi26 routine (g261 child)",
             Self::Sb00 => "sb00 routine (gs02 child)",
+            Self::LoadZone => "load zone (West Ronfaure)",
+            Self::LoadWeather => "load weather (clouds)",
         }
     }
 
@@ -126,6 +152,8 @@ fn case_from_name(s: &str) -> Option<Case> {
         "levelup" => Case::LevelUp,
         "hi26" => Case::Hi26,
         "sb00" => Case::Sb00,
+        "zone" => Case::LoadZone,
+        "weather" => Case::LoadWeather,
         _ => return None,
     })
 }
@@ -151,6 +179,7 @@ fn main() {
 
     let root = Arc::new(root);
     app.insert_resource(ActionDatRoot(Some(Arc::clone(&root))));
+    app.insert_resource(SharedDatRoot(Some(Arc::clone(&root))));
     app.insert_resource(ActorDatRoot(Some(root)));
 
     app.add_plugins(DefaultPlugins.set(bevy::window::WindowPlugin {
@@ -162,11 +191,44 @@ fn main() {
         ..default()
     }));
 
+    // Particle lifetimes and the ANIMTEST_AUTO spacing are authored in 30 fps frames;
+    // uncapped, a fast GPU runs them at half their intended duration. Same limiter as
+    // the client's fps_cap (apply_fps_cap_system).
+    app.add_plugins(bevy_framepace::FramepacePlugin);
+
     // The production VFX pipeline, minus the session layer.
     app.add_plugins(SchedulerRuntimePlugin);
     app.add_plugins(kuluu_render::skinned_ffxi_material::FfxiMaterialPlugin);
     app.add_plugins(kuluu_render::ffxi_particle_material::FfxiParticleMaterialPlugin);
+    app.add_plugins(kuluu_render::ffxi_zone_material::FfxiZoneMaterialPlugin);
     app.add_plugins(kuluu_render::audio::AudioPlugin);
+    // Zone geometry + weather: the LoadZone/LoadWeather buttons write snapshot fields and
+    // these plugins do the rest (auto-load MZB off zone_id, load/sample weather sets,
+    // spawn the weat/* particle generators). DatOverlayPlugin also owns the actor-load chain.
+    app.add_plugins(kuluu_render::dat_mmb::DatOverlayPlugin);
+    app.add_plugins(kuluu_render::weather::WeatherPlugin);
+    app.add_plugins(kuluu_render::zone_particles::ZoneParticlesPlugin);
+    app.add_plugins(kuluu_render::weather_particles::WeatherParticlesPlugin);
+    // The weat/<type> set splits across modules: precipitation above, the cld1/cld2
+    // camera canopies in zone_clouds, and the Sun/Moon-attached billboards in
+    // celestial_particles (env-gated by FFXI_DAT_CELESTIALS). West Ronfaure's clod
+    // ships only canopy + sun, so all three are needed for a visible sky.
+    // Registers Assets<MoonMaterial> that sun_moon_system's SunMoonRenderCfg reads.
+    app.add_plugins(kuluu_render::moon_material::MoonMaterialPlugin);
+    app.add_plugins(kuluu_render::zone_clouds::ZoneCloudsPlugin);
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_plugins(kuluu_render::celestial_particles::CelestialParticlesPlugin);
+    app.init_resource::<kuluu_render::weather_fx::CurrentWeather>()
+        .init_resource::<kuluu_render::weather_fx::ActiveWeatherModifier>()
+        .init_resource::<kuluu_render::hud::HudPanels>();
+    app.add_systems(
+        Update,
+        kuluu_render::weather_fx::sync_current_weather_from_snapshot
+            .before(kuluu_render::weather::sample_zone_weather),
+    );
+    // Writes VanaSky from the clock every frame; without it the Default sky (hour 0)
+    // puts the sun below the horizon and samples cloud colour tracks at night.
+    app.add_systems(Update, kuluu_render::sun_moon::sun_moon_system);
 
     // Resources the pipeline reads (rabbit_tester's rig + the actor-load task pair).
     // The production plugins below read these from the host app (kuluu wires them in its own
@@ -189,12 +251,14 @@ fn main() {
         .init_resource::<ActorLoadInFlight>()
         .init_resource::<TestLog>()
         .init_resource::<PendingCase>()
-        .init_resource::<WormState>();
+        .init_resource::<WormState>()
+        .init_resource::<FloorHidden>();
     app.init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
         .init_resource::<kuluu_render::weather::ZoneDirectionalLighting>()
         .init_resource::<kuluu_render::weather::ZoneWeather>()
         .init_resource::<kuluu_render::dat_mzb::MzbCollisionGeometry>()
         .init_resource::<kuluu_render::vana_time::VanaClock>()
+        .init_resource::<kuluu_render::sun_moon::VanaSky>()
         .init_resource::<kuluu_render::audio::BgmPlaybackState>();
     app.insert_resource(kuluu_render::scene::EntityMaterials {
         pc: Handle::default(),
@@ -242,9 +306,6 @@ fn main() {
     app.add_systems(
         Update,
         (
-            kick_load_actor_tasks,
-            poll_load_actor_tasks,
-            kuluu_render::ffxi_actor_render::tick_morph_in,
             dispatch_action_overlay.before(tick_live_ffxi_actors),
             apply_invis_flag_system.before(tick_live_ffxi_actors),
             tick_live_ffxi_actors,
@@ -253,9 +314,17 @@ fn main() {
             handle_button_presses,
             run_pending_case,
             worm_death_watch,
+            apply_floor_hidden,
             sync_log_text,
         ),
     );
+
+    {
+        let mut framepace = app
+            .world_mut()
+            .resource_mut::<bevy_framepace::FramepaceSettings>();
+        framepace.limiter = bevy_framepace::Limiter::from_framerate(30.0);
+    }
 
     app.run();
 }
@@ -326,11 +395,18 @@ fn setup_scene(
     mut state: ResMut<SceneState>,
     mut log: ResMut<TestLog>,
 ) {
-    // Camera + light + ground.
+    // Camera + light + ground. The marker routes camera-relative systems at
+    // this eye: track_weather_particles rewrites camera-anchored origins and
+    // select_zone_mmb_lod owns MMB chunk visibility; both early-return without it.
+    let cam_h = cam_height();
+    // Faces zone west (bevy -X/-Z): the jime tree line and campfire sit that way; the
+    // yama_2_m mountain 18 units east stays behind the eye.
     commands.spawn((
+        kuluu_render::camera::OperatorCamera,
         Camera3d::default(),
-        Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
-            .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        // Aim above the horizon so the cloud canopy shares the frame with the ground.
+        Transform::from_translation(Vec3::new(7.5, cam_h, 7.5))
+            .looking_at(Vec3::new(0.0, 4.0, 0.0), Vec3::Y),
     ));
     commands.spawn(DirectionalLight {
         illuminance: 9000.0,
@@ -341,6 +417,7 @@ fn setup_scene(
     // +Y normal: a +Z plane is a vertical wall at z=0 that hides everything behind it.
     let plane: Mesh = bevy::prelude::Plane3d::new(Vec3::Y, Vec2::splat(40.0)).into();
     commands.spawn((
+        TestFloor,
         Mesh3d(meshes.add(plane)),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.22, 0.26, 0.22),
@@ -426,6 +503,26 @@ fn app_ambient(commands: &mut Commands) {
     });
 }
 
+/// The flat test floor; hidden once a real zone loads under it.
+#[derive(Component)]
+struct TestFloor;
+
+#[derive(Resource, Default)]
+struct FloorHidden(bool);
+
+fn apply_floor_hidden(flag: Res<FloorHidden>, mut q: Query<&mut Visibility, With<TestFloor>>) {
+    if !flag.is_changed() {
+        return;
+    }
+    for mut vis in &mut q {
+        *vis = if flag.0 {
+            Visibility::Hidden
+        } else {
+            Visibility::default()
+        };
+    }
+}
+
 #[derive(Component)]
 struct LogText;
 
@@ -457,6 +554,8 @@ fn spawn_ui(commands: &mut Commands) {
         Case::LevelUp,
         Case::Hi26,
         Case::Sb00,
+        Case::LoadZone,
+        Case::LoadWeather,
     ] {
         let button = commands
             .spawn((
@@ -535,6 +634,9 @@ fn handle_button_presses(
 fn run_pending_case(
     mut pending: ResMut<PendingCase>,
     mut log: ResMut<TestLog>,
+    mut load_tx: MessageWriter<kuluu_render::dat_mzb::LoadMzbRequest>,
+    mut last_zone: ResMut<kuluu_render::dat_mzb::LastAutoLoadedZone>,
+    mut floor_hidden: ResMut<FloorHidden>,
     tracked: Res<TrackedEntities>,
     q_children: Query<&Children>,
     q_render: Query<&kuluu_render::ffxi_actor_render::FfxiRenderActor>,
@@ -581,6 +683,30 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
+        // vendor/server/data/enums/weather.yaml: Clouds = 2; West Ronfaure's weat/clod set
+        // carries the camera-distance-culled (sec3 0x2E) weather generators.
+        Case::LoadZone => {
+            load_tx.write(kuluu_render::dat_mzb::LoadMzbRequest {
+                file_id: WEST_RONFAURE_MZB_FILE_ID,
+                chunk_idx: None,
+                world_pos: WR_ENTRY_OFFSET,
+                auto_loaded: true,
+                slot: kuluu_render::dat_mzb::ZONE_SLOT_MAIN,
+                active_sub_area: None,
+            });
+            // Stamp the auto-load sentinel so it does not re-issue the block at ZERO offset.
+            last_zone.file_id = Some(WEST_RONFAURE_MZB_FILE_ID);
+            state.snapshot.zone_id = Some(WEST_RONFAURE_ZONE_ID);
+            floor_hidden.0 = true;
+            log_line(
+                &mut log,
+                format!("zone: West Ronfaure (mzb {WEST_RONFAURE_MZB_FILE_ID}) loading at entry offset {WR_ENTRY_OFFSET:?}"),
+            );
+        }
+        Case::LoadWeather => {
+            state.snapshot.weather = Some(kuluu_snapshot::Weather::Clouds);
+            log_line(&mut log, "weather: clouds set (weat/clod)".into());
+        }
         _ => fire_hit(
             case,
             &tracked,

@@ -16,6 +16,20 @@ use crate::camera::OperatorCamera;
 use crate::graphics_settings::GraphicsSettings;
 use ffxi_dat::particle_gen::KeyFrameTrack;
 
+/// Full inside `near`, linear to zero at `far` — the camera-distance law both the sec3 0x5F
+/// rumble falloff and the sec3 0x2E draw-distance alpha fade apply (research/XIClient/src/
+/// XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemIdle cases 0x2E/0x48;
+/// research/xim Utils.kt fallOff).
+pub(crate) fn distance_falloff(dist: f32, near: f32, far: f32) -> f32 {
+    if dist <= near || far <= near {
+        1.0
+    } else if dist >= far {
+        0.0
+    } else {
+        (far - dist) / (far - near)
+    }
+}
+
 /// One Add request outlives a frame by this much, so the pad never goes quiet between
 /// 30 fps ticks while the generator is alive; each frame's Stop+Add replaces it.
 const RUMBLE_REQUEST_DURATION_MS: u64 = 100;
@@ -51,13 +65,7 @@ impl RumbleSource {
 
     /// Full inside `near`, linear to zero at `far` — the sec3 0x5F law.
     fn falloff(&self, dist: f32) -> f32 {
-        if dist <= self.near || self.far <= self.near {
-            1.0
-        } else if dist >= self.far {
-            0.0
-        } else {
-            (self.far - dist) / (self.far - self.near)
-        }
+        distance_falloff(dist, self.near, self.far)
     }
 
     fn stop(

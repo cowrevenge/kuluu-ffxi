@@ -744,6 +744,15 @@ pub struct ParticleGeneratorDef {
     // beyond `far` (kuluu-render/src/rumble.rs update_rumble_system).
     pub rumble_falloff: Option<[f32; 3]>,
 
+    // sec3 0x2E DrawDistanceUpdater: [near, far, kill-flag u32] — per frame the element's alpha
+    // multiplier fades linearly from full at `near` to zero at `far` by camera-to-particle
+    // distance; retail zeroes it (and kills the element when the flag is set) beyond `far`
+    // (research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemIdle
+    // case 0x2E; research/xim ParticleUpdaters.kt DrawDistanceUpdater). The kill flag is 0 in
+    // every shipped DAT, so kuluu culls at zero alpha without killing.
+    pub draw_distance_near: Option<f32>,
+    pub draw_distance_far: Option<f32>,
+
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
     // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
     // offsets the previous-frame transform by (research/xim ParticleInitializers.kt
@@ -986,6 +995,9 @@ const SEC3_OPCODE_OSCILLATION_APPLIER_X: u8 = 0x29;
 const SEC3_OPCODE_OSCILLATION_APPLIER_Y: u8 = 0x2A;
 const SEC3_OPCODE_OSCILLATION_APPLIER_Z: u8 = 0x2B;
 const SEC3_OPCODE_VELOCITY_DAMPENER: u8 = 0x2C;
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemIdle
+// case 0x2E; research/xim ParticleUpdaters.kt DrawDistanceUpdater.
+pub const SEC3_OPCODE_DRAW_DISTANCE: u8 = 0x2E;
 const SEC3_OPCODE_VELOCITY_ROTATION_UPDATER: u8 = 0x2F;
 const SEC3_OPCODE_CHILD_GENERATOR: u8 = 0x33;
 const SEC3_OPCODE_POINT_LIST_POSITION: u8 = 0x34;
@@ -1320,6 +1332,8 @@ pub(crate) struct GeneratorSections {
     // Rumble intensity falloff by camera-to-particle distance: full inside `near`, zero
     // beyond `far` (kuluu-render/src/rumble.rs update_rumble_system).
     pub(crate) rumble_falloff: Option<[f32; 3]>,
+    pub(crate) draw_distance_near: Option<f32>,
+    pub(crate) draw_distance_far: Option<f32>,
 
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
     // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
@@ -1576,6 +1590,8 @@ impl ParticleGeneratorDef {
             specular_rot_y_track: s.specular_rot_y_track,
             rumble_track: s.rumble_track,
             rumble_falloff: s.rumble_falloff,
+            draw_distance_near: s.draw_distance_near,
+            draw_distance_far: s.draw_distance_far,
             haze_offset_x: s.haze_offset_x,
             parent_rotate: s.parent_rotate,
             parent_color: s.parent_color,
@@ -2193,6 +2209,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut rotation_updater = false;
     let mut position_updater = false;
     let mut rumble_falloff = None;
+    let mut draw_distance_near = None;
+    let mut draw_distance_far = None;
     let mut velocity_dampener = None;
     let mut velocity_rotator = None;
     let mut color_transform_modifier = None;
@@ -2286,6 +2304,14 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 // SEC2_OPCODE_VELOCITY_DAMPENER_TRACK. The engine does not model the
                 // dampener, so the block arms nothing and only consumes.
                 SEC3_OPCODE_DAMPENING_FACTOR => {}
+                // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp
+                // CYyGenerator::ElemIdle case 0x2E: [near, far, kill-flag] — the third word is
+                // 0 in every shipped DAT (research/xim ParticleUpdaters.kt DrawDistanceUpdater
+                // reads it as an unused 32-bit value).
+                SEC3_OPCODE_DRAW_DISTANCE if payload + 8 <= body.len() => {
+                    draw_distance_near = Some(f32_le(body, payload));
+                    draw_distance_far = Some(f32_le(body, payload + 4));
+                }
                 // research/xim ParticleUpdaters.kt ColorTransformModifier: the per-frame
                 // rate on the SEC2_OPCODE_COLOR_TRANSFORM_SETUP transform. The engine does
                 // not model the transform's application, so parse-only.
@@ -2583,6 +2609,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             specular_rot_y_track,
             rumble_track,
             rumble_falloff,
+            draw_distance_near,
+            draw_distance_far,
             haze_offset_x,
             parent_rotate,
             parent_color,
@@ -3885,6 +3913,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.rumble_falloff, None);
+    }
+
+    // sec3 0x2E DrawDistanceUpdater: [near, far, kill-flag u32] — the shipped weather value
+    // set is near 10 / far 20 (research/xim ParticleUpdaters.kt DrawDistanceUpdater;
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemIdle
+    // case 0x2E).
+    #[test]
+    fn draw_distance_updater_reads_near_and_far() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&SEC2_TERMINATOR);
+        let sec3_body_index = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_body_index + 0x10) as u32).to_le_bytes());
+        let mut payload = [0u8; 12];
+        payload[0..4].copy_from_slice(&10.0f32.to_le_bytes());
+        payload[4..8].copy_from_slice(&20.0f32.to_le_bytes());
+        body.extend_from_slice(&op(0x2E, 4, &payload));
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.draw_distance_near, Some(10.0));
+        assert_eq!(def.draw_distance_far, Some(20.0));
+
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.draw_distance_near, None);
+        assert_eq!(plain.draw_distance_far, None);
     }
 
     // 0x32 HazeOffsetInitializer: [unused f32, horizontal offset] — xim applies only the

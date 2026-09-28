@@ -331,6 +331,11 @@ struct LiveGenerator {
     /// The mesh entity's world rotation — the actor root's for actor-local generators, whose
     /// local frame is the actor's FFXI frame; identity otherwise.
     actor_rot: Quat,
+    // The mesh entity's GlobalTransform at the last sync — identity for a world-space generator,
+    // the actor root's for an actor-local one. Draw-distance falloff (sec3 0x2E) measures
+    // camera-to-particle in true world space, so the particle's local-frame position passes
+    // through it before the distance is taken.
+    entity_world: GlobalTransform,
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
@@ -901,6 +906,7 @@ pub fn spawn_particle_generators(
             elements_emitted: 0,
             cam_view: Quat::IDENTITY,
             actor_rot: Quat::IDENTITY,
+            entity_world: GlobalTransform::IDENTITY,
             built_key: MeshKey::Empty,
         });
     }
@@ -993,6 +999,7 @@ pub fn spawn_actor_auto_run_particles(
                 elements_emitted: 0,
                 cam_view: Quat::IDENTITY,
                 actor_rot: Quat::IDENTITY,
+                entity_world: GlobalTransform::IDENTITY,
                 built_key: MeshKey::Empty,
                 def,
             });
@@ -1073,6 +1080,7 @@ pub fn spawn_zone_particle_generator(
         elements_emitted: 0,
         cam_view: Quat::IDENTITY,
         actor_rot: Quat::IDENTITY,
+        entity_world: GlobalTransform::IDENTITY,
         built_key: MeshKey::Empty,
         def,
     });
@@ -1685,6 +1693,7 @@ pub fn sync_particle_meshes(
         // rotation; sync runs after tick, so both reach emit() one frame behind like
         // `emit_culled` (research/xim ParticleGeneratorParser.kt SphericalPositionVarianceFull).
         g.cam_view = cam_rot;
+        g.entity_world = *entity_xf;
         if g.actor_local {
             g.actor_rot = entity_xf.rotation();
         }
@@ -2005,6 +2014,18 @@ fn quantized(v: f32, quantum: f32) -> i32 {
     (v / quantum).round() as i32
 }
 
+// sec3 0x2E DrawDistanceUpdater's per-frame alpha multiplier from camera-to-particle distance;
+// 1.0 for a generator that carries no updater (research/xim ParticleUpdaters.kt
+// DrawDistanceUpdater — the multiplier lands on the element's colour alpha).
+fn draw_distance_alpha(g: &LiveGenerator, world_pos: Vec3, cam_pos: Vec3) -> f32 {
+    match (g.def.draw_distance_near, g.def.draw_distance_far) {
+        (Some(near), Some(far)) => {
+            crate::rumble::distance_falloff(cam_pos.distance(world_pos), near, far)
+        }
+        _ => 1.0,
+    }
+}
+
 fn mesh_key(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock) -> MeshKey {
     if g.particles.is_empty() {
         return MeshKey::Empty;
@@ -2020,13 +2041,16 @@ fn mesh_key(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock) -> MeshK
             .iter()
             .map(|p| {
                 let draw = particle_draw(g, p, clock);
+                // sec3 0x2E: the key quantizes the same falloff-multiplied alphas rebuild_mesh
+                // draws, so a camera move that fades an element by one colour step rebuilds.
+                let m = draw_distance_alpha(g, g.entity_world.transform_point(draw.world), cam.pos);
                 ParticleKey {
                     world: draw.world.to_array().map(spatial),
                     flipbook_frame: draw.flipbook_frame,
                     scale: [spatial(draw.scale.x), spatial(draw.scale.y)],
                     factor_rgb: draw.factor_rgb.to_array().map(color),
-                    factor_alpha: color(draw.factor_alpha),
-                    life_alpha: color(draw.life_alpha),
+                    factor_alpha: color(draw.factor_alpha * m),
+                    life_alpha: color(draw.life_alpha * m),
                     rotation: p.rotation.to_array().map(spatial),
                 }
             })
@@ -2156,7 +2180,17 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
     let axial = is_axial_camera_billboard(g);
 
     for p in &g.particles {
-        let draw = particle_draw(g, p, clock);
+        let mut draw = particle_draw(g, p, clock);
+        // sec3 0x2E DrawDistanceUpdater: fade the element's alpha by camera distance and cull
+        // it at zero (research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp
+        // CYyGenerator::ElemIdle case 0x2E; research/xim ParticleUpdaters.kt
+        // DrawDistanceUpdater — drawDistanceCulled skips the element in the draw list).
+        let m = draw_distance_alpha(g, g.entity_world.transform_point(draw.world), cam.pos);
+        if m == 0.0 {
+            continue;
+        }
+        draw.factor_alpha *= m;
+        draw.life_alpha *= m;
         let tpl = flipbook_template(g, draw.flipbook_frame);
 
         // research/xim Particle.kt applyMovementOrientation — a Movement billboard keeps its world
@@ -2546,6 +2580,8 @@ mod tests {
             specular_rot_y_track: None,
             rumble_track: None,
             rumble_falloff: None,
+            draw_distance_near: None,
+            draw_distance_far: None,
             haze_offset_x: None,
             parent_rotate: false,
             parent_color: false,
@@ -2605,6 +2641,7 @@ mod tests {
             elements_emitted: 0,
             cam_view: Quat::IDENTITY,
             actor_rot: Quat::IDENTITY,
+            entity_world: GlobalTransform::IDENTITY,
             built_key: MeshKey::Empty,
             bound_radius: 0.0,
         }
@@ -3851,6 +3888,62 @@ mod tests {
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
     }
 
+    // sec3 0x2E DrawDistanceUpdater: the element's alpha fades linearly from full at `near`
+    // to zero at `far` by camera distance and is culled beyond (research/XIClient/src/
+    // XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemIdle case 0x2E;
+    // research/xim ParticleUpdaters.kt DrawDistanceUpdater).
+    #[test]
+    fn draw_distance_fades_alpha_and_culls_beyond_far() {
+        let make = |near: Option<f32>, far: Option<f32>| -> LiveGenerator {
+            let mut d = def(120.0, 1.0, 1);
+            d.camera_billboard = false;
+            d.continuous = true;
+            d.draw_distance_near = near;
+            d.draw_distance_far = far;
+            let mut g = live(d, 1000.0);
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            g
+        };
+        let clock = CelestialClock::default();
+        let cam = view(Quat::IDENTITY);
+        let alphas = |g: &LiveGenerator| -> Vec<f32> {
+            use bevy::mesh::VertexAttributeValues;
+            let mut mesh = empty_mesh();
+            rebuild_mesh(g, cam, &clock, &mut mesh);
+            match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+                Some(VertexAttributeValues::Float32x4(v)) => v.iter().map(|c| c[3]).collect(),
+                _ => panic!("rebuilt mesh has f32x4 colours"),
+            }
+        };
+
+        // Inside `near` the fade is 1.0: identical to a generator without the updater.
+        let mut plain = make(None, None);
+        plain.origin = Vec3::new(5.0, 0.0, 0.0);
+        let mut faded = make(Some(10.0), Some(20.0));
+        faded.origin = Vec3::new(5.0, 0.0, 0.0);
+        assert_eq!(alphas(&plain), alphas(&faded));
+
+        // Mid-band: the fade is (far - dist) / (far - near) = 0.5.
+        plain.origin = Vec3::new(15.0, 0.0, 0.0);
+        faded.origin = Vec3::new(15.0, 0.0, 0.0);
+        let full = alphas(&plain);
+        let half = alphas(&faded);
+        assert!(
+            full.iter().all(|a| *a > 0.0),
+            "the plain generator draws at mid-band"
+        );
+        for (f, h) in full.iter().zip(half.iter()) {
+            assert!((h - f * 0.5).abs() < 1e-6, "mid-band fade: {f} vs {h}");
+        }
+
+        // Beyond `far` the element is culled from the draw list: only the hidden primitive.
+        faded.origin = Vec3::new(30.0, 0.0, 0.0);
+        let mut mesh = empty_mesh();
+        rebuild_mesh(&faded, cam, &clock, &mut mesh);
+        assert_eq!(mesh.count_vertices(), HIDDEN_PRIMITIVE_VERTS);
+    }
+
     // sec2 0x3D + 0x3E with the sec3 0x29 applier: the particle's x position sways with the
     // applier's amplitude curve (research/xim ParticleUpdaters.kt OscillationApplier —
     // rate = 180f / 2 = 90, baseOffset 0, so the amplitude peaks at half a period, 90 frames,
@@ -4881,8 +4974,10 @@ mod tests {
         const SUN_DOME_GEN: [u8; 4] = *b"sun0";
         const SPRITE_SHEET_ZONE: u32 = 230;
         const SPRITE_SHEET_GEN: [u8; 4] = *b"bun4";
-        // Far enough along +Z that the eye direction is that axis to well inside FACING.
-        const EYE_DISTANCE: f32 = 500.0;
+        // Along +Z so the eye direction is that axis to well inside FACING, and inside
+        // bun4's authored sec3 0x2E draw-distance band (near 20 / far 30), beyond which the
+        // sheet is culled from the draw list.
+        const EYE_DISTANCE: f32 = 15.0;
         const FACING: f32 = 0.999;
 
         let (Some(dome_assets), Some(sheet_assets)) = (

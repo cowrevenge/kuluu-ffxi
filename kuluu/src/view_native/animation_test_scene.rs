@@ -6,14 +6,16 @@
 
 use std::time::{Duration, Instant};
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use kuluu_render::components::{InGameEntity, WorldEntity};
+use kuluu_render::dat_mzb::{LastAutoLoadedZone, LoadMzbRequest, ZONE_SLOT_MAIN};
 use kuluu_render::ffxi_actor_render::{
     ActorSubject, FfxiActorMeshChild, FfxiRenderActor, FfxiRenderRoot, LoadActorRequest,
 };
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
-    enqueue_routine, stage_summary, ActionDatRoot, ActiveScheduler, GlobalEffectDir,
+    enqueue_routine, stage_summary, ActionDatRoot, ActionTarget, ActiveScheduler, GlobalEffectDir,
     ParticleSpawnTrace, RoutineLookup, VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
@@ -25,6 +27,19 @@ const WORM_FILE: u32 = 1724;
 // joint-mapped vertices but no polygon instructions, so nothing draws from it. Production fills
 // the slot from the equipped item; the box pins a real sword file with geometry.
 const TEST_SWORD_FILE: u32 = 8397;
+
+// LSB zone id for West Ronfaure (zone table maps it to mzb file 200, ROM/0/120.DAT).
+const WEST_RONFAURE_ZONE_ID: u16 = 100;
+
+// MZB/DAT file id the zone table resolves West Ronfaure to.
+const WEST_RONFAURE_MZB_FILE_ID: u32 = 200;
+
+// Retail reference standing point (in-game debug readout x=-238.241 y=139.944 z=-49.754,
+// wire order: z is height) — mid-zone open grass, tree line west, campfire at (-293, 137),
+// the yama_2/5 mountains east behind the camera. Placements spawn at
+// mzb_to_bevy(zone_pos) + world_pos, so world_pos is the negation of that conversion:
+// -(-238.241, 49.754, -139.944).
+const WR_ENTRY_OFFSET: Vec3 = Vec3::new(238.241, -49.754, 139.944);
 
 const WORM_ID: u32 = 1;
 const HUME_ID: u32 = 2;
@@ -60,6 +75,8 @@ enum Case {
     Hit1Full,
     Hi26,
     Sb00,
+    LoadZone,
+    LoadWeather,
 }
 
 impl Case {
@@ -77,6 +94,8 @@ impl Case {
             Self::Hit1Full => "hit1 full (141/144 alpha 1)",
             Self::Hi26 => "hi26 routine (g261 child carrier)",
             Self::Sb00 => "sb00 routine (gs02 child carrier)",
+            Self::LoadZone => "load zone (West Ronfaure)",
+            Self::LoadWeather => "load weather (clouds)",
         }
     }
 
@@ -144,6 +163,21 @@ struct TestSceneScoped;
 #[derive(Resource, Default)]
 pub(crate) struct PendingToggle(pub bool);
 
+// True while a real zone block is loaded into the box: zone_backdrop_visibility exists to
+// hide the launcher backdrop's own geometry and would swallow the test zone too.
+#[derive(Resource, Default)]
+struct TestZoneActive(bool);
+
+// The LoadZone case's three zone params as one SystemParam: Bevy 0.19 generates IntoSystem for
+// fn pointers up to 16 params (bevy_ecs function_system all_tuples! impl_build_system 0..=16),
+// and run_pending_case sits exactly at that cap with this bundle.
+#[derive(SystemParam)]
+struct ZoneLoadParams<'w> {
+    load_tx: MessageWriter<'w, LoadMzbRequest>,
+    last_zone: ResMut<'w, LastAutoLoadedZone>,
+    backdrop_zone: ResMut<'w, super::launcher_backdrop::LauncherBackdropZone>,
+}
+
 #[derive(Component)]
 struct CloseBox;
 
@@ -164,6 +198,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<TestHp>()
             .init_resource::<CaseLock>()
             .init_resource::<PendingToggle>()
+            .init_resource::<TestZoneActive>()
             .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
                 Update,
@@ -687,6 +722,8 @@ fn spawn_panel(commands: &mut Commands) {
         Case::Hit1Full,
         Case::Hi26,
         Case::Sb00,
+        Case::LoadZone,
+        Case::LoadWeather,
     ] {
         let button = commands
             .spawn((
@@ -749,6 +786,9 @@ fn case_duration(case: Case) -> std::time::Duration {
         // The carrier particle lives 60 frames (1s) and emits its child every frame in that
         // window; hold the lock long enough to watch the child appear.
         Case::Hi26 | Case::Sb00 => std::time::Duration::from_millis(2500),
+        // Not animations: short windows only keep a double-press from re-issuing loads.
+        Case::LoadZone => std::time::Duration::from_millis(2000),
+        Case::LoadWeather => std::time::Duration::from_millis(500),
     }
 }
 
@@ -820,6 +860,7 @@ fn run_pending_case(
     root: Res<ActionDatRoot>,
     mut worm_state: ResMut<WormState>,
     mut scene: ResMut<SceneState>,
+    mut zone: ZoneLoadParams,
     q_root: Query<&kuluu_render::ffxi_actor_render::FfxiRenderRoot>,
     mut q_vis: Query<&mut Visibility>,
     mut commands: Commands,
@@ -908,6 +949,38 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
+        Case::LoadZone => {
+            if zone.last_zone.file_id == Some(WEST_RONFAURE_MZB_FILE_ID) {
+                log_line(&mut log, "zone: West Ronfaure already loaded".into());
+            } else {
+                // Drive the zone through the backdrop resource so
+                // mirror_backdrop_to_scene_state keeps snapshot.zone_id in agreement; the
+                // pre-stamp stops auto_load_zone_geometry_system re-issuing the block at a
+                // ZERO offset (which would stand us 50+ units off the terrain).
+                *zone.backdrop_zone =
+                    super::launcher_backdrop::LauncherBackdropZone(WEST_RONFAURE_ZONE_ID);
+                zone.last_zone.file_id = Some(WEST_RONFAURE_MZB_FILE_ID);
+                zone.load_tx.write(LoadMzbRequest {
+                    file_id: WEST_RONFAURE_MZB_FILE_ID,
+                    chunk_idx: None,
+                    world_pos: WR_ENTRY_OFFSET,
+                    auto_loaded: true,
+                    slot: ZONE_SLOT_MAIN,
+                    active_sub_area: None,
+                });
+                log_line(
+                    &mut log,
+                    format!("zone: West Ronfaure (mzb {WEST_RONFAURE_MZB_FILE_ID}) loading at entry offset {WR_ENTRY_OFFSET:?}"),
+                );
+            }
+            commands.insert_resource(TestZoneActive(true));
+        }
+        Case::LoadWeather => {
+            // sync_current_weather_from_snapshot copies this into CurrentWeather every frame
+            // (myroom is None pre-server); sample_zone_weather then selects weat/clod for 200.
+            scene.snapshot.weather = Some(kuluu_snapshot::Weather::Clouds);
+            log_line(&mut log, "weather: clouds set (weat/clod)".into());
+        }
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
 
@@ -1194,6 +1267,11 @@ fn fire_named_routine(
         log_line(log, "worm not loaded yet".into());
         return;
     };
+    // Production semantics: the routine runs on the victim with ActionTarget = attacker, so
+    // target-facing generators place off the Hume like a real hit instead of at the worm's feet.
+    if let Some(hume) = tracked.by_id.get(&HUME_ID).copied() {
+        commands.entity(worm).try_insert(ActionTarget(Some(hume)));
+    }
     let Some(g) = global else {
         log_line(log, "no global effect dir wired".into());
         return;
@@ -1250,13 +1328,16 @@ fn worm_death_watch(
 // Restores visibility on teardown.
 fn zone_backdrop_visibility(
     q_scoped: Query<Entity, With<TestSceneScoped>>,
+    test_zone: Res<TestZoneActive>,
     mut q_vis: Query<
         (&mut Visibility, Option<&ChildOf>),
         (With<InGameEntity>, Without<TestSceneScoped>),
     >,
     q_anc: Query<(Option<&ChildOf>, Has<TestSceneScoped>)>,
 ) {
-    let active = q_scoped.iter().next().is_some();
+    // A user-loaded zone block is InGameEntity too; the sweep only exists for the backdrop's
+    // own geometry, so it stands down while one is active.
+    let active = q_scoped.iter().next().is_some() && !test_zone.0;
     for (mut vis, parent) in &mut q_vis {
         if active {
             if matches!(*vis, Visibility::Hidden) {
@@ -1302,6 +1383,12 @@ fn tear_down(
     tracked: &mut TrackedEntities,
     scene: &mut SceneState,
 ) {
+    // Drop the test zone and let mirror_backdrop_to_scene_state + auto-load bring the
+    // default backdrop block back at its own offset.
+    commands.insert_resource(TestZoneActive(false));
+    commands.insert_resource(super::launcher_backdrop::LauncherBackdropZone(
+        super::launcher_backdrop::DEFAULT_BACKDROP_ZONE,
+    ));
     for e in q_scoped.iter() {
         // try_despawn: despawn() is recursive, so a parent earlier in the query may have
         // already freed this entity (same fix as launcher_backdrop's teardown).

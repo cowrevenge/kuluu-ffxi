@@ -168,14 +168,22 @@ pub(crate) struct PendingToggle(pub bool);
 #[derive(Resource, Default)]
 struct TestZoneActive(bool);
 
-// The LoadZone case's three zone params as one SystemParam: Bevy 0.19 generates IntoSystem for
-// fn pointers up to 16 params (bevy_ecs function_system all_tuples! impl_build_system 0..=16),
-// and run_pending_case sits exactly at that cap with this bundle.
+/// The flat test floor; hidden once a real zone loads under it (standalone tester parity).
+#[derive(Component)]
+struct TestFloor;
+
+#[derive(Resource, Default)]
+struct FloorHidden(bool);
+
+// The LoadZone case's params as one SystemParam: Bevy 0.19 generates IntoSystem for fn pointers
+// up to 16 params (bevy_ecs function_system all_tuples! impl_build_system 0..=16), and
+// run_pending_case sits exactly at that cap with this bundle.
 #[derive(SystemParam)]
 struct ZoneLoadParams<'w> {
     load_tx: MessageWriter<'w, LoadMzbRequest>,
     last_zone: ResMut<'w, LastAutoLoadedZone>,
     backdrop_zone: ResMut<'w, super::launcher_backdrop::LauncherBackdropZone>,
+    floor_hidden: ResMut<'w, FloorHidden>,
 }
 
 #[derive(Component)]
@@ -199,6 +207,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<CaseLock>()
             .init_resource::<PendingToggle>()
             .init_resource::<TestZoneActive>()
+            .init_resource::<FloorHidden>()
             .add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
                 Update,
@@ -207,6 +216,7 @@ impl Plugin for AnimationTestScenePlugin {
                     handle_close_press,
                     handle_case_presses,
                     run_pending_case,
+                    apply_floor_hidden,
                     verify_drawn,
                     worm_death_watch,
                     zone_backdrop_visibility,
@@ -348,6 +358,11 @@ fn activate_test_scene(
     // does not show around the test floor.
     commands.spawn((
         TestSceneScoped,
+        // Marker routes camera-relative systems at this eye: track_weather_particles rewrites
+        // camera-anchored origins and select_zone_mmb_lod owns MMB chunk visibility; both
+        // early-return without it. No other OperatorCamera exists pre-server (the in-game one
+        // spawns OnEnter(InGame)), so the box is the sole marker while open.
+        kuluu_render::camera::OperatorCamera,
         Camera3d::default(),
         // Order 3: above the launcher backdrop (-2) and any default-order (gizmo) camera;
         // 1-2 are the in-game nameplate overlay/composite slots.
@@ -356,8 +371,10 @@ fn activate_test_scene(
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
-        Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
-            .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        // Faces zone west (bevy -X/-Z) with the aim above the horizon so the cloud canopy
+        // shares the frame with the ground — the standalone tester's proven framing.
+        Transform::from_translation(Vec3::new(7.5, 2.6, 7.5))
+            .looking_at(Vec3::new(0.0, 4.0, 0.0), Vec3::Y),
     ));
     commands.spawn((
         TestSceneScoped,
@@ -374,8 +391,10 @@ fn activate_test_scene(
     });
     // +Y normal: a +Z plane is a vertical wall at z=0 that hides everything behind it.
     let plane: Mesh = Plane3d::new(Vec3::Y, Vec2::splat(40.0)).into();
+    commands.insert_resource(FloorHidden(false));
     commands.spawn((
         TestSceneScoped,
+        TestFloor,
         Mesh3d(meshes.add(plane)),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.22, 0.26, 0.22),
@@ -954,11 +973,14 @@ fn run_pending_case(
                 log_line(&mut log, "zone: West Ronfaure already loaded".into());
             } else {
                 // Drive the zone through the backdrop resource so
-                // mirror_backdrop_to_scene_state keeps snapshot.zone_id in agreement; the
-                // pre-stamp stops auto_load_zone_geometry_system re-issuing the block at a
-                // ZERO offset (which would stand us 50+ units off the terrain).
+                // mirror_backdrop_to_scene_state keeps snapshot.zone_id in agreement. The
+                // snapshot write is atomic with the pre-stamp: auto_load_zone_geometry_system
+                // compares effective_zone_file_id(snapshot) against LastAutoLoadedZone, and a
+                // frame gap between the two re-issues the block at a ZERO offset (which would
+                // stand us 50+ units off the terrain).
                 *zone.backdrop_zone =
                     super::launcher_backdrop::LauncherBackdropZone(WEST_RONFAURE_ZONE_ID);
+                scene.snapshot.zone_id = Some(WEST_RONFAURE_ZONE_ID);
                 zone.last_zone.file_id = Some(WEST_RONFAURE_MZB_FILE_ID);
                 zone.load_tx.write(LoadMzbRequest {
                     file_id: WEST_RONFAURE_MZB_FILE_ID,
@@ -973,6 +995,7 @@ fn run_pending_case(
                     format!("zone: West Ronfaure (mzb {WEST_RONFAURE_MZB_FILE_ID}) loading at entry offset {WR_ENTRY_OFFSET:?}"),
                 );
             }
+            zone.floor_hidden.0 = true;
             commands.insert_resource(TestZoneActive(true));
         }
         Case::LoadWeather => {
@@ -1320,6 +1343,19 @@ fn worm_death_watch(
         }
     }
     worm_state.dead_at = None;
+}
+
+fn apply_floor_hidden(flag: Res<FloorHidden>, mut q: Query<&mut Visibility, With<TestFloor>>) {
+    if !flag.is_changed() {
+        return;
+    }
+    for mut vis in &mut q {
+        *vis = if flag.0 {
+            Visibility::Hidden
+        } else {
+            Visibility::default()
+        };
+    }
 }
 
 // The launcher backdrop mirrors a live zone into the same world space; its meshes carry

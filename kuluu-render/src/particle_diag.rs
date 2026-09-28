@@ -105,6 +105,9 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         }
         (GeneratorSection::Initializers, 0x51) => "velocity_y_track: no per-frame velocity track",
         (GeneratorSection::Initializers, 0x54) => "point_list_position: no spline runtime",
+        (GeneratorSection::Initializers, 0x6B) => {
+            "sound path_ref: no Sph (0x4A) parser; origin fallback"
+        }
         (GeneratorSection::Initializers, 0x55 | 0x59 | 0x5B | 0x5D | 0x5F) => {
             "specular element not modelled"
         }
@@ -533,6 +536,25 @@ pub fn analyze(
 
     for (&name, def) in &assets.sound_defs {
         let dir = NO_LOCAL_DIR;
+        // CYyGenerator.cpp ElemGenerate case 0x6B — the rail's nearest point to the eye is the
+        // attenuation origin; with no Sph parser the engine falls back to the generator origin.
+        if let Some(path_id) = def.path_ref {
+            bump(
+                &mut diag.missing_resource,
+                format!(
+                    "Sph rail '{}' (kind 0x4A{})",
+                    id4(path_id),
+                    if assets.sph_names.contains(&path_id) {
+                        "; present, no parser"
+                    } else {
+                        ""
+                    }
+                ),
+                name,
+                dir,
+                String::new(),
+            );
+        }
         if !assets.seps.contains_key(&def.sep_id) {
             bump(
                 &mut diag.sound,

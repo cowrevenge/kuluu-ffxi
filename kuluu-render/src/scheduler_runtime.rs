@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
@@ -556,6 +556,10 @@ pub struct ActionAssets {
     /// sprite sheet and texture resolve in.
     pub particle_def_dirs: HashMap<[u8; 4], [u8; 4]>,
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
+    /// The Sph rail chunk names (kind 0x4A) — a sound generator's sec2 0x6B path reference
+    /// resolves against these. No parser for the chunk body exists yet, so only the names are
+    /// kept and diagnostics can tell "absent" from "present but unparsed".
+    pub sph_names: HashSet<[u8; 4]>,
 }
 
 impl ActionAssets {
@@ -971,6 +975,11 @@ pub fn parse_action_tree_reporting(
                 if let Ok(s) = Sep::parse(c.name, c.data) {
                     assets.seps.insert(c.name, s);
                 }
+            }
+            // research/XIClient ResourceType.h `Sph = 74` — the rail a sound generator's sec2
+            // 0x6B path reference resolves against; name only, no body parser yet.
+            ChunkKind::Path => {
+                assets.sph_names.insert(c.name);
             }
             // research/XIClient include/World/Camera/CameraFormat.h - the camera route a
             // scheduler's 0x04 stage drives; keyed by name like every other chunk here.

@@ -1592,6 +1592,9 @@ pub(crate) struct GeneratorSections {
     /// sec2 0x4C audio range — the sound consumer's near/far.
     pub(crate) sound_far: f32,
     pub(crate) sound_near: f32,
+    /// sec2 0x6B — the Sph rail resource (chunk kind 0x4A) whose nearest point to the camera eye
+    /// is a sound generator's attenuation origin (CYyGenerator.cpp ElemGenerate case 0x6B).
+    pub(crate) sound_path_ref: Option<[u8; 4]>,
 }
 
 impl ParticleGeneratorDef {
@@ -1824,6 +1827,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut kind_byte = 0u8;
     let mut sound_far = 0.0f32;
     let mut sound_near = 0.0f32;
+    let mut sound_path_ref: Option<[u8; 4]> = None;
     let mut emit_child_id: Option<[u8; 4]> = None;
     let mut init_scale = [1.0f32; 3];
     let mut single_scale_variance = None;
@@ -2382,6 +2386,16 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 sound_far = f32_le(body, payload);
                 sound_near = f32_le(body, payload + 4);
             }
+            // research/XIClient CYyGenerator.cpp ElemGenerate case 0x6B — path_id char[4] plus
+            // two zero words; only a sound elem consumes the resolved rail.
+            SOUND_PATH_REF_OPCODE if payload + 12 <= body.len() => {
+                sound_path_ref = Some([
+                    body[payload],
+                    body[payload + 1],
+                    body[payload + 2],
+                    body[payload + 3],
+                ]);
+            }
             _ => decoded = false,
         }
         blocks.push((
@@ -2880,6 +2894,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             emit_child_id,
             sound_far,
             sound_near,
+            sound_path_ref,
         },
         blocks,
     )))
@@ -2895,6 +2910,12 @@ pub(crate) const LINKED_DATA_SOUND: u8 = 0x3D;
 // `s_width = 0.0` unconditionally, so the third shipped word (non-zero in 22 of the 5,895
 // generators) is discarded rather than read.
 const SOUND_SETUP_OPCODE: u8 = 0x4C;
+
+// research/XIClient CYyGenerator.cpp ElemGenerate case 0x6B — a sound elem binds its attenuation
+// origin to an Sph rail resource (ResourceType.h `Sph = 74`): at generation the resolved
+// CMoSphRes's nearest point to the camera eye replaces the generator position. The two trailing
+// words are zero in every shipped use.
+const SOUND_PATH_REF_OPCODE: u8 = 0x6B;
 
 /// A 0x05 Generator whose setup links a 0x3D `Sep` — a placed sound emitter rather than a
 /// particle. [`ParticleGeneratorDef::parse`] rejects the same chunks, so the two views
@@ -2928,6 +2949,11 @@ pub struct SoundGeneratorDef {
     /// keyframe track sampled at the full-day interpolation that multiplies the emitter's gain
     /// (research/xim ParticleGeneratorParser.kt — audioConfiguration.volumeMultiplier).
     pub tod_volume_track: Option<[u8; 4]>,
+
+    /// sec2 0x6B — the Sph rail resource (chunk kind 0x4A) whose nearest point to the camera eye
+    /// is this emitter's attenuation origin. No parser for that chunk exists yet, so the engine
+    /// falls back to the generator origin and diagnostics records the gap.
+    pub path_ref: Option<[u8; 4]>,
 }
 
 impl SoundGeneratorDef {
@@ -2965,6 +2991,7 @@ impl SoundGeneratorDef {
             max_life_frames: s.max_life_frames,
             attach_type: s.attach_type,
             tod_volume_track: s.tod_volume_track,
+            path_ref: s.sound_path_ref,
         }
     }
 
@@ -5886,6 +5913,30 @@ mod tests {
             ParticleGeneratorDef::parse(&body).unwrap().is_none(),
             "a sound generator must never reach the particle sim"
         );
+    }
+
+    // CYyGenerator.cpp ElemGenerate case 0x6B — the payload is path_id char[4] plus two words;
+    // the shipped kaw3/skw3 river emitters reference a rail no zone DAT in scope defines.
+    #[test]
+    fn sound_path_ref_reads_the_rail_name_and_ignores_the_trailing_words() {
+        let mut setup = setup_with_link(LINKED_DATA_SOUND);
+        setup[4 + 8..4 + 12].copy_from_slice(b"5009");
+        let mut p = Vec::new();
+        p.extend_from_slice(b"kaw3");
+        p.extend_from_slice(&7u32.to_le_bytes());
+        p.extend_from_slice(&9u32.to_le_bytes());
+        setup.extend(op(SOUND_PATH_REF_OPCODE, 4, &p));
+
+        let body = build(&setup, 30, GEN_FLAG_AUTO_RUN);
+        let def = SoundGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.path_ref, Some(*b"kaw3"));
+        assert_eq!(def.sep_id, *b"5009");
+
+        // A mesh generator carrying the same block parses it and declines to claim it.
+        let mut setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        setup.extend(op(SOUND_PATH_REF_OPCODE, 4, &p));
+        let body = build(&setup, 30, GEN_FLAG_AUTO_RUN);
+        assert!(SoundGeneratorDef::parse(&body).unwrap().is_none());
     }
 
     fn with_sec1(mut body: Vec<u8>, sec1: &[u8]) -> Vec<u8> {

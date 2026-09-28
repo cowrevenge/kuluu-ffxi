@@ -58,6 +58,8 @@ enum Case {
     Gen141,
     Gen144,
     Hit1Full,
+    Hi26,
+    Sb00,
 }
 
 impl Case {
@@ -73,6 +75,8 @@ impl Case {
             Self::Gen141 => "g141 (alpha 1)",
             Self::Gen144 => "g144 (alpha 1)",
             Self::Hit1Full => "hit1 full (141/144 alpha 1)",
+            Self::Hi26 => "hi26 routine (g261 child carrier)",
+            Self::Sb00 => "sb00 routine (gs02 child carrier)",
         }
     }
 
@@ -681,6 +685,8 @@ fn spawn_panel(commands: &mut Commands) {
         Case::Gen141,
         Case::Gen144,
         Case::Hit1Full,
+        Case::Hi26,
+        Case::Sb00,
     ] {
         let button = commands
             .spawn((
@@ -740,6 +746,9 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::MobRespawn => std::time::Duration::from_millis(300),
         Case::Gen141 | Case::Gen144 => std::time::Duration::from_millis(2000),
         Case::Hit1Full => std::time::Duration::from_millis(2500),
+        // The carrier particle lives 60 frames (1s) and emits its child every frame in that
+        // window; hold the lock long enough to watch the child appear.
+        Case::Hi26 | Case::Sb00 => std::time::Duration::from_millis(2500),
     }
 }
 
@@ -885,6 +894,20 @@ fn run_pending_case(
             &mut commands,
         ),
         Case::Hit1Full => fire_hit1_full(&tracked, global.as_deref(), &mut log, &mut commands),
+        Case::Hi26 => fire_named_routine(
+            &tracked,
+            global.as_deref(),
+            b"hi26",
+            &mut log,
+            &mut commands,
+        ),
+        Case::Sb00 => fire_named_routine(
+            &tracked,
+            global.as_deref(),
+            b"sb00",
+            &mut log,
+            &mut commands,
+        ),
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }
 
@@ -1156,6 +1179,45 @@ fn fire_hit1_full(
             enqueue_routine(commands, worm, active);
         }
         None => log_line(log, "hit1 UNRESOLVED in the global effect dir".into()),
+    }
+}
+
+// Tester-only: play a named ROM/0/0.DAT routine on the worm (as target), no alpha override.
+fn fire_named_routine(
+    tracked: &TrackedEntities,
+    global: Option<&GlobalEffectDir>,
+    routine: &[u8; 4],
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
+        log_line(log, "worm not loaded yet".into());
+        return;
+    };
+    let Some(g) = global else {
+        log_line(log, "no global effect dir wired".into());
+        return;
+    };
+    let lookup = RoutineLookup::new().with_dat(&g.schedulers);
+    match ActiveScheduler::from_routine(&lookup, routine) {
+        Some(active) => {
+            log_line(
+                log,
+                format!(
+                    "{} on worm: {}",
+                    String::from_utf8_lossy(routine),
+                    stage_summary(&active)
+                ),
+            );
+            enqueue_routine(commands, worm, active);
+        }
+        None => log_line(
+            log,
+            format!(
+                "{} UNRESOLVED in the global effect dir",
+                String::from_utf8_lossy(routine)
+            ),
+        ),
     }
 }
 

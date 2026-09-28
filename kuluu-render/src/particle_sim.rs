@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, MeshVertexAttribute, PrimitiveTopology, VertexFormat};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use ffxi_dat::particle_gen::{

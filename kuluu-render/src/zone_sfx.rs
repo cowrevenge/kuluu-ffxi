@@ -546,35 +546,54 @@ mod tests {
             ),
             0.5
         );
-        let mut half = AudioMuteState::default();
-        half.master = 0.5;
+        let half = AudioMuteState {
+            master: 0.5,
+            ..Default::default()
+        };
         assert_eq!(
             zone_sfx_gain(&half, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
             0.25
         );
-        let mut muted = AudioMuteState::default();
-        muted.sfx = true;
+        let muted = AudioMuteState {
+            sfx: true,
+            ..Default::default()
+        };
         assert_eq!(
             zone_sfx_gain(&muted, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
             0.0
         );
-        let mut amb_off = AudioMuteState::default();
-        amb_off.ambient = false;
+        let amb_off = AudioMuteState {
+            ambient: false,
+            ..Default::default()
+        };
         assert_eq!(
             zone_sfx_gain(&amb_off, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
             0.0,
             "the ambient gate silences mixer A regardless of master/gain"
         );
-        let mut doubled = AudioMuteState::default();
-        doubled.ambient_gain = 2.0;
+        let doubled = AudioMuteState {
+            ambient_gain: 2.0,
+            ..Default::default()
+        };
         assert_eq!(
             zone_sfx_gain(&doubled, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
             1.0,
             "gain clamps at full volume"
         );
-        doubled.master = 0.5;
+        let doubled_half = AudioMuteState {
+            ambient_gain: 2.0,
+            master: 0.5,
+            ..Default::default()
+        };
         assert_eq!(
-            zone_sfx_gain(&doubled, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            zone_sfx_gain(
+                &doubled_half,
+                eye,
+                origin,
+                0.0,
+                0.0,
+                UNATTACHED_VERTICAL_WEIGHT
+            ),
             0.5,
             "gain multiplies into master"
         );

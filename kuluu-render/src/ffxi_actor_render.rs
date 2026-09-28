@@ -1015,7 +1015,7 @@ pub fn load_pc(
         let slot = if weapon_anim_type == CIB_MOTION_INDEX_NONE {
             0u8
         } else {
-            (weapon_anim_type as u8).min(12)
+            weapon_anim_type.min(12)
         };
         if let Ok(base_loc) = root.resolve(base) {
             if let Some(id) = root.id_at(&base_loc.rom_dir, base_loc.sub_path.dir, slot) {

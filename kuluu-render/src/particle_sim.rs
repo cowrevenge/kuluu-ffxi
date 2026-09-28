@@ -5231,7 +5231,10 @@ mod tests {
         use ffxi_dat::texture::DXT3_ALPHA_DITHER_STEP;
 
         let step = DXT3_ALPHA_DITHER_STEP as usize;
-        alpha.iter().filter(|a| **a as usize % step != 0).count()
+        alpha
+            .iter()
+            .filter(|a| !(**a as usize).is_multiple_of(step))
+            .count()
     }
 
     fn image_alpha(images: &Assets<Image>, handle: &Handle<Image>) -> Vec<u8> {

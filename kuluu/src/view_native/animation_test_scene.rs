@@ -920,7 +920,7 @@ fn fire_hit(
         Case::PlayerNhIt | Case::PlayerChit | Case::PlayerDhit => (HUME_ID, WORM_ID),
         _ => (WORM_ID, HUME_ID),
     };
-    if tracked.by_id.get(&attacker_id).is_none() || tracked.by_id.get(&victim_id).is_none() {
+    if !tracked.by_id.contains_key(&attacker_id) || !tracked.by_id.contains_key(&victim_id) {
         log_line(log, "actors not loaded yet — try again in a second".into());
         return;
     }
@@ -1226,7 +1226,7 @@ fn sync_log_text(log: Res<TestLog>, mut node: Query<&mut Text, With<LogText>>) {
     if !log.is_changed() {
         return;
     }
-    let recent: Vec<String> = log.lines.iter().rev().take(18).map(|s| s.clone()).collect();
+    let recent: Vec<String> = log.lines.iter().rev().take(18).cloned().collect();
     let text = recent.into_iter().rev().collect::<Vec<_>>().join("\n");
     if let Ok(mut t) = node.single_mut() {
         *t = Text::new(text);

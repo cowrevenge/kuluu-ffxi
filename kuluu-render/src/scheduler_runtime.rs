@@ -3969,16 +3969,12 @@ fn run_routine_on(
     global: Option<&GlobalEffectDir>,
     commands: &mut Commands,
 ) -> Option<String> {
-    let Some(routines) = actor_render_routines(entity, q_children, q_render) else {
-        return None;
-    };
+    let routines = actor_render_routines(entity, q_children, q_render)?;
     let mut lookup = RoutineLookup::new().with_actor(routines);
     if let Some(g) = global {
         lookup = lookup.with_dat(&g.schedulers);
     }
-    let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
-        return None;
-    };
+    let active = ActiveScheduler::from_routine(&lookup, routine)?;
     let summary = stage_summary(&active);
     match q_active.get_mut(entity) {
         Ok(mut scheds) => scheds.push(active),

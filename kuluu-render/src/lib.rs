@@ -60,6 +60,7 @@ pub mod nameplate_final_pass;
 pub mod nameplate_icons;
 pub mod nameplate_marker;
 pub mod nameplate_overlay;
+pub mod particle_diag;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod particle_sim;
 pub mod perf_probe;

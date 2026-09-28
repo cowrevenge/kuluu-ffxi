@@ -44,15 +44,26 @@ pub enum GeneratorOpcodeOutcome {
 /// what it discards instead of inferring either from a missing visual.
 pub type GeneratorOpcodeSink<'a> = &'a mut dyn FnMut(GeneratorSection, u8, GeneratorOpcodeOutcome);
 
+/// The block-level view: the same notification plus the block's size in 4-byte words (header
+/// word included) and its raw payload after that header — what an unknown opcode actually
+/// carried, for a diagnostics table instead of a guess.
+pub type GeneratorBlockSink<'a> =
+    &'a mut dyn FnMut(GeneratorSection, u8, usize, &[u8], GeneratorOpcodeOutcome);
+
 /// A generator chunk is offered to every def parser in turn and only one claims it, so a block
 /// is only honestly this parse's business once the parse that saw it returns a def. Blocks are
 /// buffered until then; a sound generator must not report its whole stream as particle
 /// initializers.
-pub(crate) fn flush_blocks(sink: GeneratorOpcodeSink<'_>, blocks: &[(GeneratorSection, u8, bool)]) {
-    for &(section, opcode, decoded) in blocks {
+pub(crate) fn flush_blocks(
+    sink: GeneratorBlockSink<'_>,
+    blocks: &[(GeneratorSection, u8, usize, &[u8], bool)],
+) {
+    for &(section, opcode, size_words, payload, decoded) in blocks {
         sink(
             section,
             opcode,
+            size_words,
+            payload,
             if decoded {
                 GeneratorOpcodeOutcome::Decoded
             } else {
@@ -995,7 +1006,13 @@ impl ParticleGeneratorDef {
     }
 
     pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
-        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
+        Self::parse_detailed(body, &mut |section, opcode, _size_words, _args, outcome| {
+            sink(section, opcode, outcome)
+        })
+    }
+
+    pub fn parse_detailed(body: &[u8], sink: GeneratorBlockSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, usize, &[u8], bool)> = Vec::new();
         if body.len() < HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -1553,7 +1570,13 @@ impl ParticleGeneratorDef {
                 }
                 _ => decoded = false,
             }
-            blocks.push((GeneratorSection::Initializers, opcode, decoded));
+            blocks.push((
+                GeneratorSection::Initializers,
+                opcode,
+                size_words,
+                &body[payload..payload + block_len - 4],
+                decoded,
+            ));
             cursor += block_len;
         }
 
@@ -1781,7 +1804,13 @@ impl ParticleGeneratorDef {
                     }
                     _ => decoded = false,
                 }
-                blocks.push((GeneratorSection::Updaters, opcode, decoded));
+                blocks.push((
+                    GeneratorSection::Updaters,
+                    opcode,
+                    size_words,
+                    &body[payload..payload + block_len - 4],
+                    decoded,
+                ));
                 cursor += block_len;
             }
         }
@@ -1824,7 +1853,13 @@ impl ParticleGeneratorDef {
                     }
                     _ => decoded = false,
                 }
-                blocks.push((GeneratorSection::Setup, opcode, decoded));
+                blocks.push((
+                    GeneratorSection::Setup,
+                    opcode,
+                    size_words,
+                    &body[payload..payload + block_len - 4],
+                    decoded,
+                ));
                 cursor += block_len;
             }
         }
@@ -1843,10 +1878,21 @@ impl ParticleGeneratorDef {
                 // 0x01 is the child-emitter block (research/xim ParticleExpirationHandlers.kt
                 // EmitChildHandler: [expectZero32, child generator DAT id]); retail's ElemDie has
                 // no case for it and the engine has no child-particle path, so decode-only.
+                let payload = cursor + 4;
+                let block_len = size_words * 4;
+                if cursor + block_len > body.len() {
+                    break;
+                }
                 let decoded = opcode == SEC4_OPCODE_RELIFE || opcode == SEC4_OPCODE_EMIT_CHILD;
                 relife_on_expiry |= opcode == SEC4_OPCODE_RELIFE;
-                blocks.push((GeneratorSection::ElementDie, opcode, decoded));
-                cursor += size_words * 4;
+                blocks.push((
+                    GeneratorSection::ElementDie,
+                    opcode,
+                    size_words,
+                    &body[payload..payload + block_len - 4],
+                    decoded,
+                ));
+                cursor += block_len;
             }
         }
 
@@ -2023,7 +2069,13 @@ impl SoundGeneratorDef {
     }
 
     pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
-        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
+        Self::parse_detailed(body, &mut |section, opcode, _size_words, _args, outcome| {
+            sink(section, opcode, outcome)
+        })
+    }
+
+    pub fn parse_detailed(body: &[u8], sink: GeneratorBlockSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, usize, &[u8], bool)> = Vec::new();
         if body.len() < HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -2083,7 +2135,13 @@ impl SoundGeneratorDef {
                 }
                 _ => decoded = false,
             }
-            blocks.push((GeneratorSection::SoundSetup, opcode, decoded));
+            blocks.push((
+                GeneratorSection::SoundSetup,
+                opcode,
+                size_words,
+                &body[payload..payload + block_len - 4],
+                decoded,
+            ));
             cursor += block_len;
         }
 
@@ -2157,7 +2215,13 @@ impl DistortionGeneratorDef {
     }
 
     pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
-        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
+        Self::parse_detailed(body, &mut |section, opcode, _size_words, _args, outcome| {
+            sink(section, opcode, outcome)
+        })
+    }
+
+    pub fn parse_detailed(body: &[u8], sink: GeneratorBlockSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, usize, &[u8], bool)> = Vec::new();
         if body.len() < HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -2214,7 +2278,13 @@ impl DistortionGeneratorDef {
                 }
                 _ => decoded = false,
             }
-            blocks.push((GeneratorSection::DistortionSetup, opcode, decoded));
+            blocks.push((
+                GeneratorSection::DistortionSetup,
+                opcode,
+                size_words,
+                &body[payload..payload + block_len - 4],
+                decoded,
+            ));
             cursor += block_len;
         }
 

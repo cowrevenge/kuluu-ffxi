@@ -782,6 +782,23 @@ pub fn parse_action_bytes_reporting(
     parse_action_tree_reporting(&ffxi_dat::chunk::walk_tree(bytes))
 }
 
+/// The raw payload of one generator block no section arm decoded — what an unknown opcode
+/// actually carried. `args_sample` is capped so a corpus-wide walk stays bounded; the full
+/// length is `size_words * 4 - 4`.
+pub const DROPPED_ARGS_SAMPLE_BYTES: usize = 32;
+
+#[derive(Debug, Clone)]
+pub struct DroppedOpcodeDetail {
+    pub name: [u8; 4],
+    pub dir: [u8; 4],
+    pub section: ffxi_dat::particle_gen::GeneratorSection,
+    pub opcode: u8,
+    /// The block's size in 4-byte words, header word included.
+    pub size_words: usize,
+    /// The payload after the header word, capped at DROPPED_ARGS_SAMPLE_BYTES.
+    pub args_sample: Vec<u8>,
+}
+
 /// What one effect-DAT parse understood nothing of: scheduler stages whose opcode reaches no
 /// `StageKind` arm, and generator blocks no section arm decoded. Both are silent degradations —
 /// the routine still runs, missing whatever the instruction said — so they are counted rather
@@ -797,9 +814,12 @@ pub struct EffectCoverageReport {
         u8,
         ffxi_dat::particle_gen::GeneratorOpcodeOutcome,
     )>,
-    /// (generator name, raw kind byte, linked data id) for chunks whose StandardParticleSetup
-    /// names a kind the reader does not recognise — refused outright, nothing renders.
-    pub unknown_linked_data_kinds: Vec<([u8; 4], u8, [u8; 4])>,
+    /// The raw payload of every Dropped block, for the unknown-opcode table.
+    pub dropped_opcode_details: Vec<DroppedOpcodeDetail>,
+    /// (generator name, raw kind byte, linked data id, directory) for chunks whose
+    /// StandardParticleSetup names a kind the reader does not recognise — refused outright,
+    /// nothing renders.
+    pub unknown_linked_data_kinds: Vec<([u8; 4], u8, [u8; 4], [u8; 4])>,
 }
 
 impl EffectCoverageReport {
@@ -859,10 +879,24 @@ pub fn parse_action_tree_reporting(
                 }
             }
             ChunkKind::Generator => {
-                let mut sink = |section, opcode, outcome| {
+                let mut sink = |section, opcode, size_words, args: &[u8], outcome| {
                     report
                         .generator_opcodes
                         .push((c.name, section, opcode, outcome));
+                    if outcome == ffxi_dat::particle_gen::GeneratorOpcodeOutcome::Dropped {
+                        report.dropped_opcode_details.push(DroppedOpcodeDetail {
+                            name: c.name,
+                            dir,
+                            section,
+                            opcode,
+                            size_words,
+                            args_sample: args
+                                .iter()
+                                .take(DROPPED_ARGS_SAMPLE_BYTES)
+                                .copied()
+                                .collect(),
+                        });
+                    }
                 };
                 if let Ok(Some(g)) = Generator::parse(c.name, c.data) {
                     assets.generators.insert(c.name, g);
@@ -870,7 +904,7 @@ pub fn parse_action_tree_reporting(
                 if let Ok(Some(e)) = Generator::parse_particle_emitter(c.data) {
                     assets.emitters.insert(c.name, e);
                 }
-                match ffxi_dat::particle_gen::ParticleGeneratorDef::parse_reporting(
+                match ffxi_dat::particle_gen::ParticleGeneratorDef::parse_detailed(
                     c.data, &mut sink,
                 ) {
                     Ok(Some(d)) => {
@@ -887,7 +921,7 @@ pub fn parse_action_tree_reporting(
                         // what it was — no stand-in render, no silent drop.
                         report
                             .unknown_linked_data_kinds
-                            .push((name, kind, linked_id));
+                            .push((name, kind, linked_id, dir));
                         tracing::error!(
                             "generator {:?}: unknown linked_data_type {kind:#04x} (linked id {:?}) — chunk refused",
                             name, linked_id,
@@ -896,11 +930,11 @@ pub fn parse_action_tree_reporting(
                     _ => {}
                 }
                 if let Ok(Some(d)) =
-                    ffxi_dat::particle_gen::SoundGeneratorDef::parse_reporting(c.data, &mut sink)
+                    ffxi_dat::particle_gen::SoundGeneratorDef::parse_detailed(c.data, &mut sink)
                 {
                     assets.sound_defs.insert(c.name, d);
                 }
-                if let Ok(Some(d)) = ffxi_dat::particle_gen::DistortionGeneratorDef::parse_reporting(
+                if let Ok(Some(d)) = ffxi_dat::particle_gen::DistortionGeneratorDef::parse_detailed(
                     c.data, &mut sink,
                 ) {
                     assets.distortion_defs.insert(c.name, d);

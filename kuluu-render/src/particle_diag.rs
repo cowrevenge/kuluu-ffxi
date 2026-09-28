@@ -280,6 +280,17 @@ fn resolve_draw_resource(
                     None,
                 );
             };
+            // A zeroed texture_name references no texture at all — the D3m draws vertex-coloured
+            // by design (hi14 in 0.DAT), which is not a missing resource.
+            if d3m.texture_name == [0u8; 16] {
+                return (
+                    format!("0x1F mesh '{}' (no texture referenced)", id4(def.mesh_id)),
+                    Some(format!(
+                        "mesh {} / vertex-coloured, no texture by design",
+                        id4(def.mesh_id)
+                    )),
+                );
+            }
             let (namespace, local) = d3m.texture_name_tokens();
             let found = (!local.is_empty())
                 .then(|| {

@@ -309,6 +309,23 @@ fn sync_zone_sfx(
     }
 }
 
+// Mixer A's per-frame gain: retail Calc3D × master — the same law `play_sfx_system`
+// applies to routine cues, so lowering master quiets ambient with everything else;
+// the sfx mute still hard-overrides.
+pub fn zone_sfx_gain(
+    mute: &AudioMuteState,
+    eye: Vec3,
+    origin: Vec3,
+    near: f32,
+    far: f32,
+    vertical_weight: f32,
+) -> f32 {
+    if mute.sfx {
+        return 0.0;
+    }
+    sfx_attenuation_calc3d(eye, origin, near, far, vertical_weight) * mute.master
+}
+
 fn update_zone_sfx(
     time: Res<Time>,
     slots: Res<BgmSlots>,
@@ -346,11 +363,7 @@ fn update_zone_sfx(
         } else {
             (em.origin, UNATTACHED_VERTICAL_WEIGHT)
         };
-        let gain = if mute.sfx {
-            0.0
-        } else {
-            sfx_attenuation_calc3d(eye, origin, em.near, em.far, vertical_weight)
-        };
+        let gain = zone_sfx_gain(&mute, eye, origin, em.near, em.far, vertical_weight);
 
         if em.loops {
             match (em.audio, gain > 0.0) {
@@ -481,6 +494,38 @@ mod tests {
                 .insert(*name, Sep::parse(*name, &sep_body(*se_id, 0)).unwrap());
         }
         assets
+    }
+
+    // Master at 50% halves an ambient emitter exactly as it does a routine cue;
+    // the sfx mute overrides master to silence.
+    #[test]
+    fn ambient_gain_follows_master_and_mute_overrides() {
+        let eye = Vec3::ZERO;
+        // Authored 0/0 → Calc3D class defaults (near 3, far 30); 16.5 yalms is the midpoint.
+        let origin = Vec3::new(0.0, 0.0, 16.5);
+        assert_eq!(
+            zone_sfx_gain(
+                &AudioMuteState::default(),
+                eye,
+                origin,
+                0.0,
+                0.0,
+                UNATTACHED_VERTICAL_WEIGHT
+            ),
+            0.5
+        );
+        let mut half = AudioMuteState::default();
+        half.master = 0.5;
+        assert_eq!(
+            zone_sfx_gain(&half, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.25
+        );
+        let mut muted = AudioMuteState::default();
+        muted.sfx = true;
+        assert_eq!(
+            zone_sfx_gain(&muted, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.0
+        );
     }
 
     /// Only an auto-run, source-attached Sep generator rides the actor; a zone

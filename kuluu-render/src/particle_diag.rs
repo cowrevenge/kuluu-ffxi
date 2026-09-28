@@ -93,7 +93,6 @@ fn hex_sample(args: &[u8], cap: usize) -> String {
 // these must remove it here.
 pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static str> {
     Some(match (section, opcode) {
-        (GeneratorSection::Initializers, 0x19) => "color_transform: no consumer",
         (GeneratorSection::Initializers, 0x1D) => "sprite-sheet init word never read",
         (GeneratorSection::Initializers, 0x29) => "scale_z_track: the engine sprite is 2-D",
         (GeneratorSection::Initializers, 0x32) => {
@@ -116,7 +115,6 @@ pub fn inert_reason(section: GeneratorSection, opcode: u8) -> Option<&'static st
         }
         (GeneratorSection::Initializers, 0x56) => "batching_setup: retail walk has no case",
         (GeneratorSection::Initializers, 0x8E) => "foot_mark: spawn-snap not implemented",
-        (GeneratorSection::Updaters, 0x0B | 0x0C) => "color transform applier/modifier unmodelled",
         (GeneratorSection::Updaters, 0x25 | 0x33) => "child-generator updater: no child path",
         (GeneratorSection::Updaters, 0x34) => "point-list position updater: no spline runtime",
         (GeneratorSection::Updaters, 0x36 | 0x37 | 0x3B) => {

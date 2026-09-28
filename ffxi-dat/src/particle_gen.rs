@@ -490,16 +490,22 @@ pub struct ParticleGeneratorDef {
     // xim's mapping is the available evidence).
     pub color_variance: Option<[f32; 4]>,
     // sec2 0x19 ColorTransformSetup: four i16s (r,g,b,a) written to the element's allocation
-    // slot. Parsed, not applied: the retail decompile's ElemGenerate has no 0x19 case
-    // (XICLIENT_CODE_MISSING) and xim allocates the transform but its drawers never read it
-    // (research/xim ParticleInitializers.kt ColorTransformSetup — particle.allocate only), so
-    // the application is unknown and the shipped alpha is always 0.
+    // slot at emit (research/xim ParticleInitializers.kt ColorTransformSetup). The retail
+    // decompile's ElemGenerate has no 0x19 case, so xim's mapping is the available evidence;
+    // every shipped alpha channel is 0.
     pub color_transform: Option<[i16; 4]>,
+    // sec2 0x1A ColorTransformVariance: four i16s — each emitted element's transform gains
+    // round(posRand(1) × variance) per channel on top of the 0x19 base (research/xim
+    // ParticleInitializers.kt ColorTransformVariance).
+    pub color_transform_variance: Option<[i16; 4]>,
+    // sec3 0x0B ColorTransformApplier: no payload — arms the per-frame application of the
+    // transform to the element's colour (research/xim ParticleUpdaters.kt
+    // ColorTransformApplier).
+    pub color_transform_applier: bool,
     // sec3 0x0C ColorTransformModifier: four i16s [r, g, b, a] — the per-frame rate on the
     // sec2 0x19 color transform over the particle's life (research/xim
     // ParticleUpdaters.kt ColorTransformModifier — colorTransform += floor(modifier ×
-    // frames/30) per frame). The engine does not model the color transform's
-    // application, so parse-only.
+    // frames/30) per frame).
     pub color_transform_modifier: Option<[i16; 4]>,
     pub init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
@@ -971,6 +977,8 @@ const SEC2_OPCODE_SCALE_VELOCITY: u8 = 0x12;
 const SEC2_OPCODE_SCALE_VEL_VARIANCE: u8 = 0x13;
 const SEC2_OPCODE_COLOR_VARIANCE: u8 = 0x17;
 const SEC2_OPCODE_COLOR_TRANSFORM_SETUP: u8 = 0x19;
+// research/xim ParticleGeneratorParser.kt sec2Handler — ColorTransformVariance.
+const SEC2_OPCODE_COLOR_TRANSFORM_VARIANCE: u8 = 0x1A;
 const SEC2_OPCODE_SPRITE_SHEET_INIT: u8 = 0x1D;
 const SEC2_OPCODE_SPHERICAL_VARIANCE_FULL: u8 = 0x1F;
 // research/xim ParticleGeneratorParser.kt sec2Handler — KeyFrameValueSetup bound to the
@@ -1130,16 +1138,22 @@ pub(crate) struct GeneratorSections {
     // xim's mapping is the available evidence).
     pub(crate) color_variance: Option<[f32; 4]>,
     // sec2 0x19 ColorTransformSetup: four i16s (r,g,b,a) written to the element's allocation
-    // slot. Parsed, not applied: the retail decompile's ElemGenerate has no 0x19 case
-    // (XICLIENT_CODE_MISSING) and xim allocates the transform but its drawers never read it
-    // (research/xim ParticleInitializers.kt ColorTransformSetup — particle.allocate only), so
-    // the application is unknown and the shipped alpha is always 0.
+    // slot at emit (research/xim ParticleInitializers.kt ColorTransformSetup). The retail
+    // decompile's ElemGenerate has no 0x19 case, so xim's mapping is the available evidence;
+    // every shipped alpha channel is 0.
     pub(crate) color_transform: Option<[i16; 4]>,
+    // sec2 0x1A ColorTransformVariance: four i16s — each emitted element's transform gains
+    // round(posRand(1) × variance) per channel on top of the 0x19 base (research/xim
+    // ParticleInitializers.kt ColorTransformVariance).
+    pub(crate) color_transform_variance: Option<[i16; 4]>,
+    // sec3 0x0B ColorTransformApplier: no payload — arms the per-frame application of the
+    // transform to the element's colour (research/xim ParticleUpdaters.kt
+    // ColorTransformApplier).
+    pub(crate) color_transform_applier: bool,
     // sec3 0x0C ColorTransformModifier: four i16s [r, g, b, a] — the per-frame rate on the
     // sec2 0x19 color transform over the particle's life (research/xim
     // ParticleUpdaters.kt ColorTransformModifier — colorTransform += floor(modifier ×
-    // frames/30) per frame). The engine does not model the color transform's
-    // application, so parse-only.
+    // frames/30) per frame).
     pub(crate) color_transform_modifier: Option<[i16; 4]>,
     pub(crate) init_velocity: [f32; 3],
     // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
@@ -1603,6 +1617,8 @@ impl ParticleGeneratorDef {
             init_color: s.init_color,
             color_variance: s.color_variance,
             color_transform: s.color_transform,
+            color_transform_variance: s.color_transform_variance,
+            color_transform_applier: s.color_transform_applier,
             color_transform_modifier: s.color_transform_modifier,
             init_velocity: s.init_velocity,
             velocity_variance: s.velocity_variance,
@@ -1768,6 +1784,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut init_color = [1.0f32; 4];
     let mut color_variance = None;
     let mut color_transform = None;
+    let mut color_transform_variance = None;
     let mut init_velocity = [0.0f32; 3];
     let mut position_allocation = None;
     let mut rotation_allocation = None;
@@ -2113,10 +2130,21 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                     body[payload + 3] as f32 / 255.0,
                 ]);
             }
-            // Parsed only: CYyGenerator.cpp CYyGenerator::ElemGenerate has no 0x19
-            // case, so the transform's application is unknown.
+            // research/xim ParticleInitializers.kt ColorTransformSetup: four signed i16s
+            // (r,g,b,a) written to the element's allocation slot at emit. CYyGenerator.cpp
+            // ElemGenerate has no 0x19 case, so xim's mapping is the available evidence.
             SEC2_OPCODE_COLOR_TRANSFORM_SETUP if payload + 8 <= body.len() => {
                 color_transform = Some([
+                    i16::from_le_bytes([body[payload], body[payload + 1]]),
+                    i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
+                    i16::from_le_bytes([body[payload + 4], body[payload + 5]]),
+                    i16::from_le_bytes([body[payload + 6], body[payload + 7]]),
+                ]);
+            }
+            // research/xim ParticleInitializers.kt ColorTransformVariance: four signed i16s;
+            // each emitted element's transform gains round(posRand(1) × variance) per channel.
+            SEC2_OPCODE_COLOR_TRANSFORM_VARIANCE if payload + 8 <= body.len() => {
+                color_transform_variance = Some([
                     i16::from_le_bytes([body[payload], body[payload + 1]]),
                     i16::from_le_bytes([body[payload + 2], body[payload + 3]]),
                     i16::from_le_bytes([body[payload + 4], body[payload + 5]]),
@@ -2328,6 +2356,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut velocity_rotator = None;
     let mut dampening_factor_applier = false;
     let mut velocity_rotation_updater = false;
+    let mut color_transform_applier = false;
     let mut color_transform_modifier = None;
     let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
     let sec3_raw = u32_le(body, 0x78) as usize;
@@ -2432,8 +2461,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                     draw_distance_far = Some(f32_le(body, payload + 4));
                 }
                 // research/xim ParticleUpdaters.kt ColorTransformModifier: the per-frame
-                // rate on the SEC2_OPCODE_COLOR_TRANSFORM_SETUP transform. The engine does
-                // not model the transform's application, so parse-only.
+                // rate on the SEC2_OPCODE_COLOR_TRANSFORM_SETUP transform (particle_sim.rs).
                 SEC3_OPCODE_COLOR_TRANSFORM_MODIFIER if payload + 8 <= body.len() => {
                     color_transform_modifier = Some([
                         i16::from_le_bytes([body[payload], body[payload + 1]]),
@@ -2468,10 +2496,10 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                 | SEC3_OPCODE_SPECULAR_ROT_Z_PROGRESS
                 | SEC3_OPCODE_SPECULAR_COLOR_A_PROGRESS => {}
                 // research/xim ParticleUpdaters.kt ColorTransformApplier: no payload —
-                // color += (transform shr 7) * (0.5 * dt) per frame. The engine does
-                // not model the transform's application, so the block arms nothing and
-                // only consumes.
-                SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {}
+                // color += (transform shr 7) * (0.5 * dt) per frame (particle_sim.rs).
+                SEC3_OPCODE_COLOR_TRANSFORM_APPLIER => {
+                    color_transform_applier = true;
+                }
                 // research/xim ParticleGeneratorParser.kt sec3Handler: ChildGeneratorBasicUpdater
                 // / ChildGeneratorUpdater: no payload, they emit/update the sec2 child
                 // generator per particle. The engine has no child-particle path, so the
@@ -2680,6 +2708,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             init_color,
             color_variance,
             color_transform,
+            color_transform_variance,
+            color_transform_applier,
             color_transform_modifier,
             init_velocity,
             velocity_variance,
@@ -4582,11 +4612,11 @@ mod tests {
         }
     }
 
-    // sec3 0x0B ColorTransformApplier: no payload — color += (transform shr 7) × (0.5 × dt)
-    // per frame; the engine does not model the color transform's application (research/xim
-    // ParticleUpdaters.kt ColorTransformApplier).
+    // sec3 0x0B ColorTransformApplier: no payload — arms the per-frame application of the
+    // transform to the element's colour (particle_sim.rs; research/xim ParticleUpdaters.kt
+    // ColorTransformApplier).
     #[test]
-    fn color_transform_applier_consumes_the_block_without_state() {
+    fn color_transform_applier_arms_the_application() {
         let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
         sec2.extend(op(OPCODE_END, 0, &[]));
@@ -4598,11 +4628,16 @@ mod tests {
         body.extend_from_slice(&op(OPCODE_END, 0, &[]));
 
         let mut outcomes: Vec<(GeneratorSection, u8, GeneratorOpcodeOutcome)> = Vec::new();
-        ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
+        let def = ParticleGeneratorDef::parse_reporting(&body, &mut |s, op, o| {
             outcomes.push((s, op, o));
         })
         .unwrap()
         .unwrap();
+        assert!(def.color_transform_applier, "sec3 0x0B arms the applier");
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.color_transform_applier);
         assert!(
             outcomes.iter().any(|(s, o, outcome)| {
                 *s == GeneratorSection::Updaters
@@ -4611,6 +4646,28 @@ mod tests {
             }),
             "sec3 0x0B must report decoded: {outcomes:?}"
         );
+    }
+
+    // sec2 0x1A ColorTransformVariance: four signed i16s (research/xim ParticleInitializers.kt
+    // ColorTransformVariance).
+    #[test]
+    fn color_transform_variance_reads_the_four_i16s() {
+        let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let mut sec2 = setup.clone();
+        let mut payload = [0u8; 8];
+        payload[0..2].copy_from_slice(&(-48i16).to_le_bytes());
+        payload[2..4].copy_from_slice(&(-48i16).to_le_bytes());
+        payload[4..6].copy_from_slice(&(32i16).to_le_bytes());
+        sec2.extend(op(SEC2_OPCODE_COLOR_TRANSFORM_VARIANCE, 3, &payload));
+        sec2.extend(op(OPCODE_END, 0, &[]));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(def.color_transform_variance, Some([-48, -48, 32, 0]));
+        let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.color_transform_variance, None);
     }
 
     // sec3 0x25/0x33 ChildGeneratorBasicUpdater / ChildGeneratorUpdater: no payload — they

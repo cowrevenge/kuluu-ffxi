@@ -443,6 +443,13 @@ struct Particle {
     // 0x26 VelocityRotator and replaced wholesale by the sec3 0x2F VelocityRotationUpdater.
     // Zero while neither block is present, so the integration path stays a plain add.
     vel_rot: Vec3,
+    // The sec2 0x19 color transform for this element (base plus one 0x1A variance draw per
+    // channel), drifted by the sec3 0x0C modifier and applied to rgb by the sec3 0x0B
+    // applier. None while the generator carries no setup — xim allocates the slot only from
+    // ColorTransformSetup. The a channel is parsed and drifted but not applied: every shipped
+    // transform's alpha is 0, and per-particle alpha has no draw path of its own.
+    color_transform: Option<[i32; 4]>,
+
     // Some while the generator carries the sec2 0x3D marker (research/xim
     // ParticleGeneratorSettings.kt OscillationParams): the per-axis acceleration (0x3E/0x3F/
     // 0x40 base plus one variance draw) and the applier's last-amplitude memory.
@@ -471,6 +478,18 @@ const WORLD_PARTICLE_VEL_BASIS: Vec3 = Vec3::new(1.0, -1.0, -1.0);
 // work": the rotateAmount accumulates into the velocity rotation at half the authored rate per
 // frame. No XIClient symbol found; flagged for retail verification.
 const VELOCITY_ROTATOR_RATE_HALF: f32 = 0.5;
+
+// research/xim ParticleUpdaters.kt ColorTransformApplier — the transform's shr-7 value is
+// added to the colour at half rate per frame.
+const COLOR_TRANSFORM_STEP_HALF: f32 = 0.5;
+
+// research/xim ParticleUpdaters.kt ColorTransformModifier — the drift divisor: the modifier
+// accumulates floor(modifier × frames/30) into the transform each frame.
+const COLOR_TRANSFORM_MODIFIER_RATE_FRAMES: f32 = 30.0;
+
+// The PS2 half-scale colour byte (ffxi_dat::particle_gen::ps2_float_rescale): 128 is full,
+// so xim's raw-byte-space transform delta divides by this to land on the rescaled rgb.
+const PS2_COLOR_BYTE_SCALE: f32 = 128.0;
 
 // research/xim Particle.kt getTotalVelocity — the velocityRotation rotates the total velocity
 // before integration, negate_rotation_y flipping the y angle sign (yRotationMultiplier). xim's
@@ -1402,6 +1421,29 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
                 p.scale_vel += Vec2::new(accel[0], accel[1]) * frames;
             }
         }
+        // sec3 0x0C ColorTransformModifier: the transform itself drifts — floor(modifier ×
+        // dt/30) per channel (research/xim ParticleUpdaters.kt ColorTransformModifier). The
+        // applier reads the drifted value; no shipped generator carries both a nonzero base
+        // and a modifier, so xim's table order between them is unobservable in the data.
+        if let Some(ct) = p.color_transform.as_mut() {
+            if let Some(modifier) = g.def.color_transform_modifier {
+                for (ch, m) in ct.iter_mut().zip(modifier) {
+                    *ch +=
+                        (m as f32 * frames / COLOR_TRANSFORM_MODIFIER_RATE_FRAMES).floor() as i32;
+                }
+            }
+            // sec3 0x0B ColorTransformApplier: color += (transform shr 7) × (0.5 × dt), in
+            // xim's raw byte space — divided by the PS2 half-scale so it lands on this
+            // particle's rescaled rgb (research/xim ParticleUpdaters.kt ColorTransformApplier).
+            if g.def.color_transform_applier {
+                p.rgb.x +=
+                    (ct[0] >> 7) as f32 * COLOR_TRANSFORM_STEP_HALF * frames / PS2_COLOR_BYTE_SCALE;
+                p.rgb.y +=
+                    (ct[1] >> 7) as f32 * COLOR_TRANSFORM_STEP_HALF * frames / PS2_COLOR_BYTE_SCALE;
+                p.rgb.z +=
+                    (ct[2] >> 7) as f32 * COLOR_TRANSFORM_STEP_HALF * frames / PS2_COLOR_BYTE_SCALE;
+            }
+        }
     }
     reap_expired(g);
 
@@ -1679,6 +1721,18 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         ffxi_dat::particle_gen::ps2_float_rescale(rgb.y),
         ffxi_dat::particle_gen::ps2_float_rescale(rgb.z),
     );
+    // sec2 0x19 ColorTransformSetup + 0x1A ColorTransformVariance: the per-element transform
+    // — base plus one round(posRand(1) × variance) draw per channel (research/xim
+    // ParticleInitializers.kt ColorTransformSetup / ColorTransformVariance).
+    let color_transform = g.def.color_transform.map(|base| {
+        let mut ct: [i32; 4] = base.map(i32::from);
+        if let Some(var) = g.def.color_transform_variance {
+            for (ch, v) in ct.iter_mut().zip(var) {
+                *ch += (next_unit(&mut g.emit_rng) * v as f32).round() as i32;
+            }
+        }
+        ct
+    });
     // sec2 0x3D OscillationSetup + 0x3E/0x3F/0x40 OscillationAccelerationSetup: the
     // per-particle oscillation state — each present axis gets acceleration + one [−1, 1)
     // variance draw, absent axes stay 0 (research/xim ParticleInitializers.kt
@@ -1707,6 +1761,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
         rgb,
+        color_transform,
         scale,
         scale_seed: scale,
         scale_vel,
@@ -2649,6 +2704,8 @@ mod tests {
             init_color: [0.2, 0.2, 0.6, 0.5],
             color_variance: None,
             color_transform: None,
+            color_transform_variance: None,
+            color_transform_applier: false,
             color_transform_modifier: None,
             init_velocity: [0.0, 0.01, 0.0],
             velocity_variance: None,
@@ -3603,6 +3660,7 @@ mod tests {
                 age_frames: 50.0,
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
+                color_transform: None,
                 scale: Vec2::ONE,
                 scale_seed: Vec2::ONE,
                 scale_vel: Vec2::ZERO,
@@ -4256,6 +4314,82 @@ mod tests {
         }
     }
 
+    // sec2 0x19 + sec3 0x0B: each frame rgb += (transform shr 7) × 0.5, in xim's raw byte
+    // space divided by the PS2 half-scale — a red transform of 256 adds 2 × 0.5 / 128 per
+    // frame (research/xim ParticleUpdaters.kt ColorTransformApplier).
+    #[test]
+    fn color_transform_applies_the_shifted_rate() {
+        let make = |applier: bool| -> LiveGenerator {
+            let mut d = def(100.0, 1.0, 1);
+            d.continuous = true;
+            d.color_transform = Some([256, -256, 0, 0]);
+            d.color_transform_applier = applier;
+            let mut g = live(d, 1000.0);
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            g.stopped = true;
+            for _ in 0..4 {
+                advance(&mut g, 1.0);
+            }
+            g
+        };
+        let plain = make(false);
+        let applied = make(true);
+        // Four frames × (256 shr 7) × 0.5 / 128 on red, the negative of it on green.
+        let step = 4.0 * 2.0 * COLOR_TRANSFORM_STEP_HALF / PS2_COLOR_BYTE_SCALE;
+        assert!((applied.particles[0].rgb.x - plain.particles[0].rgb.x - step).abs() < 1e-6);
+        assert!((plain.particles[0].rgb.y - applied.particles[0].rgb.y - step).abs() < 1e-6);
+        // Blue untouched.
+        assert_eq!(applied.particles[0].rgb.z, plain.particles[0].rgb.z);
+    }
+
+    // sec3 0x0C: the transform drifts by floor(modifier × dt/30) per frame and the applier
+    // reads the drifted value — a red modifier of 960 adds 32/frame, so shr-7 stays 0 until
+    // frame 4 (research/xim ParticleUpdaters.kt ColorTransformModifier).
+    #[test]
+    fn color_transform_modifier_drifts_the_transform() {
+        let make = |modifier: Option<[i16; 4]>| -> LiveGenerator {
+            let mut d = def(100.0, 1.0, 1);
+            d.continuous = true;
+            d.color_transform = Some([0, 0, 0, 0]);
+            d.color_transform_applier = true;
+            d.color_transform_modifier = modifier;
+            let mut g = live(d, 1000.0);
+            advance(&mut g, 1.0);
+            assert_eq!(g.particles.len(), 1);
+            g.stopped = true;
+            for _ in 0..5 {
+                advance(&mut g, 1.0);
+            }
+            g
+        };
+        let plain = make(None);
+        let drifted = make(Some([960, 0, 0, 0]));
+        // Frames 4 and 5 each add 1 × 0.5 / 128 to red.
+        let expected = 2.0 * COLOR_TRANSFORM_STEP_HALF / PS2_COLOR_BYTE_SCALE;
+        assert!(
+            (drifted.particles[0].rgb.x - plain.particles[0].rgb.x - expected).abs() < 1e-6,
+            "drifted: {}",
+            drifted.particles[0].rgb.x
+        );
+    }
+
+    // sec2 0x1A: each element's transform gains round(posRand(1) × variance) per channel on
+    // top of the base (research/xim ParticleInitializers.kt ColorTransformVariance).
+    #[test]
+    fn color_transform_variance_spreads_the_base() {
+        let mut d = def(100.0, 1.0, 1);
+        d.color_transform = Some([100, 0, 0, 0]);
+        d.color_transform_variance = Some([-100, 0, 0, 0]);
+        let mut g = live(d, 1000.0);
+        advance(&mut g, 1.0);
+        assert!(!g.particles.is_empty());
+        for p in &g.particles {
+            let ct = p.color_transform.expect("setup allocates the transform");
+            assert!(ct[0] >= 0 && ct[0] <= 100, "draw out of range: {}", ct[0]);
+        }
+    }
+
     // sec2 0x3D + 0x3E with the sec3 0x29 applier: the particle's x position sways with the
     // applier's amplitude curve (research/xim ParticleUpdaters.kt OscillationApplier —
     // rate = 180f / 2 = 90, baseOffset 0, so the amplitude peaks at half a period, 90 frames,
@@ -4390,6 +4524,7 @@ mod tests {
             negate_rotation_y: false,
             rel_vel: Vec3::Y,
             vel_rot: Vec3::ZERO,
+            color_transform: None,
             osc: Some(Oscillation {
                 accel: [0.5, 0.0, 0.0],
                 prev_amplitude: [0.0; 3],
@@ -4423,6 +4558,7 @@ mod tests {
                 age_frames: 50.0,
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
+                color_transform: None,
                 scale: Vec2::ONE,
                 scale_seed: Vec2::ONE,
                 scale_vel: Vec2::ZERO,
@@ -5136,6 +5272,7 @@ mod tests {
             age_frames: 0.0,
             life_frames: 1.0,
             rgb: Vec3::from_slice(&g.def.init_color[..3]),
+            color_transform: None,
             scale: Vec2::ONE,
             scale_seed: Vec2::ONE,
             scale_vel: Vec2::ZERO,
@@ -5861,6 +5998,7 @@ mod tests {
             age_frames: age,
             life_frames: 4.0,
             rgb: Vec3::ONE,
+            color_transform: None,
             scale: Vec2::splat(0.1),
             scale_seed: Vec2::splat(0.1),
             scale_vel: Vec2::ZERO,

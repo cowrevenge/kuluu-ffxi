@@ -8572,7 +8572,9 @@ mod tests {
         };
         let mut e = EventVm::start(&block, 0, 0, vec![]).expect("event 0 entry");
         e.attach_scene(
-            std::sync::Arc::new(ffxi_dat::event_dat::EventDat { blocks: vec![block] }),
+            std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+                blocks: vec![block],
+            }),
             ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
             crate::vm::scene::EventPosition::default(),
         );

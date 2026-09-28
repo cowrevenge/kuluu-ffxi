@@ -41,6 +41,45 @@ const WEST_RONFAURE_MZB_FILE_ID: u32 = 200;
 // -(-238.241, 49.754, -139.944).
 const WR_ENTRY_OFFSET: Vec3 = Vec3::new(238.241, -49.754, 139.944);
 
+// ANIMTEST_ZONE_ID / ANIMTEST_MZB_FILE_ID / ANIMTEST_WORLD_POS ("x,y,z") override the LoadZone
+// case so external captures can frame any zone — South Gustaberg's tunnel lamps load at world_pos
+// ZERO, where zone geometry lands at absolute mzb_to_bevy(native) coordinates.
+fn env_zone_override() -> Option<(u16, u32, Vec3)> {
+    let zone_id: u16 = std::env::var("ANIMTEST_ZONE_ID").ok()?.parse().ok()?;
+    let mzb_file: u32 = std::env::var("ANIMTEST_MZB_FILE_ID").ok()?.parse().ok()?;
+    let world_pos = match std::env::var("ANIMTEST_WORLD_POS") {
+        Ok(s) => s
+            .split(',')
+            .map(|t| t.trim().parse::<f32>())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?
+            .into_iter()
+            .take(3)
+            .chain(std::iter::repeat(0.0))
+            .take(3)
+            .collect::<Vec<_>>(),
+        Err(_) => Vec3::ZERO.to_array().to_vec(),
+    };
+    if world_pos.len() != 3 {
+        return None;
+    }
+    Some((zone_id, mzb_file, Vec3::from_slice(&world_pos)))
+}
+
+// ANIMTEST_CAM="px,py,pz,tx,ty,tz" overrides the box camera's position and look-at target.
+fn env_camera_override() -> Option<(Vec3, Vec3)> {
+    let v: Vec<f32> = std::env::var("ANIMTEST_CAM")
+        .ok()?
+        .split(',')
+        .map(|t| t.trim().parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if v.len() != 6 {
+        return None;
+    }
+    Some((Vec3::from_slice(&v[0..3]), Vec3::from_slice(&v[3..6])))
+}
+
 const WORM_ID: u32 = 1;
 const HUME_ID: u32 = 2;
 
@@ -77,6 +116,7 @@ enum Case {
     Sb00,
     LoadZone,
     LoadWeather,
+    Shot,
 }
 
 impl Case {
@@ -96,6 +136,7 @@ impl Case {
             Self::Sb00 => "sb00 routine (gs02 child carrier)",
             Self::LoadZone => "load zone (West Ronfaure)",
             Self::LoadWeather => "load weather (clouds)",
+            Self::Shot => "screenshot (GPU readback)",
         }
     }
 
@@ -120,6 +161,19 @@ impl Case {
 
 #[derive(Resource, Default)]
 struct PendingCase(Option<Case>);
+
+// run_pending_case sits at bevy's 16-parameter system ceiling (the ZoneLoadParams bundle is
+// what keeps it there), so the shot rides a resource a dedicated two-param system consumes.
+fn fire_pending_shot(
+    mut shot: ResMut<PendingShot>,
+    mut requests: MessageWriter<super::screenshot::ScreenshotRequest>,
+) {
+    let Some(path) = shot.0.take() else {
+        return;
+    };
+    eprintln!("[animationtest] screenshot -> {}", path.display());
+    requests.write(super::screenshot::ScreenshotRequest { path });
+}
 
 /// Worm death bookkeeping: dhit runs the `dead` fall-over, then hides the model.
 #[derive(Resource, Default)]
@@ -190,6 +244,9 @@ fn case_from_name(s: &str) -> Option<Case> {
         "sb00" => Case::Sb00,
         "zone" => Case::LoadZone,
         "weather" => Case::LoadWeather,
+        // ANIMTEST_SHOT_PATH names the PNG; Bevy reads back the render target, so this works
+        // with KULUU_WINDOW_HIDDEN=1 where no window capture can reach.
+        "shot" => Case::Shot,
         _ => return None,
     })
 }
@@ -205,6 +262,11 @@ struct TestFloor;
 
 #[derive(Resource, Default)]
 struct FloorHidden(bool);
+
+/// One-shot screenshot request the box fires through the production Screenshot path (GPU
+/// readback of the render target — valid while the window is buried).
+#[derive(Resource, Default)]
+struct PendingShot(Option<std::path::PathBuf>);
 
 // The LoadZone case's params as one SystemParam: Bevy 0.19 generates IntoSystem for fn pointers
 // up to 16 params (bevy_ecs function_system all_tuples! impl_build_system 0..=16), and
@@ -238,7 +300,8 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<CaseLock>()
             .init_resource::<PendingToggle>()
             .init_resource::<TestZoneActive>()
-            .init_resource::<FloorHidden>();
+            .init_resource::<FloorHidden>()
+            .init_resource::<PendingShot>();
         // ANIMTEST_AUTO=nhit,chit,... — fire the named cases on a fixed clock with no input
         // (standalone tester parity); opening the box too, so the whole run is hands-free.
         let auto_cases: Vec<Case> = std::env::var("ANIMTEST_AUTO")
@@ -270,6 +333,7 @@ impl Plugin for AnimationTestScenePlugin {
                     auto_fire_cases,
                     handle_case_presses,
                     run_pending_case,
+                    fire_pending_shot,
                     apply_floor_hidden,
                     verify_drawn,
                     worm_death_watch,
@@ -426,9 +490,13 @@ fn activate_test_scene(
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
-        // Right angle to both actors (worm -X / Hume +X): the box's intended framing.
-        Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
-            .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        // Right angle to both actors (worm -X / Hume +X): the box's intended framing;
+        // ANIMTEST_CAM re-frames it for zone captures.
+        match env_camera_override() {
+            Some((pos, target)) => Transform::from_translation(pos).looking_at(target, Vec3::Y),
+            None => Transform::from_translation(Vec3::new(0.0, 2.6, 7.5))
+                .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        },
     ));
     commands.spawn((
         TestSceneScoped,
@@ -862,6 +930,7 @@ fn case_duration(case: Case) -> std::time::Duration {
         // Not animations: short windows only keep a double-press from re-issuing loads.
         Case::LoadZone => std::time::Duration::from_millis(2000),
         Case::LoadWeather => std::time::Duration::from_millis(500),
+        Case::Shot => std::time::Duration::from_millis(1500),
     }
 }
 
@@ -1063,8 +1132,13 @@ fn run_pending_case(
             &mut commands,
         ),
         Case::LoadZone => {
-            if zone.last_zone.file_id == Some(WEST_RONFAURE_MZB_FILE_ID) {
-                log_line(&mut log, "zone: West Ronfaure already loaded".into());
+            let (zone_id, mzb_file, world_pos) = env_zone_override().unwrap_or((
+                WEST_RONFAURE_ZONE_ID,
+                WEST_RONFAURE_MZB_FILE_ID,
+                WR_ENTRY_OFFSET,
+            ));
+            if zone.last_zone.file_id == Some(mzb_file) {
+                log_line(&mut log, "zone: already loaded".into());
             } else {
                 // Drive the zone through the backdrop resource so
                 // mirror_backdrop_to_scene_state keeps snapshot.zone_id in agreement. The
@@ -1072,21 +1146,20 @@ fn run_pending_case(
                 // compares effective_zone_file_id(snapshot) against LastAutoLoadedZone, and a
                 // frame gap between the two re-issues the block at a ZERO offset (which would
                 // stand us 50+ units off the terrain).
-                *zone.backdrop_zone =
-                    super::launcher_backdrop::LauncherBackdropZone(WEST_RONFAURE_ZONE_ID);
-                scene.snapshot.zone_id = Some(WEST_RONFAURE_ZONE_ID);
-                zone.last_zone.file_id = Some(WEST_RONFAURE_MZB_FILE_ID);
+                *zone.backdrop_zone = super::launcher_backdrop::LauncherBackdropZone(zone_id);
+                scene.snapshot.zone_id = Some(zone_id);
+                zone.last_zone.file_id = Some(mzb_file);
                 zone.load_tx.write(LoadMzbRequest {
-                    file_id: WEST_RONFAURE_MZB_FILE_ID,
+                    file_id: mzb_file,
                     chunk_idx: None,
-                    world_pos: WR_ENTRY_OFFSET,
+                    world_pos,
                     auto_loaded: true,
                     slot: ZONE_SLOT_MAIN,
                     active_sub_area: None,
                 });
                 log_line(
                     &mut log,
-                    format!("zone: West Ronfaure (mzb {WEST_RONFAURE_MZB_FILE_ID}) loading at entry offset {WR_ENTRY_OFFSET:?}"),
+                    format!("zone: id {zone_id} (mzb {mzb_file}) loading at offset {world_pos:?}"),
                 );
             }
             zone.floor_hidden.0 = true;
@@ -1097,6 +1170,21 @@ fn run_pending_case(
             // (myroom is None pre-server); sample_zone_weather then selects weat/clod for 200.
             scene.snapshot.weather = Some(kuluu_snapshot::Weather::Clouds);
             log_line(&mut log, "weather: clouds set (weat/clod)".into());
+        }
+        Case::Shot => {
+            let path = std::env::var("ANIMTEST_SHOT_PATH")
+                .ok()
+                .map(std::path::PathBuf::from);
+            log_line(
+                &mut log,
+                format!(
+                    "shot: {}",
+                    path.clone()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "default screenshot-<n>.png".into())
+                ),
+            );
+            commands.insert_resource(PendingShot(path));
         }
         _ => fire_hit(case, &tracked, &mut log, &mut events, &mut scene, &mut hp),
     }

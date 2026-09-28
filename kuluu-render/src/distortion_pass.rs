@@ -5,11 +5,14 @@
 //!
 //! Scheduled in Core3d AFTER `Core3dSystems::PostProcess` (bloom/DOF/fog/TAA/tonemapping done) and
 //! before upscaling writes the window — the same bounds as [`crate::nameplate_final_pass`]. It is a
-//! strict no-op unless a distortion generator is alive ([`ActiveDistortion`]) AND the view is
-//! single-sample; MSAA views are skipped (logged once) rather than risk an unsupported multi-sample
-//! capture.
+//! strict no-op unless a distortion generator is alive ([`ActiveDistortion`]).
+//!
+//! MSAA-safe by construction: bevy's ViewTarget "main" texture is ALWAYS single-sample — under
+//! Msaa2/4/8 the geometry pass renders into a separate multi-sample buffer that wgpu resolves INTO
+//! this main texture at pass end (ColorAttachment.resolve_target), so after PostProcess the
+//! unsampled view holds the fully processed image in every AA mode. Both passes here touch only
+//! that single-sample surface; nothing samples a multi-sample buffer.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use bevy::asset::{embedded_asset, AssetServer};
@@ -27,7 +30,7 @@ use bevy::render::render_resource::{
     TextureViewDescriptor, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
-use bevy::render::view::{ExtractedView, Msaa, ViewTarget};
+use bevy::render::view::{ExtractedView, ViewTarget};
 use bevy::render::{Extract, RenderApp, RenderStartup};
 
 /// Main-world: a distortion generator is alive. Written by `spawn_particle_generators` when a
@@ -219,15 +222,13 @@ fn distortion_pipeline_descriptor(
     }
 }
 
-static MSAA_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
-
 /// Core3d sub-schedule (per camera run): ghost last frame's processed output over the CURRENT view
 /// with the horizontal haze bias, then capture the result for next frame. Gated to the operator
 /// camera; every other 3D camera (launcher, minimap bake, ...) runs its own Core3d schedule and
 /// skips — same gate as [`crate::nameplate_final_pass`].
 #[allow(clippy::type_complexity)]
 fn draw_distortion_pass(
-    view: ViewQuery<(&ExtractedView, Option<&Msaa>, &ViewTarget)>,
+    view: ViewQuery<(&ExtractedView, &ViewTarget)>,
     data: Res<DistortionPassData>,
     mut gpu: ResMut<DistortionPassGpu>,
     device: Res<RenderDevice>,
@@ -242,7 +243,7 @@ fn draw_distortion_pass(
         return;
     }
 
-    let (ev, msaa, target) = view.into_inner();
+    let (ev, target) = view.into_inner();
 
     // Only the operator camera's PRIMARY view carries the effect. Note that `view.entity()` is a
     // RENDER-world view entity and does not equal a main-world camera Entity — match via
@@ -253,15 +254,6 @@ fn draw_distortion_pass(
     if ev.retained_view_entity.main_entity.id() != operator_cam
         || ev.retained_view_entity.subview_index != 0
     {
-        return;
-    }
-
-    // Single-sample only: the capture pass samples the main texture as a plain 2D texture, which
-    // is not valid on a multi-sample buffer. Skip MSAA views rather than risk it.
-    if msaa.map_or(1, Msaa::samples) != 1 {
-        if MSAA_SKIP_LOGGED.swap(true, Ordering::Relaxed) {
-            tracing::debug!(target: "distortion", "distortion pass skipped: view is multi-sample");
-        }
         return;
     }
 

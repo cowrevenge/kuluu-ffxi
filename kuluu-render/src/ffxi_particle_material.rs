@@ -167,8 +167,8 @@ impl FfxiParticleMaterial {
 }
 
 impl Material for FfxiParticleMaterial {
-    // A custom @vertex stage: the factor attribute (location 3) has no standard Bevy
-    // counterpart, so the default vertex function cannot forward it.
+    // A custom @vertex stage: the per-particle factor rides the TANGENT slot (location 4),
+    // which the default mesh vertex function does not forward.
     fn vertex_shader() -> ShaderRef {
         "embedded://kuluu_render/ffxi_particle.wgsl".into()
     }

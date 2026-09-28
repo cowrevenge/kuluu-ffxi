@@ -21,15 +21,11 @@ use crate::scheduler_runtime::{
 };
 use ffxi_dat::scheduler::{StageKind, NO_LOCAL_DIR};
 
-// The per-particle TEXTUREFACTOR (F) as its own attribute: stage 1 of ffxi_particle.wgsl reads
-// it at location 3, appended after POSITION/UV_0/COLOR by Bevy's BTreeMap-by-attribute-id
-// ordering. The id base follows skinned_ffxi_material.rs's FFXI block convention.
-const PARTICLE_FACTOR_ATTR_ID_BASE: u64 = 0x4646_5850_0000_0000;
-pub(crate) const PARTICLE_FACTOR: MeshVertexAttribute = MeshVertexAttribute::new(
-    "Kuluu_Particle_Factor",
-    PARTICLE_FACTOR_ATTR_ID_BASE,
-    VertexFormat::Float32x4,
-);
+// The per-particle TEXTUREFACTOR (F) rides the TANGENT slot: Bevy's material pipeline only
+// exposes standard attributes at fixed shader locations (bevy_pbr render/mesh.rs
+// MeshPipeline::specialize — position 0, normal 1, uv 2, uv_b 3, tangent 4, color 5), and a
+// custom attribute id never reaches the vertex buffer layout. TANGENT is the one standard
+// vec4 slot these meshes do not otherwise use; ffxi_particle.wgsl reads it at location 4.
 
 // CPU particle simulation. research/xim ParticleGenerator + Particle: a Particle stage (0x02)
 // spawns a `LiveGenerator` that streams billboard particles over its window, each integrating
@@ -2990,7 +2986,7 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_attribute(PARTICLE_FACTOR, factors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, factors);
     mesh.insert_indices(Indices::U32(indices));
 }
 
@@ -3225,7 +3221,7 @@ fn empty_mesh() -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_attribute(PARTICLE_FACTOR, factors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, factors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -4272,8 +4268,8 @@ mod tests {
             assert_eq!(promote(0x03, D3mDrawPath::D3m, at_threshold), at_threshold);
         }
 
-        // The mesh carries D (template colour, COLOR) and F (per-particle factor,
-        // PARTICLE_FACTOR) as separate attributes — the shader runs the table against both.
+        // The mesh carries D (template colour, COLOR) and F (per-particle factor, TANGENT
+        // slot) as separate attributes — the shader runs the table against both.
         fn mesh_colors_and_factors(g: &LiveGenerator) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
             let mut mesh = empty_mesh();
             rebuild_mesh(
@@ -4286,7 +4282,7 @@ mod tests {
                 Some(bevy::mesh::VertexAttributeValues::Float32x4(v)) => v.clone(),
                 _ => panic!("expected Float32x4 vertex colours"),
             };
-            let factors = match mesh.attribute(PARTICLE_FACTOR) {
+            let factors = match mesh.attribute(Mesh::ATTRIBUTE_TANGENT) {
                 Some(bevy::mesh::VertexAttributeValues::Float32x4(v)) => v.clone(),
                 _ => panic!("expected Float32x4 particle factors"),
             };
@@ -4764,7 +4760,7 @@ mod tests {
             use bevy::mesh::VertexAttributeValues;
             let mut mesh = empty_mesh();
             rebuild_mesh(g, cam, &clock, &mut mesh);
-            match mesh.attribute(PARTICLE_FACTOR) {
+            match mesh.attribute(Mesh::ATTRIBUTE_TANGENT) {
                 Some(VertexAttributeValues::Float32x4(v)) => v.iter().map(|c| c[3]).collect(),
                 _ => panic!("rebuilt mesh has f32x4 factors"),
             }
@@ -6019,7 +6015,7 @@ mod tests {
         let Some(Float32x4(col)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR) else {
             panic!("rebuilt mesh has f32x4 colours");
         };
-        let Some(Float32x4(fac)) = mesh.attribute(PARTICLE_FACTOR) else {
+        let Some(Float32x4(fac)) = mesh.attribute(Mesh::ATTRIBUTE_TANGENT) else {
             panic!("rebuilt mesh has f32x4 particle factors");
         };
         (
@@ -6723,7 +6719,7 @@ mod tests {
                 &CelestialClock::default(),
                 &mut mesh,
             );
-            match mesh.attribute(PARTICLE_FACTOR).unwrap() {
+            match mesh.attribute(Mesh::ATTRIBUTE_TANGENT).unwrap() {
                 bevy::mesh::VertexAttributeValues::Float32x4(f) => f[0][3],
                 _ => panic!("expected Float32x4 particle factors"),
             }

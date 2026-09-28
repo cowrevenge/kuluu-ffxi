@@ -70,14 +70,16 @@ const PATH_MMB_TEXTURED: f32 = 2.0;
 const STAGE_MODULATE_2X: f32 = 2.0;
 const STAGE_MODULATE_4X: f32 = 4.0;
 
-// Mesh attribute order (BTreeMap by attribute id): POSITION, UV_0, COLOR, then the custom
-// factor — locations 0..3. The factor is stage 1's TFACTOR argument, per particle.
+// Bevy's material pipeline exposes standard attributes at fixed shader locations
+// (bevy_pbr render/mesh.rs MeshPipeline::specialize): position 0, normal 1, uv 2,
+// uv_b 3, tangent 4, color 5. The per-particle factor rides the TANGENT slot —
+// stage 1's TFACTOR argument.
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) factor: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(4) factor: vec4<f32>,
+    @location(5) color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -139,27 +141,23 @@ fn stage0(d: vec4<f32>, texel: vec4<f32>, in_factor: vec4<f32>) -> vec4<f32> {
     if (data.params.w == PATH_D3M_TEXTURED) {
         // NonZeroTwoTSS / NonZeroOneTSS stage 0: MODULATE2X(CURRENT, TEXTURE); the One table
         // selects DIFFUSE for alpha (SELECTARG1 — no doubling).
-        var s0 = vec4<f32>(min(STAGE_MODULATE_2X * d.rgb * texel.rgb, vec3<f32>(1.0)), 0.0);
+        let rgb = min(STAGE_MODULATE_2X * d.rgb * texel.rgb, vec3<f32>(1.0));
         if (data.params.z > 0.5) {
-            s0.a = d.a;
-        } else {
-            s0.a = min(STAGE_MODULATE_2X * d.a * texel.a, 1.0);
+            return vec4<f32>(rgb, d.a);
         }
-        return s0;
+        return vec4<f32>(rgb, min(STAGE_MODULATE_2X * d.a * texel.a, 1.0));
     }
     if (data.params.w == PATH_MMB_TEXTURED) {
         // DoD3mDraw textured stage 0: MODULATE(TEXTURE, CURRENT) with a4 set; with it clear
         // the texture modulates TFACTOR and stage 1 takes DIFFUSE. No doubling — MMB colours
         // are raw byte/255 so every product here is already <= 1.
-        var s0 = vec4<f32>(0.0);
         if (data.params.z > 0.5) {
-            s0.rgb = d.rgb * texel.rgb;
-            s0.a = d.a;
-        } else {
-            s0.rgb = texel.rgb * in_factor.rgb;
-            s0.a = min(STAGE_MODULATE_2X * in_factor.a * texel.a, 1.0);
+            return vec4<f32>(d.rgb * texel.rgb, d.a);
         }
-        return s0;
+        return vec4<f32>(
+            texel.rgb * in_factor.rgb,
+            min(STAGE_MODULATE_2X * in_factor.a * texel.a, 1.0),
+        );
     }
     // ZeroOneTSS / DoD3mDraw untextured: one stage against TFACTOR — in the shared form the
     // stage-0 output is D itself and stage 1 supplies both gains.
@@ -172,7 +170,10 @@ fn stage0(d: vec4<f32>, texel: vec4<f32>, in_factor: vec4<f32>) -> vec4<f32> {
 // is clear.
 fn stage1(s0: vec4<f32>, d: vec4<f32>, f: vec4<f32>) -> vec4<f32> {
     if (data.params.w == PATH_MMB_TEXTURED) {
-        let arg = if (data.params.z > 0.5) { f } else { d };
+        var arg = f;
+        if (data.params.z <= 0.5) {
+            arg = d;
+        }
         return vec4<f32>(
             min(STAGE_MODULATE_4X * s0.rgb * arg.rgb, vec3<f32>(1.0)),
             min(STAGE_MODULATE_4X * s0.a * arg.a, 1.0),

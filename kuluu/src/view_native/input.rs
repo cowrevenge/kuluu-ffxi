@@ -57,6 +57,9 @@ pub struct MoveEnvParams<'w, 's> {
     /// walker must hold the server-seeded height rather than fall (the
     /// sub-area case).
     pub mzb_in_flight: Res<'w, kuluu_render::dat_mzb::LoadMzbInFlight>,
+    /// View-window zoom target (PgUp/PgDn, `.`, `,`): the held-key sweep writes
+    /// it here; camera.rs pushes it into the projection each frame.
+    pub view_fov: ResMut<'w, kuluu_render::ViewFov>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -101,7 +104,7 @@ pub struct CameraInputParams<'w> {
 use kuluu_render::{
     heading_for_yaw, Action, Bindings, CameraMode, CameraTransition, ChaseCamera, ChatBuffer,
     CursorLockRequest, InputMode, IsSelf, LockOn, LockOnToggle, MenuStack, OperatorCamera,
-    PassiveCursorState, SceneState, Target, WorldEntity,
+    PassiveCursorState, SceneState, Target, ViewFov, WorldEntity,
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 use tokio::sync::mpsc;
@@ -1172,15 +1175,15 @@ pub fn dispatch_movement_system(
 
     if matches!(*camera_mode, CameraMode::Chase) && !in_picker && !env.minimap_hover.hovered {
         let mut zoom_d = 0.0;
-        let step = ChaseCamera::KEYBOARD_ZOOM_RATE * time.delta_secs();
+        let step = ViewFov::RATE_DEG_PER_SEC * time.delta_secs();
         if bindings.pressed(Action::CameraZoomIn, keys) {
             zoom_d -= step;
         }
         if bindings.pressed(Action::CameraZoomOut, keys) {
             zoom_d += step;
         }
-        // PgUp/PgDn drive the same chase zoom: Action::PageUp/PageDown are bound to those
-        // keys in every preset and were previously unconsumed.
+        // PgUp/PgDn drive the same view-window zoom: Action::PageUp/PageDown are bound to
+        // those keys in every preset and were previously unconsumed.
         if bindings.pressed(Action::PageUp, keys) {
             zoom_d -= step;
         }
@@ -1188,8 +1191,7 @@ pub fn dispatch_movement_system(
             zoom_d += step;
         }
         if zoom_d != 0.0 {
-            chase.distance =
-                (chase.distance + zoom_d).clamp(ChaseCamera::DIST_MIN, ChaseCamera::DIST_MAX);
+            env.view_fov.deg = ViewFov::stepped(env.view_fov.deg, zoom_d);
         }
     }
 
@@ -2259,6 +2261,7 @@ mod tests {
             .init_resource::<LockOn>()
             .init_resource::<AutoRun>()
             .init_resource::<ChaseCamera>()
+            .init_resource::<kuluu_render::ViewFov>()
             .init_resource::<HeadingTurnAccum>()
             .init_resource::<DispatchLocals>()
             .init_resource::<LocalPlayerPrediction>()

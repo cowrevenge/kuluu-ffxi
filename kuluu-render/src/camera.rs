@@ -214,6 +214,67 @@ impl Default for ChaseCamera {
     }
 }
 
+/// The operator camera's vertical field of view in degrees — the live value the view zoom
+/// (PgUp/PgDn, `.`, `,`) writes and [`apply_view_fov_system`] pushes into the projection each
+/// frame. Runtime-only: `GraphicsSettings::fov_deg` is the base it re-seats from, so a menu FOV
+/// change wins over a held zoom. Zooming the window (not the chase distance) keeps world-space
+/// nameplate billboards constant on screen — their size derives from `tan(fov/2)`
+/// (nameplate_billboard.rs), which is how retail's focal-driven projection behaves.
+#[derive(Resource)]
+pub struct ViewFov {
+    pub deg: f32,
+}
+
+impl Default for ViewFov {
+    fn default() -> Self {
+        Self {
+            deg: crate::graphics_settings::DEFAULT_FOV_DEG,
+        }
+    }
+}
+
+impl ViewFov {
+    // Retail's projection is fixed (RETAIL_DEFAULT_FOCAL_LENGTH over RETAIL_PROJECTION_HALF_HEIGHT);
+    // the local build widens the window so a held zoom key can magnify and pull back past it.
+    pub const MIN_DEG: f32 = 28.0;
+
+    pub const MAX_DEG: f32 = 90.0;
+
+    /// Held-key sweep across the window, degrees per second.
+    pub const RATE_DEG_PER_SEC: f32 = 30.0;
+
+    /// `deg` advanced by `delta_deg`, clamped to the zoom window.
+    pub fn stepped(deg: f32, delta_deg: f32) -> f32 {
+        (deg + delta_deg).clamp(Self::MIN_DEG, Self::MAX_DEG)
+    }
+}
+
+/// Pushes [`ViewFov`] into the operator camera's projection. Skipped while a running event
+/// holds the camera: `cutscene_camera::apply_frame` owns that fov per frame (focal-driven) and
+/// restores `settings.fov_deg` on release, so a zoom write would fight it mid-cutscene.
+pub fn apply_view_fov_system(
+    mut view_fov: ResMut<ViewFov>,
+    settings: Res<GraphicsSettings>,
+    cutscene: Res<crate::cutscene::CutsceneMode>,
+    mut last_base: Local<Option<f32>>,
+    mut cam_q: Query<&mut Projection, With<OperatorCamera>>,
+) {
+    // First frame and any menu change of the base FOV re-seat the zoom on it.
+    if *last_base != Some(settings.fov_deg) {
+        view_fov.deg = settings.fov_deg.clamp(ViewFov::MIN_DEG, ViewFov::MAX_DEG);
+        *last_base = Some(settings.fov_deg);
+    }
+    if cutscene.camera_locked {
+        return;
+    }
+    let Ok(mut proj) = cam_q.single_mut() else {
+        return;
+    };
+    if let Projection::Perspective(p) = &mut *proj {
+        p.fov = view_fov.deg.to_radians();
+    }
+}
+
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct CameraTransition {
     pub active: bool,
@@ -709,5 +770,21 @@ mod tests {
             "operator camera must see the gizmo overlay layer so debug \
              overlays still show in the live 3D view"
         );
+    }
+
+    #[test]
+    fn view_fov_defaults_to_the_retail_derived_value() {
+        assert_eq!(
+            ViewFov::default().deg,
+            crate::graphics_settings::DEFAULT_FOV_DEG
+        );
+    }
+
+    #[test]
+    fn view_fov_step_clamps_to_the_zoom_window() {
+        assert_eq!(ViewFov::stepped(ViewFov::MIN_DEG, -50.0), ViewFov::MIN_DEG);
+        assert_eq!(ViewFov::stepped(ViewFov::MAX_DEG, 50.0), ViewFov::MAX_DEG);
+        let mid = (ViewFov::MIN_DEG + ViewFov::MAX_DEG) * 0.5;
+        assert!((ViewFov::stepped(mid, -10.0) - (mid - 10.0)).abs() < 1e-6);
     }
 }

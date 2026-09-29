@@ -43,6 +43,8 @@ client build. Reuse sufficient evidence rather than repeating an investigation.
 - **Exact computation, predicates or format bits:** inspect the relevant retail
   binary/DAT and trace the caller, branch and data provenance. XIClient is the
   preferred community map into that code; its names and comments are not proof.
+  Never cite `research/xim` for these — it is a reimplementation, not retail;
+  lookup aid only, never a cited reference (research/AGENTS.md tier 6).
   Read [binary inspection](references/binary-inspection.md) when this route is
   needed. A screenshot can establish the output without uniquely identifying
   the algorithm; a DAT value alone does not establish how the client uses it.

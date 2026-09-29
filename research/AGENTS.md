@@ -90,35 +90,22 @@ the higher tier:
    `kuluu-render` materials and `ffxi-actor` posing.
    Build: v1.6.0; it ships no client and reads whatever install it is pointed
    at (the author's is CatsEyeXI, with lists baked by xi-tools).
-6. **`xim/`** — broad behavioral/architecture reference (actor handling,
-   packet flow, DAT pipeline), but the author rarely consulted the
-   disassembly and states XIM is unaware of in-memory-only bits/fields.
-   **Do not trust XIM for bit-level format details** — it carries latent
-   bugs there (e.g. it walks DAT chunks with a 20-bit size field where
-   retail uses 19; harmless on retail data only because bit 26
-   (`is_shadow`) is always clear). Confirm any XIM-derived mask or width
-   against XIClient or the disassembly.
-
-   The drift is wider than bit widths. Aamace's own guidance is to stay
-   skeptical of XIM wherever an effect is subtle in-game, because XIM
-   reproduces what is *observable*, not what the client computes. So a
-   detail XIM omits is weak evidence that retail omits it. Worked example:
-   XIM's chase camera skips triangles by a `hitWall` material bit
-   (`type & 0x40`), which reads as the whole rule; XIClient shows retail
-   also gates that skip on the mesh header flags and takes the bit from the
-   triangle's third vertex index (`Flags != 0 && VertexIndex3 & 0x4000`).
-   XIM was right about the shape and wrong about the predicate — the usual
-   failure mode. Use XIM to find *where* to look, then read XIClient.
-   Build: the unversioned `source.zip` from xim.pages.dev (`1.0-SNAPSHOT`);
-   the copy fetched here carries content dated 2026-03-09 and LSB tables from
-   2024-06-30.
+6. **`xim/`** — **not an evidence source.** XIM is a community reimplementation
+   that reproduces what is observable, not what the client computes; in this repo
+   it has repeatedly supplied wrong layouts, opcodes and predicates (DAT chunk
+   sizes, particle opcodes, camera skip rules). It may serve as a lookup aid
+   (where things live), never as a cited reference for new findings — go straight
+   to tier 1 (FFXiMain.dll disassembly + DATs), with XIClient as corroboration.
+   A finding that exists only in XIM is an unverified hypothesis and must be
+   labeled as such.
+   Build: the unversioned `source.zip` from xim.pages.dev (`1.0-SNAPSHOT`).
 
 ## XIM
 
 [XIM](https://xim.pages.dev/) is Aamace's from-scratch browser FFXI client
-PoC (unrelated to atom0s's Xi* repos). It's a
-useful reference for vanilla feature behavior — actor/animation handling,
-packet flow, DAT parsing — when filling in the parity scoreboard.
+PoC (unrelated to atom0s's Xi* repos). **Not an evidence source for retail
+behavior** (see tier 6 above) — present here only as a fetch target and
+historical pointer.
 
 - Live app:   <https://xim.pages.dev/>
 - Source zip: <https://xim.pages.dev/source.zip>

@@ -2,7 +2,7 @@
 """
 dat_routines.py - dump FFXI model DATs into sections: chunk table + scheduler routines + clip names.
 
-Companion to Cow_doc/disassmembly_docs/mob_animation.md (F46: runtime routine record = stage stream; F37/F50-F52: which
+Companion to docs/mob_animation.md (next to this script; F46: runtime routine record = stage stream; F37/F50-F52: which
 routine names the client asks for). The point is to see, per model DAT, which routine names it
 ships (init, ini1, atk0, dam?, hit?, sp??, hen0, ...) and what each routine plays, so the kuluu
 driver can stay generic: the client asks for a name, the DAT either has it or it doesn't.

@@ -2,7 +2,7 @@
 """Probe (event pass T2/E6): check which scheduler chunk names live in the Tpc-mapped
 file ids for packages 12 and 20, against the retail install.
 
-Re-runs the E6 cross-check recorded in Cow_doc/disassmembly_docs/tpc_package_table.md:
+Re-runs the E6 cross-check recorded in docs/tpc_package_table.md:
 resolves the four-band A/B file ids through VTABLE/FTABLE (vtable[id] == rom index,
 ftable u16 = (dir << 7) | file), opens each mapped DAT, and lists which of tlk0 / thk1 /
 kka0 it carries as a type-0x07 chunk. Self-contained chunk walker (same 16-byte header

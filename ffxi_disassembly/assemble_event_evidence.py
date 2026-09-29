@@ -1,7 +1,7 @@
-"""Rebuild Cow_doc/disassmembly_docs/event_evidence.md from the raw dumps in out3/.
+"""Rebuild docs/event_evidence.md (next to this script) from the raw dumps in out3/.
 
 Each section embeds one or more out3/*.md files verbatim under its heading; the E-entries in
-Cow_doc/disassmembly_docs/event_vm.md cite these sections as "evidence doc \u00a7X". The I.2 section carries the
+docs/event_vm.md cite these sections as "evidence doc \u00a7X". The I.2 section carries the
 E16 correction block (true VTABLE/FTABLE ids for five of the p9 scan's rows) after the raw output.
 Re-running this script regenerates the evidence doc exactly from the current out3/ contents; if you
 add new dumps, extend the section lists here and re-run. Usage: python assemble_event_evidence.py
@@ -9,7 +9,7 @@ add new dumps, extend the section lists here and re-run. Usage: python assemble_
 import os
 
 OUT = r"C:\Cow_Kuluu_ffxi-engine\cow_tools\ffxi_disasm\out3"
-DEST = r"C:\Cow_Kuluu_ffxi-engine\Cow_doc\disassmembly_docs\event_evidence.md"
+DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "event_evidence.md")
 
 
 def rd(name):
@@ -24,7 +24,7 @@ parts.append("""# FFXI Event VM Disassembly - Raw Evidence (Part 1)
 Companion to [event_vm.md](event_vm.md). This doc holds the raw scanner
 outputs and disassembly dumps that back the E-findings. All addresses are RVAs relative to
 `FFXiMain.dll` ImageBase **0x10000000** (on-disk VA = 0x10000000 + RVA). `.text` is POL1-packed on
-disk; every dump was produced by the tooling in `cow_tools/ffxi_disasm/` after auto-decoding. Raw
+disk; every dump was produced by the tooling in `ffxi_disassembly/` (this folder) after auto-decoding. Raw
 source files live in `cow_tools/ffxi_disasm/out3/` (kept for re-runs); the listings below are copies
 of those outputs.
 
@@ -151,7 +151,7 @@ for fname, sub in [
     parts.append(rd(fname))
     parts.append("```\n")
 
-# I.2 with the E16 correction block appended after the raw output (see Cow_doc/disassmembly_docs/event_vm.md E16).
+# I.2 with the E16 correction block appended after the raw output (see docs/event_vm.md E16).
 sub = "I.2 DAT scan: every file with movN / exNN scheduler stages (52869 DATs scanned); only ROM\\0\\23.DAT has both"
 parts.append("\n### %s\n" % sub)
 parts.append("Source file: `out3/p9_zone_scene_scan.md`\n")
@@ -170,8 +170,8 @@ plus a 0x8000 offset for ROM2) instead of through VTABLE/FTABLE. The true client
 | ROM2\19\126.DAT | 35326 | 31009 |
 
 The ids for ROM\0\23..26.DAT (23 to 26) are correct under both schemes. The hit list itself (which files
-carry movN / exNN references, and their name lists) is unchanged; verified by re-running the committed
-`cow_tools/ffxi_disasm/p9_zone_scene.py`, which resolves ids through VTABLE/FTABLE.""")
+carry movN / exNN references, and their name lists) is unchanged; verified by re-running
+`p9_zone_scene.py` in this folder, which resolves ids through VTABLE/FTABLE.""")
 for fname, sub in [
     ("probe_zone_vt.md", "I.3 All zone-object vcall sites in .text; the [zoneObj->vt+N] pattern at 0xB4FF8 / 0xB50E8 / 0xB7439"),
 ]:

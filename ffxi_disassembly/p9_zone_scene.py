@@ -2,7 +2,7 @@
 """
 p9_zone_scene.py - list every DAT whose scheduler routines reference movN / exNN names.
 
-Event pass T5 (zone scene DAT, Cow_doc/disassmembly_docs/event_vm.md E14): the zone scene file is expected to
+Event pass T5 (zone scene DAT, docs/event_vm.md E14): the zone scene file is expected to
 hold a loop routine that references stage names mov1..mov8 and ex1a..ex3e. This scan walks every
 *.DAT under the install, parses each file with dat_routines.analyze() (chunk walk + scheduler
 stage-stream parse), collects the named stages referenced inside parsed routines (motion / vfx /

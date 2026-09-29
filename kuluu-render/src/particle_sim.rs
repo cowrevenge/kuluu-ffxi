@@ -263,22 +263,52 @@ impl AnchorState {
 // one burst at init; `on_expiry` marks a sec4 0x01 binding — one burst when the parent particle
 // dies (research/xim ParticleExpirationHandlers.kt EmitChildHandler). `children` are this def's
 // own bindings, resolved recursively.
+// The payload a child binding resolves to at parent spawn time. Draw carries everything the
+// mesh path needs; the non-draw kinds carry their resolved cues so instantiation calls the
+// same arm_* dispatch the routine scheduler uses — a sec2 0x44 binding and a 0x02 stage that
+// name the same def behave identically.
+#[derive(Clone)]
+enum ChildPayload {
+    Draw {
+        def: ParticleGeneratorDef,
+        template: SpriteTemplate,
+        sprite_frames: Vec<SpriteTemplate>,
+        mat: Handle<FfxiParticleMaterial>,
+        scale_x: Option<KeyFrameTrack>,
+        scale_y: Option<KeyFrameTrack>,
+        position_x: Option<KeyFrameTrack>,
+        position_y: Option<KeyFrameTrack>,
+        position_z: Option<KeyFrameTrack>,
+        dampening_factor: Option<KeyFrameTrack>,
+        alpha: Option<KeyFrameTrack>,
+        tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+    },
+    Sound {
+        se_id: u32,
+        near: f32,
+        far: f32,
+        vertical_weight: f32,
+    },
+    Distortion {
+        haze_offset_x: f32,
+        life_frames: f32,
+        envelope: Option<ffxi_dat::particle_gen::KeyFrameTrack>,
+    },
+    Rumble {
+        envelope: ffxi_dat::particle_gen::KeyFrameTrack,
+        near: f32,
+        far: f32,
+        life_frames: f32,
+    },
+}
+
 #[derive(Clone)]
 struct ChildFactory {
+    // The bound generator's name — the trace and diagnostics need it.
+    name: [u8; 4],
     once: bool,
     on_expiry: bool,
-    def: ParticleGeneratorDef,
-    template: SpriteTemplate,
-    sprite_frames: Vec<SpriteTemplate>,
-    mat: Handle<FfxiParticleMaterial>,
-    scale_x: Option<KeyFrameTrack>,
-    scale_y: Option<KeyFrameTrack>,
-    position_x: Option<KeyFrameTrack>,
-    position_y: Option<KeyFrameTrack>,
-    position_z: Option<KeyFrameTrack>,
-    dampening_factor: Option<KeyFrameTrack>,
-    alpha: Option<KeyFrameTrack>,
-    tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+    payload: ChildPayload,
     children: Vec<ChildFactory>,
 }
 
@@ -707,6 +737,73 @@ fn attached_origin(
 #[derive(Resource, Default)]
 pub struct TestAlphaOverride(pub std::collections::HashSet<[u8; 4]>);
 
+// The non-drawable generator kinds share one implementation between the routine scheduler and
+// child bindings: a 0x02 stage and a sec2 0x44/0x53/0x6A/0x3C binding that name the same def
+// must behave identically, so neither path carries its own copy of these branches.
+fn rescale_track(
+    t: &ffxi_dat::particle_gen::KeyFrameTrack,
+) -> ffxi_dat::particle_gen::KeyFrameTrack {
+    ffxi_dat::particle_gen::KeyFrameTrack {
+        points: t
+            .points
+            .iter()
+            .map(|&(time, v)| (time, ffxi_dat::particle_gen::ps2_float_rescale(v)))
+            .collect(),
+    }
+}
+
+fn arm_distortion_effect(
+    haze_offset_x: f32,
+    life_frames: f32,
+    envelope: Option<ffxi_dat::particle_gen::KeyFrameTrack>,
+    commands: &mut Commands,
+) {
+    let life_secs = life_frames / 60.0;
+    commands.insert_resource(crate::distortion_pass::ActiveDistortion {
+        haze_offset_x,
+        expires_at: Some(Instant::now() + Duration::from_secs_f32(life_secs)),
+        envelope,
+        started_at: Instant::now(),
+        duration_secs: life_secs,
+        strength: 1.0,
+    });
+}
+
+fn play_generator_sound(
+    se_id: u32,
+    near: f32,
+    far: f32,
+    vertical_weight: f32,
+    origin_pos: Vec3,
+    sfx_writer: &mut MessageWriter<crate::audio::SfxEvent>,
+) {
+    // sec2 0x4C AudioRangeSetup: full inside near, linear to silence at far.
+    sfx_writer.write(crate::audio::SfxEvent::at_ranged(
+        se_id,
+        origin_pos,
+        near,
+        far,
+        vertical_weight,
+    ));
+}
+
+fn arm_rumble_effect(
+    envelope: ffxi_dat::particle_gen::KeyFrameTrack,
+    near: f32,
+    far: f32,
+    life_frames: f32,
+    origin: Vec3,
+    commands: &mut Commands,
+) {
+    // sec2 0x82 + sec3 0x5F: a rumble generator never draws — it drives gamepad vibration
+    // (kuluu-render/src/rumble.rs).
+    commands.spawn((
+        InGameEntity,
+        Transform::from_translation(origin),
+        crate::rumble::RumbleSource::new(envelope, near, far, life_frames),
+    ));
+}
+
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<(&Transform, Option<&ActionAssets>)>,
@@ -774,14 +871,19 @@ pub fn spawn_particle_generators(
                         .and_then(|t| t.0)
                         .unwrap_or(ev.actor);
                     match q_xf.get(origin) {
-                        Ok(xf) => sfx_writer.write(crate::audio::SfxEvent::at_ranged(
-                            se_id,
-                            xf.translation,
-                            sound.near,
-                            sound.far,
-                            vertical_weight,
-                        )),
-                        Err(_) => sfx_writer.write(crate::audio::SfxEvent::new(se_id)),
+                        Ok(xf) => {
+                            play_generator_sound(
+                                se_id,
+                                sound.near,
+                                sound.far,
+                                vertical_weight,
+                                xf.translation,
+                                &mut sfx_writer,
+                            );
+                        }
+                        Err(_) => {
+                            sfx_writer.write(crate::audio::SfxEvent::new(se_id));
+                        }
                     };
                     played_sound = true;
                 }
@@ -807,23 +909,15 @@ pub fn spawn_particle_generators(
                         global.as_ref().map(|g| &g.assets),
                         dist.envelope_track,
                     )
-                    .map(|t| ffxi_dat::particle_gen::KeyFrameTrack {
-                        points: t
-                            .points
-                            .iter()
-                            .map(|&(time, v)| (time, ffxi_dat::particle_gen::ps2_float_rescale(v)))
-                            .collect(),
-                    });
+                    .map(|t| rescale_track(&t));
                     let life_secs = dist.max_life_frames / 60.0;
                     let envelope_pts = envelope.as_ref().map(|t| t.points.len()).unwrap_or(0);
-                    commands.insert_resource(crate::distortion_pass::ActiveDistortion {
-                        haze_offset_x: dist.haze_offset_x,
-                        expires_at: Some(Instant::now() + Duration::from_secs_f32(life_secs)),
-                        envelope,
-                        started_at: Instant::now(),
-                        duration_secs: life_secs,
-                        strength: 1.0,
-                    });
+                    arm_distortion_effect(
+                        dist.haze_offset_x,
+                        dist.max_life_frames,
+                        envelope.clone(),
+                        &mut commands,
+                    );
                     if tracing {
                         info!(
                             "animationtest trace: particle stage {} [{}] — DISTORTION armed haze_x={:.3} life {:.1}s envelope={} pts",
@@ -867,25 +961,23 @@ pub fn spawn_particle_generators(
         // sec2 0x82 + sec3 0x5F: a rumble generator never draws — it drives gamepad
         // vibration (kuluu-render/src/rumble.rs). Skip the mesh path entirely.
         if let (Some(track_id), Some([near, far, _])) = (def.rumble_track, def.rumble_falloff) {
+            // A missing track falls back to a full-to-zero ramp over life.
             let envelope = keyframe(assets, global.as_ref().map(|g| &g.assets), Some(track_id))
-                .map(|t| ffxi_dat::particle_gen::KeyFrameTrack {
-                    points: t
-                        .points
-                        .iter()
-                        .map(|&(time, v)| (time, ffxi_dat::particle_gen::ps2_float_rescale(v)))
-                        .collect(),
-                })
+                .map(|t| rescale_track(&t))
                 .unwrap_or_else(|| ffxi_dat::particle_gen::KeyFrameTrack {
                     points: vec![(0.0, 1.0), (1.0, 0.0)],
                 });
             let target = q_action_target.get(ev.actor).ok().and_then(|t| t.0);
             let origin = attached_origin(&def, ev.actor, target, &q_xf, &q_children, &q_render)
                 .unwrap_or(actor_xf.translation + Vec3::Y * def.base_position[1]);
-            commands.spawn((
-                InGameEntity,
-                Transform::from_translation(origin),
-                crate::rumble::RumbleSource::new(envelope.clone(), near, far, def.max_life_frames),
-            ));
+            arm_rumble_effect(
+                envelope.clone(),
+                near,
+                far,
+                def.max_life_frames,
+                origin,
+                &mut commands,
+            );
             if tracing {
                 info!(
                     "animationtest trace: particle stage {} [{}] — RUMBLE armed envelope={} pts near={:.1} far={:.1} life {:.1}s",
@@ -1363,6 +1455,9 @@ pub fn tick_particle_simulator(
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
+    mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
+    mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
     let frames = time.delta_secs() * ROUTINE_FPS;
     // research/xim Particle.kt update — children read the parent's state before anything ages.
@@ -1371,7 +1466,14 @@ pub fn tick_particle_simulator(
         advance_generator(g, frames);
     }
     remove_dead_generators(&mut sim, &mut commands, orphans);
-    instantiate_child_generators(&mut sim, &mut commands, &mut meshes);
+    instantiate_child_generators(
+        &mut sim,
+        &mut commands,
+        &mut meshes,
+        trace.is_some_and(|t| t.0),
+        &mut trace_writer,
+        &mut sfx_writer,
+    );
 }
 
 // research/xim Particle.kt update — a child generator's origin is its parent particle's current
@@ -1484,6 +1586,9 @@ fn instantiate_child_generators(
     sim: &mut ParticleSimulator,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    tracing: bool,
+    trace_writer: &mut MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
+    sfx_writer: &mut MessageWriter<crate::audio::SfxEvent>,
 ) {
     struct SpawnReq {
         // The generator that holds child_factories[factory_idx].
@@ -1559,99 +1664,166 @@ fn instantiate_child_generators(
             continue;
         };
         // Clone the factory's payload out before pushing: the push shifts every index.
-        let (def, template, sprite_frames, mat) = (
-            f.def,
-            f.template.clone(),
-            f.sprite_frames.clone(),
-            f.mat.clone(),
-        );
-        let (
-            scale_x,
-            scale_y,
-            position_x,
-            position_y,
-            position_z,
-            dampening_factor,
-            alpha,
-            tod_color,
-            children,
-        ) = (
-            f.scale_x.clone(),
-            f.scale_y.clone(),
-            f.position_x.clone(),
-            f.position_y.clone(),
-            f.position_z.clone(),
-            f.dampening_factor.clone(),
-            f.alpha.clone(),
-            f.tod_color.clone(),
-            f.children.clone(),
-        );
-        let mesh = meshes.add(empty_mesh());
-        let entity = commands
-            .spawn((
-                InGameEntity,
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(mat),
-                Transform::IDENTITY,
-                Visibility::default(),
-                bevy::camera::visibility::NoFrustumCulling,
-                bevy::light::NotShadowCaster,
-                bevy::light::NotShadowReceiver,
-            ))
-            .id();
-        let new_idx = sim.generators.len();
-        sim.generators.push(LiveGenerator {
-            def,
-            solid_mesh: is_solid_mesh(&template),
-            bound_radius: template_bound_radius(&template, &sprite_frames),
-            template,
-            draw_path: D3mDrawPath::D3m,
-            sprite_frames,
-            scale_x,
-            scale_y,
-            position_x,
-            position_y,
-            position_z,
-            dampening_factor,
-            alpha,
-            tod_color,
-            origin: r.pos,
-            particles: Vec::new(),
-            emit_accum: def.frames_per_emission,
-            age_frames: 0.0,
-            emit_window_frames: r.window,
-            mesh,
-            entity,
-            auto_run: false,
-            orientation: None,
-            actor_local: false,
-            tex_translate: Vec2::ZERO,
-            vel_basis: WORLD_PARTICLE_VEL_BASIS,
-            origin_routine: None,
-            stopped: false,
-            camera_relative: false,
-            emit_culled: false,
-            emit_scale: UNSCALED_EMISSION,
-            emit_rng: emit_seed(entity),
-            elements_emitted: 0,
-            cam_view: Quat::IDENTITY,
-            actor_rot: Quat::IDENTITY,
-            entity_world: GlobalTransform::IDENTITY,
-            parent: r.owner,
-            anchor: r.anchor,
-            child_factories: children,
-            next_particle_id: 0,
-            dead_child_gens: Vec::new(),
-            pending_expiry_spawns: Vec::new(),
-            built_key: MeshKey::Empty,
-        });
-        if let Some((ogi, pid)) = r.owner {
-            if let Some(p) = sim
-                .generators
-                .get_mut(ogi)
-                .and_then(|g| g.particles.iter_mut().find(|p| p.id == pid))
-            {
-                p.child_gens.push(new_idx);
+        let children = f.children.clone();
+        match &f.payload {
+            ChildPayload::Sound {
+                se_id,
+                near,
+                far,
+                vertical_weight,
+            } => {
+                if tracing {
+                    let line = format!(
+                        "child {} — SOUND se_id={} near={:.1} far={:.1}",
+                        String::from_utf8_lossy(&f.name),
+                        *se_id,
+                        *near,
+                        *far
+                    );
+                    info!("animationtest trace: {line}");
+                    trace_writer.write(crate::scheduler_runtime::ParticleSpawnTrace(line));
+                }
+                play_generator_sound(*se_id, *near, *far, *vertical_weight, r.pos, sfx_writer);
+            }
+            ChildPayload::Distortion {
+                haze_offset_x,
+                life_frames,
+                envelope,
+            } => {
+                if tracing {
+                    let line = format!(
+                        "child {} — DISTORTION armed haze_x={:.3} life {:.1}s",
+                        String::from_utf8_lossy(&f.name),
+                        *haze_offset_x,
+                        *life_frames / ROUTINE_FPS
+                    );
+                    info!("animationtest trace: {line}");
+                    trace_writer.write(crate::scheduler_runtime::ParticleSpawnTrace(line));
+                }
+                arm_distortion_effect(*haze_offset_x, *life_frames, envelope.clone(), commands);
+            }
+            ChildPayload::Rumble {
+                envelope,
+                near,
+                far,
+                life_frames,
+            } => {
+                if tracing {
+                    let line = format!(
+                        "child {} — RUMBLE armed near={:.1} far={:.1} life {:.1}s",
+                        String::from_utf8_lossy(&f.name),
+                        *near,
+                        *far,
+                        *life_frames / ROUTINE_FPS
+                    );
+                    info!("animationtest trace: {line}");
+                    trace_writer.write(crate::scheduler_runtime::ParticleSpawnTrace(line));
+                }
+                arm_rumble_effect(envelope.clone(), *near, *far, *life_frames, r.pos, commands);
+            }
+            ChildPayload::Draw {
+                def,
+                template,
+                sprite_frames,
+                mat,
+                scale_x,
+                scale_y,
+                position_x,
+                position_y,
+                position_z,
+                dampening_factor,
+                alpha,
+                tod_color,
+            } => {
+                let (def, template, sprite_frames, mat) =
+                    (*def, template.clone(), sprite_frames.clone(), mat.clone());
+                let (
+                    scale_x,
+                    scale_y,
+                    position_x,
+                    position_y,
+                    position_z,
+                    dampening_factor,
+                    alpha,
+                    tod_color,
+                ) = (
+                    scale_x.clone(),
+                    scale_y.clone(),
+                    position_x.clone(),
+                    position_y.clone(),
+                    position_z.clone(),
+                    dampening_factor.clone(),
+                    alpha.clone(),
+                    tod_color.clone(),
+                );
+                let mesh = meshes.add(empty_mesh());
+                let entity = commands
+                    .spawn((
+                        InGameEntity,
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(mat),
+                        Transform::IDENTITY,
+                        Visibility::default(),
+                        bevy::camera::visibility::NoFrustumCulling,
+                        bevy::light::NotShadowCaster,
+                        bevy::light::NotShadowReceiver,
+                    ))
+                    .id();
+                let new_idx = sim.generators.len();
+                sim.generators.push(LiveGenerator {
+                    def,
+                    solid_mesh: is_solid_mesh(&template),
+                    bound_radius: template_bound_radius(&template, &sprite_frames),
+                    template,
+                    draw_path: D3mDrawPath::D3m,
+                    sprite_frames,
+                    scale_x,
+                    scale_y,
+                    position_x,
+                    position_y,
+                    position_z,
+                    dampening_factor,
+                    alpha,
+                    tod_color,
+                    origin: r.pos,
+                    particles: Vec::new(),
+                    emit_accum: def.frames_per_emission,
+                    age_frames: 0.0,
+                    emit_window_frames: r.window,
+                    mesh,
+                    entity,
+                    auto_run: false,
+                    orientation: None,
+                    actor_local: false,
+                    tex_translate: Vec2::ZERO,
+                    vel_basis: WORLD_PARTICLE_VEL_BASIS,
+                    origin_routine: None,
+                    stopped: false,
+                    camera_relative: false,
+                    emit_culled: false,
+                    emit_scale: UNSCALED_EMISSION,
+                    emit_rng: emit_seed(entity),
+                    elements_emitted: 0,
+                    cam_view: Quat::IDENTITY,
+                    actor_rot: Quat::IDENTITY,
+                    entity_world: GlobalTransform::IDENTITY,
+                    parent: r.owner,
+                    anchor: r.anchor,
+                    child_factories: children,
+                    next_particle_id: 0,
+                    dead_child_gens: Vec::new(),
+                    pending_expiry_spawns: Vec::new(),
+                    built_key: MeshKey::Empty,
+                });
+                if let Some((ogi, pid)) = r.owner {
+                    if let Some(p) = sim
+                        .generators
+                        .get_mut(ogi)
+                        .and_then(|g| g.particles.iter_mut().find(|p| p.id == pid))
+                    {
+                        p.child_gens.push(new_idx);
+                    }
+                }
             }
         }
     }
@@ -1713,34 +1885,64 @@ fn resolve_child_bindings(
                 })
         };
         let Some((tier, child_dir, child_def)) = resolved else {
-            // The chunk may exist under a kind this engine has no child path for (ai90 in the
-            // zone DATs is a 0x22 distortion bound by i900's sec2 0x44).
-            let other_kind = assets
+            // Not a particle def: the same id may name a sound or distortion generator — those
+            // kinds spawn through the shared dispatch too (ai90 in the zone DATs is a 0x22
+            // distortion bound by i900's sec2 0x44).
+            if let Some(sound) = assets
                 .sound_defs
-                .contains_key(&id)
-                .then_some("sound")
-                .or_else(|| {
-                    assets
-                        .distortion_defs
-                        .contains_key(&id)
-                        .then_some("distortion")
-                })
-                .or_else(|| {
-                    global.and_then(|g| {
-                        g.sound_defs
-                            .contains_key(&id)
-                            .then_some("sound")
-                            .or_else(|| g.distortion_defs.contains_key(&id).then_some("distortion"))
-                    })
+                .get(&id)
+                .or_else(|| global.and_then(|g| g.sound_defs.get(&id)))
+            {
+                let se_id = assets.seps.get(&sound.sep_id).map(|s| s.se_id).or_else(|| {
+                    global
+                        .and_then(|g| g.seps.get(&sound.sep_id))
+                        .map(|s| s.se_id)
                 });
-            error!(
-                "child generator '{}' of gen '{}' [{}] unresolved — {} tier holds no particle def ({}); parent keeps running",
-                String::from_utf8_lossy(&id),
-                String::from_utf8_lossy(&def.mesh_id),
-                String::from_utf8_lossy(&def_dir),
-                if on_expiry || !once { "own" } else { "own/global" },
-                other_kind.map(|k| format!("a {k} def exists")).unwrap_or_default(),
-            );
+                if let Some(se_id) = se_id {
+                    out.push(ChildFactory {
+                        name: id,
+                        once,
+                        on_expiry,
+                        payload: ChildPayload::Sound {
+                            se_id,
+                            near: sound.near,
+                            far: sound.far,
+                            vertical_weight: if sound.attach_type
+                                == ffxi_dat::particle_gen::AttachType::None
+                            {
+                                crate::audio::UNATTACHED_VERTICAL_WEIGHT
+                            } else {
+                                crate::audio::ATTACHED_VERTICAL_WEIGHT
+                            },
+                        },
+                        children: Vec::new(),
+                    });
+                }
+            } else if let Some(dist) = assets
+                .distortion_defs
+                .get(&id)
+                .or_else(|| global.and_then(|g| g.distortion_defs.get(&id)))
+            {
+                out.push(ChildFactory {
+                    name: id,
+                    once,
+                    on_expiry,
+                    payload: ChildPayload::Distortion {
+                        haze_offset_x: dist.haze_offset_x,
+                        life_frames: dist.max_life_frames,
+                        envelope: keyframe(assets, global, dist.envelope_track)
+                            .map(|t| rescale_track(&t)),
+                    },
+                    children: Vec::new(),
+                });
+            } else {
+                error!(
+                    "child generator '{}' of gen '{}' [{}] unresolved — no tier holds a particle, sound or distortion def; parent keeps running",
+                    String::from_utf8_lossy(&id),
+                    String::from_utf8_lossy(&def.mesh_id),
+                    String::from_utf8_lossy(&def_dir),
+                );
+            }
             continue;
         };
         // A cycle in the binding chain would recurse forever; retail data has none.
@@ -1751,6 +1953,28 @@ fn resolve_child_bindings(
                 String::from_utf8_lossy(&def.mesh_id),
                 String::from_utf8_lossy(&def_dir),
             );
+            continue;
+        }
+        // sec2 0x82 + sec3 0x5F: a rumble child never draws — same dispatch as the routine path.
+        if let (Some(track_id), Some([near, far, _])) =
+            (child_def.rumble_track, child_def.rumble_falloff)
+        {
+            out.push(ChildFactory {
+                name: id,
+                once,
+                on_expiry,
+                payload: ChildPayload::Rumble {
+                    envelope: keyframe(tier, global, Some(track_id))
+                        .map(|t| rescale_track(&t))
+                        .unwrap_or_else(|| ffxi_dat::particle_gen::KeyFrameTrack {
+                            points: vec![(0.0, 1.0), (1.0, 0.0)],
+                        }),
+                    near,
+                    far,
+                    life_frames: child_def.max_life_frames,
+                },
+                children: Vec::new(),
+            });
             continue;
         }
         let Some((template, sprite_frames, tex)) =
@@ -1774,27 +1998,30 @@ fn resolve_child_bindings(
             id.and_then(|i| tier.keyframes.get(&i).cloned())
         };
         out.push(ChildFactory {
+            name: id,
             children: resolve_child_bindings(
                 child_def, tier, global, child_dir, images, mats, visited,
             ),
             once,
             on_expiry,
-            def: *child_def,
-            template,
-            sprite_frames,
-            mat,
-            scale_x: resolve(child_def.scale_x_track),
-            scale_y: resolve(child_def.scale_y_track),
-            position_x: resolve(child_def.position_x_track),
-            position_y: resolve(child_def.position_y_track),
-            position_z: resolve(child_def.position_z_track),
-            dampening_factor: if child_def.dampening_factor_applier {
-                resolve(child_def.velocity_dampener_track)
-            } else {
-                None
+            payload: ChildPayload::Draw {
+                def: *child_def,
+                template,
+                sprite_frames,
+                mat,
+                scale_x: resolve(child_def.scale_x_track),
+                scale_y: resolve(child_def.scale_y_track),
+                position_x: resolve(child_def.position_x_track),
+                position_y: resolve(child_def.position_y_track),
+                position_z: resolve(child_def.position_z_track),
+                dampening_factor: if child_def.dampening_factor_applier {
+                    resolve(child_def.velocity_dampener_track)
+                } else {
+                    None
+                },
+                alpha: resolve(child_def.alpha_track),
+                tod_color: resolve_tod_tracks(child_def, tier),
             },
-            alpha: resolve(child_def.alpha_track),
-            tod_color: resolve_tod_tracks(child_def, tier),
         });
     }
     out
@@ -3796,6 +4023,11 @@ mod tests {
         let mut time = Time::<()>::default();
         time.advance_by(Duration::from_secs_f32(TICK_SECS));
         world.insert_resource(time);
+        // Messages<T> has no FromWorld, so the bare test world inserts it for the SfxEvent writer.
+        world.insert_resource(bevy::ecs::message::Messages::<crate::audio::SfxEvent>::default());
+        world.insert_resource(bevy::ecs::message::Messages::<
+            crate::scheduler_runtime::ParticleSpawnTrace,
+        >::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(sim);
         world.run_system_once(tick_particle_simulator).unwrap();
@@ -7708,26 +7940,29 @@ mod tests {
 
     fn child_factory(once: bool, on_expiry: bool) -> ChildFactory {
         ChildFactory {
+            name: *b"tst1",
             once,
             on_expiry,
-            // fpe=30: only the primed first burst fires within the test's few ticks.
-            def: def(30.0, 30.0, 1),
-            template: SpriteTemplate {
-                positions: vec![Vec3::ZERO; 3],
-                uvs: vec![[0.0, 0.0]; 3],
-                indices: vec![0, 1, 2],
-                colors: vec![Vec4::ONE; 3],
+            payload: ChildPayload::Draw {
+                // fpe=30: only the primed first burst fires within the test's few ticks.
+                def: def(30.0, 30.0, 1),
+                template: SpriteTemplate {
+                    positions: vec![Vec3::ZERO; 3],
+                    uvs: vec![[0.0, 0.0]; 3],
+                    indices: vec![0, 1, 2],
+                    colors: vec![Vec4::ONE; 3],
+                },
+                sprite_frames: Vec::new(),
+                mat: Handle::default(),
+                scale_x: None,
+                scale_y: None,
+                position_x: None,
+                position_y: None,
+                position_z: None,
+                dampening_factor: None,
+                alpha: None,
+                tod_color: std::array::from_fn(|_| None),
             },
-            sprite_frames: Vec::new(),
-            mat: Handle::default(),
-            scale_x: None,
-            scale_y: None,
-            position_x: None,
-            position_y: None,
-            position_z: None,
-            dampening_factor: None,
-            alpha: None,
-            tod_color: std::array::from_fn(|_| None),
             children: Vec::new(),
         }
     }
@@ -7743,6 +7978,11 @@ mod tests {
 
     fn child_test_world(sim: ParticleSimulator) -> World {
         let mut world = World::new();
+        // Messages<T> has no FromWorld, so the bare test world inserts it for the SfxEvent writer.
+        world.insert_resource(bevy::ecs::message::Messages::<crate::audio::SfxEvent>::default());
+        world.insert_resource(bevy::ecs::message::Messages::<
+            crate::scheduler_runtime::ParticleSpawnTrace,
+        >::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(sim);
@@ -7860,6 +8100,65 @@ mod tests {
         assert_eq!(child.emit_window_frames, 0.0);
     }
 
+    // A distortion child (the ai90 shape: i900 binds it via sec2 0x44) arms the same screen-space
+    // pass a 0x02 stage would — no mesh, no MissingResource.
+    #[test]
+    fn distortion_child_arms_the_shared_dispatch() {
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(def(60.0, 30.0, 1), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(ChildFactory {
+            name: *b"ai90",
+            once: false,
+            on_expiry: false,
+            payload: ChildPayload::Distortion {
+                haze_offset_x: 0.02,
+                life_frames: 60.0,
+                envelope: None,
+            },
+            children: Vec::new(),
+        });
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // parent emits; the child arms on instantiation
+
+        let dist = world.resource::<crate::distortion_pass::ActiveDistortion>();
+        assert_eq!(dist.haze_offset_x, 0.02);
+    }
+
+    // A sound child writes the same SfxEvent a 0x02 stage naming that generator would.
+    #[test]
+    fn sound_child_writes_the_sfx_event() {
+        let mut sim = ParticleSimulator::default();
+        let mut parent = live(def(60.0, 30.0, 1), f32::MAX);
+        prime(&mut parent);
+        parent.child_factories.push(ChildFactory {
+            name: *b"g14s",
+            once: false,
+            on_expiry: false,
+            payload: ChildPayload::Sound {
+                se_id: 5008,
+                near: 0.0,
+                far: 30.0,
+                vertical_weight: crate::audio::UNATTACHED_VERTICAL_WEIGHT,
+            },
+            children: Vec::new(),
+        });
+        sim.generators.push(parent);
+
+        let mut world = child_test_world(sim);
+        tick_world(&mut world, 1.0 / 60.0); // parent emits; the child plays on instantiation
+
+        // The primed first tick emits ppe+1 = 2 parent particles (see
+        // child_generator_spawns_per_parent_particle), so the child plays once per particle.
+        let msgs = world.resource::<bevy::ecs::message::Messages<crate::audio::SfxEvent>>();
+        assert_eq!(msgs.len(), 2);
+        for ev in msgs.iter_current_update_messages() {
+            assert_eq!(ev.se_id, 5008);
+        }
+    }
+
     // sec2 0x45..0x49 (research/xim ParticleInitializers.kt Parent*Config) — a child particle
     // copies its anchor's state at init.
     #[test]
@@ -7883,10 +8182,11 @@ mod tests {
         let mut sim = ParticleSimulator::default();
         let mut parent = live(pd, f32::MAX);
         prime(&mut parent);
-        parent.child_factories.push(ChildFactory {
-            def: cd,
-            ..child_factory(false, false)
-        });
+        let mut cf = child_factory(false, false);
+        if let ChildPayload::Draw { def: d, .. } = &mut cf.payload {
+            *d = cd;
+        }
+        parent.child_factories.push(cf);
         sim.generators.push(parent);
 
         let mut world = child_test_world(sim);

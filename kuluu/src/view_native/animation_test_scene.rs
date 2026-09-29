@@ -4,6 +4,7 @@
 //! particle and audio systems. Every press logs its path (what dam0 picked, which stages ran)
 //! to this window AND stderr so both sides see it.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
@@ -15,8 +16,9 @@ use kuluu_render::ffxi_actor_render::{
 };
 use kuluu_render::scene::TrackedEntities;
 use kuluu_render::scheduler_runtime::{
-    enqueue_routine, stage_summary, ActionDatRoot, ActionTarget, ActiveScheduler, GlobalEffectDir,
-    ParticleSpawnTrace, RoutineLookup, VfxTrace, LEVEL_UP_EFFECT_DAT_ID,
+    enqueue_routine, parse_action_bytes_reporting, stage_summary, ActionDatRoot, ActionTarget,
+    ActiveScheduler, GlobalEffectDir, ParticleSpawnTrace, RoutineLookup, VfxTrace,
+    LEVEL_UP_EFFECT_DAT_ID,
 };
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_snapshot::EntityKind;
@@ -114,6 +116,7 @@ enum Case {
     Hit1Full,
     Hi26,
     Sb00,
+    I900,
     LoadZone,
     LoadWeather,
     Shot,
@@ -134,6 +137,7 @@ impl Case {
             Self::Hit1Full => "hit1 full (141/144 alpha 1)",
             Self::Hi26 => "hi26 routine (g261 child carrier)",
             Self::Sb00 => "sb00 routine (gs02 child carrier)",
+            Self::I900 => "i900 zone gen (ai90 haze child)",
             Self::LoadZone => "load zone (West Ronfaure)",
             Self::LoadWeather => "load weather (clouds)",
             Self::Shot => "screenshot (GPU readback)",
@@ -242,6 +246,7 @@ fn case_from_name(s: &str) -> Option<Case> {
         "hit1full" => Case::Hit1Full,
         "hi26" => Case::Hi26,
         "sb00" => Case::Sb00,
+        "i900" => Case::I900,
         "zone" => Case::LoadZone,
         "weather" => Case::LoadWeather,
         // ANIMTEST_SHOT_PATH names the PNG; Bevy reads back the render target, so this works
@@ -863,6 +868,7 @@ fn spawn_panel(commands: &mut Commands) {
         Case::Hit1Full,
         Case::Hi26,
         Case::Sb00,
+        Case::I900,
         Case::LoadZone,
         Case::LoadWeather,
     ] {
@@ -925,8 +931,8 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::Gen141 | Case::Gen144 => std::time::Duration::from_millis(2000),
         Case::Hit1Full => std::time::Duration::from_millis(2500),
         // The carrier particle lives 60 frames (1s) and emits its child every frame in that
-        // window; hold the lock long enough to watch the child appear.
-        Case::Hi26 | Case::Sb00 => std::time::Duration::from_millis(2500),
+        // window; hold the lock long enough to watch the child appear. i900 lives 90 frames.
+        Case::Hi26 | Case::Sb00 | Case::I900 => std::time::Duration::from_millis(2500),
         // Not animations: short windows only keep a double-press from re-issuing loads.
         Case::LoadZone => std::time::Duration::from_millis(2000),
         Case::LoadWeather => std::time::Duration::from_millis(500),
@@ -1131,6 +1137,7 @@ fn run_pending_case(
             &mut log,
             &mut commands,
         ),
+        Case::I900 => fire_zone_i900(&tracked, root.0.clone(), &mut log, &mut commands),
         Case::LoadZone => {
             let (zone_id, mzb_file, world_pos) = env_zone_override().unwrap_or((
                 WEST_RONFAURE_ZONE_ID,
@@ -1514,6 +1521,93 @@ fn fire_named_routine(
             ),
         ),
     }
+}
+
+// i900 (West Ronfaure fefr/fefs) binds ai90 — a Distortion generator — as its sec2 0x44 child,
+// and retail triggers it from server events; no zone routine names it. The test synthesizes the
+// one Particle stage that would name i900 and runs it on a proxy actor carrying the zone file's
+// ActionAssets: production dispatch resolves ai90 from the local tier and arms the haze child
+// through the same entry point as any other 0x02 stage.
+fn fire_zone_i900(
+    tracked: &TrackedEntities,
+    dat_root: Option<Arc<ffxi_dat::DatRoot>>,
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    let Some(worm) = tracked.by_id.get(&WORM_ID).copied() else {
+        log_line(log, "worm not loaded yet".into());
+        return;
+    };
+    let hume = tracked.by_id.get(&HUME_ID).copied();
+    commands.entity(worm).insert(ActionTarget(hume));
+    let Some(root) = dat_root else {
+        log_line(log, "no DAT root wired".into());
+        return;
+    };
+    let Ok(loc) = root.resolve(WEST_RONFAURE_MZB_FILE_ID) else {
+        log_line(
+            log,
+            format!("zone mzb {} not found", WEST_RONFAURE_MZB_FILE_ID),
+        );
+        return;
+    };
+    let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+        log_line(
+            log,
+            format!("zone mzb {} unreadable", WEST_RONFAURE_MZB_FILE_ID),
+        );
+        return;
+    };
+    let (_schedulers, assets, _report, _cameras) = parse_action_bytes_reporting(&bytes);
+    // i900's authored life (90 frames in the DAT) is the stage window.
+    const I900_LIFE_FRAMES: u16 = 90;
+    let routine = ffxi_dat::scheduler::Scheduler {
+        name: *b"tst1",
+        stages: vec![ffxi_dat::scheduler::TimedStage {
+            frame: 0,
+            stage: ffxi_dat::scheduler::SchedulerStage {
+                kind: ffxi_dat::scheduler::StageKind::Particle,
+                raw_type: 0x02,
+                stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
+                delay_frames: 0,
+                duration_frames: I900_LIFE_FRAMES,
+                id: *b"i900",
+                max_loops: 0,
+                transition_in: 0,
+                transition_out: 0,
+                model_transform: None,
+                follow_points: None,
+                screen_color: None,
+                actor_fade: None,
+                idle_transition_time: None,
+                flinch_duration: None,
+                model_visibility: None,
+                spell_effect: None,
+                sound_range: None,
+                control_flow: None,
+                random_group: None,
+                local_dir: *b"fefs",
+            },
+        }],
+    };
+    let active = ActiveScheduler::from_scheduler(&routine);
+    // The worm stands at its spawn point; the proxy shares that spot so the effect lands on it.
+    const WORM_SPAWN_POS: Vec3 = Vec3::new(-1.0, 0.0, 0.0);
+    let proxy = commands
+        .spawn((
+            TestSceneScoped,
+            Transform::from_translation(WORM_SPAWN_POS),
+            GlobalTransform::from_translation(WORM_SPAWN_POS),
+            ActionTarget(hume),
+            assets,
+        ))
+        .id();
+    enqueue_routine(commands, proxy, active);
+    log_line(
+        log,
+        "i900 on zone-asset proxy at the worm: Particle id='i900' dir=fefs (ai90 haze child)"
+            .into(),
+    );
 }
 
 fn worm_death_watch(

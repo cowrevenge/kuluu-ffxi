@@ -498,35 +498,22 @@ pub fn analyze(
             (def.emit_child_id, false),
         ] {
             let Some(id) = id else { continue };
-            let found = if once {
-                assets.particle_defs_by_dir.contains_key(&(*dir, id))
-                    || global.is_some_and(|g| g.particle_def_scoped(*dir, &id).is_some())
-            } else {
-                assets.particle_def_scoped(*dir, &id).is_some()
+            // The same kinds resolve_child_bindings accepts: a particle def, or the sound /
+            // distortion defs those bindings spawn through the shared dispatch.
+            let found = {
+                let particle = if once {
+                    assets.particle_defs_by_dir.contains_key(&(*dir, id))
+                        || global.is_some_and(|g| g.particle_def_scoped(*dir, &id).is_some())
+                } else {
+                    assets.particle_def_scoped(*dir, &id).is_some()
+                };
+                let sound = assets.sound_defs.contains_key(&id)
+                    || global.is_some_and(|g| g.sound_defs.contains_key(&id));
+                let distortion = assets.distortion_defs.contains_key(&id)
+                    || global.is_some_and(|g| g.distortion_defs.contains_key(&id));
+                particle || sound || distortion
             };
             if !found {
-                // The chunk may exist under a kind with no child path (ai90 is a 0x22
-                // distortion bound by i900's sec2 0x44 in the zone DATs).
-                let other_kind = assets
-                    .sound_defs
-                    .contains_key(&id)
-                    .then_some("sound")
-                    .or_else(|| {
-                        assets
-                            .distortion_defs
-                            .contains_key(&id)
-                            .then_some("distortion")
-                    })
-                    .or_else(|| {
-                        global.and_then(|g| {
-                            g.sound_defs
-                                .contains_key(&id)
-                                .then_some("sound")
-                                .or_else(|| {
-                                    g.distortion_defs.contains_key(&id).then_some("distortion")
-                                })
-                        })
-                    });
                 bump(
                     &mut diag.missing_resource,
                     format!(
@@ -537,9 +524,7 @@ pub fn analyze(
                     ),
                     *name,
                     *dir,
-                    other_kind
-                        .map(|k| format!("a {k} def exists; no child path for that kind"))
-                        .unwrap_or_default(),
+                    String::new(),
                 );
             }
         }

@@ -48,7 +48,9 @@ jobs:
       - run: scripts/checks.sh harness
       - run: scripts/checks.sh comments
       - run: scripts/checks.sh literals
-      - uses: dtolnay/rust-toolchain@stable
+      # The workspace manifest needs the pinned nightly (unstable codegen-backend);
+      # stable cargo cannot parse Cargo.toml, so this must track rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@nightly-2026-06-01
         with:
           components: rustfmt
       - run: scripts/checks.sh fmt

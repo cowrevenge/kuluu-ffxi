@@ -1,86 +1,25 @@
-# Headless drive: MCP, raw stdio, live tests
+# Headless drive — see `kuluu_headless/` (canonical)
 
-Three ways to a protocol-observable session, strongest first.
+The full recipes live in [`kuluu_headless/README.md`](../../../kuluu_headless/README.md):
+Surface A animationtest box, Surface B MCP / raw stdio / integration tests, accounts,
+evidence, gotchas — Windows and other-OS variants inline. This file is kept only as the
+verify skill's entry point; do not duplicate recipes here.
 
-## 1. kuluu-mcp standalone (preferred)
+Quick surface pick:
 
-Spawns the full supervisor→reactor→session pipeline and exposes MCP
-tools/resources over stdio. This is the only headless path with the reactor
-(goals, keepalive, event auto-dismiss) and the only one with event-driven
-waits instead of log polling.
+| Verifying | Surface | Where |
+|---|---|---|
+| Particles, routines, zone/weather load, actor placement, **any render-layer question** | A — AnimationTest box (hidden window) | `kuluu_headless/` §1 |
+| Wire protocol, session state, reactor goals, zoning, chat, entity/spawn flow | B — headless MCP (preferred) or raw stdio | `kuluu_headless/` §2–§3 |
+| Session/zone/MCP transport layers as a whole | B — live integration tests (self-skip without a server) | `kuluu_headless/` §4 |
 
-```bash
-cargo build -p kuluu-mcp          # binary at target/debug/kuluu-mcp
-FFXI_USER=... FFXI_PASS=... FFXI_CHAR=... FFXI_SERVER=127.0.0.1 target/debug/kuluu-mcp
-```
+Key facts that cost hours when forgotten:
 
-Drive it as an MCP server (`claude mcp add` / `.mcp.json` — see
-`ffxi-agent/.mcp.json` for the canonical config). The high-value calls for
-verification:
-
-- `wait_for_event {kinds, timeout_ms}` — block until `zone_changed` /
-  `entity_upserted` / `connected` / … fires. Use instead of polling.
-- `read_resource scene://current` — entities, zone, self state as JSON.
-- `read_resource diagnostics://session` — seq/sync counters, net health.
-- `request_zone_change {line_id}` — zoneline/MH-door trigger (char must be
-  standing in the rect; move there first with `path_to`).
-- `snapshot`, `chat`, `cast`, `engage`, `follow`, `disconnect` — see
-  `ffxi-agent/instructions/playbook.md` for the full vocabulary.
-
-`FFXI_ATTACH=auto` mode attaches to an already-running client instead of
-spawning its own — that's the GUI path, see `drive-gui.md`.
-
-## 2. Raw stdio (`play --headless`)
-
-Zero extra deps; JSON commands on stdin, typed JSON events on stdout, tracing
-on stderr. This path uses the reactor's explicit agent profile, so goal commands
-and fishing automation behave like MCP; it has no supervisor/reconnect layer or
-event-driven MCP waits.
-
-```bash
-D=$(mktemp -d); mkfifo $D/in; (exec 3>$D/in; sleep 900 & wait) &   # hold write end open
-cargo run -q -p kuluu --features native-window -- \
-  play <user> '<pass>' <CharName> --headless < $D/in > $D/events.jsonl 2> $D/client.log &
-
-echo '{"cmd":"move","x":164.9,"y":164.8,"z":-5.5,"heading":64}' > $D/in
-echo '{"cmd":"request_zone_change","line_id":812805498}' > $D/in    # zmr0, S. San d'Oria
-```
-
-- Commands are `AgentCommand` serde: `{"cmd":"snake_case", ...}` (state.rs).
-  Events are `{"type":"snake_case", ...}`.
-- Credentials are **positional args**, not env — env vars only feed the
-  interactive launcher, which will otherwise block on a `Username:` prompt.
-- Coordinate space in commands/events: `x` = native x, `y` = ground (native z),
-  `z` = vertical (native y).
-- Zoneline ids are the fourcc as LE u32 — look them up in
-  `vendor/server/data/zones/<zone>/zone.yaml` zonelines (the fourcc key names each line).
-
-## 3. Live integration tests (canonical layer proofs)
-
-These drive the real client against the real server and **self-skip when no
-server is reachable** — they are runtime verification harnesses, not CI
-re-runs. Use them to bisect which layer is broken before hand-driving:
-
-```bash
-cargo test -p kuluu --test play_lifecycle -- --nocapture   # auth→lobby→map→InZone→disconnect (~3s)
-cargo test -p kuluu --test zone_change    -- --nocapture   # GM !zone → reconnect → re-zone-in
-cargo test -p kuluu --test agent_session  -- --nocapture   # full MCP-driven session (transport floor)
-RESTART_MAP_SERVER=1 cargo test -p kuluu --test disconnect_recovery -- --nocapture  # destructive, opt-in
-```
-
-They use the `EphemeralChar` fixture (`tests/common/mod.rs`): isolated
-account + char stamped into MariaDB, gmlevel set before first login. If a
-manual flow fails where the matching test passes, diff your flow against the
-fixture's — that delta is the bug or the blocker.
-
-## Provisioning throwaway chars manually
-
-```bash
-cargo run -p kuluu --features native-window -- provision <user> 'TestPass!1234'
-cargo run -p kuluu --features native-window -- create-char <user> 'TestPass!1234' <Name> 1 1 0 1 1
-docker exec server-database-1 mariadb -uxiadmin -ppassword xidb \
-  -e "UPDATE chars SET pos_zone=230,pos_x=..,pos_y=..,pos_z=.. WHERE charname='<Name>';"
-```
-
-Remember the fresh-char c2s blocker (SKILL.md §Character strategy): good for
-login/spawn/inventory observation, currently no good for zoning or chat.
+- **`play --headless` is session-only** — no Bevy, no MZB geometry, no particles. Render
+  questions go to Surface A (`kuluu_headless/` §3).
+- Raw stdio launch = three separate commands (Git Bash precedence race), prebuilt repo-root
+  exe, `--mute`, ports from `docker port cow-connect` (§3).
+- Pixels: in-app `shot` case first (works on the zero-size hidden window);
+  `scripts/cap-window.ps1` only when the window has a client area (§1).
+- Ending a driven session cleanly: `/shutdown` chat from a GM account, ~35s wait — not
+  `taskkill` (§7).

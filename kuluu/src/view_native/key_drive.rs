@@ -10,7 +10,7 @@
 //!   {"key":"Enter"}          tap (press + release) a named or single-char key
 //!   {"key":"W","down":true}  press and HOLD (pair with up)
 //!   {"key":"W","up":true}    release a held key
-//!   {"text":"cowpass"}       type literal text; each character becomes a tap
+//!   {"text":"abc123"}       type literal text; each character becomes a tap
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -293,8 +293,8 @@ mod tests {
     #[test]
     fn text_line_parses() {
         assert!(matches!(
-            KeyMsg::from_json_line(r#"{"text":"cowpass"}"#),
-            Some(KeyMsg::Type(t)) if t == "cowpass"
+            KeyMsg::from_json_line(r#"{"text":"abc123"}"#),
+            Some(KeyMsg::Type(t)) if t == "abc123"
         ));
     }
 

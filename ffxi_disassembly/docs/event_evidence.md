@@ -1,7 +1,7 @@
 # Event VM pass evidence (§A to §M)
 
 Raw scanner outputs and disassembly dumps backing E1-E20 in [event_vm.md](event_vm.md). Conventions in
-[README.md](README.md). Sources are copies of `cow_tools/ffxi_disasm/out3/*`.
+[../README.md](../README.md). Sources are copies of the local untracked `out3/*` dumps.
 
 ## A. XiEvents pattern search (p7_event_vm.py)
 
@@ -4393,8 +4393,8 @@ plus a 0x8000 offset for ROM2) instead of through VTABLE/FTABLE. The true client
 | ROM2\19\126.DAT | 35326 | 31009 |
 
 The ids for ROM\0\23..26.DAT (23 to 26) are correct under both schemes. The hit list itself (which files
-carry movN / exNN references, and their name lists) is unchanged; verified by re-running the committed
-`cow_tools/ffxi_disasm/p9_zone_scene.py`, which resolves ids through VTABLE/FTABLE.
+carry movN / exNN references, and their name lists) is unchanged; verified by re-running
+`p9_zone_scene.py` in the scanner suite, which resolves ids through VTABLE/FTABLE.
 
 ### I.3 All zone-object vcall sites in .text; the [zoneObj->vt+N] pattern at 0xB4FF8 / 0xB50E8 / 0xB7439
 

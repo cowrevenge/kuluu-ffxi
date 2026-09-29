@@ -26,8 +26,8 @@ pub const COMM_EMOTE_LIST: &str = "Emote List";
 /// Desk are dropped; Graphics/Debug are ours, grouped with the page-2 config-like
 /// commands). The Debug entry renders only when built with `--features
 /// debug-menu` — opt-in and off by default, so retail parity holds as long as
-/// shipped builds do not enable the flag; local test batches (build_cowland.bat)
-/// pass it on RELEASE builds on purpose.
+/// shipped builds do not enable the flag; the local release build script
+/// passes it on RELEASE builds on purpose.
 const ROOT_ENTRIES: &[&str] = &[
     // Page 1
     "Status",

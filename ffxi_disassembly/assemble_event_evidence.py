@@ -7,8 +7,12 @@ Re-running this script regenerates the evidence doc exactly from the current out
 add new dumps, extend the section lists here and re-run. Usage: python assemble_event_evidence.py
 """
 import os
+import sys
 
-OUT = r"C:\Cow_Kuluu_ffxi-engine\cow_tools\ffxi_disasm\out3"
+# Raw dump folder is local working data, never tracked: point FFXI_DISASM_OUT3 at it.
+OUT = os.environ.get("FFXI_DISASM_OUT3")
+if not OUT:
+    sys.exit("set FFXI_DISASM_OUT3 to the local raw event-pass dump folder (out3)")
 DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "event_evidence.md")
 
 
@@ -25,7 +29,7 @@ Companion to [event_vm.md](event_vm.md). This doc holds the raw scanner
 outputs and disassembly dumps that back the E-findings. All addresses are RVAs relative to
 `FFXiMain.dll` ImageBase **0x10000000** (on-disk VA = 0x10000000 + RVA). `.text` is POL1-packed on
 disk; every dump was produced by the tooling in `ffxi_disassembly/` (this folder) after auto-decoding. Raw
-source files live in `cow_tools/ffxi_disasm/out3/` (kept for re-runs); the listings below are copies
+source files live in the local untracked raw dump folder named by FFXI_DISASM_OUT3; the listings below are copies
 of those outputs.
 
 Section letters (\u00a7A, \u00a7B, ...) are cited by the E-entries ("evidence doc \u00a7X").""")

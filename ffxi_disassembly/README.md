@@ -47,6 +47,7 @@ kuluu install path <NAME>          # prints the DAT root; FFXiMain.dll sits besi
 | `probe_tpc_files.py` | Tpc cross-check: resolves the four-band A/B file ids through VTABLE/FTABLE and lists which of tlk0 / thk1 / kka0 each mapped DAT carries. |
 | `scene_dat_parse.py` | Parses zone scene DATs (scheduler routines, stage names) for the p9/probe workflows. |
 | `dat_routines.py` | Shared DAT/scheduler-routine parsing used by the event-VM tools. |
+| `ffxi_dat_find.py` | Two install lookups: `resolve <file id...>` (VTABLE/FTABLE -> ROM path) and `scan-tag <fourcc...>` (which DATs carry a scheduler chunk with those names). No build needed; `FFXI_DAT_PATH` or `--root`. |
 | `assemble_event_evidence.py` | Rebuilds the raw evidence appendix (`docs/event_evidence.md`) from the local raw dumps. Extend its section lists when adding new dumps. |
 | `xref.py` | Cross-reference: `--to 0xRVA` (callers), `--from 0xRVA` (callees), `--imm 0x...` (who uses an immediate / on-disk VA / fourcc), `--disp 0x11E --size 2` (who touches a displacement), `--tree 0xRVA --depth N`. |
 | `disasm.py` | Disassembly: `--func 0xRVA` (whole heuristic function, annotated), `--rva/--len`, `--va 0x04DF0F40` (convert a runtime VA, base 0x04AC0000), `--bytes 0x32BB38 --len 0x100` (hex/dword dump of vtables/tables). Annotations: known-vtable VAs, fourcc immediates, plan offsets. |
@@ -97,9 +98,8 @@ python p8_jumptable.py "<install>" > out_p8.md                # ExecProg opcode 
 ## Raw source map (local working dumps, untracked)
 
 Scanner outputs land in local untracked dump folders (`out/` Phase 0, `out2/` mob pass,
-`out3/` event pass, `out4/` camera + UI handler dumps) under the legacy
-`cow_tools/ffxi_disasm/` tree; they are kept for re-runs and never tracked. The evidence
-docs embed copies of the relevant outputs:
+`out3/` event pass, `out4/` camera + UI handler dumps); they are kept for re-runs and never
+tracked. The evidence docs embed copies of the relevant outputs:
 
 | Source | Reproduced in |
 |---|---|

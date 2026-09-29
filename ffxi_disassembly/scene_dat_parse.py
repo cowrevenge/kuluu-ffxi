@@ -28,7 +28,9 @@ import re
 import struct
 
 DEFAULT_DAT = r"C:\PhoenixXI\SquareEnix\FINAL FANTASY XI\ROM\0\23.DAT"
-DEFAULT_SQL = r"C:\Cow_Kuluu_ffxi-engine\vendor\server\sql\zone_settings.sql"
+DEFAULT_SQL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "vendor", "server", "sql", "zone_settings.sql"
+)
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out3", "d_scene23_full.md")
 
 

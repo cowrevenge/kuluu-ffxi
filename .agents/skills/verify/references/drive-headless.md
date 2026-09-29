@@ -18,7 +18,7 @@ Key facts that cost hours when forgotten:
 - **`play --headless` is session-only** — no Bevy, no MZB geometry, no particles. Render
   questions go to Surface A (`kuluu_headless/` §3).
 - Raw stdio launch = three separate commands (Git Bash precedence race), prebuilt repo-root
-  exe, `--mute`, ports from `docker port cow-connect` (§3).
+  exe, `--mute`, ports from the stack's connect container (`docker ps`, §3).
 - Pixels: in-app `shot` case first (works on the zero-size hidden window);
   `scripts/cap-window.ps1` only when the window has a client area (§1).
 - Ending a driven session cleanly: `/shutdown` chat from a GM account, ~35s wait — not

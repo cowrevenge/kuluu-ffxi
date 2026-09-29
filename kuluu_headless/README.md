@@ -1,8 +1,8 @@
 # kuluu_headless — canonical headless testing recipes
 
 The single tracked source of truth for running kuluu without a visible window. Merges the
-old `Cow_doc/Headless_testing.md` and `.agents/skills/verify/references/drive-headless.md`;
-those files now point here. Windows-first (this machine), with the other-OS equivalents kept
+old untracked local headless notes and `.agents/skills/verify/references/drive-headless.md`;
+that file now points here. Windows-first (this machine), with the other-OS equivalents kept
 inline — do not drop them.
 
 Two headless surfaces, pick by what you're verifying:
@@ -15,13 +15,13 @@ Two headless surfaces, pick by what you're verifying:
 - **B. Session headless** — a real session driven over MCP / raw stdio / integration tests.
   Use it for wire protocol, zoning, cutscene flow, chat, entity spawn. §2–§4.
 
-Companion docs: `Cow_doc/LSB_Docker.md` (the stack itself), `.agents/skills/verify/SKILL.md`
-(canonical verify recipes + evidence recording).
+Companion docs: the local LSB docker notes (untracked; the stack itself),
+`.agents/skills/verify/SKILL.md` (canonical verify recipes + evidence recording).
 
 ## 0. The rules that keep runs from wrecking the desktop
 
-1. **Build with `.\build_cowland.bat`** (Windows) — release + full local feature batch, exe
-   synced to repo root. Never an ad-hoc `cargo build -p kuluu --features <subset>`: a
+1. **Build with the repo-root release `.bat`** (Windows; untracked by design) — release +
+   full local feature batch, exe synced to repo root. Never an ad-hoc `cargo build -p kuluu --features <subset>`: a
    half-feature binary is not what gets verified and behavior can differ. On other OSes the
    equivalent is the same cargo invocation with that feature list (see the bat file header).
 2. **Never open a visible window for agent runs.** Surface A: `KULUU_WINDOW_HIDDEN=1`.
@@ -42,17 +42,17 @@ char name auto-starts a session and plays the intro cutscene instead — never d
 ### Stack check
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Status}}" | grep cow-     # all Up
+docker ps --format "{{.Names}}\t{{.Status}}"                # all server containers Up
 # host ports (container ports are remapped on this machine):
 #   auth 53232   data 53231   view 54001
 ```
 
-If the stack is down: `bash scripts/lsb-stack.sh up` (`Cow_doc/LSB_Docker.md`).
+If the stack is down: `bash scripts/lsb-stack.sh up` (manual recovery in the untracked local stack notes).
 
 ### Launch (Windows, Git Bash)
 
 ```bash
-cd /c/Cow_Kuluu_ffxi-engine
+cd <repo root>
 KULUU_WINDOW_HIDDEN=1 \
 ANIMTEST_AUTO="zone,weather,nhit,chit,dhit,mobnhit,mobchit,respawn,hi26,sb00" \
 FFXI_MAP_LOCAL_PORT=47500 WGPU_ADAPTER_NAME=NVIDIA \
@@ -62,7 +62,7 @@ nohup ./kuluu.exe --server 127.0.0.1 --auth-port 53232 --data-port 53231 \
 
 Other OSes: same env vars, `./target/release/kuluu` (or the synced repo-root binary), no
 `WGPU_ADAPTER_NAME` pinning. The port numbers are this machine's docker remap — read them
-from `docker port cow-connect`, not from memory.
+from `docker port <connect container>` (name it via `docker ps`), not from memory.
 
 - `ANIMTEST_AUTO` — comma-separated case names fired on a fixed clock with no input: first
   fire ~4s after app start, then one every 7s. The full list runs ~95s; pass only the cases
@@ -170,9 +170,9 @@ Verified working recipe (Windows / Git Bash, this machine's stack). **Three sepa
 commands** — do not chain them:
 
 ```bash
-# 1) setup its own command: D=C:/tmp/shity; rm -rf $D; mkdir -p $D; mkfifo $D/in
+# 1) setup its own command: D=/c/tmp/agent; rm -rf $D; mkdir -p $D; mkfifo $D/in
 
-# 2) launch (prebuilt repo-root exe from build_cowland.bat, ports from `docker port cow-connect`):
+# 2) launch (prebuilt repo-root exe from the release .bat, ports via `docker port <connect container>`):
 (exec 3>$D/in; sleep 900) &   # hold the fifo write end open for the session's lifetime
 ./kuluu.exe --server 127.0.0.1 --auth-port 53232 --data-port 53231 \
   play <user> '<pass>' <CharName> --headless --mute < $D/in > $D/events.jsonl 2> $D/client.log &
@@ -199,7 +199,7 @@ Other OSes: same three steps with `./target/release/kuluu` (or the synced repo-r
   `vendor/server/data/zones/<zone>/zone.yaml` zonelines.
 - `--headless` opens **no window at all** (Surface B never needs `KULUU_WINDOW_HIDDEN`,
   which is a Surface A thing); still pass `--mute`.
-- Use the prebuilt repo-root `./kuluu.exe` from `build_cowland.bat`, not an ad-hoc
+- Use the prebuilt repo-root `./kuluu.exe` from the release .bat, not an ad-hoc
   `cargo run`: a half-feature debug binary is not what gets verified (rule 0).
 - **Git Bash precedence gotcha**: `A && B & C` backgrounds the whole chain. If mkfifo sits
   in the same command as the launch, kuluu's `< $D/in` redirect can race fifo creation and
@@ -212,7 +212,7 @@ Other OSes: same three steps with `./target/release/kuluu` (or the synced repo-r
     (from Git Bash the `$` vars get eaten — put it in a .ps1 file and use `-File`).
   - Unix: `echo '{"cmd":"move",...}' | nc 127.0.0.1 48199`.
 - Reading what the server sends around you: every nearby entity is an `entity_upserted`
-  event; self is the one with `kind:"pc"` (shitypants = id 5 on this stack). Compute
+  event; self is the one with `kind:"pc"` (its entity id varies per login). Compute
   distance from self's `pos` over all upserts to see exactly who/what the server placed in
   the area — zone fixtures (lamps, torches) are NOT entities, they come from the MZB and
   only show up in Surface A runs.
@@ -249,18 +249,18 @@ and the test dies at the 0x02 ack step.
   safe to type into launch commands and logs, not a real secret.
 - **The user's real character**: credentials come from env
   (`FFXI_USER`/`FFXI_PASS`/`FFXI_CHAR`); never commit or log them; use only when the check
-  needs the user's own character/progress. On this stack: `cow / cowpass`, char
-  `shitypants`.
+  needs the user's own character/progress — use your own local account, and never log in
+  as the user while they are playing.
 - **Fresh provisioned chars** (no DB teleport needed for the basics):
 
   ```bash
   cargo run -p kuluu --features native-window -- provision <user> 'TestPass!1234'
   cargo run -p kuluu --features native-window -- create-char <user> 'TestPass!1234' <Name> 1 1 0 1 1
-  docker exec cow-db mariadb -uxiadmin -ppassword xidb \
+  docker exec <db container> mariadb -uxiadmin -ppassword xidb \
     -e "UPDATE chars SET pos_zone=230,pos_x=..,pos_y=..,pos_z=.. WHERE charname='<Name>';"
   ```
 
-  (container name varies per stack — `cow-db` here; the fixture's own runs use whatever
+  (container name varies per stack — find it with `docker ps`; the fixture's own runs use whatever
   `tests/common/mod.rs` points at). The old "fresh chars get all c2s silently ignored"
   blocker was two client bugs, both fixed: the c2s datagram header must be the last
   subpacket's sync (`session.rs::datagram_header_id` — drift = server skips every
@@ -273,7 +273,7 @@ and the test dies at the 0x02 ack step.
 - Surface A: `client.log` `[animationtest]` lines (table in §1) — quote them inline; pixels
   via the `shot` case / `scripts/cap-window.ps1` (§1 capture), saved under `artifacts/verify/`.
 - Surface B: `events.jsonl` (stdout JSON events), `client.log` (stderr tracing),
-  `scene://current` snapshots, and the map-server log (`docker logs cow-map --since 5m` —
+  `scene://current` snapshots, and the map-server log (`docker logs <map container> --since 5m` —
   LoadChar / cleanupSessions / `Invalid <name> packet from <char>` validator failures).
 - Keep the raw captures until the report is delivered; quote the observed lines inline.
 - Recording for the stop-hook verify gate:
@@ -292,8 +292,9 @@ and the test dies at the 0x02 ack step.
   on this stack are not yours to drop, and a whole-table delete is destructive).
 - **colima dead / one-way UDP / login stuck at "Authenticating"** — the VM slept and
   virtiofs went stale: `colima restart`, then `docker start` the server containers.
-- **Map UDP return path** — s2c UDP replies are kept alive by the `cow-dnat` sidecar
-  (`Cow_doc/LSB_Docker.md`); if login succeeds and then map traffic goes silent, check that
+- **Map UDP return path** — s2c UDP replies are kept alive by a DNAT sidecar container in
+  the local stack (see the untracked stack notes); if login succeeds and then map traffic
+goes silent, check that
   before theorizing about the client.
 
 **Surface A**

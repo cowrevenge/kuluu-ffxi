@@ -419,7 +419,7 @@ only on a real 1 -> 0 transition (dead, F42).
   with off=(b2|b1<<8)&0xFFF (off==0 terminates the stream), len=(b1>>4)+3, byte-wise copy. The unpacker
   ignores its size argument and stops only at off==0; decoded length equals .text vsize exactly on both
   binaries (FFXiMain 0x32762E). Evidence: disasm rva 0xBB1A60-0xBB1B47 (`probe_entrystub.py`, scratch);
-  `pol1_decode()` + auto-decoding `Image` in `cow_tools/ffxi_disasm/common.py`. Consequence: every
+  `pol1_decode()` + auto-decoding `Image` in `common.py` (the scanner suite next to this doc). Consequence: every
   static scan below runs on the *decoded* .text; RVAs are unaffected.
 
 - **F25 [local] 2026-09-08 (Phase 0 module map, p0_modmap.py):** Install dir `C:\PhoenixXI\SquareEnix\
@@ -527,7 +527,7 @@ only on a real 1 -> 0 transition (dead, F42).
   position/pose update path, same entity table). Evidence: p2.lf.md top-15 + full disasm in
   mob_evidence_3 §E.
 
-- **F31 [local] 2026-09-08 (tooling changes):** `cow_tools/ffxi_disasm/common.py` gained `pol1_decode()`
+- **F31 [local] 2026-09-08 (tooling changes):** `common.py` in the scanner suite gained `pol1_decode()`
   (the F24 bit-packed LZSS decoder) and an auto-decoding `Image`: when a section is executable with
   rawsize==0 and a POL1 section exists, the payload is decoded once into `packed_text` so every scanner
   treats .text as if it were on disk (`read()`/`u32()`/`text()` fall back to the blob). All Phase 0/1/2
@@ -855,7 +855,7 @@ only on a real 1 -> 0 transition (dead, F42).
   (F50: 'atk0' -> hwat -> one of ati0/1/2 -> at00/at10/at20). Mob-specific extras (worm ini1 with sp1?,
   hare Foot Kick with sp1?) sit on top of this standard set. Consequence for Q3: **the name families the
   client asks for are fixed; every model ships the same ~36 routines plus its specials; the per-mob
-  content is entirely inside the routines.** Tool: `cow_tools/ffxi_disasm/dat_routines.py`; dumps in
+  content is entirely inside the routines.** Tool: `dat_routines.py` (scanner suite); dumps in
   mob_evidence_3 §H.
 
 - **F55 [local] 2026-09-09 (FULL-INSTALL CENSUS, `dat_routines.py --scan` over 445 ROM chunks by the
@@ -995,8 +995,8 @@ only on a real 1 -> 0 transition (dead, F42).
 | 2026-09-09 | `dat_routines.py --scan` over all 445 ROM subdirs (`out2/datdump.zip`) | F55 |
 | 2026-09-09 | external: xi-model-viewer, xi-tools, sruon/FFXI-PS2, xim, LSB four_cc.h + 0x028 | F56-F58 |
 
-Wormwatch logs live in `cow_tools/ffxi_disasm/ashita/wormwatch/logs/`; scanner outputs in
-`cow_tools/ffxi_disasm/out/` and `out2/`. Observation record for F36-F45:
+Wormwatch logs live in the local untracked wormwatch addon folder; scanner outputs in
+local untracked `out/` and `out2/` folders. Observation record for F36-F45:
 `.agents/skills/retail-observe/references/worm-burrow-routines.md`.
 
 ## 6. Open items

@@ -1006,7 +1006,7 @@ mod tests {
         app.add_message::<KeyboardInput>()
             .init_resource::<NextState<LauncherState>>()
             .insert_resource(LoginForm {
-                user: "cow".into(),
+                user: "player".into(),
                 pass: "moo".into(),
                 ..Default::default()
             })
@@ -1031,7 +1031,7 @@ mod tests {
     fn escape_at_login_wipes_credentials_without_leaving_the_screen() {
         let mut app = escape_app();
         let window = app.world_mut().spawn(PrimaryWindow).id();
-        let fields: Vec<_> = ["cow", "moo"]
+        let fields: Vec<_> = ["alpha", "beta"]
             .into_iter()
             .map(|value| {
                 app.world_mut()

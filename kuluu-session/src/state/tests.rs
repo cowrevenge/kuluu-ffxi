@@ -2776,11 +2776,11 @@ fn self_position_events_stamp_the_self_id() {
     s.apply_event(&AgentEvent::Connected {
         account_id: 1,
         char_id: 7,
-        character: "Cow".into(),
+        character: "Player".into(),
         zone_id: 103,
     });
     assert!(s.apply_event(&AgentEvent::EntityUpserted {
-        entity: make_test_entity(7, Some("Cow"), EntityKind::Pc),
+        entity: make_test_entity(7, Some("Player"), EntityKind::Pc),
         pos_present: true,
     }));
     s.take_pending_entities();

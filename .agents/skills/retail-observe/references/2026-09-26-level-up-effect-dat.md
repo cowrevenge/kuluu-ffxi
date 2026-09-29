@@ -23,8 +23,8 @@ motion half: which file, and under what routine name.
 ## Reproduce
 
 ```
-python cow_tools/ffxi_dat_find.py resolve 3310 3309
-python cow_tools/ffxi_disasm/dat_routines.py <install>/ROM/13/35.DAT
+python ffxi_disassembly/ffxi_dat_find.py resolve 3310 3309
+python ffxi_disassembly/dat_routines.py <install>/ROM/13/35.DAT
 ```
 
 The first prints `3310 ROM\13\35.DAT` / `3309 ROM\13\34.DAT`; the second dumps

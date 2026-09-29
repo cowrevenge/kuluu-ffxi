@@ -4,8 +4,8 @@ How the retail client drives the camera during events: which opcodes touch it, w
 manager object is, how positions cross between event work slots and camera space, and how the
 look-at opcodes pose the actors. Findings **C1..** are a third pass, distinct from the mob pass
 (**F**, [mob_animation.md](mob_animation.md)) and the event-VM pass (**E**, [event_vm.md](event_vm.md)).
-Conventions (RVA base 0x10000000, POL1-packed `.text`, evidence tiers) are in [README.md](README.md).
-Raw dumps: `cow_tools/ffxi_disasm/out4/d_*.md` (this pass).
+Conventions (RVA base 0x10000000, POL1-packed `.text`, evidence tiers) are in [../README.md](../README.md).
+Raw dumps: local untracked `out4/d_*.md` (this pass).
 
 Target binary: `FFXiMain.dll`, build TDS 0x6A7297F5 (same build as the E pass).
 

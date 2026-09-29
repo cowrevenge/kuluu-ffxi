@@ -4,7 +4,7 @@ Question: which DAT carries a PC's crit-hit flash, and how does retail select it
 (No white/red hit flash in kuluu live; user's viewer read of ROM/0/0.DAT pointed at the
 hitN family.)
 
-## Chain (byte-dumped from the installed client via cow_tools/ffxi_disasm/dat_routines.py)
+## Chain (byte-dumped from the installed client via ffxi_disassembly/dat_routines.py)
 
 - Normal melee hit: victim `damg` → ref09 **chit** on the attacker → `call57 se h` +
   `call57 ef h`. For a HumeM sword, `ef h` is defined in the weapon DAT (id 8392 =

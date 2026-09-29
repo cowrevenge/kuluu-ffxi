@@ -5,8 +5,8 @@ triad, dialog creation and select-wait, menu option masks, chat lines, string in
 event-report opcodes. Findings **U1..** are a fourth pass, distinct from the mob pass (**F**,
 [mob_animation.md](mob_animation.md)), the event-VM pass (**E**, [event_vm.md](event_vm.md)),
 and the camera pass (**C**, [camera.md](camera.md)). Conventions (RVA base 0x10000000,
-POL1-packed `.text`, evidence tiers) are in [README.md](README.md). Raw dumps:
-`cow_tools/ffxi_disasm/out4/d_*.md` (this pass).
+POL1-packed `.text`, evidence tiers) are in [../README.md](../README.md). Raw dumps:
+local untracked `out4/d_*.md` (this pass).
 
 Target binary: `FFXiMain.dll`, build TDS 0x6A7297F5 (same build as the E and C passes).
 

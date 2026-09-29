@@ -46,8 +46,8 @@ pub struct MapClient {
 impl MapClient {
     pub async fn connect(server: SocketAddr, seed: [u8; 20]) -> Result<Self> {
         // FFXI_MAP_LOCAL_PORT pins the local UDP port: under Docker Desktop/WSL2 the s2c return
-        // path needs a one-shot DNAT in cow-map's netns (the CowEngine repo's
-        // runbook covers it; that repo is not part of this tree),
+        // path needs a one-shot DNAT in the map container's netns (the local stack
+        // runbook covers it; it is not part of this tree),
         // and an ephemeral bind changes its target on every run.
         let local = match std::env::var("FFXI_MAP_LOCAL_PORT") {
             Ok(port) => format!("0.0.0.0:{port}"),

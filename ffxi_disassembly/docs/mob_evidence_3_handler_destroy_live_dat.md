@@ -940,7 +940,7 @@ vtable-install sites (no other immediate uses); `--disp 0xA0 --size 4` = **1036*
 
 ## §G. Live session, wormwatch_20260908_231759.log: routine records + combat crawls (F46-F49)
 
-Log: `cow_tools/ffxi_disasm/ashita/wormwatch/logs/wormwatch_20260908_231759.log` (3526 lines, v0.4,
+Log: local untracked wormwatch log `wormwatch_20260908_231759.log` (3526 lines, v0.4,
 FFXiMain.dll base this session 0x03DF0000). Three Carrion Worms locked at f328: idx 100 (entity
 0x29120B10), 101 (0x2911F680), 102 (0x29120820). One wormwatch frame = ~34.5 ms.
 

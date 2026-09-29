@@ -83,12 +83,12 @@ enhanced-engage-move-lock-off = ["kuluu-render?/enhanced-engage-move-lock-off"]
 enhanced-particle-alpha-20 = ["kuluu-render?/enhanced-particle-alpha-20"]
 # Enhanced (non-retail) `//targetname` slash command: target the nearest
 # NPC/mob/pet by exact name. Kuluu-local (no render side), so no sub-features;
-# the local build (build_cowland.bat) enables it. Vanilla builds omit it.
+# the local release build script enables it. Vanilla builds omit it.
 enhanced-targetname = []
 # Enhanced (non-retail) pre-server animation test box: an AnimationTest button
 # in the launcher titlebar loads a worm+Hume scene and fires dam0 hit cases
 # through the production VFX pipeline with on-screen + stderr logging. Kuluu-local
-# (no render side), so no sub-features; the local build (build_cowland.bat)
+# (no render side), so no sub-features; the local release build script
 # enables it. Vanilla builds omit it.
 enhanced-animationtest = []
 # Enable the WebSocket relay listener (`--relay-listen <addr>` global flag).

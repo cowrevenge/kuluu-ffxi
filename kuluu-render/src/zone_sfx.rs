@@ -366,13 +366,15 @@ pub fn zone_sfx_gain(
         * mute.ambient_gain
 }
 
-fn update_zone_sfx(
+pub fn update_zone_sfx(
     time: Res<Time>,
     sim: Res<crate::particle_sim::ParticleSimulator>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
     sfx_debug: Res<crate::audio::SfxDebug>,
     listener: Query<&GlobalTransform, With<OperatorCamera>>,
+    voices: Query<Entity, With<crate::audio::SeVoice>>,
+    mut buffer: ResMut<crate::audio::SeRequestBuffer>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut emitters: Query<(Entity, &mut ZonePlacedSfx, Option<&GlobalTransform>)>,
@@ -456,17 +458,22 @@ fn update_zone_sfx(
                 }
                 (None, true) => {
                     let se_id = em.se_id;
-                    if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, true) {
-                        em.audio = Some(
-                            commands
-                                .spawn((
-                                    ChildOf(emitter),
-                                    AudioPlayer(handle),
-                                    PlaybackSettings::ONCE
-                                        .with_volume(bevy::audio::Volume::Linear(gain)),
-                                ))
-                                .id(),
-                        );
+                    // Retail admission: a refused loop simply does not start this tick; the
+                    // next frame re-asks once a slot frees.
+                    if buffer.request(se_id, voices.iter().count()) {
+                        if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, true) {
+                            em.audio = Some(
+                                commands
+                                    .spawn((
+                                        ChildOf(emitter),
+                                        crate::audio::SeVoice,
+                                        AudioPlayer(handle),
+                                        PlaybackSettings::ONCE
+                                            .with_volume(bevy::audio::Volume::Linear(gain)),
+                                    ))
+                                    .id(),
+                            );
+                        }
                     }
                 }
                 (None, false) => {}
@@ -491,16 +498,19 @@ fn update_zone_sfx(
             continue;
         }
         let se_id = em.se_id;
-        if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, false) {
-            let cue = commands
-                .spawn((
-                    ChildOf(emitter),
-                    AudioPlayer(handle),
-                    PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(gain)),
-                ))
-                .id();
-            if em.singleton {
-                em.audio = Some(cue);
+        if buffer.request(se_id, voices.iter().count()) {
+            if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, false) {
+                let cue = commands
+                    .spawn((
+                        ChildOf(emitter),
+                        crate::audio::SeVoice,
+                        AudioPlayer(handle),
+                        PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(gain)),
+                    ))
+                    .id();
+                if em.singleton {
+                    em.audio = Some(cue);
+                }
             }
         }
     }

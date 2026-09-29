@@ -310,6 +310,62 @@ impl AudioMuteState {
     }
 }
 
+// research/XIClient/src/XIClient/include/World/Generator/Effects/CYySoundElem.h:
+// `INDEX_SOUND_REQUEST_MAX = 12`, `req_buffer[12]` of `CYySepRes*`. CYySepRes.cpp
+// `RequestSoundResourcePlayback`: a full buffer refuses (no eviction, no replacement);
+// a resource already queued is accepted without taking a second slot. CYySoundElem.cpp
+// `SysMove` drains the queue FIFO every tick and resets `se_req_num = 0`, so this is a
+// per-tick request queue, not a voice table — looping SEs hold no slot; they occupy an
+// active instance against the concurrent cap for their life. AudioManager.cpp
+// `RequestSoundEffectPlay`: `ActiveInstanceCount >= MainRegistryConfig::MaxConcurrentSoundEffects`
+// (12, RegistryConfig.cpp) refuses playback. BGM bypasses this path entirely
+// (AudioStreamHandler's "BGMStream"); UI/global cues go through it (`PlayUISoundResource`
+// → `CYySepRes::Play`), so they count.
+pub const SE_REQUEST_MAX: usize = 12;
+pub const MAX_CONCURRENT_SE: usize = 12;
+
+/// Retail's SE admission control, one buffer both mixers go through.
+#[derive(Resource, Default)]
+pub struct SeRequestBuffer {
+    queued: Vec<u32>,
+    pub refused_total: u64,
+}
+
+impl SeRequestBuffer {
+    /// `RequestSoundResourcePlayback` plus the concurrent cap in `RequestSoundEffectPlay`.
+    pub fn request(&mut self, se_id: u32, active_voices: usize) -> bool {
+        if self.queued.len() >= SE_REQUEST_MAX {
+            self.refused_total += 1;
+            return false;
+        }
+        if !self.queued.contains(&se_id) && active_voices >= MAX_CONCURRENT_SE {
+            self.refused_total += 1;
+            return false;
+        }
+        if !self.queued.contains(&se_id) {
+            self.queued.push(se_id);
+        }
+        true
+    }
+
+    /// `CYySoundElem::SysMove` — the queue drains FIFO every tick and resets to zero.
+    pub fn begin_frame(&mut self) {
+        self.queued.clear();
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
+    }
+}
+
+/// Marks a live SE voice; the count is what the concurrent cap sees.
+#[derive(Component)]
+pub struct SeVoice;
+
+fn reset_se_request_buffer(mut buffer: ResMut<SeRequestBuffer>) {
+    buffer.begin_frame();
+}
+
 /// Runtime SE-mixing readout: per-emitter ambient toasts plus the routine-cue line.
 /// Off by default; `/sfxdebug` toggles it for finding the next loud thing.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -849,14 +905,36 @@ pub fn play_sfx_system(
     mut events: MessageReader<SfxEvent>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
+    // Option: the system is also registered standalone by tests without AudioPlugin.
+    sfx_debug: Option<Res<SfxDebug>>,
     listener_camera: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    voices: Query<Entity, With<SeVoice>>,
+    mut buffer: ResMut<SeRequestBuffer>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut commands: Commands,
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     mut last_chat: Local<Option<(u32, std::time::Instant)>>,
+    mut last_slot_report: Local<Option<std::time::Instant>>,
     mut warned: Local<bool>,
 ) {
+    // /sfxdebug slot readout — occupancy and refusals are only observable here.
+    if sfx_debug.is_some_and(|d| d.0) {
+        let now = std::time::Instant::now();
+        if last_slot_report
+            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+        {
+            toasts.write(crate::snapshot::ToastEvent::debug(format!(
+                "✦ se slots queued {}/{} active {}/{} refused {}",
+                buffer.queued_count(),
+                SE_REQUEST_MAX,
+                voices.iter().count(),
+                MAX_CONCURRENT_SE,
+                buffer.refused_total
+            )));
+            *last_slot_report = Some(now);
+        }
+    }
     if events.is_empty() {
         return;
     }
@@ -882,11 +960,16 @@ pub fn play_sfx_system(
         if volume <= 0.0 {
             continue;
         }
+        // Retail admission (CYySepRes::Play): a refused cue is simply not played this tick.
+        if !buffer.request(ev.se_id, voices.iter().count()) {
+            continue;
+        }
         let Some(handle) = cache.handle(&install, &mut pcm_assets, ev.se_id, false) else {
             continue;
         };
         commands.spawn((
             InGameEntity,
+            SeVoice,
             AudioPlayer(handle),
             PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(volume)),
         ));
@@ -1267,10 +1350,14 @@ impl Plugin for AudioPlugin {
             .init_resource::<SystemSfxCursor>()
             .init_resource::<CombatSfxState>()
             .init_resource::<ZoneAmbientBed>()
+            .init_resource::<SeRequestBuffer>()
             .add_message::<SfxEvent>()
             .add_systems(
                 Update,
                 (
+                    // The per-tick queue resets before either mixer admits a cue; zone_sfx
+                    // runs in its own plugin's chain, so pin the reset ahead of it too.
+                    reset_se_request_buffer.before(crate::zone_sfx::update_zone_sfx),
                     drain_music_events_system,
                     derive_bgm_playback_state,
                     apply_bgm_system,
@@ -2126,6 +2213,7 @@ mod tests {
                 ..Default::default()
             })
             .init_resource::<AudioMuteState>()
+            .init_resource::<SeRequestBuffer>()
             .init_resource::<SfxCache>()
             .add_systems(Update, play_sfx_system);
 
@@ -2453,5 +2541,70 @@ mod tests {
             app.world().get::<AudioPlayer<PcmAudio>>(entity).is_some(),
             "the spawned entity should carry an AudioPlayer<PcmAudio> component"
         );
+    }
+
+    // CYySepRes::RequestSoundResourcePlayback: the 13th distinct request in a tick is refused,
+    // no eviction; a resource already queued is accepted without taking a second slot.
+    #[test]
+    fn thirteenth_request_in_a_tick_is_refused() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..SE_REQUEST_MAX as u32 {
+            assert!(buf.request(id, 0), "request {id} fits the queue");
+        }
+        assert_eq!(buf.queued_count(), SE_REQUEST_MAX);
+        assert!(
+            !buf.request(SE_REQUEST_MAX as u32, 0),
+            "the 13th distinct id is refused"
+        );
+        assert_eq!(buf.refused_total, 1);
+        // The fullness check precedes the dedup scan, so
+        assert!(!buf.request(0, 0), "fullness precedes dedup");
+        assert_eq!(buf.queued_count(), SE_REQUEST_MAX);
+        assert_eq!(buf.refused_total, 2);
+    }
+
+    #[test]
+    fn queued_resource_rides_its_slot() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..5 {
+            assert!(buf.request(id, 0));
+        }
+        // An already-queued resource is accepted without taking a second slot.
+        assert!(buf.request(2, 0));
+        assert_eq!(buf.queued_count(), 5);
+        assert_eq!(buf.refused_total, 0);
+    }
+
+    // AudioManager::RequestSoundEffectPlay: ActiveInstanceCount >= MaxConcurrentSoundEffects
+    // refuses; a loop that leaves `far` despawns and frees its slot for the next frame.
+    #[test]
+    fn concurrent_cap_refuses_until_a_voice_frees() {
+        let mut buf = SeRequestBuffer::default();
+        assert!(
+            !buf.request(1, MAX_CONCURRENT_SE),
+            "full voice table refuses"
+        );
+        assert_eq!(buf.refused_total, 1);
+        // One loop left `far` and was despawned: the slot is free again.
+        assert!(buf.request(1, MAX_CONCURRENT_SE - 1));
+    }
+
+    // PlayUISoundResource → CYySepRes::Play: UI/global (dry) cues take slots exactly like
+    // positional ones — admission keys on the se id alone.
+    #[test]
+    fn global_cues_count_toward_the_buffer() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..SE_REQUEST_MAX as u32 {
+            assert!(buf.request(id, 0));
+        }
+        // A dry UI cue with a fresh id is refused just like any other.
+        assert!(!buf.request(99, 0));
+        // ...while room remains, a duplicate rides its existing slot.
+        let mut open = SeRequestBuffer::default();
+        for id in 0u32..5 {
+            assert!(open.request(id, 0));
+        }
+        assert!(open.request(5, 0));
+        assert_eq!(open.queued_count(), 6);
     }
 }

@@ -1433,29 +1433,6 @@ impl FfxiRenderActor {
         self.action_clips.clear();
     }
 
-    /// The cached point-light selection's evaluation position (None before its first pick).
-    pub fn point_light_eval_pos(&self) -> Option<Vec3> {
-        self.point_light_selection.as_ref().map(|sel| sel.eval_pos)
-    }
-
-    /// Drop the selected point lights `keep` rejects, keeping the cached positions aligned with
-    /// the surviving indices (the two are zipped in [`ActorPointLightSelection::valid_for`]).
-    pub fn filter_point_light_selection(&mut self, mut keep: impl FnMut(u32) -> bool) {
-        let Some(sel) = self.point_light_selection.as_mut() else {
-            return;
-        };
-        let mut indices = Vec::with_capacity(sel.indices.len());
-        let mut positions = Vec::with_capacity(sel.positions.len());
-        for (i, &idx) in sel.indices.iter().enumerate() {
-            if keep(idx) {
-                indices.push(idx);
-                positions.push(sel.positions[i]);
-            }
-        }
-        sel.indices = indices;
-        sel.positions = positions;
-    }
-
     /// A scheduler Motion stage's action is in flight on this model.
     pub fn has_action(&self) -> bool {
         self.action.is_some()

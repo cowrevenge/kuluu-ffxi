@@ -74,6 +74,7 @@ pub fn build_active_scene_lights(
     faithful: Res<ZonePointLights>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
+    time: Res<Time>,
     mut active: ResMut<ActiveSceneLights>,
 ) {
     let day = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
@@ -88,7 +89,14 @@ pub fn build_active_scene_lights(
         let target = &mut active.bypass_change_detection().lights;
         target.truncate(source.len());
         for (index, light) in source.iter().enumerate() {
-            let evaluated = light.at_time(day);
+            let mut evaluated = light.at_time(day);
+            // The FFXI custom materials read this list straight into their shader uniforms,
+            // so the menu's flicker row has to land here as well as on the Bevy PointLight
+            // entities — without it a toggled flicker is invisible on walls and actors.
+            if settings.light_flicker {
+                let waver = lamp_flicker(time.elapsed_secs_wrapped(), index as f32);
+                evaluated.color *= waver;
+            }
             if let Some(old) = target.get_mut(index) {
                 changed |= old.light_id != evaluated.light_id
                     || old.world_pos != evaluated.world_pos
@@ -610,10 +618,16 @@ mod tests {
             return;
         };
         let lights = point_lights_from_dat(&bytes);
+        // This test asserts steady authored colors; the default-on flicker waver is a
+        // separate concern (lamp_flicker_bounded_and_never_dark covers its shape).
+        let settings = crate::graphics_settings::GraphicsSettings {
+            light_flicker: false,
+            ..Default::default()
+        };
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<ActiveSceneLights>()
-            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .insert_resource(settings)
             .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
             .insert_resource(ZonePointLights {
                 file_id: Some(LOWER_JEUNO_DAT),

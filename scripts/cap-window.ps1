@@ -12,6 +12,9 @@ using System;
 using System.Runtime.InteropServices;
 public class W3 {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmdShow);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int l, t, r, b; }
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
 }
 '@
@@ -20,13 +23,27 @@ Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 if ($Proc.EndsWith('.exe')) { $Proc = $Proc.Substring(0, $Proc.Length - 4) }
 $w = Get-Process $Proc -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $w) { Write-Output "no window for process '$Proc'"; exit 1 }
-# SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE: no move, no focus steal.
-[W3]::SetWindowPos($w.MainWindowHandle, [IntPtr](-1), 0, 0, 0, 0, 0x13) | Out-Null
-Start-Sleep -Milliseconds $WaitMs
-$r = $w.MainWindowBounds
-Write-Output "bounds=$($r.Width)x$($r.Height)"
-if ($r.Width -le 0 -or $r.Height -le 0) { Write-Output 'zero-size window'; exit 1 }
-$bmp = New-Object System.Drawing.Bitmap($r.Width, $r.Height)
+$hwnd = $w.MainWindowHandle
+# Read the real rect: .NET's MainWindowBounds reports 0x0 for KULUU_WINDOW_HIDDEN windows
+# even after they are sized, so GetWindowRect is the source of truth.
+$rect = New-Object W3+Rect
+[W3]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+$cw = $rect.r - $rect.l; $ch = $rect.b - $rect.t
+Write-Output "bounds=${cw}x${ch}"
+if ($cw -le 0 -or $ch -le 0) {
+    # Zero-sized (hidden until shown): place offscreen at the capture size —
+    # SWP_NOZORDER|SWP_NOACTIVATE, no focus steal, never on screen — then show without
+    # activation so winit sizes the swapchain; at -32000 it stays invisible.
+    [W3]::SetWindowPos($hwnd, [IntPtr](0), -32000, -32000, 1280, 800, 0x14) | Out-Null
+    [W3]::ShowWindow($hwnd, 4) | Out-Null   # SW_SHOWNOACTIVATE
+    Start-Sleep -Milliseconds ($WaitMs + 600)
+    $rect = New-Object W3+Rect
+    [W3]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    $cw = $rect.r - $rect.l; $ch = $rect.b - $rect.t
+    Write-Output "bounds=${cw}x${ch} (offscreen)"
+    if ($cw -le 0 -or $ch -le 0) { Write-Output 'zero-size window'; exit 1 }
+}
+$bmp = New-Object System.Drawing.Bitmap($cw, $ch)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $hdc = $g.GetHdc()
 # PW_RENDERFULLCONTENT (2): renders the full window content even when hidden/occluded.

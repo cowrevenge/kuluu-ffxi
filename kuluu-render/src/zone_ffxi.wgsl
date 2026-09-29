@@ -100,13 +100,6 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) color: vec4<f32>,
-    // Per-light point contribution, evaluated at the vertex and interpolated across
-    // the triangle — D3D8 fixed function evaluates point attenuation per vertex,
-    // so a lamp's reach fades with mesh density instead of cutting off in a ring.
-    @location(4) point_contrib0: vec3<f32>,
-    @location(5) point_contrib1: vec3<f32>,
-    @location(6) point_contrib2: vec3<f32>,
-    @location(7) point_contrib3: vec3<f32>,
 };
 
 @vertex
@@ -120,16 +113,14 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.world_normal = normalize(mesh_functions::mesh_normal_local_to_world(v.normal, v.instance_index));
     out.uv = v.uv;
     out.color = v.color;
-    let nrm = out.world_normal;
-    let pos = out.world_position;
-    out.point_contrib0 = authored_point_contribution(0u, nrm, pos);
-    out.point_contrib1 = authored_point_contribution(1u, nrm, pos);
-    out.point_contrib2 = authored_point_contribution(2u, nrm, pos);
-    out.point_contrib3 = authored_point_contribution(3u, nrm, pos);
     return out;
 }
 
-fn authored_point_contribution(slot: u32, n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+// One bound lamp's contribution at a fragment: diffuse N·L × D3D8 attenuation, evaluated
+// at the pixel's own distance to the light (the same per-pixel evaluation skinned_ffxi.wgsl
+// scene_irradiance runs for actors), so the pool fades smoothly over whatever mesh density it
+// lands on — no interpolation facets between vertices and no hard edge where a chunk stops.
+fn point_light_term(slot: u32, n: vec3<f32>, p: vec3<f32>, frag_coord: vec2<f32>) -> vec3<f32> {
     let range = points.colors[slot].w;
     if (range <= 0.0) { return vec3<f32>(0.0); }
     let to_light = points.positions[slot].xyz - p;
@@ -143,16 +134,14 @@ fn authored_point_contribution(slot: u32, n: vec3<f32>, p: vec3<f32>) -> vec3<f3
     // so near a light the contribution is nl * color, not nl * color / denom.
     let dist_factor = min(1.0, 1.0 / max(denom, 1e-5));
     let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-    return nl * points.colors[slot].rgb * dist_factor;
-}
-
-fn point_light_term(contrib: vec3<f32>, slot: u32, n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
-    if (points.colors[slot].w <= 0.0) { return vec3<f32>(0.0); }
+    // Enhanced Dynamic Lights: the slot's light may carry a cube shadow map (zone_point_lights.rs
+    // select_shadowed_zone_lights); no floor, matching skinned_ffxi.wgsl so a shadow reads the
+    // same on the character and the deck.
     var shadow = 1.0;
     if (lighting.time_params.z > 0.0) {
-        shadow = point_shadow_factor(p, n, points.positions[slot].xyz, frag);
+        shadow = point_shadow_factor(p, n, points.positions[slot].xyz, frag_coord);
     }
-    return contrib * shadow;
+    return nl * points.colors[slot].rgb * dist_factor * shadow;
 }
 
 
@@ -213,13 +202,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             directional_shadow_factor(in.world_position, n, -lighting.dir1_dir.xyz, in.clip_position.xy),
         ),
     );
-    // The vertex-stage contributions are the light; the fragment only multiplies each by its
-    // cube-shadow factor (Enhanced Dynamic Lights). Re-evaluating attenuation per pixel put a
-    // hard ring at every lamp's range on the walls — D3D8 fixed function never does that.
-    let point_light = point_light_term(in.point_contrib0, 0u, n, in.world_position, in.clip_position.xy)
-        + point_light_term(in.point_contrib1, 1u, n, in.world_position, in.clip_position.xy)
-        + point_light_term(in.point_contrib2, 2u, n, in.world_position, in.clip_position.xy)
-        + point_light_term(in.point_contrib3, 3u, n, in.world_position, in.clip_position.xy);
+    let point_light = point_light_term(0u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(1u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(2u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(3u, n, in.world_position, in.clip_position.xy);
     let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy) + point_light) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.

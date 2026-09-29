@@ -20,6 +20,7 @@ pub mod launcher_backdrop;
 // until then.
 #[allow(deprecated)]
 pub mod launcher_ui;
+pub mod light_occlusion;
 #[allow(deprecated)]
 pub mod model_viewer;
 pub mod nameplate_occlude;
@@ -873,6 +874,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         sun_occlusion::update_sun_occlusion_system
             .after(collision_bvh::build_zone_collision_bvh_system)
             .before(kuluu_render::lens_flare::lens_flare_system),
+    );
+    app.add_systems(
+        Update,
+        light_occlusion::apply_light_occlusion_system
+            .after(collision_bvh::build_zone_collision_bvh_system)
+            .after(kuluu_render::zone_point_lights::build_active_scene_lights)
+            .before(kuluu_render::ffxi_actor_render::update_ffxi_actor_point_lights),
     );
     app.add_systems(
         Update,

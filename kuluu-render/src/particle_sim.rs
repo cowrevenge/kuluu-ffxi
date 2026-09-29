@@ -3401,7 +3401,6 @@ fn resolve_mesh(
                 .into_iter()
                 .flatten()
                 .find_map(|a| a.sprite_sheet(local_dir, &def.mesh_id))?;
-
             let frames = sprite_sheet_templates(ss);
             let first = frames.first().cloned()?;
             // research/xim DatResource.kt getTextureResourceByNameAs — try the qualified (namespace, local) pair

@@ -1,34 +1,25 @@
 # Headless drive — canonical recipes (single source of truth)
 
 The single tracked source of truth for running kuluu without a visible window. Windows-first
-(this machine), with the other-OS equivalents kept inline — do not drop them, and do not
-improvise: on this host use the Windows entries, on other hosts use the Unix ones.
-Companion: `.agents/skills/verify/SKILL.md` (canonical verify recipes + evidence recording).
-
-## Credentials
-
-Never stored in any tracked file, doc, log, or command history. **Ask the user** for the
-account/password/character before a run that needs them; use them only inside the single
-launch command of that session. If you cannot ask (user asleep), do not guess and do not
-mine old sessions for credentials — pick work that does not need login, or stop and say so.
+(this machine), with the other-OS equivalents kept inline — do not drop them. Companion:
+`.agents/skills/verify/SKILL.md` (canonical verify recipes + evidence recording); the local
+LSB docker notes are untracked and cover the stack itself.
 
 ## Options menu — pick by what you're verifying
 
 | You need | Option | Section |
 |---|---|---|
 | **No pixels** — server output only: wire protocol, zoning, cutscene flow, chat, entity spawn | B2 raw stdio `play --headless` (JSON events on stdout) or B1 MCP | §B |
-| **Pixels, pre-server** — particles/routines in the animationtest box, zone/weather load by file id | A AnimationTest box (hidden window). Loads MZB geometry + particles with no server state | §A |
-| **Pixels, live session** — real character in a real zone: zone lighting, weather as zoned, anything needing server state | D key-drive on a hidden live session (printscreen GPU readback) | §D |
+| **Pixels / any render-layer question** — particles, routines, zone/weather load, actor placement | A AnimationTest box (hidden window). The only surface that loads MZB geometry + particles | §A |
 | **No server at all** — standalone VFX test box (worm + Hume, dam-cascade buttons) | C `kuluu_noserver_tester`. Only when the user tells you to use it; it may be outdated for future fixes | §C |
 
-### Windows options list (this machine)
+### Windows options list
 
 1. **Build**: repo-root release `.bat` (untracked by design) — release + full local feature
    batch, exe synced to repo root. Never an ad-hoc `cargo build -p kuluu --features <subset>`.
 2. **Render box**: Surface A launch with `KULUU_WINDOW_HIDDEN=1` (§A).
-3. **Pixels from a hidden window**: in-app GPU readback — the `shot` case for surface A, the
-   `printscreen` keybind over FFXI_KEY_DRIVE for live sessions (§D). Both work at zero-size
-   windows; `scripts/cap-window.ps1` only when the window has a client area.
+3. **Pixels from the hidden window**: in-app `shot` case first; `scripts/cap-window.ps1` only
+   when the window has a client area (§A capture).
 4. **Session, no pixels**: raw stdio three-command recipe (§B2) or MCP standalone (§B1).
 5. **No server**: `cargo run -p kuluu_noserver_tester --features native-window` (§C).
 6. **Kill**: `taskkill //F //IM kuluu.exe`; verify with `tasklist | grep -ic kuluu`.
@@ -38,8 +29,8 @@ mine old sessions for credentials — pick work that does not need login, or sto
 1. **Build**: same cargo invocation as the .bat's feature list (see its header),
    `./target/release/kuluu` is the binary to run.
 2. **Render box**: Surface A with `KULUU_WINDOW_HIDDEN=1`, no `WGPU_ADAPTER_NAME` pinning (§A).
-3. **Pixels from the hidden window**: in-app GPU readback (same as Windows);
-   `cap-window.ps1` is Windows-only — on other OSes use the readback paths only.
+3. **Pixels from the hidden window**: in-app `shot` case (same as Windows); `cap-window.ps1`
+   is Windows-only — on other OSes use `shot`.
 4. **Session, no pixels**: raw stdio with `mktemp -d` + pipe holder (§B2), MCP standalone
    (§B1), TCP injection via `nc` (§B2).
 5. **No server**: `cargo run -p kuluu_noserver_tester --features native-window` (§C).
@@ -51,14 +42,13 @@ mine old sessions for credentials — pick work that does not need login, or sto
    full local feature batch, exe synced to repo root. Never an ad-hoc `cargo build -p kuluu --features <subset>`: a
    half-feature binary is not what gets verified and behavior can differ. On other OSes the
    equivalent is the same cargo invocation with that feature list (see the bat file header).
-2. **Never open a visible window for agent runs.** Surface A/D: `KULUU_WINDOW_HIDDEN=1`.
+2. **Never open a visible window for agent runs.** Surface A: `KULUU_WINDOW_HIDDEN=1`.
    Surface B: raw stdio / MCP have no window at all; GUI attach (`FFXI_ATTACH=auto`) is only
    when pixels are required, and then warn first.
 3. **Always mute** launches (`--mute`): a hidden run still decodes and plays BGM/SFX.
 4. **Kill the process when done.** Windows: `taskkill //F //IM kuluu.exe`. Other OSes:
    `pkill -f kuluu`. Check first — never fire a test if one is already running
-   (`tasklist | grep -i kuluu` / `pgrep -a kuluu`). If the user may be playing, confirm which
-   processes are yours before killing anything.
+   (`tasklist | grep -i kuluu` / `pgrep -a kuluu`).
 5. **Run from the repo root** — game files resolve from `vendor/game-files` relative to CWD.
 
 ## A. Surface A: AnimationTest box (pre-server, pixels)
@@ -85,7 +75,7 @@ KULUU_WINDOW_HIDDEN=1 \
 ANIMTEST_AUTO="zone,weather,nhit,chit,dhit,mobnhit,mobchit,respawn,hi26,sb00" \
 FFXI_MAP_LOCAL_PORT=47500 WGPU_ADAPTER_NAME=NVIDIA \
 nohup ./kuluu.exe --server 127.0.0.1 --auth-port 53232 --data-port 53231 \
-  play <user> '<pass>' --mute > /dev/null 2> client.log &
+  play verilight 'TestPass!1234' --mute > /dev/null 2> client.log &
 ```
 
 Other OSes: same env vars, `./target/release/kuluu` (or the synced repo-root binary), no
@@ -101,6 +91,7 @@ from `docker port <connect container>` (name it via `docker ps`), not from memor
   `ANIMTEST_WORLD_POS="x,y,z"` (zone geometry lands at absolute mzb_to_bevy(native) coords
   when ZERO), `ANIMTEST_HOUR=<h>` (pin VanaClock for night/midday captures),
   `ANIMTEST_CAM="px,py,pz,tx,ty,tz"` (re-frame the box camera).
+- `verilight / TestPass!1234` — the local GM drive account (see §5 Accounts).
 
 ### Reading the log
 
@@ -147,7 +138,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cap-window.ps1 kuluu
   rendered frame — wait and re-shoot.
 - These are the only sanctioned pixel paths for surface A. Do not launch a visible window
   "to check", do not use screen-grab of the desktop, do not point an example binary at the
-  zone: those put pixels on the user's screen.
+  zone: those put pixels on Shane's screen.
 
 ### Kill
 
@@ -161,7 +152,7 @@ tasklist | grep -ic kuluu          # must be 0 (pgrep -c kuluu elsewhere)
 **`--headless` is session-only: it runs NO render pipeline.** No Bevy app, no MZB geometry,
 no particles — only protocol/session state (that's why `client.log` carries zero
 `kuluu_render` lines). A live session answers "what does the server send around here", not
-"what is drawn". For any render-layer question use Surface A or D.
+"what is drawn". For any render-layer question use Surface A.
 
 ### B1. kuluu-mcp standalone (preferred for sessions)
 
@@ -215,19 +206,19 @@ echo '{"cmd":"request_zone_change","line_id":812805498}' > $D/in    # zmr0, S. S
 Simpler stdin holder (any OS, no mkfifo): `(sleep 1800 | ./kuluu.exe ... --headless) > events.jsonl 2> client.log &`
 — the pipe's write end stays open for `sleep`'s lifetime; EOF ends the session cleanly.
 
-Other OSes: same three steps with `./target/release/kuluu`;
+Other OSes: same three steps with `./target/release/kuluu` (or the synced repo-root binary);
 `mktemp -d` is fine for `$D`; kill with `pkill -f kuluu`.
 
 - Commands are `AgentCommand` serde: `{"cmd":"snake_case", ...}`; events are `AgentEvent`:
   `{"type":"snake_case", ...}` (`kuluu-session/src/state.rs`).
 - Credentials are **positional args**, not env — env vars only feed the interactive
-  launcher, which otherwise blocks on a `Username:` prompt. Ask the user first (§Credentials).
+  launcher, which otherwise blocks on a `Username:` prompt.
 - Coordinate space in commands/events: `x` = native x, `y` = ground (native z),
   `z` = vertical (native y).
 - Zoneline ids are the fourcc as LE u32 — look them up in
   `vendor/server/data/zones/<zone>/zone.yaml` zonelines.
 - `--headless` opens **no window at all** (Surface B never needs `KULUU_WINDOW_HIDDEN`,
-  which is a Surface A/D thing); still pass `--mute`.
+  which is a Surface A thing); still pass `--mute`.
 - Use the prebuilt repo-root `./kuluu.exe` from the release .bat, not an ad-hoc
   `cargo run`: a half-feature debug binary is not what gets verified (rule 0).
 - **Git Bash precedence gotcha**: `A && B & C` backgrounds the whole chain. If mkfifo sits
@@ -244,11 +235,11 @@ Other OSes: same three steps with `./target/release/kuluu`;
   event; self is the one with `kind:"pc"` (its entity id varies per login). Compute
   distance from self's `pos` over all upserts to see exactly who/what the server placed in
   the area — zone fixtures (lamps, torches) are NOT entities, they come from the MZB and
-  only show up in Surface A/D runs.
+  only show up in Surface A runs.
 
 ### B3. Live integration tests (canonical layer proofs)
 
-In `kuluu-session/tests/`. They drive the real client against the real server and
+All in `kuluu-session/tests/`. They drive the real client against the real server and
 **self-skip when the auth port or xidb is unreachable** (`tests/common/mod.rs`) — runtime
 verification harnesses, not CI re-runs. Use them to bisect which layer is broken before
 hand-driving.
@@ -260,8 +251,8 @@ hand-driving.
 | `agent_session.rs` | full MCP-driven session (transport floor); spawns `target/debug/kuluu-mcp` — rebuild it first | `cargo test -p kuluu-session --test agent_session -- --nocapture` |
 | `disconnect_recovery.rs` | map-server restart mid-session; destructive, opt-in | `RESTART_MAP_SERVER=1 cargo test -p kuluu-session --test disconnect_recovery -- --nocapture` |
 | `event_503_live.rs` | end-to-end playback of the SSD new-character cutscene: cues in authored order, input-gated frames, onEventFinish rewards (item 536 + setPos to the gate); also self-skips when no FFXI install can be opened | `cargo test -p kuluu-session --test event_503_live -- --nocapture` |
-| `auction_search_live.rs` | AH search-server smoke: cast a category and history over TCP SEARCH_PORT; no map session needed | `cargo test -p kuluu-session --test auction_search_live -- --nocapture` |
-| `delivery_box_live.rs` | server-side delivery-box flow driven directly via the agent channel | `cargo test -p kuluu-session --test delivery_box_live -- --nocapture` |
+| `auction_search_live.rs` | AH search-server smoke: browse a category + sale history over TCP SEARCH_PORT; no map session needed | `cargo test -p kuluu-session --test auction_search_live -- --nocapture` |
+| `delivery_box_live.rs` | server-side delivery-box flow driven directly | `cargo test -p kuluu-session --test delivery_box_live -- --nocapture` |
 | `action_dispatch.rs` | offline: subpacket layouts (cast/weaponskill/job-ability/item-use) match the phoenix structs | `cargo test -p kuluu-session --test action_dispatch` |
 
 They use the `EphemeralChar` fixture (`tests/common/mod.rs`): an isolated account + char
@@ -285,90 +276,39 @@ It opens its own window with an on-screen log panel + stderr lines prefixed
 `[kuluu_noserver_tester]`; `ANIMTEST_AUTO`-style case names fire the same dam0 cases as
 Surface A. No server, no login — it loads a scene straight from the DATs.
 
-## D. Surface D: live session with pixels (hidden window + key drive)
+## 5. Accounts
 
-A real character zoned into a real zone, full render pipeline, zero visible windows. This
-is the surface for questions that need **server state** to be true — zone lighting at game
-time in a specific tunnel, weather as the server sends it, particles on live MZB — where
-the pre-server box (§A) cannot reproduce the scene.
+- **Local GM drive account** (default): `verilight` / `TestPass!1234`, char `Verilamp`
+  (gmlevel 5). The LSB provisioning-doc example credential for this machine's dev DB —
+  safe to type into launch commands and logs, not a real secret.
+- **The user's real character**: credentials come from env
+  (`FFXI_USER`/`FFXI_PASS`/`FFXI_CHAR`); never commit or log them; use only when the check
+  needs the user's own character/progress — use your own local account, and never log in
+  as the user while they are playing.
+- **Fresh provisioned chars** (no DB teleport needed for the basics):
 
-### Launch (Windows, Git Bash; ask the user for credentials first)
+  ```bash
+  cargo run -p kuluu --features native-window -- provision <user> 'TestPass!1234'
+  cargo run -p kuluu --features native-window -- create-char <user> 'TestPass!1234' <Name> 1 1 0 1 1
+  docker exec <db container> mariadb -uxiadmin -ppassword xidb \
+    -e "UPDATE chars SET pos_zone=230,pos_x=..,pos_y=..,pos_z=.. WHERE charname='<Name>';"
+  ```
 
-```bash
-cd <repo root>
-KULUU_WINDOW_HIDDEN=1 WGPU_ADAPTER_NAME=NVIDIA FFXI_KEY_DRIVE=:48198 \
-nohup ./kuluu.exe --server 127.0.0.1 --auth-port 53232 --data-port 53231 \
-  play <user> '<pass>' <CharName> --mute > /dev/null 2> C:/tmp/<dated-folder>/client.log &
-```
+  (container name varies per stack — find it with `docker ps`; the fixture's own runs use whatever
+  `tests/common/mod.rs` points at). The old "fresh chars get all c2s silently ignored"
+  blocker was two client bugs, both fixed: the c2s datagram header must be the last
+  subpacket's sync (`session.rs::datagram_header_id` — drift = server skips every
+  subpacket silently), and the new-char intro cutscene rides the 0x00A LOGIN packet
+  (`decode::ZoneInEvent`) and must be answered with 0x05B or the char sticks InEvent. If
+  those symptoms return, check the sync/header invariant first.
 
-Other OSes: same env vars, `./target/release/kuluu`, no adapter pinning. Pick any free
-port for `FFXI_KEY_DRIVE` (example uses 48198); note it — every recipe below targets it.
-The character logs in at its **saved position**, so the login zone is whatever he last
-stood in — confirm via §D "checking zone/location", do not assume a spawn town.
-
-### The key-drive protocol (one JSON line per TCP connection)
-
-All input goes over `FFXI_KEY_DRIVE` as one JSON object per connection, written with
-`printf ... > /dev/tcp/127.0.0.1/<port>` from Git Bash (PowerShell mangles the JSON):
-
-| Line | Effect |
-|---|---|
-| `{"text":"//warp 123.4 -56.7"}` then `{"key":"enter"}` | type + submit a **dev command** — dev commands take a DOUBLE slash (`//warp`, `//whereami`, `//lights`, `//zones`, `//pathto`, `//endevent`). Single-slash `/cmd` is rejected with a suggestion. |
-| `{"text":"/shutdown"}` then `{"key":"enter"}` | GM single-slash commands (server restart; see clean exit below). |
-| `{"key":"printscreen"}` | in-app GPU readback → `screenshot-N.png` in the repo root, N incrementing. Works on a zero-size hidden window — this is THE pixel path for live sessions (`cap-window.ps1` does not work here: it needs a client area). Move each capture into your dated tmp folder before viewing; re-capture overwrites nothing (N keeps counting). |
-| `{"key":"enter"}` / any other key name | plain key press (see `KeyMsg::resolve` in `kuluu/src/view_native/key_drive.rs` for the accepted names, incl. F1–F12 and printscreen). |
-
-Typed characters are deferred one frame on release so Bevy sees a clean
-press→release; you do not need to space them out. Chat input requires `InputMode::World`;
-right after a zone-in a pending server event can block chat for ~20s — send
-`{"text":"//endevent"}` + enter first, and treat a rejected command
-(map log: `"msg #2 para=0,0"`) as the InEvent symptom.
-
-### Walking to a place
-
-- `//pathto <x> <y>` (wire coords, double slash) navmesh-walks there — **the reliable
-  mover**. Raw walking into props/canyons wastes cycles; use pathto for every reposition.
-- Zonelines: `//zones` lists them with rect coords. Warping INTO a rect does NOT trigger the
-  zone change — you must be in the source zone and stand inside the rect (pathto there,
-  wait). Verify the crossing in the map log (§D location check), not by guessing.
-
-### Checking zone / location
-
-- **Login zone + position**: `docker logs <map-container> --since 5m | grep -i <char>` (name it via
-  `docker ps`) — look for
-  `Player <name> logging in to zone <id> (LoadChar)` and the `IncreaseZoneCounter` line.
-- **Live position on screen**: `//whereami` prints `self_pos: x=.. y=.. z=..  zone=<id>` as
-  an on-screen system message — read it from a printscreen capture (it does not go to
-  client.log). Wire space, Z-up: `y` is ground.
-
-### Clean exit (do this, in order)
-
-1. `{"text":"/shutdown"}` + enter from the session (GM account) — restarts map/world and
-   releases every held session; no ghost rows left for the next login.
-2. Wait ~35s; confirm `docker ps` shows all containers Up again.
-3. Then `taskkill //F //IM kuluu.exe` (or let the disconnect kill it) so nothing of yours is
-   holding a client slot while the user logs in.
-
-A plain taskkill without /shutdown leaves a ghost session that makes the next lobby login
-time out for minutes (§7). If you had to hard-kill, say so — the user may prefer to reset
-the stack themselves.
-
-### Captures and artifacts
-
-Dated tmp folder per investigation (e.g. `C:/tmp/lampcap-YYYYMMDD/`): client.log there,
-every printscreen capture moved in with a name that says what it shows
-(`AFTER_vanilla_arch_1.png`, `flicker_A.png`). Keep raw frames until the report is written;
-quote what you observed from them inline.
-
-## 5. Evidence
+## 6. Evidence
 
 - Surface A: `client.log` `[animationtest]` lines (table in §A) — quote them inline; pixels
   via the `shot` case / `scripts/cap-window.ps1` (§A capture), saved under `artifacts/verify/`.
 - Surface B: `events.jsonl` (stdout JSON events), `client.log` (stderr tracing),
   `scene://current` snapshots, and the map-server log (`docker logs <map container> --since 5m` —
   LoadChar / cleanupSessions / `Invalid <name> packet from <char>` validator failures).
-- Surface D: dated tmp folder with client.log + named printscreen captures (§D); map-log
-  lines for zone/position; quote the observed lines inline.
 - Keep the raw captures until the report is delivered; quote the observed lines inline.
 - Recording for the stop-hook verify gate:
   `.agents/skills/verify/scripts/record-evidence.sh --verdict pass --summary "<what was
@@ -388,7 +328,7 @@ quote what you observed from them inline.
   virtiofs went stale: `colima restart`, then `docker start` the server containers.
 - **Map UDP return path** — s2c UDP replies are kept alive by a DNAT sidecar container in
   the local stack (see the untracked stack notes); if login succeeds and then map traffic
-  goes silent, check that before theorizing about the client.
+goes silent, check that before theorizing about the client.
 
 **Surface A**
 
@@ -411,19 +351,7 @@ quote what you observed from them inline.
   (which blocks on a `Username:` prompt).
 - **Coordinate swap** — in commands and events `y` is ground and `z` is vertical.
 - **Session-only, no render** — see §B; do not expect geometry/particle log lines here.
-- **Ending a driven session**: send `/shutdown` (GM) to restart the server and release every
-  held session, then wait ~35s for docker to bring it back up before logging in again. A
-  plain `taskkill` leaves a ghost session that the lobby rejects for minutes ("server did
-  not respond within 20s", "no valid sessionHash").
-
-**Surface D**
-
-- **Login zone is the saved position**, not a spawn town — read it from the map log before
-  assuming where you are (§D location check).
-- **PrintScreen is the only pixel path** on a hidden live window; `cap-window.ps1` fails
-  with "zero-size window". Numbered `screenshot-N.png` files land in the repo root — move
-  them out immediately.
-- **Dev commands are double-slash, GM single-slash.** A rejected command usually means
-  InEvent state — `//endevent` + enter clears it (map log shows `"msg #2 para=0,0"`).
-- **Never kill a kuluu.exe you did not start** — the user plays on this machine too;
-  confirm ownership (`tasklist`, who launched it) before any taskkill.
+- **Ending a driven session**: send `{"cmd":"chat","text":"/shutdown"}` from a GM account to
+  restart the server and release every held session, then wait ~35s for docker to bring it
+  back up before logging in again. A plain `taskkill` leaves a ghost session that the lobby
+  rejects for minutes ("server did not respond within 20s", "no valid sessionHash").

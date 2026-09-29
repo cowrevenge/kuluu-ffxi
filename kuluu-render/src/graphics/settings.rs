@@ -2308,14 +2308,14 @@ pub fn apply_volumetric_fog_system(
     }
 }
 
-/// Owns the projection's far plane only. FOV is owned by
-/// [`crate::camera::apply_view_fov_system`] (the live view zoom): writing
-/// `settings.fov_deg` here on every settings change would stomp a held zoom
-/// back to base whenever any unrelated row dirtied the resource.
-pub fn apply_projection_system(mut q_cam: Query<&mut Projection, With<OperatorCamera>>) {
+pub fn apply_projection_system(
+    settings: Res<GraphicsSettings>,
+    mut q_cam: Query<&mut Projection, With<OperatorCamera>>,
+) {
     for mut proj in q_cam.iter_mut() {
         if let Projection::Perspective(p) = proj.as_mut() {
             p.far = crate::skybox::CAMERA_FAR;
+            p.fov = settings.fov_deg.to_radians();
         }
     }
 }

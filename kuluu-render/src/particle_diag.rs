@@ -266,15 +266,22 @@ impl ParticleDiag {
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_draw_resource(
     assets: &ActionAssets,
+    global: Option<&ActionAssets>,
     dir: [u8; 4],
     def: &ffxi_dat::particle_gen::ParticleGeneratorDef,
 ) -> (String, Option<String>) {
-    // The same lookup order as particle_sim::resolve_mesh — dir-scoped tier first, flat map
-    // after — so the static answer matches what a live spawn would find.
+    // The same lookup order as particle_sim::resolve_mesh — this tier's dir-scoped map first,
+    // its flat map after, then the global effect dir — so the static answer matches what a
+    // live spawn would find.
     use ffxi_dat::particle_gen::ParticleMeshKind;
+    let tiers = [Some(assets), global];
     match def.mesh_kind {
         ParticleMeshKind::StaticMesh | ParticleMeshKind::WeightedMesh => {
-            let Some(d3m) = assets.d3m(dir, &def.mesh_id) else {
+            let Some(d3m) = tiers
+                .into_iter()
+                .flatten()
+                .find_map(|a| a.d3m(dir, &def.mesh_id))
+            else {
                 return (
                     format!("0x1F mesh '{}' (dir {} + flat)", id4(def.mesh_id), id4(dir)),
                     None,
@@ -292,15 +299,16 @@ fn resolve_draw_resource(
                 );
             }
             let (namespace, local) = d3m.texture_name_tokens();
-            let found = (!local.is_empty())
-                .then(|| {
-                    assets
-                        .images_by_qualified_name
-                        .get(&(namespace.clone(), local.clone()))
-                        .or_else(|| assets.images_by_name.get(&local))
-                })
-                .flatten()
-                .or_else(|| assets.images.get(&d3m.texture_dat_id()));
+            let found = tiers.into_iter().flatten().find_map(|a| {
+                (!local.is_empty())
+                    .then(|| {
+                        a.images_by_qualified_name
+                            .get(&(namespace.clone(), local.clone()))
+                            .or_else(|| a.images_by_name.get(&local))
+                    })
+                    .flatten()
+                    .or_else(|| a.images.get(&d3m.texture_dat_id()))
+            });
             match found {
                 Some(_) => (
                     format!("0x1F mesh '{}' + 0x20 texture", id4(def.mesh_id)),
@@ -316,7 +324,11 @@ fn resolve_draw_resource(
             }
         }
         ParticleMeshKind::SpriteSheet => {
-            let Some(ss) = assets.sprite_sheet(dir, &def.mesh_id) else {
+            let Some(ss) = tiers
+                .into_iter()
+                .flatten()
+                .find_map(|a| a.sprite_sheet(dir, &def.mesh_id))
+            else {
                 return (
                     format!(
                         "0x21 sheet '{}' (dir {} + flat)",
@@ -326,11 +338,12 @@ fn resolve_draw_resource(
                     None,
                 );
             };
-            match assets
-                .images_by_qualified_name
-                .get(&(ss.category.clone(), ss.id.clone()))
-                .or_else(|| assets.images_by_name.get(&ss.id))
-            {
+            let found = tiers.into_iter().flatten().find_map(|a| {
+                a.images_by_qualified_name
+                    .get(&(ss.category.clone(), ss.id.clone()))
+                    .or_else(|| a.images_by_name.get(&ss.id))
+            });
+            match found {
                 Some(_) => (
                     format!("0x21 sheet '{}' + 0x20 texture", id4(def.mesh_id)),
                     Some(format!("sheet {} / texture ok", id4(def.mesh_id))),
@@ -474,7 +487,7 @@ pub fn analyze(
             }
         }
 
-        let (searched, found) = resolve_draw_resource(assets, *dir, def);
+        let (searched, found) = resolve_draw_resource(assets, global, *dir, def);
         if found.is_none() {
             bump(
                 &mut diag.missing_resource,
@@ -581,6 +594,7 @@ pub fn analyze(
 pub fn trace_routine(
     schedulers: &[Scheduler],
     assets: &ActionAssets,
+    global: Option<&ActionAssets>,
     report: &EffectCoverageReport,
     routine_name: [u8; 4],
 ) -> Vec<String> {
@@ -612,7 +626,7 @@ pub fn trace_routine(
                     ),
                 )
             } else {
-                let (searched, found) = resolve_draw_resource(assets, def_dir, def);
+                let (searched, found) = resolve_draw_resource(assets, global, def_dir, def);
                 (
                     "draw",
                     match found {

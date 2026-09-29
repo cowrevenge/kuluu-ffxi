@@ -991,9 +991,14 @@ pub fn spawn_particle_generators(
             }
             continue;
         }
-        let Some((template, sprite_frames, tex)) =
-            resolve_mesh(assets, def_dir, &def, &mut images, false)
-        else {
+        let Some((template, sprite_frames, tex)) = resolve_mesh(
+            assets,
+            global.as_deref().map(|g| &g.assets),
+            def_dir,
+            &def,
+            &mut images,
+            false,
+        ) else {
             if tracing {
                 info!(
                     "animationtest trace: particle stage {} [{}] — def found but mesh {} [{}] missing",
@@ -1156,9 +1161,14 @@ pub fn spawn_actor_auto_run_particles(
                 .get(name)
                 .copied()
                 .unwrap_or(NO_LOCAL_DIR);
-            let Some((template, sprite_frames, tex)) =
-                resolve_mesh(&fx.assets, def_dir, &def, &mut images, false)
-            else {
+            let Some((template, sprite_frames, tex)) = resolve_mesh(
+                &fx.assets,
+                global.as_deref().map(|g| &g.assets),
+                def_dir,
+                &def,
+                &mut images,
+                false,
+            ) else {
                 continue;
             };
             let mat = mats.add(FfxiParticleMaterial::for_def(
@@ -1978,7 +1988,7 @@ fn resolve_child_bindings(
             continue;
         }
         let Some((template, sprite_frames, tex)) =
-            resolve_mesh(tier, child_dir, child_def, images, false)
+            resolve_mesh(tier, global, child_dir, child_def, images, false)
         else {
             error!(
                 "child generator '{}' of gen '{}' [{}] has no drawable mesh — binding dropped",
@@ -3284,7 +3294,9 @@ fn resolve_zone_mesh(
     // Zone and weather generators are collected by chunk name without their directory
     // (zone_particles.rs `zone_static_defs`), so there is no scope to resolve the mesh in and
     // the lookup falls through to the flat tier.
-    if let Some((template, frames, tex)) = resolve_mesh(assets, NO_LOCAL_DIR, def, images, undither)
+    // The caller (zone_static_defs dispatch) retries against the global tier itself.
+    if let Some((template, frames, tex)) =
+        resolve_mesh(assets, None, NO_LOCAL_DIR, def, images, undither)
     {
         // A textureless D3m submesh (the Bastok tunnel `ligh` lamp fixtures) takes the
         // ZeroOneTSS one-stage table; on the textured chain it would sample a null texture.
@@ -3335,44 +3347,64 @@ fn to_image(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
 // across effect directories, so the flat maps alone bind whichever copy the walk saw last.
 fn resolve_mesh(
     assets: &ActionAssets,
+    global: Option<&ActionAssets>,
     local_dir: [u8; 4],
     def: &ParticleGeneratorDef,
     images: &mut Assets<Image>,
     undither: bool,
 ) -> Option<(SpriteTemplate, Vec<SpriteTemplate>, Option<Handle<Image>>)> {
+    // research/xim ParticleLinkedDataProviders.kt resolveStaticMeshLink — the effect directory
+    // first, wider scopes after. Retail's tree is one merged virtual filesystem, so a mesh or
+    // texture absent from this tier resolves against the global effect dir: i900 in 120.DAT
+    // binds asi1, which exists only under syst/effe of 0.DAT.
+    let tiers = [Some(assets), global];
     // research/xim ParticleGeneratorSettings.kt LinkedDataType: WeightedMesh(0x1D) resolves like
     // StaticMesh; the draw path is identical.
     match def.mesh_kind {
         ParticleMeshKind::StaticMesh | ParticleMeshKind::WeightedMesh => {
-            let d3m = assets.d3m(local_dir, &def.mesh_id)?;
+            let d3m = tiers
+                .into_iter()
+                .flatten()
+                .find_map(|a| a.d3m(local_dir, &def.mesh_id))?;
             let template = sprite_template(d3m)?;
             let (namespace, local) = d3m.texture_name_tokens();
             // research/xim DatResource.kt getTextureResourceByNameAs — qualified (namespace, local) match, then
             // local-only. The truncated DatId stays as a last tier: a few meshes name a
             // texture whose local token outruns the Img chunk id (`kumori` vs `kumo`) and
             // resolve only that way.
-            let by_name = (!local.is_empty()).then(|| {
-                assets
-                    .images_by_qualified_name
-                    .get(&(namespace, local.clone()))
-                    .or_else(|| assets.images_by_name.get(&local))
-            });
-            let tex = by_name
+            let tex = tiers
+                .into_iter()
                 .flatten()
-                .or_else(|| assets.images.get(&d3m.texture_dat_id()))
+                .find_map(|a| {
+                    let by_name = (!local.is_empty()).then(|| {
+                        a.images_by_qualified_name
+                            .get(&(namespace.clone(), local.clone()))
+                            .or_else(|| a.images_by_name.get(&local))
+                    });
+                    by_name
+                        .flatten()
+                        .or_else(|| a.images.get(&d3m.texture_dat_id()))
+                })
                 .map(|t| images.add(to_image(t, undither)));
             Some((template, Vec::new(), tex))
         }
         ParticleMeshKind::SpriteSheet => {
-            let ss = assets.sprite_sheet(local_dir, &def.mesh_id)?;
+            let ss = tiers
+                .into_iter()
+                .flatten()
+                .find_map(|a| a.sprite_sheet(local_dir, &def.mesh_id))?;
             let frames = sprite_sheet_templates(ss);
             let first = frames.first().cloned()?;
             // research/xim DatResource.kt getTextureResourceByNameAs — try the qualified (namespace, local) pair
             // first, then fall back to a local-name-only match.
-            let tex = assets
-                .images_by_qualified_name
-                .get(&(ss.category.clone(), ss.id.clone()))
-                .or_else(|| assets.images_by_name.get(&ss.id))
+            let tex = tiers
+                .into_iter()
+                .flatten()
+                .find_map(|a| {
+                    a.images_by_qualified_name
+                        .get(&(ss.category.clone(), ss.id.clone()))
+                        .or_else(|| a.images_by_name.get(&ss.id))
+                })
                 .map(|t| images.add(to_image(t, undither)));
             Some((first, frames, tex))
         }
@@ -7057,7 +7089,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, NO_LOCAL_DIR, &sheet_def(), &mut images, false)
+            resolve_mesh(assets, None, NO_LOCAL_DIR, &sheet_def(), &mut images, false)
                 .expect("sheet mesh resolves")
                 .2
         }
@@ -7105,7 +7137,7 @@ mod tests {
             def.mesh_id = SMOKE_SHEET_ID;
             let mut images = Assets::<Image>::default();
             assert!(
-                resolve_mesh(&assets, NO_LOCAL_DIR, &def, &mut images, false)
+                resolve_mesh(&assets, None, NO_LOCAL_DIR, &def, &mut images, false)
                     .expect("smok sheet resolves")
                     .2
                     .is_some()
@@ -7129,7 +7161,7 @@ mod tests {
             def: &ParticleGeneratorDef,
         ) -> Vec3 {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, local_dir, def, &mut images, false)
+            resolve_mesh(assets, None, local_dir, def, &mut images, false)
                 .expect("the linked mesh resolves")
                 .0
                 .positions[0]
@@ -7296,7 +7328,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, NO_LOCAL_DIR, &mesh_def(), &mut images, false)
+            resolve_mesh(assets, None, NO_LOCAL_DIR, &mesh_def(), &mut images, false)
                 .expect("static mesh resolves")
                 .2
         }
@@ -7336,6 +7368,28 @@ mod tests {
             assert!(resolved_texture(&mesh_assets(false, false, false)).is_none());
         }
 
+        // i900 (120.DAT fefr/fefs) binds asi1, which exists only under syst/effe of 0.DAT — a
+        // mesh absent from this tier must resolve through the global effect dir.
+        #[test]
+        fn static_mesh_resolves_through_the_global_tier() {
+            let empty = ActionAssets::default();
+            assert!(empty.d3m(NO_LOCAL_DIR, &MESH_ID).is_none());
+            let global = mesh_assets(true, false, false);
+            let mut images = Assets::<Image>::default();
+            let Some((template, _, tex)) = resolve_mesh(
+                &empty,
+                Some(&global),
+                NO_LOCAL_DIR,
+                &mesh_def(),
+                &mut images,
+                false,
+            ) else {
+                panic!("the mesh must resolve through the global tier")
+            };
+            assert!(!template.positions.is_empty());
+            assert!(tex.is_some());
+        }
+
         // A mesh that names no texture must not claim the blank key: 44 d3ms in this install
         // carry an all-blank qualified name, and a single blank-keyed Img would give every one
         // of them the same wrong texture.
@@ -7353,7 +7407,7 @@ mod tests {
 
         fn texture_for(assets: &ActionAssets, def: &ParticleGeneratorDef) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, NO_LOCAL_DIR, def, &mut images, false)
+            resolve_mesh(assets, None, NO_LOCAL_DIR, def, &mut images, false)
                 .expect("mesh resolves")
                 .2
         }

@@ -43,10 +43,11 @@ cargo run -p kuluu -- play                          # native window (default)
 cargo run -p kuluu --no-default-features -- play --headless  # JSON event-stream agent session, no Bevy
 ```
 
-Headless testing recipes — animationtest box, session drive (MCP / raw stdio /
-integration tests), accounts, evidence, gotchas, Windows + other-OS variants — live in
-the tracked `kuluu_headless/` folder. Read it before any headless run; never open a
-visible window for agent runs.
+Headless testing recipes — the options menu (render box vs session-only vs no-server),
+animationtest box, session drive (MCP / raw stdio / integration tests), accounts,
+evidence, gotchas, Windows + other-OS option lists — live in
+`.agents/skills/verify/references/drive-headless.md` (canonical). Read it before any
+headless run; never open a visible window for agent runs.
 
 noserver_tester (`kuluu_noserver_tester/`) — this is a single event window that can be
 given the AI for faster testing, but only when the user tells the AI to use it and it

@@ -128,8 +128,13 @@ fn authored_point_irradiance(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
         if (dist > range) { continue; }
         let a = points.attenuation[i].xyz;
         let denom = a.x + a.y * dist + a.z * dist * dist;
+        // FFXiMain.dll retail-2026-09: InitLight RVA 0x178610 zeroes the constant and linear
+        // attenuation, UpdateLight RVA 0x178530 sets q = 1/theta — D3D8 fixed function then
+        // clamps 1/(c + l*d + q*d^2) to at most 1 (xim pointLightCalc clamps the same way),
+        // so near a light the contribution is nl * color, not nl * color / denom.
+        let dist_factor = min(1.0, 1.0 / max(denom, 1e-5));
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        rgb += nl * points.colors[i].rgb / max(denom, 1e-5);
+        rgb += nl * points.colors[i].rgb * dist_factor;
     }
     return rgb;
 }
@@ -144,9 +149,11 @@ fn shadowed_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec
         if (dist > range) { continue; }
         let a = points.attenuation[i].xyz;
         let denom = a.x + a.y * dist + a.z * dist * dist;
+        // D3D8 attenuation clamp — see authored_point_irradiance above.
+        let dist_factor = min(1.0, 1.0 / max(denom, 1e-5));
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
         let shadow = point_shadow_factor(p, n, points.positions[i].xyz, frag);
-        rgb += shadow * nl * points.colors[i].rgb / max(denom, 1e-5);
+        rgb += shadow * nl * points.colors[i].rgb * dist_factor;
     }
     return rgb;
 }

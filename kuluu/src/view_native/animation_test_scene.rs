@@ -68,6 +68,26 @@ fn env_zone_override() -> Option<(u16, u32, Vec3)> {
     Some((zone_id, mzb_file, Vec3::from_slice(&world_pos)))
 }
 
+// ANIMTEST_HOUR pins VanaClock to a fixed game hour on LoadZone (night/midday captures).
+fn env_hour_override() -> Option<f32> {
+    std::env::var("ANIMTEST_HOUR").ok()?.trim().parse().ok()
+}
+
+// ANIMTEST_ACTOR_POS="x,y,z" re-bases the worm/hume pair (worm at base-1x, hume at base+1x)
+// so an actor can stand under a zone lamp for lighting captures.
+fn env_actor_pos() -> Option<Vec3> {
+    let v: Vec<f32> = std::env::var("ANIMTEST_ACTOR_POS")
+        .ok()?
+        .split(',')
+        .map(|t| t.trim().parse())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if v.len() != 3 {
+        return None;
+    }
+    Some(Vec3::from_slice(&v))
+}
+
 // ANIMTEST_CAM="px,py,pz,tx,ty,tz" overrides the box camera's position and look-at target.
 fn env_camera_override() -> Option<(Vec3, Vec3)> {
     let v: Vec<f32> = std::env::var("ANIMTEST_CAM")
@@ -536,13 +556,14 @@ fn activate_test_scene(
     // local +X at identity (live-checked), so opposite headings square them onto each other:
     // worm 0 faces +X toward the Hume, Hume 128 faces -X back.
     // Both are engaged so they stand in battle stance with weapons out, not rest pose.
+    let actor_base = env_actor_pos().unwrap_or(Vec3::ZERO);
     spawn_wire(
         commands,
         tracked,
         scene,
         WORM_ID,
         EntityKind::Mob,
-        Vec3::new(-1.0, 0.0, 0.0),
+        actor_base + Vec3::new(-1.0, 0.0, 0.0),
         0,
         ffxi_proto::decode::animation::ATTACK,
         HUME_ID,
@@ -553,7 +574,7 @@ fn activate_test_scene(
         scene,
         HUME_ID,
         EntityKind::Pc,
-        Vec3::new(1.0, 0.0, 0.0),
+        actor_base + Vec3::new(1.0, 0.0, 0.0),
         128,
         ffxi_proto::decode::animation::ATTACK,
         WORM_ID,
@@ -1168,6 +1189,11 @@ fn run_pending_case(
                     &mut log,
                     format!("zone: id {zone_id} (mzb {mzb_file}) loading at offset {world_pos:?}"),
                 );
+            }
+            if let Some(hour) = env_hour_override() {
+                commands
+                    .insert_resource(kuluu_render::vana_time::VanaClock::anchored_at_hour(hour));
+                log_line(&mut log, format!("clock: pinned to hour {hour}"));
             }
             zone.floor_hidden.0 = true;
             commands.insert_resource(TestZoneActive(true));

@@ -171,8 +171,11 @@ fn vertex_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
         let a = skins[si].lighting.point_atten[i].xyz;
         let denom = a.x + a.y * dist + a.z * dist * dist;
         if (denom <= 0.0) { continue; }
+        // D3D8 fixed function clamps the attenuation to at most 1 — see zone_ffxi.wgsl
+        // authored_point_irradiance for the FFXiMain.dll citation.
+        let dist_factor = min(1.0, 1.0 / denom);
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        rgb += nl * skins[si].lighting.point_color[i].rgb / denom;
+        rgb += nl * skins[si].lighting.point_color[i].rgb * dist_factor;
     }
     return rgb;
 }
@@ -201,7 +204,9 @@ fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale
             if (dist <= range) {
                 let a = skins[si].lighting.point_atten[i].xyz; // (const, linear, quad)
                 let denom = a.x + a.y * dist + a.z * dist * dist;
-                let dist_factor = select(1.0 / denom, 0.0, denom <= 0.0);
+                // D3D8 fixed function clamps the attenuation to at most 1 — see zone_ffxi.wgsl
+                // authored_point_irradiance for the FFXiMain.dll citation.
+                let dist_factor = select(min(1.0, 1.0 / denom), 0.0, denom <= 0.0);
                 let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
                 // Enhanced Dynamic Lights: the slot's light may carry a cube shadow map
                 // (zone_point_lights.rs select_shadowed_zone_lights); no floor, matching

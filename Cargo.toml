@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["ffxi-proto", "kuluu", "kuluu-mcp", "kuluu-nav", "ffxi-nav-recast", "kuluu-snapshot", "kuluu-render", "kuluu-dlss-nr", "kuluu-ngx-fwd", "kuluu-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "kuluu-session", "ffxi-vocab", "lsb-scrape", "ffxi-install", "ffxi-pol", "xtask"]
-# `xtask` is project automation run on demand via `cargo xtask` — exclude it
-# from the default set so plain `cargo build`/`test` don't compile it.
+members = ["ffxi-proto", "kuluu", "kuluu-mcp", "kuluu-nav", "ffxi-nav-recast", "kuluu-snapshot", "kuluu-render", "kuluu-dlss-nr", "kuluu-ngx-fwd", "kuluu-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "kuluu-session", "ffxi-vocab", "lsb-scrape", "ffxi-install", "ffxi-pol", "kuluu_noserver_tester", "xtask"]
+# `xtask` (project automation, `cargo xtask`) and `kuluu_noserver_tester`
+# (standalone VFX test box) are run on demand — exclude them from the default
+# set so plain `cargo build`/`test` don't compile them.
 default-members = ["ffxi-proto", "kuluu", "kuluu-mcp", "kuluu-nav", "ffxi-nav-recast", "kuluu-snapshot", "kuluu-render", "kuluu-dlss-nr", "kuluu-ngx-fwd", "kuluu-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "kuluu-session", "ffxi-vocab", "lsb-scrape", "ffxi-install", "ffxi-pol"]
 
 # Vendored fork of recastnavigation-rs 0.1.0 with a one-line `#include

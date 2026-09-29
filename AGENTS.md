@@ -48,6 +48,10 @@ integration tests), accounts, evidence, gotchas, Windows + other-OS variants —
 the tracked `kuluu_headless/` folder. Read it before any headless run; never open a
 visible window for agent runs.
 
+noserver_tester (`kuluu_noserver_tester/`) — this is a single event window that can be
+given the AI for faster testing, but only when the user tells the AI to use it and it
+might be outdated for future fixes. It needs no server: `cargo run -p kuluu_noserver_tester --features native-window`.
+
 `kuluu install list|which|use|path|link|get|update` manages the registry of named installs in the user data dir (`ffxi_dat::install`: `installs/NAME`, a one-line `default` file naming the one that loads, `FFXI_DAT_PATH` as the only override). Agents that need an install's files ask `kuluu install path NAME` rather than assuming a directory; `kuluu install list` shows each install's KNOWN_CLIENTS row. The checkout holds no game files.
 
 ## Issue tracking (beads)

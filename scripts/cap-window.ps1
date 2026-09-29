@@ -1,4 +1,4 @@
-# Capture a hidden/occluded kuluu (or animationtester) window to PNG via
+# Capture a hidden/occluded kuluu window to PNG via
 # PrintWindow(PW_RENDERFULLCONTENT). The window never needs to be on screen:
 # KULUU_WINDOW_HIDDEN=1 runs render into the buried surface and this reads it back.
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cap-window.ps1 <process-name> <out.png> [wait-ms]

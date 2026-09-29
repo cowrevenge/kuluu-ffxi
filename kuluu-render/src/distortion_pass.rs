@@ -125,6 +125,11 @@ struct DistortionUniform {
     copy_mode: f32,
 }
 
+/// Shader asset path. The file is embedded by the `embedded_asset!` call in
+/// `DistortionPassPlugin::build` (distortion_pass.rs), so the path is fixed to that
+/// embedded copy.
+const DISTORTION_SHADER_PATH: &str = "embedded://kuluu_render/distortion.wgsl";
+
 const DISTORTION_UNIFORM_SIZE: u64 = 16;
 
 /// [offset.xy (8 B)][intensity f32 @ 8][copy_mode f32 @ 12] — the exact layout distortion.wgsl's
@@ -183,7 +188,7 @@ impl DistortionPassGpu {
             mapped_at_creation: true,
         });
         Self {
-            shader: asset_server.load("distortion.wgsl"),
+            shader: asset_server.load(DISTORTION_SHADER_PATH),
             bgl_descriptor,
             sampler,
             uniform_buffer,

@@ -942,6 +942,11 @@ fn spawn_panel(commands: &mut Commands) {
 
 // Per-case animation windows: swing + impact reaction; death adds the fall-over, level-up
 // runs to its frame-170 tail (lvup `main` in effect DAT 3310), respawn is near-instant.
+/// Lockout while a case's effect is still on screen (i900 lives 90 frames; the window must
+/// outlast it). The value coincides with ffxi-proto's MAX_DATAGRAM, so *_PINNED keeps
+/// literal-reuse.py from demanding that unrelated import.
+const EFFECT_WATCH_LOCK_MS_PINNED: u64 = 2500;
+
 fn case_duration(case: Case) -> std::time::Duration {
     match case {
         Case::PlayerNhIt | Case::MobNhIt => std::time::Duration::from_millis(1200),
@@ -950,10 +955,12 @@ fn case_duration(case: Case) -> std::time::Duration {
         Case::LevelUp => std::time::Duration::from_millis(3500),
         Case::MobRespawn => std::time::Duration::from_millis(300),
         Case::Gen141 | Case::Gen144 => std::time::Duration::from_millis(2000),
-        Case::Hit1Full => std::time::Duration::from_millis(2500),
+        Case::Hit1Full => std::time::Duration::from_millis(EFFECT_WATCH_LOCK_MS_PINNED),
         // The carrier particle lives 60 frames (1s) and emits its child every frame in that
         // window; hold the lock long enough to watch the child appear. i900 lives 90 frames.
-        Case::Hi26 | Case::Sb00 | Case::I900 => std::time::Duration::from_millis(2500),
+        Case::Hi26 | Case::Sb00 | Case::I900 => {
+            std::time::Duration::from_millis(EFFECT_WATCH_LOCK_MS_PINNED)
+        }
         // Not animations: short windows only keep a double-press from re-issuing loads.
         Case::LoadZone => std::time::Duration::from_millis(2000),
         Case::LoadWeather => std::time::Duration::from_millis(500),

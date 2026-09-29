@@ -21,12 +21,6 @@ path = "src/lib.rs"
 name = "kuluu"
 path = "src/main.rs"
 
-[[example]]
-# Headless replay of the single-authority walker over real MZB geometry
-# (plan §4). Needs the viewer feature: the walker lives in `view_native`.
-name = "zz-field-walk"
-required-features = ["native-window"]
-
 [features]
 # The native windowed viewer is the mode we develop and ship by default, so
 # enable it out of the box: a bare `cargo build`/`cargo test -p kuluu`

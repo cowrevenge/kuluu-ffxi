@@ -268,21 +268,24 @@ impl AnchorState {
 // same arm_* dispatch the routine scheduler uses — a sec2 0x44 binding and a 0x02 stage that
 // name the same def behave identically.
 #[derive(Clone)]
+struct ChildDraw {
+    def: ParticleGeneratorDef,
+    template: SpriteTemplate,
+    sprite_frames: Vec<SpriteTemplate>,
+    mat: Handle<FfxiParticleMaterial>,
+    scale_x: Option<KeyFrameTrack>,
+    scale_y: Option<KeyFrameTrack>,
+    position_x: Option<KeyFrameTrack>,
+    position_y: Option<KeyFrameTrack>,
+    position_z: Option<KeyFrameTrack>,
+    dampening_factor: Option<KeyFrameTrack>,
+    alpha: Option<KeyFrameTrack>,
+    tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+}
+
+#[derive(Clone)]
 enum ChildPayload {
-    Draw {
-        def: ParticleGeneratorDef,
-        template: SpriteTemplate,
-        sprite_frames: Vec<SpriteTemplate>,
-        mat: Handle<FfxiParticleMaterial>,
-        scale_x: Option<KeyFrameTrack>,
-        scale_y: Option<KeyFrameTrack>,
-        position_x: Option<KeyFrameTrack>,
-        position_y: Option<KeyFrameTrack>,
-        position_z: Option<KeyFrameTrack>,
-        dampening_factor: Option<KeyFrameTrack>,
-        alpha: Option<KeyFrameTrack>,
-        tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
-    },
+    Draw(Box<ChildDraw>),
     Sound {
         se_id: u32,
         near: f32,
@@ -1731,22 +1734,13 @@ fn instantiate_child_generators(
                 }
                 arm_rumble_effect(envelope.clone(), *near, *far, *life_frames, r.pos, commands);
             }
-            ChildPayload::Draw {
-                def,
-                template,
-                sprite_frames,
-                mat,
-                scale_x,
-                scale_y,
-                position_x,
-                position_y,
-                position_z,
-                dampening_factor,
-                alpha,
-                tod_color,
-            } => {
-                let (def, template, sprite_frames, mat) =
-                    (*def, template.clone(), sprite_frames.clone(), mat.clone());
+            ChildPayload::Draw(d) => {
+                let (def, template, sprite_frames, mat) = (
+                    d.def,
+                    d.template.clone(),
+                    d.sprite_frames.clone(),
+                    d.mat.clone(),
+                );
                 let (
                     scale_x,
                     scale_y,
@@ -1757,14 +1751,14 @@ fn instantiate_child_generators(
                     alpha,
                     tod_color,
                 ) = (
-                    scale_x.clone(),
-                    scale_y.clone(),
-                    position_x.clone(),
-                    position_y.clone(),
-                    position_z.clone(),
-                    dampening_factor.clone(),
-                    alpha.clone(),
-                    tod_color.clone(),
+                    d.scale_x.clone(),
+                    d.scale_y.clone(),
+                    d.position_x.clone(),
+                    d.position_y.clone(),
+                    d.position_z.clone(),
+                    d.dampening_factor.clone(),
+                    d.alpha.clone(),
+                    d.tod_color.clone(),
                 );
                 let mesh = meshes.add(empty_mesh());
                 let entity = commands
@@ -2014,7 +2008,7 @@ fn resolve_child_bindings(
             ),
             once,
             on_expiry,
-            payload: ChildPayload::Draw {
+            payload: ChildPayload::Draw(Box::new(ChildDraw {
                 def: *child_def,
                 template,
                 sprite_frames,
@@ -2031,7 +2025,7 @@ fn resolve_child_bindings(
                 },
                 alpha: resolve(child_def.alpha_track),
                 tod_color: resolve_tod_tracks(child_def, tier),
-            },
+            })),
         });
     }
     out
@@ -2905,6 +2899,20 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
 
 #[cfg(feature = "enhanced-particle-alpha-20")]
 const ENHANCED_ALPHA_GAIN: f32 = 1.2;
+
+// Retail pins assert the raw authored alpha; under the enhancement the same build lifts it,
+// so tests compare against whichever value this feature set produces.
+#[cfg(test)]
+fn expected_factor_alpha(raw: f32) -> f32 {
+    #[cfg(feature = "enhanced-particle-alpha-20")]
+    {
+        (raw * ENHANCED_ALPHA_GAIN).min(1.0)
+    }
+    #[cfg(not(feature = "enhanced-particle-alpha-20"))]
+    {
+        raw
+    }
+}
 
 fn particle_origin(g: &LiveGenerator, p: &Particle) -> Vec3 {
     if g.def.camera_attached_base {
@@ -4627,7 +4635,7 @@ mod tests {
             let (_, unpromoted) = mesh_colors_and_factors(&g);
             assert_eq!(promoted[0][3], 1.0, "byte >= 0x7F promotes to full");
             assert!(
-                (unpromoted[0][3] - 0.5).abs() < 1e-6,
+                (unpromoted[0][3] - expected_factor_alpha(0.5)).abs() < 1e-6,
                 "raw byte/255 stays raw"
             );
         }
@@ -6516,7 +6524,7 @@ mod tests {
                     c.w
                 );
                 assert!(
-                    (f[3] - g.def.init_color[3]).abs() < 1e-6,
+                    (f[3] - expected_factor_alpha(g.def.init_color[3])).abs() < 1e-6,
                     "{path:?} factor is the raw init alpha byte: {}",
                     f[3]
                 );
@@ -6714,14 +6722,14 @@ mod tests {
             );
 
             let halo_alpha = phase_alpha(&halo, phase);
-            let expected = tinted(&halo, phase);
+            let expected = expected_factor_alpha(tinted(&halo, phase));
             assert!(
                 (halo_alpha - expected).abs() < ALPHA_EPS,
                 "halo draws its DAT alpha lane, phase {phase}: {halo_alpha} vs {expected}"
             );
 
             let sprite_alpha = phase_alpha(&sprite, phase);
-            let sprite_expected = tinted(&sprite, phase);
+            let sprite_expected = expected_factor_alpha(tinted(&sprite, phase));
             assert!(
                 (sprite_alpha - sprite_expected).abs() < ALPHA_EPS,
                 "moon draws its own table, phase {phase}: {sprite_alpha} vs {sprite_expected}"
@@ -6975,6 +6983,8 @@ mod tests {
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];
 
+        let expected_alpha = expected_factor_alpha(base.init_color[3]);
+
         let factor_alpha_of = |g: &LiveGenerator| -> f32 {
             let mut mesh = empty_mesh();
             rebuild_mesh(
@@ -6990,11 +7000,11 @@ mod tests {
         };
 
         assert!(
-            (factor_alpha_of(&cont) - base.init_color[3]).abs() < 1e-6,
+            (factor_alpha_of(&cont) - expected_alpha).abs() < 1e-6,
             "continuous body keeps authored opacity"
         );
         assert!(
-            (factor_alpha_of(&spray) - base.init_color[3]).abs() < 1e-6,
+            (factor_alpha_of(&spray) - expected_alpha).abs() < 1e-6,
             "a transient spray holds the authored alpha too — retail has no life fade"
         );
     }
@@ -7012,7 +7022,7 @@ mod tests {
         let def = *assets.particle_defs.get(b"SPLT").expect("monument shaft");
         assert!(def.is_singleton());
         assert_eq!(def.init_color[3], SHAFT_ALPHA);
-        let expected = SHAFT_ALPHA;
+        let expected = expected_factor_alpha(SHAFT_ALPHA);
         let mut g = celestial(def);
         g.particles[0].life_frames = f32::INFINITY;
         for age in [0.0, 300.0, 30_000.0] {
@@ -7997,7 +8007,7 @@ mod tests {
             name: *b"tst1",
             once,
             on_expiry,
-            payload: ChildPayload::Draw {
+            payload: ChildPayload::Draw(Box::new(ChildDraw {
                 // fpe=30: only the primed first burst fires within the test's few ticks.
                 def: def(30.0, 30.0, 1),
                 template: SpriteTemplate {
@@ -8016,7 +8026,7 @@ mod tests {
                 dampening_factor: None,
                 alpha: None,
                 tod_color: std::array::from_fn(|_| None),
-            },
+            })),
             children: Vec::new(),
         }
     }
@@ -8237,8 +8247,8 @@ mod tests {
         let mut parent = live(pd, f32::MAX);
         prime(&mut parent);
         let mut cf = child_factory(false, false);
-        if let ChildPayload::Draw { def: d, .. } = &mut cf.payload {
-            *d = cd;
+        if let ChildPayload::Draw(d) = &mut cf.payload {
+            d.def = cd;
         }
         parent.child_factories.push(cf);
         sim.generators.push(parent);

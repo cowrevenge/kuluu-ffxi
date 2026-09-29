@@ -22,12 +22,12 @@ use bevy::render::render_resource::{
     binding_types::{sampler as smp_entry, texture_2d, uniform_buffer},
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, BufferBinding, BufferDescriptor, BufferUsages,
-    CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, LoadOp,
-    MultisampleState, Operations, PipelineCache, PrimitiveState, PrimitiveTopology,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FilterMode, FragmentState,
+    LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState, PrimitiveTopology,
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
-    SamplerBindingType, ShaderStages, ShaderType, StoreOp, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-    TextureViewDescriptor, VertexState,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, ShaderType, StoreOp, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureView, TextureViewDescriptor, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::{ExtractedView, ViewTarget};
@@ -170,10 +170,10 @@ struct DistortionPassGpu {
 impl DistortionPassGpu {
     fn new(device: &RenderDevice, asset_server: &AssetServer) -> Self {
         let bgl_descriptor = distortion_bgl_descriptor();
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("distortion_pass_sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
             ..Default::default()
         });
         let uniform_buffer = device.create_buffer(&BufferDescriptor {
@@ -400,7 +400,9 @@ fn draw_distortion_pass(
             depth_slice: None,
             resolve_target: None,
             ops: Operations {
-                load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                // wgpu is a native-only dep here; the app color converts to it (bevy's own
+                // no-camera clear does the same to_linear().into()).
+                load: LoadOp::Clear(Color::srgba(0.0, 0.0, 0.0, 0.0).to_linear().into()),
                 store: StoreOp::Store,
             },
         })],

@@ -18,7 +18,7 @@
 //! ordering/ranges, not exact frames.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
@@ -42,6 +42,11 @@ use kuluu_render::skinned_ffxi_material::{FfxiSkinRegistry, FfxiSkinnedMaterialC
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_render::EntityTable;
 use kuluu_snapshot::{EntityKind, ViewerEvent};
+
+/// Wall-clock bound for async work in this rig (the global effect dir, S8's actor loads):
+/// under a loaded CI machine the pool workers can be descheduled past any fixed number of
+/// in-process frames, so waits are bounded by wall clock, not frame count.
+const ASYNC_LOAD_DEADLINE_SECS: u64 = 30;
 
 /// Savanna Rarab - ROM/4/109.DAT. No weapon; the "both event sets" pairing is HumeM below.
 const RARAB_FILE: u32 = 1569;
@@ -249,6 +254,17 @@ fn build_app() -> App {
         mob_claimed_other: Default::default(),
         invis_orb: Default::default(),
     });
+    // ROM/0/0.DAT's global effect dir loads on the async pool (load_global_effect_dir in
+    // Startup), and every victim-reaction scenario asserts at the inlined DamageCallback frame:
+    // dam0 must be reachable BEFORE the first event, so wait for it here. Wall-clock bound -
+    // a fixed frame window is exactly what flaked under full-gate load (the da08efe class).
+    let deadline = Instant::now() + Duration::from_secs(ASYNC_LOAD_DEADLINE_SECS);
+    while !app.world().contains_resource::<GlobalEffectDir>() {
+        if Instant::now() > deadline {
+            panic!("ROM/0/0.DAT global effect dir did not land within {ASYNC_LOAD_DEADLINE_SECS}s");
+        }
+        step(&mut app);
+    }
     app
 }
 
@@ -424,17 +440,16 @@ fn push_battle2(
     0
 }
 
-/// Wait for the async global effect dir load (ROM/0/0.DAT) to land, then remove it so no lookup
-/// can rescue a routine from there. The poll system inserts exactly once and does not
-/// re-insert, so the removal holds for the rest of the scenario. Asserting ldam is present first keeps the
-/// S6c/S6d fallback honest: without this step the global dir's own ldam would satisfy the guard.
+/// Remove the global effect dir so no lookup can rescue a routine from there. build_app already
+/// waited for it to land, so this asserts presence instead of re-waiting; the poll system inserts
+/// exactly once and does not re-insert, so the removal holds for the rest of the scenario.
+/// Asserting ldam is present first keeps the S6c/S6d fallback honest: without this step the global
+/// dir's own ldam would satisfy the guard.
 fn drop_global_effect_dir(app: &mut App) {
-    for _ in 0..600 {
-        if app.world().contains_resource::<GlobalEffectDir>() {
-            break;
-        }
-        step(app);
-    }
+    assert!(
+        app.world().contains_resource::<GlobalEffectDir>(),
+        "build_app waits for ROM/0/0.DAT to land; it must be present here"
+    );
     let g = app.world().resource::<GlobalEffectDir>();
     assert!(
         g.schedulers.iter().any(|s| s.name == *b"ldam"),
@@ -934,20 +949,27 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
             });
     }
 
+    // The load rides the shared async pool (real file I/O), so bound the wait by wall clock,
+    // not frame count: under a loaded CI machine the pool workers can be descheduled past any
+    // fixed number of in-process frames.
+    let deadline = Instant::now() + Duration::from_secs(ASYNC_LOAD_DEADLINE_SECS);
     let mut bat_live = None;
     let mut walker_live = None;
-    watch(&mut app, 900, |_i, w| {
+    while bat_live.is_none() || walker_live.is_none() {
+        step(&mut app);
         if bat_live.is_none() {
-            bat_live = live_root_probe(w, bat_parent);
+            bat_live = live_root_probe(app.world(), bat_parent);
         }
         if walker_live.is_none() {
-            walker_live = live_root_probe(w, walker_parent);
+            walker_live = live_root_probe(app.world(), walker_parent);
         }
-        bat_live.is_some() && walker_live.is_some()
-    });
+        if Instant::now() > deadline {
+            break;
+        }
+    }
 
     let Some((bat_scale, bat_move)) = bat_live else {
-        panic!("bat never left the placeholder root within 900 frames");
+        panic!("bat never left the placeholder root within {ASYNC_LOAD_DEADLINE_SECS}s");
     };
     assert!(
         (bat_scale - 0.85).abs() < f32::EPSILON,
@@ -956,7 +978,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     assert_eq!(bat_move, ffxi_dat::cib::MovementType::Flying);
 
     let Some((walker_scale, walker_move)) = walker_live else {
-        panic!("walker never left the placeholder root within 900 frames");
+        panic!("walker never left the placeholder root within {ASYNC_LOAD_DEADLINE_SECS}s");
     };
     assert!(
         (walker_scale - 1.0).abs() < f32::EPSILON,

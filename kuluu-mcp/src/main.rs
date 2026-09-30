@@ -9,7 +9,7 @@ use rmcp::{
     model::{
         CallToolResult, ContentBlock, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
         ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-        ResourceContents, ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+        ResourceContents, ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig,
         SubscribeRequestParams, UnsubscribeRequestParams,
     },
     service::{serve_server, Peer, RequestContext, RoleServer},
@@ -563,14 +563,14 @@ impl FfxiServer {
 
 #[tool_handler]
 impl ServerHandler for FfxiServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let caps = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
             .enable_resources_subscribe()
             .build();
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.protocol_version = ProtocolVersion::V_2025_11_25;
         info.capabilities = caps;
         info.instructions = Some(

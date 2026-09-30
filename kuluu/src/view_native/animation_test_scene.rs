@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::ui::{ComputedNode, UiGlobalTransform};
+use bevy::window::PrimaryWindow;
 use kuluu_render::components::{InGameEntity, WorldEntity};
 use kuluu_render::dat_mzb::{LastAutoLoadedZone, LoadMzbRequest, ZONE_SLOT_MAIN};
 use kuluu_render::ffxi_actor_render::{
@@ -35,6 +37,29 @@ const WEST_RONFAURE_ZONE_ID: u16 = 100;
 
 // MZB/DAT file id the zone table resolves West Ronfaure to.
 const WEST_RONFAURE_MZB_FILE_ID: u32 = 200;
+
+// LSB zone id for South Gustaberg (the Bastok tunnel entrance). DAT file 207 carries both the
+// tunnel MZB and the `ligh` lamp dir — li00..li11 fixtures, lt00..lt11 halos, ghu1/ghu2 — all gated
+// by the tkaa time-of-day track (dat-lamp-glow-probe: ROM/0/124.DAT).
+const SOUTH_GUSTABERG_ZONE_ID: u16 = 107;
+const SOUTH_GUSTABERG_MZB_FILE_ID: u32 = 207;
+
+// Reference camera for lamp work: the in-game standing spot used by every lamp capture, read from
+// the character's own entity stream (x=262.766 y=-205.876 z=2.326) through scene::ffxi_to_bevy
+// (x,-z,-y); eye = that spot raised to head height. The halo cluster around it (DAT 207 lt* base_pos
+// rows through mzb_to_bevy: x in 255.8..264.2, glass at +2.29) sits ~21 yalms ahead along -Z, so
+// the look-at is that cluster's centroid — reproduces exactly where the character stands and looks.
+const SG_LAMP_EYE: Vec3 = Vec3::new(262.77, -0.6, 205.88);
+const SG_LAMP_LOOK_AT: Vec3 = Vec3::new(260.0, 1.5, 184.4);
+
+// Game hour for the lamp room: just past dusk on DAT 207's tkaa gate (off between ~4.39h and
+// ~17.46h, ≈0.96 after), held still by VanaClock::freeze_at_hour_minute so shots repeat.
+const SG_LAMP_HOUR: u32 = 18;
+
+// Lantern-alpha slider geometry (logical px): track fills the panel's inner width (215 - 2x8 pad).
+const LAMP_SLIDER_TRACK_W: f32 = 195.0;
+const LAMP_SLIDER_TRACK_H: f32 = 24.0;
+const LAMP_SLIDER_KNOB_W: f32 = 10.0;
 
 // Retail reference standing point (in-game debug readout x=-238.241 y=139.944 z=-49.754,
 // wire order: z is height) — mid-zone open grass, tree line west, campfire at (-293, 137),
@@ -139,6 +164,7 @@ enum Case {
     I900,
     LoadZone,
     LoadWeather,
+    SgLamps,
     Shot,
 }
 
@@ -160,6 +186,7 @@ impl Case {
             Self::I900 => "i900 zone gen (ai90 haze child)",
             Self::LoadZone => "load zone (West Ronfaure)",
             Self::LoadWeather => "load weather (clouds)",
+            Self::SgLamps => "south gusta lamps @ 18:00",
             Self::Shot => "screenshot (GPU readback)",
         }
     }
@@ -234,7 +261,7 @@ struct DrawnCheck {
 
 /// Everything the test scene spawns (3D + UI), so teardown takes it all down at once.
 #[derive(Component)]
-struct TestSceneScoped;
+pub(crate) struct TestSceneScoped;
 
 /// Set by the launcher's AnimationTest titlebar button (gated on the
 /// `enhanced-animationtest` feature); consumed by handle_toggle.
@@ -269,6 +296,7 @@ fn case_from_name(s: &str) -> Option<Case> {
         "i900" => Case::I900,
         "zone" => Case::LoadZone,
         "weather" => Case::LoadWeather,
+        "sglamps" => Case::SgLamps,
         // ANIMTEST_SHOT_PATH names the PNG; Bevy reads back the render target, so this works
         // with KULUU_WINDOW_HIDDEN=1 where no window capture can reach.
         "shot" => Case::Shot,
@@ -293,6 +321,131 @@ struct FloorHidden(bool);
 #[derive(Resource, Default)]
 struct PendingShot(Option<std::path::PathBuf>);
 
+/// Set when the lamp-room case fires and cleared on teardown: drives the clock freeze and camera
+/// framing edges in arm_lamp_room.
+#[derive(Resource, Default)]
+struct LampRoomActive(bool);
+
+// Hand-rolled lantern-alpha slider — bevy_ui 0.19 ships no Slider widget. The track carries a
+// Button so its Interaction tracks the whole mouse-hold (same mechanism as the case buttons), and
+// drive_lamp_alpha_slider maps the held cursor through ComputedNode::normalize_point, which is the
+// same physical-pixel space bevy_ui's own focus pass hit-tests in.
+/// Checkbox control: while set, `light_occlusion::apply_light_occlusion_system` stands down, so
+/// the lamp room can be lit without raycast-zeroed bindings. Seeded off (rays suppressed) by the
+/// lamp-room case; the panel checkbox flips it live.
+#[derive(Resource, Default)]
+pub struct LampRaysOff(pub bool);
+
+// The Enhanced half of the user's graphics settings (`dynamic_lights` = Lamps + Shadows makes each
+// DAT lamp a real Bevy PointLight with cube shadow maps and flicker; volumetric fog scatters over
+// the whole frame), neither of which exists in retail. Neither belongs under a lamp capture, so
+// this checkbox (and the lamp-room seed) suppresses them and restores exactly what it replaced on
+// un-suppress or teardown. `persist_graphics_on_change` rewrites graphics.json at both edges like
+// any menu change would; the value ends up back where it started.
+#[derive(Resource, Default)]
+pub struct ShadowsOff(pub bool);
+
+#[derive(Component)]
+struct ShadowsCheckbox;
+
+// The night-fx kill switches (panel rows after shadows): sun/moon/fog/stars, applied through the
+// renderer's `SkyFxOverride` — sun and moon pin their celestial below the horizon (light, disc,
+// landscape dir term), fog pulls the camera's DistanceFog, stars hide the dome. All default off;
+// only the box ever flips them (see `kuluu_render::sun_moon::SkyFxOverride`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SkyFxField {
+    Sun,
+    Moon,
+    Fog,
+    Stars,
+}
+
+impl SkyFxField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sun => "sun",
+            Self::Moon => "moon",
+            Self::Fog => "fog",
+            Self::Stars => "stars",
+        }
+    }
+
+    fn get(self, ov: &kuluu_render::sun_moon::SkyFxOverride) -> bool {
+        match self {
+            Self::Sun => ov.sun,
+            Self::Moon => ov.moon,
+            Self::Fog => ov.fog,
+            Self::Stars => ov.stars,
+        }
+    }
+
+    fn set(self, ov: &mut kuluu_render::sun_moon::SkyFxOverride) -> &mut bool {
+        match self {
+            Self::Sun => &mut ov.sun,
+            Self::Moon => &mut ov.moon,
+            Self::Fog => &mut ov.fog,
+            Self::Stars => &mut ov.stars,
+        }
+    }
+}
+
+#[derive(Component)]
+struct SkyCheckbox(SkyFxField);
+
+// Lamps kill switch: checked hides the lig* halo billboards (the lantern glow sprites).
+#[derive(Component)]
+struct LampsCheckbox;
+
+// Wall-glow kill switch: unchecked empties the faithful ActiveSceneLights feed, so the FFXI
+// zone/actor materials lose the authored `ligh` palette that paints the stone around each lamp.
+#[derive(Component)]
+struct WallGlowCheckbox;
+
+// Enhance mode: checked replaces the lig* glow textures with one real flickering PointLight per
+// lamp. Unchecked = retail path (glow textures at slider alpha, pinned draw order).
+#[derive(Component)]
+struct EnhanceModeCheckbox;
+
+/// What suppression replaced: `None` while shadows run normally. The camera's VolumetricFog
+/// component is stashed whole (it is only ever inserted at camera spawn, camera.rs), so restoring
+/// re-inserts the exact same values rather than a second copy of its defaults.
+#[derive(Resource, Default)]
+struct ShadowOverrides(Option<ShadowSnapshot>);
+
+#[derive(Clone)]
+struct ShadowSnapshot {
+    dynamic_lights: kuluu_render::graphics_settings::DynamicLights,
+    light_flicker: bool,
+    volumetric_fog: Option<bevy::light::VolumetricFog>,
+}
+
+// Flipping back on resumes raycasting against the authored bindings stashed by
+// `light_occlusion::restore_light_bindings_on_rays_off`, so no zone re-press is needed.
+#[derive(Component)]
+struct LampRaysCheckbox;
+
+/// Run condition for `light_occlusion::apply_light_occlusion_system`: the box's checkbox (or the
+/// lamp-room case) suppresses the raycast; with no toggle in play it always runs.
+pub(crate) fn lamp_rays_enabled(rays: Option<Res<LampRaysOff>>) -> bool {
+    !rays.is_some_and(|r| r.0)
+}
+
+#[derive(Component)]
+struct LampSliderTrack;
+#[derive(Component)]
+struct LampSliderKnob;
+#[derive(Component)]
+struct LampSliderLabel;
+
+// Wall-wash alpha slider (under the lantern one): same hand-rolled track/knob, range 0..2 over
+// the full track width (1.0 = authored, knob at mid-travel).
+#[derive(Component)]
+struct WashSliderTrack;
+#[derive(Component)]
+struct WashSliderKnob;
+#[derive(Component)]
+struct WashSliderLabel;
+
 // The LoadZone case's params as one SystemParam: Bevy 0.19 generates IntoSystem for fn pointers
 // up to 16 params (bevy_ecs function_system all_tuples! impl_build_system 0..=16), and
 // run_pending_case sits exactly at that cap with this bundle.
@@ -302,6 +455,10 @@ struct ZoneLoadParams<'w> {
     last_zone: ResMut<'w, LastAutoLoadedZone>,
     backdrop_zone: ResMut<'w, super::launcher_backdrop::LauncherBackdropZone>,
     floor_hidden: ResMut<'w, FloorHidden>,
+    lamp_rays: ResMut<'w, LampRaysOff>,
+    sky_fx: ResMut<'w, kuluu_render::sun_moon::SkyFxOverride>,
+    lamps_off: ResMut<'w, kuluu_render::particle_sim::LampHalosOff>,
+    wall_glow_off: ResMut<'w, kuluu_render::particle_sim::WallWashOff>,
 }
 
 #[derive(Component)]
@@ -318,6 +475,7 @@ pub struct AnimationTestScenePlugin;
 impl Plugin for AnimationTestScenePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TestLog>()
+            .init_resource::<LampRaysOff>()
             .init_resource::<DrawnCheck>()
             .init_resource::<PendingCase>()
             .init_resource::<WormState>()
@@ -326,7 +484,15 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<PendingToggle>()
             .init_resource::<TestZoneActive>()
             .init_resource::<FloorHidden>()
-            .init_resource::<PendingShot>();
+            .init_resource::<PendingShot>()
+            .init_resource::<ShadowsOff>()
+            .init_resource::<ShadowOverrides>()
+            .init_resource::<kuluu_render::sun_moon::SkyFxOverride>()
+            .init_resource::<kuluu_render::particle_sim::LampHalosOff>()
+            .init_resource::<kuluu_render::particle_sim::WallWashOff>()
+            .init_resource::<kuluu_render::zone_point_lights::ZoneLampLightsOff>()
+            .init_resource::<kuluu_render::particle_sim::LampEnhancedLights>()
+            .init_resource::<LampRoomActive>();
         // ANIMTEST_AUTO=nhit,chit,... — fire the named cases on a fixed clock with no input
         // (standalone tester parity); opening the box too, so the whole run is hands-free.
         let auto_cases: Vec<Case> = std::env::var("ANIMTEST_AUTO")
@@ -352,6 +518,10 @@ impl Plugin for AnimationTestScenePlugin {
         app.add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
             .add_systems(
                 Update,
+                sync_shadow_override.run_if(in_state(super::AppPhase::Launcher)),
+            )
+            .add_systems(
+                Update,
                 (
                     handle_toggle,
                     handle_close_press,
@@ -360,6 +530,8 @@ impl Plugin for AnimationTestScenePlugin {
                     run_pending_case,
                     fire_pending_shot,
                     apply_floor_hidden,
+                    arm_lamp_room,
+                    drive_lamp_alpha_slider,
                     verify_drawn,
                     worm_death_watch,
                     zone_backdrop_visibility,
@@ -370,8 +542,57 @@ impl Plugin for AnimationTestScenePlugin {
                 )
                     .chain()
                     .run_if(in_state(super::AppPhase::Launcher)),
+            )
+            // The lamp-rays checkbox lives outside the chained group — adding it there would
+            // cross bevy's 17-element tuple ceiling for one add_systems call.
+            .add_systems(
+                Update,
+                (
+                    toggle_lamp_rays_checkbox,
+                    toggle_shadows_checkbox,
+                    toggle_sky_checkboxes,
+                    toggle_lamps_checkbox,
+                    toggle_wall_glow_checkbox,
+                    toggle_enhance_mode_checkbox,
+                    drive_wash_alpha_slider,
+                )
+                    .run_if(in_state(super::AppPhase::Launcher)),
+            )
+            // Last (post command-flush): the box's own spawn is deferred, so this is the earliest
+            // point that sees it — no frame of launcher-camera coexistence.
+            .add_systems(
+                bevy::prelude::Last,
+                apply_test_unload.run_if(in_state(super::AppPhase::Launcher)),
             );
     }
+}
+
+// The box owns the screen while it is up: unload (not just hide) the launcher render camera and
+// the backdrop so nothing loaded sits behind the test scene; tear_down restores both. Level-
+//triggered (runs in Last, after the frame's command flush) because the box's own spawn is
+// deferred — Update-side systems can't see it on its opening frame.
+fn apply_test_unload(
+    q_box: Query<(), With<TestSceneScoped>>,
+    q_launch_cam: Query<Entity, With<super::launcher_ui::LauncherCamera>>,
+    q_backdrop: Query<Entity, With<super::launcher_backdrop::BackdropScoped>>,
+    mut commands: Commands,
+    mut log: ResMut<TestLog>,
+    mut was_open: Local<bool>,
+) {
+    let open = q_box.iter().next().is_some();
+    if !open {
+        *was_open = false;
+        return;
+    }
+    for e in q_launch_cam.iter() {
+        commands.entity(e).try_despawn();
+    }
+    // Idempotent once unloaded: empty scoped query, remove_resource is a silent no-op.
+    super::launcher_backdrop::unload_for_test(&mut commands, &q_backdrop);
+    if !*was_open {
+        log_line(&mut log, "launcher + backdrop unloaded".into());
+    }
+    *was_open = true;
 }
 
 fn set_launcher_ui_visibility(
@@ -416,7 +637,15 @@ fn handle_toggle(
     pending.0 = false;
 
     if q_scoped.iter().next().is_some() {
-        tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
+        tear_down(
+            &mut commands,
+            &q_scoped,
+            &q_ui,
+            &mut tracked,
+            &mut scene,
+            &mut meshes,
+            &mut materials,
+        );
         // The dispatch funnel's info! traces (routine resolution, particle defs/meshes) are
         // gated on this; the box is where they earn their keep.
         commands.insert_resource(VfxTrace(false));
@@ -465,6 +694,8 @@ fn handle_close_press(
     q_scoped: Query<Entity, With<TestSceneScoped>>,
     q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
     mut log: ResMut<TestLog>,
@@ -475,7 +706,15 @@ fn handle_close_press(
     if !matches!(interaction, Interaction::Pressed) {
         return;
     }
-    tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
+    tear_down(
+        &mut commands,
+        &q_scoped,
+        &q_ui,
+        &mut tracked,
+        &mut scene,
+        &mut meshes,
+        &mut materials,
+    );
     log_line(&mut log, "scene down".into());
 }
 
@@ -493,7 +732,7 @@ fn activate_test_scene(
     let Some(dat_root) = actor_root.0.as_ref() else {
         log_line(
             log,
-            "no retail install wired — pick one in Settings first".into(),
+            "no retail install wired - pick one in Settings first".into(),
         );
         return;
     };
@@ -591,7 +830,7 @@ fn activate_test_scene(
         }
         None => log_line(
             log,
-            "ERROR: face file unresolved — head will not render".into(),
+            "ERROR: face file unresolved - head will not render".into(),
         ),
     }
     // Slots 2..5 come from the race's default equipment table (real geometry); slot 6 is pinned
@@ -613,7 +852,7 @@ fn activate_test_scene(
             }
             None => log_line(
                 log,
-                format!("ERROR: slot {slot} ({name}) unresolved — that body part will not render"),
+                format!("ERROR: slot {slot} ({name}) unresolved - that body part will not render"),
             ),
         }
     }
@@ -717,7 +956,7 @@ fn verify_parts(
                 log_line(
                     log,
                     format!(
-                        "ERROR: {name}={file_id} unreadable or 0 mesh buffers — will not render"
+                        "ERROR: {name}={file_id} unreadable or 0 mesh buffers - will not render"
                     ),
                 );
             }
@@ -738,7 +977,7 @@ fn verify_parts(
     if check.exp_worm == 0 {
         log_line(
             log,
-            format!("ERROR: worm={worm_file} unreadable or 0 mesh buffers — will not render"),
+            format!("ERROR: worm={worm_file} unreadable or 0 mesh buffers - will not render"),
         );
     }
 }
@@ -869,6 +1108,8 @@ fn spawn_panel(commands: &mut Commands) {
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(8.0)),
                 column_gap: Val::Px(6.0),
+                // Rows never crush under log growth; extra log lines clip at the panel floor.
+                overflow: bevy::ui::Overflow::clip(),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.04, 0.05, 0.09, 0.92)),
@@ -892,6 +1133,7 @@ fn spawn_panel(commands: &mut Commands) {
         Case::I900,
         Case::LoadZone,
         Case::LoadWeather,
+        Case::SgLamps,
     ] {
         let button = commands
             .spawn((
@@ -899,6 +1141,10 @@ fn spawn_panel(commands: &mut Commands) {
                 Node {
                     width: Val::Percent(100.0),
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                    // Fixed-height panel + default flex_shrink=1 let a long log crush every
+                    // row toward its content-min; the slider track's min is zero, so it vanished
+                    // first (user repro: shadows-checkbox click). Controls never shrink.
+                    flex_shrink: 0.0,
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
@@ -917,11 +1163,272 @@ fn spawn_panel(commands: &mut Commands) {
         commands.entity(panel).add_child(button);
     }
 
+    // Lantern-alpha slider row: label + track + knob. Seed both drawn pieces from the renderer's
+    // default lift so panel and shader agree before anyone touches it.
+    let seed_lift = kuluu_render::particle_sim::LAMP_ALPHAMAP_LIFT_DEFAULT;
+    let label = commands
+        .spawn((
+            TestSceneScoped,
+            LampSliderLabel,
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Text::new(format!("lantern alpha {seed_lift:.2}")),
+            TextFont {
+                font_size: 12.0.into(),
+                ..default()
+            },
+            TextColor(Color::srgb(0.85, 0.8, 0.65)),
+        ))
+        .id();
+    commands.entity(panel).add_child(label);
+    let knob = commands
+        .spawn((
+            TestSceneScoped,
+            LampSliderKnob,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(seed_lift * (LAMP_SLIDER_TRACK_W - LAMP_SLIDER_KNOB_W)),
+                top: Val::Px(2.0),
+                width: Val::Px(LAMP_SLIDER_KNOB_W),
+                height: Val::Px(LAMP_SLIDER_TRACK_H - 4.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.85, 0.72, 0.35)),
+        ))
+        .id();
+    let track = commands
+        .spawn((
+            TestSceneScoped,
+            LampSliderTrack,
+            Node {
+                width: Val::Px(LAMP_SLIDER_TRACK_W),
+                height: Val::Px(LAMP_SLIDER_TRACK_H),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.13, 0.15, 0.2)),
+            bevy::ui::widget::Button,
+        ))
+        .id();
+    commands.entity(track).add_child(knob);
+    commands.entity(panel).add_child(track);
+
+    // Wall-wash alpha slider row (under the lantern one): label + track + knob, seeded at the
+    // neutral 1.0 so the washes start exactly as authored.
+    let seed_wash = kuluu_render::particle_sim::WASH_ALPHA_LIFT_DEFAULT;
+    let wash_label = commands
+        .spawn((
+            TestSceneScoped,
+            WashSliderLabel,
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Text::new(format!("wash alpha {seed_wash:.2}")),
+            TextFont {
+                font_size: 12.0.into(),
+                ..default()
+            },
+            TextColor(Color::srgb(0.85, 0.8, 0.65)),
+        ))
+        .id();
+    commands.entity(panel).add_child(wash_label);
+    let wash_knob = commands
+        .spawn((
+            TestSceneScoped,
+            WashSliderKnob,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(
+                    (seed_wash / kuluu_render::particle_sim::WASH_ALPHA_LIFT_MAX)
+                        * (LAMP_SLIDER_TRACK_W - LAMP_SLIDER_KNOB_W),
+                ),
+                top: Val::Px(2.0),
+                width: Val::Px(LAMP_SLIDER_KNOB_W),
+                height: Val::Px(LAMP_SLIDER_TRACK_H - 4.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.85, 0.72, 0.35)),
+        ))
+        .id();
+    let wash_track = commands
+        .spawn((
+            TestSceneScoped,
+            WashSliderTrack,
+            Node {
+                width: Val::Px(LAMP_SLIDER_TRACK_W),
+                height: Val::Px(LAMP_SLIDER_TRACK_H),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.13, 0.15, 0.2)),
+            bevy::ui::widget::Button,
+        ))
+        .id();
+    commands.entity(wash_track).add_child(wash_knob);
+    commands.entity(panel).add_child(wash_track);
+
+    // Lamp-rays row: filled = rays on; unchecked suppresses the occlusion raycast so lanterns
+    // light whatever their authored bindings allow (no BVH zeroing). The lamp-room case seeds it
+    // unchecked.
+    let rays_checkbox = commands
+        .spawn((
+            TestSceneScoped,
+            LampRaysCheckbox,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+            bevy::ui::widget::Button,
+            Text::new("[x] lamp rays"),
+            TextFont {
+                font_size: 13.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ))
+        .id();
+    commands.entity(panel).add_child(rays_checkbox);
+
+    // Shadows row: filled = on; unchecked suppresses the Enhanced dynamic-lights half of the
+    // user's graphics settings (Bevy PointLight lamp shadows + flicker, volumetric fog density).
+    let shadows_checkbox = commands
+        .spawn((
+            TestSceneScoped,
+            ShadowsCheckbox,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+            bevy::ui::widget::Button,
+            Text::new("[x] shadows"),
+            TextFont {
+                font_size: 13.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ))
+        .id();
+    commands.entity(panel).add_child(shadows_checkbox);
+
+    // Night-fx rows (moon/fog first — the ones the lamp-room walls needed): filled = on,
+    // unchecked suppresses.
+    for field in [
+        SkyFxField::Moon,
+        SkyFxField::Fog,
+        SkyFxField::Sun,
+        SkyFxField::Stars,
+    ] {
+        let row = commands
+            .spawn((
+                TestSceneScoped,
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+                bevy::ui::widget::Button,
+                Text::new(format!("[x] {}", field.label())),
+                TextFont {
+                    font_size: 13.0.into(),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                SkyCheckbox(field),
+            ))
+            .id();
+        commands.entity(panel).add_child(row);
+    }
+
+    // Enhance-mode row: filled replaces the lig* glow textures with one real flickering
+    // PointLight per lamp; unchecked keeps the retail texture path at slider alpha.
+    let enhance_mode_checkbox = commands
+        .spawn((
+            TestSceneScoped,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+            bevy::ui::widget::Button,
+            Text::new("[ ] enhance mode"),
+            TextFont {
+                font_size: 13.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            EnhanceModeCheckbox,
+        ))
+        .id();
+    commands.entity(panel).add_child(enhance_mode_checkbox);
+
+    // Lamps row: filled = halos drawn; unchecked hides them live.
+    let lamps_checkbox = commands
+        .spawn((
+            TestSceneScoped,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+            bevy::ui::widget::Button,
+            Text::new("[x] lamps"),
+            TextFont {
+                font_size: 13.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            LampsCheckbox,
+        ))
+        .id();
+    commands.entity(panel).add_child(lamps_checkbox);
+
+    // Wall-glow row: filled = the ghu*/li* wash volumes draw (authored additive look); unchecked
+    // hides them. The wash-alpha slider scales their brightness.
+    let wall_glow_checkbox = commands
+        .spawn((
+            TestSceneScoped,
+            Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.16, 0.2, 0.3)),
+            bevy::ui::widget::Button,
+            Text::new("[x] wall glow"),
+            TextFont {
+                font_size: 13.0.into(),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            WallGlowCheckbox,
+        ))
+        .id();
+    commands.entity(panel).add_child(wall_glow_checkbox);
+
     let log_node = commands
         .spawn((
             TestSceneScoped,
             Node {
+                // Absorbs the panel's leftover space (and any overflow) so no log line ever
+                // squeezes the control rows above it.
                 flex_grow: 1.0,
+                min_height: Val::Px(0.0),
                 width: Val::Percent(100.0),
                 align_items: AlignItems::FlexStart,
                 ..default()
@@ -964,6 +1471,7 @@ fn case_duration(case: Case) -> std::time::Duration {
         // Not animations: short windows only keep a double-press from re-issuing loads.
         Case::LoadZone => std::time::Duration::from_millis(2000),
         Case::LoadWeather => std::time::Duration::from_millis(500),
+        Case::SgLamps => std::time::Duration::from_millis(4000),
         Case::Shot => std::time::Duration::from_millis(1500),
     }
 }
@@ -1101,7 +1609,7 @@ fn run_pending_case(
         Case::PlayerNhIt | Case::PlayerChit | Case::PlayerDhit | Case::MobNhIt | Case::MobChit
     ) && hp.worm == 0
     {
-        log_line(&mut log, "worm dead — respawning before hit".into());
+        log_line(&mut log, "worm dead - respawning before hit".into());
         respawn_worm(
             &mut worm_state,
             &mut scene,
@@ -1166,6 +1674,11 @@ fn run_pending_case(
             &mut commands,
         ),
         Case::I900 => fire_zone_i900(&tracked, root.0.clone(), &mut log, &mut commands),
+        Case::SgLamps => {
+            // Item one of the lamp-room setup: lantern rays off (the panel checkbox shows checked).
+            *zone.lamp_rays = LampRaysOff(true);
+            load_sg_lamp_room(&mut zone, &mut scene, &mut log, &mut commands);
+        }
         Case::LoadZone => {
             let (zone_id, mzb_file, world_pos) = env_zone_override().unwrap_or((
                 WEST_RONFAURE_ZONE_ID,
@@ -1262,7 +1775,7 @@ fn fire_hit(
         _ => (WORM_ID, HUME_ID),
     };
     if !tracked.by_id.contains_key(&attacker_id) || !tracked.by_id.contains_key(&victim_id) {
-        log_line(log, "actors not loaded yet — try again in a second".into());
+        log_line(log, "actors not loaded yet - try again in a second".into());
         return;
     }
     events.push(kuluu_snapshot::ViewerEvent::ActionStarted {
@@ -1679,6 +2192,501 @@ fn apply_floor_hidden(flag: Res<FloorHidden>, mut q: Query<&mut Visibility, With
     }
 }
 
+// Loads the South Gustaberg tunnel through the same atomic write set as LoadZone (backdrop,
+// snapshot and LastAutoLoadedZone pre-stamp in one frame, or auto-load re-issues the block at a
+// wrong offset) but always at world_pos ZERO: SG's zone-static lamp placements are authored in
+// absolute native coordinates, and every lamp capture is framed against that absolute space. The
+// ZoneParticlesPlugin then spawns ligh/'s li*/lt* generators itself from effective_zone_file_id.
+fn load_sg_lamp_room(
+    zone: &mut ZoneLoadParams,
+    scene: &mut SceneState,
+    log: &mut TestLog,
+    commands: &mut Commands,
+) {
+    commands.insert_resource(LampRoomActive(true));
+    if zone.last_zone.file_id == Some(SOUTH_GUSTABERG_MZB_FILE_ID) {
+        log_line(
+            &mut *log,
+            format!(
+                "lamp room: South Gustaberg already loaded (zone {} / DAT {})",
+                SOUTH_GUSTABERG_ZONE_ID, SOUTH_GUSTABERG_MZB_FILE_ID
+            ),
+        );
+        return;
+    }
+    *zone.backdrop_zone = super::launcher_backdrop::LauncherBackdropZone(SOUTH_GUSTABERG_ZONE_ID);
+    scene.snapshot.zone_id = Some(SOUTH_GUSTABERG_ZONE_ID);
+    zone.last_zone.file_id = Some(SOUTH_GUSTABERG_MZB_FILE_ID);
+    zone.load_tx.write(LoadMzbRequest {
+        file_id: SOUTH_GUSTABERG_MZB_FILE_ID,
+        chunk_idx: None,
+        world_pos: Vec3::ZERO,
+        auto_loaded: true,
+        slot: ZONE_SLOT_MAIN,
+        active_sub_area: None,
+    });
+    zone.floor_hidden.0 = true;
+    commands.insert_resource(TestZoneActive(true));
+    // Lamp work wants the authored look: suppress the occlusion raycast unless a capture asks
+    // for it (ANIMTEST_LAMP_RAYS_ON=1 keeps the BVH zeroing running for before/after shots).
+    if std::env::var("ANIMTEST_LAMP_RAYS_ON").is_ok() {
+        zone.lamp_rays.0 = false;
+        log_line(&mut *log, "lamp rays: ON (ANIMTEST_LAMP_RAYS_ON)".into());
+    } else {
+        zone.lamp_rays.0 = true;
+        log_line(
+            &mut *log,
+            "lamp rays: seeded off (authored bindings; checkbox re-enables the raycast)".into(),
+        );
+    }
+    // Same reasoning for the user's own Enhanced dynamic-lights/VF settings: lamp captures want
+    // authored lighting only. ANIMTEST_LAMP_SHADOWS_ON=1 skips the suppression.
+    if std::env::var("ANIMTEST_LAMP_SHADOWS_ON").is_ok() {
+        log_line(&mut *log, "shadows: ON (ANIMTEST_LAMP_SHADOWS_ON)".into());
+    } else {
+        commands.insert_resource(ShadowsOff(true));
+        log_line(
+            &mut *log,
+            "shadows: seeded off (Bevy lamp shadows/flicker/volumetric fog suppressed; checkbox re-enables)"
+                .into(),
+        );
+    }
+    // ANIMTEST_SKY_OFF="moon,fog,sun,stars" pre-checks the night-fx kill switches for headless
+    // A/B captures (the panel labels mirror from the override, same as a click would).
+    if let Ok(list) = std::env::var("ANIMTEST_SKY_OFF") {
+        let mut hit: Vec<&'static str> = Vec::new();
+        for name in list.split(',').map(|s| s.trim().to_ascii_lowercase()) {
+            let field = match name.as_str() {
+                "sun" => Some(SkyFxField::Sun),
+                "moon" => Some(SkyFxField::Moon),
+                "fog" => Some(SkyFxField::Fog),
+                "stars" => Some(SkyFxField::Stars),
+                _ => None,
+            };
+            if let Some(field) = field {
+                *field.set(&mut zone.sky_fx) = true;
+                hit.push(field.label());
+            }
+        }
+        log_line(
+            &mut *log,
+            format!("sky fx seeded off: {}", hit.join(", ")).into(),
+        );
+    }
+    // ANIMTEST_LAMP_HALOS_OFF=1 pre-checks the lamps kill switch for headless A/B captures.
+    if std::env::var_os("ANIMTEST_LAMP_HALOS_OFF").is_some() {
+        zone.lamps_off.0 = true;
+        log_line(
+            &mut *log,
+            "lamps: seeded OFF (halo billboards hidden)".into(),
+        );
+    }
+    // ANIMTEST_WALL_GLOW_OFF=1 pre-checks the wall-glow kill switch for headless A/B captures.
+    if std::env::var_os("ANIMTEST_WALL_GLOW_OFF").is_some() {
+        zone.wall_glow_off.0 = true;
+        log_line(&mut *log, "wall glow: seeded OFF (washes hidden)".into());
+    }
+    log_line(
+        &mut *log,
+        format!(
+            "lamp room: South Gustaberg loading at absolute origin (zone {} / DAT {})",
+            SOUTH_GUSTABERG_ZONE_ID, SOUTH_GUSTABERG_MZB_FILE_ID
+        ),
+    );
+}
+
+// Edges of the lamp-room case. On activation: hold the game clock at SG_LAMP_HOUR (the tkaa gate,
+// the halos' ToD curves and the sky all read this one clock, so "time doesn't move" freezes them
+// together) and re-frame the box camera on the standing spot — unless ANIMTEST_CAM overrides it.
+// ANIMTEST_LAMP_ALPHA=0..1 scripts the lantern-alpha value for headless A/B shots. On teardown the
+// clock is released again.
+fn arm_lamp_room(
+    lamp: Res<LampRoomActive>,
+    mut clock: ResMut<kuluu_render::vana_time::VanaClock>,
+    mut q_cam: Query<&mut Transform, With<kuluu_render::camera::OperatorCamera>>,
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut log: ResMut<TestLog>,
+) {
+    if !lamp.is_changed() {
+        return;
+    }
+    if !lamp.0 {
+        clock.thaw();
+        return;
+    }
+    clock.freeze_at_hour_minute(SG_LAMP_HOUR, 0);
+    log_line(
+        &mut log,
+        format!("clock: frozen at {:02}:00 (tkaa gate on)", SG_LAMP_HOUR),
+    );
+    if env_camera_override().is_none() {
+        for mut cam in q_cam.iter_mut() {
+            *cam = Transform::from_translation(SG_LAMP_EYE).looking_at(SG_LAMP_LOOK_AT, Vec3::Y);
+        }
+        log_line(
+            &mut log,
+            format!(
+                "camera: framed eye {:?} look-at {:?}",
+                SG_LAMP_EYE.to_array(),
+                SG_LAMP_LOOK_AT.to_array()
+            ),
+        );
+    }
+    if let Some(v) = std::env::var("ANIMTEST_LAMP_ALPHA")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+    {
+        sim.set_lamp_halos_lift(v);
+        log_line(&mut log, format!("lantern alpha scripted to {v:.3}"));
+    }
+}
+
+// While the slider track is held down (Button holds Interaction for the whole mouse-down, like the
+// case buttons), map cursor x through normalize_point straight onto the simulator's lantern lift —
+// live, no resource in between.
+// One flip per mouse-down (Button holds Interaction the whole hold, same reason the case buttons
+// edge-detect through CaseLock); filled box = rays on.
+fn toggle_lamp_rays_checkbox(
+    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<LampRaysCheckbox>>,
+    mut rays: ResMut<LampRaysOff>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<bool>,
+) {
+    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+        return;
+    };
+    let pressed = matches!(interaction, Interaction::Pressed);
+    if pressed && !*was_pressed {
+        rays.0 = !rays.0;
+        log_line(
+            &mut log,
+            if rays.0 {
+                "lamp rays: off (occlusion raycast suppressed, authored bindings restored)".into()
+            } else {
+                // Restored bindings go back through the raycast from this frame on.
+                "lamp rays: on - occlusion resumes against the restored authored bindings".into()
+            },
+        );
+    }
+    *was_pressed = pressed;
+    let on = !rays.0;
+    if rays.is_changed() || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!("{} lamp rays", if on { "[x]" } else { "[ ]" }));
+    }
+    *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+}
+
+// One flip per mouse-down (same edge pattern as the rays checkbox).
+fn toggle_shadows_checkbox(
+    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<ShadowsCheckbox>>,
+    mut shadows: ResMut<ShadowsOff>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<bool>,
+) {
+    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+        return;
+    };
+    let pressed = matches!(interaction, Interaction::Pressed);
+    if pressed && !*was_pressed {
+        shadows.0 = !shadows.0;
+        log_line(
+            &mut log,
+            if shadows.0 {
+                "shadows: off (Bevy lamp point-lights + flicker + volumetric fog suppressed)".into()
+            } else {
+                "shadows: on (user graphics settings restored)".into()
+            },
+        );
+    }
+    *was_pressed = pressed;
+    let on = !shadows.0;
+    if shadows.is_changed() || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!("{} shadows", if on { "[x]" } else { "[ ]" }));
+    }
+    *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+}
+
+// One flip per mouse-down for all four sky-effect rows (edge-detect is per row: a hold over one
+// row must not repeat); filled box = on. Labels mirror the override every frame cheaply.
+fn toggle_sky_checkboxes(
+    mut q_rows: Query<(
+        Entity,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut Text,
+        &SkyCheckbox,
+    )>,
+    mut ov: ResMut<kuluu_render::sun_moon::SkyFxOverride>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<std::collections::HashMap<bevy::ecs::entity::Entity, bool>>,
+) {
+    let changed = ov.is_changed();
+    for (row_entity, interaction, mut bg, mut text, cx) in q_rows.iter_mut() {
+        let pressed = matches!(interaction, Interaction::Pressed);
+        if pressed && !was_pressed.get(&row_entity).copied().unwrap_or(false) {
+            let field = cx.0;
+            let flag = field.set(&mut ov);
+            *flag = !*flag;
+            log_line(
+                &mut log,
+                format!(
+                    "{}: {}",
+                    field.label(),
+                    if field.get(&ov) { "off" } else { "on" }
+                ),
+            );
+        }
+        was_pressed.insert(row_entity, pressed);
+        let on = !cx.0.get(&ov);
+        if changed || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+            *text = Text::new(format!(
+                "{} {}",
+                if on { "[x]" } else { "[ ]" },
+                cx.0.label()
+            ));
+        }
+        *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+    }
+}
+
+// Same one-flip-per-mouse-down pattern; flips the halo kill switch (the tick purges live halos).
+fn toggle_lamps_checkbox(
+    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<LampsCheckbox>>,
+    mut off: ResMut<kuluu_render::particle_sim::LampHalosOff>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<bool>,
+) {
+    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+        return;
+    };
+    let pressed = matches!(interaction, Interaction::Pressed);
+    if pressed && !*was_pressed {
+        off.0 = !off.0;
+        log_line(
+            &mut log,
+            if off.0 {
+                "lamps: OFF (halo billboards hidden)".into()
+            } else {
+                "lamps: on (halos restored live)".into()
+            },
+        );
+    }
+    *was_pressed = pressed;
+    let on = !off.0;
+    if off.is_changed() || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!("{} lamps", if on { "[x]" } else { "[ ]" }));
+    }
+    *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+}
+
+// Same one-flip-per-mouse-down pattern; shows/hides the wash volumes live.
+fn toggle_wall_glow_checkbox(
+    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<WallGlowCheckbox>>,
+    mut off: ResMut<kuluu_render::particle_sim::WallWashOff>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<bool>,
+) {
+    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+        return;
+    };
+    let pressed = matches!(interaction, Interaction::Pressed);
+    if pressed && !*was_pressed {
+        off.0 = !off.0;
+        log_line(
+            &mut log,
+            if off.0 {
+                "wall glow: OFF (washes hidden)".into()
+            } else {
+                "wall glow: on (washes drawing)".into()
+            },
+        );
+    }
+    *was_pressed = pressed;
+    let on = !off.0;
+    if off.is_changed() || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!("{} wall glow", if on { "[x]" } else { "[ ]" }));
+    }
+    *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+}
+
+// Same one-flip-per-mouse-down pattern; filled swaps the lig* glow textures for real flickering
+// point lights and back to the retail texture path (the tick hides/restores halos live).
+fn toggle_enhance_mode_checkbox(
+    mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<EnhanceModeCheckbox>>,
+    mut enhanced: ResMut<kuluu_render::particle_sim::LampEnhancedLights>,
+    mut log: ResMut<TestLog>,
+    mut was_pressed: Local<bool>,
+) {
+    let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
+        return;
+    };
+    let pressed = matches!(interaction, Interaction::Pressed);
+    if pressed && !*was_pressed {
+        enhanced.0 = !enhanced.0;
+        log_line(
+            &mut log,
+            if enhanced.0 {
+                "enhance mode: ON (glow textures replaced by flickering point lights)".into()
+            } else {
+                "enhance mode: OFF (retail glow textures restored)".into()
+            },
+        );
+    }
+    *was_pressed = pressed;
+    if enhanced.is_changed() || !text.starts_with(if enhanced.0 { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!(
+            "{} enhance mode",
+            if enhanced.0 { "[x]" } else { "[ ]" }
+        ));
+    }
+    *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
+}
+
+// Apply/restore the suppression itself, decoupled from the checkbox so the lamp-room seed and a
+// launcher teardown take the same path. `settings.volumetric_fog` only ever takes effect at camera
+// spawn (camera.rs), so live suppression removes the stashed component and restore re-inserts it.
+fn apply_shadow_override(
+    shadows: bool,
+    settings: &mut kuluu_render::graphics_settings::GraphicsSettings,
+    saved: &mut Option<ShadowSnapshot>,
+    commands: &mut Commands,
+    camera: Option<Entity>,
+    live_fog: Option<&bevy::light::VolumetricFog>,
+) {
+    use kuluu_render::graphics_settings::DynamicLights;
+    match (shadows, saved.as_mut()) {
+        (true, None) => {
+            let snapshot = ShadowSnapshot {
+                dynamic_lights: settings.dynamic_lights,
+                light_flicker: settings.light_flicker,
+                volumetric_fog: live_fog.cloned(),
+            };
+            if settings.dynamic_lights == DynamicLights::Enhanced {
+                // Vanilla keeps feeding the FFXI zone/actor materials exactly as retail does; only
+                // the Bevy PointLight + cube-shadow half disappears.
+                settings.dynamic_lights = DynamicLights::Vanilla;
+                settings.light_flicker = false;
+            }
+            if snapshot.volumetric_fog.is_some() {
+                if let Some(cam) = camera {
+                    commands.entity(cam).remove::<bevy::light::VolumetricFog>();
+                }
+            }
+            *saved = Some(snapshot);
+        }
+        (false, Some(_)) => {
+            // Take the snapshot first: re-inserting runs through deferred commands, so it must
+            // not still be borrowed while we clear the stash.
+            let restore = saved.take().expect("matched Some");
+            settings.dynamic_lights = restore.dynamic_lights;
+            settings.light_flicker = restore.light_flicker;
+            if let (Some(cam), Some(fog)) = (camera, restore.volumetric_fog) {
+                commands.entity(cam).insert(fog);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sync_shadow_override(
+    shadows: Res<ShadowsOff>,
+    mut settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
+    mut saved: ResMut<ShadowOverrides>,
+    mut commands: Commands,
+    mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
+    cam_q: Query<
+        (Entity, Option<&bevy::light::VolumetricFog>),
+        With<kuluu_render::camera::OperatorCamera>,
+    >,
+) {
+    if !shadows.is_changed() {
+        return;
+    }
+    let (camera, live_fog) = cam_q
+        .iter()
+        .next()
+        .map(|(e, f)| (Some(e), f))
+        .unwrap_or((None, None));
+    apply_shadow_override(
+        shadows.0,
+        &mut settings,
+        &mut saved.0,
+        &mut commands,
+        camera,
+        live_fog,
+    );
+    // The override (and the restore's write-back of the user's own values) stay off-disk.
+    persist_gate.0 = saved.0.is_some();
+}
+
+fn drive_lamp_alpha_slider(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    q_track: Query<(&ComputedNode, &UiGlobalTransform, &Interaction), With<LampSliderTrack>>,
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut q_knob: Query<&mut Node, With<LampSliderKnob>>,
+    mut q_label: Query<&mut Text, With<LampSliderLabel>>,
+) {
+    let Ok((node, xform, interaction)) = q_track.single() else {
+        return;
+    };
+    if !matches!(interaction, Interaction::Pressed) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Some(rel) = node.normalize_point(*xform, cursor) else {
+        return;
+    };
+    let v = (rel.x + 0.5).clamp(0.0, 1.0);
+    sim.set_lamp_halos_lift(v);
+    if let Ok(mut knob) = q_knob.single_mut() {
+        knob.left = Val::Px((LAMP_SLIDER_TRACK_W - LAMP_SLIDER_KNOB_W) * v);
+    }
+    if let Ok(mut label) = q_label.single_mut() {
+        *label = Text::new(format!("lantern alpha {v:.2}"));
+    }
+}
+
+// Wall-wash slider: full track width spans 0..WASH_ALPHA_LIFT_MAX (unlike the lamp lift's 0..1).
+fn drive_wash_alpha_slider(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    q_track: Query<(&ComputedNode, &UiGlobalTransform, &Interaction), With<WashSliderTrack>>,
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut q_knob: Query<&mut Node, With<WashSliderKnob>>,
+    mut q_label: Query<&mut Text, With<WashSliderLabel>>,
+) {
+    let Ok((node, xform, interaction)) = q_track.single() else {
+        return;
+    };
+    if !matches!(interaction, Interaction::Pressed) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Some(rel) = node.normalize_point(*xform, cursor) else {
+        return;
+    };
+    let v = (rel.x + 0.5).clamp(0.0, 1.0) * kuluu_render::particle_sim::WASH_ALPHA_LIFT_MAX;
+    sim.set_wash_alpha_lift(v);
+    if let Ok(mut knob) = q_knob.single_mut() {
+        knob.left = Val::Px(
+            (LAMP_SLIDER_TRACK_W - LAMP_SLIDER_KNOB_W)
+                * (v / kuluu_render::particle_sim::WASH_ALPHA_LIFT_MAX),
+        );
+    }
+    if let Ok(mut label) = q_label.single_mut() {
+        *label = Text::new(format!("wash alpha {v:.2}"));
+    }
+}
+
 // The launcher backdrop mirrors a live zone into the same world space; its meshes carry
 // InGameEntity and would show through around the test floor. While the box is up, hide every
 // InGameEntity not under it — effect particles are children of the test actors, so they stay.
@@ -1739,10 +2747,29 @@ fn tear_down(
     q_ui: &Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     tracked: &mut TrackedEntities,
     scene: &mut SceneState,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
+    // Restore-gate: phase exit runs this with no box ever up; only a real open unloads things.
+    let was_open = q_scoped.iter().next().is_some();
     // Drop the test zone and let mirror_backdrop_to_scene_state + auto-load bring the
-    // default backdrop block back at its own offset.
+    // default backdrop block back at its own offset; release any lamp-room clock hold too.
     commands.insert_resource(TestZoneActive(false));
+    commands.insert_resource(LampRoomActive(false));
+
+    // Resetting shadows to "on" makes `sync_shadow_override` restore whatever the suppression
+    // replaced on its next pass (still in Launcher either way); leaving the Launcher phase itself
+    // is covered by `tear_down_test_scene` applying it directly, as Update stops running there.
+    commands.insert_resource(ShadowsOff(false));
+    // Night-fx kill switches too: leaving the box means authored sky behaviour again (the fog
+    // suppressor re-inserts what it stashed when this flips back to all-off).
+    commands.insert_resource(kuluu_render::sun_moon::SkyFxOverride::default());
+    commands.insert_resource(kuluu_render::particle_sim::LampHalosOff(false));
+    commands.insert_resource(kuluu_render::particle_sim::WallWashOff(false));
+    commands.insert_resource(kuluu_render::particle_sim::LampEnhancedLights(false));
+    commands.insert_resource(kuluu_render::zone_point_lights::ZoneLampLightsOff(false));
+    // A stale rays-off toggle must not follow the app into a real session.
+    commands.insert_resource(LampRaysOff(false));
     commands.insert_resource(super::launcher_backdrop::LauncherBackdropZone(
         super::launcher_backdrop::DEFAULT_BACKDROP_ZONE,
     ));
@@ -1752,6 +2779,12 @@ fn tear_down(
         commands.entity(e).try_despawn();
     }
     set_launcher_ui_visibility(commands, q_ui, true);
+    // Restore what the open unloaded: launcher render camera + backdrop entities. Zone state
+    // was left standing, so the standing zone block is already in place for the mirror.
+    if was_open {
+        super::launcher_ui::spawn_launcher_camera_core(&mut *commands);
+        super::launcher_backdrop::restore_for_test(commands, &mut *meshes, &mut *materials);
+    }
     tracked.by_id.remove(&WORM_ID);
     tracked.by_id.remove(&HUME_ID);
     scene
@@ -1766,6 +2799,33 @@ fn tear_down_test_scene(
     q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
+    mut graphics_settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
+    mut overrides: ResMut<ShadowOverrides>,
+    mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
+    cam_q: Query<Entity, With<kuluu_render::camera::OperatorCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    tear_down(&mut commands, &q_scoped, &q_ui, &mut tracked, &mut scene);
+    // Update (and so `sync_shadow_override`) stops running once the Launcher phase ends: hand
+    // any live suppression back before dropping the scene. Re-inserting needs no live-fog read:
+    // the snapshot already holds the component.
+    let camera = cam_q.iter().next();
+    apply_shadow_override(
+        false,
+        &mut graphics_settings,
+        &mut overrides.0,
+        &mut commands,
+        camera,
+        None,
+    );
+    persist_gate.0 = false;
+    tear_down(
+        &mut commands,
+        &q_scoped,
+        &q_ui,
+        &mut tracked,
+        &mut scene,
+        &mut meshes,
+        &mut materials,
+    );
 }

@@ -6,8 +6,13 @@
 //! for every authored (surface, lamp) pair it raycasts lamp -> surface through the zone
 //! collision BVH and zeroes the slot when geometry stands between them. The zeroed binding is
 //! written back into the material asset, so `update_zone_point_lighting` repacks the chunk's
-//! point-light arrays from the reduced set on its own (no second write path). Zone geometry is
-//! static within a load, so a zeroed slot stays zeroed for the zone's lifetime.
+//! point-light arrays from the reduced set on its own (no second write path).
+//!
+//! Zeroing is reversible while an AnimationTest box toggle is in play: before a material loses
+//! its first slot, its authored bindings are stashed ([`AuthoredZoneBindings`]), and flipping
+//! the toggle to rays-off writes them back. Without a toggle there is nothing to restore *to*,
+//! so no stash is kept and zeroing stands for the zone load's lifetime (the pre-existing
+//! behaviour).
 //!
 //! Lamps gated off by time of day carry zero colour (`zone_point_lights::at_time`) and already
 //! contribute nothing; their bindings are left intact so they return when the track turns them
@@ -19,12 +24,16 @@
 //! a selection (the actor moved past its reselect epsilon) the unfiltered set is visible for at
 //! most one frame, which reads as nothing.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use kuluu_render::{
-    ffxi_actor_render::FfxiRenderActor, ffxi_zone_material::FfxiZoneMaterial,
+    ffxi_actor_render::FfxiRenderActor,
+    ffxi_zone_material::{FfxiZoneMaterial, ZoneLightBindings},
     zone_point_lights::ActiveSceneLights,
 };
 
+use super::animation_test_scene::LampRaysOff;
 use super::collision_bvh::ZoneCollisionBvh;
 
 // The lamp fixture mesh sits at the light position (the DAT's basePosition is inside the
@@ -46,17 +55,26 @@ fn bvh_blocks(bvh: &ZoneCollisionBvh, from: Vec3, to: Vec3) -> bool {
     })
 }
 
+/// The authored bindings of every material the raycast has zeroed at least one slot in, kept
+/// so a rays-off toggle can restore them. Only populated while an AnimationTest box could
+/// restore — without the toggle there is no path back, and stash-free zeroing avoids leaking a
+/// copy per zone load.
+#[derive(Resource, Default)]
+pub(crate) struct AuthoredZoneBindings(HashMap<Handle<FfxiZoneMaterial>, ZoneLightBindings>);
+
 /// Zero the authored light slots of every zone material whose lamp is occluded from that
 /// surface, and drop the same lamps from actors' cached point-light selections. Runs after the
 /// BVH build (so a freshly loaded zone has its geometry) and before the actor registry write;
 /// the zone-material repack lands on `update_zone_point_lighting`'s next pass, one frame later —
 /// occlusion only changes when a zone loads or an actor walks between lamp and wall, so the lag
 /// is not visible.
-pub fn apply_light_occlusion_system(
+pub(crate) fn apply_light_occlusion_system(
     bvh: Res<ZoneCollisionBvh>,
     active: Option<Res<ActiveSceneLights>>,
+    toggle: Option<Res<LampRaysOff>>,
     q_zone: Query<(Entity, &GlobalTransform, &MeshMaterial3d<FfxiZoneMaterial>)>,
     mut materials: ResMut<Assets<FfxiZoneMaterial>>,
+    mut authored: ResMut<AuthoredZoneBindings>,
     mut q_actors: Query<&mut FfxiRenderActor, With<GlobalTransform>>,
 ) {
     let Some(active) = active else { return };
@@ -64,6 +82,11 @@ pub fn apply_light_occlusion_system(
         return;
     }
 
+    if toggle.is_some() && !authored.0.is_empty() {
+        authored.0.retain(|handle, _| materials.contains(handle));
+    }
+
+    let stashable = toggle.is_some();
     for (_entity, gt, mat_handle) in &q_zone {
         let Some(mut mat) = materials.get_mut(&mat_handle.0) else {
             continue;
@@ -84,6 +107,12 @@ pub fn apply_light_occlusion_system(
                 continue;
             };
             if light.color != Vec3::ZERO && bvh_blocks(&bvh, light.world_pos, target) {
+                if stashable {
+                    authored
+                        .0
+                        .entry(mat_handle.0.clone())
+                        .or_insert_with(|| mat.light_bindings);
+                }
                 mat.light_bindings[slot] = None;
             }
         }
@@ -99,5 +128,29 @@ pub fn apply_light_occlusion_system(
                 .get(i as usize)
                 .is_some_and(|l| l.color != Vec3::ZERO && !bvh_blocks(&bvh, l.world_pos, eval_pos))
         });
+    }
+}
+
+/// The edge of the box's toggle flipping to rays-off: put every stashed authored binding back
+/// so switching off returns the *current* zone to its authored lighting, not just freshly loaded
+/// ones. Without this the slots zeroed while rays were on persist in the material asset until a
+/// zone reload and rays-off reads as a no-op (kuluu lamp-room sessions hit exactly that).
+pub(crate) fn restore_light_bindings_on_rays_off(
+    rays: Option<Res<LampRaysOff>>,
+    mut authored: ResMut<AuthoredZoneBindings>,
+    mut materials: ResMut<Assets<FfxiZoneMaterial>>,
+) {
+    let Some(rays) = rays else { return };
+    if !rays.is_changed() || !rays.0 {
+        return;
+    }
+    // Drain everything: handles whose assets are gone would otherwise leak across zone loads,
+    // and there is nothing left to restore once a zone unloads anyway.
+    for (handle, bindings) in authored.0.drain() {
+        if let Some(mut mat) = materials.get_mut(&handle) {
+            // The asset mutation dirties the material; update_zone_point_lighting repacks from
+            // the restored bindings on its next pass.
+            mat.light_bindings = bindings;
+        }
     }
 }

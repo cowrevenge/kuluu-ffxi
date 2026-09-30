@@ -43,11 +43,38 @@ pub struct ParticleSimulator {
 // EnvironmentManager.getFullDayInterpolation() (the fraction of the Vana'diel day, NOT the
 // particle's life progress); DayOfWeekColorUpdater / MoonPhaseColorUpdater /
 // MoonPhaseSpriteSheetUpdater index their tables by the elemental weekday and moon phase.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct CelestialClock {
     pub day_fraction: f32,
     pub day_of_week: usize,
     pub moon_phase: usize,
+    // The animation-test slider values for lamp halos (PATH_LAMP_ALPHAMAP): lift is the peak
+    // wall-brighten, gain multiplies the added light's colour past white under additive blending,
+    // radius scales each halo quad. wash_alpha_lift multiplies the authored alpha of the ghu*/li*
+    // wall-wash volumes (1.0 = exactly as authored). All live on the clock so every draw site
+    // reads them without new plumbing.
+    pub lamp_halos_lift: f32,
+    pub lamp_halos_gain: f32,
+    pub lamp_halos_radius: f32,
+    pub wash_alpha_lift: f32,
+    // Seconds accumulator for the halo flicker wave (the DAT ships no flicker keyframes; retail
+    // wavers at runtime, so both modes ride the hand-tuned `lamp_flicker` model on this clock).
+    pub lamp_flicker_phase: f32,
+}
+
+impl Default for CelestialClock {
+    fn default() -> Self {
+        Self {
+            day_fraction: 0.0,
+            day_of_week: 0,
+            moon_phase: 0,
+            lamp_halos_lift: LAMP_ALPHAMAP_LIFT_DEFAULT,
+            lamp_halos_gain: LAMP_HALOS_GAIN_DEFAULT,
+            lamp_halos_radius: LAMP_HALOS_RADIUS_DEFAULT,
+            wash_alpha_lift: WASH_ALPHA_LIFT_DEFAULT,
+            lamp_flicker_phase: 0.0,
+        }
+    }
 }
 
 impl ParticleSimulator {
@@ -61,8 +88,42 @@ impl ParticleSimulator {
         self.generators.iter().map(|g| g.origin)
     }
 
-    pub fn set_celestial_clock(&mut self, clock: CelestialClock) {
+    pub fn set_celestial_clock(&mut self, mut clock: CelestialClock) {
+        clock.lamp_halos_lift = self.clock.lamp_halos_lift;
+        clock.lamp_halos_gain = self.clock.lamp_halos_gain;
+        clock.lamp_halos_radius = self.clock.lamp_halos_radius;
+        clock.wash_alpha_lift = self.clock.wash_alpha_lift;
+        clock.lamp_flicker_phase = self.clock.lamp_flicker_phase;
         self.clock = clock;
+    }
+
+    /// World positions of the live halo generators — one per lamp, for enhance mode's point lights.
+    pub fn lamp_halo_origins(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.generators
+            .iter()
+            .filter(|g| is_lamp_halo_def(&g.def))
+            .map(|g| g.origin)
+    }
+
+    pub fn set_lamp_halos_lift(&mut self, lift: f32) {
+        self.clock.lamp_halos_lift = lift.clamp(0.0, 1.0);
+    }
+
+    /// Brightness knob: how far past white the lamp's added light may reach under additive
+    /// blending. The ceiling mirrors `LAMP_GAIN_CEILING` in ffxi_particle.wgsl.
+    pub fn set_lamp_halos_gain(&mut self, gain: f32) {
+        self.clock.lamp_halos_gain = gain.clamp(0.0, LAMP_HALOS_GAIN_MAX);
+    }
+
+    /// Range knob: multiplier on each lamp halo quad's authored size (1.0 = as-authored ±2 units).
+    pub fn set_lamp_halos_radius(&mut self, radius: f32) {
+        self.clock.lamp_halos_radius = radius.clamp(0.0, LAMP_HALOS_RADIUS_MAX);
+    }
+
+    /// Wall-wash brightness knob: multiplier on the ghu*/li* volumes' authored alpha
+    /// (1.0 = exactly as authored; 2.0 ceiling matches the lamp gain ceiling).
+    pub fn set_wash_alpha_lift(&mut self, lift: f32) {
+        self.clock.wash_alpha_lift = lift.clamp(0.0, WASH_ALPHA_LIFT_MAX);
     }
 
     /// The Vana'diel day fraction the time-of-day tracks sample at (the zone lighting's clock —
@@ -191,6 +252,64 @@ const D3M_MMB_FORCE_IGNORE_TEXTURE_ALPHA_BLEND_BYTE: u8 = 0x64;
 const D3M_TFACTOR_PROMOTE_BLEND_BYTE: u8 = 0x44;
 const D3M_TFACTOR_PROMOTE_MIN: f32 = 0x7F as f32 / u8::MAX as f32;
 const D3M_TFACTOR_PROMOTED: f32 = 1.0;
+
+// Lamp halo billboards (the lig* sheets authored under ligh/): these ride the alpha-map
+// path — they brighten what is behind them along the sheet's alpha and carry no colour of
+// their own.
+pub(crate) fn is_lamp_halo_def(def: &ParticleGeneratorDef) -> bool {
+    def.mesh_kind == ParticleMeshKind::SpriteSheet && def.mesh_id.starts_with(b"lig")
+}
+
+/// Wall-wash volumes — the soft light shafts retail draws around tunnel mouths and lantern
+/// clusters (verified against the real client): additive StaticMesh `ligh` generators. In South
+/// Gustaberg that is the ghu* sheet pair plus the li*/li0x families sharing one "ligh" volume
+// mesh — the generator name isn't on the def, only its drawn mesh, so kind is the discriminator.
+pub(crate) fn is_wall_wash_def(def: &ParticleGeneratorDef) -> bool {
+    matches!(
+        def.mesh_kind,
+        ParticleMeshKind::StaticMesh | ParticleMeshKind::WeightedMesh
+    )
+}
+
+/// The AnimationTest box's lamps kill switch (panel checkbox): while set, the tick hides every
+/// lig* halo billboard (and restores it on uncheck), so the lantern glow sprites draw nothing.
+/// Only the box inserts it; without it (a real session) halos render as authored.
+#[derive(Resource, Default)]
+pub struct LampHalosOff(pub bool);
+
+/// The AnimationTest box's wall-glow kill switch (panel checkbox): while set, the tick hides
+/// every additive ligh wash volume (`is_wall_wash_def`) and restores it on uncheck. Only the box
+/// inserts it; without it (a real session) the washes render as authored.
+#[derive(Resource, Default)]
+pub struct WallWashOff(pub bool);
+
+/// The AnimationTest box's enhance-mode switch: while set, the lig* glow textures are replaced
+/// by one real Bevy PointLight per lamp (`zone_point_lights::lamp_enhanced_point_light_system`)
+/// that flickers and warms the scene instead of covering it. Only the box inserts it.
+#[derive(Resource, Default)]
+pub struct LampEnhancedLights(pub bool);
+
+/// Halo suppression marker (AnimationTest lamps/enhance/wall-glow rows): while present,
+/// `sync_particle_meshes` keeps the mesh hidden whatever the frustum says — tick runs before the
+/// culler, so a direct Visibility write from there would be overwritten every frame. The tick
+/// inserts/removes it per checkbox state, live both ways.
+#[derive(Component)]
+pub struct HaloSuppressed;
+
+// Retail reference peak (user-verified against the real client at 18:00): at 0.18 the halo
+// reads as lantern light on stone without washing out the wall texture; past roughly 0.6 it
+// covers the stone instead of lighting it.
+// pub: the AnimationTest box seeds its lantern-alpha slider from this default.
+pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.18;
+// Brightness and range sliders' neutral defaults (1.0 = exactly as authored) and ceilings; the
+// gain ceiling mirrors `LAMP_GAIN_CEILING` in ffxi_particle.wgsl.
+pub const LAMP_HALOS_GAIN_DEFAULT: f32 = 1.0;
+pub const LAMP_HALOS_GAIN_MAX: f32 = 2.0;
+// Wall-wash slider neutral (authored alpha, untouched) and ceiling.
+pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 1.0;
+pub const WASH_ALPHA_LIFT_MAX: f32 = 2.0;
+pub const LAMP_HALOS_RADIUS_DEFAULT: f32 = 1.0;
+pub const LAMP_HALOS_RADIUS_MAX: f32 = 4.0;
 
 pub(crate) fn ignores_texture_alpha(def: &ParticleGeneratorDef, path: D3mDrawPath) -> bool {
     def.ignore_texture_alpha
@@ -1466,12 +1585,53 @@ pub fn track_attached_origins(
 pub fn tick_particle_simulator(
     time: Res<Time>,
     mut sim: ResMut<ParticleSimulator>,
+    mut suppressed: Local<std::collections::BTreeSet<Entity>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
+    lamp_halos: Option<Res<LampHalosOff>>,
+    wall_washes: Option<Res<WallWashOff>>,
+    enhanced_lights: Option<Res<LampEnhancedLights>>,
     mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
     mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
+    // Box kill switches, applied as a per-entity marker diff (live both ways): glow billboards
+    // hide while either lamp switch is set — enhance mode replaces them with real point lights;
+    // wash volumes hide whenever the box is up — its wall-glow row replaces them. Zone-static
+    // generators only re-dispatch on a zone load, so despawning would never bring them back; the
+    // marker is non-destructive. The diff keeps steady-state command traffic at zero, and an entry
+    // whose generator died with a zone change is dropped without a command (the entity — and its
+    // marker — is already gone), which is what floods the log otherwise.
+    let halos_hidden = lamp_halos.is_some_and(|o| o.0) || enhanced_lights.is_some_and(|e| e.0);
+    // Wash volumes draw as authored while the row is checked; unchecked hides them (a real
+    // session has no WallWashOff and renders as authored).
+    let washes_hidden = wall_washes.is_some_and(|o| o.0);
+    let live: std::collections::BTreeSet<Entity> =
+        sim.generators.iter().map(|g| g.entity).collect();
+    let desired: std::collections::BTreeSet<Entity> = sim
+        .generators
+        .iter()
+        .filter(|g| {
+            if is_lamp_halo_def(&g.def) {
+                halos_hidden
+            } else {
+                washes_hidden && is_wall_wash_def(&g.def)
+            }
+        })
+        .map(|g| g.entity)
+        .collect();
+    let prev = &*suppressed;
+    for &e in desired.difference(prev) {
+        commands.entity(e).insert(HaloSuppressed);
+    }
+    for &e in prev.difference(&desired) {
+        if live.contains(&e) {
+            commands.entity(e).remove::<HaloSuppressed>();
+        }
+    }
+    *suppressed = desired;
+    // Advance the shared flicker wave before any draw factor samples it this frame.
+    sim.clock.lamp_flicker_phase += time.delta_secs();
     let frames = time.delta_secs() * ROUTINE_FPS;
     // research/xim Particle.kt update — children read the parent's state before anything ages.
     let orphans = anchor_children(&mut sim);
@@ -2625,7 +2785,7 @@ pub fn sync_particle_meshes(
         With<OperatorCamera>,
     >,
     q_mesh_xf: Query<&GlobalTransform, With<Mesh3d>>,
-    mut q_vis: Query<&mut Visibility, With<Mesh3d>>,
+    mut q_vis: Query<(&mut Visibility, Option<&HaloSuppressed>), With<Mesh3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
@@ -2724,8 +2884,11 @@ pub fn sync_particle_meshes(
                     .iter()
                     .any(|f| f.intersects_obb(&b, &entity_xf.affine(), true, false))
             });
-        if let Ok(mut v) = q_vis.get_mut(g.entity) {
-            v.set_if_neq(if drawable {
+        if let Ok((mut v, suppressed)) = q_vis.get_mut(g.entity) {
+            // Suppressed halos stay hidden even while in frustum; the frame the marker comes off,
+            // culling resumes normal per-frame control.
+            let visible = drawable && suppressed.is_none();
+            v.set_if_neq(if visible {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -2838,13 +3001,17 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
     let mut rgb = p.rgb;
     let mut alpha = alpha;
+    let mut tod_alpha_gate = 1.0f32;
     for (channel, track) in g.tod_color.iter().enumerate() {
         let Some(track) = track.as_ref().filter(|_| g.def.tod_color_driven[channel]) else {
             continue;
         };
         let v = track.sample(clock.day_fraction);
         match channel {
-            TOD_ALPHA_CHANNEL => alpha *= v,
+            TOD_ALPHA_CHANNEL => {
+                alpha *= v;
+                tod_alpha_gate *= v;
+            }
             _ => rgb[channel] = v,
         }
     }
@@ -2888,11 +3055,40 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         world.z = origin.z + t.sample_from(progress, Some(p.spawn_pos.z));
     }
 
+    let lamp_halo = is_lamp_halo_def(&g.def);
+    let factor_alpha = if lamp_halo {
+        // PATH_LAMP_ALPHAMAP multiplies this against the texel's own alpha in the shader; the
+        // day gate (tkaa) is what turns lamps on at night and off by day. Retail's visible
+        // wavering is runtime behavior (no flicker keyframes ship), so retail mode rides the
+        // same hand-tuned lamp_flicker model as the Enhanced lights — a timer going up/down.
+        let seed: f32 = g.def.mesh_id.iter().map(|b| *b as f32).sum::<f32>() * 0.37;
+        (clock.lamp_halos_lift
+            * tod_alpha_gate
+            * crate::zone_point_lights::lamp_flicker(clock.lamp_flicker_phase, seed))
+        .clamp(0.0, 1.0)
+    } else if is_wall_wash_def(&g.def) {
+        // Wash volumes keep the authored D3m alpha path; the slider multiplies it (1.0 = as
+        // authored) so the test box can dial the wash down without touching retail defaults.
+        tfactor_alpha(&g.def, g.draw_path, alpha) * clock.wash_alpha_lift
+    } else {
+        tfactor_alpha(&g.def, g.draw_path, alpha)
+    };
+
     ParticleDraw {
         flipbook_frame,
-        scale: Vec2::new(sx, sy),
-        factor_rgb: rgb,
-        factor_alpha: tfactor_alpha(&g.def, g.draw_path, alpha),
+        // The range knob scales each halo quad from its authored extents; brightness rides
+        // in.factor.rgb to the shader's lamp branch (1.0 = the white it drew before the knob).
+        scale: if lamp_halo {
+            Vec2::new(sx * clock.lamp_halos_radius, sy * clock.lamp_halos_radius)
+        } else {
+            Vec2::new(sx, sy)
+        },
+        factor_rgb: if lamp_halo {
+            Vec3::splat(clock.lamp_halos_gain)
+        } else {
+            rgb
+        },
+        factor_alpha,
         world,
     }
 }
@@ -4012,6 +4208,45 @@ mod tests {
     fn drawn_factor(g: &LiveGenerator, clock: &CelestialClock) -> Vec4 {
         let draw = particle_draw(g, &g.particles[0], clock);
         draw.factor_rgb.extend(draw.factor_alpha)
+    }
+
+    // Lamp halos (`lig*` sprite sheets) are LIGHTS: their drawn alpha is the lift knob times the
+    // ToD gate and must not carry the `enhanced-particle-alpha-20` boost — that enhancement is
+    // for hit-flash and other effect particles. Pins both sides so either half drifting fails a
+    // test whichever feature set hits it.
+    #[test]
+    fn lamp_halo_alpha_bypasses_enhanced_particle_gain() {
+        let mut g = live(def(60.0, 1.0, 1), 60.0);
+        advance(&mut g, 2.0);
+        assert!(!g.particles.is_empty(), "two frames emit");
+
+        let raw_alpha = g.def.init_color[3];
+        let plain = drawn_factor(&g, &CelestialClock::default());
+        assert_eq!(
+            plain.w,
+            expected_factor_alpha(raw_alpha),
+            "non-halo particles carry the build's alpha gain"
+        );
+
+        g.def.mesh_id = *b"lig0";
+        g.def.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
+        let clock = CelestialClock::default();
+        let halo = drawn_factor(&g, &clock);
+        assert!(
+            is_lamp_halo_def(&g.def),
+            "lig* sheet must hit the halo branch"
+        );
+        // No ToD track here: gate holds at 1.0, so alpha is the lift knob times the flicker wave
+        // at this phase — still independent of the build's alpha gain.
+        let seed: f32 = g.def.mesh_id.iter().map(|b| *b as f32).sum::<f32>() * 0.37;
+        assert_eq!(
+            halo.w,
+            (clock.lamp_halos_lift
+                * crate::zone_point_lights::lamp_flicker(clock.lamp_flicker_phase, seed))
+            .clamp(0.0, 1.0)
+        );
+        let gain = clock.lamp_halos_gain;
+        assert_eq!(halo.xyz(), Vec3::splat(gain));
     }
 
     // A generator stage's duration is authored in 60 fps frames (research/xim util/Fps.kt Fps internalFps),
@@ -6588,6 +6823,7 @@ mod tests {
             day_fraction: 0.5,
             day_of_week: 3,
             moon_phase: 6,
+            ..Default::default()
         };
         let untinted = celestial(blended_celestial_def());
         let plain = drawn_factor(&untinted, &clock).x;
@@ -6622,6 +6858,7 @@ mod tests {
                     day_fraction: 0.5,
                     day_of_week: 0,
                     moon_phase: 11,
+                    ..Default::default()
                 },
             )
             .factor_alpha
@@ -6665,6 +6902,7 @@ mod tests {
                 day_fraction: 0.5,
                 day_of_week: 0,
                 moon_phase,
+                ..Default::default()
             },
         )
         .factor_alpha

@@ -65,6 +65,11 @@ const FOG_BLACK: f32 = 2.0;
 const PATH_D3M_TEXTURED: f32 = 0.0;
 const PATH_D3M_UNTEXTURED: f32 = 1.0;
 const PATH_MMB_TEXTURED: f32 = 2.0;
+// Lamp halo alpha map: neutral light only — adds no authored colour, lifts the pixel
+// underneath along the sheet's alpha pattern. The brightness knob rides in.factor.rgb (1.0 =
+// white, as originally drawn); its ceiling mirrors LAMP_HALOS_GAIN_MAX (particle_sim.rs).
+const PATH_LAMP_ALPHAMAP: f32 = 3.0;
+const LAMP_GAIN_CEILING: f32 = 2.0;
 
 // d3d8types.h D3DTOP_MODULATE2X / MODULATE4X — the per-stage gains of every table above.
 const STAGE_MODULATE_2X: f32 = 2.0;
@@ -192,16 +197,28 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // are already <= 1.0 (byte/255).
     let d = min(in.color, vec4<f32>(1.0));
     var texel = vec4<f32>(1.0);
-    if (data.params.w == PATH_D3M_TEXTURED || data.params.w == PATH_MMB_TEXTURED) {
+    if (data.params.w == PATH_D3M_TEXTURED
+        || data.params.w == PATH_MMB_TEXTURED
+        || data.params.w == PATH_LAMP_ALPHAMAP)
+    {
         texel = textureSample(particle_texture, particle_sampler, in.uv);
     }
-    let staged = stage1(stage0(d, texel, in.factor), d, in.factor);
+    var staged = stage1(stage0(d, texel, in.factor), d, in.factor);
+    if (data.params.w == PATH_LAMP_ALPHAMAP) {
+        staged = vec4<f32>(
+            min(in.factor.rgb, vec3(LAMP_GAIN_CEILING)),
+            min(in.factor.a * texel.a, 1.0),
+        );
+    }
 
-    let color = apply_element_fog(
-        clamp(staged, vec4<f32>(0.0), vec4<f32>(1.0)),
-        in.world_position.xyz,
-        data.params.y,
-    );
+    var core = clamp(staged, vec4<f32>(0.0), vec4<f32>(1.0));
+    if (data.params.w == PATH_LAMP_ALPHAMAP) {
+        // Over-white rgb survives on the lamp path so the brightness knob has headroom past 1.0;
+        // alpha still clamps before fog and the premultiply below.
+        core = vec4<f32>(clamp(staged.rgb, vec3(0.0), vec3(LAMP_GAIN_CEILING)), min(staged.a, 1.0));
+    }
+
+    let color = apply_element_fog(core, in.world_position.xyz, data.params.y);
 
     if data.params.x == PREMULTIPLY_ADD {
         return vec4<f32>(color.rgb * color.a, 0.0);

@@ -5,7 +5,8 @@ use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, CompareFunction, DepthBiasState, DepthStencilState, RenderPipelineDescriptor,
+    ShaderType, SpecializedMeshPipelineError, StencilFaceState, StencilState, TextureFormat,
 };
 use bevy::shader::ShaderRef;
 
@@ -37,6 +38,7 @@ const FOG_BLACK_BLEND_BYTE: u8 = 0x48;
 const PATH_D3M_TEXTURED: f32 = 0.0;
 const PATH_D3M_UNTEXTURED: f32 = 1.0;
 const PATH_MMB_TEXTURED: f32 = 2.0;
+const PATH_LAMP_ALPHAMAP: f32 = 3.0;
 
 impl D3mDrawPath {
     fn selector(self) -> f32 {
@@ -123,7 +125,7 @@ impl FfxiParticleMaterial {
             ParticleBlend::Blend => D3mBlendMode::Blended,
             ParticleBlend::Subtract => D3mBlendMode::Subtractive,
         };
-        Self::new(
+        let mut material = Self::new(
             blend,
             texture,
             ParticleFog::for_def(def),
@@ -131,7 +133,14 @@ impl FfxiParticleMaterial {
             def.depth_write,
             path,
             ignores_texture_alpha(def, path),
-        )
+        );
+        if crate::particle_sim::is_lamp_halo_def(def) {
+            material.data.params.w = PATH_LAMP_ALPHAMAP;
+            // The glow sheets pin in chunk order: depth-sorted, they re-sort against each other
+            // frame to frame and dance under/over one another as the camera moves.
+            material.sort_bias = crate::element_sort::pinned_order_bias(dat_offset);
+        }
+        material
     }
 
     pub fn new(
@@ -194,14 +203,24 @@ impl Material for FfxiParticleMaterial {
         // CMoElem::PrepDX sets D3DRS_CULLMODE to D3DCULL_NONE for every particle element
         // (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::PrepDX).
         descriptor.primitive.cull_mode = None;
-        // CMoElem.cpp CMoElem::PrepDX — D3DRS_ZWRITEENABLE follows the element's own bit, so a
-        // depth-writing element (Lower Jeuno's `down` sea floor) writes from the transparent
-        // pass Bevy otherwise keeps read-only.
-        if key.bind_group_data.depth_write {
-            if let Some(ds) = descriptor.depth_stencil.as_mut() {
-                ds.depth_write_enabled = Some(true);
-            }
-        }
+        // MaterialPlugin pipelines ship no depth-stencil state, and wgpu builds a pipeline with
+        // none as NO depth test at all — every additive element painted over the walls. State is
+        // explicit here: compare GreaterEqual matches bevy_pbr's 3D pipeline (reversed-Z view
+        // buffer), write follows the element's own bit (CMoElem.cpp CMoElem::PrepDX —
+        // D3DRS_ZWRITEENABLE; a depth-writing element like Lower Jeuno's `down` sea floor writes
+        // from the transparent pass Bevy otherwise keeps read-only).
+        descriptor.depth_stencil = Some(DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_compare: Some(CompareFunction::GreaterEqual),
+            depth_write_enabled: Some(key.bind_group_data.depth_write),
+            stencil: StencilState {
+                front: StencilFaceState::IGNORE,
+                back: StencilFaceState::IGNORE,
+                read_mask: 0,
+                write_mask: 0,
+            },
+            bias: DepthBiasState::default(),
+        });
         Ok(())
     }
 }

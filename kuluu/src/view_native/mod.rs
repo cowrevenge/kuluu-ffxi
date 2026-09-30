@@ -41,6 +41,7 @@ pub mod zone_transition;
 use std::sync::Arc;
 
 use anyhow::Result;
+use bevy::camera::RenderTarget;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use kuluu_render::{
@@ -67,6 +68,65 @@ use crate::launcher::Defaults;
 use self::bridge::NativeSource;
 use self::input::{AutoRun, CommandTx, HeadingTurnAccum, LocalPlayerPrediction};
 use self::launcher_ui::{LoginErrorMsg, PendingConnect};
+
+// Bevy's duplicate-camera warning prints only the colliding (order, target) pair; this names the
+// entities so a camera-order collision is diagnosable from the log alone. Silent unless two
+// active window cameras share an order; throttled to one line per 5s while that persists.
+fn audit_camera_order_collisions(
+    q: Query<(
+        Entity,
+        &Camera,
+        Option<&RenderTarget>,
+        Option<&kuluu_render::camera::OperatorCamera>,
+        Option<&launcher_backdrop::BackdropCamera>,
+        Option<&launcher_ui::LauncherCamera>,
+        Option<&animation_test_scene::TestSceneScoped>,
+    )>,
+    mut last: Local<Option<std::time::Instant>>,
+) {
+    let mut by_order: std::collections::HashMap<isize, Vec<(Entity, &'static str)>> =
+        std::collections::HashMap::new();
+    for (e, cam, target, op, bd, lu, ts) in &q {
+        if !cam.is_active || !matches!(target, Some(RenderTarget::Window(_))) {
+            continue;
+        }
+        let who = if op.is_some() {
+            "operator"
+        } else if bd.is_some() {
+            "backdrop"
+        } else if lu.is_some() {
+            "launcher-ui"
+        } else if ts.is_some() {
+            "anim-test-box"
+        } else {
+            "unknown"
+        };
+        by_order.entry(cam.order).or_default().push((e, who));
+    }
+    let dups: Vec<_> = by_order
+        .into_iter()
+        .filter(|(_, cams)| cams.len() > 1)
+        .collect();
+    if dups.is_empty() {
+        return;
+    }
+    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    for (order, cams) in dups {
+        let list: Vec<String> = cams
+            .iter()
+            .map(|(e, who)| format!("{who}({e:?})"))
+            .collect();
+        tracing::warn!(
+            "cam-audit: {} active window cameras share order {}: {}",
+            cams.len(),
+            order,
+            list.join(", ")
+        );
+    }
+}
 
 fn drive_feathers_cursor(
     style: Res<CursorStyle>,
@@ -565,7 +625,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             bevy::feathers::dark_theme::create_dark_theme(),
         ))
         .add_plugins(widgets::WidgetsPlugin)
-        .add_systems(Update, drive_feathers_cursor);
+        .add_systems(Update, drive_feathers_cursor)
+        .add_systems(Update, audit_camera_order_collisions);
 
     if std::env::var_os("FFXI_WIDGET_DEMO").is_some() {
         app.add_systems(Startup, widgets::spawn_widget_demo);
@@ -710,6 +771,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     // (graphics settings were loaded above so the initial window mode could honour `fullscreen`.)
     app.insert_resource(loaded_graphics);
+    app.init_resource::<crate::graphics_store::GraphicsPersistSuspended>();
     app.insert_resource(crate::graphics_store::GraphicsStateRes {
         store: graphics_store_obj,
     });
@@ -875,9 +937,18 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .after(collision_bvh::build_zone_collision_bvh_system)
             .before(kuluu_render::lens_flare::lens_flare_system),
     );
+    app.init_resource::<light_occlusion::AuthoredZoneBindings>();
+    app.add_systems(
+        Update,
+        light_occlusion::restore_light_bindings_on_rays_off
+            .after(light_occlusion::apply_light_occlusion_system),
+    );
     app.add_systems(
         Update,
         light_occlusion::apply_light_occlusion_system
+            // The AnimationTest box's "lamp rays" checkbox suppresses the raycast for lamp work;
+            // everywhere else it always runs.
+            .run_if(animation_test_scene::lamp_rays_enabled)
             .after(collision_bvh::build_zone_collision_bvh_system)
             .after(kuluu_render::zone_point_lights::build_active_scene_lights)
             .before(kuluu_render::ffxi_actor_render::update_ffxi_actor_point_lights),

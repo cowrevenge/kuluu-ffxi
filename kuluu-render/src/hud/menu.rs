@@ -307,6 +307,14 @@ pub const DEBUG_WEATHER: &str = "Weather";
 /// Debug fog gate row: [on] = every fog layer (DAT distance fog, volumetric
 /// ground haze) renders; toggling it off strips all of them. Default on.
 pub const DEBUG_FOG: &str = "Fog";
+/// Debug clock-gate row: [on] = the Vana clock is frozen at 18:00 (lamp
+/// night-scene testing); off thaws it back to live time.
+pub const DEBUG_FORCE_18: &str = "Force_18:00";
+#[cfg(feature = "enhanced-camera-leash")]
+/// Debug camera-leash row (`enhanced-camera-leash` builds only): [on] = the chase
+/// camera's focus dead zone, eye slack band and spring run; off bypasses them so the
+/// eye sits on its plain polar goal. Default on.
+pub const DEBUG_CAMERA_LEASH: &str = "Camera_leash";
 /// Debug body smoother row: [on] = the self model slerps toward the dispatch
 /// heading; off = it sits on it every frame. Default on.
 pub const DEBUG_BODY_SMOOTHER: &str = "Body_smoother";
@@ -345,6 +353,14 @@ pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
 /// Gates the party-frame Job column (retail shows none; default off). The row
 /// exists only with `enhanced-job-display`.
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
+#[cfg(feature = "enhanced-ignore-knockback-self")]
+/// Retail+ row: [on] = the player character ignores knockback displacement (flinch
+/// and push-in play, only the travel is dropped). Off by default.
+pub const RETAIL_IGNORE_KNOCKBACK_SELF: &str = "Ignore_knockback_self";
+#[cfg(feature = "enhanced-leg-unlock")]
+/// Retail+ row: [on] = while a weapon is drawn or sheathed the legs run free
+/// (run/walk) instead of riding the draw stance; only the legs unlock. Off by default.
+pub const RETAIL_LEG_UNLOCK: &str = "Leg_unlock";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -357,6 +373,9 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_AUTO_ENTER_CS,
     DEBUG_WEATHER,
     DEBUG_FOG,
+    DEBUG_FORCE_18,
+    #[cfg(feature = "enhanced-camera-leash")]
+    DEBUG_CAMERA_LEASH,
     DEBUG_BODY_SMOOTHER,
     DEBUG_ENTITY_LIST,
     DEBUG_SOUND,
@@ -377,6 +396,10 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_MOB_HP_UNDER,
     #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
+    #[cfg(feature = "enhanced-ignore-knockback-self")]
+    RETAIL_IGNORE_KNOCKBACK_SELF,
+    #[cfg(feature = "enhanced-leg-unlock")]
+    RETAIL_LEG_UNLOCK,
 ];
 
 /// The settings pages whose rows are derived from `GraphicsSection` lists.
@@ -1540,6 +1563,24 @@ fn format_row_body(
                         if settings.job_display { "on" } else { "off" }
                     );
                 }
+                #[cfg(feature = "enhanced-ignore-knockback-self")]
+                if label == RETAIL_IGNORE_KNOCKBACK_SELF {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.ignore_knockback_self {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                }
+                #[cfg(feature = "enhanced-leg-unlock")]
+                if label == RETAIL_LEG_UNLOCK {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.leg_unlock { "on" } else { "off" }
+                    );
+                }
                 let on = debug_panel_state(label, panels, net_status_on, sound_on);
                 format!("{label:<14}[{}]", if on { "on" } else { "off" })
             }
@@ -1574,6 +1615,9 @@ pub fn debug_panel_state(
         DEBUG_AUTO_ENTER_CS => panels.auto_enter_cs,
         DEBUG_WEATHER => !panels.weather_off,
         DEBUG_FOG => !panels.fog_off,
+        DEBUG_FORCE_18 => panels.force_18,
+        #[cfg(feature = "enhanced-camera-leash")]
+        DEBUG_CAMERA_LEASH => !panels.camera_leash_off,
         DEBUG_BODY_SMOOTHER => !panels.body_smoother_off,
         DEBUG_ENTITY_LIST => panels.entity_list,
         DEBUG_NET_STATUS => net_status_on,

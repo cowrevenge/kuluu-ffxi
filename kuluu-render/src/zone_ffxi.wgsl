@@ -165,6 +165,28 @@ fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, shadow_scale: vec2<f32>, frag_co
     return rgb;
 }
 
+// Enhanced lamps: per-pixel light from the shared lamp slots (empty unless Dynamic
+// Lights is Enhanced). The window fades to zero at the range, so there is no hard ring.
+fn enhanced_lamp_light(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let range = lighting.point_color[i].w;
+        if (range <= 0.0) { continue; }
+        let to_light = lighting.point_pos[i].xyz - p;
+        let dist = length(to_light);
+        if (dist >= range) { continue; }
+        let x = dist / range;
+        let window = (1.0 - x * x) * (1.0 - x * x);
+        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+        var shadow = 1.0;
+        if (lighting.time_params.z > 0.0) {
+            shadow = point_shadow_factor(p, n, lighting.point_pos[i].xyz, frag);
+        }
+        sum += shadow * nl * window * lighting.point_color[i].rgb;
+    }
+    return sum;
+}
+
 // Fade a lit fragment toward the fog colour by view distance. Scattering is
 // left at zero (the weather DAT drives a flat horizon colour, not sun-inscatter
 // fog), so this is the plain distance blend Bevy's `apply_fog` does. No-op when
@@ -220,7 +242,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         + point_light_term(in.point_contrib1, 1u, n, in.world_position, in.clip_position.xy)
         + point_light_term(in.point_contrib2, 2u, n, in.world_position, in.clip_position.xy)
         + point_light_term(in.point_contrib3, 3u, n, in.world_position, in.clip_position.xy);
-    let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy) + point_light) * in.color.rgb;
+    let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy)
+        + point_light
+        + enhanced_lamp_light(n, in.world_position, in.clip_position.xy)) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.
 #ifdef FFXI_GENERATOR_STAGE_CHAIN

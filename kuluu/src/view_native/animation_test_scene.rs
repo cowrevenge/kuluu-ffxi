@@ -412,6 +412,12 @@ struct EnhanceModeCheckbox;
 #[derive(Resource, Default)]
 struct ShadowOverrides(Option<ShadowSnapshot>);
 
+/// The user's own Dynamic Lights value, stashed the first time the box flips enhance mode —
+/// teardown hands it back so closing the box never rewrites a setting the box was never told
+/// to change.
+#[derive(Resource, Default)]
+struct EnhanceRestore(Option<kuluu_render::graphics_settings::DynamicLights>);
+
 #[derive(Clone)]
 struct ShadowSnapshot {
     dynamic_lights: kuluu_render::graphics_settings::DynamicLights,
@@ -491,7 +497,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<kuluu_render::particle_sim::LampHalosOff>()
             .init_resource::<kuluu_render::particle_sim::WallWashOff>()
             .init_resource::<kuluu_render::zone_point_lights::ZoneLampLightsOff>()
-            .init_resource::<kuluu_render::particle_sim::LampEnhancedLights>()
+            .init_resource::<EnhanceRestore>()
             .init_resource::<LampRoomActive>();
         // ANIMTEST_AUTO=nhit,chit,... — fire the named cases on a fixed clock with no input
         // (standalone tester parity); opening the box too, so the whole run is hands-free.
@@ -1215,8 +1221,8 @@ fn spawn_panel(commands: &mut Commands) {
     commands.entity(track).add_child(knob);
     commands.entity(panel).add_child(track);
 
-    // Wall-wash alpha slider row (under the lantern one): label + track + knob, seeded at the
-    // neutral 1.0 so the washes start exactly as authored.
+    // Wall-wash alpha slider row (under the lantern one): label + track + knob, seeded at
+    // WASH_ALPHA_LIFT_DEFAULT.
     let seed_wash = kuluu_render::particle_sim::WASH_ALPHA_LIFT_DEFAULT;
     let wash_label = commands
         .spawn((
@@ -2509,35 +2515,47 @@ fn toggle_wall_glow_checkbox(
     *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
 }
 
-// Same one-flip-per-mouse-down pattern; filled swaps the lig* glow textures for real flickering
-// point lights and back to the retail texture path (the tick hides/restores halos live).
+// Same one-flip-per-mouse-down pattern; filled flips Dynamic Lights between Lamps and
+// Enhanced — the setting itself is the checkbox state, so a real session set to Enhanced
+// reads checked on open.
 fn toggle_enhance_mode_checkbox(
     mut q_check: Query<(&Interaction, &mut BackgroundColor, &mut Text), With<EnhanceModeCheckbox>>,
-    mut enhanced: ResMut<kuluu_render::particle_sim::LampEnhancedLights>,
+    mut settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
+    mut restore: ResMut<EnhanceRestore>,
+    mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
     mut log: ResMut<TestLog>,
     mut was_pressed: Local<bool>,
 ) {
+    use kuluu_render::graphics_settings::DynamicLights;
     let Ok((interaction, mut bg, mut text)) = q_check.single_mut() else {
         return;
     };
     let pressed = matches!(interaction, Interaction::Pressed);
+    // The checkbox state is the setting itself — no separate resource to fall out of sync.
+    let on = settings.dynamic_lights.enhanced();
     if pressed && !*was_pressed {
-        enhanced.0 = !enhanced.0;
+        if restore.0.is_none() {
+            restore.0 = Some(settings.dynamic_lights);
+        }
+        settings.dynamic_lights = if on {
+            DynamicLights::Vanilla
+        } else {
+            DynamicLights::Enhanced
+        };
+        persist_gate.0 = true;
         log_line(
             &mut log,
-            if enhanced.0 {
-                "enhance mode: ON (glow textures replaced by flickering point lights)".into()
+            if on {
+                "enhance mode: OFF (Lamps)".into()
             } else {
-                "enhance mode: OFF (retail glow textures restored)".into()
+                "enhance mode: ON (Dynamic Lights = Lamps + Shadows)".into()
             },
         );
     }
     *was_pressed = pressed;
-    if enhanced.is_changed() || !text.starts_with(if enhanced.0 { "[x]" } else { "[ ]" }) {
-        *text = Text::new(format!(
-            "{} enhance mode",
-            if enhanced.0 { "[x]" } else { "[ ]" }
-        ));
+    let on = settings.dynamic_lights.enhanced();
+    if settings.is_changed() || !text.starts_with(if on { "[x]" } else { "[ ]" }) {
+        *text = Text::new(format!("{} enhance mode", if on { "[x]" } else { "[ ]" }));
     }
     *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
 }
@@ -2592,6 +2610,7 @@ fn sync_shadow_override(
     shadows: Res<ShadowsOff>,
     mut settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
     mut saved: ResMut<ShadowOverrides>,
+    restore: Res<EnhanceRestore>,
     mut commands: Commands,
     mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
     cam_q: Query<
@@ -2615,8 +2634,9 @@ fn sync_shadow_override(
         camera,
         live_fog,
     );
-    // The override (and the restore's write-back of the user's own values) stay off-disk.
-    persist_gate.0 = saved.0.is_some();
+    // The override (and the restore's write-back of the user's own values) stay off-disk; same
+    // for a live enhance-mode flip, which teardown hands back the same way.
+    persist_gate.0 = saved.0.is_some() || restore.0.is_some();
 }
 
 fn drive_lamp_alpha_slider(
@@ -2766,7 +2786,6 @@ fn tear_down(
     commands.insert_resource(kuluu_render::sun_moon::SkyFxOverride::default());
     commands.insert_resource(kuluu_render::particle_sim::LampHalosOff(false));
     commands.insert_resource(kuluu_render::particle_sim::WallWashOff(false));
-    commands.insert_resource(kuluu_render::particle_sim::LampEnhancedLights(false));
     commands.insert_resource(kuluu_render::zone_point_lights::ZoneLampLightsOff(false));
     // A stale rays-off toggle must not follow the app into a real session.
     commands.insert_resource(LampRaysOff(false));
@@ -2801,6 +2820,7 @@ fn tear_down_test_scene(
     mut scene: ResMut<SceneState>,
     mut graphics_settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
     mut overrides: ResMut<ShadowOverrides>,
+    mut restore: ResMut<EnhanceRestore>,
     mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
     cam_q: Query<Entity, With<kuluu_render::camera::OperatorCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -2818,6 +2838,10 @@ fn tear_down_test_scene(
         camera,
         None,
     );
+    // Hand the user's own Dynamic Lights value back if the box flipped it.
+    if let Some(prev) = restore.0.take() {
+        graphics_settings.dynamic_lights = prev;
+    }
     persist_gate.0 = false;
     tear_down(
         &mut commands,

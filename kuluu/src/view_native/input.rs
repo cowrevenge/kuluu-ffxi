@@ -60,6 +60,10 @@ pub struct MoveEnvParams<'w, 's> {
     /// View-window zoom target (PgUp/PgDn, `.`, `,`): the held-key sweep writes
     /// it here; camera.rs pushes it into the projection each frame.
     pub view_fov: ResMut<'w, kuluu_render::ViewFov>,
+    /// The leg-unlock row's setting (Retail+ menu): with it on and self mid
+    /// draw/sheathe, the movement tick flags the intent so the pose pass keeps
+    /// the lower body moving.
+    pub settings: Res<'w, kuluu_render::graphics_settings::GraphicsSettings>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1364,18 +1368,18 @@ pub fn dispatch_movement_system(
     // .agents/skills/retail-observe/references/2026-09-21-action-confirm-and-locks.md,
     // "The one real player lock is the weapon draw and sheathe"). The
     // enhanced build lifts it unless the Debug row forces it back on.
+    let self_engage_transition = state
+        .snapshot
+        .self_char_id
+        .and_then(|id| env.tracked.by_id.get(&id).copied())
+        .and_then(|wire| env.roots.get(wire).ok())
+        .and_then(|root| env.actors.get(root.0).ok())
+        .is_some_and(|actor| actor.engage_transition_in_progress());
     #[cfg(feature = "enhanced-engage-move-lock-off")]
     let hold_applies = env.hud_panels.engage_anim_lock;
     #[cfg(not(feature = "enhanced-engage-move-lock-off"))]
     let hold_applies = true;
-    let engage_transition = hold_applies
-        && state
-            .snapshot
-            .self_char_id
-            .and_then(|id| env.tracked.by_id.get(&id).copied())
-            .and_then(|wire| env.roots.get(wire).ok())
-            .and_then(|root| env.actors.get(root.0).ok())
-            .is_some_and(|actor| actor.engage_transition_in_progress());
+    let engage_transition = hold_applies && self_engage_transition;
     if engage_transition {
         forward = 0;
         strafe = 0;
@@ -1594,6 +1598,7 @@ pub fn dispatch_movement_system(
         moving,
         forward: move_vec.0,
         strafe: move_vec.1,
+        leg_free: env.settings.leg_unlock && self_engage_transition,
         ..default()
     };
 
@@ -2271,6 +2276,7 @@ mod tests {
             .init_resource::<super::super::walker::obstacles::ObstacleSet>()
             .init_resource::<kuluu_render::elevators::ZoneElevators>()
             .init_resource::<kuluu_render::hud::HudPanels>()
+            .init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
             .init_resource::<kuluu_render::minimap::input::MinimapHoverGate>()
             .init_resource::<kuluu_render::MousePointer>()
             .init_resource::<super::super::gamepad_input::PadStickIntent>()

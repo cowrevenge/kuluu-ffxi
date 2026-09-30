@@ -251,11 +251,19 @@ pub fn persist_graphics_on_change(
     settings: Res<GraphicsSettings>,
     state: Res<GraphicsStateRes>,
     suspended: Option<Res<GraphicsPersistSuspended>>,
+    mut last_saved: Local<Option<kuluu_render::GraphicsSettings>>,
 ) {
     if suspended.is_some_and(|s| s.0) {
         return;
     }
     if !settings.is_changed() {
+        return;
+    }
+    // Menu key handling deref-muts the resource even when a row ignores the
+    // key (a held movement key repeats through it while a menu is open), so
+    // change detection alone would rewrite graphics.json on every press.
+    // Only content differences are worth a disk write.
+    if last_saved.as_ref() == Some(&*settings) {
         return;
     }
     if let Err(e) = state.store.save(&settings) {
@@ -264,7 +272,9 @@ pub fn persist_graphics_on_change(
             error = %e,
             "graphics: failed to persist settings",
         );
+        return;
     }
+    *last_saved = Some(settings.clone());
 }
 
 #[cfg(test)]

@@ -2307,7 +2307,7 @@ pub fn advance_actor_pose_standalone(
     elapsed_frames: f32,
     mount: Option<MountAttach>,
 ) {
-    advance_actor_pose(actor, elapsed_frames, None, mount, false, None);
+    advance_actor_pose(actor, elapsed_frames, None, mount, false, None, false);
 }
 
 /// The same standalone advance with the caller's routine-lock state instead of
@@ -2319,17 +2319,36 @@ pub(crate) fn advance_actor_pose_standalone_locked(
     elapsed_frames: f32,
     animation_locked: bool,
 ) {
-    advance_actor_pose(actor, elapsed_frames, None, None, animation_locked, None);
+    advance_actor_pose(
+        actor,
+        elapsed_frames,
+        None,
+        None,
+        animation_locked,
+        None,
+        false,
+    );
 }
 
 pub fn tick_ffxi_render_actors(
     time: Res<Time>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut registry: ResMut<FfxiSkinRegistry>,
     mut q_actors: Query<&mut FfxiRenderActor>,
 ) {
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
+    // The scenes that tick actors this way (the launcher's character preview) show the player
+    // own model, so the leg-unlock setting applies to every actor here.
     q_actors.par_iter_mut().for_each(|mut actor| {
-        advance_actor_pose(&mut actor, elapsed_frames, None, None, false, None);
+        advance_actor_pose(
+            &mut actor,
+            elapsed_frames,
+            None,
+            None,
+            false,
+            None,
+            settings.leg_unlock,
+        );
     });
     for actor in &q_actors {
         registry.set_skin_joints(actor.skin_slot, &actor.world_pose);
@@ -2757,12 +2776,14 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
     actor.knockback = None;
     actor.coordinator.clear();
     actor.current_clip = None;
-    advance_actor_pose(actor, elapsed_frames, None, None, false, name);
+    advance_actor_pose(actor, elapsed_frames, None, None, false, name, false);
     actor.death_phase = actor_state::DeathPhase::Unobserved;
 }
 
 /// Runs inside the parallel per-actor pass: it touches only the actor's own fields, leaving the
-/// pose in `world_pose` for the serial registry copy.
+/// pose in `world_pose` for the serial registry copy. `leg_free` (self only; the movement
+/// dispatch computes it from the leg-unlock setting and the engage machine) keeps the lower body
+/// on locomotion while a draw/sheathe transition owns the pose.
 fn advance_actor_pose(
     actor: &mut FfxiRenderActor,
     elapsed_frames: f32,
@@ -2770,6 +2791,7 @@ fn advance_actor_pose(
     mount: Option<MountAttach>,
     animation_locked: bool,
     name: Option<&str>,
+    leg_free: bool,
 ) {
     let FfxiRenderActor {
         skeleton,
@@ -3088,6 +3110,32 @@ fn advance_actor_pose(
     // an unchanged gait does not reach this branch. There is no per-frame or per-update
     // re-registration path for an unchanged locomotion clip: coordinator.update below advances
     // the cursor monotonically instead.
+    // Leg unlock: while a draw/sheathe transition owns the pose, register only its
+    // upper-body slots from that family and keep the lower body on the locomotion clip the
+    // movement inputs select. A model with no usable lower-body locomotion clip keeps the
+    // full stance family (there is nothing to run in).
+    let reg_clips: Vec<&SkeletonAnimation> = if leg_free && selected_tier == PoseTier::EngageOverlay
+    {
+        let loco_id = actor_state::selected_animation(inputs).id;
+        let lower: Vec<&SkeletonAnimation> = resolve(loco_id)
+            .into_iter()
+            .filter(|a| a.id.final_digit() == Some(0) && is_usable_clip(a))
+            .collect();
+        if lower.is_empty() {
+            matches.iter().copied().collect()
+        } else {
+            let mut clips: Vec<&SkeletonAnimation> = matches
+                .iter()
+                .copied()
+                .filter(|a| a.id.final_digit() != Some(0))
+                .collect();
+            clips.extend(lower);
+            clips
+        }
+    } else {
+        matches.iter().copied().collect()
+    };
+
     if !matches.is_empty() && *current_clip != Some((selected_id, use_battle)) {
         let prev_clip_id = current_clip.map(|(id, _)| id);
         if let Some(resolved) = matches.iter().find(|a| is_usable_clip(a)) {
@@ -3096,7 +3144,7 @@ fn advance_actor_pose(
         *current_clip = Some((selected_id, use_battle));
 
         let mut new_mask = 0u8;
-        for clip in &matches {
+        for clip in &reg_clips {
             let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
             new_mask |= 1 << slot;
         }
@@ -3109,7 +3157,7 @@ fn advance_actor_pose(
         }
 
         if is_idle {
-            for &clip in &matches {
+            for &clip in &reg_clips {
                 if action_just_ended {
                     coordinator.register_idle_animation_eager(clip.clone());
                 } else {
@@ -3164,7 +3212,7 @@ fn advance_actor_pose(
                 .then_some(1)),
                 low_priority: false,
             };
-            for &clip in &matches {
+            for &clip in &reg_clips {
                 coordinator
                     .register_animation(clip.clone(), loop_params, Some(tp.clone()), |_| true);
             }
@@ -4774,6 +4822,7 @@ pub fn tick_live_ffxi_actors(
                 mount_attach,
                 animation_locked.contains(&world_id),
                 snap.and_then(|s| s.name.as_deref()),
+                is_self && self_move.leg_free,
             );
 
             // Special-pose visibility: status INVISIBLE hides the model root outright (retail
@@ -5164,50 +5213,52 @@ pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
+    lamps: Res<crate::ffxi_zone_material::ZoneGlobalLighting>,
     mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
     mut registry: ResMut<FfxiSkinRegistry>,
 ) {
-    if active.lights.is_empty() {
-        return;
-    }
     let count = settings.model_light_count as usize;
     for (mut actor, gt) in &mut q_actors {
         let pos = gt.translation();
-        let ground = collision.lighting_at(pos);
-        let cached_valid = actor
-            .point_light_selection
-            .as_ref()
-            .is_some_and(|sel| sel.valid_for(pos, ground, count, &active.lights))
-            && !collision.is_changed();
-        if !cached_valid {
-            let indices = match ground {
-                Some(ground) => crate::zone_point_lights::authored_point_light_indices(
-                    &active.lights,
-                    &ground.lights,
-                ),
-                None => crate::zone_point_lights::nearest_point_light_indices(
-                    pos,
-                    &active.lights,
+        // An empty authored feed must not skip the actor: a tunnel full of enhanced lamps
+        // ships no Generator lights at all, and append_enhanced_lamps still feeds them.
+        let mut arrays = if active.lights.is_empty() {
+            crate::zone_point_lights::point_light_arrays_for(&[], &[])
+        } else {
+            let ground = collision.lighting_at(pos);
+            let cached_valid = actor
+                .point_light_selection
+                .as_ref()
+                .is_some_and(|sel| sel.valid_for(pos, ground, count, &active.lights))
+                && !collision.is_changed();
+            if !cached_valid {
+                let indices = match ground {
+                    Some(ground) => crate::zone_point_lights::authored_point_light_indices(
+                        &active.lights,
+                        &ground.lights,
+                    ),
+                    None => crate::zone_point_lights::nearest_point_light_indices(
+                        pos,
+                        &active.lights,
+                        count,
+                    ),
+                };
+                let positions = indices
+                    .iter()
+                    .map(|&i| active.lights[i as usize].world_pos)
+                    .collect();
+                actor.point_light_selection = Some(ActorPointLightSelection {
+                    eval_pos: pos,
+                    ground,
                     count,
-                ),
+                    lights_len: active.lights.len(),
+                    indices,
+                    positions,
+                });
+            }
+            let Some(sel) = actor.point_light_selection.as_ref() else {
+                continue;
             };
-            let positions = indices
-                .iter()
-                .map(|&i| active.lights[i as usize].world_pos)
-                .collect();
-            actor.point_light_selection = Some(ActorPointLightSelection {
-                eval_pos: pos,
-                ground,
-                count,
-                lights_len: active.lights.len(),
-                indices,
-                positions,
-            });
-        }
-        let Some(sel) = actor.point_light_selection.as_ref() else {
-            continue;
-        };
-        let (point_pos, point_color, point_atten) =
             if settings.dynamic_lights.point_shadows_enabled() {
                 crate::zone_point_lights::point_light_arrays_for(&active.lights, &sel.indices)
             } else {
@@ -5216,8 +5267,11 @@ pub fn update_ffxi_actor_point_lights(
                     &active.lights,
                     &sel.indices,
                 )
-            };
+            }
+        };
 
+        crate::zone_point_lights::append_enhanced_lamps(&mut arrays, &lamps.0, pos);
+        let (point_pos, point_color, point_atten) = arrays;
         registry.set_skin_point_lights(actor.skin_slot, point_pos, point_color, point_atten);
     }
 }
@@ -5846,6 +5900,64 @@ mod pose_resolution_tests {
             base_mvl1_kfs,
             "the upper body must play the base set's strafe clip, not the weapon battle set's"
         );
+    }
+
+    /// Leg unlock: while the draw transition owns the pose, slot 0 (the lower body) stays on
+    /// the locomotion clip and only the stance's upper-body slots come from its family. Without
+    /// the flag the stance family's own lower-body clip owns slot 0.
+    #[test]
+    fn leg_unlock_keeps_the_lower_body_on_locomotion() {
+        use ffxi_dat::skel_anim::KeyFrameTransform;
+
+        let clip = |id: &str| {
+            let mut sets = std::collections::HashMap::new();
+            let frames = (0..4)
+                .map(|f| KeyFrameTransform {
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    translation: [f as f32 * 10.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                })
+                .collect::<Vec<_>>();
+            sets.insert(0u32, frames);
+            SkeletonAnimation {
+                id: DatId::from_str(id),
+                num_joints: 1,
+                num_frames: 4,
+                key_frame_duration: 1.0,
+                key_frame_sets: sets,
+            }
+        };
+
+        let fresh = || {
+            let mut actor = render_actor_with_skeleton_clips(
+                7,
+                vec![clip("idl0"), clip("run0"), clip("ind0"), clip("ind1")],
+            );
+            actor.routines = Arc::new(synth_routines(&[(b"in 0", b"ind?")]));
+            actor.set_engage_for_test(true);
+            actor.inputs = inputs_for_pose(PoseState::Run, true);
+            actor
+        };
+
+        let slot_clip = |actor: &FfxiRenderActor, slot: usize| {
+            actor
+                .coordinator
+                .animations
+                .get(slot)
+                .and_then(|s| s.as_ref())
+                .and_then(|s| s.current_animation.as_ref())
+                .map(|c| c.animation.id.as_str().to_string())
+        };
+
+        let mut held = fresh();
+        advance_actor_pose(&mut held, 1.0, None, None, false, None, false);
+        assert_eq!(slot_clip(&held, 0).as_deref(), Some("ind0"));
+        assert_eq!(slot_clip(&held, 1).as_deref(), Some("ind1"));
+
+        let mut free = fresh();
+        advance_actor_pose(&mut free, 1.0, None, None, false, None, true);
+        assert_eq!(slot_clip(&free, 0).as_deref(), Some("run0"));
+        assert_eq!(slot_clip(&free, 1).as_deref(), Some("ind1"));
     }
 
     #[test]
@@ -8193,6 +8305,7 @@ mod skin_slab_tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
             .init_resource::<FfxiSkinRegistry>()
             .add_systems(Update, tick_ffxi_render_actors);
 

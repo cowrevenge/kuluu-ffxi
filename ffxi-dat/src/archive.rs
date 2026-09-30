@@ -341,6 +341,13 @@ impl DatRoot {
             .clone()
     }
 
+    /// [`Self::path_of`] without the overlay tiers: the base install's copy of a location,
+    /// so an overlay that shadows a file cannot hide content only the base ships.
+    pub fn base_path_of(&self, loc: &DatLocation) -> PathBuf {
+        loc.find_under(&self.root)
+            .unwrap_or_else(|| loc.join_under(&self.root))
+    }
+
     /// Resolve a location to a real file: each overlay in order, then the base
     /// install under either `.DAT` spelling. The raw `.DAT` join is returned
     /// unconditionally when no spelling exists, so a missing file still

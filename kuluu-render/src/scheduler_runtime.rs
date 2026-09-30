@@ -80,6 +80,12 @@ pub fn sound_origin_entity(on_caster: bool, caster: Entity, target: Option<Entit
 // stop live there, not in the caster's DAT). `DatRoot::resolve(0)` yields exactly that file.
 pub const GLOBAL_EFFECT_DIR_FILE_ID: u32 = 0;
 
+// Install layouts whose VTABLE spreads the shared effect directories across ROM subdirectories
+// keep a second half of that tree at id 216 (ROM/1/0.DAT) — `syst/effe`, home of the campfire
+// flame sheets (`hi12`) zone generators link. Both halves load into one asset tier; an overlay
+// pack that shadows a file wholesale would otherwise delete every sheet only the base ships.
+pub const GLOBAL_EFFECT_DIR_SECONDARY_FILE_ID: u32 = 216;
+
 // The level-up effect DAT (s2c 0x029 BATTLE_MESSAGE msg_num=9): its type-0x01 marker is `lvup`,
 // but the routine itself is named `main` — the effect-DAT pattern spell effects run, not a
 // named-routine lookup. The sibling lvdw lives in ROM/13/34.DAT (file id 3309).
@@ -562,6 +568,43 @@ pub struct ActionAssets {
     /// resolves against these. No parser for the chunk body exists yet, so only the names are
     /// kept and diagnostics can tell "absent" from "present but unparsed".
     pub sph_names: HashSet<[u8; 4]>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ActionAssets {
+    /// Fold `lower`'s entries in for keys this set does not already own (first tier wins), so an
+    /// overlay's copy shadows the base while names only the lower tier ships survive. Schedulers
+    /// and skeleton animations are deliberately not merged: they are per-file timelines, and the
+    /// global dir's spell lookup needs only the mesh/texture/keyframe maps.
+    pub(crate) fn extend_missing_from(&mut self, lower: &ActionAssets) {
+        macro_rules! merge_map {
+            ($field:ident) => {
+                for (k, v) in &lower.$field {
+                    if !self.$field.contains_key(k) {
+                        self.$field.insert(k.clone(), v.clone());
+                    }
+                }
+            };
+        }
+        merge_map!(generators);
+        merge_map!(d3ms);
+        merge_map!(d3ms_by_dir);
+        merge_map!(mmbs);
+        merge_map!(sprite_sheets);
+        merge_map!(sprite_sheets_by_dir);
+        merge_map!(seps);
+        merge_map!(images);
+        merge_map!(images_by_name);
+        merge_map!(images_by_qualified_name);
+        merge_map!(emitters);
+        merge_map!(particle_defs);
+        merge_map!(sound_defs);
+        merge_map!(distortion_defs);
+        merge_map!(particle_defs_by_dir);
+        merge_map!(particle_def_dirs);
+        merge_map!(keyframes);
+        self.sph_names.extend(lower.sph_names.iter().copied());
+    }
 }
 
 impl ActionAssets {
@@ -1079,6 +1122,43 @@ fn read_dat_bytes(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> Vec<u8>
     .unwrap_or_default()
 }
 
+/// One global-effect file's tiers in shadow order: the overlay-resolved copy first, then the
+/// base install's own copy when an overlay shadows it wholesale — a pack that replaces a whole
+/// DAT must not delete the sheets only the base ships. `primary` takes the schedulers (the
+/// secondary half is asset content for zone generators, not spell timelines).
+#[cfg(not(target_arch = "wasm32"))]
+fn read_global_effect_tiers(
+    root: &Option<Arc<ffxi_dat::DatRoot>>,
+    file_id: u32,
+    primary: bool,
+    schedulers: &mut Vec<Scheduler>,
+    assets: &mut ActionAssets,
+) {
+    let Some(root) = root.as_ref() else { return };
+    let Ok(loc) = root.resolve(file_id) else {
+        return;
+    };
+    let overlay_path = loc.path_under(root);
+    for (path, overlay_copy) in [
+        (overlay_path.clone(), true),
+        (root.base_path_of(&loc), false),
+    ] {
+        // The base copy is the same file when no overlay claims it.
+        if !overlay_copy && path == overlay_path {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let (scheds, tier_assets, report, _cameras) = parse_action_bytes_reporting(&bytes);
+        if primary && overlay_copy {
+            schedulers.extend(scheds);
+        }
+        assets.extend_missing_from(&tier_assets);
+        report_effect_coverage(file_id, &report);
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
@@ -1092,10 +1172,24 @@ pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Com
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
         // The global effect dir is spell effects, not cutscene camera routes
         // (ffxi-dat/src/scheduler.rs StageKind::CameraRoute); the parse's camera value
-        // does not land here.
-        let (schedulers, assets, report, _cameras) =
-            parse_action_bytes_reporting(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID));
-        report_effect_coverage(GLOBAL_EFFECT_DIR_FILE_ID, &report);
+        // does not land here. Both halves of the shared tree load into one asset tier,
+        // earlier files winning name ties.
+        let mut schedulers: Vec<Scheduler> = Vec::new();
+        let mut assets = ActionAssets::default();
+        read_global_effect_tiers(
+            &root,
+            GLOBAL_EFFECT_DIR_FILE_ID,
+            true,
+            &mut schedulers,
+            &mut assets,
+        );
+        read_global_effect_tiers(
+            &root,
+            GLOBAL_EFFECT_DIR_SECONDARY_FILE_ID,
+            false,
+            &mut schedulers,
+            &mut assets,
+        );
         (schedulers, assets)
     });
     commands.insert_resource(GlobalEffectDirTask(task));
@@ -2211,6 +2305,7 @@ pub fn dispatch_knockback_stages(
 pub fn tick_knockbacks(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut self_kb: ResMut<crate::ffxi_actor_render::SelfKnockback>,
     mut q_render: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
 ) {
@@ -2222,7 +2317,11 @@ pub fn tick_knockbacks(
             continue;
         };
         if Some(actor.world_id) == self_id {
-            self_kb.pending += shove;
+            // Retail+ Ignore_knockback_self: the flinch, facing and movement lock
+            // still play; only the travel is dropped.
+            if !settings.ignore_knockback_self {
+                self_kb.pending += shove;
+            }
             self_active |= actor.knockback_active();
         }
     }

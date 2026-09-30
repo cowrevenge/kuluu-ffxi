@@ -302,6 +302,10 @@ pub struct SelfMoveIntent {
     /// visual yaw and the camera follow read. `None` on a tick that produced
     /// none (a snapshot-driven or muted tick), when the wire heading stands in.
     pub heading: Option<u8>,
+    /// Leg unlock (enhanced): self is mid weapon draw/sheathe this tick, so the pose pass keeps
+    /// the lower body on locomotion while the upper body plays the stance. The movement dispatch
+    /// computes it from the graphics setting and the self actor's engage machine.
+    pub leg_free: bool,
 }
 
 impl SelfMoveIntent {

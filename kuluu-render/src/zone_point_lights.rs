@@ -8,7 +8,13 @@ use crate::components::InGameEntity;
 use crate::scene::mzb_to_bevy;
 use crate::snapshot::SceneState;
 
-const FAITHFUL_LIGHT_INTENSITY: f32 = 25_000.0;
+// Bevy PointLight intensity for the Enhanced-mode carriers (faithful fixtures + lamp pool).
+// The FFXI zone/actor shaders never read these — they light per-pixel from ActiveSceneLights
+// and the shared lamp slots — so any real value here only feeds PBR surfaces and volumetric
+// fog, which reads as a blown-out glow blob around every fixture that shifts with the view
+// angle (Bastok Markets, where dozens of pl* lights are visible at once). Carriers exist to
+// carry shadow maps; this keeps their ambient side near-silent.
+const ENHANCED_POINT_LIGHT_INTENSITY: f32 = 1.0;
 
 // FFXiMain.dll retail-2026-09 RVA 0x178610 InitLight zeroes Attenuation0/1.
 const SCENE_LIGHT_CONST_ATTEN: f32 = 0.0;
@@ -82,8 +88,6 @@ pub fn build_active_scene_lights(
     vana_clock: Res<crate::vana_time::VanaClock>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     lamp_off: Option<Res<ZoneLampLightsOff>>,
-    sim: Res<crate::particle_sim::ParticleSimulator>,
-    enhanced: Option<Res<crate::particle_sim::LampEnhancedLights>>,
     mut active: ResMut<ActiveSceneLights>,
 ) {
     let day = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
@@ -114,47 +118,6 @@ pub fn build_active_scene_lights(
     if changed {
         active.set_changed();
     }
-
-    // Test-box redirect: terrain shaders evaluate only each chunk's authored binding slots, so a
-    // brand-new light id can never reach the walls. In test mode enhance mode moves the faithful
-    // lights to the lig* halo origins instead of leaving them where retail authors them; the ids —
-    // and with them the bindings, BVH occlusion and flicker — stay put. A real session has no
-    // LampEnhancedLights and is untouched.
-    if enhanced.is_some_and(|e| e.0) {
-        let moved =
-            redirect_faithful_lights(&mut active.lights, sim.lamp_halo_origins().collect(), 1.0);
-        if moved {
-            active.set_changed();
-        }
-    }
-}
-
-fn redirect_faithful_lights(
-    lights: &mut [ZonePointLight],
-    targets: Vec<Vec3>,
-    intensity: f32,
-) -> bool {
-    if targets.is_empty() {
-        return false;
-    }
-    let mut moved = false;
-    for l in lights
-        .iter_mut()
-        .filter(|l| l.light_id != UNAUTHORED_LIGHT_ID)
-    {
-        let Some(near) = targets.iter().min_by(|a, b| {
-            a.distance_squared(l.world_pos)
-                .total_cmp(&b.distance_squared(l.world_pos))
-        }) else {
-            continue;
-        };
-        if l.world_pos != *near || intensity != 1.0 {
-            l.world_pos = *near;
-            l.color *= intensity;
-            moved = true;
-        }
-    }
-    moved
 }
 
 impl ZonePointLight {
@@ -452,7 +415,7 @@ fn animate_faithful_zone_lights(
             1.0
         };
         pl.color = Color::linear_rgb(hue.x, hue.y, hue.z);
-        pl.intensity = FAITHFUL_LIGHT_INTENSITY * peak * flicker;
+        pl.intensity = ENHANCED_POINT_LIGHT_INTENSITY * peak * flicker;
         pl.range = light.range;
         *vis = if enhanced && peak > 0.0 {
             Visibility::Inherited
@@ -465,44 +428,50 @@ fn animate_faithful_zone_lights(
 #[derive(Component)]
 struct LampEnhancedPointLight;
 
-/// The box's enhance mode: one real Bevy PointLight per live lig* halo generator — it flickers
-/// and warms the scene with the lamp's warm white instead of an additive glow texture covering
-/// it. Driven by `particle_sim::LampEnhancedLights` (the panel checkbox); without that resource
-/// (a real session) this system does nothing.
+/// Dynamic Lights = Enhanced: one real Bevy PointLight per live lig* halo generator — the
+/// shadow-map carrier (the per-pixel light itself rides the shared lamp slots, see
+/// [`feed_enhanced_lamp_lights`]). The pool exists only while that setting is on.
 fn lamp_enhanced_point_light_system(
-    enhanced: Option<Res<crate::particle_sim::LampEnhancedLights>>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     sim: Res<crate::particle_sim::ParticleSimulator>,
+    faithful: Res<ZonePointLights>,
+    vana_clock: Res<crate::vana_time::VanaClock>,
     time: Res<bevy::time::Time>,
     mut commands: Commands,
-    mut q_lights: Query<&mut PointLight, With<LampEnhancedPointLight>>,
+    mut q_lights: Query<(&mut PointLight, &mut Visibility), With<LampEnhancedPointLight>>,
     mut owned: Local<Vec<Entity>>,
 ) {
-    let Some(on) = enhanced else { return };
-    if !on.0 {
+    if !settings.dynamic_lights.enhanced() {
         for e in std::mem::take(&mut *owned) {
             commands.entity(e).try_despawn();
         }
         return;
     }
-    let origins: Vec<Vec3> = sim.lamp_halo_origins().collect();
-    if owned.len() != origins.len() {
+    let lamps: Vec<(Vec3, f32)> = sim.lamp_halo_lights().collect();
+    if owned.len() != lamps.len() {
         // Grow/shrink the pool to match the live halo list (order is stable across frames);
         // min keeps the despawn slice valid when growing from an empty pool.
-        for e in &owned[origins.len().min(owned.len())..] {
+        for e in &owned[lamps.len().min(owned.len())..] {
             commands.entity(*e).try_despawn();
         }
         let mut new_owned = owned.clone();
-        new_owned.truncate(origins.len());
-        for origin in &origins[new_owned.len()..] {
+        new_owned.truncate(lamps.len());
+        let range = ENHANCED_LAMP_RANGE * sim.clock().lamp_halos_radius;
+        // Same authored fire hue the per-pixel feed uses, so shadow and light agree.
+        let color = enhanced_lamp_color(
+            &faithful,
+            crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now()),
+        );
+        for (origin, _) in &lamps[new_owned.len()..] {
+            // shadow_maps_enabled stays false at spawn: select_shadowed_zone_lights owns it.
             new_owned.push(
                 commands
                     .spawn((
                         LampEnhancedPointLight,
                         InGameEntity,
-                        // Warm white from the lig sheet core (255, 248.7, 245).
                         PointLight {
-                            range: LAMP_ENHANCED_RANGE,
-                            color: Color::srgb(1.0, 0.975, 0.96),
+                            range,
+                            color: Color::srgb(color.x, color.y, color.z),
                             ..default()
                         },
                         Transform::from_translation(*origin),
@@ -514,16 +483,126 @@ fn lamp_enhanced_point_light_system(
         *owned = new_owned;
     }
     let lift = sim.clock().lamp_halos_lift;
-    for (index, mut pl) in q_lights.iter_mut().enumerate() {
-        // Same warm white the lig sheet core carries; intensity rides the slider like the
-        // texture path did, and the flicker wave matches the faithful lights' convention.
-        let flicker = lamp_flicker(time.elapsed_secs_wrapped(), index as f32);
-        pl.intensity = FAITHFUL_LIGHT_INTENSITY * lift.max(0.05) * flicker;
+    let t = time.elapsed_secs_wrapped();
+    for (index, &e) in owned.iter().enumerate() {
+        let Some((_, gate)) = lamps.get(index) else {
+            continue;
+        };
+        // Intensity rides the slider like the texture path did; the flicker wave matches the
+        // faithful lights' convention and the per-lamp day/night gate from the DAT curve.
+        let pulse = if settings.light_flicker {
+            lamp_flicker(t, index as f32)
+        } else {
+            1.0
+        };
+        if let Ok((mut pl, mut vis)) = q_lights.get_mut(e) {
+            pl.intensity = ENHANCED_POINT_LIGHT_INTENSITY * lift.max(0.05) * gate * pulse;
+            *vis = if *gate <= 0.0 {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+        }
     }
 }
 
-// The lig2 glow quad spans ~4 world units; the light reaches just past it.
-const LAMP_ENHANCED_RANGE: f32 = 5.0;
+// The lig2 halo sheet is a 4x4 yalm quad: the light reaches exactly as far as the halo.
+pub const ENHANCED_LAMP_RANGE: f32 = 2.0;
+// Fallback lamp colour for zones that author no fixture light at all.
+const ENHANCED_LAMP_COLOR: Vec3 = Vec3::new(1.0, 0.975, 0.96);
+
+/// The fire/lantern hue the zone authors on its own point lights (DAT 207's tkb* are
+/// [0.78 0.39 0.08]); enhanced lamps light walls with that colour instead of the halo
+/// sheet's near-white, so they read as the same fire retail paints the stone with.
+pub(crate) fn enhanced_lamp_color(faithful: &ZonePointLights, day: f32) -> Vec3 {
+    faithful
+        .lights
+        .iter()
+        .find_map(|l| {
+            let evaluated = l.at_time(day);
+            (evaluated.range > 0.0 && evaluated.color.max_element() > 0.0)
+                .then_some(evaluated.color)
+        })
+        .unwrap_or(ENHANCED_LAMP_COLOR)
+}
+// point_atten.w on a lamp slot: shaders use the soft radius window, not 1/d^2.
+pub const ENHANCED_LAMP_SLOT_MARKER: f32 = 1.0;
+// How far a body extends from its origin; lamps hang above head height.
+const ACTOR_REACH: f32 = 3.0;
+
+/// Dynamic Lights = Enhanced feeds the shared lamp slots of `ZoneGlobalLighting` — the
+/// per-pixel light every FFXI material reads (zone terrain via its lighting uniform, actors
+/// via [`append_enhanced_lamps`]). One slot per live lig* halo generator, nearest to the
+/// camera first so a tunnel full of lamps keeps the ones you can see.
+pub fn feed_enhanced_lamp_lights(
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
+    sim: Res<crate::particle_sim::ParticleSimulator>,
+    faithful: Res<ZonePointLights>,
+    vana_clock: Res<crate::vana_time::VanaClock>,
+    time: Res<bevy::time::Time>,
+    cam: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    mut global: ResMut<crate::ffxi_zone_material::ZoneGlobalLighting>,
+) {
+    let u = &mut global.0;
+    u.point_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    u.point_color = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    u.point_atten = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    if !settings.dynamic_lights.enhanced() {
+        return;
+    }
+    let clock = sim.clock();
+    let mut lamps: Vec<(usize, Vec3, f32)> = sim
+        .lamp_halo_lights()
+        .enumerate()
+        .map(|(i, (pos, gate))| (i, pos, gate))
+        .filter(|l| l.2 > 0.0)
+        .collect();
+    if let Some(c) = cam.iter().next().map(|c| c.translation()) {
+        lamps.sort_by(|a, b| a.1.distance_squared(c).total_cmp(&b.1.distance_squared(c)));
+    }
+    let range = ENHANCED_LAMP_RANGE * clock.lamp_halos_radius;
+    let t = time.elapsed_secs_wrapped();
+    let color = enhanced_lamp_color(
+        &faithful,
+        crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now()),
+    );
+    for (slot, (index, pos, gate)) in lamps.into_iter().take(MAX_POINT_LIGHTS).enumerate() {
+        let pulse = if settings.light_flicker {
+            lamp_flicker(t, index as f32)
+        } else {
+            1.0
+        };
+        let rgb = color * clock.lamp_halos_gain * gate * pulse;
+        u.point_pos[slot] = pos.extend(0.0);
+        u.point_color[slot] = rgb.extend(range);
+        u.point_atten[slot] = Vec4::new(1.0, 0.0, 0.0, ENHANCED_LAMP_SLOT_MARKER);
+    }
+}
+
+/// Copies the enhanced lamps near `actor_pos` into the free slots of an actor's arrays.
+pub(crate) fn append_enhanced_lamps(
+    arrays: &mut PointLightArrays,
+    lamps: &crate::skinned_ffxi_material::FfxiLightingUniform,
+    actor_pos: Vec3,
+) {
+    let free: Vec<usize> = (0..MAX_POINT_LIGHTS)
+        .filter(|&i| arrays.1[i].w == 0.0)
+        .collect();
+    let mut free = free.into_iter();
+    for i in 0..MAX_POINT_LIGHTS {
+        let range = lamps.point_color[i].w;
+        if range <= 0.0 {
+            continue;
+        }
+        if lamps.point_pos[i].truncate().distance(actor_pos) > range + ACTOR_REACH {
+            continue;
+        }
+        let Some(slot) = free.next() else { break };
+        arrays.0[slot] = lamps.point_pos[i];
+        arrays.1[slot] = lamps.point_color[i];
+        arrays.2[slot] = lamps.point_atten[i];
+    }
+}
 
 // Retail casts no shadow map at all (graphics/settings.rs `zone_shadow_cast`), so this is the
 // Enhanced half of Dynamic Lights: the lit lights nearest the camera render Bevy cube shadow
@@ -544,7 +623,12 @@ pub(crate) fn pick_shadowed(
 fn select_shadowed_zone_lights(
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     cam: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
-    mut q: Query<(Entity, &GlobalTransform, &Visibility, &mut PointLight), With<FaithfulZoneLight>>,
+    // Lamps compete for the same budget as authored lights (the Enhanced setting is what puts
+    // both kinds in this query at all).
+    mut q: Query<
+        (Entity, &GlobalTransform, &Visibility, &mut PointLight),
+        Or<(With<FaithfulZoneLight>, With<LampEnhancedPointLight>)>,
+    >,
 ) {
     let count = if settings.dynamic_lights.point_shadows_enabled() {
         settings.shadowed_lights as usize
@@ -594,7 +678,11 @@ impl Plugin for ZonePointLightsPlugin {
         app.add_systems(Update, select_shadowed_zone_lights);
         app.add_systems(
             Update,
-            lamp_enhanced_point_light_system.after(crate::particle_sim::tick_particle_simulator),
+            (
+                feed_enhanced_lamp_lights.after(crate::particle_sim::tick_particle_simulator),
+                lamp_enhanced_point_light_system
+                    .after(crate::particle_sim::tick_particle_simulator),
+            ),
         );
         app.init_resource::<ZonePointLights>()
             .init_resource::<ActiveSceneLights>()

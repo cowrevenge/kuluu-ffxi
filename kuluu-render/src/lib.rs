@@ -410,7 +410,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             Update,
             ffxi_actor_render::update_ffxi_actor_point_lights
                 .after(ffxi_actor_render::update_ffxi_render_actor_lighting)
-                .after(zone_point_lights::build_active_scene_lights),
+                .after(zone_point_lights::build_active_scene_lights)
+                .after(zone_point_lights::feed_enhanced_lamp_lights),
         );
 
         app.init_resource::<combat_stance::EntityMotion>();

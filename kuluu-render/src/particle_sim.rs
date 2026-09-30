@@ -105,6 +105,22 @@ impl ParticleSimulator {
             .map(|g| g.origin)
     }
 
+    /// One entry per lamp: world position and its time-of-day gate (0 by day, ~1 at night).
+    /// Follow-camera halos are excluded: their origin re-anchors to the eye every frame, so a
+    /// real light there would pan with the view — retail authors no world light for them.
+    pub fn lamp_halo_lights(&self) -> impl Iterator<Item = (Vec3, f32)> + '_ {
+        self.generators
+            .iter()
+            .filter(|g| is_lamp_halo_def(&g.def) && !g.camera_relative)
+            .map(|g| {
+                let gate = g.tod_color[TOD_ALPHA_CHANNEL]
+                    .as_ref()
+                    .filter(|_| g.def.tod_color_driven[TOD_ALPHA_CHANNEL])
+                    .map_or(1.0, |t| t.sample(self.clock.day_fraction));
+                (g.origin, gate)
+            })
+    }
+
     pub fn set_lamp_halos_lift(&mut self, lift: f32) {
         self.clock.lamp_halos_lift = lift.clamp(0.0, 1.0);
     }
@@ -253,11 +269,19 @@ const D3M_TFACTOR_PROMOTE_BLEND_BYTE: u8 = 0x44;
 const D3M_TFACTOR_PROMOTE_MIN: f32 = 0x7F as f32 / u8::MAX as f32;
 const D3M_TFACTOR_PROMOTED: f32 = 1.0;
 
-// Lamp halo billboards (the lig* sheets authored under ligh/): these ride the alpha-map
-// path — they brighten what is behind them along the sheet's alpha and carry no colour of
-// their own.
+// Lamp halo billboards — the soft glow sheets retail authors under ligh/ (SG's lig* quad,
+// Bastok's lt__/gl*/lp* families, the lglt wall wash): additive sprite sheets whose whole
+// brightness is their ToD gate. The class is content-based so every zone's lanterns ride one
+// code path: lift/flicker/range knobs and Enhanced-mode replacement all apply identically.
+const LAMP_HALO_INIT_ALPHA_MAX: f32 = 0.2;
+
 pub(crate) fn is_lamp_halo_def(def: &ParticleGeneratorDef) -> bool {
-    def.mesh_kind == ParticleMeshKind::SpriteSheet && def.mesh_id.starts_with(b"lig")
+    def.mesh_kind == ParticleMeshKind::SpriteSheet
+        && def.blend == ffxi_dat::particle_gen::ParticleBlend::Additive
+        && def.tod_color_driven[TOD_ALPHA_CHANNEL]
+        // Halos author a near-zero alpha (SG lig2 0.071, Bastok lt__ 0.0) and let the ToD gate
+        // do all the work; flame sheets carry their own authored alpha (fi* 0.5) and stay out.
+        && def.init_color[TOD_ALPHA_CHANNEL] <= LAMP_HALO_INIT_ALPHA_MAX
 }
 
 /// Wall-wash volumes — the soft light shafts retail draws around tunnel mouths and lantern
@@ -269,6 +293,19 @@ pub(crate) fn is_wall_wash_def(def: &ParticleGeneratorDef) -> bool {
         def.mesh_kind,
         ParticleMeshKind::StaticMesh | ParticleMeshKind::WeightedMesh
     )
+}
+
+// A baked wall-light overlay: untextured additive mesh, night-gated, and bigger than
+// a lamp's own halo (so the small lantern-glass glow is not one).
+fn is_baked_wall_light(g: &LiveGenerator) -> bool {
+    is_wall_wash_def(&g.def)
+        && g.draw_path == D3mDrawPath::Untextured
+        && g.def.blend == ffxi_dat::particle_gen::ParticleBlend::Additive
+        && g.def.tod_color_driven[TOD_ALPHA_CHANNEL]
+        && g.template
+            .positions
+            .iter()
+            .any(|p| p.length() > crate::zone_point_lights::ENHANCED_LAMP_RANGE)
 }
 
 /// The AnimationTest box's lamps kill switch (panel checkbox): while set, the tick hides every
@@ -283,12 +320,6 @@ pub struct LampHalosOff(pub bool);
 #[derive(Resource, Default)]
 pub struct WallWashOff(pub bool);
 
-/// The AnimationTest box's enhance-mode switch: while set, the lig* glow textures are replaced
-/// by one real Bevy PointLight per lamp (`zone_point_lights::lamp_enhanced_point_light_system`)
-/// that flickers and warms the scene instead of covering it. Only the box inserts it.
-#[derive(Resource, Default)]
-pub struct LampEnhancedLights(pub bool);
-
 /// Halo suppression marker (AnimationTest lamps/enhance/wall-glow rows): while present,
 /// `sync_particle_meshes` keeps the mesh hidden whatever the frustum says — tick runs before the
 /// culler, so a direct Visibility write from there would be overwritten every frame. The tick
@@ -296,17 +327,17 @@ pub struct LampEnhancedLights(pub bool);
 #[derive(Component)]
 pub struct HaloSuppressed;
 
-// Retail reference peak (user-verified against the real client at 18:00): at 0.18 the halo
+// Retail reference peak (user-verified against the real client at 18:00): at 0.12 the halo
 // reads as lantern light on stone without washing out the wall texture; past roughly 0.6 it
 // covers the stone instead of lighting it.
 // pub: the AnimationTest box seeds its lantern-alpha slider from this default.
-pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.18;
+pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.12;
 // Brightness and range sliders' neutral defaults (1.0 = exactly as authored) and ceilings; the
 // gain ceiling mirrors `LAMP_GAIN_CEILING` in ffxi_particle.wgsl.
 pub const LAMP_HALOS_GAIN_DEFAULT: f32 = 1.0;
 pub const LAMP_HALOS_GAIN_MAX: f32 = 2.0;
-// Wall-wash slider neutral (authored alpha, untouched) and ceiling.
-pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 1.0;
+// Wall-wash slider seed (1.0 = authored alpha) and ceiling.
+pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 0.18;
 pub const WASH_ALPHA_LIFT_MAX: f32 = 2.0;
 pub const LAMP_HALOS_RADIUS_DEFAULT: f32 = 1.0;
 pub const LAMP_HALOS_RADIUS_MAX: f32 = 4.0;
@@ -1591,20 +1622,22 @@ pub fn tick_particle_simulator(
     trace: Option<Res<crate::scheduler_runtime::VfxTrace>>,
     lamp_halos: Option<Res<LampHalosOff>>,
     wall_washes: Option<Res<WallWashOff>>,
-    enhanced_lights: Option<Res<LampEnhancedLights>>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut trace_writer: MessageWriter<crate::scheduler_runtime::ParticleSpawnTrace>,
     mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
     // Box kill switches, applied as a per-entity marker diff (live both ways): glow billboards
-    // hide while either lamp switch is set — enhance mode replaces them with real point lights;
-    // wash volumes hide whenever the box is up — its wall-glow row replaces them. Zone-static
+    // hide while the box's lamps row is set or Dynamic Lights = Enhanced — that setting replaces
+    // them with real point lights; wash volumes hide when their box row is unchecked. Zone-static
     // generators only re-dispatch on a zone load, so despawning would never bring them back; the
     // marker is non-destructive. The diff keeps steady-state command traffic at zero, and an entry
     // whose generator died with a zone change is dropped without a command (the entity — and its
     // marker — is already gone), which is what floods the log otherwise.
-    let halos_hidden = lamp_halos.is_some_and(|o| o.0) || enhanced_lights.is_some_and(|e| e.0);
+    let enhanced_on = settings.dynamic_lights.enhanced();
+    let halos_hidden = lamp_halos.is_some_and(|o| o.0) || enhanced_on;
     // Wash volumes draw as authored while the row is checked; unchecked hides them (a real
-    // session has no WallWashOff and renders as authored).
+    // session has no WallWashOff and renders as authored). Enhanced mode additionally hides the
+    // big baked wall-light overlays: their light now comes from the lamp point slots.
     let washes_hidden = wall_washes.is_some_and(|o| o.0);
     let live: std::collections::BTreeSet<Entity> =
         sim.generators.iter().map(|g| g.entity).collect();
@@ -1615,7 +1648,8 @@ pub fn tick_particle_simulator(
             if is_lamp_halo_def(&g.def) {
                 halos_hidden
             } else {
-                washes_hidden && is_wall_wash_def(&g.def)
+                (washes_hidden && is_wall_wash_def(&g.def))
+                    || (enhanced_on && is_baked_wall_light(g))
             }
         })
         .map(|g| g.entity)
@@ -4220,8 +4254,14 @@ mod tests {
         advance(&mut g, 2.0);
         assert!(!g.particles.is_empty(), "two frames emit");
 
+        // The wash-alpha slider multiplies authored alpha on the D3m path (this StaticMesh def
+        // rides it); pin a neutral lift so each assertion measures its own knob.
+        let clock = CelestialClock {
+            wash_alpha_lift: 1.0,
+            ..CelestialClock::default()
+        };
         let raw_alpha = g.def.init_color[3];
-        let plain = drawn_factor(&g, &CelestialClock::default());
+        let plain = drawn_factor(&g, &clock);
         assert_eq!(
             plain.w,
             expected_factor_alpha(raw_alpha),
@@ -4230,11 +4270,13 @@ mod tests {
 
         g.def.mesh_id = *b"lig0";
         g.def.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
-        let clock = CelestialClock::default();
+        // The content rule: ToD-gated alpha over a near-zero authored alpha.
+        g.def.tod_color_driven[TOD_ALPHA_CHANNEL] = true;
+        g.def.init_color[TOD_ALPHA_CHANNEL] = 0.071;
         let halo = drawn_factor(&g, &clock);
         assert!(
             is_lamp_halo_def(&g.def),
-            "lig* sheet must hit the halo branch"
+            "ToD-gated low-alpha sheet must hit the halo branch"
         );
         // No ToD track here: gate holds at 1.0, so alpha is the lift knob times the flicker wave
         // at this phase — still independent of the build's alpha gain.
@@ -4303,6 +4345,8 @@ mod tests {
         world.insert_resource(bevy::ecs::message::Messages::<
             crate::scheduler_runtime::ParticleSpawnTrace,
         >::default());
+        // tick reads the Dynamic Lights setting (Default = Vanilla, texture path).
+        world.insert_resource(crate::graphics_settings::GraphicsSettings::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(sim);
         world.run_system_once(tick_particle_simulator).unwrap();
@@ -4779,12 +4823,13 @@ mod tests {
         // slot) as separate attributes — the shader runs the table against both.
         fn mesh_colors_and_factors(g: &LiveGenerator) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
             let mut mesh = empty_mesh();
-            rebuild_mesh(
-                g,
-                view(Quat::IDENTITY),
-                &CelestialClock::default(),
-                &mut mesh,
-            );
+            // Authored fixed-function factors are the subject here — pin a neutral wash lift
+            // (the default carries the box's slider seed, which multiplies this D3m path).
+            let clock = CelestialClock {
+                wash_alpha_lift: 1.0,
+                ..CelestialClock::default()
+            };
+            rebuild_mesh(g, view(Quat::IDENTITY), &clock, &mut mesh);
             let colors = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
                 Some(bevy::mesh::VertexAttributeValues::Float32x4(v)) => v.clone(),
                 _ => panic!("expected Float32x4 vertex colours"),
@@ -6518,7 +6563,13 @@ mod tests {
     fn rebuilt_colors_and_factors(g: &LiveGenerator, cam: CameraView) -> (Vec<Vec4>, Vec<Vec4>) {
         use bevy::mesh::VertexAttributeValues::Float32x4;
         let mut mesh = empty_mesh();
-        rebuild_mesh(g, cam, &CelestialClock::default(), &mut mesh);
+        // These tests assert authored fixed-function factors; the wash-alpha slider multiplies
+        // them on the D3m path, so pin a neutral lift (the default carries the box's seed).
+        let clock = CelestialClock {
+            wash_alpha_lift: 1.0,
+            ..CelestialClock::default()
+        };
+        rebuild_mesh(g, cam, &clock, &mut mesh);
         let Some(Float32x4(col)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR) else {
             panic!("rebuilt mesh has f32x4 colours");
         };
@@ -6898,10 +6949,12 @@ mod tests {
         particle_draw(
             &g,
             &g.particles[0],
+            // Neutral wash lift: the assertion is on the DAT's own alpha lane.
             &CelestialClock {
                 day_fraction: 0.5,
                 day_of_week: 0,
                 moon_phase,
+                wash_alpha_lift: 1.0,
                 ..Default::default()
             },
         )
@@ -7223,14 +7276,15 @@ mod tests {
 
         let expected_alpha = expected_factor_alpha(base.init_color[3]);
 
+        // The wash-alpha slider multiplies authored alpha on this D3m path; the assertion is on
+        // the factor itself, so pin a neutral lift (the clock default carries the box's seed).
+        let clock = CelestialClock {
+            wash_alpha_lift: 1.0,
+            ..CelestialClock::default()
+        };
         let factor_alpha_of = |g: &LiveGenerator| -> f32 {
             let mut mesh = empty_mesh();
-            rebuild_mesh(
-                g,
-                view(Quat::IDENTITY),
-                &CelestialClock::default(),
-                &mut mesh,
-            );
+            rebuild_mesh(g, view(Quat::IDENTITY), &clock, &mut mesh);
             match mesh.attribute(Mesh::ATTRIBUTE_TANGENT).unwrap() {
                 bevy::mesh::VertexAttributeValues::Float32x4(f) => f[0][3],
                 _ => panic!("expected Float32x4 particle factors"),
@@ -7261,11 +7315,17 @@ mod tests {
         assert!(def.is_singleton());
         assert_eq!(def.init_color[3], SHAFT_ALPHA);
         let expected = expected_factor_alpha(SHAFT_ALPHA);
+        // Neutral wash lift: the assertion is on the authored byte holding for the whole life,
+        // not on the slider seed that multiplies it.
+        let clock = CelestialClock {
+            wash_alpha_lift: 1.0,
+            ..CelestialClock::default()
+        };
         let mut g = celestial(def);
         g.particles[0].life_frames = f32::INFINITY;
         for age in [0.0, 300.0, 30_000.0] {
             g.particles[0].age_frames = age;
-            let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
+            let draw = particle_draw(&g, &g.particles[0], &clock);
             assert_eq!(draw.factor_alpha, expected);
         }
     }
@@ -8287,6 +8347,9 @@ mod tests {
         >::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
+        // tick reads the Dynamic Lights setting for its enhance-mode suppression (Default =
+        // Vanilla, so these tests exercise the texture path exactly as before).
+        world.insert_resource(crate::graphics_settings::GraphicsSettings::default());
         world.insert_resource(sim);
         world
     }

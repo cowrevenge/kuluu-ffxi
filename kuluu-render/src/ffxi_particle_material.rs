@@ -40,6 +40,21 @@ const PATH_D3M_UNTEXTURED: f32 = 1.0;
 const PATH_MMB_TEXTURED: f32 = 2.0;
 const PATH_LAMP_ALPHAMAP: f32 = 3.0;
 
+// Forward depth bias for every particle element. Wash volumes like South Gustaberg's
+// ghu1 are copies of the wall geometry drawn additively on top of it; without a bias
+// they tie with the stone and depth-fight per triangle. The view depth buffer is
+// reversed-Z (compare GreaterEqual), so a positive bias moves toward the camera.
+const PARTICLE_FORWARD_BIAS: i32 = 1;
+const PARTICLE_FORWARD_SLOPE_SCALE: f32 = 1.0;
+
+fn particle_depth_bias() -> DepthBiasState {
+    DepthBiasState {
+        constant: PARTICLE_FORWARD_BIAS,
+        slope_scale: PARTICLE_FORWARD_SLOPE_SCALE,
+        clamp: 0.0,
+    }
+}
+
 impl D3mDrawPath {
     fn selector(self) -> f32 {
         match self {
@@ -219,7 +234,7 @@ impl Material for FfxiParticleMaterial {
                 read_mask: 0,
                 write_mask: 0,
             },
-            bias: DepthBiasState::default(),
+            bias: particle_depth_bias(),
         });
         Ok(())
     }
@@ -330,5 +345,13 @@ mod tests {
                 blend.alpha_mode()
             );
         }
+    }
+
+    #[test]
+    fn particle_elements_bias_toward_the_camera() {
+        let bias = particle_depth_bias();
+        assert!(bias.constant > 0);
+        assert!(bias.slope_scale > 0.0);
+        assert_eq!(bias.clamp, 0.0);
     }
 }

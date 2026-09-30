@@ -407,6 +407,10 @@ fn upload_zone_material_buffers(
             .cloned()
             .unwrap_or_else(|| lighting.0.clone());
         value.time_params = lighting.0.time_params;
+        // Enhanced lamps ride the shared slots: every area sees the same lamp set.
+        value.point_pos = lighting.0.point_pos;
+        value.point_color = lighting.0.point_color;
+        value.point_atten = lighting.0.point_atten;
         write_uniform(&queue, buffer, &value);
     }
 }

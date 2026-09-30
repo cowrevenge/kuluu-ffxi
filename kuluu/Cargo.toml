@@ -75,6 +75,18 @@ enhanced-shutdown-counter = ["kuluu-render?/enhanced-shutdown-counter"]
 enhanced-engage-move-lock-off = ["kuluu-render?/enhanced-engage-move-lock-off"]
 # Enhanced (non-retail) +20% particle alpha (clamped). See kuluu-render for details.
 enhanced-particle-alpha-20 = ["kuluu-render?/enhanced-particle-alpha-20"]
+# Enhanced (non-retail) Debug menu row that bypasses the chase camera leash
+# (focus dead zone, eye slack band, spring). Deliberately NOT in build_cowland.bat —
+# local test builds enable it by hand.
+enhanced-camera-leash = ["kuluu-render?/enhanced-camera-leash"]
+# Enhanced (non-retail): the player character ignores knockback displacement
+# (flinch and push-in play, only the travel is dropped); Debug -> Retail+ row.
+# build_cowland.bat enables it.
+enhanced-ignore-knockback-self = ["kuluu-render?/enhanced-ignore-knockback-self"]
+# Enhanced (non-retail): while a weapon is drawn or sheathed the legs run free
+# (run/walk) instead of riding the draw stance — only the legs unlock;
+# Debug -> Retail+ row. build_cowland.bat enables it.
+enhanced-leg-unlock = ["kuluu-render?/enhanced-leg-unlock"]
 # Enhanced (non-retail) `//targetname` slash command: target the nearest
 # NPC/mob/pet by exact name. Kuluu-local (no render side), so no sub-features;
 # the local release build script enables it. Vanilla builds omit it.

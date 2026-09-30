@@ -318,6 +318,10 @@ impl DynamicLights {
         !matches!(self, DynamicLights::Off)
     }
 
+    pub const fn enhanced(self) -> bool {
+        matches!(self, DynamicLights::Enhanced)
+    }
+
     /// Retail casts no shadow map at all (see `zone_shadow_cast`), so shadows thrown by the
     /// DAT's point lights are the Enhanced half of this setting.
     pub const fn point_shadows_enabled(self) -> bool {
@@ -685,6 +689,21 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub mob_hp_under: bool,
 
+    /// Retail+ gate: the player character ignores knockback displacement (the push and the
+    /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
+    /// The `enhanced-ignore-knockback-self` feature is its compile-time half. Persisted here so
+    /// the choice sticks across runs.
+    #[serde(default)]
+    pub ignore_knockback_self: bool,
+
+    /// Retail+ gate: while a weapon is being drawn or sheathed the legs run free (run/walk)
+    /// instead of riding the draw animation's stance — only the legs, so the body still plays
+    /// the pull. OFF by default; retail locks the lower body to the draw pose. The
+    /// `enhanced-leg-unlock` feature is its compile-time half. Persisted here so the choice
+    /// sticks across runs.
+    #[serde(default)]
+    pub leg_unlock: bool,
+
     #[serde(default)]
     pub texture_filtering: TextureFiltering,
 
@@ -982,6 +1001,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
@@ -1028,6 +1049,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
@@ -1074,6 +1097,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso2x,
                 bloom_intensity: 0.04,
                 volumetric_fog: false,
@@ -1120,6 +1145,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -1170,6 +1197,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
                 volumetric_fog: true,
@@ -1217,6 +1246,8 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso16x,
                 bloom_intensity: 0.16,
                 volumetric_fog: true,
@@ -2308,14 +2339,14 @@ pub fn apply_volumetric_fog_system(
     }
 }
 
-pub fn apply_projection_system(
-    settings: Res<GraphicsSettings>,
-    mut q_cam: Query<&mut Projection, With<OperatorCamera>>,
-) {
+/// Owns the projection's far plane only. FOV is owned by
+/// [`crate::camera::apply_view_fov_system`] (the live view zoom): writing
+/// `settings.fov_deg` here on every settings change would stomp a held zoom
+/// back to base whenever any unrelated row dirtied the resource.
+pub fn apply_projection_system(mut q_cam: Query<&mut Projection, With<OperatorCamera>>) {
     for mut proj in q_cam.iter_mut() {
         if let Projection::Perspective(p) = proj.as_mut() {
             p.far = crate::skybox::CAMERA_FAR;
-            p.fov = settings.fov_deg.to_radians();
         }
     }
 }

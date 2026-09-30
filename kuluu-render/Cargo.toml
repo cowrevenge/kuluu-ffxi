@@ -70,6 +70,21 @@ enhanced-engage-move-lock-off = []
 # particle_draw's alpha chain.
 enhanced-particle-alpha-20 = []
 
+# Enhanced (non-retail) Debug menu row that bypasses the chase camera leash
+# (focus dead zone, eye slack band, spring). The behavior sits in kuluu; this
+# feature lights only the Retail+ row here. Deliberately NOT in build_cowland.bat.
+enhanced-camera-leash = []
+
+# Enhanced (non-retail): the player character ignores knockback displacement
+# (flinch and push-in play, only the travel is dropped); Debug -> Retail+ row,
+# behavior in scheduler_runtime's knockback tick. build_cowland.bat enables it.
+enhanced-ignore-knockback-self = []
+
+# Enhanced (non-retail): while a weapon is drawn or sheathed the legs run free
+# (run/walk) instead of riding the draw stance — only the legs unlock; Debug ->
+# Retail+ row, behavior in ffxi_actor_render's pose pass. build_cowland.bat enables it.
+enhanced-leg-unlock = []
+
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
 # holds by construction; dev/test builds pass `--features debug-menu` explicitly.

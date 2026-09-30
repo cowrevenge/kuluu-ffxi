@@ -128,6 +128,13 @@ const WALL_PAD: f32 = 0.25;
 
 const CAMERA_MIN_DISTANCE: f32 = 0.5;
 
+/// How far below the pivot the eye may sit at full down-tilt, yalms. Retail adds the tilt to
+/// the eye's world Y and rolls the camera back toward the player when you force it down
+/// (CameraManager::UpdatePlayerFollowingCamera), so its reachable envelope never parks a full
+/// boom under the anchor; the zone BVH raycast cannot see unauthored floor gaps, so without this
+/// a fully lowered eye slips under the floor and views through it from below.
+const EYE_FLOOR_BELOW_PIVOT: f32 = 0.5;
+
 const OUTWARD_LERP: f32 = 0.18;
 
 const INWARD_LERP: f32 = 0.45;
@@ -184,6 +191,7 @@ const INWARD_LERP: f32 = 0.45;
 pub fn resolve_camera(
     mode: Res<CameraMode>,
     settings: Res<kuluu_render::GraphicsSettings>,
+    hud_panels: Res<kuluu_render::hud::HudPanels>,
     mut chase: ResMut<ChaseCamera>,
     step: Res<kuluu_render::camera::CameraStepSmoothing>,
     time: Res<Time>,
@@ -233,16 +241,26 @@ pub fn resolve_camera(
     let pivot_xz = Vec2::new(player_pos.x, player_pos.z);
     let dt = time.delta_secs().max(1e-4);
 
+    // Debug menu Camera_leash row (enhanced-camera-leash builds): off bypasses the
+    // focus dead zone, eye slack band and spring — the eye sits on its plain polar goal.
+    let leash_on = !hud_panels.camera_leash_off;
+
     let cos_p = chase.pitch.cos().max(1e-3);
     let sin_p = chase.pitch.sin();
     let max_h = chase.orbit_radius() * cos_p;
-    let min_h = max_h * LEASH_SLACK_MIN_RATIO;
+    let min_h = if leash_on {
+        max_h * LEASH_SLACK_MIN_RATIO
+    } else {
+        0.0
+    };
     let yaw_dir = |yaw: f32| Vec2::new(yaw.sin(), yaw.cos());
 
     // Focus: held inside the dead zone, dragged to its edge outside it. The
     // dead zone is always on; it decides when the camera moves at all.
     let focus = match leash_state.focus {
-        Some(f) if !chase.snap_to_anchor => leash(f, pivot_xz, 0.0, FOCUS_DEADZONE, Vec2::ZERO),
+        Some(f) if !chase.snap_to_anchor && leash_on => {
+            leash(f, pivot_xz, 0.0, FOCUS_DEADZONE, Vec2::ZERO)
+        }
         _ => pivot_xz,
     };
 
@@ -281,7 +299,7 @@ pub fn resolve_camera(
         _ => (focus, focus + yaw_dir(chase.yaw) * max_h),
     };
     let eye_goal = leash(eye_prev, focus, min_h, max_h, yaw_dir(chase.yaw));
-    let eye = if settings.camera_spring && !chase.snap_to_anchor {
+    let eye = if settings.camera_spring && !chase.snap_to_anchor && leash_on {
         spring_toward(eye_prev, eye_goal, dt)
     } else {
         eye_goal
@@ -309,7 +327,7 @@ pub fn resolve_camera(
 
     let target = clamped_camera_distance(hit_t, wanted);
 
-    let effective = if !settings.camera_spring || chase.snap_to_anchor {
+    let mut effective = if !settings.camera_spring || chase.snap_to_anchor {
         target
     } else {
         match *smoothed_effective {
@@ -318,6 +336,11 @@ pub fn resolve_camera(
             None => target,
         }
     };
+    // The down-tilt floor: shorten the boom so the eye never drops a full
+    // EYE_FLOOR_BELOW_PIVOT under the pivot — retail's roll-toward-the-player.
+    if dir.y < 0.0 {
+        effective = effective.min((EYE_FLOOR_BELOW_PIVOT / -dir.y).max(CAMERA_MIN_DISTANCE));
+    }
     *smoothed_effective = Some(effective);
 
     cam_t.translation = pivot + dir * effective;
@@ -481,6 +504,7 @@ mod tests {
                 camera_spring: false,
                 ..Default::default()
             })
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .insert_resource(SceneState::default())
             .init_resource::<ZoneCollisionBvh>()
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
@@ -550,6 +574,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .insert_resource(CameraMode::Chase)
             .insert_resource(kuluu_render::GraphicsSettings::default())
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .insert_resource(SceneState::default())
             .init_resource::<ZoneCollisionBvh>()
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())

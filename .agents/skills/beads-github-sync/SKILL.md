@@ -17,6 +17,8 @@ GitHub Issues are a **generated projection of beads** for contributors, not a se
 
 `.github/workflows/beads-github-publish.yml` runs it automatically on every push to `main` that touches `.beads/issues.jsonl`, publishing **all** beads (not just `roadmap`-labelled ones). `workflow_dispatch` remains available for manual runs, where `dry_run` defaults to true.
 
+Dry runs need authenticated GitHub read access to compare existing projections and preview creates, updates, closures and reopenings accurately. They print proposed writes without executing them; offline regression tests guard that boundary before the workflow publishes.
+
 **Beads edits only reach GitHub once the auto-exported `.beads/issues.jsonl` is committed and pushed.** A bead changed locally but not exported/pushed will look stale on GitHub — that's the usual cause of "my issue didn't update".
 
 ## Inbound: GitHub → beads

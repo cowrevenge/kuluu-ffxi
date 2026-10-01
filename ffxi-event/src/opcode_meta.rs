@@ -1240,6 +1240,8 @@ pub const OPCODE_META: &[OpMeta] = &[
         sets_ret: false,
         valid: true,
     }, // 0x00C9
+    // 0x00CA/0x00CB: deprecated, no retail handler (research/XiEvents/OpCodes/0x00CA.md, 0x00CB.md). No
+    // event authors them; the VM stops on either.
     OpMeta {
         size: 0,
         jumps: false,

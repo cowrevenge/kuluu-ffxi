@@ -188,7 +188,7 @@ pub fn dat_id_helper(param: i32) -> i32 {
 const EVENT_MOTION_BAND_1: i32 = 512;
 const EVENT_MOTION_BAND_2: i32 = 1024;
 const EVENT_MOTION_BAND_3: i32 = 2048;
-const EVENT_MOTION_BAND_4: i32 = 3072;
+pub(crate) const EVENT_MOTION_BAND_4: i32 = 3072;
 const EVENT_MOTION_BASE_0: i32 = 32104;
 const EVENT_MOTION_BASE_1: i32 = 49135;
 const EVENT_MOTION_BASE_2: i32 = 56345;

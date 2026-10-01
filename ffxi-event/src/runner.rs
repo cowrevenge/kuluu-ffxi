@@ -1238,7 +1238,7 @@ mod tests {
             cues.iter().any(|c| matches!(
                 c,
                 EventCue::Mount {
-                    target: ActorLookup(2_147_483_632),
+                    target: ActorLookup(ZONE_PLAYER_ACTOR),
                     status_event: STATUS_EVENT_CHOCOBO,
                     mount_id: None
                 }
@@ -1275,6 +1275,8 @@ mod tests {
     /// install. research/XiEvents/OpCodes/0x0045.md
     #[test]
     fn routine_length_reads_the_authored_end_frame_from_the_install() {
+        use crate::cue::SCHEDULER_FADE_DAT_ID;
+
         let Some(root) = install() else {
             eprintln!("skipping: no FFXI install");
             return;
@@ -1295,9 +1297,9 @@ mod tests {
             (30_834u32, *b"s082", 5u32),
             (30_834, *b"s026", 180),
             (30_906, *b"c00i", 60),
-            (30_904, *b"fdo1", 60),
-            (30_904, *b"fdi0", 30),
-            (30_904, *b"fdo0", 30),
+            (SCHEDULER_FADE_DAT_ID, *b"fdo1", 60),
+            (SCHEDULER_FADE_DAT_ID, *b"fdi0", 30),
+            (SCHEDULER_FADE_DAT_ID, *b"fdo0", 30),
             (30_905, *b"chco", 40),
         ] {
             assert_eq!(

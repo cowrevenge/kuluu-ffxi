@@ -248,13 +248,7 @@ pub struct DialogSession {
     /// The last-observed liveness tuple `(park, exec pointer, wait units,
     /// move units)` and the instant it was first seen: a stall is the same
     /// tuple held across the park-specific grace.
-    liveness: Option<(
-        ffxi_event::Park,
-        usize,
-        f32,
-        f32,
-        std::time::Instant,
-    )>,
+    liveness: Option<(ffxi_event::Park, usize, f32, f32, std::time::Instant)>,
 }
 
 impl DialogSession {
@@ -3748,10 +3742,19 @@ pub(crate) mod tests {
             event_offsets: vec![0],
             references: vec![SPEED_REF, GOAL_X_REF, 0, 0],
             event_data: vec![
-                0x32, ref16(0)[0], ref16(0)[1], // SPEED = refs[0]
-                0x1F, 0x00, ref16(1)[0], ref16(1)[1], ref16(2)[0], ref16(2)[1], ref16(3)[0],
+                0x32,
+                ref16(0)[0],
+                ref16(0)[1], // SPEED = refs[0]
+                0x1F,
+                0x00,
+                ref16(1)[0],
+                ref16(1)[1],
+                ref16(2)[0],
+                ref16(2)[1],
+                ref16(3)[0],
                 ref16(3)[1], // MOVE case 0: goal x=refs[1], z=refs[2], y=refs[3]
-                0x1F, 0x01, // MOVE case 1 (park on the walk)
+                0x1F,
+                0x01, // MOVE case 1 (park on the walk)
                 0x21, // EXECEND
             ],
         };

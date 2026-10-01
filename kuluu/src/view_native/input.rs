@@ -49,6 +49,7 @@ pub struct MoveEnvParams<'w, 's> {
     pub actors: Query<'w, 's, &'static kuluu_render::ffxi_actor_render::FfxiRenderActor>,
     /// The self actor's knockback: its lock and the shove the walker owes it.
     pub self_knockback: ResMut<'w, kuluu_render::ffxi_actor_render::SelfKnockback>,
+    pub cutscene: Res<'w, kuluu_render::cutscene::CutsceneMode>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -2412,6 +2413,7 @@ mod tests {
             .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
             .init_resource::<kuluu_render::scene::TrackedEntities>()
             .init_resource::<kuluu_render::ffxi_actor_render::SelfKnockback>()
+            .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<super::super::walker::debug::FieldDebug>()
             .add_systems(
                 Update,
@@ -2670,6 +2672,34 @@ mod tests {
             ticks.last().expect("ticks").1,
             ticks.first().expect("ticks").1,
             "an actor on the wire entity is not the self actor; nothing holds"
+        );
+    }
+
+    #[test]
+    fn running_event_holds_the_player_between_frames() {
+        let mut drive = MoveDrive::new();
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::cutscene::CutsceneMode>()
+            .active = true;
+        drive.press(KeyCode::KeyW);
+        let held = drive.run(SETTLE_TICKS);
+        assert_eq!(
+            held.last().expect("ticks").1,
+            held.first().expect("ticks").1,
+            "the event must hold the player through its waits"
+        );
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<kuluu_render::cutscene::CutsceneMode>()
+            .active = false;
+        let free = drive.run(SETTLE_TICKS);
+        assert_ne!(
+            free.last().expect("ticks").1,
+            held.last().expect("ticks").1,
+            "the event over, the same key moves"
         );
     }
 

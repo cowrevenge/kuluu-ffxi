@@ -1080,7 +1080,9 @@ pub enum CutsceneCue {
     ClockHold {
         stop: bool,
         hour: Option<u32>,
+        #[serde(default)]
         minute: u8,
+        #[serde(default)]
         day_from_epoch: Option<u32>,
     },
     Mount {

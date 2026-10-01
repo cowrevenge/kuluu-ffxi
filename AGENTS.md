@@ -147,9 +147,12 @@ HUD, menus, camera, animation, or input behavior, use the `verify` skill to
 choose the runtime surface and the visible result to inspect. Build the changed
 client, drive the affected view, capture it, and open the capture for pixel
 inspection before closing the bead or claiming completion. Include the evidence
-path and observation in the final report. Unit tests and source inspection do
-not satisfy this requirement. A commit does not clear it, and work in another
-worktree still belongs to this session. If a concrete build, launch, capture,
+path and observation in the final report. Prefer evidence captured directly
+from the game or derived from its production rendering pipeline. When direct
+evidence cannot be gathered, state the reason and the limits of any secondary
+evidence. Unit tests and source inspection do not satisfy this requirement.
+A commit does not clear it, and work in another worktree still belongs to this
+session. If a concrete build, launch, capture,
 or access failure prevents verification, capture the diagnostic, keep the bead
 open, and report verification as blocked. Build duration or effort already spent
 is not a reason to skip the drive. Waiving visual verification requires the

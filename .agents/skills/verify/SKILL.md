@@ -22,9 +22,14 @@ alone do not establish the visible result.
 For UI work, choose the drive and expected visible result before editing.
 Completion requires the changed build, an affected-view capture, and opening
 that capture with `view_image` (Codex) or `Read` (Claude) to inspect the pixels.
-A fixture is sufficient for a cosmetic widget change when it renders the real
-production widget and covers the reported defect; an independently drawn mockup
-is not evidence. Keep navigation/session checks on the live stack. Exercise the
+Prefer evidence captured directly from the game or derived from its production
+rendering pipeline, with that provenance stated. A fixture can establish a
+cosmetic result when it renders the real production widget and covers the
+reported defect; it does not establish the live game's navigation or session
+behavior. Secondary evidence is a fallback when direct evidence cannot be
+gathered: record the specific reason and limit the claim to what it demonstrates.
+An independently drawn mockup cannot verify the game's pixels. Keep
+navigation/session checks on the live stack. Exercise the
 shared widget's affected consumers and the cases that motivated the fix, such
 as quantity text over bright/dark art, empty slots, and single-item stacks.
 

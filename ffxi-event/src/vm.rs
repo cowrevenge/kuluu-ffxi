@@ -6,10 +6,9 @@ use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
     dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
-    EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, MAGIC_DAT_ID_BASE,
-    MAGIC_ROUTINE_TAG, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE, MUSIC_VOLUME_MAX, NO_ACTION_KEY,
-    SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE,
-    STATUS_EVENT_MOUNT,
+    EventCue, ExtSchedulerMotion, FourCc, EMOTE_ANIMATION_KEY, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE,
+    MAGIC_DAT_ID_BASE, MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
+    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -4131,7 +4130,11 @@ mod tests {
             operands.extend_from_slice(&MAGIC_ROUTINE_TAG);
             operands.extend_from_slice(&REF1);
             assert_eq!(
-                cues_of(op, &operands, vec![WORK, SCHEDULER_DURATION_FROM_DAT as u32]),
+                cues_of(
+                    op,
+                    &operands,
+                    vec![WORK, SCHEDULER_DURATION_FROM_DAT as u32]
+                ),
                 [EventCue::Scheduler {
                     dat_id: base + WORK,
                     actor1: ActorLookup::EVENT_ENTITY,

@@ -50,6 +50,7 @@ pub struct MoveEnvParams<'w, 's> {
     /// The self actor's knockback: its lock and the shove the walker owes it.
     pub self_knockback: ResMut<'w, kuluu_render::ffxi_actor_render::SelfKnockback>,
     pub cutscene: Res<'w, kuluu_render::cutscene::CutsceneMode>,
+    pub mzb_in_flight: Res<'w, kuluu_render::dat_mzb::LoadMzbInFlight>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where

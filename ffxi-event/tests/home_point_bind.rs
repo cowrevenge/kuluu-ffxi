@@ -77,14 +77,23 @@ fn advance_past_parks(
 ) -> DialogStep {
     const WAIT_SKIP_SECS: f32 = 3600.0;
     let mut step = runner.advance(choice, strings);
-    while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+    for _ in 0..MAX_STEPS {
+        if !matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+            return step;
+        }
         step = if matches!(step, DialogStep::Waiting) {
             runner.tick(WAIT_SKIP_SECS, strings)
         } else {
             runner.ack_server(strings)
         };
     }
-    step
+    panic!(
+        "home point driver stalled: {step:?}, park={:?}, opcode={:#x}, pc={}, wait={}",
+        runner.park(),
+        runner.current_opcode(),
+        runner.exec_pointer(),
+        runner.wait_units_remaining(),
+    )
 }
 
 fn bind_on_event_entity(cues: &[EventCue]) -> bool {

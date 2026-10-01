@@ -539,14 +539,23 @@ mod tests {
     ) -> DialogStep {
         const WAIT_SKIP_SECS: f32 = 3600.0;
         let mut step = runner.advance(choice, strings);
-        while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+        const MAX_PARK_STEPS: usize = 100;
+        for _ in 0..MAX_PARK_STEPS {
+            if !matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+                return step;
+            }
             step = if matches!(step, DialogStep::Waiting) {
                 runner.tick(WAIT_SKIP_SECS, strings)
             } else {
                 runner.ack_server(strings)
             };
         }
-        step
+        panic!(
+            "runner stalled: {step:?}, park={:?}, opcode={:#x}, pc={}",
+            runner.park(),
+            runner.current_opcode(),
+            runner.exec_pointer(),
+        )
     }
 
     #[test]
@@ -659,6 +668,22 @@ mod tests {
                 end_para: EVENT_CANCELLED_END_PARA,
             }
         );
+    }
+
+    /// Regression: a bare QUERYWAIT used to yield AwaitMessageAck without moving
+    /// EP, and this loop answered it with dismiss_message and stepped onto the
+    /// same opcode forever (8700's favorites branch). It now ends.
+    #[test]
+    fn bare_querywait_does_not_spin_the_runner() {
+        let strings = empty_strings();
+        let mut r = DialogRunner::start(
+            &one_event_block(vec![OP_QUERYWAIT, OP_END], vec![]),
+            1,
+            0,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(r.advance(None, &strings), DialogStep::Ended { end_para: 0 });
     }
 
     #[test]

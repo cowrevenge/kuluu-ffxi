@@ -393,6 +393,9 @@ const MAPLOAD_SIZE: usize = 3;
 /// 0x0058.md is `ExecPointer++; RetFlag = 1`; 0x009A.md yields only while the
 /// music server is mid-read, which nothing here triggers.
 const YIELD_SIZE: usize = 1;
+/// 0x0025.md / 0x007F.md: one byte, `ExecPointer += 1` on every exit that
+/// advances (selection taken, or no talk window open).
+const QUERYWAIT_SIZE: usize = 1;
 
 // 0x003E BITTEST operand layout (research/XiEvents/OpCodes/0x003E.md): the bit
 // index at +3 selects a work slot `bit >> 5` past the one named at +1, and the
@@ -979,6 +982,13 @@ impl EventVm {
         }
         self.message_open = MESSAGE_OPEN_NONE;
         self.pending_message = None;
+    }
+
+    /// A message frame the host has not dismissed yet: retail's
+    /// `PTR_TalkWinFlag` for the message half of the talk window. The menu
+    /// half is `pending_choice`, checked by the QUERYWAIT arms themselves.
+    fn message_frame_open(&self) -> bool {
+        self.pending_message.is_some() || self.message_open == MESSAGE_OPEN_AWAITING
     }
 
     /// Mark the open message invalid so the next MESWAIT force-cancels the
@@ -1971,20 +1981,29 @@ impl EventVm {
                     self.selection_made = false;
                     self.exec_pointer += 7;
                 }
+                // With no menu armed and no message frame open, retail's
+                // `!PTR_TalkWinFlag` path steps past the opcode and yields;
+                // the script runs on with whatever Work_Zone[0] already holds
+                // (research/XiEvents/OpCodes/0x0025.md). A message frame that
+                // is still open keeps the ack yield so the host closes it first.
                 OP_QUERYWAIT => {
                     if !self.selection_made {
-                        return match self.pending_choice.clone() {
-                            Some(choice) => StepResult::AwaitChoice(choice),
-                            None => StepResult::AwaitMessageAck,
-                        };
+                        if let Some(choice) = self.pending_choice.clone() {
+                            return StepResult::AwaitChoice(choice);
+                        }
+                        if self.message_frame_open() {
+                            return StepResult::AwaitMessageAck;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
+                    } else {
+                        self.selection_made = false;
+                        self.pending_choice = None;
+                        if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                            self.finished = true;
+                            return StepResult::Cancelled;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
                     }
-                    self.selection_made = false;
-                    self.pending_choice = None;
-                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
-                        self.finished = true;
-                        return StepResult::Cancelled;
-                    }
-                    self.exec_pointer += 1;
                 }
                 // XiEvent ReqSet/GetReqStatus family (research/XiEvents/OpCodes/
                 // 0x0027.md, 0x0028.md, 0x0029.md, 0x002A.md): actor-choreography
@@ -2825,17 +2844,21 @@ impl EventVm {
                 // (research/XiEvents/OpCodes/0x007F.md).
                 OP_QUERYWAIT2 => {
                     if !self.selection_made {
-                        return match self.pending_choice.clone() {
-                            Some(choice) => StepResult::AwaitChoice(choice),
-                            None => StepResult::AwaitMessageAck,
-                        };
+                        if let Some(choice) = self.pending_choice.clone() {
+                            return StepResult::AwaitChoice(choice);
+                        }
+                        if self.message_frame_open() {
+                            return StepResult::AwaitMessageAck;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
+                    } else {
+                        self.selection_made = false;
+                        self.pending_choice = None;
+                        if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                            self.work_zone.lock().unwrap()[0] = CHOICE_CANCELLED_QUERYWAIT2;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
                     }
-                    self.selection_made = false;
-                    self.pending_choice = None;
-                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
-                        self.work_zone.lock().unwrap()[0] = CHOICE_CANCELLED_QUERYWAIT2;
-                    }
-                    self.exec_pointer += 1;
                 }
                 // The sub-byte-dispatched families. Their width is the case's,
                 // not the table's widest, so an undocumented sub stops the VM
@@ -5016,6 +5039,61 @@ mod tests {
         assert_eq!(e.exec_pointer(), 8);
     }
 
+    /// 8700's favorites branch: a bare 0x25 after the menu that answered the
+    /// previous 0x25. Retail steps past it (`!PTR_TalkWinFlag`) and the IF
+    /// behind it reads the slot the player already picked
+    /// (research/XiEvents/OpCodes/0x0025.md). Layout: [0..7] QUERY,
+    /// [7] QUERYWAIT, [8] QUERYWAIT (bare), [9] END.
+    #[test]
+    fn op_25_querywait_with_no_menu_open_skips_and_keeps_the_last_selection() {
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT,
+            OP_QUERYWAIT,
+            OP_END,
+        ];
+        let mut e = vm(data, vec![500, 0]);
+        assert!(matches!(e.step(), StepResult::AwaitChoice(_)));
+        e.select_choice(Some(2));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 9, "the bare QUERYWAIT is one byte");
+        assert_eq!(e.work_zone(0), 2, "the earlier selection survives the skip");
+    }
+
+    /// A 0x25 with nothing armed at all: the event starts on it and runs on.
+    #[test]
+    fn op_25_querywait_as_the_first_opcode_runs_on() {
+        let mut e = vm(vec![OP_QUERYWAIT, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
+    }
+
+    /// A message frame with no MESWAIT behind it, then a bare 0x25: the frame
+    /// shows, the host dismisses it, and the 0x25 skips instead of parking.
+    #[test]
+    fn op_25_querywait_after_a_dismissed_message_skips() {
+        let data = vec![OP_MESSAGE, 0x00, 0x80, OP_QUERYWAIT, OP_END];
+        let mut e = vm(data, vec![900]);
+        assert!(matches!(e.step(), StepResult::AwaitMessage(_)));
+        e.dismiss_message();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4);
+    }
+
+    /// 0x7F takes the same no-window exit as 0x25.
+    #[test]
+    fn op_7f_querywait2_with_no_menu_open_skips() {
+        let mut e = vm(vec![OP_QUERYWAIT2, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
+    }
+
     /// Unlike 0x25, a cancelled menu stores 255 and the event runs on.
     #[test]
     fn op_7f_querywait2_does_not_cancel_on_a_cancelled_choice() {
@@ -6272,7 +6350,7 @@ mod tests {
     fn map_query_data_cases_advance_by_their_width() {
         for (sub, width) in [(1u8, 8usize), (3, 6), (5, 12)] {
             let mut data = vec![OP_MAP_QUERY, sub];
-            data.extend(std::iter::repeat(0).take(width - 2));
+            data.extend(std::iter::repeat_n(0, width - 2));
             data.push(OP_END);
             let mut e = vm(data, vec![]);
             assert_eq!(e.step(), StepResult::Done, "case {sub}");
@@ -6311,7 +6389,7 @@ mod tests {
             (0x0A, 2),
         ] {
             let mut data = vec![OP_RANKING, sub];
-            data.extend(std::iter::repeat(0).take(width - 2));
+            data.extend(std::iter::repeat_n(0, width - 2));
             data.push(OP_END);
             let mut e = vm(data, vec![]);
             assert_eq!(e.step(), StepResult::Done, "case {sub}");
@@ -6336,7 +6414,7 @@ mod tests {
             for &slot in slots {
                 data.extend_from_slice(&sel(slot));
             }
-            data.extend(std::iter::repeat(0).take(width - 2 - 2 * slots.len()));
+            data.extend(std::iter::repeat_n(0, width - 2 - 2 * slots.len()));
             data.push(OP_END);
             let mut e = EventVm::start(&block(data, vec![]), 7, 5, vec![1; 8]).unwrap();
             if let Some(slot) = untouched {

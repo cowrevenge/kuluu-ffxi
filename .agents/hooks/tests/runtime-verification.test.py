@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HOOKS = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("verification", HOOKS / "runtime-verification.py")
@@ -18,6 +19,11 @@ PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 class VerificationGateTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ, {
+            key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+        }, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
@@ -204,6 +210,25 @@ class VerificationGateTests(unittest.TestCase):
         note.write_text("contributor orientation\n")
         verification.track(self.session, self.root, [str(note)])
         self.assertIsNone(verification.check(self.payload))
+
+
+class HookEnvironmentTests(unittest.TestCase):
+    def test_fixture_does_not_mutate_the_hook_callers_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory)
+            clean = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            subprocess.run(["git", "init", "-q", str(caller)], env=clean, check=True)
+            config = caller / ".git/config"
+            before = config.read_bytes()
+            environment = {**clean, "GIT_DIR": str(caller / ".git"),
+                           "GIT_WORK_TREE": str(caller), "GIT_INDEX_FILE": str(caller / ".git/index")}
+            result = subprocess.run([
+                sys.executable, str(Path(__file__).resolve()),
+                "VerificationGateTests.test_commit_does_not_clear_the_requirement",
+            ], env=environment, capture_output=True, text=True)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertFalse((caller / ".git/index").exists())
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -31,13 +31,9 @@ cargo test -p ffxi-proto framing::tests::roundtrip --features native-window
 - **Enable the hooks once per clone:** `cargo xtask install-hooks` (sets `core.hooksPath=.githooks`). Bypass a push with `git push --no-verify`; `PREPUSH_FAST=1 git push` runs fmt and state contracts.
 - `xtask` is excluded from `default-members`, so plain `cargo build`/`test` skip it; run it via the `cargo xtask` alias.
 
-## PR visual evidence
+## PR review and evidence
 
-PRs that can change rendered output or visible interaction should include reviewer-accessible screenshots or video in the PR body. This includes materials, lighting, particles, animation, camera, movement/collision, HUD and menus. Use screenshots for static appearance; use video for motion, timing, transitions and interaction. Prefer matched before/after captures when comparing behavior.
-
-Caption evidence with the tested commit, install/client profile, scene and reproduction steps; include clock/weather/settings when they affect the comparison. Inspect the actual media for the claimed result. Black, stale or unrelated frames, local-only artifact paths, logs and green CI do not establish visual correctness. Refresh affected evidence after relevant code changes; explain when earlier evidence still applies.
-
-Use the [verify skill](.agents/skills/verify/SKILL.md) for capture and the [retail-grounding skill](.agents/skills/retail-grounding/SKILL.md) for the expected behavior. If capture is unavailable, state the exact gap and keep visual claims unverified. Reviewers report missing evidence as a validation gap, not a demonstrated code defect; do not claim visual verification or recommend merge on that basis. Nonvisual PRs can omit the visual-evidence section.
+PRs must justify why the change belongs in Kuluu beyond linking a Bead/issue. Vanilla/Retail is the default; modest FPS or UX improvements need a clear benefit without material gameplay or convenience drift; Enhanced behavior requires explicit opt-in. Use the [Kuluu review skill](.agents/skills/kuluu-review/SKILL.md) for project-fit assessment, focused correction stacks and evidence requirements. Graphical or visible interaction changes need reviewer-accessible screenshots/video; use [verify](.agents/skills/verify/SKILL.md) to capture them.
 
 ## Running
 

@@ -2829,3 +2829,23 @@ fn respawn_cancels_pending_removal_before_batch_drain() {
         Some("new")
     );
 }
+
+#[test]
+fn legacy_clock_hold_event_uses_hour_only_defaults() {
+    let event: AgentEvent = serde_json::from_value(serde_json::json!({
+        "type": "cutscene_cue",
+        "cue": {"ClockHold": {"stop": true, "hour": null}}
+    }))
+    .unwrap();
+    assert!(matches!(
+        event,
+        AgentEvent::CutsceneCue {
+            cue: CutsceneCue::ClockHold {
+                stop: true,
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
+            }
+        }
+    ));
+}

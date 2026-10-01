@@ -143,7 +143,7 @@ pub struct ZoneDoorNpc {
     /// cues, research/XiEvents/OpCodes/0x004C.md, 0x004D.md, 0x004F.md).
     /// Kept off `animation` because the wire byte keeps reporting the
     /// server's own state and would clobber the event's dedup.
-    pub event_animation: u8,
+    pub event_animation: Option<u8>,
 }
 
 /// One zone-DAT door directory: every Scheduler it holds (so a routine's 0x03
@@ -482,13 +482,14 @@ pub fn trigger_zone_doors(
                     continue;
                 }
                 npc.animation = wire.animation;
+                npc.event_animation = None;
                 false
             }
             Err(_) => {
                 commands.entity(entity).try_insert(ZoneDoorNpc {
                     four_cc,
                     animation: wire.animation,
-                    event_animation: 0,
+                    event_animation: None,
                 });
                 true
             }
@@ -552,12 +553,7 @@ fn swing_door(dir: &DoorDir, routine: &[u8; 4], entity: Entity, commands: &mut C
     });
 }
 
-/// Swing the door the running event script asked for. The 0x4C/0x4D/0x4F
-/// StatusEvent writes ride the 0x7E Mount cue (ffxi-event/src/cue.rs), and
-/// this is their consumer: the target's look says which door geometry it is,
-/// and the swing is the same routine trigger_zone_doors runs on the server's
-/// byte. The two dedup on ZoneDoorNpc.animation, so a state the server already
-/// reported does not swing twice.
+/// Applies authored event door state (research/XiEvents/OpCodes/0x004C.md).
 pub fn trigger_event_doors(
     events: Res<crate::snapshot::EventLog>,
     scene_state: Res<SceneState>,
@@ -573,10 +569,21 @@ pub fn trigger_event_doors(
     let new_count =
         (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
     *last_seen = events.pushed_total;
-    if new_count == 0 || doors.dirs.is_empty() {
+    if new_count == 0 {
         return;
     }
     for ev in events.recent.iter().rev().take(new_count).rev() {
+        if matches!(
+            ev,
+            kuluu_snapshot::ViewerEvent::CutsceneEnded
+                | kuluu_snapshot::ViewerEvent::ZoneChanged { .. }
+                | kuluu_snapshot::ViewerEvent::Disconnected { .. }
+        ) {
+            for mut npc in &mut q_npc {
+                npc.event_animation = None;
+            }
+            continue;
+        }
         let kuluu_snapshot::ViewerEvent::Cutscene { cue } = *ev else {
             continue;
         };
@@ -615,16 +622,16 @@ pub fn trigger_event_doors(
         };
         match q_npc.get_mut(entity) {
             Ok(mut npc) => {
-                if npc.event_animation == status_event {
+                if npc.event_animation.unwrap_or(npc.animation) == status_event {
                     continue;
                 }
-                npc.event_animation = status_event;
+                npc.event_animation = Some(status_event);
             }
             Err(_) => {
                 commands.entity(entity).try_insert(ZoneDoorNpc {
                     four_cc,
                     animation: wire.animation,
-                    event_animation: status_event,
+                    event_animation: Some(status_event),
                 });
             }
         }
@@ -1092,6 +1099,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn event_door_override_releases_on_server_change_and_event_end() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<TrackedEntities>()
+            .init_resource::<ZoneDoors>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::snapshot::EventLog>()
+            .add_systems(Update, (trigger_event_doors, trigger_zone_doors).chain());
+        app.world_mut().resource_mut::<ZoneDoors>().dirs.insert(
+            u32::from_le_bytes(SSANDY_STABLES_DOOR),
+            swing_dir(SSANDY_STABLES_SWING_DEG.to_radians()),
+        );
+        let npc = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<TrackedEntities>()
+            .by_id
+            .insert(DOOR_ENTITY_ID, npc);
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .entities = vec![door_entity(DOOR_ENTITY_ID, animation::CLOSE_DOOR)];
+        let open = kuluu_snapshot::ViewerEvent::Cutscene {
+            cue: kuluu_snapshot::CutsceneCue::Mount {
+                target: kuluu_snapshot::CutsceneActor::Entity {
+                    server_id: DOOR_ENTITY_ID,
+                },
+                status_event: animation::OPEN_DOOR,
+                mount_id: None,
+            },
+        };
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(open.clone());
+        app.update();
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .entities[0]
+            .animation = animation::OPEN_DOOR;
+        app.update();
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .entities[0]
+            .animation = animation::CLOSE_DOOR;
+        app.update();
+        let before = app
+            .world()
+            .get::<ActiveSchedulers>(npc)
+            .unwrap()
+            .routine_names()
+            .count();
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(open.clone());
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<ActiveSchedulers>(npc)
+                .unwrap()
+                .routine_names()
+                .count(),
+            before + 1
+        );
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::CutsceneEnded);
+        app.update();
+        assert_eq!(
+            app.world().get::<ZoneDoorNpc>(npc).unwrap().event_animation,
+            None
+        );
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(open);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<ActiveSchedulers>(npc)
+                .unwrap()
+                .routine_names()
+                .count(),
+            before + 2
+        );
     }
 
     #[test]

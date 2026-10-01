@@ -1725,7 +1725,9 @@ pub enum CutsceneCue {
     ClockHold {
         stop: bool,
         hour: Option<u32>,
+        #[serde(default)]
         minute: u8,
+        #[serde(default)]
         day_from_epoch: Option<u32>,
     },
     /// Put the target on or off a mount. `status_event` is the `GameStatus`
@@ -2114,6 +2116,23 @@ pub enum ClientFrame {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn legacy_clock_hold_cue_uses_hour_only_defaults() {
+        let cue: super::CutsceneCue = serde_json::from_value(serde_json::json!({
+            "ClockHold": {"stop": true, "hour": null}
+        }))
+        .unwrap();
+        assert!(matches!(
+            cue,
+            super::CutsceneCue::ClockHold {
+                stop: true,
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
+            }
+        ));
+    }
     use super::*;
 
     fn sample_auction() -> AuctionUi {

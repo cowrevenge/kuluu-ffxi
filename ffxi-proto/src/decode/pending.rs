@@ -91,7 +91,6 @@ pub struct FriendPass {
 }
 
 impl FriendPass {
-    /// Body size after the 4-byte sub-header: 3 + 16 + 1 + 1 + 2 bytes.
     pub(crate) const SIZE: usize =
         3 * std::mem::size_of::<i32>() + 16 + 2 + std::mem::size_of::<u16>();
 

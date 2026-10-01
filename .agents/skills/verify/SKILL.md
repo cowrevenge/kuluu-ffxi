@@ -125,6 +125,14 @@ observed (e.g. a GUI leg that needs human eyes) gets named explicitly rather
 than silently skipped. Probes off the happy path (wrong zone, dead server,
 double-send) are worth a line each even when they hold.
 
+## Visual evidence in PRs
+
+For a PR that can alter pixels or visible interaction, include reviewer-accessible captures in its body. Follow `AGENTS.md`'s PR visual evidence policy: screenshots for static appearance, video for movement, animation, camera, timing or transitions. Prefer matched before/after scenes, and identify the tested commit and client profile plus the conditions and steps needed to reproduce it.
+
+Open and inspect the actual capture before publishing or citing it. A successful screenshot command, a nonempty file or a healthy socket is not visual proof; reject black, stale and unrelated frames using the GUI reference's capture checks. Keep raw artifacts locally, but attach/embed the evidence or provide a stable link reviewers can access; a local path alone is insufficient. Refresh affected captures after relevant changes or explain why earlier evidence still applies.
+
+If capturing or publishing media is blocked, report that limitation in the PR body/review and keep visual correctness unverified. A read-only review reports this as an evidence gap rather than inventing a defect. Do not substitute logs or green CI for visual evidence, or imply that a capture on the original combined branch verifies a new extracted stack.
+
 ## Recording evidence (feeds the stop-hook gate)
 
 The stop-hook verify gate (`.agents/hooks/stop.d/25-verify.sh`) blocks session

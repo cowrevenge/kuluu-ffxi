@@ -19,6 +19,12 @@ An issue link explains where work came from; it does not justify inclusion. Asse
 
 Look for unrelated changes that add review cost, regress established behavior or mix these categories. Recommend coherent independent PRs, with stacking only where dependencies require it. Judge scope by behavior and risk, not an arbitrary line limit.
 
+## Contributor-facing issue references
+
+Prefer verified GitHub issue URLs in PR bodies and review reports; retain Beads as the durable tracking source. Resolve the publisher's exact `<!-- beads-id: ID -->` marker across open and closed GitHub issues, or verify an imported bead's `external_ref: gh-N` against the issue. Do not infer an issue number from a bead ID or create a second issue merely to satisfy the template.
+
+Use [beads-github-sync](../beads-github-sync/SKILL.md) when a mapping is missing or stale. Local/unmerged exports have not reached the automatic main-branch publisher; manual publication defaults to a dry run, and closed beads without existing mappings are deliberately not backfilled. GitHub-only issues may require the opt-in inbound path rather than already having a bead. If no verified mapping exists, name the bead and publication gap briefly, or explain why the PR needs no issue. Correct sync problems through the canonical publisher/import workflow within existing authority; never assume two-way synchronization or broaden a review into bulk publication.
+
 ## Correctness and evidence
 
 Follow the defect-first discipline of the generic review-agent: inspect surrounding code, call sites and meaningful tests; report discrete introduced problems with a demonstrated trigger and consequence. Continue through the entire diff. Do not turn style preferences, pre-existing failures or missing proof into bugs.
@@ -33,7 +39,7 @@ Use [verify](../verify/SKILL.md) for runtime collection. Match proof to the clai
 
 A review-only invocation is read-only: return findings, evidence gaps and decisions; do not edit, commit, push or post. When used with the generic review-agent, retain that agent's read-only and no-delegation constraints. A parent workflow may separately perform explicitly authorized verification, corrections and publication. This skill grants no outward-facing authority.
 
-In an authorized correction workflow, put uncontroversial fixes and explanatory limitations in a focused correction stack. Keep one issue per coherent correction commit, referenced in the PR body. Put controversial proposals in a concise decision section for the maintainer. Prefer those notes over separate GitHub comments unless the user requests comments. Do not use a verbose corrections chronology; describe the final behavior, project justification, dependencies and actual validation.
+In an authorized correction workflow, put uncontroversial fixes and explanatory limitations in a focused correction stack. Keep one issue per coherent correction commit, referenced in the PR body using the contributor-facing mapping above. Put controversial proposals in a concise decision section for the maintainer. Prefer those notes over separate GitHub comments unless the user requests comments. Do not use a verbose corrections chronology; describe the final behavior, project justification, dependencies and actual validation.
 
 ## Result
 

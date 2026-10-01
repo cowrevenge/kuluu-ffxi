@@ -1,6 +1,6 @@
 ## Change
 
-<!-- What problem does this solve, and what happens now? Link the Bead/issue. -->
+<!-- What problem does this solve, and what happens now? Prefer a verified GitHub issue URL. If the Bead has no published issue, identify it and the publication gap; do not invent a link or duplicate the issue. Explain when no issue is needed. -->
 
 ## Why this belongs in Kuluu
 

@@ -1282,18 +1282,17 @@ impl EventVm {
             || self.pending_choice.is_some()
     }
 
-    /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
-    /// clear it and step past the case-1 poll opcode execution is parked on.
-    /// Retail's next tick sees `RecPendingFlag` cleared, advances +2, and
-    /// yields; doing that advance here instead of re-running the poll is
-    /// behaviorally identical one frame earlier (research/XiEvents/OpCodes/
-    /// 0x0043.md, 0x0047.md). No-op if nothing is pending. Retail's
-    /// `RecPendingFlag`/`RecPendingXZYFlag` are single globals shared by every
-    /// entity VM in the event, so the release reaches every parked VM, not
-    /// just the one that sent the tag.
+    // research/XiEvents/OpCodes/0x0043.md, 0x0047.md, 0x008C.md: release the shared pending flag.
     pub fn ack_server(&mut self) {
-        if self.pending_ack.take().is_some() {
-            self.exec_pointer += 2;
+        if let Some(tag) = self.pending_ack.take() {
+            // research/XiEvents/OpCodes/0x008C.md: the send cases precede the separate case-1 poll.
+            let width = if matches!(tag, PendingTag::Recipe { .. }) {
+                crate::opcode_meta::sub_size(OP_RECIPE, self.byte_at(1))
+                    .expect("a pending recipe has a sending case") as usize
+            } else {
+                2
+            };
+            self.exec_pointer += width;
         }
         let mut release = |child: &mut EventVm| child.ack_server();
         self.for_each_child_vm(&mut release);
@@ -6588,6 +6587,7 @@ mod tests {
         // Case 0's skill/level/Param0 operands are work-zone selectors
         // (0x1002/0x1004/0x1006), which the arm resolves through getworkofs.
         data.extend_from_slice(&[OP_RECIPE, 0x00, 0x02, 0x10, 0x04, 0x10, 0x06, 0x10]);
+        let poll = data.len();
         data.extend_from_slice(&[OP_RECIPE, 0x01, OP_END]);
         let mut e = vm(data, refs);
         assert_eq!(
@@ -6604,6 +6604,7 @@ mod tests {
             })
         );
         e.ack_server();
+        assert_eq!(e.exec_pointer(), poll, "resume at the recipe poll");
         assert_eq!(e.step(), StepResult::Done);
     }
 
@@ -6661,6 +6662,7 @@ mod tests {
             data.push(OP_RECIPE);
             data.push(sub);
             data.extend_from_slice(selectors);
+            let poll = data.len();
             data.extend_from_slice(&[OP_RECIPE, 0x01, OP_END]);
             let mut e = vm(data, refs.clone());
             assert_eq!(
@@ -6669,6 +6671,11 @@ mod tests {
                 "case {sub}"
             );
             e.ack_server();
+            assert_eq!(
+                e.exec_pointer(),
+                poll,
+                "case {sub}: resume at the recipe poll"
+            );
             assert_eq!(e.step(), StepResult::Done);
         }
     }

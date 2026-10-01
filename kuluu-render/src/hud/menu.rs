@@ -26,8 +26,8 @@ pub const COMM_EMOTE_LIST: &str = "Emote List";
 /// Desk are dropped; Graphics/Debug are ours, grouped with the page-2 config-like
 /// commands). The Debug entry renders only when built with `--features
 /// debug-menu` — opt-in and off by default, so retail parity holds as long as
-/// shipped builds do not enable the flag; local test batches (build_cowland.bat)
-/// pass it on RELEASE builds on purpose.
+/// shipped builds do not enable the flag; the local release build script
+/// passes it on RELEASE builds on purpose.
 const ROOT_ENTRIES: &[&str] = &[
     // Page 1
     "Status",
@@ -307,12 +307,29 @@ pub const DEBUG_WEATHER: &str = "Weather";
 /// Debug fog gate row: [on] = every fog layer (DAT distance fog, volumetric
 /// ground haze) renders; toggling it off strips all of them. Default on.
 pub const DEBUG_FOG: &str = "Fog";
+/// Debug clock-gate row: [on] = the Vana clock is frozen at 18:00 (lamp
+/// night-scene testing); off thaws it back to live time.
+pub const DEBUG_FORCE_18: &str = "Force_18:00";
+#[cfg(feature = "enhanced-camera-leash")]
+/// Debug camera-leash row (`enhanced-camera-leash` builds only): [on] = the chase
+/// camera's focus dead zone, eye slack band and spring run; off bypasses them so the
+/// eye sits on its plain polar goal. Default on.
+pub const DEBUG_CAMERA_LEASH: &str = "Camera_leash";
+/// Debug body smoother row: [on] = the self model slerps toward the dispatch
+/// heading; off = it sits on it every frame. Default on.
+pub const DEBUG_BODY_SMOOTHER: &str = "Body_smoother";
 /// Debug Entity List overlay row: [on] = the scrollable live-entity dump
 /// (id/name/kind/pos/status/hp/invis flags from the EntityTable) is shown.
 /// Mouse wheel scrolls. Default off.
 pub const DEBUG_ENTITY_LIST: &str = "Entity List";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
+/// Debug Ambient row: [on]/[off] for the zone/actor ambience emitters (mixer A);
+/// routine one-shots are unaffected. Toggles `AudioMuteState::ambient`.
+pub const DEBUG_AMBIENT: &str = "Ambient";
+/// Debug Ambient Gain row: 0..=200 percent of unity, adjusted with Left/Right
+/// like Volume. Nudges `AudioMuteState::ambient_gain`.
+pub const DEBUG_AMBIENT_GAIN: &str = "Ambient Gain";
 pub const DEBUG_PRINT_POS: &str = "Print POS";
 pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
 pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
@@ -336,6 +353,14 @@ pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
 /// Gates the party-frame Job column (retail shows none; default off). The row
 /// exists only with `enhanced-job-display`.
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
+#[cfg(feature = "enhanced-ignore-knockback-self")]
+/// Retail+ row: [on] = the player character ignores knockback displacement (flinch
+/// and push-in play, only the travel is dropped). Off by default.
+pub const RETAIL_IGNORE_KNOCKBACK_SELF: &str = "Ignore_knockback_self";
+#[cfg(feature = "enhanced-leg-unlock")]
+/// Retail+ row: [on] = while a weapon is drawn or sheathed the legs run free
+/// (run/walk) instead of riding the draw stance; only the legs unlock. Off by default.
+pub const RETAIL_LEG_UNLOCK: &str = "Leg_unlock";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -348,9 +373,15 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_AUTO_ENTER_CS,
     DEBUG_WEATHER,
     DEBUG_FOG,
+    DEBUG_FORCE_18,
+    #[cfg(feature = "enhanced-camera-leash")]
+    DEBUG_CAMERA_LEASH,
+    DEBUG_BODY_SMOOTHER,
     DEBUG_ENTITY_LIST,
     DEBUG_SOUND,
     DEBUG_VOLUME,
+    DEBUG_AMBIENT,
+    DEBUG_AMBIENT_GAIN,
     DEBUG_PRINT_POS,
     DEBUG_STAIR_DRAW,
     DEBUG_STAIR_STATUS,
@@ -365,6 +396,10 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_MOB_HP_UNDER,
     #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
+    #[cfg(feature = "enhanced-ignore-knockback-self")]
+    RETAIL_IGNORE_KNOCKBACK_SELF,
+    #[cfg(feature = "enhanced-leg-unlock")]
+    RETAIL_LEG_UNLOCK,
 ];
 
 /// The settings pages whose rows are derived from `GraphicsSection` lists.
@@ -1324,9 +1359,14 @@ pub fn update_main_menu(
                 .to_string()
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let (sound_on, master_pct) = (!(audio_mute.bgm && audio_mute.sfx), audio_mute.master_pct());
+        let (sound_on, master_pct, ambient_on, ambient_gain_pct) = (
+            !(audio_mute.bgm && audio_mute.sfx),
+            audio_mute.master_pct(),
+            audio_mute.ambient,
+            audio_mute.ambient_gain_pct(),
+        );
         #[cfg(target_arch = "wasm32")]
-        let (sound_on, master_pct) = (false, 0);
+        let (sound_on, master_pct, ambient_on, ambient_gain_pct) = (false, 0, true, 100);
         let body = format_row_body(
             view.kind,
             list_idx,
@@ -1336,6 +1376,8 @@ pub fn update_main_menu(
             net_status.0,
             sound_on,
             master_pct,
+            ambient_on,
+            ambient_gain_pct,
             &scene.snapshot,
         );
 
@@ -1469,6 +1511,8 @@ fn format_row_body(
     net_status_on: bool,
     sound_on: bool,
     master_pct: i32,
+    ambient_on: bool,
+    ambient_gain_pct: i32,
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
@@ -1485,6 +1529,10 @@ fn format_row_body(
         MenuKind::Debug => {
             if label == DEBUG_VOLUME {
                 format!("{label:<14}[{master_pct:>3}]")
+            } else if label == DEBUG_AMBIENT_GAIN {
+                format!("{label:<14}[{ambient_gain_pct:>3}]")
+            } else if label == DEBUG_AMBIENT {
+                format!("{label:<14}[{}]", if ambient_on { "on" } else { "off" })
             } else if label == DEBUG_PRINT_POS {
                 format!("{label:<14}[enter]")
             } else if label == DEBUG_RETAIL_SEPARATOR || label == DEBUG_RETAIL_LABEL {
@@ -1513,6 +1561,24 @@ fn format_row_body(
                     return format!(
                         "{label:<14}[{}]",
                         if settings.job_display { "on" } else { "off" }
+                    );
+                }
+                #[cfg(feature = "enhanced-ignore-knockback-self")]
+                if label == RETAIL_IGNORE_KNOCKBACK_SELF {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.ignore_knockback_self {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                }
+                #[cfg(feature = "enhanced-leg-unlock")]
+                if label == RETAIL_LEG_UNLOCK {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.leg_unlock { "on" } else { "off" }
                     );
                 }
                 let on = debug_panel_state(label, panels, net_status_on, sound_on);
@@ -1549,6 +1615,10 @@ pub fn debug_panel_state(
         DEBUG_AUTO_ENTER_CS => panels.auto_enter_cs,
         DEBUG_WEATHER => !panels.weather_off,
         DEBUG_FOG => !panels.fog_off,
+        DEBUG_FORCE_18 => panels.force_18,
+        #[cfg(feature = "enhanced-camera-leash")]
+        DEBUG_CAMERA_LEASH => !panels.camera_leash_off,
+        DEBUG_BODY_SMOOTHER => !panels.body_smoother_off,
         DEBUG_ENTITY_LIST => panels.entity_list,
         DEBUG_NET_STATUS => net_status_on,
         DEBUG_SOUND => sound_on,
@@ -2355,11 +2425,46 @@ mod tests {
             .filter(|s| s.header != ENHANCED_SECTION)
         {
             assert!(
-                !section.fields.contains(&GraphicsField::CameraSpring)
-                    && !section.fields.contains(&GraphicsField::DepthOfField)
+                !section.fields.contains(&GraphicsField::DepthOfField)
                     && !section.fields.contains(&GraphicsField::BloomIntensity),
                 "{} must not hold a row the original client never had",
                 section.header
+            );
+        }
+    }
+
+    /// The camera spring is the normal client's behaviour: tagged on, on in
+    /// every preset, and listed under Display, not the enhanced group.
+    #[test]
+    fn camera_spring_is_a_display_row_on_by_default() {
+        use crate::graphics_settings::{
+            BoolParity, QualityPreset, ENHANCED_SECTION, GRAPHICS_SECTIONS,
+        };
+        assert_eq!(
+            GraphicsField::CameraSpring.bool_parity(),
+            BoolParity::VanillaOn
+        );
+        let display = GRAPHICS_SECTIONS
+            .iter()
+            .find(|s| s.header == "Display")
+            .expect("a Display section");
+        assert!(display.fields.contains(&GraphicsField::CameraSpring));
+        let enhanced = GRAPHICS_SECTIONS
+            .iter()
+            .find(|s| s.header == ENHANCED_SECTION)
+            .expect("an enhanced section");
+        assert!(!enhanced.fields.contains(&GraphicsField::CameraSpring));
+        for preset in [
+            QualityPreset::Minimum,
+            QualityPreset::Low,
+            QualityPreset::Medium,
+            QualityPreset::High,
+            QualityPreset::Ultra,
+            QualityPreset::Maximum,
+        ] {
+            assert!(
+                GraphicsSettings::for_preset(preset).camera_spring,
+                "{preset:?} must ship the spring on"
             );
         }
     }

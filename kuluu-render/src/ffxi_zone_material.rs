@@ -9,10 +9,11 @@ use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntry, BindingResources,
-    BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, DepthBiasState, Face,
-    FrontFace, OwnedBindingResource, RenderPipelineDescriptor, SamplerBindingType, ShaderStages,
-    ShaderType, SpecializedMeshPipelineError, TextureSampleType, TextureViewDimension,
-    UnpreparedBindGroup,
+    BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CompareFunction,
+    DepthBiasState, DepthStencilState, Face, FrontFace, OwnedBindingResource,
+    RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
+    SpecializedMeshPipelineError, StencilFaceState, StencilState, TextureFormat, TextureSampleType,
+    TextureViewDimension, UnpreparedBindGroup,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{FallbackImage, GpuImage};
@@ -406,6 +407,10 @@ fn upload_zone_material_buffers(
             .cloned()
             .unwrap_or_else(|| lighting.0.clone());
         value.time_params = lighting.0.time_params;
+        // Enhanced lamps ride the shared slots: every area sees the same lamp set.
+        value.point_pos = lighting.0.point_pos;
+        value.point_color = lighting.0.point_color;
+        value.point_atten = lighting.0.point_atten;
         write_uniform(&queue, buffer, &value);
     }
 }
@@ -600,6 +605,23 @@ impl Material for FfxiZoneMaterial {
             FrontFace::Cw
         };
 
+        // MaterialPlugin pipelines ship no depth-stencil state, and wgpu builds a pipeline with
+        // none as NO depth test — zone tiles would overpaint each other by draw order alone.
+        // Explicit here: opaque world geometry writes the reversed-Z view buffer (compare
+        // GreaterEqual, bevy_pbr's 3D convention) so walls occlude particles and decals behind
+        // them. The block below refines write/bias per render-state word on top of this state.
+        descriptor.depth_stencil = Some(DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_compare: Some(CompareFunction::GreaterEqual),
+            depth_write_enabled: Some(true),
+            stencil: StencilState {
+                front: StencilFaceState::IGNORE,
+                back: StencilFaceState::IGNORE,
+                read_mask: 0,
+                write_mask: 0,
+            },
+            bias: DepthBiasState::default(),
+        });
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             // GLDrawer.kt drawXim — blended decals never write depth. Bevy's
             // transparent pass already disables depth write, but the prepass

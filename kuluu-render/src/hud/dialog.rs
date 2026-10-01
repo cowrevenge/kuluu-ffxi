@@ -459,8 +459,13 @@ fn format_body(d: &DialogState, cursor: Option<u32>, entry: Option<&str>) -> Str
     }
     if let Some(prompt) = &d.prompt {
         // A menu's options render as separate rows, so the body is the prompt
-        // alone; plain speech gets an advance hint.
+        // alone; plain speech gets an advance hint — except frames retail
+        // dismisses on its own clock (the `7F 34/35/36 NN` auto-prompt code,
+        // research/cexi-docs/dialog/format.md): those show no ▼ prompt.
         if d.choices.is_empty() {
+            if d.auto_advance.is_some() {
+                return prompt.clone();
+            }
             return format!("{prompt}\n\n{CONTINUE_MARKER} Enter to continue");
         }
         return prompt.clone();
@@ -513,6 +518,7 @@ mod tests {
             cancel_armed: true,
             speaker_index: None,
             contains_item: false,
+            auto_advance: None,
         }
     }
 
@@ -553,6 +559,18 @@ mod tests {
         let body = format_body(&x, None, None);
         assert!(body.starts_with("Good luck, citizen."), "got: {body}");
         assert!(body.contains("Enter to continue"));
+    }
+
+    /// A retail auto-prompt frame (the `7F 34/35/36 NN` code) dismisses itself
+    /// on the session's clock, so the box shows no ▼ prompt of its own.
+    #[test]
+    fn auto_advance_body_shows_no_advance_hint() {
+        let mut x = d();
+        x.prompt = Some("The year is 1156.".into());
+        x.auto_advance = Some(5);
+        let body = format_body(&x, None, None);
+        assert_eq!(body, "The year is 1156.");
+        assert!(!body.contains("Enter to continue"));
     }
 
     #[test]

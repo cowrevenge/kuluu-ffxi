@@ -341,6 +341,13 @@ impl DatRoot {
             .clone()
     }
 
+    /// [`Self::path_of`] without the overlay tiers: the base install's copy of a location,
+    /// so an overlay that shadows a file cannot hide content only the base ships.
+    pub fn base_path_of(&self, loc: &DatLocation) -> PathBuf {
+        loc.find_under(&self.root)
+            .unwrap_or_else(|| loc.join_under(&self.root))
+    }
+
     /// Resolve a location to a real file: each overlay in order, then the base
     /// install under either `.DAT` spelling. The raw `.DAT` join is returned
     /// unconditionally when no spelling exists, so a missing file still
@@ -417,6 +424,18 @@ impl DatRoot {
             }
         }
         Err(DatError::FileNotPresent { file_id })
+    }
+
+    /// Reverse of [`Self::resolve`]: the lowest claimed id `rom_dir`'s tables assign to a
+    /// `(dir/file)` slot — ids are not contiguous within a directory, so sibling files cannot
+    /// be reached by arithmetic on a resolved id. research/XIClient/src/XIClient/source/
+    /// System/FileIO/FileIOVirtualFileSystem.cpp GetNumFileName decodes one entry per id.
+    pub fn id_at(&self, rom_dir: &str, dir: u16, file: u8) -> Option<u32> {
+        let app = self.apps.iter().rev().find(|a| a.rom_dir == rom_dir)?;
+        let target = crate::ftable::SubPath { dir, file };
+        (0..app.ftable.len())
+            .filter(|&id| app.vtable.contains(id, app.rom_index))
+            .find(|&id| app.ftable.sub_path(id).is_ok_and(|p| p == target))
     }
 }
 

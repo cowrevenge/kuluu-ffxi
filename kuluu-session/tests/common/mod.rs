@@ -100,15 +100,27 @@ fn fixture_login_pattern() -> String {
 /// just-freed port, so a back-to-back live test gets matched to the previous
 /// run's session and its 0x00A is rejected with "Player ID mismatch"
 /// (vendor/server/src/map/packets/c2s/0x00a_login.cpp). A random high port
-/// avoids that. Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
+/// avoids that. Windows may exclude random sub-ranges of the port space from
+/// user binds (Hyper-V/WinNAT; `netsh int ipv4 show excludedportrange
+/// protocol=udp`), so each candidate is probe-bound before it is pinned.
+/// Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
 pub fn pin_unique_local_port() {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let port = LOCAL_PORT_BASE + (nanos % LOCAL_PORT_SPAN) as u16;
-    std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
-    eprintln!("[live] pinned local UDP port {port}");
+    for offset in 0..LOCAL_PORT_SPAN {
+        let port = LOCAL_PORT_BASE + ((nanos + offset) % LOCAL_PORT_SPAN) as u16;
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
+            eprintln!("[live] pinned local UDP port {port}");
+            return;
+        }
+    }
+    panic!(
+        "no bindable local UDP port in {LOCAL_PORT_BASE}..={}",
+        LOCAL_PORT_BASE + LOCAL_PORT_SPAN as u16
+    );
 }
 
 pub struct EphemeralChar {
@@ -293,6 +305,57 @@ impl EphemeralChar {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Grant `amount` gil: gil is the currency item (id 0) of the main
+    /// inventory (vendor/server/src/map/lua/lua_base_entity.cpp getGil reads
+    /// getStorage(LOC_INVENTORY)->GetItem(0)). The fixture's char-creation
+    /// trigger already inserts an empty (itemId 65535) row at the currency
+    /// slot, so upsert it.
+    pub async fn add_gil(&self, amount: u32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for gil")?;
+        "INSERT INTO char_inventory(charid, location, slot, itemId, quantity) \
+         VALUES (?, 0, 0, 0, ?) \
+         ON DUPLICATE KEY UPDATE itemId = 0, quantity = VALUES(quantity)"
+            .with((self.charid, amount))
+            .ignore(&mut conn)
+            .await
+            .context("upserting gil into char_inventory")?;
+        Ok(())
+    }
+
+    /// Grant a key item by its id (vendor/server/scripts/enum/key_item.lua),
+    /// e.g. 138 = CHOCOBO_LICENSE. The keyitems column is a fixed blob of
+    /// little-endian uint16 ids; an empty slot is 0.
+    pub async fn add_key_item(&self, id: u16) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for key item")?;
+        // A fresh fixture char's keyitems is NULL; start from an empty blob of
+        // the column's width (512 uint16s) in that case.
+        let blob: Option<Vec<u8>> = "SELECT keyitems FROM chars WHERE charid = ?"
+            .with((self.charid,))
+            .first(&mut conn)
+            .await
+            .context("reading keyitems blob")?
+            .ok_or_else(|| anyhow!("chars row {charid} not found", charid = self.charid))?;
+        let blob = blob.unwrap_or_else(|| vec![0u8; 512 * 2]);
+        let mut ids: Vec<u16> = blob
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // Find a free slot (0) or reuse the last one; the blob is large enough
+        // that a free slot always exists for a fresh fixture char.
+        let slot = ids.iter().position(|&v| v == 0).unwrap_or(ids.len() - 1);
+        ids[slot] = id;
+        let mut new_blob = Vec::with_capacity(ids.len() * 2);
+        for &v in &ids {
+            new_blob.extend_from_slice(&v.to_le_bytes());
+        }
+        "UPDATE chars SET keyitems = ? WHERE charid = ?"
+            .with((&new_blob, self.charid))
+            .ignore(&mut conn)
+            .await
+            .context("UPDATE chars keyitems")?;
         Ok(())
     }
 }

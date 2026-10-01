@@ -115,7 +115,7 @@ pub(super) fn confirm_menu_at_cursor(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
-    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
@@ -142,6 +142,7 @@ pub(super) fn confirm_menu_at_cursor(
             hud_panels,
             net_status,
             audio_mute,
+            vana_clock,
             self_pos,
             scene_state,
         );
@@ -405,8 +406,12 @@ fn handle_retail_plus_row(
     graphics: &mut kuluu_render::GraphicsSettings,
     scene_state: &mut SceneState,
 ) -> bool {
+    #[cfg(feature = "enhanced-ignore-knockback-self")]
+    use kuluu_render::hud::menu::RETAIL_IGNORE_KNOCKBACK_SELF;
     #[cfg(feature = "enhanced-job-display")]
     use kuluu_render::hud::menu::RETAIL_JOB_DISPLAY;
+    #[cfg(feature = "enhanced-leg-unlock")]
+    use kuluu_render::hud::menu::RETAIL_LEG_UNLOCK;
     #[cfg(feature = "enhanced-mob-hp-under")]
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU};
@@ -459,6 +464,34 @@ fn handle_retail_plus_row(
             );
             true
         }
+        #[cfg(feature = "enhanced-ignore-knockback-self")]
+        RETAIL_IGNORE_KNOCKBACK_SELF => {
+            graphics.ignore_knockback_self = !graphics.ignore_knockback_self;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.ignore_knockback_self {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            );
+            true
+        }
+        #[cfg(feature = "enhanced-leg-unlock")]
+        RETAIL_LEG_UNLOCK => {
+            graphics.leg_unlock = !graphics.leg_unlock;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.leg_unlock { "on" } else { "off" }
+                ),
+            );
+            true
+        }
         _ => false,
     }
 }
@@ -471,16 +504,19 @@ fn toggle_debug_panel(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     self_pos: kuluu_snapshot::Vec3,
     scene_state: &mut SceneState,
 ) {
+    #[cfg(feature = "enhanced-camera-leash")]
+    use kuluu_render::hud::menu::DEBUG_CAMERA_LEASH;
     #[cfg(feature = "enhanced-engage-move-lock-off")]
     use kuluu_render::hud::menu::DEBUG_ENGAGE_ANIM_LOCK;
     use kuluu_render::hud::menu::{
-        DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH,
-        DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG,
-        DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
-        DEBUG_UI_SETTINGS, DEBUG_WEATHER,
+        DEBUG_AMBIENT, DEBUG_AUTO_ENTER_CS, DEBUG_BODY_SMOOTHER, DEBUG_ENTITY_LIST, DEBUG_FOG,
+        DEBUG_FORCE_18, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NAMEPLATES, DEBUG_NET_STATUS,
+        DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND,
+        DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -530,6 +566,26 @@ fn toggle_debug_panel(
             hud_panels.fog_off = !hud_panels.fog_off;
             !hud_panels.fog_off
         }
+        DEBUG_FORCE_18 => {
+            // Edge-triggered: freezing is sticky until thaw, so only act on the
+            // flip (same shape as the weather/fog gates).
+            hud_panels.force_18 = !hud_panels.force_18;
+            if hud_panels.force_18 {
+                vana_clock.freeze_at_hour_minute(18, 0);
+            } else {
+                vana_clock.thaw();
+            }
+            hud_panels.force_18
+        }
+        #[cfg(feature = "enhanced-camera-leash")]
+        DEBUG_CAMERA_LEASH => {
+            hud_panels.camera_leash_off = !hud_panels.camera_leash_off;
+            !hud_panels.camera_leash_off
+        }
+        DEBUG_BODY_SMOOTHER => {
+            hud_panels.body_smoother_off = !hud_panels.body_smoother_off;
+            !hud_panels.body_smoother_off
+        }
         DEBUG_ENTITY_LIST => {
             hud_panels.entity_list = !hud_panels.entity_list;
             hud_panels.entity_list
@@ -570,6 +626,11 @@ fn toggle_debug_panel(
             audio_mute.sfx = was_on;
             !was_on
         }
+        DEBUG_AMBIENT => {
+            // Enable flag (default on): a click flips the ambience emitters.
+            audio_mute.ambient = !audio_mute.ambient;
+            audio_mute.ambient
+        }
         other => {
             push_system_chat_line(scene_state, format!("[menu] Debug: unknown `{other}`"));
             return;
@@ -598,7 +659,7 @@ pub(super) fn handle_menu_key(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
-    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     sort_options: &mut kuluu_render::hud::item_detail::SortOptions,
     item_menu_focus: &mut kuluu_render::hud::item_detail::ItemMenuFocus,
@@ -812,6 +873,16 @@ pub(super) fn handle_menu_key(
                 return None;
             }
         }
+        if label == kuluu_render::hud::menu::DEBUG_AMBIENT_GAIN {
+            if bindings.matches_logical(Action::NavLeft, key) {
+                audio_mute.cycle_ambient_gain(-1);
+                return None;
+            }
+            if bindings.matches_logical(Action::NavRight, key) {
+                audio_mute.cycle_ambient_gain(1);
+                return None;
+            }
+        }
     }
 
     // The Equipment screen is a 2D retail icon grid: arrows move between grid
@@ -1002,7 +1073,7 @@ mod menu_key_tests {
                 &mut self.hud_panels,
                 &mut self.net_status,
                 &mut self.audio_mute,
-                &self.vana_clock,
+                &mut self.vana_clock,
                 &mut self.vana_clock_visible,
                 &mut self.sort_options,
                 &mut self.item_menu_focus,

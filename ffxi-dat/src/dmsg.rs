@@ -120,6 +120,40 @@ pub const SET_COLOR_MARKER_PREFIX: &str = "{SetColor";
 /// [`MARKER_CHOICE`].
 pub const CHOICE_MARKER_PREFIX: &str = "{Choice:";
 
+// The event-message box's continue-prompt codes (research/cexi-docs/dialog/
+// format.md): the box renders the entry's text and then waits at the prompt
+// code that ends the displayed text — manual codes show the ▼ prompt and wait
+// for a key press, auto codes self-advance after their seconds parameter.
+const PROMPT_MANUAL: [u8; 4] = [0x31, 0x32, 0x33, 0x37];
+const PROMPT_AUTO: [u8; 3] = [0x34, 0x35, 0x36];
+/// `7F 38 NN NN` — prompt variant taking two parameter bytes; its timing is
+/// not documented, so it waits like a manual prompt.
+const PROMPT_VARIANT: u8 = 0x38;
+
+/// How the event-message box advances past an entry's text — the
+/// continue-prompt code that ends the displayed text
+/// (research/cexi-docs/dialog/format.md, "the continue-prompt codes").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogPrompt {
+    /// `7F 31` / `7F 32` / `7F 33` / `7F 37` — show the ▼ prompt, wait for a
+    /// key press. Retail's standard prompt.
+    Manual,
+    /// `7F 34 NN` / `7F 35 NN` / `7F 36 NN` — self-advances after `NN`
+    /// seconds, no key press needed (the cutscene narration's timed
+    /// progression).
+    Auto { seconds: u8 },
+}
+
+impl DialogPrompt {
+    /// The auto-advance seconds, `None` for a manual prompt.
+    pub fn auto_seconds(self) -> Option<u8> {
+        match self {
+            Self::Auto { seconds } => Some(seconds),
+            Self::Manual => None,
+        }
+    }
+}
+
 /// The `{Name}` text the decoder emits for a plain control code — the single
 /// place the plain-marker wrapping is spelled, shared by the decoder and the
 /// render layer that substitutes `{PlayerName}` / `{SpeakerName}`.
@@ -431,6 +465,87 @@ impl StringDat {
             .collect();
         Some((prompt, options))
     }
+
+    /// The entry's continue-prompt: how the event-message box waits after
+    /// displaying the entry's text. The prompt code that ends the displayed
+    /// text (the first NUL-terminated sub-string) governs — `7F 31/32/33/37`
+    /// waits for a key press, `7F 34/35/36 NN` self-advances after `NN`
+    /// seconds (research/cexi-docs/dialog/format.md). A line whose last
+    /// segment carries no prompt of its own, and an entry with no prompt code
+    /// at all, wait manually. The zone-235 census: 14,614 manual-prompt
+    /// entries, 17 auto-prompt (the Bastok intro narration at 5–7 s, plus a
+    /// handful of quest lines), and zero of the 560 menus.
+    pub fn prompt(&self, index: usize) -> Option<DialogPrompt> {
+        let bytes = self.entries.get(index)?;
+        let mut prompt: Option<DialogPrompt> = None;
+        let mut text_since_prompt = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            match b {
+                0x00 => break, // end of the displayed sub-string
+                CC_SET_X | CC_SET_Y => i += 3,
+                CC_NEWLINE | CC_SELECTION => i += 1, // layout, not visible text
+                CC_PLAYER_NAME | CC_SPEAKER_NAME => {
+                    text_since_prompt = true;
+                    i += 1;
+                }
+                CC_NUM | CC_CHOICE | CC_ITEM | CC_KEY_ITEM | CC_CHOCOBO_NAME | CC_SET_COLOR => {
+                    text_since_prompt = true;
+                    i += 2;
+                }
+                CC_AUTO => {
+                    let Some(&kind) = bytes.get(i + 1) else {
+                        i += 1;
+                        continue;
+                    };
+                    if PROMPT_MANUAL.contains(&kind) {
+                        prompt = Some(DialogPrompt::Manual);
+                        text_since_prompt = false;
+                        i += 2;
+                    } else if PROMPT_AUTO.contains(&kind) {
+                        let Some(&seconds) = bytes.get(i + 2) else {
+                            i += 2;
+                            continue;
+                        };
+                        prompt = Some(DialogPrompt::Auto { seconds });
+                        text_since_prompt = false;
+                        i += 3;
+                    } else if kind == PROMPT_VARIANT {
+                        prompt = Some(DialogPrompt::Manual);
+                        text_since_prompt = false;
+                        i += 4;
+                    } else {
+                        i += 2; // other 7F codes (emote slots, gender choice)
+                    }
+                }
+                CC_INLINE_TAG => {
+                    if let Some(tag) = parse_inline_tag(bytes, i) {
+                        if tag.marker.is_some() {
+                            text_since_prompt = true;
+                        }
+                        i += tag.len;
+                    } else {
+                        i += 1;
+                    }
+                }
+                b if PRINTABLE.contains(&b) => {
+                    text_since_prompt = true;
+                    i += 1;
+                }
+                b if is_sjis_lead(b) => {
+                    text_since_prompt = true;
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        Some(if text_since_prompt {
+            DialogPrompt::Manual
+        } else {
+            prompt.unwrap_or(DialogPrompt::Manual)
+        })
+    }
 }
 
 /// The `num[]` slots `text` substitutes. Reads the rendered markers, so the mask
@@ -642,6 +757,57 @@ mod tests {
             dat.text(0).as_deref(),
             Some("The\nnorth{Auto:52}{Auto:49}\n")
         );
+    }
+
+    /// The continue-prompt codes: the prompt that ends the displayed text
+    /// governs the wait (research/cexi-docs/dialog/format.md).
+    #[test]
+    fn prompt_codes_govern_the_wait() {
+        // Retail-standard manual prompt (zone-235 NPC lines end `7f 31 00 07`).
+        let dat = StringDat::parse(&synth(&[b"Hey, Gwill!\x07Is it true?\x7f\x31\x00\x07"]))
+            .expect("parse");
+        assert_eq!(dat.prompt(0), Some(DialogPrompt::Manual));
+
+        // Auto prompt with its seconds parameter (the Bastok narration ends
+        // `7f 34 05 00 07` / `7f 34 07 00 07` in zone 235).
+        let dat = StringDat::parse(&synth(&[
+            b"In the Gustaberg Mountains\x7f\x34\x05\x00\x07",
+            b"But a newborn nation\x7f\x34\x07\x00\x07",
+            b"A 7F 35 line\x7f\x35\x03\x00\x07",
+            b"A 7F 36 line\x7f\x36\x02\x00\x07",
+        ]))
+        .expect("parse");
+        assert_eq!(dat.prompt(0), Some(DialogPrompt::Auto { seconds: 5 }));
+        assert_eq!(dat.prompt(1), Some(DialogPrompt::Auto { seconds: 7 }));
+        assert_eq!(dat.prompt(2), Some(DialogPrompt::Auto { seconds: 3 }));
+        assert_eq!(dat.prompt(3), Some(DialogPrompt::Auto { seconds: 2 }));
+    }
+
+    /// A line whose last segment carries no prompt of its own waits manually:
+    /// zone-235 entry 8756 is `Right, Uka? 7f 36 02 | Uka? 7f 36 02 | Leaping
+    /// lizards, where could she have run off to?` — the auto prompts pace the
+    /// middle segments, the un-prompted last one holds for a key press.
+    #[test]
+    fn text_after_the_last_prompt_waits_manually() {
+        let entry = b"Right, Uka?\x7f\x36\x02\x07Uka?\x7f\x36\x02\x07Leaping lizards?\x00\x07";
+        let dat = StringDat::parse(&synth(&[entry])).expect("parse");
+        assert_eq!(dat.prompt(0), Some(DialogPrompt::Manual));
+
+        // No prompt code at all: manual, like retail's standard.
+        let dat = StringDat::parse(&synth(&[b"Just a line\x00\x07"])).expect("parse");
+        assert_eq!(dat.prompt(0), Some(DialogPrompt::Manual));
+
+        // The position prefix and its parameter NUL must not confuse the walk:
+        // set_x(80) is `02 50 00`, and the auto prompt after the text governs.
+        let entry = [
+            CC_SET_X, 0x50, 0x00, CC_SET_Y, 0x54, 0x01, b'T', b'h', b'e', CC_AUTO, 0x34, 9, 0x00,
+            CC_NEWLINE,
+        ];
+        let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
+        assert_eq!(dat.prompt(0), Some(DialogPrompt::Auto { seconds: 9 }));
+
+        // Out of range: None.
+        assert_eq!(dat.prompt(1), None);
     }
 
     /// Decodes the real zone-230 event-503 narration line to clean text — no

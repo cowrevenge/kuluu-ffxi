@@ -236,6 +236,17 @@ pub struct AudioMuteState {
     /// full volume instead of silent.
     #[serde(default = "default_master_volume")]
     pub master: f32,
+
+    /// Mixer A only (zone-placed + actor auto-run emitters): off mutes those
+    /// looping/repeating cues immediately; routine one-shots are unaffected.
+    /// An enable flag, not a mute flag — the default is on.
+    #[serde(default = "default_ambient_on")]
+    pub ambient: bool,
+
+    /// Mixer A gain multiplier, 0.0..=2.0 — the balance knob between ambience
+    /// and routine SEs (retail has separate BGM/SE buses; kuluu has one master).
+    #[serde(default = "default_ambient_gain")]
+    pub ambient_gain: f32,
 }
 
 impl Default for AudioMuteState {
@@ -246,6 +257,8 @@ impl Default for AudioMuteState {
             bgm: false,
             sfx: false,
             master: default_master_volume(),
+            ambient: true,
+            ambient_gain: 1.0,
         }
     }
 }
@@ -255,8 +268,21 @@ fn default_master_volume() -> f32 {
     1.0
 }
 
+/// Ambience on by default; old audio.json files load with it enabled.
+fn default_ambient_on() -> bool {
+    true
+}
+
+/// Unity ambience gain; old audio.json files load at 1.0.
+fn default_ambient_gain() -> f32 {
+    1.0
+}
+
 /// Volume menu step: 0..=100 in fives, stored as 0.0..=1.0.
 pub const VOLUME_STEP: i32 = 5;
+
+/// Ambient-gain menu step: 0..=200 in fives, stored as 0.0..=2.0.
+pub const AMBIENT_GAIN_STEP: i32 = 5;
 
 impl AudioMuteState {
     /// Master volume as an integer 0..=100 for menu display.
@@ -270,7 +296,80 @@ impl AudioMuteState {
         let pct = (self.master_pct() + delta * VOLUME_STEP).clamp(0, 100);
         self.master = pct as f32 / 100.0;
     }
+
+    /// Ambient gain as an integer 0..=200 for menu display.
+    pub fn ambient_gain_pct(&self) -> i32 {
+        (self.ambient_gain * 100.0).round().clamp(0.0, 200.0) as i32
+    }
+
+    /// Nudge the ambient gain by `delta` steps of [`AMBIENT_GAIN_STEP`] percent,
+    /// clamped to 0..=200.
+    pub fn cycle_ambient_gain(&mut self, delta: i32) {
+        let pct = (self.ambient_gain_pct() + delta * AMBIENT_GAIN_STEP).clamp(0, 200);
+        self.ambient_gain = pct as f32 / 100.0;
+    }
 }
+
+// research/XIClient/src/XIClient/include/World/Generator/Effects/CYySoundElem.h:
+// `INDEX_SOUND_REQUEST_MAX = 12`, `req_buffer[12]` of `CYySepRes*`. CYySepRes.cpp
+// `RequestSoundResourcePlayback`: a full buffer refuses (no eviction, no replacement);
+// a resource already queued is accepted without taking a second slot. CYySoundElem.cpp
+// `SysMove` drains the queue FIFO every tick and resets `se_req_num = 0`, so this is a
+// per-tick request queue, not a voice table — looping SEs hold no slot; they occupy an
+// active instance against the concurrent cap for their life. AudioManager.cpp
+// `RequestSoundEffectPlay`: `ActiveInstanceCount >= MainRegistryConfig::MaxConcurrentSoundEffects`
+// (12, RegistryConfig.cpp) refuses playback. BGM bypasses this path entirely
+// (AudioStreamHandler's "BGMStream"); UI/global cues go through it (`PlayUISoundResource`
+// → `CYySepRes::Play`), so they count.
+pub const SE_REQUEST_MAX: usize = 12;
+pub const MAX_CONCURRENT_SE: usize = 12;
+
+/// Retail's SE admission control, one buffer both mixers go through.
+#[derive(Resource, Default)]
+pub struct SeRequestBuffer {
+    queued: Vec<u32>,
+    pub refused_total: u64,
+}
+
+impl SeRequestBuffer {
+    /// `RequestSoundResourcePlayback` plus the concurrent cap in `RequestSoundEffectPlay`.
+    pub fn request(&mut self, se_id: u32, active_voices: usize) -> bool {
+        if self.queued.len() >= SE_REQUEST_MAX {
+            self.refused_total += 1;
+            return false;
+        }
+        if !self.queued.contains(&se_id) && active_voices >= MAX_CONCURRENT_SE {
+            self.refused_total += 1;
+            return false;
+        }
+        if !self.queued.contains(&se_id) {
+            self.queued.push(se_id);
+        }
+        true
+    }
+
+    /// `CYySoundElem::SysMove` — the queue drains FIFO every tick and resets to zero.
+    pub fn begin_frame(&mut self) {
+        self.queued.clear();
+    }
+
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
+    }
+}
+
+/// Marks a live SE voice; the count is what the concurrent cap sees.
+#[derive(Component)]
+pub struct SeVoice;
+
+fn reset_se_request_buffer(mut buffer: ResMut<SeRequestBuffer>) {
+    buffer.begin_frame();
+}
+
+/// Runtime SE-mixing readout: per-emitter ambient toasts plus the routine-cue line.
+/// Off by default; `/sfxdebug` toggles it for finding the next loud thing.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SfxDebug(pub bool);
 
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct BgmPlaybackState {
@@ -619,6 +718,15 @@ pub struct SfxEvent {
 
     // World-space emitter. `None` is a 2D cue (UI, system, zone ambient bed) that mixes dry.
     pub emitter: Option<Vec3>,
+
+    /// The emitter's authored AudioRangeSetup `(near, far)` — routine stages carry it in their
+    /// payload (research/xim EffectRoutineParser.kt parseSoundEffectEmitter), generator sounds
+    /// in the sec2 0x4C block. `None`, like a shipped 0.0, falls to the Calc3D class defaults
+    /// inside [`sfx_attenuation_calc3d`], exactly as retail's does.
+    pub range: Option<(f32, f32)>,
+
+    /// Calc3D vertical weighting: 3x for attached emitters, 1x for zone-static (attach code 0).
+    pub vertical_weight: f32,
 }
 
 impl SfxEvent {
@@ -627,6 +735,8 @@ impl SfxEvent {
             se_id,
             volume: 1.0,
             emitter: None,
+            range: None,
+            vertical_weight: UNATTACHED_VERTICAL_WEIGHT,
         }
     }
 
@@ -636,47 +746,16 @@ impl SfxEvent {
             ..Self::new(se_id)
         }
     }
-}
 
-// Client tuning: retail SE DATs ship no falloff curve, so the near field is ours. Sized to hold
-// a melee exchange dry — the player and whatever it is trading blows with stand a few yalms
-// apart, and their swing/impact SE must not wobble as the two shuffle.
-pub const SFX_DRY_RADIUS_YALMS: f32 = 8.0;
-
-// LSB stops streaming an entity to a client past this radius, so past it there is no entity in
-// our world model to have made the sound.
-pub const SFX_CUTOFF_YALMS: f32 = ffxi_proto::entity_stream::ENTITY_RENDER_DISTANCE_YALMS;
-
-// Amplitude follows a point source's 1/r pressure law outside the dry radius, windowed
-// linearly to exactly zero at the cutoff so culling a far emitter can never click.
-//
-// Sole authority for SE loudness — do NOT also set `PlaybackSettings::with_spatial(true)`.
-// That routes through rodio's Spatial (rodio-0.22.2 src/source/spatial.rs:56-67), whose per-ear
-// gain is `(1/dist_sq).min(1)` times a pan term anti-correlated with azimuth, i.e. a second
-// distance law stacked on this one. Stereo placement, if it is ever wanted, has to come from
-// the pan term alone with the emitter expressed relative to the camera.
-pub fn sfx_attenuation(listener: Vec3, emitter: Vec3) -> f32 {
-    let dist = listener.distance(emitter);
-    if dist <= SFX_DRY_RADIUS_YALMS {
-        return 1.0;
+    /// A generator sound with its authored AudioRangeSetup falloff.
+    pub fn at_ranged(se_id: u32, emitter: Vec3, near: f32, far: f32, vertical_weight: f32) -> Self {
+        Self {
+            emitter: Some(emitter),
+            range: Some((near, far)),
+            vertical_weight,
+            ..Self::new(se_id)
+        }
     }
-    if dist >= SFX_CUTOFF_YALMS {
-        return 0.0;
-    }
-    let pressure = SFX_DRY_RADIUS_YALMS / dist;
-    let window = 1.0 - (dist - SFX_DRY_RADIUS_YALMS) / (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS);
-    pressure * window
-}
-
-// Distance is measured from the PLAYER, never the chase camera. LSB's streaming radius — the
-// bound SFX_CUTOFF_YALMS is — is itself measured player-to-entity
-// (vendor/server/src/map/zone_entities.cpp CZoneEntities::TryAddToNearbySpawnLists isInRange), and a camera-anchored distance would swing SE
-// loudness with the mouse wheel and silence on-screen emitters at full pullback. The camera is
-// still the correct ear for left/right placement, but this function carries no pan term (see
-// `sfx_attenuation`), so nothing here reads it. Falls back to the camera where there is no
-// player at all — model viewer, launcher backdrop, pre-spawn frames.
-pub fn sfx_listener_pos(player: Option<Vec3>, camera: Option<Vec3>) -> Option<Vec3> {
-    player.or(camera)
 }
 
 // The debug toast is the only surface where SE distance mixing is observable at runtime —
@@ -693,11 +772,20 @@ pub fn sfx_debug_line(ev: &SfxEvent, listener: Option<Vec3>, volume: f32) -> Str
     }
 }
 
+// Sole authority for SE loudness — do NOT also set `PlaybackSettings::with_spatial(true)`.
+// That routes through rodio's Spatial (rodio-0.22.2 src/source/spatial.rs:56-67), whose per-ear
+// gain is `(1/dist_sq).min(1)` times a pan term anti-correlated with azimuth, i.e. a second
+// distance law stacked on this one. Stereo placement, if it is ever wanted, has to come from
+// the pan term alone with the emitter expressed relative to the camera.
 // A world emitter with no listener yet (the self actor spawns a frame later) mixes dry rather
-// than silent.
+// than silent; every positional cue follows the retail Calc3D law, an unauthored range falling
+// to its class defaults inside that function.
 pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     let attenuation = match (ev.emitter, listener) {
-        (Some(emitter), Some(listener)) => sfx_attenuation(listener, emitter),
+        (Some(emitter), Some(listener)) => {
+            let (near, far) = ev.range.unwrap_or((0.0, 0.0));
+            sfx_attenuation_calc3d(listener, emitter, near, far, ev.vertical_weight)
+        }
         _ => 1.0,
     };
     (ev.volume * attenuation).clamp(0.0, 1.0)
@@ -719,7 +807,7 @@ pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
 // full inside `near`, a linear ramp to silence at `far`, and a hard cull past it. The
 // shipped `near > far` generators fall out of the ordering — everything inside far is
 // full volume. Retail's pan term is not reproduced: this mixer carries no pan (see
-// `sfx_attenuation`).
+// `sfx_mix_volume`).
 pub fn sfx_attenuation_calc3d(
     listener: Vec3,
     emitter: Vec3,
@@ -817,15 +905,36 @@ pub fn play_sfx_system(
     mut events: MessageReader<SfxEvent>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
-    listener_player: Query<&Transform, With<crate::components::IsSelf>>,
+    // Option: the system is also registered standalone by tests without AudioPlugin.
+    sfx_debug: Option<Res<SfxDebug>>,
     listener_camera: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    voices: Query<Entity, With<SeVoice>>,
+    mut buffer: ResMut<SeRequestBuffer>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut commands: Commands,
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     mut last_chat: Local<Option<(u32, std::time::Instant)>>,
+    mut last_slot_report: Local<Option<std::time::Instant>>,
     mut warned: Local<bool>,
 ) {
+    // /sfxdebug slot readout — occupancy and refusals are only observable here.
+    if sfx_debug.is_some_and(|d| d.0) {
+        let now = std::time::Instant::now();
+        if last_slot_report
+            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+        {
+            toasts.write(crate::snapshot::ToastEvent::debug(format!(
+                "✦ se slots queued {}/{} active {}/{} refused {}",
+                buffer.queued_count(),
+                SE_REQUEST_MAX,
+                voices.iter().count(),
+                MAX_CONCURRENT_SE,
+                buffer.refused_total
+            )));
+            *last_slot_report = Some(now);
+        }
+    }
     if events.is_empty() {
         return;
     }
@@ -843,13 +952,16 @@ pub fn play_sfx_system(
         }
         return;
     };
-    let listener_pos = sfx_listener_pos(
-        listener_player.iter().next().map(|xf| xf.translation),
-        listener_camera.iter().next().map(|xf| xf.translation()),
-    );
+    // Retail measures SE distance from the camera eye (CYySepRes.cpp CYySepRes::Calc3D reads
+    // CameraManager::CachedEyePosition); there is no player-listener fallback.
+    let listener_pos = listener_camera.iter().next().map(|xf| xf.translation());
     for ev in events.read() {
         let volume = sfx_mix_volume(ev, listener_pos) * mute.master;
         if volume <= 0.0 {
+            continue;
+        }
+        // Retail admission (CYySepRes::Play): a refused cue is simply not played this tick.
+        if !buffer.request(ev.se_id, voices.iter().count()) {
             continue;
         }
         let Some(handle) = cache.handle(&install, &mut pcm_assets, ev.se_id, false) else {
@@ -857,6 +969,7 @@ pub fn play_sfx_system(
         };
         commands.spawn((
             InGameEntity,
+            SeVoice,
             AudioPlayer(handle),
             PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(volume)),
         ));
@@ -1230,16 +1343,21 @@ impl Plugin for AudioPlugin {
         app.init_resource::<BgmSlots>()
             .init_resource::<BgmPlaybackState>()
             .init_resource::<AudioMuteState>()
+            .init_resource::<SfxDebug>()
             .init_resource::<SeRegistry>()
             .init_resource::<SfxCache>()
             .init_resource::<SystemSfxTable>()
             .init_resource::<SystemSfxCursor>()
             .init_resource::<CombatSfxState>()
             .init_resource::<ZoneAmbientBed>()
+            .init_resource::<SeRequestBuffer>()
             .add_message::<SfxEvent>()
             .add_systems(
                 Update,
                 (
+                    // The per-tick queue resets before either mixer admits a cue; zone_sfx
+                    // runs in its own plugin's chain, so pin the reset ahead of it too.
+                    reset_se_request_buffer.before(crate::zone_sfx::update_zone_sfx),
                     drain_music_events_system,
                     derive_bgm_playback_state,
                     apply_bgm_system,
@@ -1987,6 +2105,8 @@ mod tests {
     #[test]
     fn sfx_debug_line_reports_distance_only_for_world_emitters() {
         let listener = Vec3::new(100.0, -8.0, -250.0);
+        // Unauthored range: the Calc3D class defaults (near 3 / far 30) put 12 yalms at
+        // 1 - 9/27 of full volume.
         let world = SfxEvent::at(42, listener + Vec3::X * 12.0);
         let line = sfx_debug_line(
             &world,
@@ -1995,50 +2115,13 @@ mod tests {
         );
         assert!(line.contains("#42"), "{line}");
         assert!(line.contains("12y"), "{line}");
-        assert!(line.contains("vol 0.60"), "{line}");
+        assert!(line.contains("vol 0.67"), "{line}");
 
         let ui = SfxEvent::new(42);
         assert_eq!(
             sfx_debug_line(&ui, Some(listener), sfx_mix_volume(&ui, Some(listener))),
             "✦ SFX #42"
         );
-    }
-
-    #[test]
-    fn sfx_is_dry_inside_the_near_field_and_silent_past_the_cutoff() {
-        let listener = Vec3::new(100.0, -8.0, -250.0);
-
-        assert_eq!(sfx_attenuation(listener, listener), 1.0);
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::X * SFX_DRY_RADIUS_YALMS),
-            1.0,
-            "a melee exchange must mix dry rather than wobble as the two actors shuffle"
-        );
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::Z * SFX_CUTOFF_YALMS),
-            0.0,
-            "the cull must reach exactly zero at the cutoff so it cannot click"
-        );
-        assert_eq!(
-            sfx_attenuation(listener, listener + Vec3::Z * (SFX_CUTOFF_YALMS * 10.0)),
-            0.0
-        );
-    }
-
-    #[test]
-    fn sfx_attenuation_falls_monotonically_across_the_rolloff() {
-        let listener = Vec3::ZERO;
-        let steps = 64;
-        let mut prev = 1.0_f32;
-        for i in 0..=steps {
-            let d = SFX_DRY_RADIUS_YALMS
-                + (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS) * (i as f32 / steps as f32);
-            let gain = sfx_attenuation(listener, Vec3::X * d);
-            assert!(gain <= prev, "gain rose from {prev} to {gain} at {d} yalms");
-            assert!((0.0..=1.0).contains(&gain), "gain {gain} out of range");
-            prev = gain;
-        }
-        assert_eq!(prev, 0.0);
     }
 
     #[test]
@@ -2054,17 +2137,18 @@ mod tests {
         );
         assert_eq!(sfx_mix_volume(&ui, None), 1.0);
 
+        // Inside the Calc3D class-default near field: full volume.
         let near = SfxEvent::at(7001, listener + Vec3::X);
         assert_eq!(sfx_mix_volume(&near, Some(listener)), 1.0);
 
-        let far = SfxEvent::at(7001, listener + Vec3::X * SFX_CUTOFF_YALMS);
+        let far = SfxEvent::at(7001, listener + Vec3::X * SOUND_FAR_DEFAULT);
         assert_eq!(
             sfx_mix_volume(&far, Some(listener)),
             0.0,
-            "a swing past the cutoff must be culled, not mixed at full volume"
+            "a swing past the class-default far must be culled, not mixed at full volume"
         );
 
-        let mid = SfxEvent::at(7001, listener + Vec3::X * SFX_DRY_RADIUS_YALMS * 1.5);
+        let mid = SfxEvent::at(7001, listener + Vec3::X * 12.0);
         let mid_volume = sfx_mix_volume(&mid, Some(listener));
         assert!(
             mid_volume > 0.0 && mid_volume < 1.0,
@@ -2072,25 +2156,30 @@ mod tests {
         );
     }
 
+    // CYySepRes.cpp CYySepRes::Calc3D reads CameraManager::CachedEyePosition — the ear is the
+    // camera, and an authored range rides on the event (g14s: far 30 / near 0 -> default 3).
     #[test]
-    fn the_player_outranks_the_camera_as_the_attenuation_listener() {
-        let player = Vec3::new(100.0, -8.0, -250.0);
-        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
+    fn a_ranged_emitter_mixes_through_its_authored_range_from_the_eye() {
+        let eye = Vec3::new(100.0, -8.0, -250.0);
 
-        assert_eq!(sfx_listener_pos(Some(player), Some(camera)), Some(player));
-        assert_eq!(sfx_listener_pos(None, Some(camera)), Some(camera));
-        assert_eq!(sfx_listener_pos(Some(player), None), Some(player));
-        assert_eq!(sfx_listener_pos(None, None), None);
-
-        // A mob just inside LSB's streaming radius, straight in front of the player and plainly
-        // on screen. Measured from the fully pulled-back camera it is past the cutoff.
-        let mob = player + Vec3::Z * (SFX_CUTOFF_YALMS - 1.0);
-        let swing = SfxEvent::at(7001, mob);
-        assert!(
-            sfx_mix_volume(&swing, sfx_listener_pos(Some(player), Some(camera))) > 0.0,
-            "an on-screen mob's swing must not be silenced by how far the camera is pulled back"
+        // g14s-shaped: near 0 (class default 3), far 30.
+        let crit = SfxEvent::at_ranged(
+            5008,
+            eye + Vec3::Z * 5.0,
+            0.0,
+            30.0,
+            ATTACHED_VERTICAL_WEIGHT,
         );
-        assert_eq!(sfx_mix_volume(&swing, Some(camera)), 0.0);
+        assert!(sfx_mix_volume(&crit, Some(eye)) > 0.9);
+
+        let beyond = SfxEvent::at_ranged(
+            5008,
+            eye + Vec3::Z * 35.0,
+            0.0,
+            30.0,
+            ATTACHED_VERTICAL_WEIGHT,
+        );
+        assert_eq!(sfx_mix_volume(&beyond, Some(eye)), 0.0);
     }
 
     fn spawned_sfx_volumes(app: &mut App) -> Vec<f32> {
@@ -2102,8 +2191,8 @@ mod tests {
     }
 
     // The bead's headline failure: a distant mob's swing reached the mixer at full volume.
-    // The camera sits a full pullback behind the player, so this also pins that the cull is
-    // measured from the player — from the camera the near emitter would itself be culled.
+    // Retail measures from the camera eye (CYySepRes.cpp CYySepRes::Calc3D), so this pins
+    // that an unauthored-range emitter is culled past the class-default far, measured there.
     #[test]
     fn play_sfx_culls_a_distant_emitter_with_real_install() {
         const REAL_SE_ID: u32 = 1;
@@ -2124,28 +2213,24 @@ mod tests {
                 ..Default::default()
             })
             .init_resource::<AudioMuteState>()
+            .init_resource::<SeRequestBuffer>()
             .init_resource::<SfxCache>()
             .add_systems(Update, play_sfx_system);
 
-        let player = Vec3::new(12.0, 1.0, -30.0);
-        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
-        app.world_mut().spawn((
-            crate::components::IsSelf,
-            Transform::from_translation(player),
-        ));
+        let camera = Vec3::new(12.0, 1.0, -30.0);
         app.world_mut().spawn((
             crate::camera::OperatorCamera,
             Transform::from_translation(camera),
             GlobalTransform::from_translation(camera),
         ));
 
-        // Dead ahead of the player, inside the streaming radius but past it from the camera.
-        let near = player + Vec3::Z * (SFX_CUTOFF_YALMS - crate::camera::ChaseCamera::DIST_MAX);
+        // Mid-rolloff from the eye (class defaults: near 3 / far 30).
         app.world_mut()
-            .write_message(SfxEvent::at(REAL_SE_ID, near));
+            .write_message(SfxEvent::at(REAL_SE_ID, camera + Vec3::Z * 16.0));
+        // Past the class-default far: culled.
         app.world_mut().write_message(SfxEvent::at(
             REAL_SE_ID,
-            player + Vec3::Z * SFX_CUTOFF_YALMS,
+            camera + Vec3::Z * SOUND_FAR_DEFAULT + Vec3::Z,
         ));
         app.update();
 
@@ -2153,11 +2238,11 @@ mod tests {
         assert_eq!(
             volumes.len(),
             1,
-            "exactly the on-screen emitter may reach the mixer, got {volumes:?}"
+            "exactly the in-range emitter may reach the mixer, got {volumes:?}"
         );
         assert!(
             volumes[0] > 0.0 && volumes[0] < 1.0,
-            "the surviving emitter is mid-rolloff from the player, got {volumes:?}"
+            "the surviving emitter is mid-rolloff from the eye, got {volumes:?}"
         );
     }
 
@@ -2456,5 +2541,70 @@ mod tests {
             app.world().get::<AudioPlayer<PcmAudio>>(entity).is_some(),
             "the spawned entity should carry an AudioPlayer<PcmAudio> component"
         );
+    }
+
+    // CYySepRes::RequestSoundResourcePlayback: the 13th distinct request in a tick is refused,
+    // no eviction; a resource already queued is accepted without taking a second slot.
+    #[test]
+    fn thirteenth_request_in_a_tick_is_refused() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..SE_REQUEST_MAX as u32 {
+            assert!(buf.request(id, 0), "request {id} fits the queue");
+        }
+        assert_eq!(buf.queued_count(), SE_REQUEST_MAX);
+        assert!(
+            !buf.request(SE_REQUEST_MAX as u32, 0),
+            "the 13th distinct id is refused"
+        );
+        assert_eq!(buf.refused_total, 1);
+        // The fullness check precedes the dedup scan, so
+        assert!(!buf.request(0, 0), "fullness precedes dedup");
+        assert_eq!(buf.queued_count(), SE_REQUEST_MAX);
+        assert_eq!(buf.refused_total, 2);
+    }
+
+    #[test]
+    fn queued_resource_rides_its_slot() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..5 {
+            assert!(buf.request(id, 0));
+        }
+        // An already-queued resource is accepted without taking a second slot.
+        assert!(buf.request(2, 0));
+        assert_eq!(buf.queued_count(), 5);
+        assert_eq!(buf.refused_total, 0);
+    }
+
+    // AudioManager::RequestSoundEffectPlay: ActiveInstanceCount >= MaxConcurrentSoundEffects
+    // refuses; a loop that leaves `far` despawns and frees its slot for the next frame.
+    #[test]
+    fn concurrent_cap_refuses_until_a_voice_frees() {
+        let mut buf = SeRequestBuffer::default();
+        assert!(
+            !buf.request(1, MAX_CONCURRENT_SE),
+            "full voice table refuses"
+        );
+        assert_eq!(buf.refused_total, 1);
+        // One loop left `far` and was despawned: the slot is free again.
+        assert!(buf.request(1, MAX_CONCURRENT_SE - 1));
+    }
+
+    // PlayUISoundResource → CYySepRes::Play: UI/global (dry) cues take slots exactly like
+    // positional ones — admission keys on the se id alone.
+    #[test]
+    fn global_cues_count_toward_the_buffer() {
+        let mut buf = SeRequestBuffer::default();
+        for id in 0u32..SE_REQUEST_MAX as u32 {
+            assert!(buf.request(id, 0));
+        }
+        // A dry UI cue with a fresh id is refused just like any other.
+        assert!(!buf.request(99, 0));
+        // ...while room remains, a duplicate rides its existing slot.
+        let mut open = SeRequestBuffer::default();
+        for id in 0u32..5 {
+            assert!(open.request(id, 0));
+        }
+        assert!(open.request(5, 0));
+        assert_eq!(open.queued_count(), 6);
     }
 }

@@ -580,6 +580,16 @@ pub struct SessionState {
     #[serde(default)]
     pub self_mount_id: u8,
 
+    /// Latched when a cutscene's 0x7E mount cue arms the local player's mount
+    /// (`AgentEvent::CsMountArmed`): the cue is a client-side write the server
+    /// never sees, so a 0x037 that still says "on foot" is stale until the
+    /// server re-asserts a mounted byte of its own (the rental CS's
+    /// `addStatusEffect(MOUNTED)` at event finish, surfaced as 0x037 status
+    /// 5/85). While latched, a non-mounted 0x037 byte is ignored rather than
+    /// clobbering the cue's write; a mounted byte releases the latch.
+    #[serde(default)]
+    pub cs_mount_armed: bool,
+
     /// Latched self appearance from 0x00A LOGIN / 0x051 GRAP_LIST. Ordering
     /// proof: 0x051 can land before self's entity exists, and `ZoneChanged`
     /// clears `entities`, so the last-known look is re-applied on upsert.
@@ -992,6 +1002,12 @@ pub struct DialogState {
     /// manual (the addon's "sentences that contain items will not be skipped").
     #[serde(default)]
     pub contains_item: bool,
+    /// Seconds the retail message box holds this frame before dismissing it on
+    /// its own — the entry's `7F 34/35/36 NN` auto-prompt code
+    /// (research/cexi-docs/dialog/format.md); `None` waits for a key press.
+    /// The session counts it down and advances exactly like a key press.
+    #[serde(default)]
+    pub auto_advance: Option<u8>,
 }
 
 fn cancel_armed_default() -> bool {
@@ -1051,20 +1067,44 @@ pub enum CutsceneCue {
         target: CutsceneActor,
         hide: bool,
     },
+    /// 0x6C TRANSPAR: fade `target`'s alpha to `end_alpha` (0..=255) over
+    /// `duration_frames` frames (research/XiEvents/OpCodes/0x006C.md).
+    Transpar {
+        target: CutsceneActor,
+        end_alpha: i32,
+        duration_frames: i32,
+    },
     CameraLock {
         lock: bool,
+    },
+    /// 0x38: the lower word of retail's `CliEventModeLocal` (the operand's
+    /// high byte with 0x20 forced). While it holds, the local player model
+    /// and the HUD pieces stay hidden
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    LocalMode {
+        mode: u16,
+    },
+    /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
+    /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
+    /// research/XIClient ActorTelemetry::CanIMove).
+    PlayerControl {
+        locked: bool,
     },
     /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
     /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
     HudHide {
         hide: bool,
     },
-    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
-    /// hour `hour`, or release it back to server time
-    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    /// 0x77/0x78/0xA9/0xC9 game-clock holds: hold the clock at Vana'diel hour
+    /// `hour`, minute `minute`, on Vana day `day_from_epoch` from the calendar
+    /// epoch when set (else the current day), or release it back to server
+    /// time (research/XiEvents/OpCodes/0x0077.md, 0x0078.md, 0x00A9.md,
+    /// 0x00C9.md).
     ClockHold {
         stop: bool,
         hour: Option<u32>,
+        minute: u8,
+        day_from_epoch: Option<u32>,
     },
     Mount {
         target: CutsceneActor,
@@ -1649,6 +1689,7 @@ impl SessionState {
                 self.auction = AuctionState::default();
                 self.self_casting = None;
                 self.self_server_status = 0;
+                self.cs_mount_armed = false;
 
                 // Wide-scan is per-zone (server rebuilds it from the new zone's
                 // entities); drop stale entries/track on any zone change or
@@ -2525,9 +2566,25 @@ impl SessionState {
                 changed
             }
             AgentEvent::SelfServerStatus { status, mount_id } => {
+                // A 0x037 that still says "on foot" is stale while a cutscene's
+                // 0x7E mount cue holds the mount: the server only re-asserts the
+                // mount as a mounted byte of its own (the MOUNTED effect added at
+                // event finish, vendor/server/scripts/effects/mounted.lua). A
+                // mounted byte releases the latch; a non-mounted one is dropped.
+                if self.cs_mount_armed && !ffxi_proto::decode::animation::is_mounted(*status) {
+                    return false;
+                }
+                self.cs_mount_armed = false;
                 let changed = self.self_server_status != *status || self.self_mount_id != *mount_id;
                 self.self_server_status = *status;
                 self.self_mount_id = *mount_id;
+                changed
+            }
+            AgentEvent::CsMountArmed { status, mount_id } => {
+                let changed = self.self_server_status != *status || self.self_mount_id != *mount_id;
+                self.self_server_status = *status;
+                self.self_mount_id = *mount_id;
+                self.cs_mount_armed = ffxi_proto::decode::animation::is_mounted(*status);
                 changed
             }
             // Machine inputs (consumed by the reactor, not the rendered projection).
@@ -3188,6 +3245,18 @@ pub enum AgentEvent {
         /// 0x037's `mount_id` — which mount, not whether one is being ridden.
         /// It rides this event because both fall out of the same packet and the
         /// pair is only meaningful read together.
+        mount_id: u8,
+    },
+
+    /// A cutscene's 0x7E mount cue armed the local player's mount on the
+    /// client. Unlike [`AgentEvent::SelfServerStatus`], this write is not a
+    /// server byte: the cue runs in the event VM and the server only learns of
+    /// the mount when its own script adds the MOUNTED effect at event finish
+    /// (vendor/server/scripts/effects/mounted.lua). Until that re-assertion
+    /// lands as a mounted 0x037 byte, non-mounted 0x037 bytes are stale and
+    /// must not clear the cue's write — see `SessionState::cs_mount_armed`.
+    CsMountArmed {
+        status: u8,
         mount_id: u8,
     },
 

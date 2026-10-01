@@ -16,8 +16,9 @@ than guessing ROM paths. `rg` normally ignores this install, so use an explicit
 path with `--no-ignore` when searching it.
 
 Search the relevant policy in `research/XIClient/src/XIClient/source/` to find
-candidate callers and data structures. XIM and xi-tools references can supply search
-terms. Preserve the distinction between a community hypothesis and a rule
+candidate callers and data structures; xi-tools docs can supply search terms
+(verify before trusting). Never cite `research/xim` as evidence — lookup aid
+only (research/AGENTS.md tier 6). Preserve the distinction between a community hypothesis and a rule
 independently confirmed in the installed binary.
 
 ## Packed FFXiMain.dll

@@ -21,12 +21,6 @@ path = "src/lib.rs"
 name = "kuluu"
 path = "src/main.rs"
 
-[[example]]
-# Headless replay of the single-authority walker over real MZB geometry
-# (plan §4). Needs the viewer feature: the walker lives in `view_native`.
-name = "zz-field-walk"
-required-features = ["native-window"]
-
 [features]
 # The native windowed viewer is the mode we develop and ship by default, so
 # enable it out of the box: a bare `cargo build`/`cargo test -p kuluu`
@@ -79,6 +73,30 @@ enhanced-job-display = ["kuluu-render?/enhanced-job-display"]
 enhanced-shutdown-counter = ["kuluu-render?/enhanced-shutdown-counter"]
 # Enhanced (non-retail) free movement during the weapon draw/sheathe. See kuluu-render.
 enhanced-engage-move-lock-off = ["kuluu-render?/enhanced-engage-move-lock-off"]
+# Enhanced (non-retail) +20% particle alpha (clamped). See kuluu-render for details.
+enhanced-particle-alpha-20 = ["kuluu-render?/enhanced-particle-alpha-20"]
+# Enhanced (non-retail) Debug menu row that bypasses the chase camera leash
+# (focus dead zone, eye slack band, spring). Deliberately NOT in build_cowland.bat —
+# local test builds enable it by hand.
+enhanced-camera-leash = ["kuluu-render?/enhanced-camera-leash"]
+# Enhanced (non-retail): the player character ignores knockback displacement
+# (flinch and push-in play, only the travel is dropped); Debug -> Retail+ row.
+# build_cowland.bat enables it.
+enhanced-ignore-knockback-self = ["kuluu-render?/enhanced-ignore-knockback-self"]
+# Enhanced (non-retail): while a weapon is drawn or sheathed the legs run free
+# (run/walk) instead of riding the draw stance — only the legs unlock;
+# Debug -> Retail+ row. build_cowland.bat enables it.
+enhanced-leg-unlock = ["kuluu-render?/enhanced-leg-unlock"]
+# Enhanced (non-retail) `//targetname` slash command: target the nearest
+# NPC/mob/pet by exact name. Kuluu-local (no render side), so no sub-features;
+# the local release build script enables it. Vanilla builds omit it.
+enhanced-targetname = []
+# Enhanced (non-retail) pre-server animation test box: an AnimationTest button
+# in the launcher titlebar loads a worm+Hume scene and fires dam0 hit cases
+# through the production VFX pipeline with on-screen + stderr logging. Kuluu-local
+# (no render side), so no sub-features; the local release build script
+# enables it. Vanilla builds omit it.
+enhanced-animationtest = []
 # Enable the WebSocket relay listener (`--relay-listen <addr>` global flag).
 # Publishes the same `kuluu-snapshot` frames the in-process bridge produces,
 # so external tools (and the future wasm browser viewer) can consume the

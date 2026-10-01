@@ -2894,9 +2894,24 @@ fn spawn_mzb_overlay(
     let noncollision_verts = noncollision_positions.len();
     let noncollision_tris = noncollision_indices.len() / 3;
 
+    // The render mesh gets req.world_pos from the overlay parent's transform; bake the same
+    // offset into the collision block so ground probes agree with what is drawn (production
+    // blocks load at ZERO, where this is a no-op).
+    let world_offset = Mat4::from_translation(req.world_pos);
+    let offset_instances: Vec<MzbInstance> = instances
+        .iter()
+        .map(|i| MzbInstance {
+            submesh_idx: i.submesh_idx,
+            bevy_transform: Transform::from_matrix(world_offset * i.bevy_transform.to_matrix()),
+            water_height_bevy: i.water_height_bevy,
+            lighting: i.lighting,
+            sub_area_link: i.sub_area_link,
+        })
+        .collect();
+
     collision_geometry.set_block(
         req.slot,
-        build_collision_geometry(submeshes, instances, Some(req.file_id)),
+        build_collision_geometry(submeshes, &offset_instances, Some(req.file_id)),
     );
 
     spawn_merged(

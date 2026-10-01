@@ -100,7 +100,13 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) color: vec4<f32>,
-    @location(4) point_light: vec3<f32>,
+    // Per-light point contribution, evaluated at the vertex and interpolated across
+    // the triangle — D3D8 fixed function evaluates point attenuation per vertex,
+    // so a lamp's reach fades with mesh density instead of cutting off in a ring.
+    @location(4) point_contrib0: vec3<f32>,
+    @location(5) point_contrib1: vec3<f32>,
+    @location(6) point_contrib2: vec3<f32>,
+    @location(7) point_contrib3: vec3<f32>,
 };
 
 @vertex
@@ -114,41 +120,39 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.world_normal = normalize(mesh_functions::mesh_normal_local_to_world(v.normal, v.instance_index));
     out.uv = v.uv;
     out.color = v.color;
-    out.point_light = authored_point_irradiance(out.world_normal, out.world_position);
+    let nrm = out.world_normal;
+    let pos = out.world_position;
+    out.point_contrib0 = authored_point_contribution(0u, nrm, pos);
+    out.point_contrib1 = authored_point_contribution(1u, nrm, pos);
+    out.point_contrib2 = authored_point_contribution(2u, nrm, pos);
+    out.point_contrib3 = authored_point_contribution(3u, nrm, pos);
     return out;
 }
 
-fn authored_point_irradiance(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
-    var rgb = vec3<f32>(0.0);
-    for (var i = 0u; i < 4u; i += 1u) {
-        let range = points.colors[i].w;
-        if (range <= 0.0) { continue; }
-        let to_light = points.positions[i].xyz - p;
-        let dist = length(to_light);
-        if (dist > range) { continue; }
-        let a = points.attenuation[i].xyz;
-        let denom = a.x + a.y * dist + a.z * dist * dist;
-        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        rgb += nl * points.colors[i].rgb / max(denom, 1e-5);
-    }
-    return rgb;
+fn authored_point_contribution(slot: u32, n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+    let range = points.colors[slot].w;
+    if (range <= 0.0) { return vec3<f32>(0.0); }
+    let to_light = points.positions[slot].xyz - p;
+    let dist = length(to_light);
+    if (dist > range) { return vec3<f32>(0.0); }
+    let a = points.attenuation[slot].xyz;
+    let denom = a.x + a.y * dist + a.z * dist * dist;
+    // FFXiMain.dll retail-2026-09: InitLight RVA 0x178610 zeroes the constant and linear
+    // attenuation, UpdateLight RVA 0x178530 sets q = 1/theta — D3D8 fixed function then
+    // clamps 1/(c + l*d + q*d^2) to at most 1 (xim pointLightCalc clamps the same way),
+    // so near a light the contribution is nl * color, not nl * color / denom.
+    let dist_factor = min(1.0, 1.0 / max(denom, 1e-5));
+    let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+    return nl * points.colors[slot].rgb * dist_factor;
 }
 
-fn shadowed_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
-    var rgb = vec3<f32>(0.0);
-    for (var i = 0u; i < 4u; i += 1u) {
-        let range = points.colors[i].w;
-        if (range <= 0.0) { continue; }
-        let to_light = points.positions[i].xyz - p;
-        let dist = length(to_light);
-        if (dist > range) { continue; }
-        let a = points.attenuation[i].xyz;
-        let denom = a.x + a.y * dist + a.z * dist * dist;
-        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        let shadow = point_shadow_factor(p, n, points.positions[i].xyz, frag);
-        rgb += shadow * nl * points.colors[i].rgb / max(denom, 1e-5);
+fn point_light_term(contrib: vec3<f32>, slot: u32, n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    if (points.colors[slot].w <= 0.0) { return vec3<f32>(0.0); }
+    var shadow = 1.0;
+    if (lighting.time_params.z > 0.0) {
+        shadow = point_shadow_factor(p, n, points.positions[slot].xyz, frag);
     }
-    return rgb;
+    return contrib * shadow;
 }
 
 
@@ -159,6 +163,28 @@ fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, shadow_scale: vec2<f32>, frag_co
     let nl1 = max(dot(n, -lighting.dir1_dir.xyz), 0.0);
     rgb += shadow_scale.y * nl1 * lighting.dir1_color.rgb * lighting.dir1_color.w;
     return rgb;
+}
+
+// Enhanced lamps: per-pixel light from the shared lamp slots (empty unless Dynamic
+// Lights is Enhanced). The window fades to zero at the range, so there is no hard ring.
+fn enhanced_lamp_light(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let range = lighting.point_color[i].w;
+        if (range <= 0.0) { continue; }
+        let to_light = lighting.point_pos[i].xyz - p;
+        let dist = length(to_light);
+        if (dist >= range) { continue; }
+        let x = dist / range;
+        let window = (1.0 - x * x) * (1.0 - x * x);
+        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+        var shadow = 1.0;
+        if (lighting.time_params.z > 0.0) {
+            shadow = point_shadow_factor(p, n, lighting.point_pos[i].xyz, frag);
+        }
+        sum += shadow * nl * window * lighting.point_color[i].rgb;
+    }
+    return sum;
 }
 
 // Fade a lit fragment toward the fog colour by view distance. Scattering is
@@ -209,11 +235,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             directional_shadow_factor(in.world_position, n, -lighting.dir1_dir.xyz, in.clip_position.xy),
         ),
     );
-    var point_light = in.point_light;
-    if (lighting.time_params.z > 0.0) {
-        point_light = shadowed_point_irradiance(n, in.world_position, in.clip_position.xy);
-    }
-    let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy) + point_light) * in.color.rgb;
+    // The vertex-stage contributions are the light; the fragment only multiplies each by its
+    // cube-shadow factor (Enhanced Dynamic Lights). Re-evaluating attenuation per pixel put a
+    // hard ring at every lamp's range on the walls — D3D8 fixed function never does that.
+    let point_light = point_light_term(in.point_contrib0, 0u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(in.point_contrib1, 1u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(in.point_contrib2, 2u, n, in.world_position, in.clip_position.xy)
+        + point_light_term(in.point_contrib3, 3u, n, in.world_position, in.clip_position.xy);
+    let lit = (scene_irradiance(n, in.world_position, shadow_scale, in.clip_position.xy)
+        + point_light
+        + enhanced_lamp_light(n, in.world_position, in.clip_position.xy)) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.
 #ifdef FFXI_GENERATOR_STAGE_CHAIN

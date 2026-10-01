@@ -49,6 +49,10 @@ pub struct ZonePlacedSfx {
     countdown_frames: f32,
     rng: u64,
     audio: Option<Entity>,
+    // sec2 0x68 KeyFrameValueSetup ("ToD Volume") + section-3 ClockValueUpdater 0x43 — the
+    // keyframe track sampled at the Vana'diel day fraction that multiplies this emitter's gain
+    // (research/xim ParticleGeneratorParser.kt — audioConfiguration.volumeMultiplier).
+    tod_volume: Option<ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
 /// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition activates the generators
@@ -81,6 +85,25 @@ fn is_zone_placed(def: &SoundGeneratorDef) -> bool {
 // 308 Sep names in West Ronfaure alone bind to more than one se id. Measured over every
 // shipped zone DAT, 5,832 of 5,895 generators resolve in their own directory and the
 // remaining 63 only through a whole-file name lookup.
+// The keyframe chunks a generator's ToD volume track (sec2 0x68) resolves against — the same
+// 0x19 chunks the scheduler indexes for its particle tracks.
+fn flat_keyframe_index(
+    node: &ChunkNode<'_>,
+    out: &mut HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
+) {
+    for child in &node.children {
+        if ffxi_dat::kind::ChunkKind::from_u8(child.chunk.kind)
+            == Some(ffxi_dat::kind::ChunkKind::KeyFrame)
+        {
+            out.insert(
+                child.chunk.name,
+                ffxi_dat::particle_gen::KeyFrameTrack::parse(child.chunk.data),
+            );
+        }
+        flat_keyframe_index(child, out);
+    }
+}
+
 fn flat_sep_index(node: &ChunkNode<'_>, out: &mut HashMap<[u8; 4], Sep>) {
     for child in &node.children {
         if ffxi_dat::kind::ChunkKind::from_u8(child.chunk.kind)
@@ -149,6 +172,7 @@ fn emitter(
     origin: Vec3,
     attached: bool,
     index: usize,
+    keyframes: &HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 ) -> ZonePlacedSfx {
     let mut rng = SFX_RNG_SEED ^ (index as u64).wrapping_mul(SFX_RNG_STRIDE);
     let countdown_frames = next_unit(&mut rng) * (def.frames_per_emission + def.emission_variance);
@@ -165,6 +189,9 @@ fn emitter(
         countdown_frames,
         rng,
         audio: None,
+        tod_volume: def
+            .tod_volume_track
+            .and_then(|id| keyframes.get(&id).cloned()),
     }
 }
 
@@ -172,6 +199,7 @@ fn spawn_emitters(
     defs: &[(SoundGeneratorDef, Sep)],
     commands: &mut Commands,
     out: &mut Vec<Entity>,
+    keyframes: &HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 ) {
     for (index, (def, sep)) in defs.iter().enumerate() {
         let bp = def.base_position;
@@ -182,7 +210,10 @@ fn spawn_emitters(
         });
         out.push(
             commands
-                .spawn((InGameEntity, emitter(def, sep, origin, false, index)))
+                .spawn((
+                    InGameEntity,
+                    emitter(def, sep, origin, false, index, keyframes),
+                ))
                 .id(),
         );
     }
@@ -222,7 +253,7 @@ fn spawn_actor_auto_run_sounds(
                 InGameEntity,
                 ChildOf(actor_root),
                 Transform::from_translation(local),
-                emitter(def, sep, local, true, index),
+                emitter(def, sep, local, true, index, &fx.assets.keyframes),
             ));
         }
     }
@@ -283,11 +314,13 @@ fn sync_zone_sfx(
     let tree = ffxi_dat::chunk::walk_tree(&bytes);
     let mut flat = HashMap::new();
     flat_sep_index(&tree, &mut flat);
+    let mut keyframes = HashMap::new();
+    flat_keyframe_index(&tree, &mut keyframes);
 
     if zone_stale {
         let mut defs = Vec::new();
         collect_placed_sounds(&tree, &flat, true, &mut defs);
-        spawn_emitters(&defs, &mut commands, &mut store.zone_entities);
+        spawn_emitters(&defs, &mut commands, &mut store.zone_entities, &keyframes);
         info!(
             "zone_sfx: DAT {file_id:?} → {} placed emitter(s)",
             store.zone_entities.len()
@@ -297,7 +330,12 @@ fn sync_zone_sfx(
         if let Some(weat) = find_weat_type(&tree, weather) {
             let mut defs = Vec::new();
             collect_placed_sounds(weat, &flat, false, &mut defs);
-            spawn_emitters(&defs, &mut commands, &mut store.weather_entities);
+            spawn_emitters(
+                &defs,
+                &mut commands,
+                &mut store.weather_entities,
+                &keyframes,
+            );
             if !store.weather_entities.is_empty() {
                 info!(
                     "zone_sfx: DAT {file_id:?} weat/{} → {} placed emitter(s)",
@@ -309,17 +347,42 @@ fn sync_zone_sfx(
     }
 }
 
-fn update_zone_sfx(
+// Mixer A's per-frame gain: retail Calc3D × master × ambient gain — the same law
+// `play_sfx_system` applies to routine cues; the sfx mute and the ambient gate
+// hard-override.
+pub fn zone_sfx_gain(
+    mute: &AudioMuteState,
+    eye: Vec3,
+    origin: Vec3,
+    near: f32,
+    far: f32,
+    vertical_weight: f32,
+) -> f32 {
+    if mute.sfx || !mute.ambient {
+        return 0.0;
+    }
+    sfx_attenuation_calc3d(eye, origin, near, far, vertical_weight)
+        * mute.master
+        * mute.ambient_gain
+}
+
+pub fn update_zone_sfx(
     time: Res<Time>,
+    sim: Res<crate::particle_sim::ParticleSimulator>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
+    sfx_debug: Res<crate::audio::SfxDebug>,
     listener: Query<&GlobalTransform, With<OperatorCamera>>,
+    voices: Query<Entity, With<crate::audio::SeVoice>>,
+    mut buffer: ResMut<crate::audio::SeRequestBuffer>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut emitters: Query<(Entity, &mut ZonePlacedSfx, Option<&GlobalTransform>)>,
     mut sinks: Query<&mut bevy::audio::AudioSink>,
     playing: Query<(), With<AudioPlayer<PcmAudio>>>,
     mut commands: Commands,
+    mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
+    mut last_amb_toast: Local<std::collections::HashMap<Entity, std::time::Instant>>,
 ) {
     if emitters.is_empty() {
         return;
@@ -327,9 +390,8 @@ fn update_zone_sfx(
     let Some(install) = slots.install_root.clone() else {
         return;
     };
-    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D), not from
-    // the player — unlike the entity-swing cues, whose cutoff is LSB's player-measured
-    // streaming radius (see `sfx_attenuation`).
+    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D),
+    // the same law and ear as the routine-swing cues (`audio.rs sfx_mix_volume`).
     let Some(eye) = listener.iter().next().map(|t| t.translation()) else {
         return;
     };
@@ -346,11 +408,42 @@ fn update_zone_sfx(
         } else {
             (em.origin, UNATTACHED_VERTICAL_WEIGHT)
         };
-        let gain = if mute.sfx {
-            0.0
-        } else {
-            sfx_attenuation_calc3d(eye, origin, em.near, em.far, vertical_weight)
-        };
+        // sec3 0x43 ClockValueUpdater: the ToD volume track multiplies the gain at the
+        // full-day interpolation (research/xim ParticleUpdaters.kt — audioConfiguration.
+        // volumeMultiplier), so a river swells and dries with the Vana'diel day.
+        let tod_volume = em
+            .tod_volume
+            .as_ref()
+            .map(|t| t.sample(sim.clock().day_fraction))
+            .unwrap_or(1.0);
+        let gain = zone_sfx_gain(&mute, eye, origin, em.near, em.far, vertical_weight) * tod_volume;
+
+        // The ambient readout exists for finding the next loud thing: on while /sfxdebug is set
+        // or the gain knob is off unity. One toast per emitter per second.
+        if sfx_debug.0 || mute.ambient_gain != 1.0 {
+            let now = std::time::Instant::now();
+            let due = last_amb_toast
+                .get(&emitter)
+                .is_none_or(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1));
+            if due {
+                toasts.write(crate::snapshot::ToastEvent::debug(format!(
+                    "✦ amb #{} near {:.0} far {:.0} dist {:.1}y gain {:.2} {}",
+                    em.se_id,
+                    em.near,
+                    em.far,
+                    eye.distance(origin),
+                    gain,
+                    if em.loops {
+                        "loop"
+                    } else if em.singleton {
+                        "singleton"
+                    } else {
+                        "repeat"
+                    },
+                )));
+                last_amb_toast.insert(emitter, now);
+            }
+        }
 
         if em.loops {
             match (em.audio, gain > 0.0) {
@@ -365,17 +458,22 @@ fn update_zone_sfx(
                 }
                 (None, true) => {
                     let se_id = em.se_id;
-                    if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, true) {
-                        em.audio = Some(
-                            commands
-                                .spawn((
-                                    ChildOf(emitter),
-                                    AudioPlayer(handle),
-                                    PlaybackSettings::ONCE
-                                        .with_volume(bevy::audio::Volume::Linear(gain)),
-                                ))
-                                .id(),
-                        );
+                    // Retail admission: a refused loop simply does not start this tick; the
+                    // next frame re-asks once a slot frees.
+                    if buffer.request(se_id, voices.iter().count()) {
+                        if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, true) {
+                            em.audio = Some(
+                                commands
+                                    .spawn((
+                                        ChildOf(emitter),
+                                        crate::audio::SeVoice,
+                                        AudioPlayer(handle),
+                                        PlaybackSettings::ONCE
+                                            .with_volume(bevy::audio::Volume::Linear(gain)),
+                                    ))
+                                    .id(),
+                            );
+                        }
                     }
                 }
                 (None, false) => {}
@@ -400,16 +498,19 @@ fn update_zone_sfx(
             continue;
         }
         let se_id = em.se_id;
-        if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, false) {
-            let cue = commands
-                .spawn((
-                    ChildOf(emitter),
-                    AudioPlayer(handle),
-                    PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(gain)),
-                ))
-                .id();
-            if em.singleton {
-                em.audio = Some(cue);
+        if buffer.request(se_id, voices.iter().count()) {
+            if let Some(handle) = cache.handle(&install, &mut pcm_assets, se_id, false) {
+                let cue = commands
+                    .spawn((
+                        ChildOf(emitter),
+                        crate::audio::SeVoice,
+                        AudioPlayer(handle),
+                        PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(gain)),
+                    ))
+                    .id();
+                if em.singleton {
+                    em.audio = Some(cue);
+                }
             }
         }
     }
@@ -481,6 +582,78 @@ mod tests {
                 .insert(*name, Sep::parse(*name, &sep_body(*se_id, 0)).unwrap());
         }
         assets
+    }
+
+    // Master at 50% halves an ambient emitter exactly as it does a routine cue;
+    // the sfx mute and the ambient gate override everything to silence; the
+    // ambient gain knob scales on top of master.
+    #[test]
+    fn ambient_gain_follows_master_and_mute_overrides() {
+        let eye = Vec3::ZERO;
+        // Authored 0/0 → Calc3D class defaults (near 3, far 30); 16.5 yalms is the midpoint.
+        let origin = Vec3::new(0.0, 0.0, 16.5);
+        assert_eq!(
+            zone_sfx_gain(
+                &AudioMuteState::default(),
+                eye,
+                origin,
+                0.0,
+                0.0,
+                UNATTACHED_VERTICAL_WEIGHT
+            ),
+            0.5
+        );
+        let half = AudioMuteState {
+            master: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_sfx_gain(&half, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.25
+        );
+        let muted = AudioMuteState {
+            sfx: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_sfx_gain(&muted, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.0
+        );
+        let amb_off = AudioMuteState {
+            ambient: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_sfx_gain(&amb_off, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            0.0,
+            "the ambient gate silences mixer A regardless of master/gain"
+        );
+        let doubled = AudioMuteState {
+            ambient_gain: 2.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_sfx_gain(&doubled, eye, origin, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT),
+            1.0,
+            "gain clamps at full volume"
+        );
+        let doubled_half = AudioMuteState {
+            ambient_gain: 2.0,
+            master: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(
+            zone_sfx_gain(
+                &doubled_half,
+                eye,
+                origin,
+                0.0,
+                0.0,
+                UNATTACHED_VERTICAL_WEIGHT
+            ),
+            0.5,
+            "gain multiplies into master"
+        );
     }
 
     /// Only an auto-run, source-attached Sep generator rides the actor; a zone

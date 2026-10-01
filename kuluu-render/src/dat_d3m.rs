@@ -42,8 +42,12 @@ pub fn d3m_to_mesh(d3m: &D3m) -> Mesh {
     mesh
 }
 
+// Retail's D3D9 fixed-function stages consume the stored 8-bit texels as-is: texture alpha is
+// read straight from the surface by MODULATE with no expansion anywhere in the client pipeline,
+// so a hit-flash sheet like `eisyou21` (stored alphas 17-136) must not be doubled — doubling
+// draws every sparkle ~2x denser than retail.
 pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
-    convert(t, false)
+    convert(t, false, false)
 }
 
 /// [`decoded_texture_to_image`] plus [`ffxi_dat::texture::resolve_dxt3_alpha_dither`], for the
@@ -59,20 +63,32 @@ pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image 
 /// been surveyed, and `resolve_dxt3_alpha_dither` declines non-nibble alpha anyway, so widening
 /// the set is an argument to make per set, not a correctness gap (kuluu-d9wv).
 pub fn decoded_sky_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
-    convert(t, true)
+    convert(t, true, true)
 }
 
 /// Convert one decoded D3M texture; when `undither` is set the DXT3 alpha dither is
 /// resolved before the remap, which doubles whatever alpha it is handed — see the note
-/// on `resolve_dxt3_alpha_dither`.
-fn convert(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
+/// on `resolve_dxt3_alpha_dither`. `remap_alpha` selects the celestial expansion and its Srgb
+/// sampling; particle sheets pass both through.
+fn convert(t: &ffxi_dat::texture::DecodedTexture, undither: bool, remap_alpha: bool) -> Image {
     use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
     let mut rgba = t.rgba.clone();
     if undither {
         ffxi_dat::texture::resolve_dxt3_alpha_dither(&mut rgba, t.width, t.height);
     }
-    ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
+    if remap_alpha {
+        ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
+    }
+    // D3D9 fixed-function has no sRGB surface: stages multiply raw 8-bit texels in gamma space
+    // and the result lands straight in the framebuffer, so decoding to linear here would shift
+    // every sub-white mid-tone (encode(decode(v)*K) = v*K^(1/2.2), not clamp(v*K)). The celestial
+    // set keeps Srgb, where its sheets were verified (kuluu-u5mm).
+    let format = if remap_alpha {
+        TextureFormat::Rgba8UnormSrgb
+    } else {
+        TextureFormat::Rgba8Unorm
+    };
     let mut image = Image::new(
         Extent3d {
             width: t.width,
@@ -81,7 +97,7 @@ fn convert(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
         },
         TextureDimension::D2,
         rgba,
-        TextureFormat::Rgba8UnormSrgb,
+        format,
         RenderAssetUsages::default(),
     );
     // Scrolling water sheets (zone-static generators) drive UVs past [0,1]; Repeat
@@ -163,8 +179,9 @@ mod tests {
 
     /// A DXT3 alpha plane holds nibble multiples only, so an authored half-opaque 0x80 ships
     /// as the nibble 7/8 pair stippled across neighbours - what `weat/<type>/kasa` is, end to
-    /// end. The sky converter averages that back out; the shared particle converter the other
-    /// D3M sheets go through leaves the stipple in place.
+    /// end. The sky converter averages that back out and expands the alpha; the shared particle
+    /// converter the other D3M sheets go through passes both the stipple and the stored alpha
+    /// through as retail's fixed-function stages consume them.
     /// texture.rs
     #[test]
     fn only_the_sky_converter_resolves_the_dxt3_alpha_stipple() {
@@ -208,13 +225,19 @@ mod tests {
             (lo, hi - lo)
         };
 
-        let stipple = ffxi_alpha_remap(DITHER_HI) - ffxi_alpha_remap(DITHER_LO);
+        use bevy::render::render_resource::TextureFormat;
+
+        // Stored bytes as-is: no remap, gamma-space sampling.
+        let plain = decoded_texture_to_image(&t);
+        assert_eq!(plain.texture_descriptor.format, TextureFormat::Rgba8Unorm);
         assert_eq!(
-            spread(decoded_texture_to_image(&t)),
-            (ffxi_alpha_remap(DITHER_LO), stipple),
-            "the shared particle converter must not undither"
+            spread(plain),
+            (DITHER_LO, DITHER_HI - DITHER_LO),
+            "the shared particle converter must not undither or remap"
         );
-        let (sky_lo, sky_spread) = spread(decoded_sky_texture_to_image(&t));
+        let sky = decoded_sky_texture_to_image(&t);
+        assert_eq!(sky.texture_descriptor.format, TextureFormat::Rgba8UnormSrgb);
+        let (sky_lo, sky_spread) = spread(sky);
         assert!(
             sky_spread <= RESOLVED_RESIDUAL_MAX && sky_lo > ffxi_alpha_remap(DITHER_LO),
             "celestial converter left alpha spread {sky_spread} from {sky_lo}"

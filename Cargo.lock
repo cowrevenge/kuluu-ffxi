@@ -3256,6 +3256,7 @@ name = "ffxi-event"
 version = "0.7.0"
 dependencies = [
  "ffxi-dat",
+ "ffxi-vocab",
  "tracing",
 ]
 
@@ -4541,6 +4542,19 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "kuluu_noserver_tester"
+version = "0.7.0"
+dependencies = [
+ "bevy",
+ "bevy_framepace",
+ "ffxi-dat",
+ "ffxi-proto",
+ "kuluu-render",
+ "kuluu-snapshot",
+ "tracing-subscriber",
 ]
 
 [[package]]

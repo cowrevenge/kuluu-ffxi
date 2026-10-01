@@ -231,6 +231,7 @@ fn track_celestial_bodies(
         day_fraction: (sky.hour / 24.0).rem_euclid(1.0),
         day_of_week: (day % ffxi_dat::particle_gen::DAYS_OF_WEEK as u64) as usize,
         moon_phase: moon_phase_frame(sky.moon_phase),
+        ..Default::default()
     });
 
     let Some(cam) = cam.iter().next() else {
@@ -429,9 +430,8 @@ mod tests {
         }
         let plain = bound_alpha(&plain_mats, &plain_images);
         assert!(
-            plain.contains(&ffxi_alpha_remap(DITHER_LO))
-                && plain.contains(&ffxi_alpha_remap(DITHER_HI)),
-            "every other generator set must keep the stipple"
+            plain.contains(&DITHER_LO) && plain.contains(&DITHER_HI),
+            "every other generator set must pass the stored alpha through as-is"
         );
     }
 }

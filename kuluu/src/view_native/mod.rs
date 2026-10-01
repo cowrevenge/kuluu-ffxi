@@ -1,3 +1,4 @@
+pub mod animation_test_scene;
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;
@@ -19,6 +20,7 @@ pub mod launcher_backdrop;
 // until then.
 #[allow(deprecated)]
 pub mod launcher_ui;
+pub mod light_occlusion;
 #[allow(deprecated)]
 pub mod model_viewer;
 pub mod nameplate_occlude;
@@ -39,6 +41,7 @@ pub mod zone_transition;
 use std::sync::Arc;
 
 use anyhow::Result;
+use bevy::camera::RenderTarget;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use kuluu_render::{
@@ -63,10 +66,67 @@ use tokio::runtime::Handle as RtHandle;
 use crate::launcher::Defaults;
 
 use self::bridge::NativeSource;
-use self::input::{
-    AutoRun, CameraAutoRecenter, CommandTx, HeadingTurnAccum, LocalPlayerPrediction,
-};
+use self::input::{AutoRun, CommandTx, HeadingTurnAccum, LocalPlayerPrediction};
 use self::launcher_ui::{LoginErrorMsg, PendingConnect};
+
+// Bevy's duplicate-camera warning prints only the colliding (order, target) pair; this names the
+// entities so a camera-order collision is diagnosable from the log alone. Silent unless two
+// active window cameras share an order; throttled to one line per 5s while that persists.
+fn audit_camera_order_collisions(
+    q: Query<(
+        Entity,
+        &Camera,
+        Option<&RenderTarget>,
+        Option<&kuluu_render::camera::OperatorCamera>,
+        Option<&launcher_backdrop::BackdropCamera>,
+        Option<&launcher_ui::LauncherCamera>,
+        Option<&animation_test_scene::TestSceneScoped>,
+    )>,
+    mut last: Local<Option<std::time::Instant>>,
+) {
+    let mut by_order: std::collections::HashMap<isize, Vec<(Entity, &'static str)>> =
+        std::collections::HashMap::new();
+    for (e, cam, target, op, bd, lu, ts) in &q {
+        if !cam.is_active || !matches!(target, Some(RenderTarget::Window(_))) {
+            continue;
+        }
+        let who = if op.is_some() {
+            "operator"
+        } else if bd.is_some() {
+            "backdrop"
+        } else if lu.is_some() {
+            "launcher-ui"
+        } else if ts.is_some() {
+            "anim-test-box"
+        } else {
+            "unknown"
+        };
+        by_order.entry(cam.order).or_default().push((e, who));
+    }
+    let dups: Vec<_> = by_order
+        .into_iter()
+        .filter(|(_, cams)| cams.len() > 1)
+        .collect();
+    if dups.is_empty() {
+        return;
+    }
+    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    for (order, cams) in dups {
+        let list: Vec<String> = cams
+            .iter()
+            .map(|(e, who)| format!("{who}({e:?})"))
+            .collect();
+        tracing::warn!(
+            "cam-audit: {} active window cameras share order {}: {}",
+            cams.len(),
+            order,
+            list.join(", ")
+        );
+    }
+}
 
 fn drive_feathers_cursor(
     style: Res<CursorStyle>,
@@ -417,6 +477,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             // whatever the user is doing instead of yanking them out of a
             // full-screen app.
             focused: !unfocused,
+            // KULUU_WINDOW_HIDDEN=1 — verification runs: no visible window, not even a
+            // taskbar entry; rendering continues on the hidden surface and the logs carry
+            // the evidence.
+            visible: std::env::var_os("KULUU_WINDOW_HIDDEN").is_none(),
             ..default()
         }),
         ..default()
@@ -537,7 +601,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
 
     app.add_systems(Startup, configure_gizmo_render_layer);
-
     app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
 
     // FFXI_NO_FRAMEPACE bisects pacing-induced stutter: if a periodic hitch vanishes without the
@@ -562,7 +625,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             bevy::feathers::dark_theme::create_dark_theme(),
         ))
         .add_plugins(widgets::WidgetsPlugin)
-        .add_systems(Update, drive_feathers_cursor);
+        .add_systems(Update, drive_feathers_cursor)
+        .add_systems(Update, audit_camera_order_collisions);
 
     if std::env::var_os("FFXI_WIDGET_DEMO").is_some() {
         app.add_systems(Startup, widgets::spawn_widget_demo);
@@ -572,7 +636,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     app.insert_resource(Time::<Fixed>::from_hz(60.0))
         .init_resource::<AutoRun>()
-        .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
         .init_resource::<entity_list_hud::EntityListScroll>()
@@ -708,6 +771,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     // (graphics settings were loaded above so the initial window mode could honour `fullscreen`.)
     app.insert_resource(loaded_graphics);
+    app.init_resource::<crate::graphics_store::GraphicsPersistSuspended>();
     app.insert_resource(crate::graphics_store::GraphicsStateRes {
         store: graphics_store_obj,
     });
@@ -720,6 +784,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         MousePlugin,
         navmesh_overlay::NavmeshOverlayPlugin,
         launcher_backdrop::LauncherBackdropPlugin,
+        animation_test_scene::AnimationTestScenePlugin,
         zone_transition::ZoneTransitionOverlayPlugin,
     ))
     .insert_resource(ZoneNameResolver::new(kuluu_nav::zone_name))
@@ -810,15 +875,30 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
+    // The player's movement runs even while the event holds the camera: in
+    // that state dispatch follows the server's scripted position (the dialog
+    // walk) and drives the walk animation from it, instead of the walker being
+    // off and the player snapped. The ground-recovery and stair-capture safety
+    // nets stay off while the event owns the position: a scripted position is
+    // on the ground, and a recovery command would fight the script.
     app.add_systems(
         FixedUpdate,
         (
             input::dispatch_movement_system,
-            input::recover_self_ground_system,
             input::apply_self_prediction_system,
+        )
+            .chain()
+            .run_if(in_state(AppPhase::InGame)),
+    );
+    app.add_systems(
+        FixedUpdate,
+        (
+            input::recover_self_ground_system,
             input::stair_capture_system,
         )
             .chain()
+            .after(input::dispatch_movement_system)
+            .before(input::apply_self_prediction_system)
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
@@ -856,6 +936,22 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         sun_occlusion::update_sun_occlusion_system
             .after(collision_bvh::build_zone_collision_bvh_system)
             .before(kuluu_render::lens_flare::lens_flare_system),
+    );
+    app.init_resource::<light_occlusion::AuthoredZoneBindings>();
+    app.add_systems(
+        Update,
+        light_occlusion::restore_light_bindings_on_rays_off
+            .after(light_occlusion::apply_light_occlusion_system),
+    );
+    app.add_systems(
+        Update,
+        light_occlusion::apply_light_occlusion_system
+            // The AnimationTest box's "lamp rays" checkbox suppresses the raycast for lamp work;
+            // everywhere else it always runs.
+            .run_if(animation_test_scene::lamp_rays_enabled)
+            .after(collision_bvh::build_zone_collision_bvh_system)
+            .after(kuluu_render::zone_point_lights::build_active_scene_lights)
+            .before(kuluu_render::ffxi_actor_render::update_ffxi_actor_point_lights),
     );
     app.add_systems(
         Update,

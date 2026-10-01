@@ -677,8 +677,28 @@ pub(super) fn apply_slash_outcome(
                     apply(&mut mute.sfx, target);
                     format!("/mutese: {}", if mute.sfx { "on" } else { "off" })
                 }
+                // `ambient` is an enable flag (default on), not a mute flag:
+                // `/muteambient on` silences the ambience.
+                SoundOp::SetAmbient(target) => {
+                    let muted = target.unwrap_or(mute.ambient);
+                    mute.ambient = !muted;
+                    format!("/muteambient: {}", if mute.ambient { "off" } else { "on" })
+                }
             };
             push_system_chat_line(scene_state, chat);
+        }
+        SlashOutcome::SetAmbientGain(pct) => {
+            let mute = &mut *slash_writers.audio_mute;
+            mute.ambient_gain = (pct as f32 / 100.0).clamp(0.0, 2.0);
+            push_system_chat_line(scene_state, format!("/ambientgain: {}", pct));
+        }
+        SlashOutcome::SetSfxDebug(on) => {
+            let sfx_debug = &mut *slash_writers.sfx_debug;
+            sfx_debug.0 = on.unwrap_or(!sfx_debug.0);
+            push_system_chat_line(
+                scene_state,
+                format!("/sfxdebug: {}", if sfx_debug.0 { "on" } else { "off" }),
+            );
         }
         SlashOutcome::SetDrawDistance(op) => {
             use crate::view_native::slash_commands::DrawDistanceOp;
@@ -746,6 +766,35 @@ pub(super) fn apply_slash_outcome(
         }
         SlashOutcome::NavInfo => {
             report_nav_info(navmesh_state, self_pos, scene_state);
+        }
+        SlashOutcome::AnimationTest {
+            weapon_case,
+            levelup,
+        } => {
+            use kuluu_render::scheduler_runtime::WeaponHitCase;
+            if let Some(case_name) = &weapon_case {
+                let case = match case_name.as_str() {
+                    "nhit" => WeaponHitCase::Normal,
+                    "chit" => WeaponHitCase::Critical,
+                    _ => WeaponHitCase::Death,
+                };
+                let on = slash_writers.animation_test.weapon_case != Some(case);
+                slash_writers.animation_test.weapon_case = if on { Some(case) } else { None };
+                slash_writers.vfx_trace.0 = on;
+                push_system_chat_line(
+                    scene_state,
+                    format!(
+                        "//animationtest: {} {}",
+                        case_name,
+                        if on { "ON" } else { "OFF" }
+                    ),
+                );
+            }
+            if levelup {
+                slash_writers.animation_test.levelup_pending = true;
+                slash_writers.vfx_trace.0 = true;
+                push_system_chat_line(scene_state, "//animationtest: level-up effect armed".into());
+            }
         }
         SlashOutcome::AgentControl(op) => {
             #[cfg(unix)]

@@ -714,6 +714,7 @@ fn frame(menu: &Menu) -> DialogState {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     }
 }
 
@@ -881,6 +882,7 @@ fn recipient_entry_frame() -> DialogState {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     }
 }
 

@@ -135,6 +135,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "vsync") {
         s.vsync = x;
     }
+    if let Some(x) = take(&v, "vibration") {
+        s.vibration = x;
+    }
     if let Some(x) = take(&v, "fps_cap") {
         s.fps_cap = x;
     }
@@ -237,8 +240,30 @@ pub fn load_or_default() -> (GraphicsSettings, GraphicsStore) {
     }
 }
 
-pub fn persist_graphics_on_change(settings: Res<GraphicsSettings>, state: Res<GraphicsStateRes>) {
+/// While set, `persist_graphics_on_change` stands down. The AnimationTest box's shadow
+/// suppression rewrites `GraphicsSettings` in memory (and hands them back afterwards); neither
+/// the override nor its restore belongs on disk — a run killed mid-box must not leave the user's
+/// own settings altered.
+#[derive(Resource, Default)]
+pub struct GraphicsPersistSuspended(pub bool);
+
+pub fn persist_graphics_on_change(
+    settings: Res<GraphicsSettings>,
+    state: Res<GraphicsStateRes>,
+    suspended: Option<Res<GraphicsPersistSuspended>>,
+    mut last_saved: Local<Option<kuluu_render::GraphicsSettings>>,
+) {
+    if suspended.is_some_and(|s| s.0) {
+        return;
+    }
     if !settings.is_changed() {
+        return;
+    }
+    // Menu key handling deref-muts the resource even when a row ignores the
+    // key (a held movement key repeats through it while a menu is open), so
+    // change detection alone would rewrite graphics.json on every press.
+    // Only content differences are worth a disk write.
+    if last_saved.as_ref() == Some(&*settings) {
         return;
     }
     if let Err(e) = state.store.save(&settings) {
@@ -247,7 +272,9 @@ pub fn persist_graphics_on_change(settings: Res<GraphicsSettings>, state: Res<Gr
             error = %e,
             "graphics: failed to persist settings",
         );
+        return;
     }
+    *last_saved = Some(settings.clone());
 }
 
 #[cfg(test)]

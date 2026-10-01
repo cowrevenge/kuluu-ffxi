@@ -580,7 +580,7 @@ mod tests {
         s.apply_event(&AgentEvent::Connected {
             account_id: 1,
             char_id: 7,
-            character: "Cow".into(),
+            character: "Player".into(),
             zone_id: 103,
         });
         let (state_tx, mut state_rx) = watch::channel(s);
@@ -632,7 +632,7 @@ mod tests {
         s.apply_event(&AgentEvent::Connected {
             account_id: 1,
             char_id: 7,
-            character: "Cow".into(),
+            character: "Player".into(),
             zone_id: 103,
         });
         let (state_tx, mut state_rx) = watch::channel(s);
@@ -701,7 +701,7 @@ mod tests {
         s.apply_event(&AgentEvent::Connected {
             account_id: 1,
             char_id: 7,
-            character: "Cow".into(),
+            character: "Player".into(),
             zone_id: 103,
         });
         let (state_tx, mut state_rx) = watch::channel(s);
@@ -748,7 +748,7 @@ mod tests {
         s.apply_event(&AgentEvent::Connected {
             account_id: 1,
             char_id: 7,
-            character: "Cow".into(),
+            character: "Player".into(),
             zone_id: 103,
         });
         let (state_tx, mut state_rx) = watch::channel(s);
@@ -810,7 +810,7 @@ mod tests {
     fn pc_entity(id: u32) -> Entity {
         let mut e = mob_entity(id);
         e.kind = EntityKind::Pc;
-        e.name = Some("Cow".into());
+        e.name = Some("Player".into());
         e.hp_pct = None;
         e
     }

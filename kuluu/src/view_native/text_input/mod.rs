@@ -44,7 +44,10 @@ mod slash_apply;
 use slash_apply::apply_slash_outcome;
 
 mod target_action;
-use target_action::{confirm_target_action_at_cursor, handle_target_action_key, handle_world_key};
+use target_action::{
+    answer_dismount_confirm, confirm_target_action_at_cursor, handle_target_action_key,
+    handle_world_key,
+};
 
 /// The one key map for every amount the game asks for — auction price, shop and
 /// bazaar quantity, delivery quantity and gil. Up/Down step the active digit,
@@ -95,6 +98,12 @@ pub struct SlashWriters<'w, 's> {
 
     pub sfx_event: MessageWriter<'w, kuluu_render::audio::SfxEvent>,
 
+    /// //animationtest's latches: the looping weapon case and the pending one-shot
+    /// (kuluu_render::scheduler_runtime re-fires them while set).
+    pub animation_test: ResMut<'w, kuluu_render::scheduler_runtime::AnimationTestState>,
+    /// Armed while an animationtest case is live; the VFX dispatch funnel logs at info!.
+    pub vfx_trace: ResMut<'w, kuluu_render::scheduler_runtime::VfxTrace>,
+
     pub screenshot: MessageWriter<'w, super::screenshot::ScreenshotRequest>,
 
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,
@@ -105,7 +114,9 @@ pub struct SlashWriters<'w, 's> {
 
     pub net_status_visible: ResMut<'w, kuluu_render::hud::network_status::NetStatusVisible>,
 
-    pub vana_clock: Res<'w, kuluu_render::vana_time::VanaClock>,
+    /// `ResMut` (not `Res`): the Debug menu "Force_18:00" row freezes/thaws
+    /// the clock at confirm time.
+    pub vana_clock: ResMut<'w, kuluu_render::vana_time::VanaClock>,
 
     pub vana_clock_visible: ResMut<'w, kuluu_render::hud::vana_clock::VanaClockVisible>,
 
@@ -116,6 +127,8 @@ pub struct SlashWriters<'w, 's> {
     pub topdown_cull: ResMut<'w, kuluu_render::minimap::topdown::TopdownCullPolicy>,
 
     pub audio_mute: ResMut<'w, kuluu_render::audio::AudioMuteState>,
+
+    pub sfx_debug: ResMut<'w, kuluu_render::audio::SfxDebug>,
 
     pub minimap_zoom: ResMut<'w, kuluu_render::minimap::MinimapZoom>,
 
@@ -220,7 +233,9 @@ pub struct MenuConfirmWriters<'w> {
     pub hud_panels: ResMut<'w, kuluu_render::hud::HudPanels>,
     pub net_status: ResMut<'w, kuluu_render::hud::network_status::NetStatusVisible>,
     pub audio_mute: ResMut<'w, kuluu_render::audio::AudioMuteState>,
-    pub vana_clock: Res<'w, kuluu_render::vana_time::VanaClock>,
+    /// `ResMut` (not `Res`): the Debug menu "Force_18:00" row freezes/thaws
+    /// the clock at confirm time.
+    pub vana_clock: ResMut<'w, kuluu_render::vana_time::VanaClock>,
     pub vana_clock_visible: ResMut<'w, kuluu_render::hud::vana_clock::VanaClockVisible>,
     pub item_screen_container: ResMut<'w, kuluu_render::hud::item_screen::ItemScreenContainer>,
 }
@@ -395,6 +410,7 @@ pub(crate) fn text_input_system(
                 let self_char_id = scene_state.snapshot.self_char_id;
                 let usable_items = kuluu_render::hud::menu::any_usable_item(&scene_state.snapshot);
                 let can_fish = slash_writers.fishing_spot.0.is_ready();
+                let mounted = scene_state.snapshot.self_mount.is_some();
                 if let Some(next) = handle_world_key(
                     &ev.logical_key,
                     &bindings,
@@ -406,6 +422,7 @@ pub(crate) fn text_input_system(
                     engaged,
                     usable_items,
                     can_fish,
+                    mounted,
                     &cmd_tx.0,
                     &mut scene_state,
                     &mut slash_writers.check_target,
@@ -459,7 +476,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.hud_panels,
                     &mut slash_writers.net_status_visible,
                     &mut slash_writers.audio_mute,
-                    &slash_writers.vana_clock,
+                    &mut slash_writers.vana_clock,
                     &mut slash_writers.vana_clock_visible,
                     &mut slash_writers.sort_options,
                     &mut slash_writers.item_menu_focus,
@@ -1823,7 +1840,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut menu_writers.hud_panels,
                 &mut menu_writers.net_status,
                 &mut menu_writers.audio_mute,
-                &menu_writers.vana_clock,
+                &mut menu_writers.vana_clock,
                 &mut menu_writers.vana_clock_visible,
                 &dynamic_menu,
                 current_target,
@@ -1873,9 +1890,23 @@ pub fn mouse_nav_dispatch_system(
 
     for ev in events.target_action.read() {
         if let InputMode::TargetAction(state) = &mut *mode {
+            let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&state.ctx);
+            if state.dismount_confirm {
+                // The pane shows Yes/No, not the rows: slot 0 is Yes.
+                if let Some(next) = answer_dismount_confirm(
+                    state,
+                    &entries,
+                    ev.slot == 0,
+                    &mut scene_state,
+                    &entities,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+                continue;
+            }
             state.cursor = ev.slot;
 
-            let entries = kuluu_render::hud::overlay::RETAIL.resolve_target_actions(&state.ctx);
             if let Some(next) = confirm_target_action_at_cursor(
                 state,
                 &entries,
@@ -2852,6 +2883,10 @@ mod cs_input_lock_tests {
         app.insert_resource(crate::view_native::navmesh_overlay::NavmeshState::default());
         app.insert_resource(bevy_framepace::FramepaceSettings::default());
         app.insert_resource(CaptureMode::default());
+        // SlashWriters reads both unconditionally (//animationtest); the full app gets them
+        // from SchedulerRuntimePlugin, these minimal apps do not.
+        app.insert_resource(kuluu_render::scheduler_runtime::AnimationTestState::default());
+        app.insert_resource(kuluu_render::scheduler_runtime::VfxTrace::default());
         app.insert_resource(kuluu_render::EventLog::default());
         app.insert_resource(kuluu_render::GraphicsSettings::default());
         app.insert_resource(kuluu_render::hud::HudVerbosity::default());
@@ -2863,6 +2898,7 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::minimap::MinimapVisible::default());
         app.insert_resource(kuluu_render::minimap::topdown::TopdownCullPolicy::default());
         app.insert_resource(kuluu_render::audio::AudioMuteState::default());
+        app.insert_resource(kuluu_render::audio::SfxDebug::default());
         app.insert_resource(kuluu_render::minimap::MinimapZoom::default());
         app.insert_resource(kuluu_render::minimap::MinimapView::default());
         app.insert_resource(kuluu_render::minimap::MinimapState::default());

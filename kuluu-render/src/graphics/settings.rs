@@ -318,6 +318,10 @@ impl DynamicLights {
         !matches!(self, DynamicLights::Off)
     }
 
+    pub const fn enhanced(self) -> bool {
+        matches!(self, DynamicLights::Enhanced)
+    }
+
     /// Retail casts no shadow map at all (see `zone_shadow_cast`), so shadows thrown by the
     /// DAT's point lights are the Enhanced half of this setting.
     pub const fn point_shadows_enabled(self) -> bool {
@@ -449,6 +453,8 @@ pub enum GraphicsField {
     FogStepCount,
     DrawDistanceScale,
     VSync,
+    /// Gamepad vibration for DAT rumble generators (kuluu-render/src/rumble.rs).
+    Vibration,
     FrameRateCap,
     Fov,
     UiScale,
@@ -512,6 +518,7 @@ impl GraphicsField {
             GraphicsField::FogStepCount => "Fog Quality",
             GraphicsField::DrawDistanceScale => "Draw Distance",
             GraphicsField::VSync => "VSync",
+            GraphicsField::Vibration => "Vibration",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
             GraphicsField::UiScale => "UI Scale",
@@ -564,13 +571,13 @@ impl GraphicsField {
             // research/XIClient/src/XIClient/include/World/Model/ModelInstance.h
             // ModelInstance::shadowRenderer: the original client draws a
             // per-model shadow decal, so shadowed models are faithful here.
-            GraphicsField::CharacterShadowReceive | GraphicsField::CharacterShadowCast => {
-                BoolParity::VanillaOn
-            }
+            GraphicsField::CharacterShadowReceive
+            | GraphicsField::CharacterShadowCast
+            | GraphicsField::CameraSpring
+            | GraphicsField::Vibration => BoolParity::VanillaOn,
             GraphicsField::VolumetricFog
             | GraphicsField::ZoneShadowCast
             | GraphicsField::DepthOfField
-            | GraphicsField::CameraSpring
             | GraphicsField::DebugChat
             | GraphicsField::LightFlicker => BoolParity::VanillaOff,
             _ => BoolParity::Neutral,
@@ -588,6 +595,14 @@ impl GraphicsField {
                 | GraphicsField::ModelLightCount
         )
     }
+}
+
+fn default_camera_spring() -> bool {
+    true
+}
+
+fn default_vibration() -> bool {
+    true
 }
 
 fn default_ui_scale() -> f32 {
@@ -674,6 +689,21 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub mob_hp_under: bool,
 
+    /// Retail+ gate: the player character ignores knockback displacement (the push and the
+    /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
+    /// The `enhanced-ignore-knockback-self` feature is its compile-time half. Persisted here so
+    /// the choice sticks across runs.
+    #[serde(default)]
+    pub ignore_knockback_self: bool,
+
+    /// Retail+ gate: while a weapon is being drawn or sheathed the legs run free (run/walk)
+    /// instead of riding the draw animation's stance — only the legs, so the body still plays
+    /// the pull. OFF by default; retail locks the lower body to the draw pose. The
+    /// `enhanced-leg-unlock` feature is its compile-time half. Persisted here so the choice
+    /// sticks across runs.
+    #[serde(default)]
+    pub leg_unlock: bool,
+
     #[serde(default)]
     pub texture_filtering: TextureFiltering,
 
@@ -687,6 +717,12 @@ pub struct GraphicsSettings {
     /// zone_draw_distance, weather.rs zone_distance_fog).
     pub draw_distance_scale: f32,
     pub vsync: bool,
+
+    /// Gamepad vibration for DAT rumble generators (kuluu-render/src/rumble.rs). Retail's
+    /// config carries a Vibration toggle; on by default — with no pad connected the system
+    /// is a silent no-op.
+    #[serde(default = "default_vibration")]
+    pub vibration: bool,
     /// 0 disables the cap (framepace Auto); RETAIL_FPS-adjacent slots otherwise.
     #[serde(default)]
     pub fps_cap: u32,
@@ -695,11 +731,13 @@ pub struct GraphicsSettings {
     /// 1.0x). Applied via bevy's UiScale by apply_ui_scale_system.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
-    /// Camera position-spring + boom easing. OFF by default while the
-    /// accel-driven UI jitter is under investigation (2026-08-27: disabling
-    /// this empirically killed the every-other-frame HUD jitter). Toggled in
-    /// the Debug menu; persisted here so the choice sticks.
-    #[serde(default)]
+    /// Camera spring (camera_collision.rs resolve_camera): how fast the camera
+    /// moves once its leash says it must. On, the eye glides there (a
+    /// gap-proportional pull) and the wall pull-in eases; off, both snap. The
+    /// leash itself (the focus dead zone and the eye's slack band) is always
+    /// on. On by default, the normal client behaviour. Persisted; a config
+    /// from before the default flipped reads on.
+    #[serde(default = "default_camera_spring")]
     pub camera_spring: bool,
     #[serde(default)]
     pub chat_layout: ChatLayout,
@@ -963,16 +1001,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
                 fog_step_count: 32,
                 draw_distance_scale: 0.5,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Off,
@@ -1008,16 +1049,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
                 fog_step_count: 32,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -1053,16 +1097,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso2x,
                 bloom_intensity: 0.04,
                 volumetric_fog: false,
                 fog_step_count: 64,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -1098,16 +1145,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
                 fog_step_count: 64,
                 draw_distance_scale: ffxi_dat::mzb::RETAIL_DRAW_DISTANCE_SCALE,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -1147,16 +1197,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
                 volumetric_fog: true,
                 fog_step_count: 96,
                 draw_distance_scale: 1.5,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Enhanced,
@@ -1193,16 +1246,19 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                ignore_knockback_self: false,
+                leg_unlock: false,
                 texture_filtering: TextureFiltering::Aniso16x,
                 bloom_intensity: 0.16,
                 volumetric_fog: true,
                 fog_step_count: 128,
                 draw_distance_scale: 2.0,
                 vsync: true,
+                vibration: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
-                camera_spring: false,
+                camera_spring: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Enhanced,
@@ -1286,6 +1342,7 @@ impl GraphicsSettings {
                 }
             }
             GraphicsField::VSync => self.toggle_label(field, self.vsync),
+            GraphicsField::Vibration => self.toggle_label(field, self.vibration),
             GraphicsField::Fullscreen => self.toggle_label(field, self.fullscreen),
             GraphicsField::Windowed => self.toggle_label(field, self.windowed_fullscreen),
             GraphicsField::FrameRateCap => match self.fps_cap {
@@ -1423,6 +1480,7 @@ impl GraphicsSettings {
                 let debug_chat = self.debug_chat;
                 let ui_scale = self.ui_scale;
                 let vsync = self.vsync;
+                let vibration = self.vibration;
                 let fps_cap = self.fps_cap;
                 let was_dlss = matches!(self.anti_aliasing, AaMode::Dlss);
                 let dlss_quality = self.dlss_quality;
@@ -1448,6 +1506,7 @@ impl GraphicsSettings {
                 self.chat_layout = chat_layout;
                 self.debug_chat = debug_chat;
                 self.vsync = vsync;
+                self.vibration = vibration;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
                 self.dlss_supported = dlss_supported;
@@ -1509,6 +1568,10 @@ impl GraphicsSettings {
             }
             GraphicsField::VSync => {
                 self.vsync = !self.vsync;
+            }
+            GraphicsField::Vibration => {
+                // Display preference like VSync — toggling it must not reset the quality preset.
+                self.vibration = !self.vibration;
             }
             GraphicsField::Fullscreen => {
                 // A quality preset shouldn't be reset just because the user
@@ -1868,9 +1931,11 @@ pub const GRAPHICS_SECTIONS: &[GraphicsSection] = &[
             GraphicsField::Fullscreen,
             GraphicsField::Windowed,
             GraphicsField::VSync,
+            GraphicsField::Vibration,
             GraphicsField::FrameRateCap,
             GraphicsField::RenderScale,
             GraphicsField::Fov,
+            GraphicsField::CameraSpring,
         ],
     },
     GraphicsSection {
@@ -1911,7 +1976,6 @@ pub const GRAPHICS_SECTIONS: &[GraphicsSection] = &[
             GraphicsField::DepthOfField,
             GraphicsField::DofAperture,
             GraphicsField::ZoneShadowCast,
-            GraphicsField::CameraSpring,
             GraphicsField::ActorArrival,
         ],
     },
@@ -2275,14 +2339,14 @@ pub fn apply_volumetric_fog_system(
     }
 }
 
-pub fn apply_projection_system(
-    settings: Res<GraphicsSettings>,
-    mut q_cam: Query<&mut Projection, With<OperatorCamera>>,
-) {
+/// Owns the projection's far plane only. FOV is owned by
+/// [`crate::camera::apply_view_fov_system`] (the live view zoom): writing
+/// `settings.fov_deg` here on every settings change would stomp a held zoom
+/// back to base whenever any unrelated row dirtied the resource.
+pub fn apply_projection_system(mut q_cam: Query<&mut Projection, With<OperatorCamera>>) {
     for mut proj in q_cam.iter_mut() {
         if let Projection::Perspective(p) = proj.as_mut() {
             p.far = crate::skybox::CAMERA_FAR;
-            p.fov = settings.fov_deg.to_radians();
         }
     }
 }
@@ -2938,7 +3002,7 @@ mod tests {
             volumetric_fog: true,
             fov_deg: 90.0,
             ui_scale: 1.0,
-            camera_spring: false,
+            camera_spring: true,
             chat_layout: ChatLayout::default(),
             debug_chat: false,
             ..Default::default()

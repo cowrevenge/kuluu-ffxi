@@ -25,6 +25,7 @@ pub mod dat_root;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;
+pub mod distortion_pass;
 pub mod element_sort;
 pub mod entity_table;
 pub mod env_flags;
@@ -59,10 +60,12 @@ pub mod nameplate_final_pass;
 pub mod nameplate_icons;
 pub mod nameplate_marker;
 pub mod nameplate_overlay;
+pub mod particle_diag;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod particle_sim;
 pub mod perf_probe;
 pub mod picking;
+pub mod rumble;
 pub mod scene;
 pub mod scheduler_runtime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -104,7 +107,7 @@ pub use camera::{
     first_person_eye_y, firstperson_camera_system, heading_for_yaw, nameplate_anchor,
     self_visibility_for_camera_mode_system, spawn_camera, third_person_anchor_y,
     toggle_camera_mode, yaw_for_heading, CameraMode, CameraTransition, ChaseCamera, OperatorCamera,
-    WORLD_GIZMO_LAYER,
+    ViewFov, WORLD_GIZMO_LAYER,
 };
 pub use components::{
     CurrRenderPos, EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate,
@@ -227,6 +230,10 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.add_plugins(nameplate_final_pass::NameplateFinalPassPlugin);
 
+        app.add_plugins(distortion_pass::DistortionPassPlugin);
+
+        app.add_plugins(rumble::RumblePlugin);
+
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_point_lights::ZonePointLightsPlugin);
 
@@ -334,6 +341,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         weather_fx::sync_current_weather_from_snapshot,
                         weather_fx::update_weather_modifier_system,
                         weather_fx::apply_weather_to_ambient_and_fog_system,
+                        atmosphere::suppress_distance_fog_when_overridden,
                         sun_moon::sun_moon_system,
                         weather_fx::apply_weather_to_sun_system,
                     ),
@@ -402,7 +410,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             Update,
             ffxi_actor_render::update_ffxi_actor_point_lights
                 .after(ffxi_actor_render::update_ffxi_render_actor_lighting)
-                .after(zone_point_lights::build_active_scene_lights),
+                .after(zone_point_lights::build_active_scene_lights)
+                .after(zone_point_lights::feed_enhanced_lamp_lights),
         );
 
         app.init_resource::<combat_stance::EntityMotion>();
@@ -413,6 +422,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.init_resource::<combat_stance::WalkMode>();
         app.init_resource::<combat_stance::SelfMoveIntent>();
         app.init_resource::<camera::CameraTransition>();
+        app.init_resource::<camera::ViewFov>();
+        app.add_systems(Update, camera::apply_view_fov_system);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

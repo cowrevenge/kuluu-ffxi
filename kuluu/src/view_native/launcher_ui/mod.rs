@@ -1112,6 +1112,10 @@ pub(crate) fn register(
 }
 
 fn spawn_launcher_camera(mut commands: Commands) {
+    spawn_launcher_camera_core(&mut commands);
+}
+
+pub(crate) fn spawn_launcher_camera_core(commands: &mut Commands) {
     commands.spawn((Camera2d, LauncherCamera));
 }
 

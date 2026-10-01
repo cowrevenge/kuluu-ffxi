@@ -111,6 +111,19 @@ pub struct HudPanels {
     /// scene-graphic errors can be isolated. Independent of `weather_off`.
     /// Runtime-only, no persist.
     pub fog_off: bool,
+    /// Debug clock-gate row (Debug menu "Force_18:00"): when true the Vana
+    /// clock is frozen at 18:00 for lamp/night-scene testing; off thaws it.
+    /// Runtime-only, no persist.
+    pub force_18: bool,
+    /// Debug camera-leash row (Debug menu "Camera_leash", `enhanced-camera-leash`
+    /// builds only): when true the chase camera's dead zone/slack band/spring are
+    /// bypassed and the eye sits on its plain polar goal — isolating leash feel.
+    /// Runtime-only, no persist; default off = the leash runs.
+    pub camera_leash_off: bool,
+    /// Debug Body_smoother row: when true the self model's visual yaw slerp
+    /// (`self_visual_yaw_system`) is bypassed and the model sits on the
+    /// dispatch heading every frame. Runtime-only, no persist.
+    pub body_smoother_off: bool,
     /// Debug Entity List overlay (Debug menu "Entity List" row): when true,
     /// shows a scrollable dump of every live wire entity from the
     /// EntityTable — id, name, kind, position, status byte, hp%, invis/name-

@@ -88,6 +88,17 @@ fn parse_audio_state(bytes: &[u8]) -> Result<AudioMuteState> {
     {
         state.master = master.clamp(0.0, 1.0);
     }
+    if let Some(ambient) = v.get("ambient").and_then(|x| x.as_bool()) {
+        state.ambient = ambient;
+    }
+    if let Some(gain) = v
+        .get("ambient_gain")
+        .and_then(|x| x.as_f64())
+        .map(|g| g as f32)
+        .filter(|g| g.is_finite())
+    {
+        state.ambient_gain = gain.clamp(0.0, 2.0);
+    }
     Ok(state)
 }
 

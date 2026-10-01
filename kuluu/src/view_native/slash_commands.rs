@@ -134,6 +134,42 @@ fn cycle_npc(c: &SlashCtx, reverse: bool) -> SlashOutcome {
     }
 }
 
+#[cfg(feature = "enhanced-targetname")]
+fn target_by_name(c: &SlashCtx) -> SlashOutcome {
+    let name = c.rest.trim();
+    if name.is_empty() {
+        return SlashOutcome::SystemMessage("//targetname: usage: //targetname <name>".into());
+    }
+    let kinds = [
+        kuluu_snapshot::EntityKind::Npc,
+        kuluu_snapshot::EntityKind::Mob,
+        kuluu_snapshot::EntityKind::Pet,
+    ];
+    let needle = name.to_ascii_lowercase();
+    let mut matches: Vec<&WireEntity> = c
+        .entities
+        .iter()
+        .filter(|e| {
+            kinds.contains(&e.kind)
+                && e.name
+                    .as_deref()
+                    .map(|n| n.to_ascii_lowercase() == needle)
+                    .unwrap_or(false)
+        })
+        .collect();
+    if matches.is_empty() {
+        return SlashOutcome::SystemMessage(format!("//targetname: no {name} in sight"));
+    }
+    // Stable areas name several actors alike (two "Chocobo"s at the stables);
+    // the nearest is the one the player is standing in front of.
+    matches.sort_by(|a, b| {
+        let da = sq_dist(a.pos, c.self_pos);
+        let db = sq_dist(b.pos, c.self_pos);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    SlashOutcome::SetTarget(Some(matches[0].id))
+}
+
 fn unknown_command(cmd: &str) -> SlashOutcome {
     SlashOutcome::SystemMessage(format!("unknown command: /{cmd}"))
 }
@@ -245,6 +281,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "report navmesh snap status at current position",
                 handler: |_| SlashOutcome::NavInfo,
+            },
+            Command {
+                names: &["animationtest"],
+                set: CommandSet::Dev,
+                usage: "weapon nhit|chit|dhit | player levelup",
+                summary: "VFX harness: loop a real hit reaction on yourself through dam0 (repeat stops it) or fire the level-up once",
+                handler: |c| parse_animation_test(c),
             },
             Command {
                 names: &["whereami", "pos"],
@@ -385,6 +428,14 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "cycle nearest NPC/mob/pet",
                 handler: |c| cycle_npc(c, false),
+            },
+            #[cfg(feature = "enhanced-targetname")]
+            Command {
+                names: &["targetname"],
+                set: CommandSet::Core,
+                usage: "<name>",
+                summary: "target the nearest NPC/mob/pet with this exact name",
+                handler: |c| target_by_name(c),
             },
             Command {
                 names: &["targetbnpc"],
@@ -601,6 +652,26 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_heal(c.rest),
             },
             Command {
+                names: &["dismount"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "dismount the chocobo (must be mounted)",
+                handler: |c| {
+                    let self_id = c.self_char_id.unwrap_or(0);
+                    let self_index = c
+                        .entities
+                        .iter()
+                        .find(|e| e.id == self_id)
+                        .map(|e| e.act_index)
+                        .unwrap_or(0);
+                    SlashOutcome::Command(AgentCommand::Action {
+                        target_id: self_id,
+                        target_index: self_index,
+                        kind: ActionKind::Dismount,
+                    })
+                },
+            },
+            Command {
                 names: &["endevent", "endevt", "clearevent", "clearevt"],
                 set: CommandSet::Dev,
                 usage: "",
@@ -671,6 +742,20 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "[on|off]",
                 summary: "mute sound effects; survives logout",
                 handler: |c| parse_mute(c.rest, SoundOp::SetSfx),
+            },
+            Command {
+                names: &["muteambient"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "mute ambient/zone sound (chocobos, waterfalls); survives logout",
+                handler: |c| parse_mute(c.rest, SoundOp::SetAmbient),
+            },
+            Command {
+                names: &["ambientgain"],
+                set: CommandSet::Retail,
+                usage: "<0..200>",
+                summary: "set the ambient/zone sound gain in percent of unity",
+                handler: |c| parse_ambient_gain(c.rest),
             },
         ],
     ),
@@ -798,6 +883,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "<max>",
                 summary: "set target frame rate",
                 handler: |c| parse_fps(c.rest),
+            },
+            Command {
+                names: &["sfxdebug"],
+                set: CommandSet::Dev,
+                usage: "[on|off]",
+                summary: "runtime SE-mixing readout (ambient emitter toasts + routine cue lines)",
+                handler: |c| parse_sfx_debug(c.rest),
             },
             Command {
                 names: &["capture"],
@@ -1043,6 +1135,15 @@ pub enum SlashOutcome {
 
     NavInfo,
 
+    /// //animationtest — the VFX verification harness (kuluu_render::scheduler_runtime):
+    /// `weapon nhit|chit|dhit` loops that melee resolution on the local player through
+    /// ROM/0/0.DAT's dam0 switch (a repeat stops it); `player levelup` fires the level-up
+    /// effect DAT once.
+    AnimationTest {
+        weapon_case: Option<String>,
+        levelup: bool,
+    },
+
     AgentControl(AgentControlOp),
 
     LoadMmb {
@@ -1092,6 +1193,12 @@ pub enum SlashOutcome {
     SetMinimap(MinimapOp),
 
     SetSound(SoundOp),
+
+    /// `/ambientgain <0..200>` — the ambient (mixer A) gain, percent of unity.
+    SetAmbientGain(u32),
+
+    /// `/sfxdebug [on|off]` — toggle the runtime SE-mixing readout.
+    SetSfxDebug(Option<bool>),
 
     Overlay(OverlayOp),
 
@@ -1199,6 +1306,8 @@ pub enum SoundOp {
     SetBgm(Option<bool>),
 
     SetSfx(Option<bool>),
+
+    SetAmbient(Option<bool>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2436,6 +2545,29 @@ fn nearby_entities(
     scored
 }
 
+/// `/sfxdebug [on|off]` — bare toggles the runtime SE-mixing readout.
+fn parse_sfx_debug(rest: &str) -> SlashOutcome {
+    let on = match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "toggle" => None,
+        "on" | "1" => Some(true),
+        "off" | "0" => Some(false),
+        other => return SlashOutcome::SystemMessage(format!("bad arg `{other}` (use on|off)")),
+    };
+    SlashOutcome::SetSfxDebug(on)
+}
+
+/// `/ambientgain <0..200>` — percent of unity for the ambient emitters; 100 is
+/// the default, 200 doubles them.
+fn parse_ambient_gain(rest: &str) -> SlashOutcome {
+    let arg = rest.trim();
+    match arg.parse::<u32>() {
+        Ok(n) if n <= 200 => SlashOutcome::SetAmbientGain(n),
+        _ => {
+            SlashOutcome::SystemMessage(format!("/ambientgain: `{arg}` is not a number in 0..=200"))
+        }
+    }
+}
+
 /// `/mutebgm` / `/mutese`. Bare toggles, matching the switch the Config menu
 /// shows; `on` is muted, the state the command is named for.
 fn parse_mute(rest: &str, op: fn(Option<bool>) -> SoundOp) -> SlashOutcome {
@@ -3035,6 +3167,27 @@ fn parse_u32_auto_radix(s: &str) -> Option<u32> {
     }
 }
 
+/// //animationtest's two-word cases; anything else reports usage.
+fn parse_animation_test(c: &SlashCtx) -> SlashOutcome {
+    let rest = c.rest;
+    let mut words = rest.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("weapon"), Some(r)) if r == "nhit" || r == "chit" || r == "dhit" => {
+            SlashOutcome::AnimationTest {
+                weapon_case: Some(r.to_string()),
+                levelup: false,
+            }
+        }
+        (Some("player"), Some("levelup")) => SlashOutcome::AnimationTest {
+            weapon_case: None,
+            levelup: true,
+        },
+        _ => SlashOutcome::SystemMessage(
+            "//animationtest: usage — `weapon nhit`, `weapon chit`, `weapon dhit` or `player levelup`".into(),
+        ),
+    }
+}
+
 fn parse_navmesh(rest: &str) -> SlashOutcome {
     match rest.trim().to_ascii_lowercase().as_str() {
         "" => SlashOutcome::ToggleNavmesh(None),
@@ -3353,6 +3506,54 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "enhanced-targetname")]
+    #[test]
+    fn targetname_targets_the_named_entity() {
+        let entities = vec![
+            ent(1, "Goblin", EntityKind::Mob, 3.0, 0.0),
+            ent(2, "Mairee", EntityKind::Npc, 5.0, 0.0),
+            ent(3, "Chocobo", EntityKind::Npc, 7.0, 0.0),
+            ent(4, "Mairee", EntityKind::Pc, 1.0, 0.0),
+        ];
+        // Case-insensitive exact match; a PC with the same name is not a target.
+        assert!(matches!(
+            parse_slash_t("//targetname mairee", &entities, origin(), None, None),
+            SlashOutcome::SetTarget(Some(2))
+        ));
+        assert!(matches!(
+            parse_slash_t("//targetname CHOCOBO", &entities, origin(), None, None),
+            SlashOutcome::SetTarget(Some(3))
+        ));
+    }
+
+    #[cfg(feature = "enhanced-targetname")]
+    #[test]
+    fn targetname_picks_the_nearest_of_same_named() {
+        let entities = vec![
+            ent(1, "Chocobo", EntityKind::Npc, 9.0, 0.0),
+            ent(2, "Chocobo", EntityKind::Npc, 2.0, 0.0),
+            ent(3, "Goblin", EntityKind::Mob, 1.0, 0.0),
+        ];
+        assert!(matches!(
+            parse_slash_t("//targetname Chocobo", &entities, origin(), None, None),
+            SlashOutcome::SetTarget(Some(2))
+        ));
+    }
+
+    #[cfg(feature = "enhanced-targetname")]
+    #[test]
+    fn targetname_reports_misses() {
+        let entities = vec![ent(1, "Goblin", EntityKind::Mob, 3.0, 0.0)];
+        match parse_slash_t("//targetname Mairee", &entities, origin(), None, None) {
+            SlashOutcome::SystemMessage(msg) => assert!(msg.contains("no Mairee"), "{msg}"),
+            other => panic!("expected a system message, got {other:?}"),
+        }
+        match parse_slash_t("//targetname", &entities, origin(), None, None) {
+            SlashOutcome::SystemMessage(msg) => assert!(msg.contains("usage"), "{msg}"),
+            other => panic!("expected a usage message, got {other:?}"),
+        }
+    }
+
     #[test]
     fn dig_targets_self() {
         let mut me = ent(42, "Me", EntityKind::Pc, 0.0, 0.0);
@@ -3380,6 +3581,34 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn dismount_targets_self() {
+        let mut me = ent(42, "Me", EntityKind::Pc, 0.0, 0.0);
+        me.act_index = 7;
+        let entities = vec![me, ent(1, "Chocobo", EntityKind::Mob, 3.0, 0.0)];
+        let outcome = parse_slash(
+            "/dismount",
+            &test_surface(),
+            &entities,
+            origin(),
+            Some(1),
+            None,
+            Some(42),
+            &[],
+            kuluu_render::fishing_spot::FishingGate::Ready,
+            None,
+            None,
+        );
+        assert!(matches!(
+            outcome,
+            SlashOutcome::Command(AgentCommand::Action {
+                target_id: 42,
+                target_index: 7,
+                kind: ActionKind::Dismount,
+            })
+        ));
+    }
+
     #[test]
     fn targetenemy_skips_npcs() {
         let entities = vec![

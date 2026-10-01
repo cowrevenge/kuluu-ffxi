@@ -1,6 +1,6 @@
 ## Change
 
-<!-- Concrete problem and resulting behavior. Prefer a verified GitHub issue URL; if its Bead has no published issue, name the publication gap briefly. Do not invent a link or duplicate an issue. -->
+<!-- Concrete problem and resulting behavior. Prefer a verified GitHub issue URL; maintainers publish linked beads through the scoped publisher before review. Outside contributors can link an ordinary GitHub issue or explain the task here for maintainer triage; Beads and issue-management permissions are not prerequisites. If publication is unavailable, name the gap briefly. Do not invent a link or duplicate an issue. -->
 
 ## Why this belongs in Kuluu
 

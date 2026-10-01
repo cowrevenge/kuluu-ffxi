@@ -4211,10 +4211,7 @@ mod tests {
     /// released (research/XiEvents/OpCodes/0x001F.md).
     #[test]
     fn non_scene_move_case1_holds_on_the_move_hold() {
-        let program = || {
-            let mut data = vec![crate::opcode_meta::OP_MOVE, 0x01, OP_END];
-            data
-        };
+        let program = || vec![crate::opcode_meta::OP_MOVE, 0x01, OP_END];
         let mut e = vm(program(), vec![]);
         e.hold_move(ActorLookup::EVENT_ENTITY, 5.0);
         assert_eq!(e.step(), StepResult::Waiting, "the move is running");

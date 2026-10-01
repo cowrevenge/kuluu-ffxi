@@ -57,8 +57,16 @@ fn main() {
                 println!(
                     "  {pc:5}: {op:02X} {}{}{}",
                     operands.join(" "),
-                    if meta.is_some_and(|m| m.jumps) { "  (jump)" } else { "" },
-                    if meta.is_none() { "  (out of meta range)" } else { "" }
+                    if meta.is_some_and(|m| m.jumps) {
+                        "  (jump)"
+                    } else {
+                        ""
+                    },
+                    if meta.is_none() {
+                        "  (out of meta range)"
+                    } else {
+                        ""
+                    }
                 );
                 if op == OP_END || op == OP_EXECEND {
                     break;

@@ -192,9 +192,7 @@ def main() -> int:
     scope = "all beads" if args.all else f'beads labelled "{filter_label}"'
     print(f">> repo={args.repo}  scope={scope}  count={len(beads)}  DRY_RUN={int(dry)}")
 
-    existing = {} if dry else fetch_issues(args.repo)
-    if dry:
-        print(">> (dry run: skipping the gh issue-list fetch; all beads shown as CREATE)")
+    existing = fetch_issues(args.repo)
 
     # Pre-create every managed label we'll reference.
     wanted_labels: set[str] = set()

@@ -81,6 +81,42 @@ pub type FourCc = [u8; 4];
 /// 30704 to `CodeLOADEVENTSCHEDULER2`).
 pub const SCHEDULER_DAT_ID_BASE: u32 = 30704;
 
+/// The DAT file id base each 0x45 twin adds its work operand to. Each twin
+/// calls `FUNC_XiEvent_CodeLOADEVENTSCHEDULER2` with a fixed second argument
+/// and skips the 0x45-only `dat_id_helper` remap, so its DAT id is this base
+/// plus the raw work value (research/XiEvents/OpCodes/0x0062.md, 0x009F.md,
+/// 0x00BB.md, 0x00C5.md, 0x00CD.md, 0x00D0.md, 0x00D5.md).
+pub const fn scheduler_twin_base(op: u8) -> Option<u32> {
+    Some(match op {
+        0x62 => 5012,
+        0x9F => 51183,
+        0xBB => 56685,
+        0xC5 => 67355,
+        0xCD => 70435,
+        0xD0 => 70691,
+        0xD5 => 102449,
+        _ => return None,
+    })
+}
+
+/// Base DAT file id opcode 0x7D adds its work operand to: the scheduler that
+/// runs on the local player (the rank-up animations), its `main` routine on
+/// the player with the player as its own target, no `dat_id_helper` remap
+/// (research/XiEvents/OpCodes/0x007D.md, `FUNC_LoadStartScheduler(val + 5112, …)`).
+pub const LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE: u32 = 5112;
+
+/// Base DAT file id opcode 0x73 MAGICSCHEDULOR adds its work operand to. The
+/// operand is a spell animation index: the same column vendor/server
+/// sql/spell_list.sql `animation` fills for a cast (Invisible 498, Sneak 499,
+/// Deodorize 500 sit beside the gate guard's Signet 497 and home point 504),
+/// and the same base a 0x028 magic finish resolves through
+/// (ffxi_vocab::action_anim::spell_file_id).
+pub const MAGIC_DAT_ID_BASE: u32 = ffxi_vocab::action_anim::SPELL_FILE_TABLE_OFFSET;
+
+/// The routine 0x73 plays out of that DAT: research/XiEvents/OpCodes/0x0073.md
+/// passes `0x6E69616D` ("main") to `FUNC_XiActor_Unknown` for every case.
+pub const MAGIC_ROUTINE_TAG: FourCc = *b"main";
+
 /// Scheduler DAT holding the screen-fade pair (ROM/62/110.DAT).
 pub const SCHEDULER_FADE_DAT_ID: u32 = 30904;
 
@@ -92,6 +128,11 @@ pub const SCHEDULER_TAG_FADE_IN: FourCc = *b"fdi0";
 /// [`EventCue::Scheduler::duration`] value meaning "play the DAT-authored
 /// timing verbatim" — the overwhelming majority of authored call sites.
 pub const SCHEDULER_DURATION_FROM_DAT: u16 = 0;
+
+/// The hold key 0x6E/0x63 arm and 0x99 polls: retail's `AnimationPlay` is one
+/// per-entity slot, so the wait carries no key operand of its own and keys on
+/// this constant (research/XiEvents/OpCodes/0x006E.md, 0x0099.md).
+pub const EMOTE_ANIMATION_KEY: FourCc = *b"emot";
 
 /// `GameStatus` values opcode 0x7E writes to the target's `StatusEvent`
 /// (research/XIClient/src/XIClient/include/World/Actor/GameStatus.h; the case-to-value mapping is
@@ -262,6 +303,15 @@ pub enum EventCue {
         actor2: ActorLookup,
         key: FourCc,
     },
+    /// 0x6E EMOT / 0x63 PLAYANIM: play the emote animation `emote_id` on
+    /// `actor`, `param` the emote's variant selector (salute nation, …).
+    /// `emote_id` is the low byte and `param` the high byte of the operand's
+    /// work value (research/XiEvents/OpCodes/0x006E.md, 0x0063.md).
+    Emote {
+        actor: ActorLookup,
+        emote_id: u16,
+        param: u16,
+    },
     /// 0x45 LOADEVENTSCHEDULER2: run scheduler `tag` out of DAT file `dat_id`
     /// over the two actors (research/XiEvents/OpCodes/0x0045.md). `duration` is
     /// the authored override, [`SCHEDULER_DURATION_FROM_DAT`] for none.
@@ -343,9 +393,8 @@ pub enum EventCue {
         actor: ActorLookup,
         target: ActorLookup,
     },
-    /// 0x5E / 0x6B stop action: kill the current action on `actor` and return
-    /// it to idle; `key` names the routine slot to clear when the operand is a
-    /// nonzero tag (research/XiEvents/OpCodes/0x005E.md, 0x006B.md).
+    /// Stop the current action; `key` supplies the replacement idle motion.
+    /// FFXiMain.dll retail-2026-09 RVA 0xB71E0 / 0xB7070.
     ActorStopAction {
         actor: ActorLookup,
         key: Option<FourCc>,
@@ -390,6 +439,15 @@ impl EventCue {
                 actor1: resolve(actor1),
                 actor2: resolve(actor2),
                 key,
+            },
+            Self::Emote {
+                actor,
+                emote_id,
+                param,
+            } => Self::Emote {
+                actor: resolve(actor),
+                emote_id,
+                param,
             },
             Self::Scheduler {
                 dat_id,

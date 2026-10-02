@@ -126,6 +126,8 @@ pub struct DialogSession {
     dat_root: Option<Arc<DatRoot>>,
     /// Logged-in character name, substituted for the `{PlayerName}` dialog marker.
     player_name: String,
+    /// The player's server id: the wire id a LocalPlayer emote cue resolves to.
+    player_id: u32,
     loaded_event_zone: Option<u16>,
     loaded_string_zone: Option<u16>,
     event_dat: Option<Arc<EventDat>>,
@@ -180,6 +182,7 @@ impl DialogSession {
         Self {
             dat_root,
             player_name,
+            player_id: 0,
             loaded_event_zone: None,
             loaded_string_zone: None,
             event_dat: None,
@@ -301,7 +304,7 @@ impl DialogSession {
         self.cues.extend(
             raw_cues
                 .into_iter()
-                .map(|c| resolve_cue(c, unique_no, event_zone)),
+                .map(|c| resolve_cue(c, unique_no, event_zone, self.player_id)),
         );
         let active = ActiveEvent {
             unique_no,
@@ -470,7 +473,7 @@ impl DialogSession {
         arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
-            .map(|c| resolve_cue(c, event_entity, zone))
+            .map(|c| resolve_cue(c, event_entity, zone, self.player_id))
             .collect();
         let advance = match outcome {
             DialogStep::Frame(frame) => Advance::Frame(frame_to_dialog(
@@ -505,6 +508,12 @@ impl DialogSession {
 
     pub fn set_player_position(&mut self, position: ffxi_event::vm::scene::EventPosition) {
         self.player_position = Some(position);
+    }
+
+    /// Remember the player's server id: the wire id a LocalPlayer emote cue
+    /// resolves to.
+    pub fn note_player_id(&mut self, id: u32) {
+        self.player_id = id;
     }
 
     /// Remember where the server placed an entity, in event coordinates:
@@ -743,6 +752,14 @@ pub enum ResolvedCue {
     /// UI state, not scene state.
     /// research/XiEvents/OpCodes/0x00C8.md
     Map(MapOp),
+    /// 0x6E/0x63 ride the existing [`AgentEvent::EntityEmoted`] (the same event
+    /// a server MOTIONMES sends): the renderer's emote dispatcher already plays
+    /// the DAT routine, so no new wire shape is needed.
+    Emote {
+        actor_id: u32,
+        emote_id: u16,
+        param: u16,
+    },
 }
 
 /// One event-script ask on the player's Map screen (research/XiEvents/OpCodes/
@@ -776,11 +793,12 @@ fn snapshot_motion(motion: ffxi_event::ExtSchedulerMotion) -> kuluu_snapshot::Ex
 }
 
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
-/// running event belongs to. `zone` is the event's zone, carried on the 0x2D
+/// running event belongs to, and `player_id`, the server id the LocalPlayer
+/// lookup resolves to. `zone` is the event's zone, carried on the 0x2D
 /// ZoneScheduler cue so the host resolves its key out of the zone's own model
 /// DAT (the VM does not know it).
 /// research/XiEvents/OpCodes/0x002D.md
-pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16) -> ResolvedCue {
+pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) -> ResolvedCue {
     let actor = |lookup| resolve_actor(lookup, event_entity);
     ResolvedCue::Scene(match cue {
         EventCue::ActorMotion {
@@ -918,6 +936,21 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16) -> ResolvedCue {
             });
         }
         EventCue::MapClose => return ResolvedCue::Map(MapOp::Close),
+        EventCue::Emote {
+            actor,
+            emote_id,
+            param,
+        } => {
+            let actor_id = match resolve_actor(actor, event_entity) {
+                CutsceneActor::LocalPlayer => player_id,
+                CutsceneActor::Entity { server_id } => server_id,
+            };
+            return ResolvedCue::Emote {
+                actor_id,
+                emote_id,
+                param,
+            };
+        }
         EventCue::EntityName {
             actor: target,
             name,
@@ -1013,6 +1046,23 @@ impl CutsceneScope {
                     MapOp::Close => AgentEvent::MapClosed,
                 };
                 let _ = event_tx.send(ev);
+            }
+            ResolvedCue::Emote {
+                actor_id,
+                emote_id,
+                param,
+            } => {
+                // The MOTIONMES shape with no target: the renderer's emote
+                // dispatcher plays the routine on `actor_id`.
+                let _ = event_tx.send(AgentEvent::EntityEmoted {
+                    actor_id,
+                    actor_index: 0,
+                    target_id: 0,
+                    target_index: 0,
+                    emote_id,
+                    param,
+                    mode: ffxi_proto::map::emote::mode::MOTION,
+                });
             }
         }
     }
@@ -3288,6 +3338,7 @@ pub(crate) mod tests {
                 },
                 EVENT_ENTITY,
                 0,
+                0,
             )
         };
         let target = |cue| match cue {
@@ -3327,6 +3378,7 @@ pub(crate) mod tests {
             },
             EVENT_ENTITY,
             0,
+            0,
         );
         match cue {
             ResolvedCue::Scene(CutsceneCue::EntityName { actor, name: got }) => {
@@ -3340,6 +3392,50 @@ pub(crate) mod tests {
             }
             other => panic!("not a name cue: {other:?}"),
         }
+    }
+
+    /// An emote cue resolves its actor to a wire id: the LocalPlayer lookup to
+    /// the session's player id, a named entity to its own server id.
+    #[test]
+    fn emote_cue_resolves_the_actor_to_a_wire_id() {
+        const EVENT_ENTITY: u32 = 0x010E_602F;
+        const PLAYER: u32 = 0x010E_0001;
+        let player_emote = resolve_cue(
+            EventCue::Emote {
+                actor: ActorLookup::LOCAL_PLAYER,
+                emote_id: 7,
+                param: 0,
+            },
+            EVENT_ENTITY,
+            0,
+            PLAYER,
+        );
+        assert_eq!(
+            player_emote,
+            ResolvedCue::Emote {
+                actor_id: PLAYER,
+                emote_id: 7,
+                param: 0,
+            }
+        );
+        let npc_emote = resolve_cue(
+            EventCue::Emote {
+                actor: ActorLookup::EVENT_ENTITY,
+                emote_id: 1,
+                param: 0,
+            },
+            EVENT_ENTITY,
+            0,
+            PLAYER,
+        );
+        assert_eq!(
+            npc_emote,
+            ResolvedCue::Emote {
+                actor_id: EVENT_ENTITY,
+                emote_id: 1,
+                param: 0,
+            }
+        );
     }
 
     /// PENDINGSTR can land before the event's VM exists: it is accepted and

@@ -101,6 +101,7 @@ pub(super) fn receive(
     position: Position,
 ) {
     use ffxi_proto::{decode, map};
+    dialog.note_player_id(player);
     match sub.opcode {
         map::s2c::WPOS2 => {
             if let Ok(movement) = decode::ForcedMove::decode(sub.data) {

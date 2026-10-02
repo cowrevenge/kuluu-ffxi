@@ -1677,7 +1677,7 @@ mod tests {
         let mut scope = CutsceneScope::default();
         scope.start(crate::event_dialog::agent_event_id(NPC_ID, EVENT_ID), &tx);
         for cue in runner.take_cues() {
-            scope.push(resolve_cue(cue, NPC_ID, 0), &tx);
+            scope.push(resolve_cue(cue, NPC_ID, 0, 0), &tx);
         }
         scope.end(EventSessionExit::ScriptEnded, &tx);
 

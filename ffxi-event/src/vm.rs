@@ -8,7 +8,8 @@ use crate::cue::{
     dat_id_helper, event_motion_dat_id, scheduler_twin_base, tpc_motion_packages, ActorLookup,
     EventCue, ExtSchedulerMotion, FourCc, LOCAL_PLAYER_SCHEDULER_DAT_ID_BASE, MAGIC_DAT_ID_BASE,
     MAGIC_ROUTINE_TAG, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
-    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    SCHEDULER_DURATION_FROM_DAT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_DOOR_CLOSE,
+    STATUS_EVENT_DOOR_OPEN, STATUS_EVENT_IDLE, STATUS_EVENT_MOTION_BASE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -187,20 +188,44 @@ const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
 const OP_SET_ACTOR_POS: u8 = 0xBA;
+// 0x0020: writes retail's CliEventUcFlag — the player-control lock
+// (research/XiEvents/OpCodes/0x0020.md).
+const OP_PLAYER_CONTROL: u8 = 0x20;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
 const OP_CLOSE_MAP: u8 = 0x8A;
+const OP_OPEN_MAP: u8 = 0x89;
+const OP_OPEN_MAP_PROPS: u8 = 0x8D;
 const OP_MAP_MARKER: u8 = 0x8B;
+const OP_MAP_ADD_MARK: u8 = 0xB8;
 const OP_MAP_TUTORIAL: u8 = 0xC8;
 const OP_HIDE_HUD: u8 = 0x67;
 const OP_SHOW_HUD: u8 = 0x68;
 const OP_STOP_CLOCK: u8 = 0x77;
 const OP_RESTORE_CLOCK: u8 = 0x78;
 const OP_MUSICVOLUME: u8 = 0x5D;
+const OP_SET_SOUND_VOLUME: u8 = 0x69;
+const OP_CHANGE_SOUND_VOLUME: u8 = 0x6A;
+const OP_SET_CLOCK_DATE: u8 = 0xA9;
+const OP_ENABLE_TIMER: u8 = 0xC9;
 const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
 const OP_CHOCOBO: u8 = 0x7E;
+// The door status writes: the event entity's StatusEvent, gated on a
+// Render.Flags0 bit no tier names (research/XiEvents/OpCodes/0x004C.md,
+// 0x004D.md, 0x004F.md).
+const OP_DOOR_OPEN: u8 = 0x4C;
+const OP_DOOR_CLOSE: u8 = 0x4D;
+const OP_STATUS_EVENT: u8 = 0x4F;
+// The D_OPEN2/D_CLOSE2 writes: 0x4C/0x4D's twins on the second door status
+// pair, the same gate and field (research/XiEvents/OpCodes/0x008E.md,
+// 0x008F.md).
+const OP_DOOR_OPEN2: u8 = 0x8E;
+const OP_DOOR_CLOSE2: u8 = 0x8F;
+// 0x90 writes the event-hide flag (the 0x4E bit, value 1) on the event
+// entity, plus a Flags1 bit no tier names (research/XiEvents/OpCodes/0x0090.md).
+const OP_EVENT_HIDE_ALWAYS: u8 = 0x90;
 const OP_SETBITWORK: u8 = 0x40;
 const OP_GETBITWORK: u8 = 0x41;
 const OP_SENDTAG: u8 = 0x43;
@@ -321,6 +346,9 @@ const WAITLOADSCHEDULER_ACTOR1_OFS: usize = 3;
 const WAITLOADSCHEDULER_KEY_OFS: usize = 11;
 const MAPSCHEDULOR_KEY_OFS: usize = 9; // 0x002D, same layout as the WAIT family
 const MAPSCHEDULOR_ACTOR2_OFS: usize = 5; // 0x002D partner slot of that layout
+                                          // 0x0020: the flag byte at +1 (research/XiEvents/OpCodes/0x0020.md).
+const PLAYER_CONTROL_FLAG_OFS: usize = 1;
+
 const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
 const DEFCAMERA_CASE_UNLOCK: u8 = 0;
 const DEFCAMERA_CASE_LOCK: u8 = 1;
@@ -334,12 +362,20 @@ const MUSICVOLUME_FADE_OFS: usize = 3;
 const STOP_CLOCK_HOUR_OFS: usize = 1;
 /// `OP_STOP_CLOCK`'s "no time change" sentinel for the hour operand.
 const STOP_CLOCK_NO_HOUR: i32 = 255;
+/// 0xA9's day operand: the clock jumps to Vana day `7 * work[1]` at 00:30
+/// (research/XiEvents/OpCodes/0x00A9.md).
+const SET_CLOCK_DATE_DAY_OFS: usize = 1;
+/// 0xA9's authored minute and hour (the local time is zeroed before the day
+/// jump, so the clock lands at 00:30).
+const SET_CLOCK_DATE_MINUTE: u8 = 30;
+const SET_CLOCK_DATE_HOUR: u32 = 0;
 const MAP_OPEN_ID_OFS: usize = 1; // 0x00C8
 const MAP_OPEN_TUTORIAL_OFS: usize = 5; // 0x00C8, LOBYTE is the bool
 const MAP_MARKER_ID_OFS: usize = 1; // 0x008B
 const MAP_MARKER_X_OFS: usize = 5; // 0x008B
 const MAP_MARKER_Y_OFS: usize = 7; // 0x008B
 const MAP_MARKER_NAME_OFS: usize = 9; // 0x008B, 16 bytes
+const OPEN_MAP_ID_OFS: usize = 1; // 0x0089, 0x008D
 const CHOCOBO_CASE_OFS: usize = 1; // 0x007E
 const CHOCOBO_TARGET_OFS: usize = 2;
 const CHOCOBO_MOUNT_ID_OFS: usize = 6;
@@ -353,6 +389,9 @@ const CHOCOBO_CASE_UNMOUNT: u8 = 8;
 /// `entity->MountId = getworkofs(6) + 1` — the id is stored biased by one.
 const CHOCOBO_MOUNT_ID_BIAS: u16 = 1;
 const CHOCOBO_UNMOUNT_ID: u16 = 0;
+/// 0x4F's work operand, the value added to `STATUS_EVENT_MOTION_BASE`
+/// (research/XiEvents/OpCodes/0x004F.md).
+const STATUS_EVENT_VALUE_OFS: usize = 1;
 
 const WORK_LOCAL_LEN: usize = 80;
 // `XiEvent::setworkstrofs` refuses string writes at slot 64 and up: a 16-byte
@@ -1639,6 +1678,14 @@ impl EventVm {
                     }
                     self.advance(op);
                 }
+                // 0x20 writes retail's CliEventUcFlag; while it holds, the
+                // player's CanIMove is false (research/XiEvents/OpCodes/0x0020.md).
+                OP_PLAYER_CONTROL => {
+                    self.cues.push(EventCue::PlayerControl {
+                        locked: self.byte_at(PLAYER_CONTROL_FLAG_OFS) != 0,
+                    });
+                    self.advance(op);
+                }
                 OP_EVENTHIDE => {
                     self.cues.push(EventCue::ActorHide {
                         target: ActorLookup(self.eventgetcode2(EVENTHIDE_TARGET_OFS)),
@@ -1677,6 +1724,17 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // 0x89 opens the map on the work-slot zone id, sub-menus
+                // hidden (research/XiEvents/OpCodes/0x0089.md).
+                OP_OPEN_MAP => {
+                    self.cues.push(EventCue::MapOpen {
+                        map_id: self.getworkofs(OPEN_MAP_ID_OFS, 0),
+                        tutorial: false,
+                    });
+                    self.advance(op);
+                }
+                OP_OPEN_MAP_PROPS => self.advance(op),
+                OP_MAP_ADD_MARK => self.advance(op),
                 OP_CLOSE_MAP => {
                     self.cues.push(EventCue::MapClose);
                     self.advance(op);
@@ -1700,6 +1758,8 @@ impl EventVm {
                         self.cues.push(EventCue::ClockHold {
                             stop: true,
                             hour: Some(hour.rem_euclid(24) as u32),
+                            minute: 0,
+                            day_from_epoch: None,
                         });
                     }
                     self.advance(op);
@@ -1708,6 +1768,32 @@ impl EventVm {
                     self.cues.push(EventCue::ClockHold {
                         stop: false,
                         hour: None,
+                        minute: 0,
+                        day_from_epoch: None,
+                    });
+                    self.advance(op);
+                }
+                // 0xA9 zeros the local time, then jumps the date to Vana day
+                // 7 * work[1] at 00:30 (research/XiEvents/OpCodes/0x00A9.md
+                // Helper2, SetMinute).
+                OP_SET_CLOCK_DATE => {
+                    let day = self.getworkofs(SET_CLOCK_DATE_DAY_OFS, 0);
+                    self.cues.push(EventCue::ClockHold {
+                        stop: true,
+                        hour: Some(SET_CLOCK_DATE_HOUR),
+                        minute: SET_CLOCK_DATE_MINUTE,
+                        day_from_epoch: Some(day.saturating_mul(7).max(0) as u32),
+                    });
+                    self.advance(op);
+                }
+                // 0xC9 releases the hold 0x77/0xA9 set
+                // (research/XiEvents/OpCodes/0x00C9.md).
+                OP_ENABLE_TIMER => {
+                    self.cues.push(EventCue::ClockHold {
+                        stop: false,
+                        hour: None,
+                        minute: 0,
+                        day_from_epoch: None,
                     });
                     self.advance(op);
                 }
@@ -1718,6 +1804,36 @@ impl EventVm {
                             .clamp(0, MUSIC_VOLUME_MAX as i32)
                             as u8,
                         fade_frames: self.getworkofs(MUSICVOLUME_FADE_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
+                OP_SET_SOUND_VOLUME | OP_CHANGE_SOUND_VOLUME => self.advance(op),
+                // Status writes: retail-2026-09 RVAs 0xB6950, 0xB6A00, 0xB69B0;
+                // .agents/skills/retail-observe/references/2026-10-02-event-control-clock-doors.md.
+                // Native actor render-bit gating is not represented by VM state.
+                OP_DOOR_OPEN => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_OPEN);
+                    self.advance(op);
+                }
+                OP_DOOR_CLOSE => {
+                    self.emit_status_event_cue(STATUS_EVENT_DOOR_CLOSE);
+                    self.advance(op);
+                }
+                OP_STATUS_EVENT => {
+                    let status = self
+                        .getworkofs(STATUS_EVENT_VALUE_OFS, 0)
+                        .wrapping_add(STATUS_EVENT_MOTION_BASE as i32)
+                        as u8;
+                    self.emit_status_event_cue(status);
+                    self.advance(op);
+                }
+                OP_DOOR_OPEN2 | OP_DOOR_CLOSE2 => self.advance(op),
+                // The Flags1 half of 0x90 has no tier-named meaning, so the cue
+                // carries only the hide write.
+                OP_EVENT_HIDE_ALWAYS => {
+                    self.cues.push(EventCue::ActorHide {
+                        target: ActorLookup::EVENT_ENTITY,
+                        hide: true,
                     });
                     self.advance(op);
                 }
@@ -1912,6 +2028,17 @@ impl EventVm {
     /// the scheduler/action keys are tags, not numbers.
     fn fourcc_at(&self, index: usize) -> FourCc {
         self.eventgetcode2(index).to_le_bytes()
+    }
+
+    /// The door opcodes' `StatusEvent` write, on 0x7E's Mount cue: same field,
+    /// so the session and wire paths 0x7E already owns carry it
+    /// (research/XiEvents/OpCodes/0x004C.md).
+    fn emit_status_event_cue(&mut self, status_event: u8) {
+        self.cues.push(EventCue::Mount {
+            target: ActorLookup::EVENT_ENTITY,
+            status_event,
+            mount_id: None,
+        });
     }
 
     /// The `StatusEvent` write 0x7E's case performs, as a cue
@@ -3416,6 +3543,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unsupported_transparency_keeps_baseline_skip_without_wait() {
+        let mut data = vec![OP_TRANSPAR];
+        data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.push(OP_END);
+        let mut event = vm(data, vec![128, 60]);
+        assert_eq!(event.step(), StepResult::Done);
+        assert!(event.take_cues().is_empty());
+    }
+
     /// 0x3E BITTEST program: bit index from References[1], work word named by
     /// `word_operand`, branch target `target`.
     fn bit_test_program(word_operand: [u8; 2], target: u8) -> Vec<u8> {
@@ -4388,6 +4527,19 @@ mod tests {
         );
     }
 
+    /// `OP_OPEN_MAP` opens the map on the work-slot zone id, sub-menus
+    /// hidden (research/XiEvents/OpCodes/0x0089.md).
+    #[test]
+    fn open_map_opcode_emits_the_open_cue() {
+        assert_eq!(
+            cues_of(OP_OPEN_MAP, &REF1, vec![0, 230]),
+            [EventCue::MapOpen {
+                map_id: 230,
+                tutorial: false
+            }]
+        );
+    }
+
     #[test]
     fn close_map_opcode_emits_the_close_cue() {
         assert_eq!(cues_of(OP_CLOSE_MAP, &[], vec![]), [EventCue::MapClose]);
@@ -4473,14 +4625,18 @@ mod tests {
             cues_of(OP_STOP_CLOCK, &ops, vec![0, 8, 0, 1]),
             [EventCue::ClockHold {
                 stop: true,
-                hour: Some(8)
+                hour: Some(8),
+                minute: 0,
+                day_from_epoch: None
             }]
         );
         assert_eq!(
             cues_of(OP_STOP_CLOCK, &ops, vec![0, 30, 0, 1]),
             [EventCue::ClockHold {
                 stop: true,
-                hour: Some(6)
+                hour: Some(6),
+                minute: 0,
+                day_from_epoch: None
             }]
         );
         assert!(cues_of(OP_STOP_CLOCK, &ops, vec![0, 255, 0, 1]).is_empty());
@@ -4492,9 +4648,72 @@ mod tests {
             cues_of(OP_RESTORE_CLOCK, &[], vec![]),
             [EventCue::ClockHold {
                 stop: false,
-                hour: None
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
             }]
         );
+    }
+
+    /// 0xA9's day operand is multiplied by seven: work slot 1 of 2 lands on
+    /// Vana day 14 at 00:30 (research/XiEvents/OpCodes/0x00A9.md).
+    #[test]
+    fn set_clock_date_opcode_jumps_seven_days_per_work_unit() {
+        let ops = [0x01u8, 0x80];
+        assert_eq!(
+            cues_of(OP_SET_CLOCK_DATE, &ops, vec![0, 2]),
+            [EventCue::ClockHold {
+                stop: true,
+                hour: Some(0),
+                minute: 30,
+                day_from_epoch: Some(14)
+            }]
+        );
+        assert_eq!(
+            cues_of(OP_SET_CLOCK_DATE, &ops, vec![0, 0]),
+            [EventCue::ClockHold {
+                stop: true,
+                hour: Some(0),
+                minute: 30,
+                day_from_epoch: Some(0)
+            }]
+        );
+    }
+
+    /// 0xC9 releases the game-timer hold, the same cue 0x78 emits.
+    #[test]
+    fn enable_timer_opcode_releases_the_hold() {
+        assert_eq!(
+            cues_of(OP_ENABLE_TIMER, &[], vec![]),
+            [EventCue::ClockHold {
+                stop: false,
+                hour: None,
+                minute: 0,
+                day_from_epoch: None
+            }]
+        );
+    }
+
+    #[test]
+    fn partial_presentation_opcodes_keep_baseline_skip_without_effects() {
+        for op in [
+            OP_SET_SOUND_VOLUME,
+            OP_CHANGE_SOUND_VOLUME,
+            OP_OPEN_MAP_PROPS,
+            OP_MAP_ADD_MARK,
+        ] {
+            let size = OPCODE_META[op as usize].size as usize;
+            let mut program = vec![op];
+            program.resize(size, 0);
+            program.push(OP_END);
+            let mut event = vm(program, vec![]);
+            assert_eq!(event.step(), StepResult::Done);
+            assert_eq!(event.exec_pointer(), size);
+            assert!(
+                event.take_cues().is_empty(),
+                "partial opcode {op:#x} emitted an effect"
+            );
+        }
     }
 
     /// `OP_DEFCAMERA` case 1 takes the camera, case 0 gives it back; case 2
@@ -4510,6 +4729,20 @@ mod tests {
             [EventCue::CameraLock { lock: false }]
         );
         assert!(cues_of(OP_DEFCAMERA, &[2, 0x0A, 0x00], vec![]).is_empty());
+    }
+
+    /// 0x20 writes retail's CliEventUcFlag: any nonzero byte locks the
+    /// player, zero releases it (research/XiEvents/OpCodes/0x0020.md).
+    #[test]
+    fn player_control_opcode_writes_the_flag() {
+        assert_eq!(
+            cues_of(OP_PLAYER_CONTROL, &[1], vec![]),
+            [EventCue::PlayerControl { locked: true }]
+        );
+        assert_eq!(
+            cues_of(OP_PLAYER_CONTROL, &[0], vec![]),
+            [EventCue::PlayerControl { locked: false }]
+        );
     }
 
     /// `OP_MUSICVOLUME`'s first operand is a volume *table index*, its second
@@ -4579,6 +4812,46 @@ mod tests {
         assert_eq!(
             cues_of(OP_CHOCOBO, &case(CHOCOBO_CASE_UNMOUNT), vec![]),
             mount(STATUS_EVENT_IDLE, Some(CHOCOBO_UNMOUNT_ID))
+        );
+    }
+
+    #[test]
+    fn door_status_opcodes_write_the_event_entity_status() {
+        let door = |status_event| {
+            [EventCue::Mount {
+                target: ActorLookup::EVENT_ENTITY,
+                status_event,
+                mount_id: None,
+            }]
+        };
+        assert_eq!(
+            cues_of(OP_DOOR_OPEN, &[], vec![]),
+            door(STATUS_EVENT_DOOR_OPEN)
+        );
+        assert_eq!(
+            cues_of(OP_DOOR_CLOSE, &[], vec![]),
+            door(STATUS_EVENT_DOOR_CLOSE)
+        );
+        for op in [OP_DOOR_OPEN2, OP_DOOR_CLOSE2] {
+            let mut e = vm(vec![op, OP_END], vec![]);
+            assert_eq!(e.step(), StepResult::Done);
+            assert!(e.take_cues().is_empty());
+        }
+        assert_eq!(
+            cues_of(OP_STATUS_EVENT, &REF1, vec![0, 3]),
+            door(STATUS_EVENT_MOTION_BASE as u8 + 3)
+        );
+    }
+
+    /// 0x90 hides the event entity: the 0x4E bit with the value fixed at 1.
+    #[test]
+    fn event_hide_always_opcode_hides_the_event_entity() {
+        assert_eq!(
+            cues_of(OP_EVENT_HIDE_ALWAYS, &[], vec![]),
+            [EventCue::ActorHide {
+                target: ActorLookup::EVENT_ENTITY,
+                hide: true,
+            }]
         );
     }
 

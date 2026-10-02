@@ -748,6 +748,11 @@ pub enum ResolvedCue {
     /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
     /// the cue stream.
     MusicVolume { volume: u8, fade_frames: u16 },
+    SoundVolume {
+        mask: u8,
+        volume: u8,
+        fade_frames: u16,
+    },
     /// 0xC8/0x8B/0x8A ride their own map AgentEvents: the Map screen is client
     /// UI state, not scene state.
     /// research/XiEvents/OpCodes/0x00C8.md
@@ -848,9 +853,29 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             target: actor(target),
             hide,
         },
+        EventCue::Transpar {
+            actor: target,
+            end_alpha,
+            duration_frames,
+        } => CutsceneCue::Transpar {
+            target: actor(target),
+            end_alpha,
+            duration_frames,
+        },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::PlayerControl { locked } => CutsceneCue::PlayerControl { locked },
         EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
-        EventCue::ClockHold { stop, hour } => CutsceneCue::ClockHold { stop, hour },
+        EventCue::ClockHold {
+            stop,
+            hour,
+            minute,
+            day_from_epoch,
+        } => CutsceneCue::ClockHold {
+            stop,
+            hour,
+            minute,
+            day_from_epoch,
+        },
         EventCue::Mount {
             target,
             status_event,
@@ -905,6 +930,17 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             fade_frames,
         } => {
             return ResolvedCue::MusicVolume {
+                volume,
+                fade_frames,
+            }
+        }
+        EventCue::SoundVolume {
+            mask,
+            volume,
+            fade_frames,
+        } => {
+            return ResolvedCue::SoundVolume {
+                mask,
                 volume,
                 fade_frames,
             }
@@ -1028,6 +1064,9 @@ impl CutsceneScope {
                 for slot in 0..crate::state::MUSIC_SLOT_COUNT {
                     let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
                 }
+            }
+            ResolvedCue::SoundVolume { .. } => {
+                tracing::warn!("unsupported event sound-volume cue ignored");
             }
             ResolvedCue::Map(op) => {
                 let ev = match op {
@@ -3291,6 +3330,18 @@ pub(crate) mod tests {
         assert_eq!(camera_locks(&events), vec![true, false], "{events:?}");
     }
 
+    /// 0x20 carries no actor: the flag write crosses the boundary as-is.
+    /// research/XiEvents/OpCodes/0x0020.md
+    #[test]
+    fn the_player_control_cue_resolves_without_an_actor() {
+        for locked in [true, false] {
+            assert_eq!(
+                resolve_cue(EventCue::PlayerControl { locked }, 0, 1, 0),
+                ResolvedCue::Scene(CutsceneCue::PlayerControl { locked })
+            );
+        }
+    }
+
     /// 0x5D is a master volume, so it rides the existing music-volume event on
     /// every slot rather than a cue of its own.
     #[test]
@@ -3320,6 +3371,21 @@ pub(crate) mod tests {
             slots,
             (0..crate::state::MUSIC_SLOT_COUNT).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn unsupported_sound_volume_does_not_apply_partial_music_changes() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut scope = CutsceneScope::default();
+        scope.push(
+            ResolvedCue::SoundVolume {
+                mask: ffxi_event::SOUND_TYPE_MASTER,
+                volume: 0,
+                fade_frames: 60,
+            },
+            &tx,
+        );
+        assert!(drain(&mut rx).is_empty());
     }
 
     /// The VM leaves its actor operands unresolved on purpose: the local
@@ -3362,6 +3428,41 @@ pub(crate) mod tests {
                 server_id: POSED_NPC
             }
         );
+    }
+
+    /// 0x6C rides the same actor resolution as the other actor cues: the fade
+    /// targets the running event's entity, not the VM's own sentinel
+    /// (research/XiEvents/OpCodes/0x006C.md).
+    #[test]
+    fn transpar_cue_resolves_its_actor_against_the_running_event() {
+        const EVENT_ENTITY: u32 = 0x010E_602F;
+        let cue = resolve_cue(
+            EventCue::Transpar {
+                actor: ActorLookup::EVENT_ENTITY,
+                end_alpha: 0,
+                duration_frames: 60,
+            },
+            EVENT_ENTITY,
+            0,
+            0,
+        );
+        match cue {
+            ResolvedCue::Scene(CutsceneCue::Transpar {
+                target,
+                end_alpha,
+                duration_frames,
+            }) => {
+                assert_eq!(
+                    target,
+                    CutsceneActor::Entity {
+                        server_id: EVENT_ENTITY
+                    }
+                );
+                assert_eq!(end_alpha, 0);
+                assert_eq!(duration_frames, 60);
+            }
+            other => panic!("not a transpar cue: {other:?}"),
+        }
     }
 
     /// 0xB5 names the event entity by default: the rename cue rides the

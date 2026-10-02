@@ -140,10 +140,31 @@ pub const EMOTE_ANIMATION_KEY: FourCc = *b"emot";
 pub const STATUS_EVENT_IDLE: u8 = 0;
 pub const STATUS_EVENT_CHOCOBO: u8 = 5;
 pub const STATUS_EVENT_MOUNT: u8 = 85;
+/// The door bytes opcodes 0x4C/0x4D write: `GameStatus` `D_OPEN`/`D_CLOSE`
+/// (research/XiEvents/OpCodes/0x004C.md, 0x004D.md; research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_DOOR_OPEN: u8 = 8;
+pub const STATUS_EVENT_DOOR_CLOSE: u8 = 9;
+/// 0x4F adds this to its work operand: the `M1`..`M8` event-motion statuses
+/// (research/XiEvents/OpCodes/0x004F.md; research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_MOTION_BASE: u32 = 18;
+/// The second door status pair opcodes 0x8E/0x8F write: `GameStatus`
+/// `D_OPEN2`/`D_CLOSE2` (research/XiEvents/OpCodes/0x008E.md, 0x008F.md;
+/// research/XIClient/src/XIClient/include/World/Actor/GameStatus.h).
+pub const STATUS_EVENT_DOOR_OPEN2: u8 = 45;
+pub const STATUS_EVENT_DOOR_CLOSE2: u8 = 46;
 
 /// Highest music-volume table index (`FUNC_YmMusicServer_Volume`'s first
 /// argument indexes a volume table; it is not a percentage).
 pub const MUSIC_VOLUME_MAX: u8 = 127;
+
+/// The retail sound-type bits the 0x69/0x6A volume opcodes write
+/// (research/XiEvents/OpCodes/0x0069.md): which of the client's volume
+/// channels the opcode sets.
+pub const SOUND_TYPE_EFFECT: u8 = 0x01;
+pub const SOUND_TYPE_SYSTEM: u8 = 0x02;
+pub const SOUND_TYPE_ZONE: u8 = 0x04;
+pub const SOUND_TYPE_MASTER: u8 = 0x08;
+pub const SOUND_TYPE_SPECIAL_CHAT: u8 = 0x10;
 
 /// `FUNC_DatIdHelper` (research/XiEvents/OpCodes/0x0045.md): the two folded
 /// bands of the scheduler DAT id space.
@@ -345,20 +366,50 @@ pub enum EventCue {
     /// 0x4E EVENTHIDE: set/clear the target's event-hide render flag
     /// (research/XiEvents/OpCodes/0x004E.md).
     ActorHide { target: ActorLookup, hide: bool },
+    /// 0x6C TRANSPAR: fade the target's alpha to `end_alpha` (a 0..=255 byte,
+    /// the work(5) operand) over `duration_frames` frames (the work(7)
+    /// operand, 0 read as 1), parking the script for that fade
+    /// (research/XiEvents/OpCodes/0x006C.md).
+    Transpar {
+        actor: ActorLookup,
+        end_alpha: i32,
+        duration_frames: i32,
+    },
     /// 0x46 DEFCAMERA: take the camera (and the cutscene HUD) away from the
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
+    /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
+    /// research/XIClient ActorTelemetry::CanIMove).
+    PlayerControl { locked: bool },
     /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
     /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
     HudHide { hide: bool },
-    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
-    /// hour `hour`, or release it back to server time
-    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
-    ClockHold { stop: bool, hour: Option<u32> },
+    /// 0x77/0x78/0xA9/0xC9 game-clock holds: hold the clock at Vana'diel hour
+    /// `hour`, minute `minute`, on Vana day `day_from_epoch` from the calendar
+    /// epoch when set (else the current day), or release it back to server
+    /// time (research/XiEvents/OpCodes/0x0077.md, 0x0078.md, 0x00A9.md,
+    /// 0x00C9.md). 0x77 sets the hour on the current day at minute zero; 0xA9
+    /// zeros the local time first, so it jumps the whole date to Vana day
+    /// `7 * work[1]` at 00:30.
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+        minute: u8,
+        day_from_epoch: Option<u32>,
+    },
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x69/0x6A SET/CHANGE sound volume: set the named retail sound types
+    /// (the `mask` bits) to `volume` over `fade_frames`
+    /// (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).
+    SoundVolume {
+        mask: u8,
+        volume: u8,
+        fade_frames: u16,
+    },
     /// 0x7E CHOCOBO/MOUNT: put the target on or off a mount by writing its
     /// `StatusEvent` (research/XiEvents/OpCodes/0x007E.md). `mount_id` is
     /// carried only by the non-chocobo mount cases.
@@ -485,6 +536,15 @@ impl EventCue {
             Self::ActorHide { target, hide } => Self::ActorHide {
                 target: resolve(target),
                 hide,
+            },
+            Self::Transpar {
+                actor,
+                end_alpha,
+                duration_frames,
+            } => Self::Transpar {
+                actor: resolve(actor),
+                end_alpha,
+                duration_frames,
             },
             Self::Mount {
                 target,

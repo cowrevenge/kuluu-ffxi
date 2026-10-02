@@ -30,9 +30,9 @@ pub use codec::{
     build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_item_move,
     build_subpacket_item_stack, build_subpacket_item_use, build_subpacket_motion,
     build_subpacket_myroom_job, build_subpacket_pbx, build_subpacket_reqlogout,
-    build_subpacket_shop_buy, build_subpacket_shop_sell_req, build_subpacket_shop_sell_set,
-    build_subpacket_tracking_end, build_subpacket_tracking_list, build_subpacket_tracking_start,
-    log_action_sent,
+    build_subpacket_reqsubmapnum, build_subpacket_shop_buy, build_subpacket_shop_sell_req,
+    build_subpacket_shop_sell_set, build_subpacket_tracking_end, build_subpacket_tracking_list,
+    build_subpacket_tracking_start, log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -2397,15 +2397,17 @@ async fn send_pending_tag(
     tag: &PendingTag,
 ) {
     let payload = match tag {
-        PendingTag::SendTag { end_para } => build_subpacket_event_end(
-            *sub_seq,
-            unique_no,
-            act_index,
-            current_zone_id,
-            event_id,
-            *end_para,
-            ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
-        ),
+        PendingTag::SendTag { end_para } | PendingTag::Registration { end_para } => {
+            build_subpacket_event_end(
+                *sub_seq,
+                unique_no,
+                act_index,
+                current_zone_id,
+                event_id,
+                *end_para,
+                ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+            )
+        }
         PendingTag::SendXzy {
             x,
             y,
@@ -2424,6 +2426,14 @@ async fn send_pending_tag(
             current_zone_id,
             event_id,
         ),
+        // 0xB2 case 1: the delivery-mode request is the 0x04D PBX open, not an
+        // event-end subpacket (vendor/server/src/map/packets/c2s/0x04d_pbx.cpp).
+        PendingTag::DeliveryOpen => {
+            build_subpacket_pbx(*sub_seq, &crate::state::DeliveryBoxOp::DeliOpen)
+        }
+        // 0xA6 case 0: the header-only 0x0EB sub-map request; the 0x10E s2c is
+        // its answer (vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
+        PendingTag::SubMapNum => build_subpacket_reqsubmapnum(*sub_seq),
     };
     let header = datagram_header_id(*sub_seq);
     *sub_seq = sub_seq.wrapping_add(1);
@@ -2544,6 +2554,22 @@ async fn begin_server_event(
                     },
                     server_ts: 0,
                 },
+            });
+            // The error line the player sees: the auto-skip system line above
+            // is the operator's marker, this is the cancel reason.
+            let _ = event_tx.send(AgentEvent::Error {
+                message: crate::event_dialog::cutscene_error_line(
+                    event_id,
+                    zone_id,
+                    stopped_op.unwrap_or(0),
+                    0,
+                    match reason {
+                        crate::event_dialog::UndriveableReason::StoppedOnOpcode => {
+                            crate::event_dialog::StallReason::UnsupportedOpcode
+                        }
+                        _ => crate::event_dialog::StallReason::NoScriptForEvent,
+                    },
+                ),
             });
         }
     }
@@ -2880,7 +2906,10 @@ async fn keepalive_loop(
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
-                                crate::event_dialog::Advance::Ended { .. } => {
+                                crate::event_dialog::Advance::Ended { error, .. } => {
+                                    if let Some(line) = error {
+                                        let _ = event_tx.send(AgentEvent::Error { message: line });
+                                    }
                                     cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
@@ -3068,8 +3097,19 @@ async fn keepalive_loop(
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
-                                crate::event_dialog::Advance::Ended { .. } => {
-                                    cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                                crate::event_dialog::Advance::Ended { error, .. } => {
+                                    let stalled = error.is_some();
+                                    if let Some(line) = error {
+                                        let _ = event_tx.send(AgentEvent::Error { message: line });
+                                    }
+                                    cutscene.end(
+                                        if stalled {
+                                            crate::event_dialog::EventSessionExit::Cancelled
+                                        } else {
+                                            crate::event_dialog::EventSessionExit::ScriptEnded
+                                        },
+                                        &event_tx,
+                                    );
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                                 crate::event_dialog::Advance::Waiting => {}
@@ -4340,8 +4380,21 @@ async fn keepalive_loop(
                             emit_event_speech_to_chat(&event_tx, &dialog);
                             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                         }
-                        crate::event_dialog::Advance::Ended { .. } => {
-                            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                        crate::event_dialog::Advance::Ended { error, .. } => {
+                            // A stalled or stopped event ends with its cancel
+                            // line in chat and the scope closed as a cancel.
+                            let stalled = error.is_some();
+                            if let Some(line) = error {
+                                let _ = event_tx.send(AgentEvent::Error { message: line });
+                            }
+                            cutscene.end(
+                                if stalled {
+                                    crate::event_dialog::EventSessionExit::Cancelled
+                                } else {
+                                    crate::event_dialog::EventSessionExit::ScriptEnded
+                                },
+                                &event_tx,
+                            );
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                         crate::event_dialog::Advance::Waiting => {}
@@ -4758,6 +4811,47 @@ async fn keepalive_loop(
                                 continue;
                             }
 
+                            event_transport::receive(&mut dialog_session, &sub, self_char_id, self_pos);
+
+                            if event_transport::server_ack_matches(&mut dialog_session, &sub)
+                            {
+                                let Some((u, a, n)) = dialog_session.active_end() else {
+                                    continue;
+                                };
+                                let Some(step) = event_transport::prepare(
+                                    &mut dialog_session, event_transport::Drive::ServerAck,
+                                    current_zone_id, &mut pending_event_end, &mut sub_seq,
+                                    &mut self_pos, &event_tx,
+                                ) else { continue; };
+                                let (advance, cues) = match step.send(map, server_last_seq).await {
+                                    Ok(outcome) => outcome,
+                                    Err(error) => {
+                                        tracing::warn!(%error, "event acknowledgement send failed");
+                                        continue;
+                                    }
+                                };
+                                for cue in cues {
+                                    cutscene.push(cue, &event_tx);
+                                }
+                                if dialog_session.take_frame_closed() {
+                                    let _ = event_tx.send(AgentEvent::DialogDismissed);
+                                }
+                                match advance {
+                                    crate::event_dialog::Advance::Frame(mut dialog) => {
+                                        attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
+                                        emit_event_speech_to_chat(&event_tx, &dialog);
+                                        let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                                    }
+                                    crate::event_dialog::Advance::Ended { error, .. } => {
+                                        event_transport::finish_server_ack(error, &mut cutscene, &event_tx);
+                                    }
+                                    crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                        send_pending_tag(map, &mut sub_seq, server_last_seq, current_zone_id, u, a, n, &tag).await;
+                                    }
+                                    crate::event_dialog::Advance::Waiting => {}
+                                }
+                            }
+
                             if sub.opcode == ffxi_proto::map::s2c::PBX_RESULT {
                                 match decode::PbxResult::decode(sub.data) {
                                     Ok(r) => {
@@ -4936,47 +5030,6 @@ async fn keepalive_loop(
                                     Err(e) => warn_decode_err(sub.opcode, e),
                                 }
                                 continue;
-                            }
-
-                            event_transport::receive(&mut dialog_session, &sub, self_char_id, self_pos);
-
-                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
-                                && eventucoff_mode_of(sub.data)
-                                    == Some(ffxi_proto::map::eventucoff_mode::EVENT_RECV_PENDING)
-                                && dialog_session.has_pending_tag()
-                            {
-                                let Some((u, a, n)) = dialog_session.active_end() else {
-                                    continue;
-                                };
-                                let advance = dialog_session.ack_server();
-                                for cue in dialog_session.take_cues() {
-                                    cutscene.push(cue, &event_tx);
-                                }
-                                if dialog_session.take_frame_closed() {
-                                    let _ = event_tx.send(AgentEvent::DialogDismissed);
-                                }
-                                match advance {
-                                    crate::event_dialog::Advance::Frame(mut dialog) => {
-                                        attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
-                                        emit_event_speech_to_chat(&event_tx, &dialog);
-                                        let _ = event_tx.send(AgentEvent::EventDialog { dialog });
-                                    }
-                                    crate::event_dialog::Advance::Ended { end_para, .. } => {
-                                        if take_pending_event_end(&mut pending_event_end, u, n) {
-                                            let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
-                                            sub_seq = sub_seq.wrapping_add(1);
-                                            if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                                tracing::warn!(error = %e, "EVENT_END (vm ack) send failed");
-                                            }
-                                        }
-                                        cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
-                                        let _ = event_tx.send(AgentEvent::EventEnded);
-                                    }
-                                    crate::event_dialog::Advance::AwaitServerAck(tag) => {
-                                        send_pending_tag(map, &mut sub_seq, server_last_seq, current_zone_id, u, a, n, &tag).await;
-                                    }
-                                    crate::event_dialog::Advance::Waiting => {}
-                                }
                             }
 
                             // Keep the LOC_INVENTORY mirror for the delivery-box
@@ -7568,7 +7621,10 @@ struct EventEndFlushInputs {
     watchdog_fires: bool,
     walked_away: bool,
     /// A VM pending tag is in flight: its event must stay open server-side for
-    /// OnEventUpdate, so no Mode-0 END may drain it this tick.
+    /// OnEventUpdate, so no Mode-0 END may drain it this tick. The session's
+    /// liveness check cancels a tag whose ack never arrives with an error in
+    /// chat, so the deferral cannot hold the pin indefinitely
+    /// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
     tag_in_flight: bool,
 }
 

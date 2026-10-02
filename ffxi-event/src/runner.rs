@@ -157,11 +157,47 @@ impl DialogRunner {
         self.vm.hold_action(actor, key, units);
     }
 
+    pub fn set_entity_positions(
+        &mut self,
+        positions: &std::collections::HashMap<u32, crate::vm::scene::EventPosition>,
+    ) {
+        self.vm.set_entity_positions(positions);
+    }
+
     /// Replace the entity Type table the LOADEXTSCHEDULER/LOADEXTSCHEDULER2 gate
     /// reads; see [`EventVm::set_actor_types`]. The session calls this with its
     /// current map before every drive.
     pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
         self.vm.set_actor_types(types);
+    }
+
+    /// Install the global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md); see
+    /// [`EventVm::set_weather_forecast`]. The session loads it once and shares
+    /// the same `Arc` across every runner it drives.
+    pub fn set_weather_forecast(
+        &mut self,
+        forecast: std::sync::Arc<ffxi_dat::weather::WeatherForecast>,
+    ) {
+        self.vm.set_weather_forecast(forecast);
+    }
+
+    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md); see [`EventVm::set_zone_rects`].
+    /// The session loads the event zone's RID table once and shares the same
+    /// `Arc` across every runner it drives.
+    pub fn set_zone_rects(
+        &mut self,
+        rects: std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    ) {
+        self.vm.set_zone_rects(rects);
+    }
+
+    /// Install the zone number 0xD4 case 0 opens the map on
+    /// (research/XiEvents/OpCodes/0x00D4.md); see [`EventVm::set_current_zone`].
+    /// The session injects the event zone before driving.
+    pub fn set_current_zone(&mut self, zone: i32) {
+        self.vm.set_current_zone(zone);
     }
 
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
@@ -216,9 +252,54 @@ impl DialogRunner {
         self.vm.apply_pending_str(strings);
     }
 
+    pub fn set_registration_result(&mut self, result: u16) {
+        self.vm.set_registration_result(result);
+    }
+
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot
+    /// (research/XiEvents/OpCodes/0x00A6.md); lands before the next step even
+    /// while the SubMapNum tag is held, like [`Self::apply_pending_num`].
+    pub fn set_submap_num(&mut self, num: u32) {
+        self.vm.set_submap_num(num);
+    }
+
     /// The pending tag the VM holds on its case-1 poll, if any.
     pub fn pending_tag(&self) -> Option<&PendingTag> {
         self.vm.pending_tag()
+    }
+
+    pub fn progress_stamp(&self) -> u64 {
+        self.vm.progress_stamp()
+    }
+
+    /// Why the VM is not advancing right now, for the host's liveness check;
+    /// see [`EventVm::park`].
+    pub fn park(&self) -> crate::vm::Park {
+        self.vm.park()
+    }
+
+    /// The opcode byte the VM is parked on (0 past the end of the bytecode),
+    /// for the host's stall diagnostics.
+    pub fn current_opcode(&self) -> u8 {
+        self.vm.current_opcode()
+    }
+
+    /// The VM's exec pointer, for the host's stall diagnostics.
+    pub fn exec_pointer(&self) -> usize {
+        self.vm.exec_pointer()
+    }
+
+    /// The timed wait's remaining units, 0 when no wait is held: the host's
+    /// liveness check watches it move on every tick.
+    pub fn wait_units_remaining(&self) -> f32 {
+        self.vm.wait_units_remaining()
+    }
+
+    /// Force-cancel the event from the host side (the liveness stall): the
+    /// next step reports Cancelled, which [`Self::run`] maps to
+    /// [`DialogStep::Ended`] with [`EVENT_CANCELLED_END_PARA`].
+    pub fn force_cancel(&mut self) {
+        self.vm.force_cancel();
     }
 
     /// Whether ESC may cancel this event right now (retail's `CliEventCancelFlag`;
@@ -473,14 +554,23 @@ mod tests {
     ) -> DialogStep {
         const WAIT_SKIP_SECS: f32 = 3600.0;
         let mut step = runner.advance(choice, strings);
-        while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+        const MAX_PARK_STEPS: usize = 100;
+        for _ in 0..MAX_PARK_STEPS {
+            if !matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+                return step;
+            }
             step = if matches!(step, DialogStep::Waiting) {
                 runner.tick(WAIT_SKIP_SECS, strings)
             } else {
                 runner.ack_server(strings)
             };
         }
-        step
+        panic!(
+            "runner stalled: {step:?}, park={:?}, opcode={:#x}, pc={}",
+            runner.park(),
+            runner.current_opcode(),
+            runner.exec_pointer(),
+        )
     }
 
     #[test]
@@ -593,6 +683,22 @@ mod tests {
                 end_para: EVENT_CANCELLED_END_PARA,
             }
         );
+    }
+
+    /// Regression: a bare QUERYWAIT used to yield AwaitMessageAck without moving
+    /// EP, and this loop answered it with dismiss_message and stepped onto the
+    /// same opcode forever (8700's favorites branch). It now ends.
+    #[test]
+    fn bare_querywait_does_not_spin_the_runner() {
+        let strings = empty_strings();
+        let mut r = DialogRunner::start(
+            &one_event_block(vec![OP_QUERYWAIT, OP_END], vec![]),
+            1,
+            0,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(r.advance(None, &strings), DialogStep::Ended { end_para: 0 });
     }
 
     #[test]

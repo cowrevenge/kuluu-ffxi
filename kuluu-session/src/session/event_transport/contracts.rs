@@ -127,6 +127,15 @@ fn position_dat(child: bool) -> EventDat {
     }
 }
 
+/// research/XiEvents/OpCodes/0x0026.md: the event parks on a yield-forever
+/// with nothing that can move it, so the session's liveness check must cancel
+/// it.
+fn stall_dat() -> EventDat {
+    EventDat {
+        blocks: vec![block(vec![0x26], vec![])],
+    }
+}
+
 // vendor/server/src/map/packets/s2c/0x034_eventnum.h GP_SERV_COMMAND_EVENTNUM.
 fn trigger(gil: i32) -> crate::event_dialog::EventTrigger {
     let mut body = [0u8; 48];
@@ -397,6 +406,228 @@ async fn acknowledgement_contract() {
         }
     }
 }
+async fn server_reply_contract() {
+    // research/XiEvents/OpCodes/0x00B2.md CodeREQPBX.
+    const OP_DELIVERY: u8 = 0xB2;
+    for show_message in [false, true] {
+        let mut host = if show_message {
+            let mut program = vec![OP_DELIVERY, 1];
+            message(&mut program, 0);
+            program.push(OP_END);
+            Host::new(
+                EventDat {
+                    blocks: vec![block(program, vec![0])],
+                },
+                FARE,
+            )
+            .await
+        } else {
+            let mut dat = position_dat(false);
+            let program = &mut dat.blocks[0].event_data;
+            assert_eq!(program.pop(), Some(OP_END));
+            program.extend([OP_DELIVERY, 1, OP_END]);
+            let mut host = Host::new(dat, FARE).await;
+            host.request();
+            host.position_ack(PLAYER, PosMode::Event);
+            host.event_ack();
+            assert!(matches!(
+                host.step(Drive::Tick(TICK)).advance,
+                Advance::AwaitServerAck(_)
+            ));
+            host
+        };
+        assert_eq!(
+            host.dialog.pending_tag(),
+            Some(ffxi_event::PendingTag::DeliveryOpen)
+        );
+        // vendor/server/src/map/packets/s2c/0x04b_pbx_result.h GP_SERV_COMMAND_PBX_RESULT.
+        let mut body = [0u8; 16];
+        body[0] = map::pbx::command::DELI_OPEN;
+        body[8] = map::pbx::result::OK;
+        let packet = framing::SubPacket {
+            opcode: map::s2c::PBX_RESULT,
+            sequence: 0,
+            data: &body,
+        };
+        assert!(server_ack_matches(&mut host.dialog, &packet));
+        let step = host.step(Drive::ServerAck);
+        let emitted = packets(&step);
+        if show_message {
+            assert!(matches!(step.advance, Advance::Frame(_)));
+            assert!(emitted.is_empty());
+        } else {
+            assert!(matches!(step.advance, Advance::Ended { .. }));
+            assert_eq!(
+                emitted.iter().map(|p| p.opcode).collect::<Vec<_>>(),
+                [map::c2s::POS, map::c2s::EVENT_END]
+            );
+            assert_eq!(step.datagram_id, emitted[1].sequence);
+            assert!(host.pending.is_empty());
+        }
+        assert!(!server_ack_matches(&mut host.dialog, &packet));
+    }
+}
+
+async fn submap_reply_contract() {
+    const OP_SUBMAP: u8 = 0xA6;
+    const MAP_NUMBER: u32 = 400;
+    let mut program = vec![OP_SUBMAP, 0, OP_SUBMAP, 2];
+    operand(&mut program, WORK_GIL);
+    message(&mut program, 0);
+    program.push(OP_END);
+    let mut host = Host::new(
+        EventDat {
+            blocks: vec![block(program, vec![0])],
+        },
+        FARE,
+    )
+    .await;
+    assert_eq!(
+        host.dialog.pending_tag(),
+        Some(ffxi_event::PendingTag::SubMapNum)
+    );
+    let generic_body = map::event_position_wire::EVENT_RECV_PENDING.to_le_bytes();
+    let generic_ack = framing::SubPacket {
+        opcode: map::s2c::EVENTUCOFF,
+        sequence: 0,
+        data: &generic_body,
+    };
+    assert!(!server_ack_matches(&mut host.dialog, &generic_ack));
+    assert_eq!(
+        host.dialog.pending_tag(),
+        Some(ffxi_event::PendingTag::SubMapNum)
+    );
+    let request = super::super::codec::build_subpacket_reqsubmapnum(0);
+    let request = framing::walk_sub_packets(&request).next().unwrap().unwrap();
+    assert_eq!(request.opcode, map::c2s::REQSUBMAPNUM);
+    let body = MAP_NUMBER.to_le_bytes();
+    let packet = framing::SubPacket {
+        opcode: map::s2c::REQSUBMAPNUM,
+        sequence: 0,
+        data: &body,
+    };
+    assert!(server_ack_matches(&mut host.dialog, &packet));
+    let step = host.step(Drive::ServerAck);
+    let Advance::Frame(frame) = step.advance else {
+        panic!("submap reply did not resume")
+    };
+    assert_eq!(frame.nums[0], MAP_NUMBER as i32);
+    assert!(!server_ack_matches(&mut host.dialog, &packet));
+}
+
+async fn submap_reply_cancellation_diagnostic_contract() {
+    const OP_SUBMAP: u8 = 0xA6;
+    const OP_UNSUPPORTED_FRIENDPASS: u8 = 0x87;
+    let mut host = Host::new(
+        EventDat {
+            blocks: vec![block(
+                vec![OP_SUBMAP, 0, OP_UNSUPPORTED_FRIENDPASS, 0, OP_END],
+                vec![],
+            )],
+        },
+        FARE,
+    )
+    .await;
+    let body = 0u32.to_le_bytes();
+    let packet = framing::SubPacket {
+        opcode: map::s2c::REQSUBMAPNUM,
+        sequence: 0,
+        data: &body,
+    };
+    assert!(server_ack_matches(&mut host.dialog, &packet));
+    let step = host.step(Drive::ServerAck);
+    let Advance::Ended { error, .. } = step.advance else {
+        panic!("unsupported reply continuation did not cancel")
+    };
+    assert!(error.is_some());
+    let (events, mut receiver) = broadcast::channel(16);
+    let mut scope = crate::event_dialog::CutsceneScope::default();
+    super::finish_server_ack(error, &mut scope, &events);
+    assert!(matches!(receiver.try_recv(), Ok(AgentEvent::Error { .. })));
+    assert!(matches!(receiver.try_recv(), Ok(AgentEvent::EventEnded)));
+}
+
+async fn registration_reply_contract() {
+    const OP_REGISTRATION: u8 = 0xA7;
+    const OP_TAG: u8 = 0x43;
+    const RESULT: u16 = 4;
+    for result_first in [true, false] {
+        let mut program = vec![OP_REGISTRATION, 0, OP_REGISTRATION, 1];
+        operand(&mut program, WORK_GIL);
+        program.extend([OP_TAG, 0, OP_TAG, 1]);
+        message(&mut program, 0);
+        program.push(OP_END);
+        let mut host = Host::new(
+            EventDat {
+                blocks: vec![block(program, vec![0])],
+            },
+            FARE,
+        )
+        .await;
+        let generic = map::event_position_wire::EVENT_RECV_PENDING.to_le_bytes();
+        let generic_packet = framing::SubPacket {
+            opcode: map::s2c::EVENTUCOFF,
+            sequence: 0,
+            data: &generic,
+        };
+        // vendor/server/src/map/packets/s2c/0x0bf_registration.h GP_SERV_COMMAND_REGISTRATION::PacketData.
+        let mut body = [0; 24];
+        body[2..4].copy_from_slice(&RESULT.to_le_bytes());
+        body[8..12].copy_from_slice(&(u32::from(INDEX) + 1).to_le_bytes());
+        assert!(!server_ack_matches(
+            &mut host.dialog,
+            &framing::SubPacket {
+                opcode: map::s2c::REGISTRATION,
+                sequence: 0,
+                data: &body,
+            }
+        ));
+        body[8..12].copy_from_slice(&u32::from(INDEX).to_le_bytes());
+        let result_packet = framing::SubPacket {
+            opcode: map::s2c::REGISTRATION,
+            sequence: 0,
+            data: &body,
+        };
+        let packets = if result_first {
+            [&result_packet, &generic_packet]
+        } else {
+            [&generic_packet, &result_packet]
+        };
+        assert!(!server_ack_matches(&mut host.dialog, packets[0]));
+        assert!(server_ack_matches(&mut host.dialog, packets[1]));
+        let step = host.step(Drive::ServerAck);
+        assert!(matches!(
+            step.advance,
+            Advance::AwaitServerAck(ffxi_event::PendingTag::SendTag { .. })
+        ));
+        assert!(!server_ack_matches(&mut host.dialog, &result_packet));
+        assert!(server_ack_matches(&mut host.dialog, &generic_packet));
+        let step = host.step(Drive::ServerAck);
+        let Advance::Frame(frame) = step.advance else {
+            panic!("second request did not resume")
+        };
+        assert_eq!(frame.nums[0], i32::from(RESULT));
+    }
+}
+
+async fn progressing_child_wait_does_not_timeout_contract() {
+    const OP_WAIT: u8 = 0x1C;
+    const WAIT_FRAMES: u32 = 1200;
+    let mut child = block(vec![OP_WAIT, 0, 0x80, OP_END], vec![WAIT_FRAMES]);
+    child.actor = ZONE_PLAYER_ACTOR;
+    let mut host = Host::new(
+        EventDat {
+            blocks: vec![block(vec![OP_END], vec![]), child],
+        },
+        FARE,
+    )
+    .await;
+    host.waiting();
+    host.dialog
+        .age_liveness_for_test(std::time::Duration::from_secs(10));
+    host.waiting();
+}
+
 async fn abort_contract() {
     let mut replaced = Host::new(position_dat(false), FARE).await;
     replaced.begin(FARE).await;
@@ -584,6 +815,66 @@ fn pos_finite_contract() {
     }
 }
 
+/// A stalled event cancels itself in the tick that detects the stall: the
+/// 0x05B carries the cancel EndPara and the cutscene scope closes as a cancel
+/// in the same tick.
+/// vendor/server/src/map/packets/c2s/0x05b_eventend.cpp
+async fn stall_contract() {
+    let mut host = Host::new(stall_dat(), FARE).await;
+    host.waiting();
+    host.dialog
+        .age_liveness_for_test(std::time::Duration::from_secs(3));
+    let step = host.step(Drive::Tick(TICK));
+    let Advance::Ended {
+        end_para, error, ..
+    } = &step.advance
+    else {
+        panic!("the stalled event must end");
+    };
+    assert_eq!(*end_para, ffxi_event::EVENT_CANCELLED_END_PARA);
+    let Some(line) = error else {
+        panic!("the stall must carry the cancel line");
+    };
+    assert!(
+        line.starts_with("Cutscene error: event 221 in zone 248 stalled at 0x26"),
+        "{line}"
+    );
+    assert!(line.contains("no opcode can advance"), "{line}");
+    assert!(line.ends_with("; cancelled."), "{line}");
+
+    // The 0x05B that ends the event server-side rides the same tick, with the
+    // cancel EndPara in its choice word.
+    let end = packets(&step)
+        .into_iter()
+        .find(|p| p.opcode == map::c2s::EVENT_END)
+        .expect("the stall ends the event server-side");
+    assert_eq!(
+        u32::from_le_bytes(end.data[4..8].try_into().unwrap()),
+        ffxi_event::EVENT_CANCELLED_END_PARA,
+        "the 0x05B carries the cancel EndPara"
+    );
+    assert!(host.pending.is_empty());
+    assert!(host.dialog.active_end().is_none());
+
+    // The keepalive closes the scope as a cancel in the same tick.
+    let mut scope = crate::event_dialog::CutsceneScope::default();
+    scope.start(
+        crate::event_dialog::agent_event_id(NPC, EVENT),
+        &host.events,
+    );
+    scope.end(
+        crate::event_dialog::EventSessionExit::Cancelled,
+        &host.events,
+    );
+    let drained = std::iter::from_fn(|| host.receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        drained
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CutsceneEnded)),
+        "CutsceneEnded follows the cancel: {drained:?}"
+    );
+}
+
 /// bootstrap_acceptance_contract blocks on its own current-thread runtime,
 /// so it must run outside an active tokio context.
 #[test]
@@ -597,8 +888,14 @@ fn ferry_and_bootstrap_contracts_hold() {
 async fn event_state_contract() {
     numeric_contract().await;
     acknowledgement_contract().await;
+    server_reply_contract().await;
+    submap_reply_contract().await;
+    submap_reply_cancellation_diagnostic_contract().await;
+    registration_reply_contract().await;
+    progressing_child_wait_does_not_timeout_contract().await;
     abort_contract().await;
     action_event_gate_contract().await;
     item_stack_gate_contract().await;
     pos_finite_contract();
+    stall_contract().await;
 }

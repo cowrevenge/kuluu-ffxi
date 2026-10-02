@@ -32,4 +32,6 @@ pub use cue::{
     STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT, TPC_PACKAGE_OUT_OF_RANGE,
 };
 pub use runner::{clean_display, DialogFrame, DialogRunner, DialogStep, EVENT_CANCELLED_END_PARA};
-pub use vm::{EventChoice, EventMessage, EventVm, PendingTag, StepResult, OPCODE_BUDGET_PER_STEP};
+pub use vm::{
+    EventChoice, EventMessage, EventVm, Park, PendingTag, StepResult, OPCODE_BUDGET_PER_STEP,
+};

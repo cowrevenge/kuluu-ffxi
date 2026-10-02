@@ -10,6 +10,7 @@ pub(crate) enum Drive {
     Cancel,
     Choice(u32),
     Tick(f32),
+    ServerAck,
 }
 
 pub(crate) struct DrivePermit(());
@@ -34,6 +35,65 @@ impl PreparedStep {
         }
         Ok((self.advance, self.cues))
     }
+}
+
+pub(super) fn server_ack_matches(
+    dialog: &mut DialogSession,
+    sub: &ffxi_proto::framing::SubPacket<'_>,
+) -> bool {
+    use ffxi_event::PendingTag;
+    use ffxi_proto::{decode, map};
+    match sub.opcode {
+        map::s2c::PBX_RESULT => decode::PbxResult::decode(sub.data).is_ok_and(|result| {
+            matches!(
+                result.command,
+                map::pbx::command::DELI_OPEN | map::pbx::command::POST_OPEN
+            ) && result.result == map::pbx::result::OK
+                && dialog.pending_tag() == Some(PendingTag::DeliveryOpen)
+        }),
+        map::s2c::REGISTRATION => decode::Registration::decode(sub.data).is_ok_and(|result| {
+            if !matches!(dialog.pending_tag(), Some(PendingTag::Registration { .. }))
+                || !dialog
+                    .active_end()
+                    .is_some_and(|(_, index, _)| u32::from(index) == result.act_index)
+            {
+                return false;
+            }
+            dialog.set_registration_result(result.result)
+        }),
+        map::s2c::REQSUBMAPNUM => decode::ReqSubMapNum::decode(sub.data).is_ok_and(|result| {
+            dialog.set_submap_num(result.map_num);
+            dialog.pending_tag() == Some(PendingTag::SubMapNum)
+        }),
+        map::s2c::EVENTUCOFF => {
+            if super::eventucoff_mode_of(sub.data)
+                != Some(map::event_position_wire::EVENT_RECV_PENDING)
+            {
+                return false;
+            }
+            match dialog.pending_tag() {
+                Some(PendingTag::Registration { .. }) => dialog.ack_registration_update(),
+                Some(PendingTag::SendTag { .. } | PendingTag::SendXzy { .. }) => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn finish_server_ack(
+    error: Option<String>,
+    scope: &mut crate::event_dialog::CutsceneScope,
+    events: &broadcast::Sender<AgentEvent>,
+) {
+    let exit = if let Some(message) = error {
+        let _ = events.send(AgentEvent::Error { message });
+        crate::event_dialog::EventSessionExit::Cancelled
+    } else {
+        crate::event_dialog::EventSessionExit::ScriptEnded
+    };
+    scope.end(exit, events);
+    let _ = events.send(AgentEvent::EventEnded);
 }
 
 pub(super) fn prepare(

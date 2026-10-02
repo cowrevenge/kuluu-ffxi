@@ -123,6 +123,34 @@ pub(super) struct Scene {
 }
 
 impl EventVm {
+    pub fn progress_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        self.exec_pointer.hash(&mut state);
+        self.work_local.hash(&mut state);
+        self.work_zone.lock().unwrap().hash(&mut state);
+        self.wait
+            .as_ref()
+            .map(|w| w.remaining_units.to_bits())
+            .hash(&mut state);
+        for hold in &self.move_holds {
+            hold.remaining_units.to_bits().hash(&mut state);
+        }
+        for hold in &self.action_holds {
+            hold.remaining_units.to_bits().hash(&mut state);
+        }
+        if let Some(scene) = &self.scene {
+            (scene.player.x, scene.player.y, scene.player.z).hash(&mut state);
+            for stack in &scene.stacks {
+                stack.actor.hash(&mut state);
+                for request in &stack.requests {
+                    request.vm.progress_stamp().hash(&mut state);
+                }
+            }
+        }
+        state.finish()
+    }
+
     pub fn attach_scene(&mut self, dat: Arc<EventDat>, actor: u32, player: EventPosition) {
         self.scene = Some(Scene {
             dat,
@@ -148,6 +176,21 @@ impl EventVm {
             .as_ref()
             .filter(|_| self.controls_player_position())
             .map(|scene| scene.player)
+    }
+
+    // research/XiEvents/OpCodes/0x0082.md reads the event actor in native RID coordinates.
+    pub(super) fn event_entity_rid_position(&self) -> Option<[f32; 3]> {
+        let scene = self.scene.as_ref()?;
+        let p = if scene.actor == ZONE_PLAYER_ACTOR {
+            scene.player
+        } else {
+            *self.entity_positions.get(&scene.actor)?
+        };
+        Some([
+            p.x as f32 / EVENT_COORD_UNITS,
+            p.y as f32 / EVENT_COORD_UNITS,
+            p.z as f32 / EVENT_COORD_UNITS,
+        ])
     }
 
     pub fn take_scene_actions(&mut self) -> Vec<SceneAction> {
@@ -509,6 +552,10 @@ impl EventVm {
             Arc::clone(&self.work_zone),
         );
         child.actor_types = self.actor_types.clone();
+        child.entity_positions = self.entity_positions.clone();
+        child.weather_forecast = self.weather_forecast.clone();
+        child.zone_rects = self.zone_rects.clone();
+        child.current_zone = self.current_zone;
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -565,6 +612,10 @@ impl EventVm {
             Arc::clone(&self.work_zone),
         );
         child.actor_types = self.actor_types.clone();
+        child.entity_positions = self.entity_positions.clone();
+        child.weather_forecast = self.weather_forecast.clone();
+        child.zone_rects = self.zone_rects.clone();
+        child.current_zone = self.current_zone;
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {

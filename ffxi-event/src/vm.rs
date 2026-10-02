@@ -55,7 +55,9 @@ pub struct EventChoice {
 pub enum PendingTag {
     /// `FUNC_SendPendingTag`: the client returns `Work_Zone[1]` as the 0x05B
     /// `EndPara` (research/XiPackets/world/client/0x005B).
-    SendTag { end_para: u32 },
+    SendTag {
+        end_para: u32,
+    },
     /// `FUNC_SendPendingXzyTag`: the opcode-scaled position values and the
     /// heading already on the wire's 0..=255 scale. The opcode scales its
     /// work-slot raw values to radians (research/XiEvents/OpCodes/0x0047.md);
@@ -73,6 +75,22 @@ pub enum PendingTag {
         dir: u8,
         end_para: u32,
     },
+    /// `CTkDelivery_RequestEnterDeliveryMode`: the 0x04D PBX open request the
+    /// 0xB2 case 1 sends, acked by the 0x04B DELI_OPEN/POST_OPEN result
+    /// (research/XiEvents/OpCodes/0x00B2.md;
+    /// vendor/server/src/map/packets/c2s/0x04d_pbx.cpp).
+    DeliveryOpen,
+    // vendor/server/src/map/packets/s2c/0x0bf_registration.h GP_SERV_COMMAND_REGISTRATION.
+    Registration {
+        end_para: u32,
+    },
+    /// `FUNC_gcZoneSendQueSearch(0xEB)`: the header-only 0x0EB REQSUBMAPNUM
+    /// request the 0xA6 case 0 sends; the 0x10E s2c's MapNum is its answer,
+    /// and the server answers nothing when the char is not npc-locked, so the
+    /// session cancels an unanswered request after its deadline
+    /// (research/XiEvents/OpCodes/0x00A6.md;
+    /// vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.cpp).
+    SubMapNum,
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -114,6 +132,23 @@ pub enum StepResult {
     /// opcode) and execution is held on its case-1 poll until the s2c ack
     /// arrives; the host calls [`EventVm::ack_server`] when it does.
     AwaitServerAck(PendingTag),
+}
+
+/// Why the VM is not advancing right now, for the host's liveness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Park {
+    /// Running, or ended.
+    None,
+    /// A frame is displayed and waits on the player; never stale.
+    Frame,
+    /// A timed wait with units left; stale only if the host stops ticking it.
+    TimedWait,
+    /// A scheduler/move hold the host must release when the action finishes.
+    Hold,
+    /// A pending tag awaiting the s2c ack.
+    ServerAck,
+    /// Parked with nothing that can move it (a yield-forever, an unmodelled poll).
+    Dead,
 }
 
 pub(crate) const OP_END: u8 = 0x00;
@@ -178,12 +213,57 @@ const OP_SCHED_TWIN_D5: u8 = 0xD5;
 // The 0x73 twin: the spell cast with a case byte, wider than 0x73 by that
 // byte (research/XiEvents/OpCodes/0x00C4.md).
 const OP_MAGIC_TWIN: u8 = 0xC4;
+// The end-scheduler family: kill the tag-named action on actor1, actor2
+// riding along (research/XiEvents/OpCodes/0x0050.md, 0x0051.md, 0x0052.md).
+// 0x50/0x51 are 13 bytes; 0x52 and its seven twins are 15.
+const OP_ENDSCHEDULOR: u8 = 0x50;
+const OP_ENDMAPSCHEDULOR: u8 = 0x51;
+const OP_ENDLOADSCHEDULER_MAIN: u8 = 0x52;
+const OP_ENDLOADSCHED_TWIN_A1: u8 = 0xA1;
+const OP_ENDLOADSCHED_TWIN_A3: u8 = 0xA3;
+const OP_ENDLOADSCHED_TWIN_BD: u8 = 0xBD;
+const OP_ENDLOADSCHED_TWIN_C7: u8 = 0xC7;
+const OP_ENDLOADSCHED_TWIN_CF: u8 = 0xCF;
+const OP_ENDLOADSCHED_TWIN_D2: u8 = 0xD2;
+const OP_ENDLOADSCHED_TWIN_D7: u8 = 0xD7;
 // The local-player scheduler (rank-up animations): work at +1, both actors the
 // player, the `main` routine (research/XiEvents/OpCodes/0x007D.md).
 const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
 // Non-scene NPC choreography: the same cues the scene path (vm/scene.rs) emits
 // when the event carries scene data. 0x1F itself is the sub-byte `OP_MOVE`.
 const OP_MAIN_SPEED: u8 = 0x32;
+// research/XiEvents/OpCodes/0x0031.md CodeSMOVE requires player movement and MoveTime support.
+const OP_SMOVE: u8 = 0x31;
+// 0x72 GETWEATHER: read the global forecast table into Work_Zone[2..5).
+// Sub-byte: mode 0 is 4 bytes, mode 1 is 6 (research/XiEvents/OpCodes/0x0072.md).
+const OP_GETWEATHER: u8 = 0x72;
+// 0x82 RANGE_RECT: hit-test the event entity against the zone range rect named
+// by the u32 at +1; a hit advances 7, a miss jumps to the u16 at +5
+// (research/XiEvents/OpCodes/0x0082.md).
+const OP_RANGE_RECT: u8 = 0x82;
+const OP_FRIENDPASS_87: u8 = 0x87;
+const OP_FRIENDPASS_88: u8 = 0x88;
+const OP_RECIPE: u8 = 0x8C;
+// 0xD4 MAP_QUERY: case 0 runs the 0x24 query helper and opens the current
+// zone's map (type 6), parking on the answer; case 2 runs the helper without
+// the map; cases 1/3/4/5 copy into the client's query window, which has no
+// kuluu counterpart, so they advance by their width
+// (research/XiEvents/OpCodes/0x00D4.md).
+const OP_MAP_QUERY: u8 = 0xD4;
+// 0xA7 waits on the server's response to the client's request: case 0 sends
+// the pending tag (EndPara = Work_Zone[1]) and case 1 writes the result the
+// ack carried into its work slot (research/XiEvents/OpCodes/0x00A7.md).
+const OP_A7_WAIT: u8 = 0xA7;
+// 0xA6 requests the event's sub-map number: case 0 sends the header-only
+// 0x0EB REQSUBMAPNUM and holds on the 0x10E answer, case 1 yields until it
+// lands, and case 2 writes the answered MapNum into its work slot
+// (research/XiEvents/OpCodes/0x00A6.md).
+const OP_A6_SUBMAP: u8 = 0xA6;
+// 0xB2: mode 0 is a timed wait (WaitTime from work slot 1, +4 on expiry);
+// mode 1 requests delivery mode (the 0x04D PBX open, +2 on the 0x04B ack)
+// (research/XiEvents/OpCodes/0x00B2.md).
+const OP_B2_DELIVERY: u8 = 0xB2;
+const OP_RANKING: u8 = 0xB3;
 const OP_SET_FACING: u8 = 0x39;
 const OP_YAW: u8 = 0x4B;
 const OP_SET_EVENT_POS: u8 = 0x36;
@@ -211,6 +291,21 @@ const OP_ENABLE_TIMER: u8 = 0xC9;
 const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
+// 0x55's WAITLOADSCHEDULER twins: the same hold, each on its own scheduler
+// DAT base (research/XiEvents/OpCodes/0x00A0.md, 0x00BC.md, 0x00C6.md,
+// 0x00CE.md, 0x00D1.md, 0x00D6.md).
+const OP_WAITLOADSCHED_TWIN_A0: u8 = 0xA0;
+const OP_WAITLOADSCHED_TWIN_BC: u8 = 0xBC;
+const OP_WAITLOADSCHED_TWIN_C6: u8 = 0xC6;
+const OP_WAITLOADSCHED_TWIN_CE: u8 = 0xCE;
+const OP_WAITLOADSCHED_TWIN_D1: u8 = 0xD1;
+const OP_WAITLOADSCHED_TWIN_D6: u8 = 0xD6;
+const OP_ACTOR_NOP: u8 = 0x56;
+const OP_ZONE_READ_YIELD: u8 = 0x98;
+const OP_ANIM_YIELD: u8 = 0x9B;
+const OP_YIELD_FOREVER: u8 = 0x26;
+const OP_ENTITY_VALID: u8 = 0x44;
+const OP_KILL_LAST_ACTION: u8 = 0xC1;
 const OP_CHOCOBO: u8 = 0x7E;
 // The door status writes: the event entity's StatusEvent, gated on a
 // Render.Flags0 bit no tier names (research/XiEvents/OpCodes/0x004C.md,
@@ -264,6 +359,9 @@ const MAPLOAD_SIZE: usize = 3;
 /// 0x0058.md is `ExecPointer++; RetFlag = 1`; 0x009A.md yields only while the
 /// music server is mid-read, which nothing here triggers.
 const YIELD_SIZE: usize = 1;
+/// 0x0025.md / 0x007F.md: one byte, `ExecPointer += 1` on every exit that
+/// advances (selection taken, or no talk window open).
+const QUERYWAIT_SIZE: usize = 1;
 
 // 0x003E BITTEST operand layout (research/XiEvents/OpCodes/0x003E.md): the bit
 // index at +3 selects a work slot `bit >> 5` past the one named at +1, and the
@@ -308,9 +406,29 @@ const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
 const MAGICSCHEDULOR_KEY_OFS: usize = 1;
 const MAGICSCHEDULOR_ACTOR1_OFS: usize = 3;
 const MAGICSCHEDULOR_ACTOR2_OFS: usize = 7;
+// 0x0050/0x0051: actor1 at +1, the tag at +9 (research/XiEvents/OpCodes/
+// 0x0050.md, 0x0051.md).
+const ENDSCHEDULOR_ACTOR1_OFS: usize = 1;
+const ENDSCHEDULOR_TAG_OFS: usize = 9;
+// 0x0052 and its twins: actor1 at +3, the tag at +11; the work operand at +1
+// selects the DAT, which the stop cue does not carry
+// (research/XiEvents/OpCodes/0x0052.md).
+const ENDLOADSCHED_ACTOR1_OFS: usize = 3;
+const ENDLOADSCHED_TAG_OFS: usize = 11;
+/// The stop family's tag operand values that name no routine slot: zero, and
+/// the four spaces retail writes over a cleared tag
+/// (research/XiEvents/OpCodes/0x005E.md `Unknown0001 = 0x20202020`).
+const STOP_TAG_ZERO: FourCc = [0, 0, 0, 0];
+const STOP_TAG_SPACES: FourCc = *b"    ";
+
+/// The stop family's tag operand as the cue's `key`.
+fn stop_action_key(tag: FourCc) -> Option<FourCc> {
+    (tag != STOP_TAG_ZERO && tag != STOP_TAG_SPACES).then_some(tag)
+}
 // FFXiMain.dll retail-2026-09 RVA 0xB4550 passes shift 1 to RVA 0xB4590;
 // actor lookups are shift+3 and shift+7, work is shift+1, width is shift+11.
 // .agents/skills/retail-observe/references/2026-10-01-c4-spell-operands.md
+
 const MAGIC_TWIN_CASE_OFS: usize = 1;
 const MAGIC_TWIN_KEY_OFS: usize = 2;
 const MAGIC_TWIN_ACTOR1_OFS: usize = 4;
@@ -344,9 +462,18 @@ const WAITSCHEDULOR_ACTOR1_OFS: usize = 1;
 const WAITSCHEDULOR_KEY_OFS: usize = 9;
 const WAITLOADSCHEDULER_ACTOR1_OFS: usize = 3;
 const WAITLOADSCHEDULER_KEY_OFS: usize = 11;
+// 0x0044: the work operand at +1 names the entity to test, the else-target
+// at +3 (research/XiEvents/OpCodes/0x0044.md).
+const ENTITY_VALID_ID_OFS: usize = 1;
+const ENTITY_VALID_TARGET_OFS: usize = 3;
+// 0x0056: the actor at +1, read and discarded (research/XiEvents/OpCodes/0x0056.md).
+const ACTOR_NOP_ACTOR_OFS: usize = 1;
+// 0x00C1: the actor at +1 (research/XiEvents/OpCodes/0x00C1.md).
+const KILL_LAST_ACTION_ACTOR_OFS: usize = 1;
 const MAPSCHEDULOR_KEY_OFS: usize = 9; // 0x002D, same layout as the WAIT family
 const MAPSCHEDULOR_ACTOR2_OFS: usize = 5; // 0x002D partner slot of that layout
                                           // 0x0020: the flag byte at +1 (research/XiEvents/OpCodes/0x0020.md).
+
 const PLAYER_CONTROL_FLAG_OFS: usize = 1;
 
 const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
@@ -366,7 +493,7 @@ const STOP_CLOCK_NO_HOUR: i32 = 255;
 /// (research/XiEvents/OpCodes/0x00A9.md).
 const SET_CLOCK_DATE_DAY_OFS: usize = 1;
 /// 0xA9's authored minute and hour (the local time is zeroed before the day
-/// jump, so the clock lands at 00:30).
+/// jump, so the clock lands at 00:30; research/XiEvents/OpCodes/0x00A9.md).
 const SET_CLOCK_DATE_MINUTE: u8 = 30;
 const SET_CLOCK_DATE_HOUR: u32 = 0;
 const MAP_OPEN_ID_OFS: usize = 1; // 0x00C8
@@ -468,6 +595,14 @@ pub struct EventVm {
     /// [`Self::take_cues`].
     cues: Vec<EventCue>,
     finished: bool,
+    /// Set by the last [`step`](Self::step): whether it yielded
+    /// [`StepResult::Waiting`] with none of the state [`Self::park`] names,
+    /// the Park::Dead half of the host's liveness check.
+    last_waiting: bool,
+    /// The host force-cancelled the event (the liveness stall): the next
+    /// [`step`](Self::step) reports [`StepResult::Cancelled`] whatever the VM
+    /// was parked on.
+    force_cancelled: bool,
     /// Diagnostics: execution ran off the end of the bytecode without an
     /// END/EXECEND opcode. Retail treats this the same as END (the missing-
     /// byte read yields 0 == OP_END), so it only signals a decode or
@@ -485,6 +620,12 @@ pub struct EventVm {
     /// position-tag counterpart), held until [`Self::ack_server`]. While set,
     /// execution stays parked on the sending opcode's case-1 poll.
     pending_ack: Option<PendingTag>,
+    // research/XiPackets/world/server/0x00BF Result.
+    a7_result: u32,
+    /// 0xA6's response result: the MapNum the 0x10E s2c carried, which case 2
+    /// writes into its work slot
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    a6_submap_num: u32,
     /// The request this VM queued via REQEW and is still tracking, as (actor,
     /// tag): retail keeps that wait in `ReqStack[RunPos].ReqFlag` across ticks
     /// (research/XiEvents/Event VM Structures.md ReqFlag;
@@ -508,6 +649,7 @@ pub struct EventVm {
     /// readers apply before loading. An absent entry is Type 0 — retail's
     /// value when the entity has no back-ptr.
     actor_types: std::collections::HashMap<u32, u8>,
+    entity_positions: std::collections::HashMap<u32, scene::EventPosition>,
     /// Actions this VM's own `OP_LOADEVENTSCHEDULER2`/`OP_LOADEXTSCHEDULER`
     /// opcodes started within the current step, before the host has drained the
     /// cues and armed their holds. They bridge a loader to its WAIT* when both
@@ -526,6 +668,22 @@ pub struct EventVm {
     parked_on_action_hold: bool,
     /// The same for a non-player MOVE case 1 parked on its move hold.
     parked_on_move_hold: bool,
+    /// The global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md). The host loads it once from the
+    /// forecast DATs and shares one copy across every VM it drives; `None` in a
+    /// host that never injects it, where 0x72 advances without writing.
+    weather_forecast: Option<Arc<ffxi_dat::weather::WeatherForecast>>,
+    /// The zone's range rects 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md): every RID chunk of the event
+    /// zone's resource DAT (ffxi-dat zone_interaction). The host loads it once
+    /// per zone and shares one copy across every VM; empty when the host has no
+    /// install, where 0x82 misses and jumps.
+    zone_rects: Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    /// The zone number 0xD4 case 0 opens the map on: retail's
+    /// `pGlobalNowZone->ZoneNo`, injected by the host via
+    /// [`Self::set_current_zone`] before driving
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    current_zone: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -692,18 +850,26 @@ impl EventVm {
             cancel_armed: true,
             cues: Vec::new(),
             finished: false,
+            last_waiting: false,
+            force_cancelled: false,
             ran_past_end: false,
             wait: None,
             pending_ack: None,
+            a7_result: 0,
+            a6_submap_num: 0,
             req_wait: None,
             action_holds: Vec::new(),
             move_holds: Vec::new(),
             move_speed: 0,
             actor_types: std::collections::HashMap::new(),
+            entity_positions: std::collections::HashMap::new(),
             pending_action_starts: Vec::new(),
             pending_action_holds: Vec::new(),
             parked_on_action_hold: false,
             parked_on_move_hold: false,
+            weather_forecast: None,
+            zone_rects: Arc::new(Vec::new()),
+            current_zone: 0,
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -735,6 +901,13 @@ impl EventVm {
         self.pending_message = None;
     }
 
+    /// A message frame the host has not dismissed yet: retail's
+    /// `PTR_TalkWinFlag` for the message half of the talk window. The menu
+    /// half is `pending_choice`, checked by the QUERYWAIT arms themselves.
+    fn message_frame_open(&self) -> bool {
+        self.pending_message.is_some() || self.message_open == MESSAGE_OPEN_AWAITING
+    }
+
     /// Mark the open message invalid so the next MESWAIT force-cancels the
     /// event (research/XiEvents/OpCodes/0x0023.md) — the Esc-on-message path.
     pub fn cancel_message(&mut self) {
@@ -763,6 +936,66 @@ impl EventVm {
 
     pub fn exec_pointer(&self) -> usize {
         self.exec_pointer
+    }
+
+    /// The opcode byte the VM is parked on, for the host's stall diagnostics;
+    /// 0 when the pointer ran past the end of the bytecode.
+    pub fn current_opcode(&self) -> u8 {
+        self.event_data.get(self.exec_pointer).copied().unwrap_or(0)
+    }
+
+    /// The timed wait's remaining units (1/60 s, the [`Self::tick`] clock),
+    /// 0 when no wait is held: the host's liveness check watches it move.
+    pub fn wait_units_remaining(&self) -> f32 {
+        self.wait.as_ref().map_or(0.0, |w| w.remaining_units)
+    }
+
+    /// Why the VM is not advancing right now, for the host's liveness check:
+    /// a frame and a moving timed wait are never stale, a hold and a pending
+    /// tag are stale when their release does not arrive, and a yield with
+    /// nothing armed behind it is stale immediately.
+    pub fn park(&self) -> Park {
+        if self.force_cancelled {
+            return Park::None;
+        }
+        if self.frame_displayed() {
+            return Park::Frame;
+        }
+        if self.wait.is_some() {
+            return Park::TimedWait;
+        }
+        if self.parked_on_action_hold || self.parked_on_move_hold || self.scene_waiting() {
+            return Park::Hold;
+        }
+        if self.pending_tag().is_some() {
+            return Park::ServerAck;
+        }
+        if self.last_waiting {
+            return Park::Dead;
+        }
+        Park::None
+    }
+
+    /// End the event from the host side (the liveness stall): the next
+    /// [`step`](Self::step) reports [`StepResult::Cancelled`] whatever the VM
+    /// was parked on, and the pending tag, holds and children are dropped
+    /// with it (research/XiPackets/world/client/0x005B).
+    pub fn force_cancel(&mut self) {
+        self.force_cancelled = true;
+        self.finished = true;
+        self.pending_ack = None;
+        self.wait = None;
+        self.action_holds.clear();
+        self.move_holds.clear();
+        self.pending_action_holds.clear();
+        self.parked_on_action_hold = false;
+        self.parked_on_move_hold = false;
+        self.pending_message = None;
+        self.pending_choice = None;
+        self.selection_made = false;
+        self.message_open = MESSAGE_OPEN_NONE;
+        let mut cancel = |child: &mut EventVm| child.force_cancel();
+        self.for_each_child_vm(&mut cancel);
     }
 
     /// Drain the [`EventCue`]s the staging opcodes emitted, in execution order.
@@ -855,6 +1088,81 @@ impl EventVm {
     /// update lands before the next step.
     pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
         self.actor_types = types.clone();
+        let mut update = |child: &mut EventVm| child.set_actor_types(types);
+        self.for_each_child_vm(&mut update);
+    }
+
+    pub fn set_entity_positions(
+        &mut self,
+        positions: &std::collections::HashMap<u32, scene::EventPosition>,
+    ) {
+        self.entity_positions.clone_from(positions);
+        let mut update = |child: &mut EventVm| child.set_entity_positions(positions);
+        self.for_each_child_vm(&mut update);
+    }
+
+    /// Install the global weather forecast table 0x72 GETWEATHER reads
+    /// (research/XiEvents/OpCodes/0x0072.md). The host loads it once from the
+    /// install's forecast DATs and shares the same `Arc` across every VM, so the
+    /// table is read, not copied, per event. No-op on a second install.
+    pub fn set_weather_forecast(
+        &mut self,
+        forecast: std::sync::Arc<ffxi_dat::weather::WeatherForecast>,
+    ) {
+        self.weather_forecast = Some(forecast.clone());
+        let mut land = |child: &mut EventVm| child.set_weather_forecast(forecast.clone());
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// Install the zone's range rects 0x82 RANGE_RECT hit-tests against
+    /// (research/XiEvents/OpCodes/0x0082.md). The host loads the event zone's
+    /// RID table once and shares the same `Arc` across every VM it drives, so
+    /// the table is read, not copied, per event. An empty install leaves the
+    /// default empty table, where 0x82 always misses.
+    pub fn set_zone_rects(
+        &mut self,
+        rects: std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>,
+    ) {
+        self.zone_rects = rects.clone();
+        let mut land = |child: &mut EventVm| child.set_zone_rects(rects.clone());
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// Install the zone number 0xD4 case 0 opens the map on
+    /// (research/XiEvents/OpCodes/0x00D4.md). The host injects the event zone
+    /// before driving; a host that never does leaves the default 0, where
+    /// case 0 opens the map on zone 0.
+    pub fn set_current_zone(&mut self, zone: i32) {
+        self.current_zone = zone;
+        let mut land = |child: &mut EventVm| child.set_current_zone(zone);
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// 0x82's hit test: whether the event entity's tracked position falls inside
+    /// the zone range rect named by `rect_id`. `false` when no scene tracks a
+    /// position (retail's null-entity early return) or no rect matches
+    /// (research/XiEvents/OpCodes/0x0082.md).
+    fn range_rect_hit(&self, rect_id: u32) -> bool {
+        let Some(pos) = self.event_entity_rid_position() else {
+            return false;
+        };
+        self.zone_rects
+            .iter()
+            .any(|r| r.rect_id() == rect_id && r.contains(pos))
+    }
+
+    /// Arm the 0x24-style choice the 0xD4 cases 0/2 open. The embedded 0x24
+    /// helper is entered one byte past the opcode start, so its message and
+    /// default-cursor selectors sit at +2 and +4 here, not +1 and +3 as on a
+    /// standalone 0x24 (research/XiEvents/OpCodes/0x00D4.md, 0x0024.md).
+    fn arm_map_query_choice(&mut self) {
+        self.pending_choice = Some(EventChoice {
+            message_id: self.getworkofs(2, 0) as u32,
+            speaker_index: self.speaker_index,
+            default_index: self.getworkofs(4, 0) as u32,
+            params: self.params(),
+        });
+        self.selection_made = false;
     }
 
     /// The retail entity Type byte the `OP_LOADEXTSCHEDULER`/
@@ -898,7 +1206,6 @@ impl EventVm {
         });
     }
 
-    /// True while a host-armed move hold for `actor` still has frames left.
     fn move_running(&self, actor: ActorLookup) -> bool {
         let actor = self.resolve_hold_actor(actor);
         self.move_holds
@@ -941,6 +1248,33 @@ impl EventVm {
             }
         }
         actor
+    }
+
+    // research/XiEvents/OpCodes/0x0044.md FUNC_SearchUniqueID.
+    fn entity_in_pool(&self, server_id: u32) -> bool {
+        ActorLookup(server_id).server_id().is_some() && self.actor_types.contains_key(&server_id)
+    }
+
+    /// Whether retail's `GetActorIndex` would succeed for `actor` in this
+    /// model (research/XiEvents/Event VM Functions.md GetActorIndex): the
+    /// reserved selectors the host always stands in for, or a literal server
+    /// id the host has published.
+    fn actor_resolved(&self, actor: ActorLookup) -> bool {
+        actor.is_local_player()
+            || actor == ActorLookup::EVENT_ENTITY
+            || self.entity_in_pool(actor.0)
+    }
+
+    /// True while any host-armed or this-pass started action holds the event
+    /// entity: retail's `AnimationPlay` is a per-entity "any animation" flag
+    /// (research/XiEvents/OpCodes/0x009B.md), not a routine slot.
+    fn entity_animation_running(&self) -> bool {
+        let actor = self.resolve_hold_actor(ActorLookup::EVENT_ENTITY);
+        self.action_holds
+            .iter()
+            .any(|h| h.actor == actor && h.remaining_units > 0.0)
+            || self.pending_action_holds.iter().any(|(a, _)| *a == actor)
+            || self.pending_action_starts.iter().any(|(a, _)| *a == actor)
     }
 
     fn arm_wait(&mut self, units: f32, advance: usize) -> StepResult {
@@ -1002,15 +1336,7 @@ impl EventVm {
             || self.pending_choice.is_some()
     }
 
-    /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
-    /// clear it and step past the case-1 poll opcode execution is parked on.
-    /// Retail's next tick sees `RecPendingFlag` cleared, advances +2, and
-    /// yields; doing that advance here instead of re-running the poll is
-    /// behaviorally identical one frame earlier (research/XiEvents/OpCodes/
-    /// 0x0043.md, 0x0047.md). No-op if nothing is pending. Retail's
-    /// `RecPendingFlag`/`RecPendingXZYFlag` are single globals shared by every
-    /// entity VM in the event, so the release reaches every parked VM, not
-    /// just the one that sent the tag.
+    // research/XiEvents/OpCodes/0x0043.md, 0x0047.md: release the shared pending flag.
     pub fn ack_server(&mut self) {
         if self.pending_ack.take().is_some() {
             self.exec_pointer += 2;
@@ -1051,6 +1377,23 @@ impl EventVm {
         self.for_each_child_vm(&mut land);
     }
 
+    pub fn set_registration_result(&mut self, result: u16) {
+        self.a7_result = u32::from(result);
+        let mut land = |child: &mut EventVm| child.set_registration_result(result);
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the 0xA6 result slot case 2 reads;
+    /// lands before the next step even while the SubMapNum tag is held, like
+    /// [`Self::apply_pending_num`]. The tag is one global per event, so the
+    /// value lands in every VM's copy at once
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    pub fn set_submap_num(&mut self, num: u32) {
+        self.a6_submap_num = num;
+        let mut land = |child: &mut EventVm| child.set_submap_num(num);
+        self.for_each_child_vm(&mut land);
+    }
+
     /// The tag held on its case-1 poll, if any: this VM's own, else the first
     /// one held by a child (the tag is one global per event in retail, so an
     /// owner child can be the holder the host must gate on).
@@ -1073,6 +1416,16 @@ impl EventVm {
 
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
+        let result = self.step_inner();
+        self.last_waiting = matches!(result, StepResult::Waiting);
+        result
+    }
+
+    /// The yield loop [`step`](Self::step) runs.
+    fn step_inner(&mut self) -> StepResult {
+        if self.force_cancelled {
+            return StepResult::Cancelled;
+        }
         if self.scene_cancelled {
             return StepResult::Cancelled;
         }
@@ -1304,6 +1657,70 @@ impl EventVm {
                     },
                     _ => self.exec_pointer += 2,
                 },
+                // research/XiEvents/OpCodes/0x00A7.md; research/XiPackets/world/server/0x00BF.
+                OP_A7_WAIT => match self.byte_at(1) {
+                    0 => {
+                        if self.pending_ack.is_none() {
+                            self.a7_result = 0;
+                            self.pending_ack = Some(PendingTag::Registration {
+                                end_para: self.work_zone(1) as u32,
+                            });
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    1 => {
+                        self.setworkofs(2, self.a7_result as i32, 0);
+                        self.exec_pointer += 4;
+                    }
+                    _ => self.exec_pointer += 2,
+                },
+                // 0xA6: case 0 sends the header-only 0x0EB REQSUBMAPNUM and
+                // holds on the 0x10E answer; case 1 yields until it lands; case
+                // 2 writes the answered MapNum into the work slot its +2 operand
+                // selects. The server answers 0 when the char is npc-locked and
+                // nothing otherwise; the session cancels an unanswered request
+                // (research/XiEvents/OpCodes/0x00A6.md). Retail spins on any
+                // other case byte, so authored data cannot hold one.
+                OP_A6_SUBMAP => match self.byte_at(1) {
+                    0 => {
+                        if self.pending_ack.is_none() {
+                            self.pending_ack = Some(PendingTag::SubMapNum);
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    1 => {
+                        self.exec_pointer += 2;
+                    }
+                    2 => {
+                        self.setworkofs(2, self.a6_submap_num as i32, 0);
+                        self.exec_pointer += 4;
+                    }
+                    _ => self.exec_pointer += 2,
+                },
+                // 0xB2: mode 0 counts down WaitTime — the u16 at +1, which
+                // spans the mode byte and the first operand byte, so authors
+                // steer it to work_zone[0] with a 0x10 first byte — by frame
+                // delay and steps +4 on expiry. Mode 1 requests delivery mode:
+                // it arms the 0x04D PBX open request and holds until the 0x04B
+                // DELI_OPEN/POST_OPEN ack, then +2. Retail spins on any other
+                // mode byte, so authored data cannot hold one
+                // (research/XiEvents/OpCodes/0x00B2.md).
+                OP_B2_DELIVERY => match self.byte_at(1) {
+                    0 => return self.arm_wait(self.getworkofs(1, 0) as f32, 4),
+                    1 => {
+                        if self.pending_ack.is_none() {
+                            self.pending_ack = Some(PendingTag::DeliveryOpen);
+                        }
+                        let tag = self.pending_ack.clone().expect("armed above");
+                        return StepResult::AwaitServerAck(tag);
+                    }
+                    _ => self.exec_pointer += 2,
+                },
+                OP_FRIENDPASS_87 | OP_FRIENDPASS_88 | OP_RECIPE | OP_RANKING => {
+                    return StepResult::Unimplemented(op);
+                }
                 OP_JUMP => {
                     if self.jump_index == JUMP_STACK_LEN {
                         self.finished = true;
@@ -1390,20 +1807,29 @@ impl EventVm {
                     self.selection_made = false;
                     self.exec_pointer += 7;
                 }
+                // With no menu armed and no message frame open, retail's
+                // `!PTR_TalkWinFlag` path steps past the opcode and yields;
+                // the script runs on with whatever Work_Zone[0] already holds
+                // (research/XiEvents/OpCodes/0x0025.md). A message frame that
+                // is still open keeps the ack yield so the host closes it first.
                 OP_QUERYWAIT => {
                     if !self.selection_made {
-                        return match self.pending_choice.clone() {
-                            Some(choice) => StepResult::AwaitChoice(choice),
-                            None => StepResult::AwaitMessageAck,
-                        };
+                        if let Some(choice) = self.pending_choice.clone() {
+                            return StepResult::AwaitChoice(choice);
+                        }
+                        if self.message_frame_open() {
+                            return StepResult::AwaitMessageAck;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
+                    } else {
+                        self.selection_made = false;
+                        self.pending_choice = None;
+                        if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                            self.finished = true;
+                            return StepResult::Cancelled;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
                     }
-                    self.selection_made = false;
-                    self.pending_choice = None;
-                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
-                        self.finished = true;
-                        return StepResult::Cancelled;
-                    }
-                    self.exec_pointer += 1;
                 }
                 // XiEvent ReqSet/GetReqStatus family (research/XiEvents/OpCodes/
                 // 0x0027.md, 0x0028.md, 0x0029.md, 0x002A.md): actor-choreography
@@ -1480,7 +1906,17 @@ impl EventVm {
                 }
                 // XiEvent WAITLOADSCHEDULER (research/XiEvents/OpCodes/0x0055.md):
                 // same hold, keyed on the actor1/key pair a 0x45 or 0x5B started.
-                OP_WAITLOADSCHEDULER => {
+                // The six twins run the identical hold on their own scheduler
+                // DAT base, which names no file in this model: the loader that
+                // armed the hold already chose the DAT and the routine
+                // (research/XiEvents/OpCodes/0x00A0.md and kin).
+                OP_WAITLOADSCHEDULER
+                | OP_WAITLOADSCHED_TWIN_A0
+                | OP_WAITLOADSCHED_TWIN_BC
+                | OP_WAITLOADSCHED_TWIN_C6
+                | OP_WAITLOADSCHED_TWIN_CE
+                | OP_WAITLOADSCHED_TWIN_D1
+                | OP_WAITLOADSCHED_TWIN_D6 => {
                     let actor = ActorLookup(self.eventgetcode2(WAITLOADSCHEDULER_ACTOR1_OFS));
                     let key = self.fourcc_at(WAITLOADSCHEDULER_KEY_OFS);
                     if self.action_running(actor, key) {
@@ -1490,7 +1926,29 @@ impl EventVm {
                     self.parked_on_action_hold = false;
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
+                // 0x56 reads an actor and does nothing with it: a deprecated
+                // yield (research/XiEvents/OpCodes/0x0056.md). The zero-length
+                // wait spends the frame retail's RetFlag spends.
+                OP_ACTOR_NOP => {
+                    self.eventgetcode2(ACTOR_NOP_ACTOR_OFS);
+                    return self.arm_wait(0.0, OPCODE_META[op as usize].size as usize);
+                }
+                // 0xC1 kills the named entity's last action and returns it to
+                // idle, then yields (research/XiEvents/OpCodes/0x00C1.md): the
+                // stop-all the ActorStopAction cue already carries, on the
+                // resolved actor, no key. An actor retail's GetActorIndex would
+                // drop emits nothing.
+                OP_KILL_LAST_ACTION => {
+                    let actor = ActorLookup(self.eventgetcode2(KILL_LAST_ACTION_ACTOR_OFS));
+                    if self.actor_resolved(actor) {
+                        self.cues
+                            .push(EventCue::ActorStopAction { actor, key: None });
+                    }
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                    return StepResult::Waiting;
+                }
                 OP_EMOT | OP_PLAYANIM | OP_ANIMWAIT => self.advance(op),
+
                 // XiEvent MAPSCHEDULOR (research/XiEvents/OpCodes/0x002D.md): start the
                 // zone-level routine `key`, waited on by 0x54. Kuluu resolves `key` out
                 // of the current zone's own model DAT (ffxi-dat
@@ -1563,6 +2021,35 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // The end-scheduler family: kill the tag-named action on
+                // actor1 (research/XiEvents/OpCodes/0x0050.md, 0x0051.md,
+                // 0x0052.md). Retail skips the kill when either actor does not
+                // resolve; this VM resolves reserved lookups to the event
+                // entity, so the cue goes out unconditionally and the consumer
+                // drops an unknown id, the way the other actor cues do.
+                OP_ENDSCHEDULOR | OP_ENDMAPSCHEDULOR => {
+                    let actor = ActorLookup(self.eventgetcode2(ENDSCHEDULOR_ACTOR1_OFS));
+                    self.cues.push(EventCue::ActorStopAction {
+                        actor,
+                        key: stop_action_key(self.fourcc_at(ENDSCHEDULOR_TAG_OFS)),
+                    });
+                    self.advance(op);
+                }
+                OP_ENDLOADSCHEDULER_MAIN
+                | OP_ENDLOADSCHED_TWIN_A1
+                | OP_ENDLOADSCHED_TWIN_A3
+                | OP_ENDLOADSCHED_TWIN_BD
+                | OP_ENDLOADSCHED_TWIN_C7
+                | OP_ENDLOADSCHED_TWIN_CF
+                | OP_ENDLOADSCHED_TWIN_D2
+                | OP_ENDLOADSCHED_TWIN_D7 => {
+                    let actor = ActorLookup(self.eventgetcode2(ENDLOADSCHED_ACTOR1_OFS));
+                    self.cues.push(EventCue::ActorStopAction {
+                        actor,
+                        key: stop_action_key(self.fourcc_at(ENDLOADSCHED_TAG_OFS)),
+                    });
+                    self.advance(op);
+                }
                 // The cast is the spell effect DAT for the work operand's
                 // animation index, its `main` routine on actor1 with actor2 as
                 // the target: the same file and routine a 0x028 magic finish
@@ -1627,6 +2114,47 @@ impl EventVm {
                 OP_MAIN_SPEED => {
                     self.move_speed = self.getworkofs(MAIN_SPEED_OFS, 0);
                     self.advance(op);
+                }
+                OP_SMOVE => return StepResult::Unimplemented(op),
+                // 0x72 GETWEATHER: mode 0 kicks off the forecast read and mode 1
+                // copies three values into Work_Zone[2..5)
+                // (research/XiEvents/OpCodes/0x0072.md). The table is resident
+                // in kuluu (the host loads it once), so the read is instant:
+                // mode 0 advances past itself and yields one frame the way
+                // retail's async read does, and mode 1 reads the values and
+                // advances. A region or index the shipped table does not cover
+                // writes nothing, like retail's unresolved early return.
+                OP_GETWEATHER => match self.byte_at(1) {
+                    0x00 => {
+                        self.exec_pointer += 4;
+                        return self.arm_wait(0.0, 0);
+                    }
+                    0x01 => {
+                        if let Some(forecast) = &self.weather_forecast {
+                            let region = self.getworkofs(2, 0) as u32;
+                            let day = self.getworkofs(4, 0) as u32;
+                            if let Some([v0, v1, v2]) = forecast.values(region, day) {
+                                let mut zone = self.work_zone.lock().unwrap();
+                                zone[2] = v0;
+                                zone[3] = v1;
+                                zone[4] = v2;
+                            }
+                        }
+                        self.exec_pointer += 6;
+                    }
+                    _ => return StepResult::Unimplemented(op),
+                },
+                // 0x82 RANGE_RECT: find the zone range rect named by the u32 at
+                // +1 and hit-test the event entity's tracked position against it;
+                // a hit advances 7, a miss (no rect, no position, or outside) jumps
+                // to the u16 at +5 (research/XiEvents/OpCodes/0x0082.md).
+                OP_RANGE_RECT => {
+                    let rect_id = self.eventgetcode2(1);
+                    if self.range_rect_hit(rect_id) {
+                        self.exec_pointer += 7;
+                    } else {
+                        self.exec_pointer = self.eventgetcode(5) as usize;
+                    }
                 }
                 // 0x39 SetFacing: set the event entity's facing, the raw work
                 // value on the 0..4095 heading scale (research/XiEvents/OpCodes/
@@ -1739,6 +2267,50 @@ impl EventVm {
                     self.cues.push(EventCue::MapClose);
                     self.advance(op);
                 }
+                // 0xD4 MAP_QUERY: cases 0 and 2 run the 0x24 query helper —
+                // case 0 also opens the current zone's map (type 6) — and park
+                // on the answer; cases 1/3/4/5 copy into the client's query
+                // window, which has no kuluu counterpart, so they advance by
+                // their width; an unknown case parks
+                // (research/XiEvents/OpCodes/0x00D4.md).
+                OP_MAP_QUERY => {
+                    let sub = self.byte_at(1);
+                    match sub {
+                        0 | 2 => {
+                            if self.selection_made {
+                                self.selection_made = false;
+                                self.pending_choice = None;
+                                if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                                    self.finished = true;
+                                    return StepResult::Cancelled;
+                                }
+                                self.exec_pointer += 8;
+                            } else {
+                                self.arm_map_query_choice();
+                                if sub == 0 {
+                                    self.cues.push(EventCue::MapOpen {
+                                        map_id: self.current_zone,
+                                        tutorial: false,
+                                    });
+                                }
+                                return match self.pending_choice.clone() {
+                                    Some(choice) => StepResult::AwaitChoice(choice),
+                                    None => StepResult::AwaitMessageAck,
+                                };
+                            }
+                        }
+                        1 => {
+                            self.exec_pointer += 8;
+                        }
+                        3 => {
+                            self.exec_pointer += 6;
+                        }
+                        4 | 5 => {
+                            self.exec_pointer += 12;
+                        }
+                        _ => return StepResult::Unimplemented(op),
+                    }
+                }
                 // 0x67's operands are retail's event-message presets, which carry no cue
                 // payload (research/XiEvents/OpCodes/0x0067.md).
                 OP_HIDE_HUD => {
@@ -1829,7 +2401,7 @@ impl EventVm {
                 }
                 OP_DOOR_OPEN2 | OP_DOOR_CLOSE2 => self.advance(op),
                 // The Flags1 half of 0x90 has no tier-named meaning, so the cue
-                // carries only the hide write.
+                // carries only the hide write (research/XiEvents/OpCodes/0x0090.md).
                 OP_EVENT_HIDE_ALWAYS => {
                     self.cues.push(EventCue::ActorHide {
                         target: ActorLookup::EVENT_ENTITY,
@@ -1860,23 +2432,60 @@ impl EventVm {
                 OP_TRANSPAR => self.exec_pointer += TRANSPAR_SIZE,
                 OP_MAPLOAD | OP_MAPLOAD_KEEP => self.exec_pointer += MAPLOAD_SIZE,
                 OP_MUSICREADWAIT | OP_YIELD => self.exec_pointer += YIELD_SIZE,
+                // 0x98 yields while the zone is reading ext data; an event
+                // never starts before the zone is resident, so only the
+                // advance path is reachable (research/XiEvents/OpCodes/0x0098.md).
+                OP_ZONE_READ_YIELD => self.exec_pointer += OPCODE_META[op as usize].size as usize,
+                // 0x9B yields while the event entity is playing any animation
+                // (research/XiEvents/OpCodes/0x009B.md): the same hold the
+                // loader waits arm, read for the event entity against every
+                // key, retail's AnimationPlay being a per-entity flag, not a
+                // routine slot.
+                OP_ANIM_YIELD => {
+                    if self.entity_animation_running() {
+                        self.parked_on_action_hold = true;
+                        return StepResult::Waiting;
+                    }
+                    self.parked_on_action_hold = false;
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // 0x26 sets RetFlag and never advances: a deprecated yield that
+                // spins in place until the event ends by another route
+                // (research/XiEvents/OpCodes/0x0026.md).
+                OP_YIELD_FOREVER => return StepResult::Waiting,
                 OP_BITTEST => self.op_bit_test(op),
+                // 0x44 tests whether the entity the work operand names is in
+                // the pool and branches on it: an if without an else body, the
+                // else-target skipping the true side
+                // (research/XiEvents/OpCodes/0x0044.md).
+                OP_ENTITY_VALID => {
+                    let id = self.getworkofs(ENTITY_VALID_ID_OFS, 0) as u32;
+                    if self.entity_in_pool(id) {
+                        self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                    } else {
+                        self.exec_pointer = self.eventgetcode(ENTITY_VALID_TARGET_OFS) as usize;
+                    }
+                }
                 // 0x007F is 0x25 QUERYWAIT with one difference: a cancelled
                 // menu stores 255 and runs on rather than ending the event
                 // (research/XiEvents/OpCodes/0x007F.md).
                 OP_QUERYWAIT2 => {
                     if !self.selection_made {
-                        return match self.pending_choice.clone() {
-                            Some(choice) => StepResult::AwaitChoice(choice),
-                            None => StepResult::AwaitMessageAck,
-                        };
+                        if let Some(choice) = self.pending_choice.clone() {
+                            return StepResult::AwaitChoice(choice);
+                        }
+                        if self.message_frame_open() {
+                            return StepResult::AwaitMessageAck;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
+                    } else {
+                        self.selection_made = false;
+                        self.pending_choice = None;
+                        if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                            self.work_zone.lock().unwrap()[0] = CHOICE_CANCELLED_QUERYWAIT2;
+                        }
+                        self.exec_pointer += QUERYWAIT_SIZE;
                     }
-                    self.selection_made = false;
-                    self.pending_choice = None;
-                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
-                        self.work_zone.lock().unwrap()[0] = CHOICE_CANCELLED_QUERYWAIT2;
-                    }
-                    self.exec_pointer += 1;
                 }
                 // The sub-byte-dispatched families. Their width is the case's,
                 // not the table's widest, so an undocumented sub stops the VM
@@ -3066,6 +3675,333 @@ mod tests {
         }
     }
 
+    #[test]
+    fn waitloadsched_twin_falls_through_without_a_hold() {
+        for op in [
+            OP_WAITLOADSCHED_TWIN_A0,
+            OP_WAITLOADSCHED_TWIN_BC,
+            OP_WAITLOADSCHED_TWIN_C6,
+            OP_WAITLOADSCHED_TWIN_CE,
+            OP_WAITLOADSCHED_TWIN_D1,
+            OP_WAITLOADSCHED_TWIN_D6,
+        ] {
+            assert_eq!(
+                OPCODE_META[op as usize].size as usize, 15,
+                "op 0x{op:02X} size drifted from research/XiEvents/OpCodes"
+            );
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, 14));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} should run to END"
+            );
+            assert_eq!(e.exec_pointer(), 15, "op 0x{op:02X} advanced wrong size");
+        }
+    }
+
+    #[test]
+    fn waitloadsched_twin_parks_on_the_actors_hold() {
+        /// A literal server id with no References entry: it resolves to itself.
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        for op in [OP_WAITLOADSCHED_TWIN_A0, OP_WAITLOADSCHED_TWIN_D1] {
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, 2));
+            data.extend_from_slice(&ACTOR.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&key);
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+            assert_eq!(
+                e.step(),
+                StepResult::Waiting,
+                "op 0x{op:02X} parks on its hold"
+            );
+            e.tick(1.1);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} falls through after expiry"
+            );
+            assert_eq!(e.exec_pointer(), 15);
+        }
+    }
+
+    #[test]
+    fn actor_nop_yields_a_frame_then_advances() {
+        let mut data = vec![OP_ACTOR_NOP];
+        data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the deprecated yield holds the frame"
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done, "the next frame runs past it");
+        assert_eq!(e.exec_pointer(), 5);
+        assert!(e.take_cues().is_empty());
+    }
+
+    /// 0x98 yields while the zone is reading data; this VM starts no zone
+    /// read, so it takes the one-byte advance
+    /// (research/XiEvents/OpCodes/0x0098.md).
+    #[test]
+    fn zone_read_yield_advances_past_itself() {
+        let mut e = vm(vec![OP_ZONE_READ_YIELD, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
+    }
+
+    #[test]
+    fn anim_yield_parks_while_the_event_entity_animates() {
+        let key: [u8; 4] = *b"abcd";
+        let program = || vm(vec![OP_ANIM_YIELD, OP_END], vec![]);
+        let mut e = program();
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "no animation: the yield falls through"
+        );
+        assert_eq!(e.exec_pointer(), 1);
+        let mut e = program();
+        e.hold_action(ActorLookup::EVENT_ENTITY, key, WAIT_UNITS_PER_SEC);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "a running animation parks the yield"
+        );
+        e.tick(1.1);
+        assert_eq!(e.step(), StepResult::Done, "an expired hold falls through");
+    }
+
+    #[test]
+    fn skipped_emote_does_not_arm_animation_yield() {
+        let mut data = vec![OP_EMOT];
+        data.extend_from_slice(&ActorLookup::EVENT_ENTITY.0.to_le_bytes());
+        data.extend_from_slice(&REF0);
+        data.push(OP_ANIM_YIELD);
+        data.push(OP_END);
+        let mut e = vm(data, vec![7]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert!(e.take_cues().is_empty());
+    }
+
+    #[test]
+    fn yield_forever_parks_without_advancing() {
+        let mut e = vm(vec![OP_YIELD_FOREVER, OP_END], vec![]);
+        for frame in 0..3 {
+            assert_eq!(
+                e.step(),
+                StepResult::Waiting,
+                "frame {frame}: the deprecated yield never advances"
+            );
+            assert_eq!(e.exec_pointer(), 0, "frame {frame}: the pointer holds");
+            e.tick(1.0 / 60.0);
+        }
+    }
+
+    /// The liveness classification: one program per Park variant, the input
+    /// the host's stall check reads between steps.
+    #[test]
+    fn park_classifies_each_yield_state() {
+        let mut e = vm(vec![OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.park(), Park::None, "an ended VM is not parked");
+
+        let mut e = vm(vec![OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END], vec![100]);
+        assert!(matches!(e.step(), StepResult::AwaitMessage(_)));
+        assert_eq!(
+            e.park(),
+            Park::Frame,
+            "a displayed frame waits on the player"
+        );
+
+        let mut e = vm(vec![OP_WAIT, 0x28, 0x01, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(e.park(), Park::TimedWait, "a timed wait has units left");
+
+        let mut e = vm(
+            vec![
+                OP_WAITSCHEDULOR,
+                0xF8,
+                0xFF,
+                0xFF,
+                0x7F,
+                0,
+                0,
+                0,
+                0,
+                b'm',
+                b'a',
+                b'i',
+                b'n',
+                OP_END,
+            ],
+            vec![],
+        );
+        e.hold_action_pending(ActorLookup::EVENT_ENTITY, *b"main");
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(
+            e.park(),
+            Park::Hold,
+            "a pending hold is the host's to release"
+        );
+
+        // Case 0 sends the tag and runs into its case-1 poll, which yields
+        // until the s2c ack (research/XiEvents/OpCodes/0x0043.md).
+        let mut e = vm(vec![OP_SENDTAG, 0x00, OP_SENDTAG, 0x01, OP_END], vec![]);
+        assert!(matches!(e.step(), StepResult::AwaitServerAck(_)));
+        assert_eq!(
+            e.park(),
+            Park::ServerAck,
+            "a pending tag waits on the s2c ack"
+        );
+
+        let mut e = vm(vec![OP_YIELD_FOREVER, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        assert_eq!(
+            e.park(),
+            Park::Dead,
+            "a yield with nothing armed moves on no clock"
+        );
+    }
+
+    /// force_cancel ends the event from the host side: a VM parked on each
+    /// Park variant reports Cancelled from the next step, and reads as
+    /// un-parked after.
+    #[test]
+    fn force_cancel_reports_cancelled_from_every_park() {
+        let programs = [
+            (vec![OP_END], vec![]),
+            (vec![OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END], vec![100]),
+            (vec![OP_WAIT, 0x28, 0x01, OP_END], vec![]),
+            (vec![OP_YIELD_FOREVER, OP_END], vec![]),
+            (vec![OP_SENDTAG, 0x00, OP_SENDTAG, 0x01, OP_END], vec![]),
+        ];
+        for (data, references) in programs {
+            let mut e = vm(data, references);
+            e.step();
+            e.force_cancel();
+            assert_eq!(
+                e.step(),
+                StepResult::Cancelled,
+                "the force-cancelled VM ends cancelled"
+            );
+            assert_eq!(e.park(), Park::None, "a cancelled VM is not parked");
+        }
+        // The Hold variant needs its hold armed before the step.
+        let mut e = vm(
+            vec![
+                OP_WAITSCHEDULOR,
+                0xF8,
+                0xFF,
+                0xFF,
+                0x7F,
+                0,
+                0,
+                0,
+                0,
+                b'm',
+                b'a',
+                b'i',
+                b'n',
+                OP_END,
+            ],
+            vec![],
+        );
+        e.hold_action_pending(ActorLookup::EVENT_ENTITY, *b"main");
+        e.step();
+        e.force_cancel();
+        assert_eq!(e.step(), StepResult::Cancelled);
+    }
+
+    #[test]
+    fn entity_valid_branches_on_the_pool() {
+        const NPC: u32 = 0x0100_02C5;
+        let program = |references: Vec<u32>| {
+            let mut data = vec![OP_ENTITY_VALID];
+            data.extend_from_slice(&REF0);
+            data.extend_from_slice(&8u16.to_le_bytes());
+            data.extend_from_slice(&[OP_WAIT, 0x01, 0x80]);
+            data.push(OP_END);
+            (data, references)
+        };
+        let (data, references) = program(vec![NPC]);
+        let mut e = vm(data, references);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "a published entity runs on past the opcode into the wait"
+        );
+        let (data, references) = program(vec![0x0100_9999]);
+        let mut e = vm(data, references);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "an unpublished entity takes the else-target"
+        );
+        assert_eq!(e.exec_pointer(), 8);
+        let (data, references) = program(vec![NPC + (LOOKUP_TARGET_INDEX_MASK + 1)]);
+        let mut e = vm(data, references);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+        let (data, references) = program(vec![ActorLookup::EVENT_ENTITY.0]);
+        let mut e = vm(data, references);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "a reserved selector names no pool entry"
+        );
+    }
+
+    /// 0xC1 emits the stop-all for a resolved actor and parks one frame; an
+    /// actor retail's GetActorIndex would drop emits nothing but still parks
+    /// (research/XiEvents/OpCodes/0x00C1.md).
+    #[test]
+    fn kill_last_action_stops_the_resolved_actor_and_yields() {
+        const NPC: u32 = 0x0100_02C5;
+        let program = |actor: u32| {
+            let mut data = vec![OP_KILL_LAST_ACTION];
+            data.extend_from_slice(&actor.to_le_bytes());
+            data.push(OP_END);
+            data
+        };
+        let mut e = vm(program(NPC), vec![]);
+        e.set_actor_types(&bridge_types(NPC));
+        assert_eq!(e.step(), StepResult::Waiting, "the kill yields its frame");
+        assert_eq!(
+            e.take_cues(),
+            vec![EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: None,
+            }]
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 5);
+        let mut e = vm(program(0x0100_9999), vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "an unresolved actor still yields"
+        );
+        assert!(
+            e.take_cues().is_empty(),
+            "an actor retail would drop emits nothing"
+        );
+        e.tick(1.0 / 60.0);
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
     /// `OP_MAPSCHEDULOR` starts the zone-level routine (kuluu resolves the key
     /// out of the current zone's own model DAT); the key sits at @9 like the
     /// WAIT family's, and both actors ride along for the host
@@ -3304,6 +4240,7 @@ mod tests {
     /// resolves it to.
     fn bridge_types(actor: u32) -> std::collections::HashMap<u32, u8> {
         let mut m = std::collections::HashMap::new();
+        m.insert(actor, 2u8);
         m.insert(actor & LOOKUP_TARGET_INDEX_MASK, 2u8);
         m
     }
@@ -3501,15 +4438,120 @@ mod tests {
         assert_eq!(e.exec_pointer(), 3);
     }
 
+    /// 0x82 RANGE_RECT hit-tests the event entity's tracked position against the
+    /// zone range rect named by the u32 at +1: a hit advances 7, a miss (outside
+    /// the box, or no rect) jumps to the u16 at +5
+    /// (research/XiEvents/OpCodes/0x0082.md).
     #[test]
-    fn unimplemented_jump_opcode_stops() {
-        // 0x44 is a jumping opcode we don't implement; it must not be skipped by
-        // size (that would desync ExecPointer), so the VM stops.
-        const OP_UNIMPLEMENTED_JUMP: u8 = 0x44;
-        assert!(OPCODE_META[OP_UNIMPLEMENTED_JUMP as usize].jumps);
-        let mut e = vm(vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0], vec![]);
-        assert_eq!(e.step(), StepResult::Unimplemented(OP_UNIMPLEMENTED_JUMP));
-        assert_eq!(e.exec_pointer(), 0);
+    fn range_rect_hit_tests_the_event_entity() {
+        use ffxi_dat::datid::DatId;
+        use ffxi_dat::zone_interaction::ZoneInteraction;
+        fn box_rect(source: [u8; 4]) -> ZoneInteraction {
+            ZoneInteraction {
+                position: [0.0, 0.0, 0.0],
+                rect_class: 0,
+                orientation: [0.0, 0.0, 0.0],
+                size: [10.0, 10.0, 10.0],
+                source_id: DatId(source),
+                dest_id: None,
+                param: 0,
+                terrain_flags: 0,
+                map_id: 0,
+                elevator_bottom_y: 0.0,
+                elevator_top_y: 0.0,
+            }
+        }
+        let source: [u8; 4] = *b"test";
+        let rect_id = u32::from_le_bytes(source);
+        let rects = std::sync::Arc::new(vec![box_rect(source)]);
+
+        let mut data = vec![OP_RANGE_RECT];
+        data.extend_from_slice(&rect_id.to_le_bytes());
+        data.extend_from_slice(&10u16.to_le_bytes());
+        data.push(OP_END);
+        data.push(0xFF);
+        data.push(0xFF);
+        data.push(OP_END);
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![])],
+        });
+
+        let mut e = vm(data.clone(), vec![]);
+        e.set_zone_rects(rects.clone());
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 0,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 7, "a hit advances 7");
+
+        let mut e = vm(data.clone(), vec![]);
+        e.set_zone_rects(rects.clone());
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 6000,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 10, "a miss jumps to the u16 at +5");
+
+        let mut e = vm(data.clone(), vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition {
+                x: 0,
+                y: 0,
+                z: 0,
+                heading: 0,
+            },
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 10, "no rect table misses");
+
+        let mut asymmetric = box_rect(source);
+        asymmetric.position = [1.0, 2.0, 30.0];
+        asymmetric.size = [1.0; 3];
+        for owner in [ffxi_dat::event_dat::ZONE_PLAYER_ACTOR, NPC_SERVER_ID] {
+            let mut e = vm(data.clone(), vec![]);
+            e.set_zone_rects(Arc::new(vec![asymmetric]));
+            let position = crate::vm::scene::EventPosition {
+                x: 1000,
+                y: 2000,
+                z: 30000,
+                heading: 0,
+            };
+            e.set_entity_positions(&std::collections::HashMap::from([(
+                NPC_SERVER_ID,
+                position,
+            )]));
+            e.attach_scene(
+                dat.clone(),
+                owner,
+                if owner == NPC_SERVER_ID {
+                    crate::vm::scene::EventPosition::default()
+                } else {
+                    position
+                },
+            );
+            assert_eq!(e.step(), StepResult::Done);
+            assert_eq!(
+                e.exec_pointer(),
+                7,
+                "owner {owner}: native height and north must not swap"
+            );
+        }
     }
 
     /// The actor-driven waits all reduce to retail's own "no such entity"
@@ -3630,6 +4672,61 @@ mod tests {
         e.select_choice(Some(1));
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 8);
+    }
+
+    /// 8700's favorites branch: a bare 0x25 after the menu that answered the
+    /// previous 0x25. Retail steps past it (`!PTR_TalkWinFlag`) and the IF
+    /// behind it reads the slot the player already picked
+    /// (research/XiEvents/OpCodes/0x0025.md). Layout: [0..7] QUERY,
+    /// [7] QUERYWAIT, [8] QUERYWAIT (bare), [9] END.
+    #[test]
+    fn op_25_querywait_with_no_menu_open_skips_and_keeps_the_last_selection() {
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT,
+            OP_QUERYWAIT,
+            OP_END,
+        ];
+        let mut e = vm(data, vec![500, 0]);
+        assert!(matches!(e.step(), StepResult::AwaitChoice(_)));
+        e.select_choice(Some(2));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 9, "the bare QUERYWAIT is one byte");
+        assert_eq!(e.work_zone(0), 2, "the earlier selection survives the skip");
+    }
+
+    /// A 0x25 with nothing armed at all: the event starts on it and runs on.
+    #[test]
+    fn op_25_querywait_as_the_first_opcode_runs_on() {
+        let mut e = vm(vec![OP_QUERYWAIT, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
+    }
+
+    /// A message frame with no MESWAIT behind it, then a bare 0x25: the frame
+    /// shows, the host dismisses it, and the 0x25 skips instead of parking.
+    #[test]
+    fn op_25_querywait_after_a_dismissed_message_skips() {
+        let data = vec![OP_MESSAGE, 0x00, 0x80, OP_QUERYWAIT, OP_END];
+        let mut e = vm(data, vec![900]);
+        assert!(matches!(e.step(), StepResult::AwaitMessage(_)));
+        e.dismiss_message();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4);
+    }
+
+    /// 0x7F takes the same no-window exit as 0x25.
+    #[test]
+    fn op_7f_querywait2_with_no_menu_open_skips() {
+        let mut e = vm(vec![OP_QUERYWAIT2, OP_END], vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 1);
     }
 
     /// Unlike 0x25, a cancelled menu stores 255 and the event runs on.
@@ -4158,7 +5255,8 @@ mod tests {
 
     /// 0x73's work operand is a spell animation index; the cue is the spell
     /// effect DAT's `main` on actor1 with actor2 as the target, the gate guard's
-    /// Signet (497) and home point (504) casts being the authored cases.
+    /// Signet (497) and home point (504) casts being the authored cases
+    /// (research/XiEvents/OpCodes/0x0073.md).
     #[test]
     fn magic_schedulor_opcode_emits_the_spell_dat_main_routine() {
         const SIGNET_ANIMATION: u32 = 497;
@@ -4190,9 +5288,78 @@ mod tests {
         assert!(cues_of(OP_MAGICSCHEDULOR, &operands, vec![u32::MAX]).is_empty());
     }
 
+    /// 0x50 ENDSCHEDULOR: kill the tag-named action on actor1, actor2 riding
+    /// along; a zero word or four spaces names no routine slot
+    /// (research/XiEvents/OpCodes/0x0050.md).
+    #[test]
+    fn end_schedulor_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let operands = |tag: FourCc| {
+            let mut o = NPC.to_le_bytes().to_vec();
+            o.extend_from_slice(&NPC.to_le_bytes());
+            o.extend_from_slice(&tag);
+            o
+        };
+        assert_eq!(
+            cues_of(OP_ENDSCHEDULOR, &operands(*b"sswh"), vec![]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
+        for tag in [STOP_TAG_ZERO, STOP_TAG_SPACES] {
+            assert_eq!(
+                cues_of(OP_ENDSCHEDULOR, &operands(tag), vec![]),
+                [EventCue::ActorStopAction {
+                    actor: ActorLookup(NPC),
+                    key: None,
+                }]
+            );
+        }
+    }
+
+    /// 0x52 ENDLOADSCHEDULER_Main: the same kill with the DAT-selector work
+    /// operand at +1, which the stop cue does not carry (the arm does not read
+    /// it), actor1 at +3, the tag at +11
+    /// (research/XiEvents/OpCodes/0x0052.md).
+    #[test]
+    fn end_loads_scheduler_main_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let mut operands = REF0.to_vec();
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(b"sswh");
+        assert_eq!(
+            cues_of(OP_ENDLOADSCHEDULER_MAIN, &operands, vec![0]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
+    }
+
+    /// The 0x52 twins share the layout and the cue, each on its own DAT base
+    /// (research/XiEvents/OpCodes/0x00A3.md).
+    #[test]
+    fn end_loads_scheduler_twin_emits_the_stop_action_cue() {
+        const NPC: u32 = 0x0100_02C5;
+        let mut operands = REF0.to_vec();
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(&NPC.to_le_bytes());
+        operands.extend_from_slice(b"sswh");
+        assert_eq!(
+            cues_of(OP_ENDLOADSCHED_TWIN_A3, &operands, vec![0]),
+            [EventCue::ActorStopAction {
+                actor: ActorLookup(NPC),
+                key: Some(*b"sswh"),
+            }]
+        );
+    }
+
     /// The 0x45 twins load their scheduler DAT from their own base plus the raw
     /// work value — the `dat_id_helper` remap is the 0x45-only branch, so a
-    /// mid-band reference (400) must land at `base + 400`, not `base + 25937 + 400`.
+    /// mid-band reference (400) must land at `base + 400`, not `base + 25937 + 400`
+    /// (research/XiEvents/OpCodes/0x0045.md).
     #[test]
     fn scheduler_twin_uses_its_base_without_the_dat_id_helper() {
         const WORK: u32 = 400;
@@ -4298,6 +5465,81 @@ mod tests {
         assert_eq!(e.step(), StepResult::Done, "the move is over");
     }
 
+    #[test]
+    fn smove_stops_without_emitting_incomplete_motion() {
+        for mode in [0, 1, 2] {
+            let mut e = vm(vec![OP_SMOVE, mode], vec![]);
+            assert_eq!(e.step(), StepResult::Unimplemented(OP_SMOVE));
+            assert!(e.take_cues().is_empty());
+        }
+    }
+
+    /// 0x72 mode 0 kicks off the forecast read: it advances past itself and
+    /// yields one frame the way retail's async read does, then mode 1 copies
+    /// the region's three forecast values into Work_Zone[2..5)
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_reads_the_forecast_into_work_zone() {
+        let mut data = vec![OP_GETWEATHER, 0x00];
+        data.extend_from_slice(&REF0);
+        data.push(OP_GETWEATHER);
+        data.push(0x01);
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.push(OP_END);
+        let mut head_low = [0u8; ffxi_dat::weather::FORECAST_HEADS_LOW];
+        head_low[17] = 5;
+        let base = 5 * ffxi_dat::weather::FORECAST_BYTES_PER_HEAD
+            + 100 * ffxi_dat::weather::FORECAST_VALUES_PER_DAY;
+        let mut data_low = vec![0; base + ffxi_dat::weather::FORECAST_VALUES_PER_DAY];
+        data_low[base..base + 3].copy_from_slice(&[111, 222, 255]);
+        let forecast = ffxi_dat::weather::WeatherForecast::from_parts(
+            head_low,
+            data_low,
+            [0u8; ffxi_dat::weather::FORECAST_HEADS_HIGH],
+            Vec::new(),
+        );
+        let mut e = vm(data, vec![17, 100]);
+        e.set_weather_forecast(std::sync::Arc::new(forecast));
+        assert_eq!(e.step(), StepResult::Waiting, "mode 0 yields on the read");
+        e.tick(1.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done, "mode 1 reads and advances");
+        assert_eq!(e.work_zone(2), 111);
+        assert_eq!(e.work_zone(3), 222);
+        assert_eq!(e.work_zone(4), 255);
+        assert!(e.take_cues().is_empty(), "0x72 writes work, not cues");
+    }
+
+    /// A VM the host never gave the forecast table advances past 0x72 without
+    /// writing, like retail's unresolved early return
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_without_the_forecast_advances_without_writing() {
+        let mut data = vec![OP_GETWEATHER, 0x00];
+        data.extend_from_slice(&REF0);
+        data.push(OP_GETWEATHER);
+        data.push(0x01);
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.push(OP_END);
+        let mut e = vm(data, vec![17, 100]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(1.0 / WAIT_UNITS_PER_SEC);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_zone(2), 0);
+        assert_eq!(e.work_zone(3), 0);
+        assert_eq!(e.work_zone(4), 0);
+    }
+
+    /// 0x72's undocumented sub-byte stops the VM rather than guessing a width
+    /// (research/XiEvents/OpCodes/0x0072.md).
+    #[test]
+    fn getweather_unknown_sub_byte_stops() {
+        let data = vec![OP_GETWEATHER, 0x02, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_GETWEATHER));
+    }
+
     /// 0x39 sets the event entity's facing from the raw work value
     /// (research/XiEvents/OpCodes/0x0039.md).
     #[test]
@@ -4372,7 +5614,8 @@ mod tests {
     }
 
     /// 0x7D runs the work-operand scheduler on the local player with the player
-    /// as its own target — the rank-up animations, tag `main`, no helper remap.
+    /// as its own target — the rank-up animations, tag `main`, no helper remap
+    /// (research/XiEvents/OpCodes/0x007D.md).
     #[test]
     fn local_player_scheduler_runs_on_the_player() {
         const WORK: u32 = 100;
@@ -4390,7 +5633,7 @@ mod tests {
 
     #[test]
     fn magic_twin_0xc4_case_past_two_casts_nothing() {
-        let mut data = vec![OP_MAGIC_TWIN, 0x03]; // case 3
+        let mut data = vec![OP_MAGIC_TWIN, 0x03];
         data.extend_from_slice(&REF0);
         data.extend_from_slice(&ActorLookup::EVENT_ENTITY.0.to_le_bytes());
         data.extend_from_slice(&ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
@@ -4414,7 +5657,8 @@ mod tests {
         }
     }
 
-    /// 0x2C's third operand is an ASCII action key, not a numeric id.
+    /// 0x2C's third operand is an ASCII action key, not a numeric id
+    /// (research/XiEvents/OpCodes/0x002C.md).
     #[test]
     fn actor_motion_opcode_emits_its_ascii_action_key() {
         const KNEEL: FourCc = *b"kue0";
@@ -4432,7 +5676,8 @@ mod tests {
     }
 
     /// 0x4E's hide flag is bit 0 of the byte after the opcode; the target is the
-    /// lookup at +2 and the cue is event-scoped either way.
+    /// lookup at +2 and the cue is event-scoped either way
+    /// (research/XiEvents/OpCodes/0x004E.md).
     #[test]
     fn event_hide_opcode_emits_both_directions() {
         for (flag, hide) in [(1u8, true), (0, false)] {
@@ -4538,6 +5783,118 @@ mod tests {
                 tutorial: false
             }]
         );
+    }
+
+    /// 0xD4 case 0 runs the 0x24 query helper and opens the current zone's map
+    /// (type 6), parking on the answer; the message and default-cursor selectors
+    /// sit at +2 and +4, where the embedded helper reads them
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_case0_opens_the_map_and_parks_on_the_answer() {
+        let mut data = vec![OP_MAP_QUERY, 0x00];
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&[0x00, 0x00]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![500, 0]);
+        e.set_current_zone(283);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitChoice(EventChoice {
+                message_id: 500,
+                speaker_index: 5,
+                default_index: 0,
+                params: vec![],
+            })
+        );
+        let cues = e.take_cues();
+        assert!(
+            cues.contains(&EventCue::MapOpen {
+                map_id: 283,
+                tutorial: false
+            }),
+            "case 0 opens the current zone's map: {cues:?}"
+        );
+        e.select_choice(Some(1));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8, "case 0 advances its 8-byte width");
+    }
+
+    /// 0xD4 case 2 runs the 0x24 query helper without the map, parking on the
+    /// answer (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_case2_parks_on_the_answer_without_the_map() {
+        let mut data = vec![OP_MAP_QUERY, 0x02];
+        data.extend_from_slice(&REF0);
+        data.extend_from_slice(&REF1);
+        data.extend_from_slice(&[0x00, 0x00]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![500, 0]);
+        e.set_current_zone(283);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitChoice(EventChoice {
+                message_id: 500,
+                speaker_index: 5,
+                default_index: 0,
+                params: vec![],
+            })
+        );
+        assert!(e.take_cues().is_empty(), "case 2 opens no map");
+        e.select_choice(Some(1));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+    }
+
+    /// 0xD4 cases 1/3/4/5 copy into the client's query window, which has no
+    /// kuluu counterpart, so they advance by their width and emit no cue
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_data_cases_advance_by_their_width() {
+        for (sub, width) in [(1u8, 8usize), (3, 6), (5, 12)] {
+            let mut data = vec![OP_MAP_QUERY, sub];
+            data.extend(std::iter::repeat_n(0, width - 2));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(e.step(), StepResult::Done, "case {sub}");
+            assert_eq!(e.exec_pointer(), width, "case {sub} advances {width}");
+            assert!(e.take_cues().is_empty(), "case {sub} emits no cue");
+        }
+    }
+
+    /// 0xD4's unknown cases stop the VM: it is a jumping opcode, so the
+    /// default arm's rule applies — no size-skip that would desync ExecPointer
+    /// (research/XiEvents/OpCodes/0x00D4.md).
+    #[test]
+    fn map_query_unknown_case_stops() {
+        let mut data = vec![OP_MAP_QUERY, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_MAP_QUERY));
+        assert_eq!(e.exec_pointer(), 0, "an unknown case does not advance");
+    }
+
+    #[test]
+    fn unsupported_query_workflows_do_not_send_or_fabricate_results() {
+        for op in [OP_FRIENDPASS_87, OP_FRIENDPASS_88, OP_RECIPE, OP_RANKING] {
+            for case in 0..=10 {
+                let mut data = vec![op, case];
+                for _ in 0..9 {
+                    data.extend_from_slice(&((WORK_ZONE_BASE + 2) as u16).to_le_bytes());
+                }
+                data.push(OP_END);
+                let mut event = EventVm::start(&block(data, vec![]), 7, 5, vec![17; 8]).unwrap();
+                assert_eq!(
+                    event.step(),
+                    StepResult::Unimplemented(op),
+                    "{op:#x} case {case}"
+                );
+                assert_eq!(event.exec_pointer(), 0);
+                assert_eq!(event.pending_tag(), None);
+                assert!(event.take_cues().is_empty());
+                assert_eq!(event.work_zone(2), 17);
+            }
+        }
     }
 
     #[test]
@@ -4680,7 +6037,8 @@ mod tests {
         );
     }
 
-    /// 0xC9 releases the game-timer hold, the same cue 0x78 emits.
+    /// 0xC9 releases the game-timer hold, the same cue 0x78 emits
+    /// (research/XiEvents/OpCodes/0x00C9.md, 0x0078.md).
     #[test]
     fn enable_timer_opcode_releases_the_hold() {
         assert_eq!(
@@ -4843,7 +6201,8 @@ mod tests {
         );
     }
 
-    /// 0x90 hides the event entity: the 0x4E bit with the value fixed at 1.
+    /// 0x90 hides the event entity: the 0x4E bit with the value fixed at 1
+    /// (research/XiEvents/OpCodes/0x0090.md, 0x004E.md).
     #[test]
     fn event_hide_always_opcode_hides_the_event_entity() {
         assert_eq!(
@@ -4907,6 +6266,113 @@ mod tests {
         let data = vec![OP_SENDTAG, 0x01, OP_END];
         let mut e = vm(data, vec![]);
         assert_eq!(e.step(), StepResult::Done);
+    }
+
+    #[test]
+    fn a7_waits_for_the_registration_result_instead_of_echoing_the_request() {
+        let mut data = vec![OP_GET_STORE, 0x01, 0x10, SRC[0], SRC[1]];
+        data.extend_from_slice(&[OP_A7_WAIT, 0x00]);
+        data.extend_from_slice(&[OP_A7_WAIT, 0x01, 0x03, 0x10]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![0, 42]);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::Registration { end_para: 42 })
+        );
+        e.set_registration_result(4);
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_zone(3), 4);
+    }
+
+    /// A bare 0xA7 case-1 poll with no outstanding tag writes the zero result
+    /// and advances its width, matching retail's acknowledged path
+    /// (research/XiEvents/OpCodes/0x00A7.md).
+    #[test]
+    fn a7_case1_without_a_tag_writes_the_zero_result() {
+        let data = vec![OP_A7_WAIT, 0x01, 0x03, 0x10, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4, "case 1 advances its 4-byte width");
+        assert_eq!(e.work_zone(3), 0, "no tag means the zero result");
+    }
+
+    /// 0xA6 pair: case 0 sends the 0x0EB request and holds on the 0x10E
+    /// answer, case 1 yields until it lands, and case 2 writes the answered
+    /// MapNum into the work slot its +2 operand selects
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    #[test]
+    fn a6_pair_requests_and_writes_the_submap_num() {
+        let mut data = vec![OP_A6_SUBMAP, 0x00, OP_A6_SUBMAP, 0x01, OP_A6_SUBMAP, 0x02];
+        data.extend_from_slice(&DST);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+
+        assert_eq!(e.step(), StepResult::AwaitServerAck(PendingTag::SubMapNum));
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SubMapNum),
+            "a second step must not resend"
+        );
+
+        e.set_submap_num(77);
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_zone(0), 77, "case 2 writes the answered MapNum");
+    }
+
+    /// A bare 0xA6 case-2 read with no outstanding request writes the zero
+    /// MapNum and advances its width, like retail's unanswered path
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    #[test]
+    fn a6_case2_without_a_request_writes_the_zero_result() {
+        let mut data = vec![OP_A6_SUBMAP, 0x02];
+        data.extend_from_slice(&DST);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 4, "case 2 advances its 4-byte width");
+        assert_eq!(e.work_zone(0), 0, "no answer means the zero MapNum");
+    }
+
+    /// 0xB2 mode 0 counts down WaitTime by frame delay and steps its 4-byte
+    /// width on expiry. Retail reads WaitTime as the u16 at +1, which spans
+    /// the mode byte and the first operand byte, so the authored events steer
+    /// that read to work_zone[0] with a 0x10 first byte; the program seeds
+    /// work_zone[0] from refs[1] (60 units = one second)
+    /// (research/XiEvents/OpCodes/0x00B2.md).
+    #[test]
+    fn b2_mode0_waits_then_advances() {
+        let mut data = vec![OP_GET_STORE, DST[0], DST[1], SRC[0], SRC[1]];
+        data.extend_from_slice(&[OP_B2_DELIVERY, 0x00, 0x10, 0x00, OP_END]);
+        let mut e = vm(data, vec![0, 60]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(0.5);
+        assert_eq!(e.step(), StepResult::Waiting, "halfway through the wait");
+        e.tick(0.51);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 9, "mode 0 advances its 4-byte width");
+    }
+
+    /// 0xB2 mode 1 arms the 0x04D PBX open request and holds until the server
+    /// acks it, then steps its 2-byte width
+    /// (research/XiEvents/OpCodes/0x00B2.md).
+    #[test]
+    fn b2_mode1_holds_until_the_delivery_ack() {
+        let data = vec![OP_B2_DELIVERY, 0x01, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::DeliveryOpen)
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::DeliveryOpen),
+            "a second step must not resend"
+        );
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 2, "mode 1 advances its 2-byte width");
     }
 
     /// The position-tag pair: case 0 scales its work-slot raw values into the

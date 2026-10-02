@@ -41,6 +41,10 @@ pub enum Advance {
     Ended {
         end_para: u32,
         final_position: Option<ffxi_event::vm::scene::EventPosition>,
+        /// The cancel line for a stalled or stopped event: the caller emits
+        /// it as [`AgentEvent::Error`](crate::state::AgentEvent) and closes
+        /// the cutscene scope with [`EventSessionExit::Cancelled`].
+        error: Option<String>,
     },
     /// The scene is holding on a timed wait: no frame to show, and the event
     /// stays open. The caller must not send EVENT_END on this.
@@ -80,6 +84,52 @@ impl UndriveableReason {
             Self::StoppedOnOpcode => "unimplemented opcode",
         }
     }
+}
+
+/// Why a stalled or stopped event is being cancelled, for the chat line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallReason {
+    /// Parked with nothing that can move it.
+    NoOpcodeCanAdvance,
+    /// The s2c ack never arrived.
+    ServerDidNotAnswer,
+    /// The renderer never reported the routine finished.
+    AnimationNeverFinished,
+    /// The timed wait's units stopped moving.
+    WaitNotTicking,
+    /// No block in the zone authors this event id.
+    NoScriptForEvent,
+    /// The VM stopped on an opcode it cannot advance past.
+    UnsupportedOpcode,
+}
+
+impl StallReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoOpcodeCanAdvance => "no opcode can advance",
+            Self::ServerDidNotAnswer => "server did not answer",
+            Self::AnimationNeverFinished => "animation never finished",
+            Self::WaitNotTicking => "wait not ticking",
+            Self::NoScriptForEvent => "no script for this event",
+            Self::UnsupportedOpcode => "unsupported opcode",
+        }
+    }
+}
+
+/// The chat line a stalled or stopped event ends with: one shape for every
+/// cancel, the reason naming what broke.
+pub(crate) fn cutscene_error_line(
+    event_id: u16,
+    zone: u16,
+    op: u8,
+    ep: usize,
+    reason: StallReason,
+) -> String {
+    format!(
+        "Cutscene error: event {event_id} in zone {zone} stalled at 0x{op:02X} \
+         (offset {ep}, {}); cancelled.",
+        reason.as_str()
+    )
 }
 
 pub enum Begin {
@@ -130,6 +180,11 @@ pub struct DialogSession {
     player_id: u32,
     loaded_event_zone: Option<u16>,
     loaded_string_zone: Option<u16>,
+    loaded_zone_rects_zone: Option<u16>,
+    /// The event zone's range rects 0x82 RANGE_RECT hit-tests against, loaded
+    /// from the zone resource DAT's RID chunks (ffxi-dat zone_interaction,
+    /// research/XiEvents/OpCodes/0x0082.md).
+    zone_rects: Option<std::sync::Arc<Vec<ffxi_dat::zone_interaction::ZoneInteraction>>>,
     event_dat: Option<Arc<EventDat>>,
     player_position: Option<ffxi_event::vm::scene::EventPosition>,
     scene_actions: Vec<ffxi_event::vm::scene::SceneAction>,
@@ -157,6 +212,11 @@ pub struct DialogSession {
     /// [`crate::session::event_transport::receive`]; an absent entry is Type 0.
     /// research/XiEvents/OpCodes/0x005B.md
     entity_types: std::collections::HashMap<u32, u8>,
+    /// The global weather forecast table 0x72 GETWEATHER reads, loaded once
+    /// from the install's forecast DATs and shared across every runner
+    /// (research/XiEvents/OpCodes/0x0072.md). `None` until the first event
+    /// that needs it (or the install has no forecast DATs).
+    weather_forecast: Option<std::sync::Arc<ffxi_dat::weather::WeatherForecast>>,
     /// Motion holds awaiting the renderer's finish report, keyed by the wire
     /// actor the cue named plus its key: the value is the VM's own unresolved
     /// lookup (for the release), the count of outstanding issues for the pair
@@ -175,6 +235,12 @@ pub struct DialogSession {
     /// Per-zone dialog-numbering skew between the server and this install,
     /// learned from the messages themselves.
     skew: std::collections::HashMap<u16, ZoneTextSkew>,
+    /// The last-observed liveness tuple `(park, exec pointer, progress stamp)`
+    /// and the instant it was first seen: a stall is the same tuple held
+    /// across the park-specific grace.
+    liveness: Option<(ffxi_event::Park, usize, u64, std::time::Instant)>,
+    registration_result: Option<u16>,
+    registration_update_acked: bool,
 }
 
 impl DialogSession {
@@ -185,6 +251,8 @@ impl DialogSession {
             player_id: 0,
             loaded_event_zone: None,
             loaded_string_zone: None,
+            loaded_zone_rects_zone: None,
+            zone_rects: None,
             event_dat: None,
             player_position: None,
             scene_actions: Vec::new(),
@@ -196,9 +264,13 @@ impl DialogSession {
             routine_lengths: std::collections::HashMap::new(),
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
+            weather_forecast: None,
             pending_motion_holds: std::collections::HashMap::new(),
             frame_was_up: false,
             skew: std::collections::HashMap::new(),
+            liveness: None,
+            registration_result: None,
+            registration_update_acked: false,
         }
     }
 
@@ -234,6 +306,62 @@ impl DialogSession {
         self.strings = load_strings(self.dat_root.as_deref(), zone);
     }
 
+    /// Load the global weather forecast table once, for 0x72 GETWEATHER
+    /// (research/XiEvents/OpCodes/0x0072.md). The table is zone-independent,
+    /// so it is cached for the session's life; a missing install or forecast
+    /// DAT leaves it `None` and 0x72 advances without writing.
+    fn ensure_weather_forecast(&mut self) {
+        if self.weather_forecast.is_some() {
+            return;
+        }
+        let Some(root) = self.dat_root.clone() else {
+            return;
+        };
+        match ffxi_dat::weather::load_weather_forecast(&root) {
+            Ok(forecast) => self.weather_forecast = Some(std::sync::Arc::new(forecast)),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "could not load the weather forecast table; 0x72 will advance without writing"
+                );
+            }
+        }
+    }
+
+    /// Load the event zone's range rects once, for 0x82 RANGE_RECT
+    /// (research/XiEvents/OpCodes/0x0082.md). The RID table is per-zone, so it
+    /// is cached per zone; a missing install or zone resource DAT leaves it
+    /// empty and 0x82 always misses.
+    fn ensure_zone_rects(&mut self, zone: u16) {
+        if self.loaded_zone_rects_zone == Some(zone) {
+            return;
+        }
+        self.loaded_zone_rects_zone = Some(zone);
+        self.zone_rects = None;
+        let Some(root) = self.dat_root.clone() else {
+            return;
+        };
+        let Some(file_id) = ffxi_dat::zone_dat::zone_id_to_mzb_file_id(zone) else {
+            return;
+        };
+        let Ok(loc) = root.resolve(file_id) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+            return;
+        };
+        match ffxi_dat::zone_interaction::from_dat(&bytes) {
+            Ok(rects) => self.zone_rects = Some(std::sync::Arc::new(rects)),
+            Err(e) => {
+                tracing::debug!(
+                    zone,
+                    error = %e,
+                    "could not parse the zone RID table; 0x82 will always miss"
+                );
+            }
+        }
+    }
+
     /// Begin a VM-driven event for a server trigger.
     pub fn begin(&mut self, trigger: EventTrigger) -> Begin {
         self.clear();
@@ -248,6 +376,8 @@ impl DialogSession {
         } = trigger;
         self.ensure_event_dat(event_zone);
         self.ensure_strings(text_zone);
+        self.ensure_weather_forecast();
+        self.ensure_zone_rects(event_zone);
         let undriveable = |reason| Begin::Undriveable {
             stopped_op: None,
             reason,
@@ -275,6 +405,14 @@ impl DialogSession {
             return undriveable(UndriveableReason::NoEventEntry);
         };
         runner.set_actor_types(&self.entity_types);
+        runner.set_entity_positions(&self.entity_positions);
+        if let Some(forecast) = self.weather_forecast.clone() {
+            runner.set_weather_forecast(forecast);
+        }
+        if let Some(rects) = self.zone_rects.clone() {
+            runner.set_zone_rects(rects);
+        }
+        runner.set_current_zone(event_zone as i32);
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event
@@ -300,7 +438,12 @@ impl DialogSession {
             event_zone,
             &mut self.pending_motion_holds,
         );
-        arm_move_holds(&mut runner, &raw_cues, &self.entity_positions, unique_no);
+        arm_move_holds(
+            &mut runner,
+            &raw_cues,
+            &mut self.entity_positions,
+            unique_no,
+        );
         self.cues.extend(
             raw_cues
                 .into_iter()
@@ -355,6 +498,7 @@ impl DialogSession {
             Drive::Cancel => self.cancel(),
             Drive::Choice(choice) => self.advance(Some(choice)),
             Drive::Tick(seconds) => self.tick(seconds),
+            Drive::ServerAck => self.ack_server(),
         }
     }
 
@@ -383,7 +527,120 @@ impl DialogSession {
     /// [`active_end`]: Self::active_end
     fn tick(&mut self, dt_secs: f32) -> Advance {
         self.sweep_pending_motion_holds();
-        self.drive(|runner, strings| runner.tick(dt_secs, strings))
+        let advance = self.drive(|runner, strings| runner.tick(dt_secs, strings));
+        self.check_liveness(advance)
+    }
+
+    /// The liveness check: the event's `(park, exec pointer, progress stamp)`
+    /// tuple must change on every tick while it is parked; the same tuple
+    /// held across the park's grace is a stall, and the event cancels itself
+    /// with an error in chat instead of pinning the player. A frame is never
+    /// stale (it waits on the player), and a timed wait the session ticks
+    /// moves every tick, so only the release-bound parks can stall.
+    fn check_liveness(&mut self, advance: Advance) -> Advance {
+        if matches!(advance, Advance::Ended { .. }) {
+            self.liveness = None;
+            return advance;
+        }
+        let (Some(runner), Some(_)) = (self.runner.as_ref(), self.active.as_ref()) else {
+            self.liveness = None;
+            return advance;
+        };
+        let park = runner.park();
+        let ep = runner.exec_pointer();
+        let progress = runner.progress_stamp();
+        let now = std::time::Instant::now();
+        match self.liveness.as_mut() {
+            Some((p, e, w, _)) if *p == park && *e == ep && *w == progress => {}
+            _ => {
+                self.liveness = Some((park, ep, progress, now));
+                return advance;
+            }
+        }
+        let since = self.liveness.as_ref().expect("set above").3;
+        let reason = match park {
+            ffxi_event::Park::None | ffxi_event::Park::Frame => return advance,
+            ffxi_event::Park::TimedWait => {
+                if since.elapsed() > WAIT_TICK_GRACE {
+                    Some(StallReason::WaitNotTicking)
+                } else {
+                    return advance;
+                }
+            }
+            ffxi_event::Park::Hold => {
+                // The deadline sweep releases a hold that outlives its routine
+                // and the script continues - that is progress, and it changes
+                // the tuple. A tuple held past the longest pending-hold
+                // deadline plus the grace means the release did not move the
+                // script.
+                let hold_grace = self
+                    .pending_motion_holds
+                    .values()
+                    .map(|(_, _, _, deadline)| *deadline)
+                    .max()
+                    .unwrap_or_default();
+                if since.elapsed() > hold_grace + HOLD_FINISH_GRACE {
+                    Some(StallReason::AnimationNeverFinished)
+                } else {
+                    return advance;
+                }
+            }
+            ffxi_event::Park::ServerAck => {
+                if since.elapsed() <= TAG_ACK_GRACE {
+                    return advance;
+                }
+                Some(StallReason::ServerDidNotAnswer)
+            }
+            ffxi_event::Park::Dead => {
+                if since.elapsed() > STALL_GRACE_DEAD {
+                    Some(StallReason::NoOpcodeCanAdvance)
+                } else {
+                    return advance;
+                }
+            }
+        };
+        self.stall(reason.expect("reason set above"))
+    }
+
+    /// Cancel a stalled event: force-cancel the VM and end the event the way
+    /// an Esc-cancelled frame ends — 0x05B with
+    /// [`ffxi_event::EVENT_CANCELLED_END_PARA`] and the cancel line riding the
+    /// [`Advance::Ended`] so the caller emits it and closes the cutscene
+    /// scope with [`EventSessionExit::Cancelled`] in the same tick.
+    fn stall(&mut self, reason: StallReason) -> Advance {
+        let active = self.active.as_ref().expect("a stall needs an active event");
+        let zone = self.loaded_event_zone.unwrap_or(0);
+        let (op, ep) = self
+            .runner
+            .as_ref()
+            .map_or((0, 0), |r| (r.current_opcode(), r.exec_pointer()));
+        let line = cutscene_error_line(active.event_id, zone, op, ep, reason);
+        tracing::error!(
+            event_id = active.event_id,
+            zone,
+            op = format!("0x{op:02X}"),
+            ep,
+            reason = reason.as_str(),
+            unique_no = format!("0x{:08X}", active.unique_no),
+            "event stalled; cancelling with an error in chat"
+        );
+        let mut advance = self.drive(|runner, strings| {
+            runner.force_cancel();
+            runner.advance(None, strings)
+        });
+        if let Advance::Ended { error, .. } = &mut advance {
+            *error = Some(line);
+        }
+        advance
+    }
+
+    /// Test seam: ages the recorded liveness observation by `by` so the next
+    /// tick sees the park's grace as elapsed without waiting in real time.
+    #[cfg(test)]
+    pub(crate) fn age_liveness_for_test(&mut self, by: std::time::Duration) {
+        if let Some((_, _, _, since)) = self.liveness.as_mut() {
+            *since -= by;
+        }
     }
 
     /// The server acknowledged the pending tag: both c2s event-end process()
@@ -416,6 +673,41 @@ impl DialogSession {
         }
     }
 
+    pub(crate) fn set_registration_result(&mut self, result: u16) -> bool {
+        self.registration_result = Some(result);
+        self.finish_registration_reply()
+    }
+
+    pub(crate) fn ack_registration_update(&mut self) -> bool {
+        self.registration_update_acked = true;
+        self.finish_registration_reply()
+    }
+
+    // vendor/server/src/map/packets/c2s/0x05b_eventend.cpp process appends EVENTUCOFF after OnEventUpdate.
+    fn finish_registration_reply(&mut self) -> bool {
+        if !self.registration_update_acked {
+            return false;
+        }
+        let Some(result) = self.registration_result.take() else {
+            return false;
+        };
+        self.registration_update_acked = false;
+        if let Some(runner) = self.runner.as_mut() {
+            runner.set_registration_result(result);
+        }
+        true
+    }
+
+    /// s2c 0x10E REQSUBMAPNUM's MapNum into the VM's 0xA6 result slot, where
+    /// case 2 reads it; lands before the next step even while the SubMapNum
+    /// tag is held. No-op when no VM event runs
+    /// (research/XiEvents/OpCodes/0x00A6.md).
+    pub fn set_submap_num(&mut self, num: u32) {
+        if let Some(runner) = self.runner.as_mut() {
+            runner.set_submap_num(num);
+        }
+    }
+
     /// True while any VM in the event (the master or an owner child) holds a
     /// pending tag awaiting its s2c ack — the tag is one global per event in
     /// retail, so a child's held tag gates the drain too. While true the
@@ -426,6 +718,12 @@ impl DialogSession {
         self.runner
             .as_ref()
             .is_some_and(|r| r.pending_tag().is_some())
+    }
+
+    /// The pending tag held by any VM in the event, if one: a clone, so the
+    /// caller can match on the variant without borrowing the runner.
+    pub fn pending_tag(&self) -> Option<PendingTag> {
+        self.runner.as_ref().and_then(|r| r.pending_tag().cloned())
     }
 
     /// True exactly once per up→down transition of the displayed frame: call it
@@ -452,10 +750,12 @@ impl DialogSession {
             return Advance::Ended {
                 end_para: 0,
                 final_position: None,
+                error: None,
             };
         };
         let event_entity = active.unique_no;
         runner.set_actor_types(&types);
+        runner.set_entity_positions(&self.entity_positions);
         let outcome = step(runner, strings);
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
@@ -470,7 +770,7 @@ impl DialogSession {
             zone,
             &mut self.pending_motion_holds,
         );
-        arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
+        arm_move_holds(runner, &raw_cues, &mut self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
             .map(|c| resolve_cue(c, event_entity, zone, self.player_id))
@@ -485,15 +785,26 @@ impl DialogSession {
             DialogStep::Ended { end_para } => Advance::Ended {
                 end_para,
                 final_position,
+                error: None,
             },
             DialogStep::Stopped(op) => {
                 tracing::warn!(
                     op = format!("0x{op:02X}"),
-                    "event VM stopped mid-dialog; releasing with end_para 0"
+                    zone,
+                    event_id = active.event_id,
+                    unique_no = format!("0x{:08X}", active.unique_no),
+                    "event VM stopped mid-dialog; releasing with the cancel line"
                 );
                 Advance::Ended {
                     end_para: 0,
                     final_position: None,
+                    error: Some(cutscene_error_line(
+                        active.event_id,
+                        zone,
+                        op,
+                        runner.exec_pointer(),
+                        StallReason::UnsupportedOpcode,
+                    )),
                 }
             }
             DialogStep::Waiting => Advance::Waiting,
@@ -580,6 +891,9 @@ impl DialogSession {
         self.active = None;
         self.frame_was_up = false;
         self.pending_motion_holds.clear();
+        self.liveness = None;
+        self.registration_result = None;
+        self.registration_update_acked = false;
     }
 
     /// The renderer finished (or could not start) the motion routine this wire
@@ -748,6 +1062,7 @@ pub enum ResolvedCue {
     /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
     /// the cue stream.
     MusicVolume { volume: u8, fade_frames: u16 },
+
     SoundVolume {
         mask: u8,
         volume: u8,
@@ -759,7 +1074,8 @@ pub enum ResolvedCue {
     Map(MapOp),
     /// 0x6E/0x63 ride the existing [`AgentEvent::EntityEmoted`] (the same event
     /// a server MOTIONMES sends): the renderer's emote dispatcher already plays
-    /// the DAT routine, so no new wire shape is needed.
+    /// the DAT routine, so no new wire shape is needed
+    /// (research/XiEvents/OpCodes/0x006E.md, 0x0063.md).
     Emote {
         actor_id: u32,
         emote_id: u16,
@@ -799,7 +1115,7 @@ fn snapshot_motion(motion: ffxi_event::ExtSchedulerMotion) -> kuluu_snapshot::Ex
 
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
 /// running event belongs to, and `player_id`, the server id the LocalPlayer
-/// lookup resolves to. `zone` is the event's zone, carried on the 0x2D
+/// lookup resolves to. `zone` is the event's zone, carried on the
 /// ZoneScheduler cue so the host resolves its key out of the zone's own model
 /// DAT (the VM does not know it).
 /// research/XiEvents/OpCodes/0x002D.md
@@ -1043,6 +1359,10 @@ impl CutsceneScope {
             return;
         }
         self.open = true;
+        tracing::info!(
+            event_id,
+            "cutscene session opened (player pinned until CutsceneEnded)"
+        );
         let _ = event_tx.send(AgentEvent::CutsceneStarted { event_id });
     }
 
@@ -1091,8 +1411,6 @@ impl CutsceneScope {
                 emote_id,
                 param,
             } => {
-                // The MOTIONMES shape with no target: the renderer's emote
-                // dispatcher plays the routine on `actor_id`.
                 let _ = event_tx.send(AgentEvent::EntityEmoted {
                     actor_id,
                     actor_index: 0,
@@ -1124,7 +1442,7 @@ impl CutsceneScope {
         }
         self.open = false;
         self.published = false;
-        tracing::debug!(?exit, "event session closed");
+        tracing::info!(?exit, "cutscene session closed (player unpinned)");
         let _ = event_tx.send(AgentEvent::CutsceneEnded);
     }
 
@@ -1687,6 +2005,18 @@ const WAIT_UNITS_PER_SEC: f32 = 60.0;
 /// routine's authored length: well above any model-DAT routine length, so a
 /// live finish report releases the hold ahead of the sweep.
 const PENDING_MOTION_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(15);
+/// A Park::Dead VM has no clock that can move it: the stall is near-immediate.
+const STALL_GRACE_DEAD: std::time::Duration = std::time::Duration::from_secs(2);
+/// A Park::Hold held past the longest pending-hold deadline plus this grace:
+/// the release did not move the script.
+const HOLD_FINISH_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// A Park::ServerAck whose s2c ack never arrived: LSB pushes EVENTUCOFF right
+/// after both 0x05B/0x05C handlers, so a missing ack is a dropped or refused
+/// packet (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+const TAG_ACK_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// A Park::TimedWait whose units did not move across this grace: the session
+/// stopped ticking it, a session bug made visible as a stall.
+const WAIT_TICK_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Arm the MOVE case-1 hold for each walk in `raw_cues`: the length comes
 /// from this session's own entity positions and the authored speed, because
@@ -1695,7 +2025,7 @@ const PENDING_MOTION_HOLD_MAX: std::time::Duration = std::time::Duration::from_s
 fn arm_move_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
-    positions: &std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    positions: &mut std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
     event_entity: u32,
 ) {
     for cue in raw_cues {
@@ -1746,6 +2076,7 @@ fn arm_move_holds(
             "armed the MOVE hold from the session's own entity positions"
         );
         runner.hold_move(actor, units);
+        positions.insert(server_id, goal);
     }
 }
 
@@ -2213,6 +2544,17 @@ mod zone_text_skew_tests {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn missing_new_zone_rects_discards_previous_zone_cache() {
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_zone_rects_zone = Some(1);
+        session.zone_rects = Some(Arc::new(Vec::new()));
+        session.ensure_zone_rects(2);
+        assert_eq!(session.loaded_zone_rects_zone, Some(2));
+        assert!(session.zone_rects.is_none());
+    }
+
     use crate::session::event_transport::contracts::NPC;
 
     /// A miniature fishing block: offsets relative to a base, mirroring the
@@ -3092,10 +3434,183 @@ pub(crate) mod tests {
             session.tick(0.2),
             Advance::Ended {
                 end_para: 0,
-                final_position: Some(final_position)
+                final_position: Some(final_position),
+                ..
             } if final_position == *position
         ));
         assert!(session.active_end().is_none());
+    }
+
+    /// A 0x26 yield-forever parks the VM with nothing that can move it: past
+    /// the dead grace the session cancels the event with the cancel EndPara
+    /// and the error line instead of pinning the player.
+    #[test]
+    fn yield_forever_stalls_and_cancels_with_the_error_line() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 9002;
+        const ZONE: u16 = 248;
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: vec![0x26],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(
+            matches!(session.begin(trigger), Begin::Waiting),
+            "the yield-forever parks the event"
+        );
+        // First tick: records the parked tuple, still within the grace.
+        assert!(matches!(session.tick(0.5), Advance::Waiting));
+        // Age the observation past STALL_GRACE_DEAD.
+        let liveness = session
+            .liveness
+            .as_mut()
+            .expect("the parked tick recorded the tuple");
+        liveness.3 =
+            std::time::Instant::now() - (STALL_GRACE_DEAD + std::time::Duration::from_secs(1));
+        // The next tick: the event cancels itself.
+        let Advance::Ended {
+            end_para, error, ..
+        } = session.tick(0.5)
+        else {
+            panic!("the stalled event must end");
+        };
+        assert_eq!(end_para, ffxi_event::EVENT_CANCELLED_END_PARA);
+        let Some(line) = error else {
+            panic!("the stall must carry the cancel line");
+        };
+        assert!(
+            line.starts_with("Cutscene error: event 9002 in zone 248 stalled at 0x26"),
+            "{line}"
+        );
+        assert!(line.contains("no opcode can advance"), "{line}");
+        assert!(line.ends_with("; cancelled."), "{line}");
+        assert!(session.active_end().is_none());
+    }
+
+    #[test]
+    fn unanswered_tag_stalls_and_cancels_with_the_error_line() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 9003;
+        const ZONE: u16 = 248;
+        const OP_SUBMAP: u8 = 0xA6;
+        for program in [vec![0x43, 0x00, 0x43, 0x01, 0x21], vec![OP_SUBMAP, 0, 0x21]] {
+            let block = ffxi_dat::event_dat::EventBlock {
+                actor: NPC,
+                event_ids: vec![EVENT],
+                event_offsets: vec![0],
+                references: vec![],
+                event_data: program,
+            };
+            let mut session = DialogSession::new(None, "Test".into());
+            session.loaded_event_zone = Some(ZONE);
+            session.loaded_string_zone = Some(ZONE);
+            session.event_dat = Some(Arc::new(EventDat {
+                blocks: vec![block],
+            }));
+            session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+            let trigger = EventTrigger {
+                event_zone: ZONE,
+                text_zone: ZONE,
+                unique_no: NPC,
+                act_index: 0,
+                event_id: EVENT,
+                params: vec![],
+                npc_name: None,
+            };
+            assert!(
+                matches!(session.begin(trigger), Begin::AwaitServerAck(_)),
+                "the send-tag parks on its s2c ack"
+            );
+            // First tick: records the parked tuple, still within the grace.
+            assert!(matches!(session.tick(0.5), Advance::Waiting));
+            // Age the observation past TAG_ACK_GRACE.
+            let liveness = session
+                .liveness
+                .as_mut()
+                .expect("the parked tick recorded the tuple");
+            liveness.3 =
+                std::time::Instant::now() - (TAG_ACK_GRACE + std::time::Duration::from_secs(1));
+            // The next tick: the event cancels itself.
+            let Advance::Ended {
+                end_para, error, ..
+            } = session.tick(0.5)
+            else {
+                panic!("the stalled event must end");
+            };
+            assert_eq!(end_para, ffxi_event::EVENT_CANCELLED_END_PARA);
+            let Some(line) = error else {
+                panic!("the stall must carry the cancel line");
+            };
+            assert!(line.contains("server did not answer"), "{line}");
+            assert!(line.ends_with("; cancelled."), "{line}");
+            assert!(session.active_end().is_none());
+        }
+    }
+
+    /// A displayed menu frame is never stale: a minute of ticks parked on it
+    /// produces no stall and no error line.
+    #[test]
+    fn displayed_menu_frame_does_not_stall() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 9004;
+        const ZONE: u16 = 248;
+        // 0x24 menu (ref0, default ref1) + QUERYWAIT + END.
+        let program = vec![0x24, 0x00, 0x80, 0x01, 0x80, 0x00, 0x00, 0x25, 0x21];
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![0, 0],
+            event_data: program,
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(
+            matches!(session.begin(trigger), Begin::Frame(_)),
+            "the menu opens on a frame"
+        );
+        for _ in 0..120 {
+            assert!(
+                matches!(session.tick(0.5), Advance::Waiting),
+                "a frame waits on the player, not a stall"
+            );
+        }
+        assert!(
+            session.active_end().is_some(),
+            "the menu is still open after a minute"
+        );
     }
 
     #[test]

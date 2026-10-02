@@ -5,7 +5,7 @@ use crate::{
     kind::ChunkKind,
     mmb::D3DCOLOR_CHANNEL_MASK,
     mzb::AreaResourceId,
-    DatError, Result,
+    DatError, DatRoot, Result,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -650,6 +650,103 @@ fn lerp_records(a: &WeatherRecord, b: &WeatherRecord, t: f32, time_minutes: u32)
         skybox_colors: sk_c,
         skybox_altitudes: sk_a,
     }
+}
+
+// FFXiMain.dll retail-2026-09 RVA 0xB84B0: byte lookup at head * 6480 + 3 * (day % 2160).
+pub const FORECAST_DAYS: u32 = 2160;
+pub const FORECAST_VALUES_PER_DAY: usize = 3;
+pub const FORECAST_BYTES_PER_HEAD: usize = FORECAST_DAYS as usize * FORECAST_VALUES_PER_DAY;
+pub const FORECAST_HEADS_LOW: usize = 100;
+pub const FORECAST_HEADS_HIGH: usize = 200;
+
+// research/XIClient/src/XIClient/source/Resource/Text/StringManager.cpp StringManager::Init.
+pub const FORECAST_HEAD_LOW_FILE: u32 = 7032;
+pub const FORECAST_DATA_LOW_FILE: u32 = 7033;
+pub const FORECAST_HEAD_HIGH_FILE: u32 = 7036;
+pub const FORECAST_DATA_HIGH_FILE: u32 = 7037;
+
+#[derive(Debug, Clone)]
+pub struct WeatherForecast {
+    head_low: [u8; FORECAST_HEADS_LOW],
+    data_low: Vec<u8>,
+    head_high: [u8; FORECAST_HEADS_HIGH],
+    data_high: Vec<u8>,
+}
+
+impl WeatherForecast {
+    /// Assemble a table from its four parts. The host builds this from
+    /// [`load_weather_forecast`]; tests build it directly with synthetic cells.
+    pub fn from_parts(
+        head_low: [u8; FORECAST_HEADS_LOW],
+        data_low: Vec<u8>,
+        head_high: [u8; FORECAST_HEADS_HIGH],
+        data_high: Vec<u8>,
+    ) -> Self {
+        Self {
+            head_low,
+            data_low,
+            head_high,
+            data_high,
+        }
+    }
+
+    /// The three forecast values 0x72 writes into `Work_Zone[2..5)` for
+    /// `region` on `day` of the 2160-day cycle
+    /// (research/XiEvents/OpCodes/0x0072.md). `None` if the region or the
+    /// derived index falls outside the shipped table.
+    pub fn values(&self, region: u32, day: u32) -> Option<[u32; 3]> {
+        let day = (day % FORECAST_DAYS) as usize;
+        let (head_table, data) = if region < FORECAST_HEADS_LOW as u32 {
+            (&self.head_low[..], &self.data_low)
+        } else {
+            (&self.head_high[..], &self.data_high)
+        };
+        let head_idx = (if region < FORECAST_HEADS_LOW as u32 {
+            region
+        } else {
+            region - FORECAST_HEADS_LOW as u32
+        }) as usize;
+        let head = *head_table.get(head_idx)? as usize;
+        let base = head * FORECAST_BYTES_PER_HEAD + FORECAST_VALUES_PER_DAY * day;
+        if base + FORECAST_VALUES_PER_DAY > data.len() {
+            return None;
+        }
+        Some(std::array::from_fn(|i| u32::from(data[base + i])))
+    }
+}
+
+/// Load the forecast table from the install's four forecast DATs (7032/7033/
+/// 7036/7037). The table is global — one copy serves every zone — so a host
+/// loads it once and shares it across the event VMs it drives.
+pub fn load_weather_forecast(root: &DatRoot) -> Result<WeatherForecast> {
+    fn read_file(root: &DatRoot, file_id: u32) -> Result<Vec<u8>> {
+        let loc = root.resolve(file_id)?;
+        let path = loc.path_under(root);
+        std::fs::read(&path).map_err(|e| DatError::Io {
+            path: path.clone(),
+            source: e,
+        })
+    }
+    let head_low = read_file(root, FORECAST_HEAD_LOW_FILE)?;
+    let head_high = read_file(root, FORECAST_HEAD_HIGH_FILE)?;
+    if head_low.len() < FORECAST_HEADS_LOW || head_high.len() < FORECAST_HEADS_HIGH {
+        return Err(DatError::Weather(format!(
+            "forecast head tables too small: {FORECAST_HEAD_LOW_FILE}={} bytes (need {}), {FORECAST_HEAD_HIGH_FILE}={} bytes (need {})",
+            head_low.len(),
+            FORECAST_HEADS_LOW,
+            head_high.len(),
+            FORECAST_HEADS_HIGH
+        )));
+    }
+    let data_low = read_file(root, FORECAST_DATA_LOW_FILE)?;
+    let data_high = read_file(root, FORECAST_DATA_HIGH_FILE)?;
+
+    Ok(WeatherForecast {
+        head_low: head_low[..FORECAST_HEADS_LOW].try_into().unwrap(),
+        data_low,
+        head_high: head_high[..FORECAST_HEADS_HIGH].try_into().unwrap(),
+        data_high,
+    })
 }
 
 #[cfg(test)]
@@ -1300,5 +1397,48 @@ mod tests {
         let sets = collect_zone_weather_sets(&buf);
         assert!(sets.by_type.is_empty());
         assert_eq!(sets.flat.len(), 1);
+    }
+
+    #[test]
+    fn forecast_uses_byte_values_and_whole_head_strides() {
+        let mut heads = [0; FORECAST_HEADS_LOW];
+        heads[0] = 2;
+        let stride = FORECAST_DAYS as usize * FORECAST_VALUES_PER_DAY;
+        let mut data = vec![0; 3 * stride];
+        data[2 * stride..2 * stride + 3].copy_from_slice(&[1, 2, 255]);
+        let forecast =
+            WeatherForecast::from_parts(heads, data, [0; FORECAST_HEADS_HIGH], Vec::new());
+        assert_eq!(forecast.values(0, 0), Some([1, 2, 255]));
+    }
+
+    fn synth_forecast() -> WeatherForecast {
+        let heads = [0; FORECAST_HEADS_LOW];
+        let data: Vec<u8> = (0..FORECAST_BYTES_PER_HEAD).map(|i| i as u8).collect();
+        WeatherForecast::from_parts(heads, data.clone(), [0; FORECAST_HEADS_HIGH], data)
+    }
+
+    #[test]
+    fn forecast_values_index_the_head_and_day() {
+        let fc = synth_forecast();
+        assert_eq!(fc.values(5, 10), Some([30, 31, 32]));
+        assert_eq!(fc.values(105, 0), Some([0, 1, 2]));
+        assert_eq!(fc.values(5, FORECAST_DAYS), fc.values(5, 0));
+        assert_eq!(fc.values(0, FORECAST_DAYS - 1), Some([77, 78, 79]));
+    }
+
+    #[test]
+    fn forecast_values_out_of_range_region_is_none() {
+        let fc = synth_forecast();
+        assert_eq!(fc.values(300, 0), None);
+    }
+
+    #[test]
+    fn real_forecast_reads_the_shipped_base_cell() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let fc = load_weather_forecast(&root).expect("forecast loads");
+        assert_eq!(fc.values(0, 0), Some([1, 2, 255]));
     }
 }

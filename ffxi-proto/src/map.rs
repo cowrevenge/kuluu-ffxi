@@ -1,3 +1,7 @@
+mod event_query_wire {
+    include!(concat!(env!("OUT_DIR"), "/event_query_wire.rs"));
+}
+
 include!(concat!(env!("OUT_DIR"), "/map_settings_table.rs"));
 
 pub const MAX_DATAGRAM: usize = 2500;
@@ -100,6 +104,9 @@ pub mod c2s {
     pub const SCENARIO_ITEM: u16 = 0x064;
 
     pub const REQ_LOGOUT: u16 = 0x0E7;
+
+    // vendor/server/src/map/packets/c2s/0x0eb_reqsubmapnum.h GP_CLI_COMMAND_REQSUBMAPNUM.
+    pub const REQSUBMAPNUM: u16 = super::event_query_wire::C2S_REQSUBMAPNUM;
 
     // GP_CLI_COMMAND_SUBMAPCHANGE, vendor/server/src/map/packets/c2s/
     // 0x0f2_submapchange.h. Sent whenever the client crosses into a different
@@ -631,6 +638,12 @@ pub mod s2c {
     // GP_SERV_COMMAND_BAZAAR_SELL, vendor/server/src/map/packets/s2c/0x109_bazaar_sell.h.
     // Another customer bought a row of the bazaar we are browsing.
     pub const BAZAAR_SELL: u16 = 0x109;
+
+    // vendor/server/src/map/packets/s2c/0x10e_reqsubmapnum.h GP_SERV_COMMAND_REQSUBMAPNUM.
+    pub const REQSUBMAPNUM: u16 = super::event_query_wire::S2C_REQSUBMAPNUM;
+
+    // vendor/server/src/map/packets/s2c/0x0bf_registration.h GP_SERV_COMMAND_REGISTRATION.
+    pub const REGISTRATION: u16 = super::event_query_wire::S2C_REGISTRATION;
 
     // GP_SERV_COMMAND_TRACKING_LIST, vendor/server/src/map/packets/s2c/0x0f4_tracking_list.h.
     // One wide-scan entry (ActIndex/Level/Type + relative x/z + sName[16]).

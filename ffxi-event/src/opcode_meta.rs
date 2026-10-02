@@ -1360,6 +1360,13 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
         // 0x0046.md: sub 2 reads a work offset (4); every other path, including
         // the render-flag-gated fall-through, advances 2.
         OP_DEFCAMERA => Some(if sub == 2 { 4 } else { 2 }),
+        // 0x0072.md: mode 0 (the forecast read) is 4 bytes, mode 1 (the value
+        // copy) is 6; an unknown mode retail spins on, so no width is encoded.
+        OP_GETWEATHER => match sub {
+            0 => Some(4),
+            1 => Some(6),
+            _ => None,
+        },
         // 0x0079.md: sub 1 is lookatone with a trailing work offset (12); sub 2
         // and the zero path are both 10.
         OP_LOOKAT => Some(if sub == 1 { 12 } else { 10 }),
@@ -1434,6 +1441,66 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             1 | 3 | 4 | 8 => Some(8),
             5 => Some(7),
             6 => Some(6),
+            _ => None,
+        },
+        // 0x00D4.md: cases 0 and 2 each run the 0x24 query helper (+1, then
+        // the helper's +7) and case 1 is a flat +8; case 3 is +6; cases 4/5
+        // are +12. An unknown case parks, so no width is encoded for it.
+        OP_MAP_QUERY => match sub {
+            0..=2 => Some(8),
+            3 => Some(6),
+            4 | 5 => Some(12),
+            _ => None,
+        },
+        // 0x00B3.md: the ranking-board cases — 0/3/4/6/7/9 are 4, case 1 is 14,
+        // case 5 is 18, cases 2/8 are 2, and retail's default arm advances 2
+        // for any other sub.
+        OP_RANKING => match sub {
+            1 => Some(14),
+            5 => Some(18),
+            0 | 3 | 4 | 6 | 7 | 9 => Some(4),
+            _ => Some(2),
+        },
+        // 0x00A7.md: case 0 arms the await and sends the tag (2), case 1
+        // writes the result (4); retail spins on any other sub, so no width is
+        // encoded for it.
+        OP_A7_WAIT => match sub {
+            0 => Some(2),
+            1 => Some(4),
+            _ => None,
+        },
+        // 0x00A6.md: cases 0/1 are the request and its poll (2 each), case 2
+        // writes the answered MapNum (4); retail spins on any other case, so
+        // no width is encoded for it.
+        OP_A6_SUBMAP => match sub {
+            0 | 1 => Some(2),
+            2 => Some(4),
+            _ => None,
+        },
+        // 0x00B2.md: mode 0 is the timed wait (4), mode 1 the delivery-mode
+        // request (2); retail returns without advancing on any other mode, so
+        // no width is encoded for it.
+        OP_B2_DELIVERY => match sub {
+            0 => Some(4),
+            1 => Some(2),
+            _ => None,
+        },
+        // 0x0087.md, 0x0088.md: the world-pass send cases (0/2) and the poll
+        // (1) are all 2 bytes; retail spins on any other case, so no width is
+        // encoded for it.
+        OP_FRIENDPASS_87 | OP_FRIENDPASS_88 => match sub {
+            0..=2 => Some(2),
+            _ => None,
+        },
+        // 0x008C.md: case 0 is 8, the poll 2, case 2 is 12, cases 3/4 are
+        // 10, case 5 is 14; retail spins on any other case, so no width is
+        // encoded for it.
+        OP_RECIPE => match sub {
+            0 => Some(8),
+            1 => Some(2),
+            2 => Some(12),
+            3 | 4 => Some(10),
+            5 => Some(14),
             _ => None,
         },
         // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
@@ -1562,6 +1629,7 @@ pub fn is_input_wait(op: u8, sub: u8) -> bool {
 }
 
 const OP_DEFCAMERA: u8 = 0x46;
+const OP_GETWEATHER: u8 = 0x72;
 const OP_LOOKAT: u8 = 0x79;
 const OP_MUSIC: u8 = 0x5C;
 const OP_MOGHOUSE_VISIT: u8 = 0xC2;
@@ -1581,6 +1649,14 @@ pub(crate) const OP_NAMESET: u8 = 0xB5;
 pub(crate) const OP_SUBSCHED: u8 = 0x5F;
 pub(crate) const OP_STRINGOPS: u8 = 0x9D;
 pub(crate) const OP_STATUSSET: u8 = 0xAC;
+pub(crate) const OP_MAP_QUERY: u8 = 0xD4;
+pub(crate) const OP_RANKING: u8 = 0xB3;
+pub(crate) const OP_A7_WAIT: u8 = 0xA7;
+pub(crate) const OP_A6_SUBMAP: u8 = 0xA6;
+pub(crate) const OP_B2_DELIVERY: u8 = 0xB2;
+pub(crate) const OP_FRIENDPASS_87: u8 = 0x87;
+pub(crate) const OP_FRIENDPASS_88: u8 = 0x88;
+pub(crate) const OP_RECIPE: u8 = 0x8C;
 
 #[cfg(test)]
 mod tests {
@@ -1635,6 +1711,52 @@ mod tests {
         assert_eq!(sub_size(0x47, 0), Some(10));
         assert_eq!(sub_size(0x47, 1), Some(2));
         assert_eq!(sub_size(0x47, 2), None);
+        // 0x00D4.md — cases 0/1/2 are 8, case 3 is 6, cases 4/5 are 12.
+        for sub in [0u8, 1, 2] {
+            assert_eq!(sub_size(0xD4, sub), Some(8), "0xD4 sub {sub}");
+        }
+        assert_eq!(sub_size(0xD4, 3), Some(6));
+        assert_eq!(sub_size(0xD4, 4), Some(12));
+        assert_eq!(sub_size(0xD4, 5), Some(12));
+        assert_eq!(sub_size(0xD4, 6), None, "undocumented case has no width");
+        // 0x00B3.md — the ranking-board widths; unlike 0xD4, an undocumented
+        // sub still advances 2 (retail's default arm).
+        for sub in [0u8, 3, 4, 6, 7, 9] {
+            assert_eq!(sub_size(0xB3, sub), Some(4), "0xB3 sub {sub}");
+        }
+        assert_eq!(sub_size(0xB3, 1), Some(14));
+        assert_eq!(sub_size(0xB3, 5), Some(18));
+        for sub in [2u8, 8, 0x0A, 0xFF] {
+            assert_eq!(sub_size(0xB3, sub), Some(2), "0xB3 sub {sub}");
+        }
+        // 0x00A7.md — the server-answer wait; an undocumented sub spins.
+        assert_eq!(sub_size(0xA7, 0), Some(2));
+        assert_eq!(sub_size(0xA7, 1), Some(4));
+        assert_eq!(sub_size(0xA7, 2), None, "undocumented sub spins");
+        // 0x00A6.md — the sub-map request; an undocumented case spins.
+        assert_eq!(sub_size(0xA6, 0), Some(2));
+        assert_eq!(sub_size(0xA6, 1), Some(2));
+        assert_eq!(sub_size(0xA6, 2), Some(4));
+        assert_eq!(sub_size(0xA6, 3), None, "undocumented case spins");
+        // 0x00B2.md — the delivery box; an undocumented mode spins.
+        assert_eq!(sub_size(0xB2, 0), Some(4));
+        assert_eq!(sub_size(0xB2, 1), Some(2));
+        assert_eq!(sub_size(0xB2, 2), None, "undocumented mode spins");
+        // 0x0087.md, 0x0088.md — the world pass; an undocumented case spins.
+        for op in [0x87u8, 0x88] {
+            for sub in 0..=2u8 {
+                assert_eq!(sub_size(op, sub), Some(2), "0x{op:02X} sub {sub}");
+            }
+            assert_eq!(sub_size(op, 3), None, "undocumented case spins");
+        }
+        // 0x008C.md — the crafting support; an undocumented case spins.
+        assert_eq!(sub_size(0x8C, 0), Some(8));
+        assert_eq!(sub_size(0x8C, 1), Some(2));
+        assert_eq!(sub_size(0x8C, 2), Some(12));
+        assert_eq!(sub_size(0x8C, 3), Some(10));
+        assert_eq!(sub_size(0x8C, 4), Some(10));
+        assert_eq!(sub_size(0x8C, 5), Some(14));
+        assert_eq!(sub_size(0x8C, 6), None, "undocumented case spins");
         // 0x0075.md — case 2's -6/+8 pair nets +2.
         assert_eq!(sub_size(0x75, 0), Some(4));
         assert_eq!(sub_size(0x75, 1), Some(2));

@@ -2,12 +2,14 @@
 //! message frames advance themselves after their read time instead of
 //! parking on Enter.
 //!
-//! Retail mechanism: an event line's stop is the 0x7F 0x31 marker in the
-//! text stream while the VM parks at MESWAIT with the box open
-//! (research/XiEvents/OpCodes/0x0023.md). The Windower addon enternity
-//! strips that marker so the box scrolls and closes by itself; kuluu's
-//! equivalent is client-side — after the read time it sends the same
-//! `EndEventChoice` Enter would send.
+//! Retail mechanism: the message box waits at the continue-prompt code that
+//! ends the entry's text stream — `7F 31/32/33/37` show the ▼ prompt and wait
+//! for a key press, `7F 34/35/36 NN` self-advance after NN seconds
+//! (research/cexi-docs/dialog/format.md, "the continue-prompt codes"). The
+//! auto-prompt frames already advance themselves on the session's clock
+//! (`DialogState::auto_advance`), so this feature is the client-side
+//! equivalent of Windower's enternity addon for the manual frames: after the
+//! read time it sends the same `EndEventChoice` Enter would send.
 //!
 //! Enternity's exceptions are kept: choice frames (the addon "will not skip
 //! choice dialog boxes"), item lines ("sentences that contain items will
@@ -55,6 +57,7 @@ const MANUAL_GUARD: Duration = Duration::from_millis(500);
 /// name, the same `get_mob_by_target('t')` the addon checks).
 pub fn eligible(d: &DialogState) -> bool {
     d.prompt.is_some()
+        && d.auto_advance.is_none()
         && !d.contains_item
         && d.choices.is_empty()
         && !d.text_entry
@@ -172,6 +175,10 @@ mod tests {
     #[test]
     fn only_plain_message_frames_are_eligible() {
         assert!(eligible(&frame("hello")));
+
+        let mut d = frame("narration");
+        d.auto_advance = Some(5);
+        assert!(!eligible(&d), "authored countdown owns timed narration");
 
         let mut d = frame("hello");
         d.choices.push("A".into());

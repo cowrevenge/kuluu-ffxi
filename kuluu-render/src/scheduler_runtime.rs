@@ -3045,6 +3045,7 @@ pub fn release_cutscene_actors(
     for e in q_hidden.iter() {
         commands.entity(e).remove::<CutsceneHidden>();
     }
+
     state.walks.clear();
     state.touched.clear();
     state.hidden.clear();
@@ -7408,6 +7409,37 @@ mod tests {
         assert_eq!(
             *app.world().get::<Visibility>(player).unwrap(),
             Visibility::Hidden
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn local_mode_cue_preserves_self_visibility() {
+        const SELF: u32 = 7;
+        let mut app = actor_cue_app();
+        let player = spawn_tracked_actor(&mut app, SELF);
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF));
+
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::Cutscene {
+                cue: CutsceneCue::LocalMode { mode: 0x20 },
+            });
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(player).is_none(),
+            "unresolved local-mode policy must not hide the actor"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(player).unwrap(),
+            Visibility::Inherited
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(
+            !state.hidden.contains(&SELF),
+            "no visibility override was acquired"
         );
     }
 

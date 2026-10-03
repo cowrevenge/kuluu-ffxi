@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 // v45: CutsceneCue::ClockHold gains `minute` and `day_from_epoch` (0xA9
 // SET_CLOCK_DATE jumps the whole date to Vana day 7*work[1] at 00:30; 0xC9
 // ENABLE_TIMER releases the hold), so the 0x77/0x78 hour-only shape now carries
-// minute 0 and no day.
+// minute 0 and no day (research/XiEvents/OpCodes/0x00A9.md, 0x00C9.md,
+// 0x0077.md, 0x0078.md).
 // v44: CutsceneCue::Transpar (0x6C) - the target's alpha fade to the authored
-// byte over the authored frame count, the first actor-colour drive on the cue channel.
+// byte over the authored frame count, the first actor-colour drive on the cue
+// channel (research/XiEvents/OpCodes/0x006C.md).
 // v43: CutsceneCue::PlayerControl (0x20) - the script's write of retail's
 // CliEventUcFlag, so an event that releases the player mid-script (the flag's 0) stops the
-// event-wide pin instead of holding it to EVENT_END.
+// event-wide pin instead of holding it to EVENT_END
+// (research/XiEvents/OpCodes/0x0020.md).
 // v42: ViewerEvent::Knockbacks - every target result of one 0x028 that landed with a
 // knockback level (GP_SERV_COMMAND_BATTLE2::pack), so the client can shove the victims when
 // the skill routine's knockback stage fires; ActionStarted.outcome carries the first
@@ -108,7 +111,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1467,6 +1470,12 @@ pub struct DialogState {
     /// manual (the addon's "sentences that contain items will not be skipped").
     #[serde(default)]
     pub contains_item: bool,
+    /// Seconds the retail message box holds this frame before dismissing it on
+    /// its own — the entry's `7F 34/35/36 NN` auto-prompt code
+    /// (research/cexi-docs/dialog/format.md); `None` waits for a key press.
+    /// The session counts it down and advances exactly like a key press.
+    #[serde(default)]
+    pub auto_advance: Option<u8>,
 }
 
 fn cancel_armed_default() -> bool {
@@ -1696,6 +1705,8 @@ pub enum CutsceneCue {
     },
     /// Take camera control away from the player, or give it back.
     CameraLock { lock: bool },
+    /// The decoded 0x38 mode word; visibility policy is unresolved.
+    LocalMode { mode: u16 },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
     /// research/XIClient ActorTelemetry::CanIMove).
@@ -2491,7 +2502,7 @@ mod tests {
 
     #[test]
     fn current_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 45;
+        const VERSION: u32 = 46;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

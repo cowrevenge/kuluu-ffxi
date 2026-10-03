@@ -188,7 +188,7 @@ pub fn dat_id_helper(param: i32) -> i32 {
 const EVENT_MOTION_BAND_1: i32 = 512;
 const EVENT_MOTION_BAND_2: i32 = 1024;
 const EVENT_MOTION_BAND_3: i32 = 2048;
-const EVENT_MOTION_BAND_4: i32 = 3072;
+pub(crate) const EVENT_MOTION_BAND_4: i32 = 3072;
 const EVENT_MOTION_BASE_0: i32 = 32104;
 const EVENT_MOTION_BASE_1: i32 = 49135;
 const EVENT_MOTION_BASE_2: i32 = 56345;
@@ -379,6 +379,8 @@ pub enum EventCue {
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// The decoded 0x38 mode word; visibility policy is unresolved.
+    LocalMode { mode: u16 },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
     /// research/XIClient ActorTelemetry::CanIMove).
@@ -402,6 +404,12 @@ pub enum EventCue {
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x5C MUSIC: set BGM slot `slot`'s song to `track` and its start volume
+    /// to `volume` (the 0x00-0x07 band starts at full, 127; the 0x80-0x87 band
+    /// starts at the authored value). The slot indexes retail's `PTR_MusicSongIds`
+    /// table, the same table the BGM slot layout reads
+    /// (research/XiEvents/OpCodes/0x005C.md).
+    MusicSong { slot: u8, track: u16, volume: u8 },
     /// 0x69/0x6A SET/CHANGE sound volume: set the named retail sound types
     /// (the `mask` bits) to `volume` over `fade_frames`
     /// (research/XiEvents/OpCodes/0x0069.md, 0x006A.md).

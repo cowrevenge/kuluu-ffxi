@@ -2,7 +2,7 @@
 //! dialog frames — the bridge the session holds across player interactions.
 
 use ffxi_dat::dmsg::{
-    StringDat, AUTO_MARKER_PREFIX, CHOICE_MARKER_PREFIX, SET_COLOR_MARKER_PREFIX,
+    DialogPrompt, StringDat, AUTO_MARKER_PREFIX, CHOICE_MARKER_PREFIX, SET_COLOR_MARKER_PREFIX,
 };
 use ffxi_dat::event_dat::EventBlock;
 
@@ -29,6 +29,12 @@ pub struct DialogFrame {
     /// the render layer substitutes `{Num:N}` with `params[N]`. Empty for a
     /// 0x32 trigger.
     pub params: Vec<i32>,
+    /// How the retail message box waits past this frame's text — the
+    /// continue-prompt code ending the entry (research/cexi-docs/dialog/
+    /// format.md). Choice frames are always [`DialogPrompt::Manual`]: a menu
+    /// is a branch the player must pick, and the zone-235 census found no
+    /// auto-prompt menu among its 560.
+    pub prompt: DialogPrompt,
 }
 
 /// Result of advancing the dialog one step. Not `Eq`: [`PendingTag::SendXzy`]
@@ -200,6 +206,27 @@ impl DialogRunner {
         self.vm.set_current_zone(zone);
     }
 
+    /// Install the install's DAT root the VM resolves motion DATs against to
+    /// read authored routine lengths; see [`EventVm::set_dat_root`]. The
+    /// session shares its `Arc<DatRoot>` across every runner it drives so the
+    /// VM reads the same install the event DAT came from.
+    pub fn set_dat_root(&mut self, root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) {
+        self.vm.set_dat_root(root);
+    }
+
+    /// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT*
+    /// hold units (1/60 s); see [`EventVm::routine_length`]. This is the event
+    /// system reading the motion DATs itself: the session no longer measures
+    /// routine lengths on the VM's behalf.
+    pub fn routine_length(
+        &mut self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        self.vm.routine_length(dat_id, tag, duration_override)
+    }
+
     /// Arm the SCHEDULOR hold the WAIT* family parks on until the renderer
     /// reports the routine finished; see [`EventVm::hold_action_pending`]. The
     /// session calls this when it publishes a SCHEDULOR motion cue, whose
@@ -295,6 +322,12 @@ impl DialogRunner {
         self.vm.wait_units_remaining()
     }
 
+    /// The remaining units of the move this event is parked on; see
+    /// [`EventVm::move_units_remaining`].
+    pub fn move_units_remaining(&self) -> f32 {
+        self.vm.move_units_remaining()
+    }
+
     /// Force-cancel the event from the host side (the liveness stall): the
     /// next step reports Cancelled, which [`Self::run`] maps to
     /// [`DialogStep::Ended`] with [`EVENT_CANCELLED_END_PARA`].
@@ -341,6 +374,9 @@ impl DialogRunner {
                         text: message_text(strings, m.message_id, &m.params),
                         choices: Vec::new(),
                         params: m.params,
+                        prompt: strings
+                            .prompt(m.message_id as usize)
+                            .unwrap_or(DialogPrompt::Manual),
                     });
                 }
                 StepResult::AwaitMessageAck => self.vm.dismiss_message(),
@@ -352,6 +388,7 @@ impl DialogRunner {
                         text,
                         choices,
                         params: c.params,
+                        prompt: DialogPrompt::Manual,
                     });
                 }
                 StepResult::Done => {
@@ -518,6 +555,66 @@ mod tests {
         ));
     }
 
+    /// A message frame carries the continue-prompt code of its entry: the
+    /// Bastok narration's `7F 34 NN` auto-advances after NN seconds, while a
+    /// `7F 31` line and a line with no prompt code wait for a key press
+    /// (research/cexi-docs/dialog/format.md).
+    #[test]
+    fn message_frames_carry_the_entry_prompt() {
+        let strings = strings_with(&[
+            b"The year is 1156.\x7f\x34\x05\x00",
+            b"Will you come with me?\x7f\x31\x00",
+            b"no prompt code at all\x00",
+        ]);
+        let data = vec![
+            OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_MESSAGE, 0x01, 0x80, OP_MESWAIT, OP_MESSAGE,
+            0x02, 0x80, OP_MESWAIT, OP_END,
+        ];
+        let mut r =
+            DialogRunner::start(&one_event_block(data, vec![0, 1, 2]), 1, 0, vec![]).unwrap();
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the auto-prompt line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Auto { seconds: 5 });
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the manual line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the prompt-less line should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        assert!(matches!(
+            r.advance(None, &strings),
+            DialogStep::Ended { .. }
+        ));
+    }
+
+    /// A choice frame is a branch the player must pick: even when the menu
+    /// entry carries an auto-prompt code, the frame waits manually (the
+    /// zone-235 census found no auto-prompt menu among its 560).
+    #[test]
+    fn choice_frames_wait_manually_even_with_an_auto_prompt_entry() {
+        let strings = strings_with(&[b"Choose?\x0bYes\x07No\x7f\x34\x05\x00"]);
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT,
+            OP_END,
+        ];
+        let mut r = DialogRunner::start(&one_event_block(data, vec![0, 0]), 1, 0, vec![]).unwrap();
+        let DialogStep::Frame(frame) = r.advance(None, &strings) else {
+            panic!("the menu should be a frame");
+        };
+        assert_eq!(frame.prompt, DialogPrompt::Manual);
+        assert_eq!(frame.choices, vec!["Yes".to_string(), "No".to_string()]);
+    }
+
     /// A scene that opens on a fade: `advance` yields `Waiting`, the host
     /// clock carries it to the frame, and the player's answer ends it. Pins
     /// the runner plumbing between [`EventVm::tick`] and the session.
@@ -663,6 +760,26 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
         buf.extend_from_slice(&(4u32 ^ ffxi_dat::dmsg::OFFSET_XOR).to_le_bytes());
+        StringDat::parse(&buf).expect("synthetic DialogTable")
+    }
+
+    /// A synthetic DialogTable with per-entry plain text bytes, same header
+    /// layout as [`empty_strings`] plus the text XOR 0x80.
+    fn strings_with(entries: &[&[u8]]) -> StringDat {
+        const DMSG_MAGIC_BASE: u32 = 0x1000_0000;
+        const DMSG_TEXT_XOR: u8 = 0x80;
+        let table_size = 4 * entries.len();
+        let data_len = table_size as u32 + entries.iter().map(|e| e.len() as u32).sum::<u32>();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
+        let mut running = table_size as u32;
+        for e in entries {
+            buf.extend_from_slice(&((running ^ ffxi_dat::dmsg::OFFSET_XOR).to_le_bytes()));
+            running += e.len() as u32;
+        }
+        for e in entries {
+            buf.extend(e.iter().map(|b| b ^ DMSG_TEXT_XOR));
+        }
         StringDat::parse(&buf).expect("synthetic DialogTable")
     }
 
@@ -1026,5 +1143,208 @@ mod tests {
             }),
             "the rental ducks the music: {cues:#?}"
         );
+    }
+
+    /// The Upper Jeuno rental (Mairee, event 10002) with a live scene: the
+    /// player walks the authored approach to the chocobo and the mount cue
+    /// fires. A y/z slip between the session and the scene turns that
+    /// four-yalm walk into a hundred-yalm jog, so the final position is
+    /// pinned to the authored goal.
+    #[test]
+    fn upper_jeuno_rental_walks_the_authored_approach() {
+        let Some(root) = install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const ZONE: u16 = 244;
+        const EVENT: u16 = 10002;
+        const MAIREE: u32 = 0x010F_4048;
+
+        let eloc = root
+            .resolve(ffxi_dat::event_locate::event_dat_file_id(ZONE))
+            .expect("resolve event DAT");
+        let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
+            .expect("parse event dat");
+        let sfid = ffxi_dat::zone_dat::string_dat_file_id(ZONE);
+        let sloc = root.resolve(sfid).expect("resolve string dat");
+        let strings =
+            StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
+                .expect("parse string dat");
+
+        let block = edat.block_for_actor(MAIREE).expect("mairee block");
+        let mut runner =
+            DialogRunner::start(block, EVENT, 0, vec![160, 10000, 0]).expect("rental event 10002");
+        // Mairee stands at wire (-56.308, 109.080 ground, 7.999 height);
+        // the event VM is (x, y = height, z = ground), so the start position
+        // carries height in y and ground in z (event units = coords * 1000).
+        use crate::cue::STATUS_EVENT_CHOCOBO;
+        use crate::vm::scene::EventPosition;
+        let start = EventPosition {
+            x: -56308,
+            y: 7999,
+            z: 109080,
+            heading: 0,
+        };
+        runner.attach_scene(std::sync::Arc::new(edat.clone()), MAIREE, start);
+
+        const DT: f32 = 1.0 / 30.0;
+        let mut response = None;
+        let mut cues = Vec::new();
+        let mut last_player = start;
+        let mut furthest = 0.0_f32;
+        let mut ended: Option<u32> = None;
+        let mut ticks = 0u32;
+        let mut track = |p: EventPosition| {
+            let dx = (p.x - start.x) as f32;
+            let dz = (p.z - start.z) as f32;
+            furthest = furthest.max(dx.hypot(dz) / 1000.0);
+            p
+        };
+        while ended.is_none() && ticks < 6000 {
+            let step = runner.advance(response.take(), &strings);
+            cues.extend(runner.take_cues());
+            for action in runner.take_scene_actions() {
+                if let crate::vm::scene::SceneAction::PlayerPosition(p) = action {
+                    last_player = track(p);
+                }
+            }
+            match step {
+                DialogStep::Frame(f) => {
+                    response = if f.choices.is_empty() { None } else { Some(0) };
+                    ticks += 1;
+                }
+                DialogStep::Ended { end_para } => {
+                    ended = Some(end_para);
+                }
+                DialogStep::Stopped(op) => {
+                    panic!("event 10002 stopped on opcode 0x{op:02X}");
+                }
+                DialogStep::Waiting => {
+                    ticks += 1;
+                    let step = runner.tick(DT, &strings);
+                    cues.extend(runner.take_cues());
+                    for action in runner.take_scene_actions() {
+                        if let crate::vm::scene::SceneAction::PlayerPosition(p) = action {
+                            last_player = track(p);
+                        }
+                    }
+                    match step {
+                        DialogStep::Frame(f) => {
+                            response = if f.choices.is_empty() { None } else { Some(0) };
+                        }
+                        DialogStep::Ended { end_para } => {
+                            ended = Some(end_para);
+                        }
+                        DialogStep::Stopped(op) => {
+                            panic!("event 10002 stopped on opcode 0x{op:02X}");
+                        }
+                        DialogStep::Waiting => {}
+                        DialogStep::AwaitServerAck(_) => {
+                            let _ = runner.ack_server(&strings);
+                        }
+                    }
+                }
+                DialogStep::AwaitServerAck(_) => {
+                    let _ = runner.ack_server(&strings);
+                }
+            }
+        }
+        assert!(
+            ended.is_some(),
+            "event 10002 did not end within {ticks} ticks"
+        );
+        assert_eq!(
+            ended,
+            Some(0),
+            "the rental's \"yes\" choice must end with EndPara 0"
+        );
+        assert!(
+            cues.iter().any(|c| matches!(
+                c,
+                EventCue::Mount {
+                    target: ActorLookup(ZONE_PLAYER_ACTOR),
+                    status_event: STATUS_EVENT_CHOCOBO,
+                    mount_id: None
+                }
+            )),
+            "the rental must mount the player: {cues:#?}"
+        );
+        // The authored end of the rental: the mount position the tag-24
+        // program writes after the SMOVE approach to the chocobo (the player
+        // block's refs 415..417, right after the SMOVE goal's 412..414).
+        let goal = EventPosition {
+            x: -72299,
+            y: 7999,
+            z: 120506,
+            heading: 0,
+        };
+        let dx = (last_player.x - goal.x) as f32;
+        let dz = (last_player.z - goal.z) as f32;
+        assert!(
+            dx.hypot(dz) < 100.0,
+            "the player must finish at the authored mount position, got {:?}",
+            last_player
+        );
+        assert!(
+            furthest < 25.0,
+            "the rental is a short approach to the stable, the player wandered {furthest} yalms"
+        );
+    }
+
+    /// The event system reads the motion DATs itself: the authored routine
+    /// lengths of the rental cutscene's scheduler chunks as this install lays
+    /// them out, the 0x45 duration-operand semantics (0/1 play the authored
+    /// timing, anything else IS the total frame count), and the fall-through
+    /// on a tag or file the install does not carry. Self-skips without an
+    /// install. research/XiEvents/OpCodes/0x0045.md
+    #[test]
+    fn routine_length_reads_the_authored_end_frame_from_the_install() {
+        use crate::cue::SCHEDULER_FADE_DAT_ID;
+
+        let Some(root) = install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: 1,
+            event_ids: vec![7],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: vec![0x21], // END
+        };
+        let mut runner = DialogRunner::start(&block, 7, 0, vec![]).expect("END block");
+        runner.set_dat_root(Some(std::sync::Arc::new(root)));
+
+        // The rental's motion DATs and the frame counts their schedulers
+        // author (the 0x45 cues of zone 230's rental, event 599).
+        for (dat_id, tag, frames) in [
+            (30_834u32, *b"s082", 5u32),
+            (30_834, *b"s026", 180),
+            (30_906, *b"c00i", 60),
+            (SCHEDULER_FADE_DAT_ID, *b"fdo1", 60),
+            (SCHEDULER_FADE_DAT_ID, *b"fdi0", 30),
+            (SCHEDULER_FADE_DAT_ID, *b"fdo0", 30),
+            (30_905, *b"chco", 40),
+        ] {
+            assert_eq!(
+                runner.routine_length(dat_id, tag, 0),
+                Some(frames),
+                "dat {dat_id} tag {tag:?}"
+            );
+            assert_eq!(
+                runner.routine_length(dat_id, tag, 1),
+                Some(frames),
+                "duration 1 also plays the authored timing: dat {dat_id} tag {tag:?}"
+            );
+        }
+
+        // A duration operand past 1 IS the total frame count the host
+        // overrides; it does not re-measure the routine.
+        assert_eq!(runner.routine_length(30_834, *b"s082", 120), Some(120));
+
+        // A tag no scheduler in the file carries, and a file id the install
+        // does not carry, measure nothing: the WAIT* hold falls through.
+        assert_eq!(runner.routine_length(30_834, *b"zzzz", 0), None);
+        assert_eq!(runner.routine_length(0xDEAD_0001, *b"s082", 0), None);
     }
 }

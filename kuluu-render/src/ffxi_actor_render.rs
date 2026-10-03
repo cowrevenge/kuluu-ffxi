@@ -3832,7 +3832,10 @@ pub fn finish_actor_reveal(
         for child in children {
             if let Ok((opaque, mut material)) = materials.get_mut(*child) {
                 material.0 = opaque.0.clone();
-                commands.entity(*child).remove::<ActorFadeMaterial>();
+                // A zone change despawns these children in the same frame the
+                // fade finishes (scene.rs sync_entities_system); a removal on
+                // a gone entity is nothing to warn about.
+                commands.entity(*child).try_remove::<ActorFadeMaterial>();
             }
         }
     }

@@ -182,6 +182,11 @@ const OP_MESSAGE_UNNAMED_ACTOR: u8 = 0x49;
 const OP_MESSAGE_ACTOR_PAIR: u8 = 0xB0;
 const OP_EXECEND: u8 = 0x21;
 const OP_EVENT_HIDE_SELF: u8 = 0x22;
+const OP_LOCAL_MODE: u8 = 0x38;
+// 0x0038's operand high byte and the bit the handler forces into it
+// (research/XiEvents/OpCodes/0x0038.md).
+const LOCAL_MODE_BYTE_MASK: i32 = 0xFF;
+const LOCAL_MODE_FORCED_BIT: u16 = 0x20;
 pub(crate) const OP_MESWAIT: u8 = 0x23;
 // 0x42 clears CliEventCancelSetData/CliEventCancelFlag and 0x2E sets them:
 // whether ESC may cancel this event. Cutscenes that lock you in disarm it in
@@ -234,6 +239,20 @@ const OP_LOCAL_PLAYER_SCHEDULER: u8 = 0x7D;
 const OP_MAIN_SPEED: u8 = 0x32;
 // research/XiEvents/OpCodes/0x0031.md CodeSMOVE requires player movement and MoveTime support.
 const OP_SMOVE: u8 = 0x31;
+// 0xDA: a batch motion loader beyond the 0x00..=0xD9 meta range. A 6-byte
+// header followed by 28-byte records, each naming (actor1, actor2, key);
+// the VM emits one ActorMotion cue per record and advances past them all.
+// Single-site in the retail corpus (zone 112 event 68), so the layout is
+// pinned by that block's bytes, not a doc.
+const OP_DA: u8 = 0xDA;
+// 0xDA record geometry: 6-byte header, then 28-byte records; within a record
+// actor1 is the u32 at +8, actor2 at +12, the key 4cc at +16.
+const OP_DA_HEADER: usize = 6;
+const OP_DA_RECORD: usize = 28;
+const OP_DA_ACTOR1: usize = 8;
+const OP_DA_ACTOR2: usize = 12;
+const OP_DA_KEY: usize = 16;
+const OP_DA_MAX_RECORDS: usize = 64;
 // 0x72 GETWEATHER: read the global forecast table into Work_Zone[2..5).
 // Sub-byte: mode 0 is 4 bytes, mode 1 is 6 (research/XiEvents/OpCodes/0x0072.md).
 const OP_GETWEATHER: u8 = 0x72;
@@ -283,6 +302,7 @@ const OP_HIDE_HUD: u8 = 0x67;
 const OP_SHOW_HUD: u8 = 0x68;
 const OP_STOP_CLOCK: u8 = 0x77;
 const OP_RESTORE_CLOCK: u8 = 0x78;
+const OP_MUSIC: u8 = 0x5C;
 const OP_MUSICVOLUME: u8 = 0x5D;
 const OP_SET_SOUND_VOLUME: u8 = 0x69;
 const OP_CHANGE_SOUND_VOLUME: u8 = 0x6A;
@@ -484,6 +504,14 @@ const EVENTHIDE_FLAG_MASK: u8 = 1;
 const EVENTHIDE_TARGET_OFS: usize = 2;
 const MUSICVOLUME_LEVEL_OFS: usize = 1; // 0x005D
 const MUSICVOLUME_FADE_OFS: usize = 3;
+// 0x005C: the low band (0x00-0x07) is 4 bytes, the 0x80-0x87 and 0xA0/0xA1
+// bands are 6; the song id is the +2 work selector in both song bands
+// (research/XiEvents/OpCodes/0x005C.md).
+const MUSIC_SONG_TRACK_OFS: usize = 2;
+const MUSIC_SONG_VOLUME_OFS: usize = 4;
+// 0x005C's 0x80-0x87 band: the slot is the sub-byte's low three bits
+// (research/XiEvents/OpCodes/0x005C.md).
+const MUSIC_SONG_SLOT_MASK: u8 = 0x07;
 /// 0x77's hour operand (research/XiEvents/OpCodes/0x0077.md); its weather
 /// half is server-driven here, so it has no cue.
 const STOP_CLOCK_HOUR_OFS: usize = 1;
@@ -576,6 +604,13 @@ pub struct EventVm {
     /// 0x00B4.md).
     pending_strings: [[u8; 16]; 4],
     work_zone: SharedWorkZone,
+    /// The local player's position, one shared cell across every VM in the
+    /// event: retail keeps a single position for the zone block's entity, and
+    /// every VM that walks or reads the local player references it
+    /// (research/XiEvents/Event VM Functions.md). Set on the zone block's
+    /// scene and shared to owner and request children, so a walk child starts
+    /// from the snapped position rather than a sibling's zeroed scene.
+    shared_player: Option<std::sync::Arc<std::sync::Mutex<scene::EventPosition>>>,
     exec_pointer: usize,
     jump_table: [u16; JUMP_STACK_LEN],
     jump_index: usize,
@@ -684,6 +719,20 @@ pub struct EventVm {
     /// [`Self::set_current_zone`] before driving
     /// (research/XiEvents/OpCodes/0x00D4.md).
     current_zone: i32,
+    /// The install's DAT root the VM resolves motion DATs against to read the
+    /// authored routine lengths its WAIT* holds wait out: retail times those
+    /// holds off the routine still running on the actor, and the routine's
+    /// authored length is the one number the DATs pin down. Injected by the
+    /// host via [`Self::set_dat_root`]; `None` in a host that never injects it,
+    /// where [`Self::routine_length`] returns nothing and the WAIT* hold falls
+    /// through instead of holding on a guessed length.
+    dat_root: Option<Arc<ffxi_dat::DatRoot>>,
+    /// Authored routine lengths keyed by `(dat_id, tag, duration_override)`,
+    /// misses included so a re-issued routine does not re-read its file. The
+    /// `duration_override` is part of the key: the 0x45 operand 0/1 means
+    /// "play the authored timing" while any other value IS the total frame
+    /// count, so the same `(dat_id, tag)` can measure two different lengths.
+    routine_lengths: std::collections::HashMap<(u32, FourCc, u16), Option<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -838,6 +887,7 @@ impl EventVm {
             work_local_str: [[0u8; 16]; WORK_LOCAL_LEN],
             pending_strings: [[0u8; 16]; 4],
             work_zone,
+            shared_player: None,
             exec_pointer,
             jump_table: [0; JUMP_STACK_LEN],
             jump_index: 0,
@@ -870,6 +920,8 @@ impl EventVm {
             weather_forecast: None,
             zone_rects: Arc::new(Vec::new()),
             current_zone: 0,
+            dat_root: None,
+            routine_lengths: std::collections::HashMap::new(),
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -948,6 +1000,21 @@ impl EventVm {
     /// 0 when no wait is held: the host's liveness check watches it move.
     pub fn wait_units_remaining(&self) -> f32 {
         self.wait.as_ref().map_or(0.0, |w| w.remaining_units)
+    }
+
+    /// The remaining units (1/60 s, the [`Self::tick`] clock) of a move this
+    /// VM or one of its descendants is parked on, 0 when no move is running:
+    /// the host's liveness check watches it move the way it watches the timed
+    /// wait's. A scene-latched player walk and a host-armed move hold both
+    /// count (research/XiEvents/OpCodes/0x001F.md: case 1 holds while the
+    /// move still has frames left).
+    pub fn move_units_remaining(&self) -> f32 {
+        let holds = self
+            .move_holds
+            .iter()
+            .map(|h| h.remaining_units)
+            .fold(0.0f32, f32::max);
+        self.scene_move_units().max(holds)
     }
 
     /// Why the VM is not advancing right now, for the host's liveness check:
@@ -1136,6 +1203,128 @@ impl EventVm {
         self.current_zone = zone;
         let mut land = |child: &mut EventVm| child.set_current_zone(zone);
         self.for_each_child_vm(&mut land);
+    }
+
+    /// Install the install's DAT root the VM resolves motion DATs against to
+    /// read authored routine lengths ([`Self::routine_length`]). The host loads
+    /// it once and shares the same `Arc` across every VM it drives, so the root
+    /// is read, not copied, per event. Child VMs inherit it, so a REQSET child
+    /// reads the same install as its master. A host that never injects a root
+    /// leaves the default `None`, where [`Self::routine_length`] returns nothing
+    /// and the WAIT* holds fall through instead of holding on a guessed length.
+    pub fn set_dat_root(&mut self, root: Option<Arc<ffxi_dat::DatRoot>>) {
+        self.dat_root = root.clone();
+        let mut land = |child: &mut EventVm| child.set_dat_root(root.clone());
+        self.for_each_child_vm(&mut land);
+    }
+
+    /// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT*
+    /// hold units (1/60 s each; the routine clock and the VM's wait clock are
+    /// both 60 fps): the routine's `end_frame`, the half-open bound at which
+    /// its effects finish. `duration_override` is the 0x45 operand: 0 or 1
+    /// means play the authored timing, anything else IS the total frame count
+    /// (research/XiEvents/OpCodes/0x0045.md). Cached per
+    /// `(dat_id, tag, duration_override)` with misses included, so a re-issued
+    /// routine does not re-read its file. `None` when the host injected no DAT
+    /// root, the file id does not resolve, the file or its scheduler chunk is
+    /// unreadable, or the tag is absent — the caller's WAIT* hold then falls
+    /// through instead of holding on a guessed length.
+    pub fn routine_length(
+        &mut self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        let key = (dat_id, tag, duration_override);
+        let units = match self.routine_lengths.get(&key) {
+            Some(&units) => units,
+            None => {
+                let units = self.routine_length_uncached(dat_id, tag, duration_override);
+                self.routine_lengths.insert(key, units);
+                units
+            }
+        };
+        if let Some(units) = units {
+            tracing::debug!(
+                dat_id,
+                tag = %String::from_utf8_lossy(&tag),
+                units,
+                "read the DAT-authored routine length the WAIT* hold arms from"
+            );
+        }
+        units
+    }
+
+    /// The uncached half of [`Self::routine_length`]: resolve `dat_id` under the
+    /// injected root, read the file, find the scheduler chunk named `tag`, and
+    /// measure its authored length. `None` on any miss, logged so a WAIT* hold
+    /// that falls through to its deadline names the reason.
+    fn routine_length_uncached(
+        &self,
+        dat_id: u32,
+        tag: FourCc,
+        duration_override: u16,
+    ) -> Option<u32> {
+        let root = self.dat_root.as_deref()?;
+        let loc = match root.resolve(dat_id) {
+            Ok(loc) => loc,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    error = %e,
+                    "failed to resolve the motion DAT; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        let path = loc.path_under(root);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read the motion DAT; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        let chunk = ffxi_dat::chunk::walk(&bytes).find_map(|c| match c {
+            Ok(c) if c.kind == ffxi_dat::kind::ChunkKind::Scheduler as u8 && c.name == tag => {
+                Some(c)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    error = %e,
+                    "truncated chunk while scanning the motion DAT"
+                );
+                None
+            }
+        })?;
+        let scheduler = match ffxi_dat::scheduler::Scheduler::parse(chunk.name, chunk.data) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    dat_id,
+                    tag = %String::from_utf8_lossy(&tag),
+                    error = %e,
+                    "failed to parse the scheduler chunk; the WAIT* hold falls through"
+                );
+                return None;
+            }
+        };
+        // 0 and 1 both mean "play the authored timing" (the 0x45 duration
+        // operand); anything else is the total frame count the host overrides.
+        Some(if duration_override <= 1 {
+            scheduler.end_frame()
+        } else {
+            u32::from(duration_override)
+        })
     }
 
     /// 0x82's hit test: whether the event entity's tracked position falls inside
@@ -1518,6 +1707,17 @@ impl EventVm {
                     self.cues.push(EventCue::ActorHide {
                         target: ActorLookup::EVENT_ENTITY,
                         hide: self.byte_at(EVENTHIDE_FLAG_OFS) & EVENTHIDE_FLAG_MASK != 0,
+                    });
+                    self.advance(op);
+                }
+                // The handler writes the operand's high byte with 0x20 forced
+                // into CliEventModeLocal's lower word; retail's Ailevia tour
+                // stores 0x2003, which applies as 0x20
+                // (research/XiEvents/OpCodes/0x0038.md).
+                OP_LOCAL_MODE => {
+                    let val = self.getworkofs(1, 0);
+                    self.cues.push(EventCue::LocalMode {
+                        mode: ((val >> 8) & LOCAL_MODE_BYTE_MASK) as u16 | LOCAL_MODE_FORCED_BIT,
                     });
                     self.advance(op);
                 }
@@ -1985,6 +2185,31 @@ impl EventVm {
                     });
                     self.advance(op);
                 }
+                // 0xDA: a batch motion loader (see the constant). Scan the
+                // 28-byte records and emit one ActorMotion cue per record that
+                // carries a printable 4cc key; stop at the first record whose
+                // key field is not a 4cc, so the advance lands on the next real
+                // instruction. Single-site in the corpus, so the record count
+                // comes from the scan, not a header count.
+                OP_DA => {
+                    let mut n = 0;
+                    while n < OP_DA_MAX_RECORDS {
+                        let rec = OP_DA_HEADER + n * OP_DA_RECORD;
+                        let key = self.fourcc_at(rec + OP_DA_KEY);
+                        if !key.iter().all(|&b| b != 0 && (0x20..=0x7e).contains(&b)) {
+                            break;
+                        }
+                        let actor1 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR1));
+                        let actor2 = ActorLookup(self.eventgetcode2(rec + OP_DA_ACTOR2));
+                        self.cues.push(EventCue::ActorMotion {
+                            actor1,
+                            actor2,
+                            key,
+                        });
+                        n += 1;
+                    }
+                    self.exec_pointer += OP_DA_HEADER + n * OP_DA_RECORD;
+                }
                 OP_LOADEVENTSCHEDULER2 => {
                     let file = dat_id_helper(self.getworkofs(LOADEVENTSCHEDULER2_FILE_OFS, 0));
                     let actor1 = ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR1_OFS));
@@ -2368,6 +2593,45 @@ impl EventVm {
                         day_from_epoch: None,
                     });
                     self.advance(op);
+                }
+                // 0x5C MUSIC: the low band (0x00-0x07) sets BGM slot `sub`'s
+                // song to the +2 work selector and starts it at full volume;
+                // the 0x80-0x87 band does the same for slot `sub & 7` at the
+                // +4 start volume; 0xA0/0xA1 ease the playing track to the +2
+                // volume over the +4 frames, the 0x5D shape
+                // (research/XiEvents/OpCodes/0x005C.md).
+                OP_MUSIC => {
+                    let sub = self.byte_at(1);
+                    match sub {
+                        0x00..=0x07 => {
+                            self.cues.push(EventCue::MusicSong {
+                                slot: sub,
+                                track: self.getworkofs(MUSIC_SONG_TRACK_OFS, 0) as u16,
+                                volume: MUSIC_VOLUME_MAX,
+                            });
+                            self.exec_pointer += 4;
+                        }
+                        0x80..=0x87 => {
+                            self.cues.push(EventCue::MusicSong {
+                                slot: sub & MUSIC_SONG_SLOT_MASK,
+                                track: self.getworkofs(MUSIC_SONG_TRACK_OFS, 0) as u16,
+                                volume: self.getworkofs(MUSIC_SONG_VOLUME_OFS, 0).clamp(0, 255)
+                                    as u8,
+                            });
+                            self.exec_pointer += 6;
+                        }
+                        0xA0 | 0xA1 => {
+                            self.cues.push(EventCue::MusicVolume {
+                                volume: self
+                                    .getworkofs(MUSIC_SONG_TRACK_OFS, 0)
+                                    .clamp(0, MUSIC_VOLUME_MAX as i32)
+                                    as u8,
+                                fade_frames: self.getworkofs(MUSIC_SONG_VOLUME_OFS, 0) as u16,
+                            });
+                            self.exec_pointer += 6;
+                        }
+                        _ => return StepResult::Unimplemented(op),
+                    }
                 }
                 OP_MUSICVOLUME => {
                     self.cues.push(EventCue::MusicVolume {
@@ -5157,9 +5421,9 @@ mod tests {
     }
 
     use crate::cue::{
-        ExtSchedulerMotion, FourCc, TpcMotionPackages, LOOKUP_TARGET_INDEX_MASK,
-        SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
-        SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
+        ExtSchedulerMotion, FourCc, TpcMotionPackages, EVENT_MOTION_BAND_4,
+        LOOKUP_TARGET_INDEX_MASK, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+        SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
     };
 
     /// Run one choreography opcode (padded to its documented width) to END and
@@ -6089,6 +6353,25 @@ mod tests {
         assert!(cues_of(OP_DEFCAMERA, &[2, 0x0A, 0x00], vec![]).is_empty());
     }
 
+    /// 0x38 writes the operand's high byte with 0x20 forced: retail's Ailevia
+    /// tour stores 0x2003, which applies as 0x20, as does the 0x0013 default
+    /// that covers most of the retail corpus
+    /// (research/XiEvents/OpCodes/0x0038.md).
+    #[test]
+    fn local_mode_opcode_carries_the_high_byte_with_the_cinematic_bit() {
+        for (stored, applied) in [
+            (0x2003u32, 0x20u16),
+            (0x0013, 0x20),
+            (0x0413, 0x24),
+            (0, 0x20),
+        ] {
+            assert_eq!(
+                cues_of(OP_LOCAL_MODE, &[0x01, 0x80], vec![0, stored]),
+                [EventCue::LocalMode { mode: applied }]
+            );
+        }
+    }
+
     /// 0x20 writes retail's CliEventUcFlag: any nonzero byte locks the
     /// player, zero releases it (research/XiEvents/OpCodes/0x0020.md).
     #[test]
@@ -6124,6 +6407,40 @@ mod tests {
             [EventCue::MusicVolume {
                 volume: MUSIC_VOLUME_MAX,
                 fade_frames: 0,
+            }]
+        );
+    }
+
+    /// 0x5C's low band sets the BGM slot's song from the +2 work selector and
+    /// starts it at full volume; the 0x80 band names the slot in its high
+    /// nibble and carries the start volume at +4; 0xA0/0xA1 ride 0x5D's shape
+    /// (research/XiEvents/OpCodes/0x005C.md).
+    #[test]
+    fn music_opcode_sets_the_slot_song_and_start_volume() {
+        let low = [0x00u8, 0x01, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &low, vec![0, 101]),
+            [EventCue::MusicSong {
+                slot: 0,
+                track: 101,
+                volume: MUSIC_VOLUME_MAX
+            }]
+        );
+        let vol = [0x83u8, 0x01, 0x80, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &vol, vec![0, 99, 40]),
+            [EventCue::MusicSong {
+                slot: 3,
+                track: 99,
+                volume: 40
+            }]
+        );
+        let fade = [0xA0u8, 0x01, 0x80, 0x02, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSIC, &fade, vec![0, 32, 60]),
+            [EventCue::MusicVolume {
+                volume: 32,
+                fade_frames: 60
             }]
         );
     }
@@ -7256,6 +7573,46 @@ mod tests {
         );
     }
 
+    /// 0xDA: the single retail site (zone 112 event 68) is a 6-byte header and
+    /// six 28-byte records, each naming (event entity, event entity, "senN").
+    /// The VM emits one ActorMotion cue per record and advances past all of
+    /// them, landing on the next real instruction.
+    #[test]
+    fn da_batch_motion_loader_emits_one_cue_per_record_and_advances_past_them() {
+        let actor = 0x7FFFFFF8u32.to_le_bytes();
+        let mut data = vec![0xDA, 0x0C, 0x00, 0x02, 0x0C, 0x00];
+        for i in 0..6u8 {
+            let mut rec = [0u8; 28];
+            rec[8..12].copy_from_slice(&actor);
+            rec[12..16].copy_from_slice(&actor);
+            rec[16..20].copy_from_slice(&[b's', b'e', b'n', b'0' + i]);
+            data.extend_from_slice(&rec);
+        }
+        // The scan must stop at the first record whose key is not a printable
+        // 4cc: this one's key field is 0x80 0x27 0x10 0xF0.
+        let mut term = [0u8; 28];
+        term[16..20].copy_from_slice(&[0x80, 0x27, 0x10, 0xF0]);
+        data.extend_from_slice(&term);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        let cues = e.take_cues();
+        assert_eq!(cues.len(), 6, "six records, six cues");
+        for (i, cue) in cues.iter().enumerate() {
+            match cue {
+                EventCue::ActorMotion {
+                    actor1,
+                    actor2,
+                    key,
+                } => {
+                    assert_eq!(*actor1, ActorLookup::EVENT_ENTITY);
+                    assert_eq!(*actor2, ActorLookup::EVENT_ENTITY);
+                    assert_eq!(*key, [b's', b'e', b'n', b'0' + i as u8]);
+                }
+                other => panic!("expected ActorMotion, got {other:?}"),
+            }
+        }
+    }
+
     /// setworkstrofs refuses both stores: a References-flagged operand is
     /// read-only, and the write bound is slot 64 even though the int view runs
     /// to 80 (research/XiEvents/Event VM Functions.md).
@@ -7274,5 +7631,244 @@ mod tests {
                 "dest 0x{dest:04X} must not store"
             );
         }
+    }
+
+    /// Copy event params 0..4 into work_local 0..4 (0x03 GET_STORE, 5-byte
+    /// width): the 0x37/0x39 tests read their operands from work slots the
+    /// way the authored programs do.
+    fn store_params_to_work_local(data: &mut Vec<u8>) {
+        for i in 0..4u16 {
+            data.push(OP_GET_STORE);
+            data.extend_from_slice(&i.to_le_bytes());
+            data.extend_from_slice(&(4098u16 + i).to_le_bytes());
+        }
+    }
+
+    fn scene_player_vm(
+        data: Vec<u8>,
+        params: Vec<i32>,
+        start: crate::vm::scene::EventPosition,
+    ) -> EventVm {
+        let block = block(data, vec![]);
+        let mut e = EventVm::start(&block, 7, 5, params).unwrap();
+        e.attach_scene(
+            std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+                blocks: vec![block],
+            }),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            start,
+        );
+        e
+    }
+
+    /// 0x37 on the player: the authored position and facing become the
+    /// tracked player position at once, published as one PlayerPosition scene
+    /// action (the renderer's snap and the c2s POS ride on it); the walks
+    /// that follow start from here.
+    #[test]
+    fn set_event_pos_on_the_player_snaps_the_tracked_position() {
+        let authored = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: 1590,
+        };
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x37);
+        for i in 0..4u16 {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        data.push(OP_END);
+        let mut e = scene_player_vm(
+            data,
+            vec![authored.x, authored.z, authored.y, authored.heading],
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_scene_actions(),
+            [crate::vm::scene::SceneAction::PlayerPosition(authored)]
+        );
+        assert_eq!(e.controlled_position(), Some(authored));
+    }
+
+    /// 0x37 on the player moves the shared local-player cell every sibling VM
+    /// reads: a walk child spawned after the snap starts from the snapped
+    /// position, not its own zeroed scene
+    /// (research/XiEvents/Event VM Functions.md).
+    #[test]
+    fn set_event_pos_on_the_player_moves_the_shared_cell_a_walk_child_reads() {
+        let authored = crate::vm::scene::EventPosition {
+            x: -365_250,
+            y: -10_501,
+            z: -184_858,
+            heading: 3584,
+        };
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x37);
+        for i in 0..4u16 {
+            data.extend_from_slice(&i.to_le_bytes());
+        }
+        data.push(OP_END);
+        let mut e = scene_player_vm(
+            data,
+            vec![authored.x, authored.z, authored.y, authored.heading],
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.shared_player_position(),
+            Some(authored),
+            "the snap moves the shared cell a later walk child reads"
+        );
+    }
+
+    /// A walk child REQSET'd after a 0x37 snap starts from the snapped
+    /// position (the shared cell), not the zeroed origin its sibling owner
+    /// scene carries: the first lerp step is a small move off the snap, not a
+    /// jump from the world origin (research/XiEvents/Event VM Functions.md).
+    #[test]
+    fn a_reqset_walk_child_starts_from_the_snapped_shared_position() {
+        use crate::vm::scene::SceneAction;
+        const P: crate::vm::scene::EventPosition = crate::vm::scene::EventPosition {
+            x: -365_250,
+            y: -10_501,
+            z: -184_858,
+            heading: 3584,
+        };
+        const G: crate::vm::scene::EventPosition = crate::vm::scene::EventPosition {
+            x: -356_714,
+            y: -10_000,
+            z: -176_372,
+            heading: 0,
+        };
+        const SPEED: u32 = 13;
+        // The 0x8000 reference flag selects the block's References table.
+        let ref16 = |i: u32| ((i | 0x8000) as u16).to_le_bytes();
+        let mut event0 = vec![
+            0x37,
+            ref16(0)[0],
+            ref16(0)[1],
+            ref16(1)[0],
+            ref16(1)[1],
+            ref16(2)[0],
+            ref16(2)[1],
+            ref16(3)[0],
+            ref16(3)[1],
+        ];
+        event0.push(0x27);
+        event0.extend_from_slice(&reqset_operands(
+            0,
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            3,
+        ));
+        event0.push(OP_END);
+        let walk_offset = event0.len();
+        let walk = vec![
+            0x32,
+            ref16(4)[0],
+            ref16(4)[1],
+            0x1F,
+            0x00,
+            ref16(5)[0],
+            ref16(5)[1],
+            ref16(6)[0],
+            ref16(6)[1],
+            ref16(7)[0],
+            ref16(7)[1],
+            0x1F,
+            0x01,
+            OP_END,
+        ];
+        let mut event_data = event0;
+        event_data.extend_from_slice(&walk);
+        let block = EventBlock {
+            actor: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            event_ids: vec![0, 0, 0, 0],
+            event_offsets: vec![0, 0, 0, walk_offset as u16],
+            references: vec![
+                P.x as u32,
+                P.z as u32,
+                P.y as u32,
+                P.heading as u32,
+                SPEED,
+                G.x as u32,
+                G.z as u32,
+                G.y as u32,
+            ],
+            event_data,
+        };
+        let mut e = EventVm::start(&block, 0, 0, vec![]).expect("event 0 entry");
+        e.attach_scene(
+            std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+                blocks: vec![block],
+            }),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        // Master: 0x37 snap (shared cell -> P), REQSET (walk child starts at P), END.
+        e.step();
+        // Tick the walk child: it lerps one step off the snapped start.
+        e.tick(0.1);
+        let first = e
+            .take_scene_actions()
+            .into_iter()
+            .find_map(|a| match a {
+                SceneAction::PlayerPosition(p) => Some(p),
+                _ => None,
+            })
+            .expect("the walk publishes its position");
+        let dx = (first.x - P.x).abs();
+        let dz = (first.z - P.z).abs();
+        assert!(
+            dx < 1_000 && dz < 1_000,
+            "the walk starts at the snap ({first:?}), not the origin"
+        );
+        for _ in 0..400 {
+            e.tick(0.1);
+            e.step();
+        }
+        let final_position = e.controlled_position().expect("the child moved the player");
+        assert_eq!(
+            [final_position.x, final_position.y, final_position.z],
+            [G.x, G.y, G.z]
+        );
+        assert_eq!(e.shared_player_position(), Some(final_position));
+    }
+
+    /// 0x39 on the player: the authored facing becomes the tracked heading and
+    /// the position is republished so the rendered body turns onto it.
+    #[test]
+    fn set_facing_on_the_player_republishes_the_heading() {
+        let mut data = Vec::new();
+        store_params_to_work_local(&mut data);
+        data.push(0x39);
+        data.extend_from_slice(&3u16.to_le_bytes());
+        data.push(OP_END);
+        let start = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: 0,
+        };
+        let mut e = scene_player_vm(
+            data,
+            vec![start.x, start.z, start.y, EVENT_MOTION_BAND_4],
+            start,
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        let expected = crate::vm::scene::EventPosition {
+            x: -56_030,
+            y: 8_000,
+            z: 109_070,
+            heading: EVENT_MOTION_BAND_4,
+        };
+        assert_eq!(
+            e.take_scene_actions(),
+            [crate::vm::scene::SceneAction::PlayerPosition(expected)]
+        );
+        assert_eq!(e.controlled_position(), Some(expected));
     }
 }

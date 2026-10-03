@@ -358,8 +358,8 @@ pub fn apply_screen_fade(
 }
 
 pub fn apply_cutscene_hud_hide(mode: Res<CutsceneMode>, mut hidden: ResMut<HudHidden>) {
-    // 0x67/0x68 drive the whole-HUD flag independently of the camera (research/XiEvents/OpCodes/
-    // 0x0068.md), so an explicit show wins over the lock default.
+    // Explicit HUD state wins over the camera-lock default.
+    // research/XiEvents/OpCodes/0x0068.md
     let cutscene = match mode.hud_event {
         Some(hide) => hide,
         None => mode.camera_locked,
@@ -888,6 +888,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_mode_does_not_invent_hud_visibility() {
+        let mut app = test_app();
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 30035 });
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::LocalMode { mode: 0x20 },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(!app.world().resource::<HudHidden>().cutscene);
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::CameraLock { lock: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(app.world().resource::<HudHidden>().cutscene);
+    }
+
     fn clock_app() -> App {
         let mut app = App::new();
         app.init_resource::<Time>()
@@ -979,7 +1001,8 @@ mod tests {
         );
     }
 
-    /// 0xA9's date jump: Vana day 14 from the epoch at 00:30 is 886/1/15.
+    /// 0xA9's date jump: Vana day 14 from the epoch at 00:30 is 886/1/15
+    /// (research/XiEvents/OpCodes/0x00A9.md).
     #[test]
     fn freeze_at_day_hour_minute_lands_on_the_authored_vana_day() {
         let mut clock = VanaClock::default();
@@ -995,7 +1018,8 @@ mod tests {
     }
 
     /// A 0xA9-style cue (a day_from_epoch) drives the date jump through the
-    /// drain, not just the VanaClock method.
+    /// drain, not just the VanaClock method
+    /// (research/XiEvents/OpCodes/0x00A9.md).
     #[test]
     fn a_set_clock_date_cue_jumps_the_vana_date() {
         let mut app = clock_app();

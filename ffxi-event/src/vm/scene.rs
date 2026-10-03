@@ -4,7 +4,7 @@ use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 
 use crate::cue::EventCue;
 
-use super::{ActorLookup, EventVm, PendingTag, StepResult};
+use super::{ActorLookup, EventVm, PendingTag, StepResult, WAIT_UNITS_PER_SEC};
 
 // research/XiEvents/OpCodes/0x001F.md CodeMOVE; 0x005A.md CodeMOVE2;
 // 0x0032.md MainSpeed; 0x0047.md FUNC_XiEvent_OpCode_0x0047.
@@ -23,6 +23,7 @@ const OP_REQUEST_WAIT: u8 = 0x29;
 const OP_REQWAIT: u8 = 0x2A;
 const OP_MOVE: u8 = 0x1F;
 const OP_CODE_MOVE2: u8 = 0x5A;
+const OP_SMOVE: u8 = 0x31;
 const OP_POSITION_UPDATE: u8 = 0x47;
 const OP_SET_EVENT_POS: u8 = 0x37;
 const OP_SET_FACING: u8 = 0x39;
@@ -122,11 +123,34 @@ pub(super) struct Scene {
     dialog_child: Option<(u32, usize)>,
 }
 
+impl Scene {
+    /// The scene-latched walk's remaining units (1/60 s, the [`EventVm::tick`]
+    /// clock), 0 when no walk is latched or its speed is 0: a zero-speed walk
+    /// never arrives, and the host's liveness check reads a constant as a
+    /// stall. The lerp in [`EventVm::tick_scene`] travels
+    /// `speed * EVENT_SPEED_SCALE * EVENT_COORD_UNITS` event units per second.
+    fn motion_units_remaining(&self) -> f32 {
+        if !self.held {
+            return 0.0;
+        }
+        let Some(goal) = self.motion else { return 0.0 };
+        let dx = (goal.x - self.player.x) as f32;
+        let dz = (goal.z - self.player.z) as f32;
+        let distance = dx.hypot(dz);
+        let travel_per_sec = self.speed as f32 * EVENT_SPEED_SCALE * EVENT_COORD_UNITS;
+        if travel_per_sec <= 0.0 {
+            return 0.0;
+        }
+        distance / travel_per_sec * WAIT_UNITS_PER_SEC
+    }
+}
+
 impl EventVm {
     pub fn progress_stamp(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut state = std::collections::hash_map::DefaultHasher::new();
         self.exec_pointer.hash(&mut state);
+        self.move_units_remaining().to_bits().hash(&mut state);
         self.work_local.hash(&mut state);
         self.work_zone.lock().unwrap().hash(&mut state);
         self.wait
@@ -152,6 +176,9 @@ impl EventVm {
     }
 
     pub fn attach_scene(&mut self, dat: Arc<EventDat>, actor: u32, player: EventPosition) {
+        if self.shared_player.is_none() {
+            self.shared_player = Some(Arc::new(std::sync::Mutex::new(player)));
+        }
         self.scene = Some(Scene {
             dat,
             actor,
@@ -167,6 +194,21 @@ impl EventVm {
         });
     }
 
+    /// The local player's shared position, or None when this event carries no
+    /// zone-block scene to own it.
+    pub(super) fn shared_player_position(&self) -> Option<EventPosition> {
+        self.shared_player.as_ref().map(|p| *p.lock().unwrap())
+    }
+
+    /// Update the shared local-player cell: the zone block's 0x37/0x39 snaps
+    /// write here so every sibling VM that walks or reads the local player
+    /// sees the new position.
+    pub(super) fn set_shared_player_position(&mut self, position: EventPosition) {
+        if let Some(p) = &self.shared_player {
+            *p.lock().unwrap() = position;
+        }
+    }
+
     pub fn controls_player_position(&self) -> bool {
         self.scene.as_ref().is_some_and(|s| s.controls_position)
     }
@@ -175,14 +217,14 @@ impl EventVm {
         self.scene
             .as_ref()
             .filter(|_| self.controls_player_position())
-            .map(|scene| scene.player)
+            .map(|scene| self.shared_player_position().unwrap_or(scene.player))
     }
 
     // research/XiEvents/OpCodes/0x0082.md reads the event actor in native RID coordinates.
     pub(super) fn event_entity_rid_position(&self) -> Option<[f32; 3]> {
         let scene = self.scene.as_ref()?;
         let p = if scene.actor == ZONE_PLAYER_ACTOR {
-            scene.player
+            self.shared_player_position().unwrap_or(scene.player)
         } else {
             *self.entity_positions.get(&scene.actor)?
         };
@@ -198,6 +240,7 @@ impl EventVm {
     }
 
     pub fn acknowledge_position(&mut self, position: EventPosition) {
+        self.set_shared_player_position(position);
         if let Some(scene) = &mut self.scene {
             scene.player = position;
             if scene.pending_position {
@@ -363,6 +406,22 @@ impl EventVm {
         scene.player.y = goal.y;
         self.scene_actions
             .push(SceneAction::PlayerPosition(scene.player));
+        let position = scene.player;
+        self.set_shared_player_position(position);
+    }
+
+    /// The remaining units (1/60 s, the [`EventVm::tick`] clock) of the moves
+    /// this VM's scene tree is parked on: the scene-latched player walk plus
+    /// every descendant child's own moves. 0 when nothing is running.
+    pub(super) fn scene_move_units(&self) -> f32 {
+        let Some(scene) = &self.scene else { return 0.0 };
+        let mut max = scene.motion_units_remaining();
+        for stack in &scene.stacks {
+            for request in &stack.requests {
+                max = max.max(request.vm.move_units_remaining());
+            }
+        }
+        max
     }
 
     /// Step one child once and bubble its cues, scene actions and zone writes.
@@ -389,19 +448,14 @@ impl EventVm {
         }
         self.scene_actions.extend(vm.take_scene_actions());
         self.param_len = vm.param_len;
-        // The local player's child owns the position this scene reports: mirror
-        // its tracked position and control flag up so a finished event still
-        // carries it (research/XiEvents/OpCodes/0x0047.md). NPC children keep
-        // their own.
-        let mirror = if actor == ZONE_PLAYER_ACTOR {
-            vm.scene.as_ref().map(|s| (s.player, s.controls_position))
-        } else {
-            None
-        };
-        if let Some((player, controls)) = mirror {
-            let scene = self.scene.as_mut().unwrap();
+        let controls = vm.controls_player_position();
+        let player = (actor == ZONE_PLAYER_ACTOR)
+            .then(|| vm.scene.as_ref().map(|scene| scene.player))
+            .flatten();
+        let scene = self.scene.as_mut().unwrap();
+        scene.controls_position |= controls;
+        if let Some(player) = player {
             scene.player = player;
-            scene.controls_position |= controls;
         }
         result
     }
@@ -510,9 +564,9 @@ impl EventVm {
     /// the actor's own block. Returns false when nothing was pushed: the tag is
     /// already queued there (ReqSet returns 0), or the actor has no block or no
     /// entry at that index. A child for the local player starts from the
-    /// master's tracked position; NPC children start at zero and their
-    /// ActorMove cues carry the goal only, so the renderer walks from where
-    /// the entity stands.
+    /// shared player cell (the zone block's live position, which a 0x37 snap
+    /// may have moved); NPC children start at zero and their ActorMove cues
+    /// carry the goal only, so the renderer walks from where the entity stands.
     fn push_request(&mut self, actor: u32, priority: u8, tag: u8) -> bool {
         if self.request_queued(actor, tag) {
             return false;
@@ -539,8 +593,10 @@ impl EventVm {
             }
         };
         let dat = scene.dat.clone();
+        // A player child reads the shared cell (the zone block's live
+        // position); an NPC child keeps its own zeroed origin.
         let player = if actor == ZONE_PLAYER_ACTOR {
-            scene.player
+            self.shared_player_position().unwrap_or(scene.player)
         } else {
             EventPosition::default()
         };
@@ -556,6 +612,8 @@ impl EventVm {
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
         child.current_zone = self.current_zone;
+        child.dat_root = self.dat_root.clone();
+        child.shared_player = self.shared_player.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -599,8 +657,10 @@ impl EventVm {
         let Some(scene) = &self.scene else { return };
         let actor = block.actor;
         let dat = scene.dat.clone();
+        // A player owner reads the shared cell (the zone block's live
+        // position); an NPC owner keeps its own zeroed origin.
         let player = if actor == ZONE_PLAYER_ACTOR {
-            scene.player
+            self.shared_player_position().unwrap_or(scene.player)
         } else {
             EventPosition::default()
         };
@@ -616,6 +676,8 @@ impl EventVm {
         child.weather_forecast = self.weather_forecast.clone();
         child.zone_rects = self.zone_rects.clone();
         child.current_zone = self.current_zone;
+        child.dat_root = self.dat_root.clone();
+        child.shared_player = self.shared_player.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -735,6 +797,12 @@ impl EventVm {
             }
             OP_SPEED => {
                 let speed = self.getworkofs(1, 0);
+                // The default-arm 0x1F/0x31 move cues for non-player actors read
+                // the VM's own speed, which only this arm writes while a scene is
+                // attached; a cue that carries 0 drops its hold and the walk is
+                // skipped (research/XiEvents/OpCodes/0x0032.md: MainSpeed is the
+                // event entity's single speed).
+                self.move_speed = speed;
                 self.scene.as_mut().unwrap().speed = speed;
                 self.advance(op);
             }
@@ -743,8 +811,8 @@ impl EventVm {
                 if target.is_local_player() {
                     let p = self.scene.as_ref().unwrap().player;
                     self.setworkofs(5, p.x, 0);
-                    self.setworkofs(7, p.z, 0);
-                    self.setworkofs(9, p.y, 0);
+                    self.setworkofs(7, p.y, 0);
+                    self.setworkofs(9, p.z, 0);
                 }
                 self.advance(op);
             }
@@ -792,16 +860,59 @@ impl EventVm {
                     return Some(StepResult::Unimplemented(op));
                 }
             }
+            // 0x31 SMOVE on the player: the same scene-latched walk as 0x1F —
+            // case 0 latches the goal into the session's position lerp, case 1
+            // holds until the walk lands. The MoveTime operand is a budget the
+            // DAT sets to the walk's own duration (this CS: 90 frames against a
+            // 4.4-yalm walk at 2.7 yalms/s), so the arrival hold is the
+            // faithful wait; a budget-capped hold lets the next beat race ahead
+            // of the body (research/XiEvents/OpCodes/0x0031.md: SMOVE is 0x1F
+            // with the MoveTime control). The non-player path keeps the default
+            // arm's ActorMove cue.
+            OP_SMOVE if self.scene.as_ref().unwrap().actor == ZONE_PLAYER_ACTOR => {
+                if self.byte_at(1) == 0 {
+                    let goal = self.position_operands(2, false);
+                    self.scene.as_mut().unwrap().motion = Some(goal);
+                    self.scene.as_mut().unwrap().controls_position = true;
+                    self.exec_pointer += 10;
+                } else if self.byte_at(1) == 1 {
+                    if self.scene.as_ref().unwrap().motion.is_some() {
+                        self.scene.as_mut().unwrap().held = true;
+                        return Some(StepResult::Waiting);
+                    }
+                    self.scene.as_mut().unwrap().held = false;
+                    self.exec_pointer += 2;
+                } else {
+                    return Some(StepResult::Unimplemented(op));
+                }
+            }
             // `OP_SET_EVENT_POS` on a non-player actor: set the event entity's
-            // position (research/XiEvents/OpCodes/0x0037.md). The
-            // player-actor version keeps its width skip (the server round trip
-            // owns that path).
+            // position (research/XiEvents/OpCodes/0x0037.md).
             OP_SET_EVENT_POS if self.scene.as_ref().unwrap().actor != ZONE_PLAYER_ACTOR => {
                 let position = self.position_operands(SET_EVENT_POS_X_OFS, true);
                 self.cues.push(EventCue::ActorPlace {
                     actor: ActorLookup::EVENT_ENTITY,
                     position,
                 });
+                self.advance(op);
+            }
+            // `OP_SET_EVENT_POS` on the player: the authored position and
+            // facing become the tracked player position at once (retail's
+            // CopyAllPosEvent snaps the entity, no round-trip hold).
+            // Publishing it as a scene action snaps the rendered player and
+            // sends the c2s POS; the walks that follow start from here, and
+            // the camera routines the script loads after this opcode build
+            // their orbit around this position and facing.
+            OP_SET_EVENT_POS => {
+                let position = self.position_operands(SET_EVENT_POS_X_OFS, true);
+                // The snap moves the shared local-player cell so every sibling
+                // VM that walks or reads the local player sees it.
+                self.set_shared_player_position(position);
+                let scene = self.scene.as_mut().unwrap();
+                scene.player = position;
+                scene.controls_position = true;
+                self.scene_actions
+                    .push(SceneAction::PlayerPosition(position));
                 self.advance(op);
             }
             // `OP_SET_FACING` on a non-player actor: set the event entity's
@@ -812,6 +923,26 @@ impl EventVm {
                     actor: ActorLookup::EVENT_ENTITY,
                     heading,
                 });
+                self.advance(op);
+            }
+            // `OP_SET_FACING` on the player: the authored facing becomes the
+            // tracked heading; republish the position so the rendered body
+            // turns onto it (the body's yaw follows the snapshot heading).
+            OP_SET_FACING => {
+                let heading = self.getworkofs(SET_FACING_OFS, 0);
+                let position = self.shared_player_position();
+                let updated = {
+                    let scene = self.scene.as_mut().unwrap();
+                    scene.player = position.unwrap_or(scene.player);
+                    scene.player.heading = heading;
+                    scene.controls_position = true;
+                    scene.player
+                };
+                // The turn moves the shared cell's heading too, so a sibling
+                // VM that walks from here faces the authored direction.
+                self.set_shared_player_position(updated);
+                self.scene_actions
+                    .push(SceneAction::PlayerPosition(updated));
                 self.advance(op);
             }
             // `OP_DTURA`: turn the first named actor toward the second
@@ -917,6 +1048,7 @@ impl EventVm {
                     | OP_GET_POSITION
                     | OP_MOVE
                     | OP_CODE_MOVE2
+                    | OP_SMOVE
                     | OP_SET_EVENT_POS
                     | OP_SET_FACING
                     | OP_DTURA

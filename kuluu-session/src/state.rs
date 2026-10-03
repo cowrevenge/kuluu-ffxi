@@ -580,6 +580,13 @@ pub struct SessionState {
     #[serde(default)]
     pub self_mount_id: u8,
 
+    /// Latched when a cutscene's 0x7E mount cue arms the local player's mount
+    /// (`AgentEvent::CsMountArmed`): the cue is a client-side write the server
+    /// never sees. The override lasts only through the event or until the
+    /// server confirms the mount (vendor/server/scripts/effects/mounted.lua).
+    #[serde(default)]
+    pub cs_mount_armed: bool,
+
     /// Latched self appearance from 0x00A LOGIN / 0x051 GRAP_LIST. Ordering
     /// proof: 0x051 can land before self's entity exists, and `ZoneChanged`
     /// clears `entities`, so the last-known look is re-applied on upsert.
@@ -992,6 +999,12 @@ pub struct DialogState {
     /// manual (the addon's "sentences that contain items will not be skipped").
     #[serde(default)]
     pub contains_item: bool,
+    /// Seconds the retail message box holds this frame before dismissing it on
+    /// its own — the entry's `7F 34/35/36 NN` auto-prompt code
+    /// (research/cexi-docs/dialog/format.md); `None` waits for a key press.
+    /// The session counts it down and advances exactly like a key press.
+    #[serde(default)]
+    pub auto_advance: Option<u8>,
 }
 
 fn cancel_armed_default() -> bool {
@@ -1060,6 +1073,10 @@ pub enum CutsceneCue {
     },
     CameraLock {
         lock: bool,
+    },
+    /// The decoded 0x38 mode word; visibility policy is unresolved.
+    LocalMode {
+        mode: u16,
     },
     /// 0x20: write retail's `CliEventUcFlag`; while it holds, the player's
     /// `CanIMove` is false (research/XiEvents/OpCodes/0x0020.md,
@@ -1667,6 +1684,7 @@ impl SessionState {
                 self.auction = AuctionState::default();
                 self.self_casting = None;
                 self.self_server_status = 0;
+                self.cs_mount_armed = false;
 
                 // Wide-scan is per-zone (server rebuilds it from the new zone's
                 // entities); drop stale entries/track on any zone change or
@@ -1932,7 +1950,9 @@ impl SessionState {
                     || self.diagnostics.stage != Some(Stage::Disconnected)
                     || self.logout_countdown.is_some()
                     || self.voyage.is_some()
-                    || self.widescan != WidescanList::default();
+                    || self.widescan != WidescanList::default()
+                    || self.cs_mount_armed;
+                self.cs_mount_armed = false;
                 self.stage = Stage::Disconnected;
                 self.diagnostics.stage = Some(Stage::Disconnected);
 
@@ -2448,10 +2468,14 @@ impl SessionState {
             | AgentEvent::KeyRotated { .. }
             | AgentEvent::CutsceneStarted { .. }
             | AgentEvent::CutsceneCue { .. }
-            | AgentEvent::CutsceneEnded
             | AgentEvent::MapOpen { .. }
             | AgentEvent::MapMarkerPlaced { .. }
             | AgentEvent::MapClosed => false,
+            AgentEvent::CutsceneEnded => {
+                let changed = self.cs_mount_armed;
+                self.cs_mount_armed = false;
+                changed
+            }
             AgentEvent::EventDialog { dialog } => {
                 let changed = self.dialog.as_ref() != Some(dialog);
                 self.dialog = Some(dialog.clone());
@@ -2543,9 +2567,20 @@ impl SessionState {
                 changed
             }
             AgentEvent::SelfServerStatus { status, mount_id } => {
+                if self.cs_mount_armed && !ffxi_proto::decode::animation::is_mounted(*status) {
+                    return false;
+                }
+                self.cs_mount_armed = false;
                 let changed = self.self_server_status != *status || self.self_mount_id != *mount_id;
                 self.self_server_status = *status;
                 self.self_mount_id = *mount_id;
+                changed
+            }
+            AgentEvent::CsMountArmed { status, mount_id } => {
+                let changed = self.self_server_status != *status || self.self_mount_id != *mount_id;
+                self.self_server_status = *status;
+                self.self_mount_id = *mount_id;
+                self.cs_mount_armed = ffxi_proto::decode::animation::is_mounted(*status);
                 changed
             }
             // Machine inputs (consumed by the reactor, not the rendered projection).
@@ -3206,6 +3241,18 @@ pub enum AgentEvent {
         /// 0x037's `mount_id` — which mount, not whether one is being ridden.
         /// It rides this event because both fall out of the same packet and the
         /// pair is only meaningful read together.
+        mount_id: u8,
+    },
+
+    /// A cutscene's 0x7E mount cue armed the local player's mount on the
+    /// client. Unlike [`AgentEvent::SelfServerStatus`], this write is not a
+    /// server byte: the cue runs in the event VM and the server only learns of
+    /// the mount when its own script adds the MOUNTED effect at event finish
+    /// (vendor/server/scripts/effects/mounted.lua). Until that re-assertion
+    /// lands as a mounted 0x037 byte, non-mounted 0x037 bytes are stale and
+    /// must not clear the cue's write — see `SessionState::cs_mount_armed`.
+    CsMountArmed {
+        status: u8,
         mount_id: u8,
     },
 

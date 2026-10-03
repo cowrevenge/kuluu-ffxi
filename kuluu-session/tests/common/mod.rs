@@ -100,15 +100,27 @@ fn fixture_login_pattern() -> String {
 /// just-freed port, so a back-to-back live test gets matched to the previous
 /// run's session and its 0x00A is rejected with "Player ID mismatch"
 /// (vendor/server/src/map/packets/c2s/0x00a_login.cpp). A random high port
-/// avoids that. Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
+/// avoids that. Windows may exclude random sub-ranges of the port space from
+/// user binds (Hyper-V/WinNAT; `netsh int ipv4 show excludedportrange
+/// protocol=udp`), so each candidate is probe-bound before it is pinned.
+/// Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
 pub fn pin_unique_local_port() {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    let port = LOCAL_PORT_BASE + (nanos % LOCAL_PORT_SPAN) as u16;
-    std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
-    eprintln!("[live] pinned local UDP port {port}");
+    for offset in 0..LOCAL_PORT_SPAN {
+        let port = LOCAL_PORT_BASE + ((nanos + offset) % LOCAL_PORT_SPAN) as u16;
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
+            eprintln!("[live] pinned local UDP port {port}");
+            return;
+        }
+    }
+    panic!(
+        "no bindable local UDP port in {LOCAL_PORT_BASE}..={}",
+        LOCAL_PORT_BASE + LOCAL_PORT_SPAN as u16
+    );
 }
 
 pub struct EphemeralChar {
@@ -295,6 +307,144 @@ impl EphemeralChar {
 
         Ok(())
     }
+
+    pub async fn saved_position_and_var(&self, varname: &str) -> Result<(f32, f32, f32, i32)> {
+        let mut conn = self
+            .pool
+            .get_conn()
+            .await
+            .context("DB conn for saved state")?;
+        "SELECT pos_x, pos_y, pos_z, COALESCE((SELECT value FROM char_vars WHERE charid = ? AND varname = ?), 0) FROM chars WHERE charid = ?"
+            .with((self.charid, varname, self.charid))
+            .first(&mut conn).await.context("reading saved character state")?
+            .ok_or_else(|| anyhow!("fixture character missing"))
+    }
+
+    // vendor/server/sql/triggers.sql char_insert; vendor/server/src/map/utils/itemutils.cpp spawn.
+    pub async fn add_gil(&self, amount: u32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for gil")?;
+        "UPDATE char_inventory SET quantity = ? WHERE charid = ? AND location = 0 AND slot = 0"
+            .with((amount, self.charid))
+            .ignore(&mut conn)
+            .await
+            .context("funding the fixture currency item")?;
+        anyhow::ensure!(conn.affected_rows() == 1, "fixture currency row missing");
+        Ok(())
+    }
+
+    pub async fn prepare_warrior_at(&self, level: u8, position: [f32; 3]) -> Result<()> {
+        let mut conn = self
+            .pool
+            .get_conn()
+            .await
+            .context("DB conn for fixture placement")?;
+        "UPDATE char_jobs SET war = ? WHERE charid = ?"
+            .with((level, self.charid))
+            .ignore(&mut conn)
+            .await?;
+        "UPDATE chars SET pos_x = ?, pos_y = ?, pos_z = ?, gmlevel = 0 WHERE charid = ?"
+            .with((position[0], position[1], position[2], self.charid))
+            .ignore(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn add_key_item(&self, id: u16) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for key item")?;
+        let blob: Option<Vec<u8>> = "SELECT keyitems FROM chars WHERE charid = ?"
+            .with((self.charid,))
+            .first(&mut conn)
+            .await
+            .context("reading keyitems blob")?
+            .ok_or_else(|| anyhow!("chars row {charid} not found", charid = self.charid))?;
+        let new_blob = grant_key_item_blob(blob.unwrap_or_default(), id)?;
+        "UPDATE chars SET keyitems = ? WHERE charid = ?"
+            .with((&new_blob, self.charid))
+            .ignore(&mut conn)
+            .await
+            .context("UPDATE chars keyitems")?;
+        Ok(())
+    }
+}
+
+// vendor/server/src/common/mmo.h keyitems_table_t, keyitems_t.
+fn key_item_layout() -> (usize, usize, usize) {
+    let source = include_str!("../../../vendor/server/src/common/mmo.h");
+    let table = source
+        .split("struct keyitems_table_t")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
+    let bits: usize = table
+        .split("xi::bitset<")
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let fields = table.matches("xi::bitset<").count();
+    let tables: usize = source
+        .split("std::array<keyitems_table_t,")
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    (bits, fields, tables)
+}
+
+fn grant_key_item_blob(mut blob: Vec<u8>, id: u16) -> Result<Vec<u8>> {
+    let (bits, fields, tables) = key_item_layout();
+    let width = bits / u8::BITS as usize;
+    anyhow::ensure!(
+        usize::from(id) < bits * tables,
+        "key item outside LSB table capacity"
+    );
+    blob.resize(blob.len().max(width * fields * tables), 0);
+    // vendor/server/src/map/utils/charutils.cpp addKeyItem: ownership only.
+    let table = usize::from(id) / bits;
+    let bit = usize::from(id) % bits;
+    blob[table * fields * width + bit / u8::BITS as usize] |= 1 << (bit % u8::BITS as usize);
+    Ok(blob)
+}
+
+#[test]
+fn key_item_fixture_preserves_lsb_bitsets() {
+    const TABLE_BITS_PINNED: usize = 512;
+    const TABLE_COUNT_PINNED: usize = 8;
+    const TABLE_FIELDS_PINNED: usize = 2;
+    const KEY_ITEM_PINNED: u16 = 138;
+    assert_eq!(
+        key_item_layout(),
+        (TABLE_BITS_PINNED, TABLE_FIELDS_PINNED, TABLE_COUNT_PINNED)
+    );
+    let width = TABLE_BITS_PINNED / u8::BITS as usize;
+    let mut before = vec![0; width * TABLE_FIELDS_PINNED * TABLE_COUNT_PINNED];
+    before[width] = u8::MAX;
+    before[width * TABLE_FIELDS_PINNED] = u8::MAX;
+    let mut expected = before.clone();
+    expected[usize::from(KEY_ITEM_PINNED) / u8::BITS as usize] |=
+        1 << (u32::from(KEY_ITEM_PINNED) % u8::BITS);
+    assert_eq!(
+        grant_key_item_blob(before, KEY_ITEM_PINNED).unwrap(),
+        expected
+    );
+    let second_table_id = TABLE_BITS_PINNED as u16 + KEY_ITEM_PINNED;
+    let mut expected_second = expected.clone();
+    expected_second
+        [width * TABLE_FIELDS_PINNED + usize::from(KEY_ITEM_PINNED) / u8::BITS as usize] |=
+        1 << (u32::from(KEY_ITEM_PINNED) % u8::BITS);
+    assert_eq!(
+        grant_key_item_blob(expected, second_table_id).unwrap(),
+        expected_second
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

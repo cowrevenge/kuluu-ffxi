@@ -4498,8 +4498,7 @@ async fn keepalive_loop(
                     let dz = self_pos.pos.z - anchor.z;
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 });
-                let walked_away = !dialog_session.controls_player_position()
-                    && should_release_on_walkaway(user_driven_events, walk_dist);
+                let walked_away = should_release_on_walkaway(user_driven_events, dialog_session.controls_player_position(), walk_dist);
                 let moved_during_event = !walked_away
                     && !dialog_session.controls_player_position()
                     && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS);
@@ -4690,7 +4689,13 @@ async fn keepalive_loop(
                 let dz = self_pos.pos.z - last_emitted_pos.z;
                 let pos_delta = (dx * dx + dy * dy + dz * dz).sqrt();
                 let heading_changed = self_pos.heading != last_emitted_heading;
-                let include_pos = self_pos_seeded
+                // Hold the position back until the zone is actually in (0x008
+                // ENTERZONE seen). Firing it on the first keepalive after the
+                // LOGIN seed lands would write the client's own position back to
+                // the server mid-login, and the server persists that to the DB —
+                // clobbering whatever the operator set before the load.
+                let include_pos = enterzone_seen
+                    && self_pos_seeded
                     && match last_move_emission {
                         None => true,
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),
@@ -6741,6 +6746,7 @@ fn decode_event_0x032(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 
@@ -6792,6 +6798,7 @@ fn decode_event_0x033(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 
@@ -6832,6 +6839,7 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
         cancel_armed: true,
         speaker_index: None,
         contains_item: false,
+        auto_advance: None,
     })
 }
 
@@ -7610,8 +7618,12 @@ fn should_emit_pos(
 /// Release a pinned event when the player walks away from it. Auto/headless
 /// mode does not release on drift (user_driven is false); there the caller
 /// warns once per episode instead.
-fn should_release_on_walkaway(user_driven: bool, walk_dist: Option<f32>) -> bool {
-    user_driven && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS)
+fn should_release_on_walkaway(
+    user_driven: bool,
+    event_controls_position: bool,
+    walk_dist: Option<f32>,
+) -> bool {
+    user_driven && !event_controls_position && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS)
 }
 
 /// Keepalive-tick state the pending-EVENT_END release reads. Named fields, not

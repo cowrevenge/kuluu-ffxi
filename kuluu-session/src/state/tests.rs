@@ -2206,6 +2206,73 @@ fn char_status_and_target_clear_both_move_the_byte() {
     assert_eq!(s.self_server_status, NONE);
 }
 
+/// A cutscene's 0x7E mount cue arms the local mount on the client; a stale on-foot
+/// 0x037 must not clobber it until the server re-asserts a mounted byte of its own.
+#[test]
+fn cutscene_mount_latch_releases_on_terminal_lifecycle() {
+    use ffxi_proto::decode::animation::{CHOCOBO, NONE};
+    for terminal in [
+        AgentEvent::CutsceneEnded,
+        AgentEvent::Disconnected {
+            reason: "fixture".into(),
+        },
+    ] {
+        let mut state = SessionState::default();
+        state.apply_event(&AgentEvent::CsMountArmed {
+            status: CHOCOBO,
+            mount_id: 0,
+        });
+        state.apply_event(&terminal);
+        assert!(!state.cs_mount_armed);
+        state.apply_event(&AgentEvent::SelfServerStatus {
+            status: NONE,
+            mount_id: 0,
+        });
+        assert_eq!(state.self_server_status, NONE);
+    }
+}
+
+#[test]
+fn cs_mount_cue_holds_against_stale_on_foot_char_status() {
+    use ffxi_proto::decode::animation::{CHOCOBO, NONE};
+    let mut s = SessionState::default();
+    // The CS cue arms the mount (status 5 = chocobo).
+    assert!(s.apply_event(&AgentEvent::CsMountArmed {
+        status: CHOCOBO,
+        mount_id: 0
+    }));
+    assert_eq!(s.self_server_status, CHOCOBO);
+    assert!(s.cs_mount_armed, "the cue arms the latch");
+
+    // A stale on-foot 0x037 (the server never saw the cue) is dropped.
+    assert!(
+        !s.apply_event(&AgentEvent::SelfServerStatus {
+            status: NONE,
+            mount_id: 0
+        }),
+        "the stale on-foot byte must not clobber the cue's write"
+    );
+    assert_eq!(s.self_server_status, CHOCOBO, "the mount byte survives");
+    assert!(s.cs_mount_armed, "the latch stays armed");
+
+    // The server's own mounted byte (MOUNTED effect at event finish) releases the latch.
+    // The byte is already CHOCOBO, so `apply_event` reports no change — but the latch
+    // is released regardless.
+    s.apply_event(&AgentEvent::SelfServerStatus {
+        status: CHOCOBO,
+        mount_id: 0,
+    });
+    assert_eq!(s.self_server_status, CHOCOBO);
+    assert!(!s.cs_mount_armed, "the mounted byte releases the latch");
+
+    // Now a genuine on-foot 0x037 (dismount) applies.
+    assert!(s.apply_event(&AgentEvent::SelfServerStatus {
+        status: NONE,
+        mount_id: 0
+    }));
+    assert_eq!(s.self_server_status, NONE);
+}
+
 /// The dismissal edge clears the displayed frame so its advance hint cannot linger over
 /// camera moves and holds; a second dismissal with nothing up is a no-op, and the next
 /// message opcode reopens it.
@@ -2585,6 +2652,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::FishHookedSize { .. } => (),
         AgentEvent::FishingServerPhase { .. } => (),
         AgentEvent::SelfServerStatus { .. } => (),
+        AgentEvent::CsMountArmed { .. } => (),
         AgentEvent::FishingPhaseChanged { .. } => (),
         AgentEvent::FishingProgress { .. } => (),
         AgentEvent::FishingEnded { .. } => (),

@@ -13,8 +13,6 @@ use ffxi_dat::dmsg::{
     MARKER_PLAYER_NAME, MARKER_SPEAKER_NAME,
 };
 use ffxi_dat::event_dat::{EventBlockSource, EventDat};
-use ffxi_dat::kind::ChunkKind;
-use ffxi_dat::scheduler::Scheduler;
 use ffxi_dat::DatRoot;
 use ffxi_event::{ActorLookup, DialogRunner, DialogStep, EventCue, FourCc, PendingTag};
 use tokio::sync::broadcast;
@@ -198,10 +196,7 @@ pub struct DialogSession {
     /// Per-zone fishing-era reconciliation state, built lazily on the first
     /// TALKNUM-family message of the zone.
     fishing: std::collections::HashMap<u16, FishingEra>,
-    /// Authored routine lengths the WAIT* holds arm from, cached per (dat id,
-    /// tag) with misses included so a re-issued routine does not re-read its
-    /// file.
-    routine_lengths: std::collections::HashMap<(u32, FourCc), Option<f32>>,
+
     /// Last known position of every entity the server has placed since the
     /// zone-in, in event coordinates: the source for MOVE hold lengths while a
     /// scene walks its actors.
@@ -222,8 +217,9 @@ pub struct DialogSession {
     /// lookup (for the release), the count of outstanding issues for the pair
     /// (a repeat issue re-arms before the first finishes), the arm time the
     /// deadline sweep measures from, and the deadline itself: the DAT-authored
-    /// routine length when the session can read it, so a renderer-less session
-    /// times out on the authored length itself, else [`PENDING_MOTION_HOLD_MAX`].
+    /// routine length the event system reads from the motion DAT when it can,
+    /// so a renderer-less session times out on the authored length itself,
+    /// else [`PENDING_MOTION_HOLD_MAX`].
     pending_motion_holds: std::collections::HashMap<
         (CutsceneActor, FourCc),
         (ActorLookup, u32, std::time::Instant, std::time::Duration),
@@ -232,6 +228,14 @@ pub struct DialogSession {
     /// [`take_frame_closed`](Self::take_frame_closed) fires exactly once per
     /// up→down transition instead of on every tick parked after it.
     frame_was_up: bool,
+    /// Seconds left on the current frame's retail auto-advance clock — the
+    /// entry's `7F 34/35/36 NN` continue-prompt code
+    /// (research/cexi-docs/dialog/format.md). While a frame with an auto
+    /// prompt is up, [`tick`](Self::tick) counts this down and dismisses the
+    /// frame exactly like a key press at zero. `None` while the box waits on
+    /// the player (manual prompt), while no frame is up, or after the event
+    /// ends.
+    auto_advance_remaining: Option<f32>,
     /// Per-zone dialog-numbering skew between the server and this install,
     /// learned from the messages themselves.
     skew: std::collections::HashMap<u16, ZoneTextSkew>,
@@ -261,12 +265,13 @@ impl DialogSession {
             active: None,
             cues: Vec::new(),
             fishing: std::collections::HashMap::new(),
-            routine_lengths: std::collections::HashMap::new(),
+
             entity_positions: std::collections::HashMap::new(),
             entity_types: std::collections::HashMap::new(),
             weather_forecast: None,
             pending_motion_holds: std::collections::HashMap::new(),
             frame_was_up: false,
+            auto_advance_remaining: None,
             skew: std::collections::HashMap::new(),
             liveness: None,
             registration_result: None,
@@ -413,6 +418,10 @@ impl DialogSession {
             runner.set_zone_rects(rects);
         }
         runner.set_current_zone(event_zone as i32);
+        // The event system reads the motion DATs itself to time its WAIT* holds
+        // off the authored routine lengths (research/XiEvents/OpCodes/0x0045.md),
+        // so it gets the same install the event DAT came from.
+        runner.set_dat_root(self.dat_root.clone());
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event
@@ -427,13 +436,17 @@ impl DialogSession {
             }
         }
         let step = runner.advance(None, strings);
+        let auto = match &step {
+            DialogStep::Frame(frame) => frame.prompt.auto_seconds(),
+            _ => None,
+        };
+        self.arm_auto_advance(auto);
         self.scene_actions.extend(runner.take_scene_actions());
         let raw_cues = runner.take_cues();
         arm_motion_holds(
             &mut runner,
             &raw_cues,
             self.dat_root.as_deref(),
-            &mut self.routine_lengths,
             unique_no,
             event_zone,
             &mut self.pending_motion_holds,
@@ -519,14 +532,30 @@ impl DialogSession {
         self.drive(|runner, strings| runner.cancel(strings))
     }
 
-    /// Run the host clock into a scene holding on a timed wait; a no-op
-    /// ([`Advance::Waiting`]) while a frame is displayed instead. Call only
-    /// while [`active_end`] is `Some` — like [`advance`](Self::advance), a
-    /// desynced call releases the event rather than wedging it open.
-    ///
-    /// [`active_end`]: Self::active_end
+    /// Arm or clear the auto-advance clock from a frame's retail continue
+    /// prompt: an auto-prompt frame (`7F 34/35/36 NN`) dismisses itself after
+    /// `NN` seconds, exactly like a key press; every other step (manual frame,
+    /// wait, tag, end) clears any running clock.
+    fn arm_auto_advance(&mut self, auto: Option<u8>) {
+        self.auto_advance_remaining = auto.map(f32::from);
+    }
+
     fn tick(&mut self, dt_secs: f32) -> Advance {
         self.sweep_pending_motion_holds();
+        if let Some(remaining) = self.auto_advance_remaining {
+            let advance = self.drive(|runner, strings| runner.tick(dt_secs, strings));
+            if !matches!(advance, Advance::Waiting) {
+                return self.check_liveness(advance);
+            }
+            let next = remaining - dt_secs;
+            if next <= 0.0 {
+                self.auto_advance_remaining = None;
+                let advance = self.advance(None);
+                return self.check_liveness(advance);
+            }
+            self.auto_advance_remaining = Some(next);
+            return Advance::Waiting;
+        }
         let advance = self.drive(|runner, strings| runner.tick(dt_secs, strings));
         self.check_liveness(advance)
     }
@@ -755,6 +784,7 @@ impl DialogSession {
         };
         let event_entity = active.unique_no;
         runner.set_actor_types(&types);
+        runner.set_dat_root(self.dat_root.clone());
         runner.set_entity_positions(&self.entity_positions);
         let outcome = step(runner, strings);
         let final_position = runner.controlled_position();
@@ -765,7 +795,6 @@ impl DialogSession {
             runner,
             &raw_cues,
             self.dat_root.as_deref(),
-            &mut self.routine_lengths,
             event_entity,
             zone,
             &mut self.pending_motion_holds,
@@ -810,6 +839,10 @@ impl DialogSession {
             DialogStep::Waiting => Advance::Waiting,
             DialogStep::AwaitServerAck(tag) => Advance::AwaitServerAck(tag),
         };
+        match &advance {
+            Advance::Frame(dialog) => self.arm_auto_advance(dialog.auto_advance),
+            _ => self.arm_auto_advance(None),
+        }
         self.cues.extend(cues);
         if matches!(advance, Advance::Ended { .. }) {
             self.finish();
@@ -890,6 +923,7 @@ impl DialogSession {
         self.runner = None;
         self.active = None;
         self.frame_was_up = false;
+        self.auto_advance_remaining = None;
         self.pending_motion_holds.clear();
         self.liveness = None;
         self.registration_result = None;
@@ -1062,6 +1096,10 @@ pub enum ResolvedCue {
     /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
     /// the cue stream.
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0x5C rides the existing [`AgentEvent::MusicChanged`] (the song) and
+    /// [`AgentEvent::MusicVolumeChanged`] (its start volume) on the named BGM
+    /// slot instead of the cue stream (research/XiEvents/OpCodes/0x005C.md).
+    MusicSong { slot: u8, track: u16, volume: u8 },
 
     SoundVolume {
         mask: u8,
@@ -1179,6 +1217,7 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             duration_frames,
         },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::LocalMode { mode } => CutsceneCue::LocalMode { mode },
         EventCue::PlayerControl { locked } => CutsceneCue::PlayerControl { locked },
         EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
         EventCue::ClockHold {
@@ -1248,6 +1287,17 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16, player_id: u32) 
             return ResolvedCue::MusicVolume {
                 volume,
                 fade_frames,
+            }
+        }
+        EventCue::MusicSong {
+            slot,
+            track,
+            volume,
+        } => {
+            return ResolvedCue::MusicSong {
+                slot,
+                track,
+                volume,
             }
         }
         EventCue::SoundVolume {
@@ -1374,6 +1424,26 @@ impl CutsceneScope {
                 if let CutsceneCue::CameraLock { lock } = cue {
                     self.camera_locked = lock;
                 }
+                // A 0x7E mount cue on the local player is the client-side "get on
+                // the chocobo": the server never sees it, so the session writes the
+                // mount state itself (the animation byte + mount index 0x037 would
+                // carry) or the render's self_mount stays on foot and the riding
+                // pose never plays. status_event is the GameStatus the script wrote,
+                // which is the animation byte (5 = chocobo, 85 = other mount, 0 =
+                // off); mount_id is the mount index, 0 for the chocobo. The write
+                // arms `cs_mount_armed` so a stale on-foot 0x037 cannot clobber it
+                // until the server re-asserts the mount of its own.
+                if let CutsceneCue::Mount {
+                    target: CutsceneActor::LocalPlayer,
+                    status_event,
+                    mount_id,
+                } = cue
+                {
+                    let _ = event_tx.send(AgentEvent::CsMountArmed {
+                        status: status_event,
+                        mount_id: mount_id.unwrap_or(0).min(u16::from(u8::MAX)) as u8,
+                    });
+                }
                 let _ = event_tx.send(AgentEvent::CutsceneCue { cue });
             }
             ResolvedCue::MusicVolume {
@@ -1384,6 +1454,18 @@ impl CutsceneScope {
                 for slot in 0..crate::state::MUSIC_SLOT_COUNT {
                     let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
                 }
+            }
+            ResolvedCue::MusicSong {
+                slot,
+                track,
+                volume,
+            } => {
+                tracing::debug!(slot, track, volume, "event script set BGM slot song (0x5C)");
+                let _ = event_tx.send(AgentEvent::MusicChanged {
+                    slot,
+                    track_id: track,
+                });
+                let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
             }
             ResolvedCue::SoundVolume { .. } => {
                 tracing::warn!("unsupported event sound-volume cue ignored");
@@ -1754,7 +1836,7 @@ fn frame_to_dialog(
         text,
         choices,
         params,
-        ..
+        prompt,
     } = frame;
     let substitute = |text: String| {
         substitute_entity_names(
@@ -1792,6 +1874,7 @@ fn frame_to_dialog(
         cancel_armed,
         speaker_index,
         contains_item,
+        auto_advance: prompt.auto_seconds(),
     }
 }
 
@@ -1992,10 +2075,6 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
     }
 }
 
-// 0x45 duration operand: 0 and this value mean "play the authored timing";
-// kuluu-render/src/cutscene.rs scheduler_speed_ratio treats both as ratio 1.
-const SCHEDULER_DURATION_LOOP: u16 = 1;
-
 /// The VM's wait clock: one hold unit per 1/60 s (ffxi-event vm.rs
 /// WAIT_UNITS_PER_SEC).
 const WAIT_UNITS_PER_SEC: f32 = 60.0;
@@ -2087,12 +2166,13 @@ fn arm_move_holds(
 /// is its deadline, so a renderer-less session times out on the authored
 /// length itself (the deadline sweep in [`DialogSession::tick`] is the last
 /// resort). Only the 0x45 fades, which cutscene.rs plays without reporting,
-/// keep a timed hold.
+/// keep a timed hold. The lengths come from the event system's own DAT read
+/// ([`DialogRunner::routine_length`]); `root` is passed only for the 0x2D
+/// file-id lookup, which the cue's zone id (not a DAT id) names.
 fn arm_motion_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
     root: Option<&DatRoot>,
-    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
     event_entity: u32,
     zone: u16,
     pending: &mut std::collections::HashMap<
@@ -2122,7 +2202,9 @@ fn arm_motion_holds(
                 duration,
                 ..
             } => {
-                let units = routine_units(root, cache, dat_id, tag, duration);
+                let units = runner
+                    .routine_length(dat_id, tag, duration)
+                    .map(|units| units as f32);
                 if dat_id == ffxi_event::SCHEDULER_FADE_DAT_ID {
                     // The fade plays in cutscene.rs, which reports no finish:
                     // its hold stays timed from the DAT length.
@@ -2159,19 +2241,16 @@ fn arm_motion_holds(
                 let Some(file_id) = file_id else {
                     continue;
                 };
+                let units = runner
+                    .routine_length(file_id, key, ffxi_event::SCHEDULER_DURATION_FROM_DAT)
+                    .map(|units| units as f32);
                 arm_pending_motion_hold(
                     runner,
                     pending,
                     actor1,
                     resolve_actor(actor1, event_entity),
                     key,
-                    routine_units(
-                        root,
-                        cache,
-                        file_id,
-                        key,
-                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                    ),
+                    units,
                 );
             }
             // 0x2D: retail runs the routine out of the CURRENT zone's own model DAT
@@ -2185,14 +2264,9 @@ fn arm_motion_holds(
                 let units = root
                     .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone, key))
                     .and_then(|file_id| {
-                        routine_units(
-                            root,
-                            cache,
-                            file_id,
-                            key,
-                            ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                        )
-                    });
+                        runner.routine_length(file_id, key, ffxi_event::SCHEDULER_DURATION_FROM_DAT)
+                    })
+                    .map(|units| units as f32);
                 arm_pending_motion_hold(
                     runner,
                     pending,
@@ -2202,6 +2276,7 @@ fn arm_motion_holds(
                     units,
                 );
             }
+
             _ => {}
         }
     }
@@ -2236,120 +2311,6 @@ fn arm_pending_motion_hold(
             .or_insert((lookup, 0, std::time::Instant::now(), deadline));
     entry.1 += 1;
     entry.2 = std::time::Instant::now();
-}
-
-/// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT* hold
-/// units (1/60 s each; the routine clock and the VM's wait clock are both 60
-/// fps). `duration_override` is the 0x45 operand: 0 or 1 means play the
-/// authored timing, anything else IS the total frame count. Cached per
-/// (dat_id, tag) with misses included so a re-issued routine does not
-/// re-read its file; a missing DAT arms nothing and the wait falls through.
-/// research/XiEvents/OpCodes/0x0045.md
-fn routine_units(
-    root: Option<&DatRoot>,
-    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
-    dat_id: u32,
-    tag: FourCc,
-    duration_override: u16,
-) -> Option<f32> {
-    let units = if let Some(units) = cache.get(&(dat_id, tag)) {
-        *units
-    } else {
-        let units = routine_units_uncached(root, dat_id, tag, duration_override);
-        cache.insert((dat_id, tag), units);
-        units
-    };
-    if let Some(units) = &units {
-        tracing::debug!(
-            target: "kuluu_session::event_dialog",
-            dat_id,
-            tag = %String::from_utf8_lossy(&tag),
-            hold_secs = units / WAIT_UNITS_PER_SEC,
-            "armed the WAIT* hold from the DAT-authored routine length"
-        );
-    }
-    units
-}
-
-fn routine_units_uncached(
-    root: Option<&DatRoot>,
-    dat_id: u32,
-    tag: FourCc,
-    duration_override: u16,
-) -> Option<f32> {
-    let miss = |reason: &str| {
-        tracing::debug!(
-            target: "kuluu_session::event_dialog",
-            dat_id,
-            tag = %String::from_utf8_lossy(&tag),
-            reason,
-            "no authored routine length; the WAIT* hold falls through"
-        );
-    };
-    let Some(root) = root else {
-        miss("no DAT root");
-        return None;
-    };
-    let loc = match root.resolve(dat_id) {
-        Ok(loc) => loc,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                error = %e,
-                "failed to resolve the motion DAT; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let path = loc.path_under(root);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                path = %path.display(),
-                error = %e,
-                "failed to read the motion DAT; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let chunk = ffxi_dat::chunk::walk(&bytes).find_map(|c| match c {
-        Ok(c) if c.kind == ChunkKind::Scheduler as u8 && c.name == tag => Some(c),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                error = %e,
-                "truncated chunk while scanning the motion DAT"
-            );
-            None
-        }
-    })?;
-    let scheduler = match Scheduler::parse(chunk.name, chunk.data) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                target: "kuluu_session::event_dialog",
-                dat_id,
-                tag = %String::from_utf8_lossy(&tag),
-                error = %e,
-                "failed to parse the scheduler chunk; the WAIT* hold falls through"
-            );
-            return None;
-        }
-    };
-    let frames = if duration_override <= SCHEDULER_DURATION_LOOP {
-        scheduler.end_frame()
-    } else {
-        u32::from(duration_override)
-    };
-    Some(frames as f32)
 }
 
 fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
@@ -2835,6 +2796,7 @@ pub(crate) mod tests {
                 b"Balance {Num:0}, fare {Num:1}\0",
                 b"Accepted: {Num:0}, fare {Num:1}\0",
                 b"Insufficient: {Num:0}, fare {Num:1}\0",
+                b"Narration\x7f\x34\x05\x00",
             ]))
             .unwrap(),
         );
@@ -2927,6 +2889,110 @@ pub(crate) mod tests {
             dialog.cancel_armed,
             "without the disarm opcode the program stays cancellable"
         );
+    }
+
+    /// Retail's auto-prompt frames (the `7F 34/35/36 NN` continue-prompt code,
+    /// research/cexi-docs/dialog/format.md) dismiss themselves on the session
+    /// clock after NN seconds, exactly like a key press: the Bastok intro
+    /// narration advances with no player input, while the manual line that
+    /// follows it still waits for one.
+    #[test]
+    fn auto_prompt_frames_advance_on_the_session_clock() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        fn session_with(entries: &[&[u8]]) -> (DialogSession, EventTrigger) {
+            let block = ffxi_dat::event_dat::EventBlock {
+                actor: NPC,
+                event_ids: vec![EVENT],
+                event_offsets: vec![0],
+                references: vec![0, 1],
+                // Two chat lines, each gated on MESWAIT.
+                event_data: vec![0x1D, 0x00, 0x80, 0x23, 0x1D, 0x01, 0x80, 0x23, 0x21],
+            };
+            let mut session = DialogSession::new(None, "Test".into());
+            session.loaded_event_zone = Some(ZONE);
+            session.loaded_string_zone = Some(ZONE);
+            session.event_dat = Some(Arc::new(EventDat {
+                blocks: vec![block],
+            }));
+            session.strings = Some(StringDat::parse(&synth_dat(entries)).unwrap());
+            let trigger = EventTrigger {
+                event_zone: ZONE,
+                text_zone: ZONE,
+                unique_no: NPC,
+                act_index: 54,
+                event_id: EVENT,
+                params: vec![],
+                npc_name: None,
+            };
+            (session, trigger)
+        }
+
+        let (mut session, trigger) =
+            session_with(&[b"narration line\x7f\x34\x05\x00", b"npc line\x7f\x31\x00"]);
+        let Begin::Frame(dialog) = session.begin(trigger) else {
+            panic!("the narration should open on a frame");
+        };
+        assert_eq!(dialog.auto_advance, Some(5));
+
+        assert!(
+            matches!(session.tick(2.0), Advance::Waiting),
+            "3 s of the 5 s remain"
+        );
+        let Advance::Frame(dialog) = session.tick(3.0) else {
+            panic!("the auto line must dismiss itself at 5 s");
+        };
+        assert_eq!(dialog.auto_advance, None, "the npc line is manual");
+        assert!(
+            matches!(session.tick(100.0), Advance::Waiting),
+            "a manual frame outlives any tick"
+        );
+        assert!(
+            matches!(session.advance(Some(0)), Advance::Ended { .. }),
+            "the player's key press ends the event"
+        );
+    }
+
+    /// A manual frame's clock is never armed: ticking it for far longer than
+    /// any authored auto-advance leaves the frame up.
+    #[test]
+    fn manual_frames_never_advance_on_the_session_clock() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![0],
+            event_data: vec![0x1D, 0x00, 0x80, 0x23, 0x21],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"npc line\x7f\x31\x00"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 54,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        let Begin::Frame(dialog) = session.begin(trigger) else {
+            panic!("the manual line should open on a frame");
+        };
+        assert_eq!(dialog.auto_advance, None);
+        for _ in 0..10 {
+            assert!(matches!(session.tick(60.0), Advance::Waiting));
+        }
+        assert!(session.active_end().is_some(), "the frame is still up");
     }
 
     /// Event 503's map beat (master +045D9..+04606): the coupon line parks on its MESWAIT
@@ -3505,6 +3571,80 @@ pub(crate) mod tests {
         assert!(session.active_end().is_none());
     }
 
+    /// A player walk parked on its MOVE case-1 hold is not a stall: the
+    /// liveness tuple's move-units term drops every tick, so a walk longer
+    /// than the hold grace runs to its goal instead of cancelling mid-walk
+    /// (research/XiEvents/OpCodes/0x001F.md).
+    #[test]
+    fn a_walk_longer_than_the_hold_grace_runs_to_its_goal_instead_of_stalling() {
+        const ZONE: u16 = 248;
+        const EVENT: u16 = 9004;
+        // Speed 13 (1.3 yalms/s) over a 13-yalm goal: a 10 s walk, well past
+        // HOLD_FINISH_GRACE (5 s).
+        const SPEED_REF: u32 = 13;
+        const GOAL_X_REF: u32 = 13_000; // 13 yalms in event units
+        let ref16 = |i: u32| (i as u16).to_le_bytes();
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![SPEED_REF, GOAL_X_REF, 0, 0],
+            event_data: vec![
+                0x32,
+                ref16(0)[0],
+                ref16(0)[1], // SPEED = refs[0]
+                0x1F,
+                0x00,
+                ref16(1)[0],
+                ref16(1)[1],
+                ref16(2)[0],
+                ref16(2)[1],
+                ref16(3)[0],
+                ref16(3)[1], // MOVE case 0: goal x=refs[1], z=refs[2], y=refs[3]
+                0x1F,
+                0x01, // MOVE case 1 (park on the walk)
+                0x21, // EXECEND
+            ],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        session.set_player_position(ffxi_event::vm::scene::EventPosition::default());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(matches!(session.begin(trigger), Begin::Waiting));
+        // Tick past the walk's 10 s duration (and the 5 s hold grace): the
+        // event must end at its goal, not cancel mid-walk.
+        let mut ended = false;
+        for _ in 0..22 {
+            match session.tick(0.5) {
+                Advance::Ended { end_para, .. } => {
+                    assert_ne!(
+                        end_para,
+                        ffxi_event::EVENT_CANCELLED_END_PARA,
+                        "the walk must not stall-cancel"
+                    );
+                    ended = true;
+                    break;
+                }
+                Advance::Waiting => {}
+                _ => panic!("the walk parks until it finishes"),
+            }
+        }
+        assert!(ended, "the walk must finish");
+    }
+
     #[test]
     fn unanswered_tag_stalls_and_cancels_with_the_error_line() {
         const NPC: u32 = 0x010E_6032;
@@ -3742,6 +3882,7 @@ pub(crate) mod tests {
             text: "{SpeakerName}: {Num:1} gil, {PlayerName}.".to_string(),
             choices: vec!["Pay {Num:1}.".to_string(), "Decline.".to_string()],
             params: vec![0, 250],
+            prompt: ffxi_dat::dmsg::DialogPrompt::Manual,
         };
         let dialog = frame_to_dialog(&active, frame, "Zeid", true);
         assert_eq!(dialog.nums, vec![0, 250]);

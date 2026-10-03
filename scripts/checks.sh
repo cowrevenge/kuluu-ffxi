@@ -7,7 +7,7 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, comments, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
+#   stage ∈ {harness, readme, comments, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
 #   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
@@ -52,6 +52,15 @@ GUARD="$PWD/scripts/cargo-guard.sh"
 if [ "${CARGO_GUARD:-1}" = "1" ] && [ -x "$GUARD" ]; then
   cargo() { "$GUARD" "$@"; }
 fi
+
+run_readme() {
+  python3 scripts/check-readme.test.py
+  if [[ "${README_DIFF:-tree}" == "staged" ]]; then
+    python3 scripts/check-readme.py --staged
+  else
+    python3 scripts/check-readme.py
+  fi
+}
 
 run_fmt() {
   cargo fmt --all --check
@@ -762,12 +771,13 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style harness comments contracts install test enhanced build wasm doc sweep)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness readme comments contracts install test enhanced build wasm doc sweep)" >&2
   exit 2
 fi
 
 for stage in "$@"; do
   case "$stage" in
+    readme) echo "checks: readme"; run_readme ;;
     fmt)    echo "checks: fmt";    run_fmt ;;
     clippy) echo "checks: clippy"; run_clippy ;;
     style)  echo "checks: style";  run_style ;;

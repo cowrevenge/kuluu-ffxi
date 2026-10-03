@@ -57,6 +57,8 @@ if ! scripts/checks.sh harness; then
   exit 1
 fi
 
+scripts/checks.sh readme
+
 if ! scripts/checks.sh comments; then
   echo "pre-push: ✗ comments — line-pinned or dangling citations; see .agents/skills/comment-discipline/SKILL.md (or 'git push --no-verify' to bypass)" >&2
   exit 1

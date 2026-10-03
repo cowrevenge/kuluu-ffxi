@@ -2,6 +2,8 @@
 
 <!-- Concrete problem and resulting behavior. Prefer a verified GitHub issue URL; maintainers publish linked beads through the scoped publisher before review. Outside contributors can link an ordinary GitHub issue or explain the task here for maintainer triage; Beads and issue-management permissions are not prerequisites. If publication is unavailable, name the gap briefly. Do not invent a link or duplicate an issue. -->
 
+<!-- README edits: name the reader question this answers; follow CONTRIBUTING.md#readme-editorial-policy and run scripts/checks.sh readme. -->
+
 ## Why this belongs in Kuluu
 
 <!-- Required beyond the issue: who benefits, the concrete task existing behavior/tooling cannot adequately perform, and why the added scope/cost is justified. Classify client behavior as Retail parity, a modest default improvement, or opt-in Enhanced. Explain interaction tradeoffs and default activation or the explicit Enhanced gate. For tooling/partial features, name the implemented consumer and activation boundary; explain why this slice is useful independently and should land separately from missing player behavior. Future usefulness, small scope and "helps verification" alone are insufficient. -->

@@ -1181,9 +1181,7 @@ fn read_global_effect_tiers(
 // (ROM/0/0.DAT - every combat reaction routine) can serve lookups while the secondary
 // asset-only half still parses.
 #[derive(Resource)]
-pub(crate) struct GlobalEffectDirPrimaryTask(
-    bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>,
-);
+pub(crate) struct GlobalEffectDirPrimaryTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
 
 #[derive(Resource)]
 pub(crate) struct GlobalEffectDirSecondaryTask(bevy::tasks::Task<ActionAssets>);
@@ -3518,6 +3516,46 @@ pub fn settle_dead_from_action(
     }
 }
 
+// The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
+// the ranged chain `ldad` uses `daml` instead). Its cases select on `context.hitTypeFlag`
+// (research/xim EffectRoutineInstance.kt resolveControlFlowVariable) and their branch order is
+// byte-for-byte the ActionResolution values in vendor/server/src/map/enums/action/resolution.h.
+// The Hit branches are `damh`/`damg`, and BOTH carry a FlinchOnCaster stage (ROM/0/0.DAT: damh =
+// chih + sdam + flinch + vdam; damg = chit + sdam + flinch + vdam) - retail ALWAYS flinches on a
+// hit. `sdam` is never a top-level reaction choice: it is only the internal sound call inside
+// dam*/ldam, so picking it for models that ship it (as this table used to) made normal hits
+// sound-only with no flinch - the "animations not playing" symptom. research/xim leaves the
+// `damh`-vs-`damg` selector (var 0x3B) unhandled (EffectRoutineInstance.kt resolveControlFlowVariable
+// warns and defaults to 0), which is the `damg` branch - so every non-crit Hit routes to `damg`. A
+// crit routes to `ldam` when the lookup resolves it, else back to `damg`; lookup still resolves
+// victim-own-first, then global.
+pub fn hit_reaction_routine(
+    resolution: ffxi_proto::melee::ActionResolution,
+    outcome: ffxi_proto::melee::ResultOutcome,
+    model_has: impl Fn(&[u8; 4]) -> bool,
+) -> Vec<[u8; 4]> {
+    use ffxi_proto::melee::ActionResolution;
+    let out = match resolution {
+        // The crit rides the VICTIM's result block as `info & CriticalHit`
+        // (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack). LSB's
+        // hitDistortion is the damage share of max HP (action.cpp action_result_t::recordDamage),
+        // so it cannot stand in for the flag. None/Light/Medium/Heavy non-crits all play `damg`
+        // per retail's dam0 branch table - never sdam, which flinches nothing on its own.
+        ActionResolution::Hit if outcome.is_critical() && model_has(b"ldam") => *b"ldam",
+        ActionResolution::Hit => *b"damg",
+        ActionResolution::Miss => *b"sway",
+        ActionResolution::Guard => *b"gurd",
+        ActionResolution::Parry => *b"pary",
+        ActionResolution::Block if model_has(b"shld") => *b"shld",
+        ActionResolution::Block => *b"gur1",
+    };
+    let mut routines = vec![out];
+    if outcome.knockback > 0 && out != *b"sway" {
+        routines.push(*b"sway");
+    }
+    routines
+}
+
 // ROM/0/0.DAT dam0/daml switch-test field selectors, as carried by CF_FIELD_SELECTOR_OP words.
 pub const HIT_FIELD_RESOLUTION: u32 = 0x28;
 pub const HIT_FIELD_ANIMATION: u32 = 0x33;
@@ -3836,15 +3874,32 @@ pub fn dispatch_melee_action_started(
         }
         // Info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP packet
         // (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"),
-        // so latch the death path now; the pose pass holds idle until the fall-over motion fires.
-        // The `dead` routine itself starts at impact (fire_hit_reaction): the model falls over
-        // as the weapon lands, not while it is still winding up.
+        // so start the victim's death path now instead of waiting for the next 0x0E.
         if outcome.defeated() {
             if combat_log_enabled() {
                 tracing::debug!(target: "combat", "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
                         actor_id, victim, outcome.info);
             }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);
+            // retail's onDisplayDeath enqueues the model's `dead` routine with
+            // displayDead=true on the Defeated frame (research/xim Actor.kt onDisplayDeath):
+            // ded? fall-over at its first Motion stage, cor0 hold after. Play mode so those
+            // Motion stages fire through dispatch_motion_stages; models without a `dead`
+            // routine keep the instant-corpse fallback (run_routine_on no-ops on an
+            // unresolvable name).
+            if let Some(victim) = victim {
+                run_routine_on(
+                    victim,
+                    b"dead",
+                    None,
+                    &q_children,
+                    &q_render,
+                    &mut q_scheds,
+                    &mut pending_inserts,
+                    global.as_deref(),
+                    &mut commands,
+                );
+            }
         }
     }
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
@@ -3893,6 +3948,7 @@ fn fire_hit_reaction(
     attacker: Entity,
     victim: Entity,
     ctx: &HitContext,
+    outcome: ffxi_proto::melee::ResultOutcome,
     q_children: &Query<&Children>,
     q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     q_active: &mut Query<&mut ActiveSchedulers>,
@@ -3920,7 +3976,12 @@ fn fire_hit_reaction(
         tracing::debug!(target: "combat", "COMBAT_RX_SKIP victim={} death path already running — no flinch over the corpse",
                 victim.index());
     } else {
-        for routine in &evaluate_switch(&lookup, b"dam0", ctx, UnknownFieldPolicy::Random) {
+        let Some(resolution) = ffxi_proto::melee::ActionResolution::from_wire(ctx.resolution as u8)
+        else {
+            return report;
+        };
+        for routine in &hit_reaction_routine(resolution, outcome, |name| lookup.get(name).is_some())
+        {
             tracing::debug!(target: "combat", "COMBAT_RX victim={} res={} info=0x{:X} routine={} found={}",
                     victim.index(),
                     ctx.resolution,
@@ -3944,23 +4005,6 @@ fn fire_hit_reaction(
                 }
                 report.victim_stages.push_str(&summary);
             }
-        }
-        // A killing blow's fall-over starts on this impact frame, not on the Defeated packet: dam0
-        // selects only the flinch/sound pair for info=defeated, so run the model's `dead` routine
-        // here (ded? fall-over at its first Motion stage, cor0 hold after). Models without a `dead`
-        // routine keep the instant-corpse fallback (run_routine_on no-ops on an unresolvable name).
-        if ctx.info & ffxi_proto::melee::INFO_DEFEATED as u32 != 0 {
-            run_routine_on(
-                victim,
-                b"dead",
-                Some(attacker),
-                q_children,
-                q_render,
-                q_active,
-                pending_inserts,
-                global,
-                commands,
-            );
         }
     }
     // `crtl` is a SubRoutine of `dada`, so retail runs it under the swing's ATTACKER-side
@@ -4047,6 +4091,7 @@ pub fn dispatch_damage_callback_stages(
             ev.actor,
             victim,
             &HitContext::from_pending(pending),
+            pending.outcome,
             &q_children,
             &q_render,
             &mut q_active,
@@ -4644,10 +4689,15 @@ pub fn animation_test_tick(
                 animation: 0,
                 info: u32::from(case.info_bits()),
             };
+            let outcome = ffxi_proto::melee::ResultOutcome {
+                info: case.info_bits(),
+                ..Default::default()
+            };
             let report = fire_hit_reaction(
                 self_entity,
                 self_entity,
                 &ctx,
+                outcome,
                 &q_children,
                 &q_render,
                 &mut q_active,
@@ -4656,6 +4706,21 @@ pub fn animation_test_tick(
                 &mut commands,
                 false,
             );
+            // dhit loops the fall-over VFX with no Defeated packet behind it, so its `dead`
+            // enqueue lives here rather than in the melee dispatcher.
+            if matches!(case, WeaponHitCase::Death) {
+                run_routine_on(
+                    self_entity,
+                    b"dead",
+                    None,
+                    &q_children,
+                    &q_render,
+                    &mut q_active,
+                    &mut pending_inserts,
+                    global.as_deref(),
+                    &mut commands,
+                );
+            }
             if reported_case.as_ref() != Some(&case) {
                 *reported_case = Some(case);
                 let chosen = if report.dam0.is_empty() {
@@ -5699,6 +5764,84 @@ mod tests {
         assert!(
             !other.dead_fall_over_pending(),
             "only the `dead` routine reports"
+        );
+    }
+
+    #[test]
+    fn hit_reaction_routine_table() {
+        use ffxi_proto::melee::ActionResolution as R;
+        use ffxi_proto::melee::{ResultOutcome, INFO_CRITICAL_HIT};
+        let has = |names: Vec<[u8; 4]>| move |name: &[u8; 4]| names.iter().any(|n| n == name);
+        let o = |info: u8, hit_distortion: u8, knockback: u8| {
+            ResultOutcome::from_wire(info, hit_distortion, knockback)
+        };
+        let crit = |knockback: u8| o(INFO_CRITICAL_HIT, 3, knockback);
+
+        assert_eq!(
+            hit_reaction_routine(R::Hit, crit(0), has(vec![*b"ldam"])),
+            vec![*b"ldam"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, crit(0), has(vec![])),
+            vec![*b"damg"]
+        );
+        // hitDistortion is the damage share of max HP, not the flag: a Heavy non-crit stays on
+        // damg and a Light crit still plays ldam (ffxi-proto/src/melee.rs hit_distortion).
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(0, 3, 0), has(vec![*b"ldam"])),
+            vec![*b"damg"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(INFO_CRITICAL_HIT, 1, 0), has(vec![*b"ldam"])),
+            vec![*b"ldam"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(0, 0, 0), has(vec![*b"sdam"])),
+            vec![*b"damg"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(0, 1, 0), has(vec![*b"sdam"])),
+            vec![*b"damg"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(0, 0, 0), has(vec![])),
+            vec![*b"damg"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, o(0, 2, 0), has(vec![*b"sdam"])),
+            vec![*b"damg"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Guard, o(0, 0, 0), has(vec![])),
+            vec![*b"gurd"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Parry, o(0, 0, 0), has(vec![])),
+            vec![*b"pary"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Block, o(0, 0, 0), has(vec![*b"shld"])),
+            vec![*b"shld"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Block, o(0, 0, 0), has(vec![])),
+            vec![*b"gur1"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Miss, o(0, 0, 0), has(vec![])),
+            vec![*b"sway"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Miss, o(0, 0, 2), has(vec![])),
+            vec![*b"sway"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, crit(1), has(vec![*b"ldam"])),
+            vec![*b"ldam", *b"sway"]
+        );
+        assert_eq!(
+            hit_reaction_routine(R::Hit, crit(1), has(vec![])),
+            vec![*b"damg", *b"sway"]
         );
     }
 
@@ -7270,6 +7413,35 @@ mod tests {
         assert_eq!(active.stages.len(), 1);
         assert_eq!(active.stages[0].stage.kind, StageKind::SubRoutineOnTarget);
         assert_eq!(&active.stages[0].stage.id, b"damg");
+    }
+
+    // vendor/server/src/map/enums/action/resolution.h ordering, pinned to the branch order the
+    // retail MELEE `dam0` chunk dispatches in (ffxi_dat guard
+    // real_dat_dam0_switches_hit_type_to_melee_reaction_routines). `ldam` is the RANGED chain's
+    // Hit branch (`ldad` -> `daml`) and links `lhit` -> eflg/selg, which no melee weapon DAT has.
+    #[test]
+    fn hit_reaction_routines_follow_lsb_resolution_order() {
+        use ffxi_proto::melee::ActionResolution;
+        let order: Vec<Vec<[u8; 4]>> = [
+            ActionResolution::Hit,
+            ActionResolution::Miss,
+            ActionResolution::Guard,
+            ActionResolution::Parry,
+            ActionResolution::Block,
+        ]
+        .into_iter()
+        .map(|r| hit_reaction_routine(r, ffxi_proto::melee::ResultOutcome::default(), |_| false))
+        .collect();
+        assert_eq!(
+            order,
+            vec![
+                vec![*b"damg"],
+                vec![*b"sway"],
+                vec![*b"gurd"],
+                vec![*b"pary"],
+                vec![*b"gur1"],
+            ]
+        );
     }
 
     // research/xim EffectRoutineInstance.kt createChild newSequences — createChild for a 0x09 link builds

@@ -115,7 +115,7 @@ pub(super) fn confirm_menu_at_cursor(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
-    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
@@ -142,6 +142,7 @@ pub(super) fn confirm_menu_at_cursor(
             hud_panels,
             net_status,
             audio_mute,
+            vana_clock,
             self_pos,
             scene_state,
         );
@@ -471,16 +472,17 @@ fn toggle_debug_panel(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     self_pos: kuluu_snapshot::Vec3,
     scene_state: &mut SceneState,
 ) {
     #[cfg(feature = "enhanced-engage-move-lock-off")]
     use kuluu_render::hud::menu::DEBUG_ENGAGE_ANIM_LOCK;
     use kuluu_render::hud::menu::{
-        DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH,
-        DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG,
-        DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
-        DEBUG_UI_SETTINGS, DEBUG_WEATHER,
+        DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_FORCE_18, DEBUG_GRAPHICS_DEBUG,
+        DEBUG_MESH, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF,
+        DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS,
+        DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -529,6 +531,22 @@ fn toggle_debug_panel(
         DEBUG_FOG => {
             hud_panels.fog_off = !hud_panels.fog_off;
             !hud_panels.fog_off
+        }
+        DEBUG_FORCE_18 => {
+            // Activation takes over another owner's hold; deactivation thaws
+            // whatever the row froze.
+            if vana_clock.debug_hold_active() {
+                vana_clock.thaw();
+                false
+            } else {
+                const FORCE_VANA_HOUR: u32 = 18;
+                vana_clock.freeze_at_hour_minute(
+                    FORCE_VANA_HOUR,
+                    0,
+                    kuluu_render::vana_time::ClockHoldOrigin::DebugRow,
+                );
+                true
+            }
         }
         DEBUG_ENTITY_LIST => {
             hud_panels.entity_list = !hud_panels.entity_list;
@@ -598,7 +616,7 @@ pub(super) fn handle_menu_key(
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
-    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock: &mut kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     sort_options: &mut kuluu_render::hud::item_detail::SortOptions,
     item_menu_focus: &mut kuluu_render::hud::item_detail::ItemMenuFocus,
@@ -1002,7 +1020,7 @@ mod menu_key_tests {
                 &mut self.hud_panels,
                 &mut self.net_status,
                 &mut self.audio_mute,
-                &self.vana_clock,
+                &mut self.vana_clock,
                 &mut self.vana_clock_visible,
                 &mut self.sort_options,
                 &mut self.item_menu_focus,
@@ -1109,6 +1127,69 @@ mod menu_key_tests {
             !world.is_resource_changed::<MapMarkers>(),
             "menu navigation must not dirty MapMarkers"
         );
+    }
+
+    /// The clock is the only truth for the Force_18 row: activation freezes
+    /// with a debug-row origin (taking over another owner's hold), deactivation
+    /// thaws, and `VanaClock::debug_hold_active` alone drives the row.
+    #[test]
+    fn force_18_row_reads_and_writes_only_the_clock() {
+        use kuluu_render::hud::menu::DEBUG_FORCE_18;
+        use kuluu_render::vana_time::{ClockHoldOrigin, VanaClock};
+        let mut hud_panels = kuluu_render::hud::HudPanels::default();
+        let mut net_status = kuluu_render::hud::network_status::NetStatusVisible(false);
+        let mut audio_mute = kuluu_render::audio::AudioMuteState::default();
+        let mut scene_state = SceneState::default();
+        let self_pos = kuluu_snapshot::Vec3::default();
+        let mut clock = VanaClock::default();
+
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(clock.is_frozen());
+        assert_eq!(clock.hold_origin(), Some(ClockHoldOrigin::DebugRow));
+
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(!clock.is_frozen());
+        assert_eq!(clock.hold_origin(), None);
+
+        // A foreign hold reads as off and is taken over; toggling then thaws.
+        clock.freeze(ClockHoldOrigin::Cutscene);
+        assert!(!clock.debug_hold_active());
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert_eq!(clock.hold_origin(), Some(ClockHoldOrigin::DebugRow));
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(!clock.is_frozen());
     }
 
     #[test]

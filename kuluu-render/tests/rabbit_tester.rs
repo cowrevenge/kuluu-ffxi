@@ -18,7 +18,7 @@
 //! ordering/ranges, not exact frames.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
@@ -51,10 +51,7 @@ const LIMB_MODEL_FILE: u32 = 101806;
 /// generators + sound, and `init` = Motion sp0? + dirt generators + sound: the full special-pose
 /// pair S12 drives through the pose pass.
 const WORM_FILE: u32 = 1724;
-/// ROM/172/67.DAT - one of exactly three retail models that ship `damg` without `ldam`
-/// (verified against the install: routines shot/damg/chit/cate/cast/pop0/init/corp/dead/setr/
-/// kil0/bom0/kil1/efon). The S6c/S6d victim: a crit on it must fall back to damg, and only
-/// when the global dir's ldam is out of reach.
+// ROM/172/67.DAT ships damg without ldam; absence is checked in the affected fixtures.
 const NOLDA_FILE: u32 = 52087;
 /// ROM/4/106.DAT - flying bat; its Info chunk carries movement byte 3 (Flying) and
 /// scale byte 85, so the live pipeline must load it at 85 percent with no wire stride scale.
@@ -72,6 +69,8 @@ const WORM_W: u32 = 9_000_004;
 const NOLDA_W: u32 = 9_000_005;
 const BAT_W: u32 = 9_000_006;
 const WALKER_W: u32 = 9_000_007;
+
+const GLOBAL_EFFECT_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 // HumeM main-hand weapon model 0: the first band of the FFXiMain.dll equipment table row 1,
 // main-hand slot (`MainDll::equipment_model_index`), identical on horizonxi-2023 and retail-2026-09.
@@ -249,6 +248,23 @@ fn build_app() -> App {
         mob_claimed_other: Default::default(),
         invis_orb: Default::default(),
     });
+    let deadline = Instant::now() + GLOBAL_EFFECT_LOAD_TIMEOUT;
+    while !app.world().contains_resource::<GlobalEffectDir>() {
+        assert!(
+            Instant::now() < deadline,
+            "global effect directory did not load before the fixture readiness deadline"
+        );
+        step(&mut app);
+        std::thread::yield_now();
+    }
+    assert!(
+        app.world()
+            .resource::<GlobalEffectDir>()
+            .schedulers
+            .iter()
+            .any(|s| s.name == *b"dam0"),
+        "global effect directory must contain the authored melee dispatch routine dam0"
+    );
     app
 }
 
@@ -411,6 +427,15 @@ fn routines(world: &bevy::prelude::World, parent: Entity) -> Vec<[u8; 4]> {
         .unwrap_or_default()
 }
 
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Conditions selecting reactions
+const PC_ATTACKER_CRIT_SPARK: [u8; 4] = *b"hi14";
+const MOB_ATTACKER_CRIT_SPARK: [u8; 4] = *b"hi29";
+
+fn runs_crit_spark(world: &bevy::prelude::World, parent: Entity) -> bool {
+    let active = routines(world, parent);
+    active.contains(&PC_ATTACKER_CRIT_SPARK) || active.contains(&MOB_ATTACKER_CRIT_SPARK)
+}
+
 /// Push a BATTLE2 event and return the update index it was pushed after.
 fn push_battle2(
     app: &mut App,
@@ -424,23 +449,19 @@ fn push_battle2(
     0
 }
 
-/// Wait for the async global effect dir load (ROM/0/0.DAT) to land, then remove it so no lookup
-/// can rescue a routine from there. The poll system inserts exactly once and does not
-/// re-insert, so the removal holds for the rest of the scenario. Asserting ldam is present first keeps the
-/// S6c/S6d fallback honest: without this step the global dir's own ldam would satisfy the guard.
-fn drop_global_effect_dir(app: &mut App) {
-    for _ in 0..600 {
-        if app.world().contains_resource::<GlobalEffectDir>() {
-            break;
-        }
-        step(app);
-    }
-    let g = app.world().resource::<GlobalEffectDir>();
+fn remove_global_ldam(app: &mut App, victim: &LoadedActor) {
+    assert!(victim.all_routines().values().all(|s| s.name != *b"ldam"));
+    let mut g = app.world_mut().resource_mut::<GlobalEffectDir>();
     assert!(
         g.schedulers.iter().any(|s| s.name == *b"ldam"),
-        "ROM/0/0.DAT ships ldam (the fallback under test must be reachable without it)"
+        "global ldam must exist before the fixture removes it"
     );
-    app.world_mut().remove_resource::<GlobalEffectDir>();
+    g.schedulers.retain(|s| s.name != *b"ldam");
+    assert!(g.schedulers.iter().all(|s| s.name != *b"ldam"));
+    assert!(
+        g.schedulers.iter().any(|s| s.name == *b"dam0"),
+        "the fixture must preserve the authored melee dispatch routine"
+    );
 }
 
 /// Drive `window` updates after the event; return (first update index in [1..=window] where
@@ -556,45 +577,46 @@ fn s4_run_gait_selects_run_clip() {
     assert!(first.is_some(), "run gait selected run? within 1 s");
 }
 
-/// S5/S5b - swing impact hands off to the victim reaction AT the inlined DamageCallback
-/// frame. Rarab swings RightAttack at HumeM (Hit, dist=0, kb=0). Expect: at0? on the attacker from
-/// ~frame 1; at the inlined DamageCallback impact (~36 for ati0) HumeM runs `damg` (it ships no sdam of
-/// its own - the reaction table falls through to damg) and its flinch stage starts dfm? on the PC host.
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Conditions selecting reactions
 #[test]
-fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
+fn s5_swing_impact_runs_authored_reaction_and_flinches_the_pc() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
         return;
     };
     let mut app = build_app();
-    let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (atk_parent, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 0, 0, 0)));
 
+    let no_spark = |w: &bevy::prelude::World| {
+        assert!(
+            !runs_crit_spark(w, atk_parent) && !runs_crit_spark(w, vic_parent),
+            "a non-critical hit runs no crtl spark"
+        );
+    };
     let (swing_at, _) = watch(&mut app, 5, |i, w| {
+        no_spark(w);
         i >= 1 && active_clip(w, atk_child).is_some_and(|c| c.starts_with("at0"))
     });
     assert!(swing_at.is_some(), "attacker plays the at0? swing clip");
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
+        no_spark(w);
         routines(w, vic_parent).contains(b"damg")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
+        "authored victim reaction with dfm? flinch fired at the inlined-0x2B frame (~36), not on \
          packet arrival",
     );
 }
 
-/// S5b: same swing, victim = a second Rarab. Retail's dam0 branch table routes every non-crit
-/// Hit to damg/damh - both carry the 0x21 flinch stage (research/xim
-/// EffectRoutineInterpolatedEffects.kt), so the mob victim runs its own `damg` and flinches
-/// with dfi? on a normal hit. This is the "animations not playing" case: sdam-shipping models
-/// like Rarab must get a visible flinch on normal hits (sdam is sound-only).
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Conditions selecting reactions
 #[test]
-fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
+fn s5b_mob_victim_normal_hit_runs_authored_reaction_and_flinches() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
@@ -609,32 +631,58 @@ fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "normal hit runs damg + dfi? flinch on the mob victim"
+        "normal hit runs an authored reaction with dfi? flinch on the mob victim"
     );
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6/S6b - crits: ldam + flinch, no sway at kb=0. S6: Hit with info=CriticalHit runs `ldam`
-/// on HumeM and its flinch stage starts dfm?; kb=0 adds no sway.
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Routine actor roles
 #[test]
-fn s6_crit_runs_ldam_and_flinches_the_pc() {
+fn s6_ordinary_crit_flinches_the_pc_without_ldam() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
         return;
     };
     let mut app = build_app();
-    let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (atk_parent, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
-    push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 2, 3, 0)));
+    push_battle2(
+        &mut app,
+        RARAB_W,
+        1,
+        Some(HUMEM_W),
+        Some((0, 0, ffxi_proto::melee::INFO_CRITICAL_HIT.into(), 3, 0)),
+    );
 
-    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
+    let mut spark_at = None;
+    let (impact_at, _) = watch(&mut app, 45, |i, w| {
+        let active = routines(w, vic_parent);
+        assert!(
+            !active.contains(b"ldam"),
+            "ordinary melee does not call ldam"
+        );
+        assert!(
+            !runs_crit_spark(w, vic_parent),
+            "crtl runs on the attacker, not the victim"
+        );
+        assert!(
+            !routines(w, atk_parent).contains(&PC_ATTACKER_CRIT_SPARK),
+            "a mob attacker never selects the player spark"
+        );
+        if spark_at.is_none() && routines(w, atk_parent).contains(&MOB_ATTACKER_CRIT_SPARK) {
+            spark_at = Some(i);
+        }
+        (active.contains(b"damg") || active.contains(b"damh"))
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "crit runs ldam + dfm? flinch at the impact frame"
+        "ordinary crit runs an authored damage routine and dfm? flinch at the impact frame"
+    );
+    assert!(
+        spark_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
+        "a mob attacker's crit runs the mob spark on the attacker at impact, got {spark_at:?}"
     );
 
     let sway = routines(app.world(), vic_parent).contains(b"sway");
@@ -642,20 +690,66 @@ fn s6_crit_runs_ldam_and_flinches_the_pc() {
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6b: same crit on a Rarab victim - ldam's flinch stage starts dfi? on the mob host. This is
-/// the "crits animations do not play" case from the field report.
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Conditions selecting reactions
 #[test]
-fn s6b_crit_flinches_the_mob_with_dfi() {
+fn s6e_pc_attacker_crit_runs_the_player_spark_on_the_attacker() {
+    let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
+        return;
+    };
+    let mut app = build_app();
+    let (vic_parent, _) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (atk_parent, _) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    step_n(&mut app, 10);
+
+    push_battle2(
+        &mut app,
+        HUMEM_W,
+        1,
+        Some(RARAB_W),
+        Some((0, 0, ffxi_proto::melee::INFO_CRITICAL_HIT.into(), 3, 0)),
+    );
+
+    let (spark_at, _) = watch(&mut app, 50, |_i, w| {
+        assert!(
+            !runs_crit_spark(w, vic_parent),
+            "crtl runs on the attacker, not the victim"
+        );
+        assert!(
+            !routines(w, atk_parent).contains(&MOB_ATTACKER_CRIT_SPARK),
+            "a player attacker never selects the mob spark"
+        );
+        routines(w, atk_parent).contains(&PC_ATTACKER_CRIT_SPARK)
+    });
+    assert!(
+        spark_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
+        "a player attacker's crit runs the player spark on the attacker at impact, got {spark_at:?}"
+    );
+}
+
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Conditions selecting reactions
+#[test]
+fn s6b_ordinary_crit_flinches_the_mob_without_ldam() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
     step_n(&mut app, 10);
 
-    push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 2, 3, 0)));
+    push_battle2(
+        &mut app,
+        RARAB_W,
+        1,
+        Some(RARAB2_W),
+        Some((0, 0, ffxi_proto::melee::INFO_CRITICAL_HIT.into(), 3, 0)),
+    );
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
+        let active = routines(w, vic_parent);
+        assert!(
+            !active.contains(b"ldam"),
+            "ordinary melee does not call ldam"
+        );
+        (active.contains(b"damg") || active.contains(b"damh"))
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
     });
     assert!(
@@ -665,14 +759,9 @@ fn s6b_crit_flinches_the_mob_with_dfi() {
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6c: crit on a victim whose DAT ships no `ldam` of its own (ROM/172/67.DAT), with the global
-/// effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The crit guard must fall back to
-/// the normal `damg` reaction instead of arming an unresolvable ldam, which would fall
-/// through to nothing. All eight retail PC skeletons ship their own ldam (verified against the
-/// install), so this fallback is reachable only on mob victims; S6 covers the PC side of the
-/// matrix.
+// .agents/skills/retail-observe/references/2026-10-04-melee-damage-dispatch.md Authored ordinary melee chain
 #[test]
-fn s6c_crit_without_ldam_falls_back_to_damg() {
+fn s6c_ordinary_crit_without_ldam_retains_authored_reaction() {
     let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
         return;
     };
@@ -680,7 +769,7 @@ fn s6c_crit_without_ldam_falls_back_to_damg() {
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, _) = spawn_actor(&mut app, NOLDA_W, EntityKind::Mob, &nolda);
     step_n(&mut app, 10);
-    drop_global_effect_dir(&mut app);
+    remove_global_ldam(&mut app, &nolda);
 
     push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 2, 3, 0)));
 
@@ -689,16 +778,13 @@ fn s6c_crit_without_ldam_falls_back_to_damg() {
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "crit on a no-ldam victim runs the damg fallback at the impact frame, not an \
-         unresolvable ldam"
+        "ordinary crit retains an authored reaction at impact without ldam"
     );
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6d: same rig (no ldam anywhere), non-crit Medium hit still routes to damg - the crit guard
-/// must not leak into the None/Light/Medium cases.
 #[test]
-fn s6d_medium_hit_without_ldam_still_runs_damg() {
+fn s6d_medium_hit_without_ldam_retains_authored_reaction() {
     let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
         return;
     };
@@ -706,7 +792,7 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, _) = spawn_actor(&mut app, NOLDA_W, EntityKind::Mob, &nolda);
     step_n(&mut app, 10);
-    drop_global_effect_dir(&mut app);
+    remove_global_ldam(&mut app, &nolda);
 
     push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 0, 2, 0)));
 
@@ -715,8 +801,7 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "non-crit hits on a no-ldam victim still run damg (the crit guard does not leak into \
-         dist 0/1/2)"
+        "non-critical hits retain an authored reaction at impact without ldam"
     );
 }
 
@@ -902,11 +987,9 @@ fn s7c_parry_plays_gud_clip() {
     );
 }
 
-/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside. The
-/// victim is fresh - no ActiveSchedulers yet - so both routines land in one same-batch insert;
-/// this pins the merge fix that kept the sway insert from overwriting the damage reaction.
+// .agents/skills/retail-observe/references/2026-10-04-melee-recoil-and-result-fields.md Authored sway is a separate resolution arm
 #[test]
-fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
+fn s7d_successful_hit_with_knockback_does_not_select_miss_sway() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
@@ -916,11 +999,16 @@ fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 0, 0, 2)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"damg") && routines(w, vic_parent).contains(b"sway")
+        let active = routines(w, vic_parent);
+        assert!(
+            !active.contains(b"sway"),
+            "successful-hit damage dispatch does not select the miss reaction"
+        );
+        active.contains(b"damg") || active.contains(b"damh")
     });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
-        "kb>0 runs the damage reaction and sway together (F52)"
+        "successful hit with knockback retains the authored damage reaction at impact"
     );
 }
 
@@ -999,8 +1087,8 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
         return;
     };
     let mut app = build_app();
-    spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
-    let (_, atk_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    let (vic_parent, _) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (atk_parent, atk_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
     push_battle2(&mut app, HUMEM_W, 1, Some(RARAB_W), Some((0, 1, 0, 0, 0)));
@@ -1011,6 +1099,29 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
     assert!(
         swing_at.is_some(),
         "HumeM ships no bti0 - LeftAttack falls back to ati0's at0? clip"
+    );
+    assert_eq!(
+        app.world()
+            .get::<kuluu_render::scheduler_runtime::PendingHitReaction>(atk_parent)
+            .expect("reaction remains pending before the swing impact")
+            .offhand_context,
+        Some(false),
+        "the resolved ati0 fallback must clear the offhand context despite the LeftAttack request"
+    );
+
+    // The left-swing context reaches dam0 only through its offhand selector; the swing must not
+    // open one of dam0's sbNN blocks on the victim.
+    let (reaction_at, _) = watch(&mut app, 45, |_i, w| {
+        let active = routines(w, vic_parent);
+        assert!(
+            !active.iter().any(|name| name.starts_with(b"sb")),
+            "a LeftAttack opens no dam0 sbNN block: {active:?}"
+        );
+        active.contains(b"damg")
+    });
+    assert!(
+        reaction_at.is_some(),
+        "the left swing still reaches dam0's successful arm"
     );
 }
 

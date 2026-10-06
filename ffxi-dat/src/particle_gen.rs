@@ -115,9 +115,13 @@ impl LinkedDataKind {
     pub const STATIC_MESH: u8 = 0x0B;
     pub const SPRITE_SHEET: u8 = 0x0E;
     pub const WEIGHTED_MESH: u8 = 0x1D;
+    // research/xim ParticleGeneratorSettings.kt LinkedDataType: a screen-space distortion
+    // (haze/smear) element, not a mesh particle.
     pub const DISTORTION: u8 = 0x22;
     pub const RING_MESH: u8 = 0x24;
     pub const LENS_FLARE: u8 = 0x39;
+    // research/XIClient/src/XIClient/include/Resource/ResourceType.h `Sep = 61`, dispatched at
+    // CYyGenerator.cpp HandleOne (`case Sep: elem = new CYySoundElem()`).
     pub const AUDIO: u8 = 0x3D;
     pub const POINT_LIGHT: u8 = 0x47;
     pub const NULL_PARTICLE: u8 = 0x57;
@@ -137,13 +141,6 @@ impl LinkedDataKind {
             Self::NULL_PARTICLE => Some(Self::Null),
             _ => None,
         }
-    }
-
-    /// Kinds that own a dedicated def parser and decline the mesh path cleanly (no lookup, no
-    /// warning): sound and distortion chunks are claimed by SoundGeneratorDef /
-    /// DistortionGeneratorDef.
-    pub fn is_deferred(&self) -> bool {
-        matches!(self, Self::Audio | Self::Distortion)
     }
 }
 
@@ -200,18 +197,45 @@ impl AttachType {
     }
 }
 
-// research/XIClient Attachment.cpp MakeAttachMatrix — the attach word carries ONE EID index,
-// not two joint fields: bits 4-9 of attachFlags plus bit 18 (bit 2 of additionalAttachFlags)
-// as its top bit. The index resolves through the actor's locator table with special semantics
-// at 48..=53 (ground/nearest/floor/water) — EID_INDEX.h.
-const ATTACH_TYPE_MASK: u16 = 0x000F;
+// .agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md Inputs — the
+// u16 attachFlags (low half) and additionalAttachFlags (high half) form one attach word: the mode
+// in bits 0-3 plus bit 16, the source reference in bits 4-9 plus bit 18, the target reference in
+// bits 10-15, the position-fit nibble in bits 20-23 and the model-fit nibble in bits 24-27. The
+// references index the actor's locator table, with the selector semantics at 48..=60 resolved by
+// the placement code.
+const ATTACH_MODE_LOW_MASK: u16 = 0x000F;
 pub const ATTACH_EID_LOW_MASK: u16 = 0x03F0;
 pub const ATTACH_EID_LOW_SHIFT: u32 = 4;
-pub const ATTACH_JOINT1_MASK: u16 = 0xFC00;
-pub const ATTACH_JOINT1_SHIFT: u32 = 10;
-// Bit 18 of the combined attach word, i.e. bit 2 of additionalAttachFlags.
+pub const ATTACH_TARGET_REFERENCE_MASK: u16 = 0xFC00;
+pub const ATTACH_TARGET_REFERENCE_SHIFT: u32 = 10;
+const ADDITIONAL_ATTACH_MODE_HIGH_BIT: u16 = 0x0001;
+const ATTACH_MODE_HIGH_SHIFT: u32 = 4;
 const ADDITIONAL_ATTACH_EID_TOP_BIT: u16 = 0x0004;
-const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
+const ATTACH_EID_TOP_SHIFT: u32 = 6;
+const ADDITIONAL_ATTACH_POSITION_FIT_MASK: u16 = 0x00F0;
+const ADDITIONAL_ATTACH_POSITION_FIT_SHIFT: u32 = 4;
+const ADDITIONAL_ATTACH_MODEL_FIT_MASK: u16 = 0x0F00;
+const ADDITIONAL_ATTACH_MODEL_FIT_SHIFT: u32 = 8;
+
+/// The attach modes whose frame the record states
+/// (.agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md Attach
+/// frame): the mode selects which actor's reference point the frame translates to and whose yaw
+/// it turns by. `AttachType::from_flag` names the low nibble of the same number.
+pub mod attach_mode {
+    pub const UNATTACHED: u8 = 0;
+    /// Source reference on the caster, caster yaw.
+    pub const SOURCE: u8 = 1;
+    /// Target reference on the target, target yaw.
+    pub const TARGET: u8 = 2;
+    /// Two-point basis from the caster point to the target point.
+    pub const SOURCE_TO_TARGET: u8 = 3;
+    /// Target reference on the target, caster yaw.
+    pub const TARGET_WITH_SOURCE_YAW: u8 = 4;
+    /// Source reference on the caster, target yaw.
+    pub const SOURCE_WITH_TARGET_YAW: u8 = 5;
+    /// Two-point basis from the target point to the caster point.
+    pub const TARGET_TO_SOURCE: u8 = 6;
+}
 
 // research/xim ParticleInitializers.kt — the StandardParticleSetup renderStateFlags u16
 // sits directly after the billboard flags. Bit 0x1000 (`ignoreTextureAlpha`) is the same bit
@@ -467,11 +491,19 @@ pub struct ParticleGeneratorDef {
     pub auto_run: bool,
     pub batched: bool,
 
+    /// The low nibble of `attach_mode`, which is all the placement code reads for the modes
+    /// whose frame it does not build.
     pub attach_type: AttachType,
-    // research/XIClient Attachment.cpp MakeAttachMatrix — the single EID locator index
-    // (bits 4-9 + bit 18 of the attach word); see ATTACH_EID_LOW_MASK.
+    /// Bits 0-3 plus bit 16 of the attach word (`attach_mode::*`).
+    pub attach_mode: u8,
+    /// The source reference: bits 4-9 plus bit 18 of the attach word.
     pub attach_eid: u8,
-    pub attach_source_oriented: bool,
+    /// The target reference: bits 10-15 of the attach word.
+    pub attach_target_reference: u8,
+    /// The position-fit nibble (bits 20-23): which actor's size scales element positions.
+    pub attach_position_fit: u8,
+    /// The model-fit nibble (bits 24-27): which actor's size scales element sprites.
+    pub attach_model_fit: u8,
 
     pub init_scale: [f32; 3],
 
@@ -626,7 +658,7 @@ pub struct ParticleGeneratorDef {
     // fraction rather than the particle's life progress. This is how retail authors the
     // sun's dawn/noon/dusk ramp and the moon's daytime fade — 0x3F multiplies alpha, the
     // other three assign their channel.
-    // research/xim ParticleGeneratorParser.kt sec2Handler,431-434
+    // research/xim ParticleGeneratorParser.kt sec2Handler
     pub tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
     pub tod_color_driven: [bool; TOD_COLOR_CHANNELS],
 
@@ -672,31 +704,23 @@ pub struct ParticleGeneratorDef {
 
     // sec2 0x45 ParentPositionCopyConfig: a no-payload marker — the particle's associated
     // position copies its parent's (research/xim ParticleInitializers.kt
-    // ParentPositionCopyConfig; apply is a no-op without a parent). Parsed but not applied
-    // until the child-generator path lands (the sec2 0x44 ChildGeneratorSetup).
+    // ParentPositionCopyConfig; apply is a no-op without a parent).
     pub parent_position_copy: bool,
 
     // sec2 0x46 ParentVelocityConfig: one float, the multiplier on the parent's total
     // velocity copied into the child's velocity transform (research/xim
     // ParticleInitializers.kt ParentVelocityConfig; apply is a no-op without a parent).
-    // Parsed but not applied until the child-generator path lands.
     pub parent_velocity: Option<f32>,
 
     // sec2 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] — the sibling
     // generator chunk emitted as a child of each particle of this one (research/xim
     // ParticleInitializers.kt ChildGeneratorSetup; the sec2 0x53 block is the same shape).
-    // Parsed but not applied until the child-generator runtime lands (the sec3 0x25/0x33
-    // child updaters).
     pub child_generator: Option<[u8; 4]>,
+    pub immediate_generator: Option<[u8; 4]>,
 
     // sec2 0x6A — the third block of the child-generator family (see SEC2_OPCODE_CHILD_GENERATOR_3):
     // a per-particle child like `child_generator`.
     pub child_generator_3: Option<[u8; 4]>,
-
-    // sec2 0x3C OnceChildGeneratorSetup: [expectZero32, child generator DAT id] — the sibling
-    // emitted once at each particle's init (research/xim ParticleInitializers.kt
-    // OnceChildGeneratorSetup).
-    pub once_child_generator: Option<[u8; 4]>,
 
     // sec4 0x01 EmitChildHandler: [expectZero32, child generator DAT id] — the sibling emitted
     // once at each particle's expiry (research/xim ParticleExpirationHandlers.kt
@@ -717,16 +741,13 @@ pub struct ParticleGeneratorDef {
     // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
     // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
     // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
-    // in [−1, 1)). Parsed but not applied until the section-3 applier lands.
+    // in [−1, 1)).
     pub oscillation_accel_z: Option<[f32; 2]>,
     // sec2 0x3E OscillationAccelerationSetup (X): the X-axis twin of 0x40
-    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup). Parsed but not
-    // applied until the section-3 applier lands.
+    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup).
     pub oscillation_accel_x: Option<[f32; 2]>,
     // sec2 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40 (research/xim
-    // ParticleInitializers.kt OscillationAccelerationSetup). Present in 30 shipped generators
-    // though absent from the launch log. Parsed but not applied until the section-3 applier
-    // lands.
+    // ParticleInitializers.kt OscillationAccelerationSetup). Present in 30 shipped generators.
     pub oscillation_accel_y: Option<[f32; 2]>,
 
     // sec3 0x29 OscillationApplier (X): [rate-divisor, base-offset, unused-in-xim] — the
@@ -810,27 +831,25 @@ pub struct ParticleGeneratorDef {
     // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
     // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
     // offsets the previous-frame transform by (research/xim ParticleInitializers.kt
-    // HazeOffsetInitializer; GLDrawer.kt previousFrameTransform). Parsed but not applied:
-    // the engine has no haze/distortion pass yet; the sec3 0x24 ProgressValueUpdater
-    // animates the same value over life.
+    // HazeOffsetInitializer; GLDrawer.kt previousFrameTransform). Unused on the mesh-particle
+    // path; a 0x22 Distortion generator carries it as DistortionGeneratorDef::haze_offset_x,
+    // which kuluu-render/src/distortion_pass.rs applies. The sec3 0x24 ProgressValueUpdater
+    // that animates the same value over life is not applied.
     pub haze_offset_x: Option<f32>,
 
     // sec2 0x47 ParentRotateConfig: a no-payload marker — the child particle copies its
     // parent's rotation (research/xim ParticleInitializers.kt ParentRotateConfig; apply is
-    // a no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
+    // a no-op without a parent).
     pub parent_rotate: bool,
 
     // sec2 0x48 ParentColorConfig: a no-payload marker — the child particle copies its
     // parent's color (research/xim ParticleInitializers.kt ParentColorConfig; apply is a
-    // no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
+    // no-op without a parent).
     pub parent_color: bool,
 
     // sec2 0x49 ParentScaleConfig: a no-payload marker — the child particle copies its
     // parent's scale (research/xim ParticleInitializers.kt ParentScaleConfig; apply is a
-    // no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
+    // no-op without a parent).
     pub parent_scale: bool,
 
     // sec2 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape
@@ -876,9 +895,7 @@ pub struct ParticleGeneratorDef {
 
     // sec2 0x53 ChildGeneratorSetup: [expectZero32, child generator DAT id] — xim maps
     // both 0x44 and 0x53 to the same class (research/xim ParticleGeneratorParser.kt
-    // sec2Handler); a second slot so a generator carrying both keeps both ids. Parsed
-    // but not applied until the child-generator runtime lands (the sec3 0x25/0x33 child
-    // updaters).
+    // sec2Handler); a second slot so a generator carrying both keeps both ids.
     pub child_generator_2: Option<[u8; 4]>,
 
     // sec2 0x5B KeyFrameValueSetup (specular rotation.z): the 0x27/0x28/0x29 track shape
@@ -897,8 +914,7 @@ pub struct ParticleGeneratorDef {
     // sec2 0x79 ParentRotateConfig: a no-payload marker — xim maps 0x79 to the same
     // class as 0x47 (research/xim ParticleGeneratorParser.kt sec2Handler, comment
     // "How does it differ from 0x47?"); a second slot so a generator carrying both
-    // keeps both. Parsed but not applied until the child-generator path lands (the
-    // sec2 0x44 ChildGeneratorSetup).
+    // keeps both. Parsed but not applied: the child path copies rotation on the 0x47 slot only.
     pub parent_rotate_2: bool,
 
     // sec2 0x56 BatchingSetup: one expectZero32 word — xim's apply sets the particle's
@@ -910,8 +926,8 @@ pub struct ParticleGeneratorDef {
 
     // sec2 0x4A ParentTexCoordConfig: a no-payload marker — a child particle copies the
     // parent's tex-coord translate (research/xim ParticleInitializers.kt
-    // ParentTexCoordConfig). A no-op without a parent, so parsed but not applied until the
-    // child-generator path lands (as for the 0x45 marker).
+    // ParentTexCoordConfig). Parsed but not applied: the child path does not copy the
+    // parent's tex-coord translate.
     pub parent_tex_coord: bool,
 
     // sec2 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem
@@ -969,17 +985,27 @@ pub struct EmitCull {
     pub unlink_out_of_range: bool,
 }
 
-// research/xim ParticleGeneratorUpdaters.kt AssociationUpdater - the section-1 0x11
-// config word: bit 0 re-snaps the generator's associated position to the attach actor
-// every frame, bit 1 the associated facing. The high word is a follow-rate factor that
-// retail parses but its own handler ignores - ParticleGeneratorAttachment.kt
-// updateAssociatedPosition is a hard copy ("it's not supposed to be an instant update,
-// but most effects are so fast that it doesn't really matter").
+// .agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md Per-update
+// follow — the section-1 0x11 payload word: bit 0 blends the frame's translation toward the
+// freshly built attach matrix on every generator update, bit 1 its rotation, at
+// `factor / 255` per update (255 snaps).
+const ASSOCIATION_FOLLOW_POSITION_BIT: u32 = 0x1;
+const ASSOCIATION_FOLLOW_FACING_BIT: u32 = 0x2;
+const ASSOCIATION_FOLLOW_RATE_SHIFT: u32 = 2;
+pub const ASSOCIATION_FOLLOW_RATE_SNAP: u32 = 0xFF;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AssociationFollow {
     pub follow_position: bool,
     pub follow_facing: bool,
     pub factor: u32,
+}
+
+impl AssociationFollow {
+    /// The fraction of the way the frame moves toward the rebuilt attach matrix per update.
+    pub fn rate(&self) -> f32 {
+        self.factor as f32 / ASSOCIATION_FOLLOW_RATE_SNAP as f32
+    }
 }
 
 impl EmitCull {
@@ -1024,16 +1050,14 @@ const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_FIRST: u8 = 0x33;
 const SEC2_OPCODE_WEIGHTED_MESH_WEIGHT_LAST: u8 = 0x37;
 // research/xim ParticleGeneratorParser.kt sec2Handler — RandomVelocitySetup.
 const SEC2_OPCODE_RANDOM_VELOCITY: u8 = 0x31;
-// research/XIClient CYyGenerator.cpp ElemGenerate — 0x3C/0x44/0x53/0x6A share one case
-// (InitiateAllContainerSearch Generater): a sibling generator chunk bound by id. xim splits the
-// family into OnceChildGeneratorSetup (this opcode, emit once at init) and ChildGeneratorSetup.
-const SEC2_OPCODE_ONCE_CHILD_GENERATOR: u8 = 0x3C;
 const SEC2_OPCODE_INCREMENTAL_ROTATION: u8 = 0x3B;
 const SEC2_OPCODE_OSCILLATION_SETUP: u8 = 0x3D;
 const SEC2_OPCODE_OSCILLATION_ACCEL_X: u8 = 0x3E;
 const SEC2_OPCODE_OSCILLATION_ACCEL_Y: u8 = 0x3F;
 const SEC2_OPCODE_OSCILLATION_ACCEL_Z: u8 = 0x40;
 const SEC2_OPCODE_RELATIVE_VEL_VARIANCE: u8 = 0x41;
+// .agents/skills/retail-observe/references/2026-10-02-level-up-linked-sparkle.md Native immediate emission.
+const SEC2_OPCODE_IMMEDIATE_GENERATOR: u8 = 0x3C;
 const SEC2_OPCODE_CHILD_GENERATOR: u8 = 0x44;
 const SEC2_OPCODE_PARENT_POSITION_COPY: u8 = 0x45;
 const SEC2_OPCODE_PARENT_VELOCITY: u8 = 0x46;
@@ -1053,9 +1077,6 @@ const SEC2_OPCODE_SPECULAR_ROT_Z_TRACK: u8 = 0x5B;
 const SEC2_OPCODE_SPECULAR_COLOR_G_TRACK: u8 = 0x5D;
 const SEC2_OPCODE_SPECULAR_COLOR_A_TRACK: u8 = 0x5F;
 const SEC2_OPCODE_REVERSE_DISPLACEMENT: u8 = 0x67;
-// research/XIClient CYyGenerator.cpp ElemGenerate case 0x6A — the third block of the
-// child-generator family (see SEC2_OPCODE_ONCE_CHILD_GENERATOR); xim maps it to
-// ChildGeneratorSetup.
 const SEC2_OPCODE_VELOCITY_DAMPENER_TRACK: u8 = 0x69;
 const SEC2_OPCODE_CHILD_GENERATOR_3: u8 = 0x6A;
 const SEC2_OPCODE_PROJECTION_BIAS: u8 = 0x72;
@@ -1111,484 +1132,138 @@ const SEC4_OFFSET: usize = 0x7C;
 const SEC4_OPCODE_RELIFE: u8 = 0x05;
 const SEC4_OPCODE_EMIT_CHILD: u8 = 0x01;
 
-/// Everything one section walk decodes from a generator chunk body, before any kind-specific
-/// consumer runs: the field set of [`ParticleGeneratorDef`] plus the claim byte and the
-/// sound/distortion-only values. The three def parsers map out of this; none re-walks the
-/// sections (research/xim ParticleGeneratorParser.kt — one parser per chunk, kind selects
-/// consumers).
+/// Everything one section walk decodes from a generator chunk body: the field set of
+/// [`ParticleGeneratorDef`], which documents each shared field, plus the claim byte and the
+/// sound-only values. Each def parser maps its view out of one walk (research/xim
+/// ParticleGeneratorParser.kt — one parser per chunk, kind selects consumers).
 #[derive(Debug)]
 pub(crate) struct GeneratorSections {
     pub(crate) frames_per_emission: f32,
     pub(crate) particles_per_emission: u32,
     pub(crate) emission_variance: f32,
-
     pub(crate) mesh_id: [u8; 4],
     pub(crate) mesh_kind: ParticleMeshKind,
     pub(crate) base_position: [f32; 3],
     pub(crate) max_life_frames: f32,
     pub(crate) camera_billboard: bool,
     pub(crate) billboard: ParticleBillboard,
-    // `base_position` is an offset from the camera rather than a world placement. Two independent
-    // flags express it: the billboard word's followCamera bit and the render-state's
-    // cameraAttachedBasePosition bit (La Theine's rain uses the first for the `~1ra` curtain and
-    // the second for the `rai2` mist puff). They place differently — followCamera pins the
-    // generator to the camera position outright, cameraAttachedBasePosition rotates the offset
-    // by the view matrix (research/xim Particle.kt updateAssociatedPosition) — so both are kept alongside the
-    // union.
     pub(crate) camera_relative: bool,
     pub(crate) follow_camera: bool,
     pub(crate) camera_attached_base: bool,
-    // The spawn spread applied to every emitted particle; None puts them all on one point.
     pub(crate) position_variance: Option<PositionVariance>,
-
-    // sec2 0x1F SphericalPositionVarianceFull: the spherical spawn spread whose azimuth is a
-    // random draw or one of the generator's evenly spaced steps (CYyGenerator.cpp
-    // CYyGenerator::ElemGenerate case 0x1F — the stepped azimuth indexes the generator's
-    // element counter; the camera flag maps the ring into the camera's frame).
     pub(crate) spherical_full: Option<SphericalPositionVarianceFull>,
-
     pub(crate) continuous: bool,
     pub(crate) auto_run: bool,
     pub(crate) batched: bool,
-
     pub(crate) attach_type: AttachType,
-    // research/XIClient Attachment.cpp MakeAttachMatrix — the single EID locator index
-    // (bits 4-9 + bit 18 of the attach word); see ATTACH_EID_LOW_MASK.
+    pub(crate) attach_mode: u8,
     pub(crate) attach_eid: u8,
-    pub(crate) attach_source_oriented: bool,
-
+    pub(crate) attach_target_reference: u8,
+    pub(crate) attach_position_fit: u8,
+    pub(crate) attach_model_fit: u8,
     pub(crate) init_scale: [f32; 3],
-
-    // sec2 0x11 SingleScaleVarianceInitializer: one ufrand(payload) draw shared by every scale
-    // axis, per particle (research/xim ParticleInitializers.kt — scale += posRand(v);
-    // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x11 — a single ufrand added to x, y, z).
     pub(crate) single_scale_variance: Option<f32>,
-    // sec2 0x10 ScaleVarianceInitializer: three floats, the per-axis ufrand bound added to the
-    // 0x0F base scale per particle (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x10 —
-    // field_EC.x/y/z += ufrand(payload); research/xim ParticleInitializers.kt
-    // ScaleVarianceInitializer — scale += variance * posRand(1f) per axis).
     pub(crate) scale_variance: Option<[f32; 3]>,
     pub(crate) init_color: [f32; 4],
-    // sec2 0x17 ColorVarianceSetup: four bytes (R,G,B,A) / 255 — the per-channel bound of the
-    // upward color draw added to the 0x16 base per particle (research/xim
-    // ParticleInitializers.kt ColorVarianceSetup — color.rgba[i] += (byte/255) * posRand(1f),
-    // one [0, 1) draw per channel; the retail decompile's ElemGenerate has no 0x17 case, so
-    // xim's mapping is the available evidence).
     pub(crate) color_variance: Option<[f32; 4]>,
-    // sec2 0x19 ColorTransformSetup: four i16s (r,g,b,a) written to the element's allocation
-    // slot at emit (research/xim ParticleInitializers.kt ColorTransformSetup). The retail
-    // decompile's ElemGenerate has no 0x19 case, so xim's mapping is the available evidence;
-    // every shipped alpha channel is 0.
     pub(crate) color_transform: Option<[i16; 4]>,
-    // sec2 0x1A ColorTransformVariance: four i16s — each emitted element's transform gains
-    // round(posRand(1) × variance) per channel on top of the 0x19 base (research/xim
-    // ParticleInitializers.kt ColorTransformVariance).
     pub(crate) color_transform_variance: Option<[i16; 4]>,
-    // sec3 0x0B ColorTransformApplier: no payload — arms the per-frame application of the
-    // transform to the element's colour (research/xim ParticleUpdaters.kt
-    // ColorTransformApplier).
     pub(crate) color_transform_applier: bool,
-    // sec3 0x0C ColorTransformModifier: four i16s [r, g, b, a] — the per-frame rate on the
-    // sec2 0x19 color transform over the particle's life (research/xim
-    // ParticleUpdaters.kt ColorTransformModifier — colorTransform += floor(modifier ×
-    // frames/30) per frame).
     pub(crate) color_transform_modifier: Option<[i16; 4]>,
     pub(crate) init_velocity: [f32; 3],
-    // sec2 0x03 VelocityVarianceSetup (position): the per-axis bound of the uniform random
-    // velocity added to the 0x02 base per particle (research/xim ParticleInitializers.kt
-    // VelocityVarianceSetup — the allocationOffset binds it to the position transform).
     pub(crate) velocity_variance: Option<[f32; 3]>,
-    // sec2 0x08 RelativeVelocitySetup: the magnitude of the per-particle velocity added along
-    // the spawn offset's direction (research/xim ParticleInitializers.kt RelativeVelocitySetup —
-    // direction = normalize of the initial position relative to the spawn point; research/XIClient
-    // CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x08 normalizes field_54 minus the
-    // position captured at element spawn, i.e. the offsets the earlier blocks added).
     pub(crate) relative_velocity: Option<f32>,
-    // sec2 0x41 RelativeVelocityVarianceSetup: the bound of the uniform random magnitude added
-    // to the 0x08 relative velocity along the spawn offset's direction per particle
-    // (research/xim ParticleInitializers.kt RelativeVelocityVarianceSetup; the retail
-    // decompile's CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x41 scales the normalized
-    // spawn offset by frand of this value and adds it to the same allocation vector as 0x08).
     pub(crate) relative_velocity_variance: Option<f32>,
-    // sec2 0x67 ReverseDisplacementSetup: the block's presence arms the spawn-at-endpoint
-    // behavior; its single float payload is never read by the effect
-    // (research/xim ParticleInitializers.kt ReverseDisplacementSetup — the read float is
-    // stored but unused in apply; the retail decompile's ElemGenerate has no 0x67 case,
-    // so xim's mapping is the available evidence).
     pub(crate) reverse_displacement: Option<f32>,
-    // sec3 0x02 PositionUpdater: a no-payload marker — retail's ElemIdle case 0x02 adds the
-    // element's total velocity × dt to its position, and only while the block is present
-    // (research/xim ParticleUpdaters.kt PositionUpdater; CYyGenerator.cpp
-    // CYyGenerator::ElemIdle case 0x02). A generator that carries a base velocity without
-    // the block is not position-stepped by retail, so the flag gates the engine's velocity
-    // integration.
     pub(crate) position_updater: bool,
-    // sec2 0x0A RotationVarianceInitializer: the per-axis bound of the uniform random rotation
-    // added to the 0x09 base per particle (research/xim ParticleInitializers.kt
-    // RotationVarianceInitializer — the retail decompile's ElemGenerate default is
-    // XICLIENT_CODE_MISSING, so xim's mapping is the available evidence).
     pub(crate) rotation_variance: Option<[f32; 3]>,
     pub(crate) init_rotation: [f32; 3],
-    // sec2 0x3B IncrementalRotationApplier: the per-axis increment added to the 0x09 base
-    // rotation, scaled by one plus the particles emitted before this one (research/xim
-    // ParticleInitializers.kt IncrementalRotationApplier — rotation += incr × (1 +
-    // totalParticlesEmitted); its apply also arms the render-time rotation-y negation, even
-    // for an all-zero payload. The retail decompile's ElemGenerate has no 0x3B case, so xim
-    // is the available evidence.
     pub(crate) incremental_rotation: Option<[f32; 3]>,
     pub(crate) blend: ParticleBlend,
-    // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
-    // `blend` because the TEXTUREFACTOR-alpha promotion is keyed on byte 0x44 exactly.
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp CMoD3m::Draw
     pub(crate) blend_byte: u8,
-
-    // Selects the D3m texture-stage table: set = NonZeroOneTSS (texture alpha ignored,
-    // alpha = 4*D.a*F.a), clear = NonZeroTwoTSS (alpha = 8*D.a*T.a*F.a).
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS
     pub(crate) ignore_texture_alpha: bool,
-
-    // Clear = the element fogs toward the area's fog colour like terrain (CMoElem.cpp
-    // CMoElem::PrepDX); the weat/ sky layers past the fog range set the bit.
     pub(crate) fog_enabled: bool,
-
     pub(crate) draw_priority: DrawPriority,
-    // CYyGenerator.cpp CYyGenerator::ElemGenerate opcode 0x30 — the element's `field_128`
-    // sort-key offset (research/xim Particle.kt `projectionBias`).
     pub(crate) sort_offset: f32,
-    // sec2 0x72 ProjectionBiasInitializer: two floats. param0 is the same `field_128` 0x30
-    // writes (the ordering-table key via CMoElem.cpp CMoElem::CheckSomethingWasTrue ->
-    // OT->Insert), so it lands in `sort_offset`; param1 is the attached SkeletalMeshActor
-    // depth-scale factor (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x72 —
-    // field_128 *= (GetDepthScale() - 1) * (param1 != 0 ? param1 : 1) + 1), which the engine
-    // does not reproduce (no actor depth scale) and xim ignores (research/xim
-    // ParticleInitializers.kt ProjectionBiasInitializer — only param0 reaches the draw bias).
     pub(crate) projection_bias: Option<[f32; 2]>,
-    // CMoElem.cpp CMoElem::PrepDX — D3DRS_ZWRITEENABLE for the element.
     pub(crate) depth_write: bool,
-
-    // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
     pub(crate) position_x_track: Option<[u8; 4]>,
     pub(crate) position_y_track: Option<[u8; 4]>,
     pub(crate) position_z_track: Option<[u8; 4]>,
     pub(crate) weighted_mesh_weight_tracks: [Option<[u8; 4]>; WEIGHTED_MESH_WEIGHTS],
     pub(crate) scale_x_track: Option<[u8; 4]>,
     pub(crate) scale_y_track: Option<[u8; 4]>,
-    // sec2 0x29 KeyFrameValueSetup (scale.z): retail captures field_EC.z, the element's
-    // scale z, as the track's initial value (CYyGenerator.cpp CYyGenerator::ElemGenerate
-    // case 0x29 — same shape as 0x27/0x28). Parsed but not applied: the engine's 2D sprite
-    // has no z axis (as for the 0x10/0x11 z bound).
     pub(crate) scale_z_track: Option<[u8; 4]>,
     pub(crate) alpha_track: Option<[u8; 4]>,
-    // sec2 0x2A KeyFrameValueSetup (color.r): a keyframe track on the element's red channel
-    // (research/xim ParticleGeneratorParser.kt — 0x2A/0x2B/0x2C are the Color.r/g/b
-    // KeyFrameValueSetup; retail's keyframe pre-load pass references the same blocks as
-    // Keyframe resources). Parsed but not applied: the engine sets the particle's rgb at
-    // spawn from the 0x16 base / 0x17 variance and has no per-frame rgb track path.
     pub(crate) color_r_track: Option<[u8; 4]>,
-    // sec2 0x2B KeyFrameValueSetup (color.g): the green-channel twin of 0x2A
-    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, as for 0x2A.
     pub(crate) color_g_track: Option<[u8; 4]>,
-    // sec2 0x2C KeyFrameValueSetup (color.b): the blue-channel twin of 0x2A
-    // (research/xim ParticleGeneratorParser.kt). Parsed but not applied, as for 0x2A.
     pub(crate) color_b_track: Option<[u8; 4]>,
-
-    // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
-    // MoonPhaseColorUpdater (0x4F, 12xRGBA): indexed by day-of-week / moon-phase frame and
-    // applied as a 2x modulate (Particle.kt getColor). RGBA in 0..=1.
     pub(crate) day_of_week_color: Option<[[f32; 4]; DAYS_OF_WEEK]>,
     pub(crate) moon_phase_color: Option<[[f32; 4]; MOON_PHASES]>,
-
-    // The time-of-day color curves: initializer 0x60..0x63 name a keyframe track per RGBA
-    // channel, and section-3 ClockValueUpdater 0x3C..0x3F sample it at the Vana'diel day
-    // fraction rather than the particle's life progress. This is how retail authors the
-    // sun's dawn/noon/dusk ramp and the moon's daytime fade — 0x3F multiplies alpha, the
-    // other three assign their channel.
-    // research/xim ParticleGeneratorParser.kt sec2Handler,431-434
     pub(crate) tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
     pub(crate) tod_color_driven: [bool; TOD_COLOR_CHANNELS],
     pub(crate) tod_volume_track: Option<[u8; 4]>,
-
-    // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater (0x45): the
-    // sprite-sheet frame is the current moon phase, not the particle's life progress.
     pub(crate) moon_phase_sprite: bool,
-
-    // research/xim ParticleUpdaters.kt section-3 updaters (offset at body[0x78], same
-    // sectionHeader+offset-0x10 convention as the setup section). TextureCoordinateUpdater
-    // 0x27/0x28 carry the per-frame UV-translate velocity that scrolls the sprite/sheet
-    // texture (cascade/moat water). VelocityAccelerator 0x03/0x06/0x09 read a Vector3f at
-    // payload+0 and target their own transform allocation. [0,0]/None = static.
     pub(crate) uv_scroll: [f32; 2],
     pub(crate) accel: Option<[f32; 3]>,
     pub(crate) rotation_accel: Option<[f32; 3]>,
     pub(crate) scale_accel: Option<[f32; 3]>,
-
-    // Section 1 (body[0x70]) generator-level updater 0x0A, research/xim
-    // ParticleGeneratorParser.kt sec1Handler GeneratorCullUpdater.
     pub(crate) emit_cull: Option<EmitCull>,
-
-    // Section 1 generator-level updater 0x11, research/xim ParticleGeneratorParser.kt
-    // sec1Handler AssociationUpdater.
     pub(crate) association: Option<AssociationFollow>,
-
-    // sec2 0x8E FootMarkEffectSetup (research/xim ParticleInitializers.kt): a no-payload marker.
-    // The particle snaps to the actor's position + joint and facing on the spawn frame, then
-    // stops following the generator (research/xim Particle.kt updateAssociatedPosition /
-    // updateAssociatedFacing footMarkEffect branches).
     pub(crate) foot_mark: bool,
-
-    // sec2 0x3D OscillationSetup: a no-payload marker allocating the particle's oscillation
-    // state (research/xim ParticleInitializers.kt OscillationSetup — NoDataParticleInitializer,
-    // apply is particle.allocate(allocationOffset, OscillationParams())); the 0x3E/0x3F/0x40
-    // acceleration setups write it and the section-3 0x29/0x2A/0x2B appliers integrate it.
     pub(crate) oscillation: bool,
-
-    // sec2 0x45 ParentPositionCopyConfig: a no-payload marker — the particle's associated
-    // position copies its parent's (research/xim ParticleInitializers.kt
-    // ParentPositionCopyConfig; apply is a no-op without a parent). Parsed but not applied
-    // until the child-generator path lands (the sec2 0x44 ChildGeneratorSetup).
     pub(crate) parent_position_copy: bool,
-
-    // sec2 0x46 ParentVelocityConfig: one float, the multiplier on the parent's total
-    // velocity copied into the child's velocity transform (research/xim
-    // ParticleInitializers.kt ParentVelocityConfig; apply is a no-op without a parent).
-    // Parsed but not applied until the child-generator path lands.
     pub(crate) parent_velocity: Option<f32>,
-
-    // sec2 0x44 ChildGeneratorSetup: [expectZero32, child generator DAT id] — the sibling
-    // generator chunk emitted as a child of each particle of this one (research/xim
-    // ParticleInitializers.kt ChildGeneratorSetup; the sec2 0x53 block is the same shape).
-    // Parsed but not applied until the child-generator runtime lands (the sec3 0x25/0x33
-    // child updaters).
     pub(crate) child_generator: Option<[u8; 4]>,
+    pub(crate) immediate_generator: Option<[u8; 4]>,
     pub(crate) child_generator_3: Option<[u8; 4]>,
-    pub(crate) once_child_generator: Option<[u8; 4]>,
     pub(crate) child_emit_basic: bool,
     pub(crate) child_emit_full: bool,
     pub(crate) child_emit_billboard: bool,
-
-    // sec2 0x40 OscillationAccelerationSetup (Z): [acceleration, accelerationVariance]; the
-    // particle's Z oscillation acceleration is acceleration + variance × one [−1, 1) draw
-    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup — RandHelper rand()
-    // in [−1, 1)). Parsed but not applied until the section-3 applier lands.
     pub(crate) oscillation_accel_z: Option<[f32; 2]>,
-    // sec2 0x3E OscillationAccelerationSetup (X): the X-axis twin of 0x40
-    // (research/xim ParticleInitializers.kt OscillationAccelerationSetup). Parsed but not
-    // applied until the section-3 applier lands.
     pub(crate) oscillation_accel_x: Option<[f32; 2]>,
-    // sec2 0x3F OscillationAccelerationSetup (Y): the Y-axis twin of 0x40 (research/xim
-    // ParticleInitializers.kt OscillationAccelerationSetup). Present in 30 shipped generators
-    // though absent from the launch log. Parsed but not applied until the section-3 applier
-    // lands.
     pub(crate) oscillation_accel_y: Option<[f32; 2]>,
-
-    // sec3 0x29 OscillationApplier (X): [rate-divisor, base-offset, unused-in-xim] — the
-    // integrator for the 0x3E acceleration: oscillationRate = 180f / payload0, baseOffset =
-    // payload1, payload2 has no effect (research/xim ParticleUpdaters.kt OscillationApplier).
-    // The acceleration is parsed but never moves a particle without it.
     pub(crate) oscillation_applier_x: Option<[f32; 3]>,
-    // sec3 0x2B OscillationApplier (Z): the Z-axis twin of 0x29 (research/xim
-    // ParticleUpdaters.kt OscillationApplier), the integrator for the 0x40 acceleration.
     pub(crate) oscillation_applier_z: Option<[f32; 3]>,
-    // sec3 0x2A OscillationApplier (Y): the Y-axis twin of 0x29 (research/xim
-    // ParticleUpdaters.kt OscillationApplier), the integrator for the 0x3F acceleration.
     pub(crate) oscillation_applier_y: Option<[f32; 3]>,
-
-    // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
-    // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
-    // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
-    // research/xim ParticleGeneratorParser.kt sec3Handler RotationUpdater), so read [`Self::spin`].
     pub(crate) rotation_velocity: Option<[f32; 3]>,
-
-    // sec2 0x0C VelocityVarianceSetup (rotation): per-particle uniform [-v, v] draw added to each
-    // axis of the 0x0B spin rate (research/xim ParticleInitializers.kt — the allocationOffset
-    // binds it to the rotation transform; CYyGenerator.cpp CYyGenerator::ElemGenerate shares one
-    // frand-add body across 0x03/0x0C/0x13).
     pub(crate) rotation_velocity_variance: Option<[f32; 3]>,
     pub(crate) rotation_updater: bool,
-
-    // sec2 0x12 ScaleVelocitySetup: scale units per 60 Hz frame on each axis. Retail's
-    // ElemGenerate shares the 0x0B/0x12 case (a 12-byte memcpy into the scale transform's
-    // velocity at the allocation offset); only the sec3 0x08 ScaleUpdater integrates it
-    // (research/xim ParticleUpdaters.kt — scale += velocity × elapsedFrames), so read
-    // [`Self::scale_rate`].
     pub(crate) scale_velocity: Option<[f32; 3]>,
     pub(crate) scale_updater: bool,
-
-    // sec2 0x13 VelocityVarianceSetup (scale): a per-particle uniform [-v, v] draw added to
-    // each axis of the 0x12 scale velocity (research/xim ParticleInitializers.kt
-    // VelocityVarianceSetup — the allocationOffset binds it to the scale transform; retail's
-    // shared 0x03/0x0C/0x13 case adds frand(bounds) to the transform's velocity).
     pub(crate) scale_velocity_variance: Option<[f32; 3]>,
-
-    // Section 4 (body[0x7C]) opcode 0x05, CYyGenerator.cpp CYyGenerator::ElemDie case 5 — an expiring
-    // element gets its life reset instead of dying, keeping its position, rotation and UV state.
-    // Every idle Home Point layer authors it; without it the crystal would snap back to its
-    // spawn rotation every 120 frames.
     pub(crate) relife_on_expiry: bool,
-
-    // CYyGenerator.cpp CYyGenerator::HandleOne 0x01000000 — the element renders through
-    // CMoD3mSpecularElem, whose draw the XIClient decompile leaves as missing code; the sec2 0x55
-    // record is kept alongside so the reconstruction has its inputs.
     pub(crate) specular_element: bool,
     pub(crate) specular: Option<SpecularParams>,
-    // sec2 0x5A KeyFrameValueSetup (specular rotation.y): a keyframe track on the specular
-    // element's rotation y (research/xim ParticleGeneratorParser.kt — 0x59/0x5A/0x5B are the
-    // Specular Rotation x/y/z KeyFrameValueSetup; retail's keyframe pre-load pass references
-    // the same blocks as Keyframe resources). Parsed but not applied: the engine does not
-    // model the specular element's rotation (the 0x55 record is kept for reconstruction
-    // inputs only).
     pub(crate) specular_rot_y_track: Option<[u8; 4]>,
-    // sec2 0x82 CameraShakeSetup: [expectZero32, keyframe track id, unk0 u32, unk1 f32,
-    // unk2 u32] — the keyframe DAT id the section-3 0x5F updater samples at the particle's
-    // progress (research/xim ParticleInitializers.kt CameraShakeSetup). xim labels this pair
-    // "camera shake"; retail applies it as gamepad vibration, and kuluu-render/src/rumble.rs
-    // update_rumble_system drives bevy's rumble pipeline from the track.
     pub(crate) rumble_track: Option<[u8; 4]>,
-    // sec3 0x5F CameraShakeUpdater: near, far, and — only in the 4-word form — shakeFactor
-    // (research/xim ParticleUpdaters.kt CameraShakeUpdater — the opCodeSize == 4 branch).
-    // Rumble intensity falloff by camera-to-particle distance: full inside `near`, zero
-    // beyond `far` (kuluu-render/src/rumble.rs update_rumble_system).
     pub(crate) rumble_falloff: Option<[f32; 3]>,
     pub(crate) draw_distance_near: Option<f32>,
     pub(crate) draw_distance_far: Option<f32>,
-
-    // sec2 0x32 HazeOffsetInitializer: two floats, of which xim applies only the second,
-    // as particle.hazeOffset.x — a draw-time x translate the haze/distortion shader pass
-    // offsets the previous-frame transform by (research/xim ParticleInitializers.kt
-    // HazeOffsetInitializer; GLDrawer.kt previousFrameTransform). Parsed but not applied:
-    // the engine has no haze/distortion pass yet; the sec3 0x24 ProgressValueUpdater
-    // animates the same value over life.
     pub(crate) haze_offset_x: Option<f32>,
-
-    // sec2 0x47 ParentRotateConfig: a no-payload marker — the child particle copies its
-    // parent's rotation (research/xim ParticleInitializers.kt ParentRotateConfig; apply is
-    // a no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
     pub(crate) parent_rotate: bool,
-
-    // sec2 0x48 ParentColorConfig: a no-payload marker — the child particle copies its
-    // parent's color (research/xim ParticleInitializers.kt ParentColorConfig; apply is a
-    // no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
     pub(crate) parent_color: bool,
-
-    // sec2 0x49 ParentScaleConfig: a no-payload marker — the child particle copies its
-    // parent's scale (research/xim ParticleInitializers.kt ParentScaleConfig; apply is a
-    // no-op without a parent). Parsed but not applied until the child-generator path
-    // lands (the sec2 0x44 ChildGeneratorSetup).
     pub(crate) parent_scale: bool,
-
-    // sec2 0x69 KeyFrameValueSetup (velocity dampener): the 0x27/0x28/0x29 track shape
-    // bound to the element's velocity dampener, sampled per frame by the sec3 0x44
-    // applier and overriding the 0x2C base factor (research/xim
-    // ParticleGeneratorParser.kt sec2Handler 0x69; retail's keyframe pre-load pass
-    // references the same blocks as Keyframe resources).
     pub(crate) velocity_dampener_track: Option<[u8; 4]>,
-    // sec3 0x44 ProgressValueUpdater (dampening factor): no payload — arms the per-frame
-    // sampling of the sec2 0x69 track into VelocityDampener's factor (research/xim
-    // ParticleGeneratorParser.kt sec3Handler).
     pub(crate) dampening_factor_applier: bool,
-    // sec3 0x2C VelocityDampener: [dampen, unk] — velocity ×= dampeningFactor^dt, the
-    // factor coming from the sec2 0x69 track when present, else dampen (research/xim
-    // ParticleUpdaters.kt VelocityDampener).
     pub(crate) velocity_dampener: Option<[f32; 2]>,
-    // sec3 0x26 VelocityRotator: three floats, the rotateAmount added to the velocity
-    // rotation × (0.5 × dt) per frame (research/xim ParticleUpdaters.kt VelocityRotator —
-    // the actor-space axis swap and the 0.5 factor are kept as named consts in
-    // particle_sim.rs, flagged for retail verification).
     pub(crate) velocity_rotator: Option<[f32; 3]>,
-    // sec3 0x2F VelocityRotationUpdater: no payload — collapses all velocity into +x and
-    // copies the particle rotation into the velocity rotation (research/xim
-    // ParticleUpdaters.kt VelocityRotationUpdater).
     pub(crate) velocity_rotation_updater: bool,
-    // sec2 0x31 RandomVelocitySetup: one float bound; each emitted element's base velocity
-    // is replaced by value × rand() on all three axes — the relative-velocity portion is a
-    // separate transform and survives (research/xim ParticleInitializers.kt
-    // RandomVelocitySetup).
     pub(crate) random_velocity: Option<f32>,
-
-    // sec2 0x4E FixedPointPositionVarianceSetup: [expectZero32, point list DAT id,
-    // expect32(0, 1)] — the point list whose points cycle as per-emitted-particle
-    // position offsets (research/xim ParticleInitializers.kt
-    // FixedPointPositionVarianceSetup). Retail's sec2 walk handles neither 0x4E nor 0x4F
-    // (research/XIClient CYyGenerator.cpp ElemGenerate), so the id is kept for
-    // reconstruction only.
     pub(crate) fixed_point_position_variance: Option<[u8; 4]>,
-    // sec2 0x4F: the twin of 0x4E — xim maps both opcodes to the same class
-    // (research/xim ParticleGeneratorParser.kt sec2Handler); a second slot so a
-    // generator carrying both keeps both ids.
     pub(crate) fixed_point_position_variance_2: Option<[u8; 4]>,
-
-    // sec2 0x53 ChildGeneratorSetup: [expectZero32, child generator DAT id] — xim maps
-    // both 0x44 and 0x53 to the same class (research/xim ParticleGeneratorParser.kt
-    // sec2Handler); a second slot so a generator carrying both keeps both ids. Parsed
-    // but not applied until the child-generator runtime lands (the sec3 0x25/0x33 child
-    // updaters).
     pub(crate) child_generator_2: Option<[u8; 4]>,
-
-    // sec2 0x5B KeyFrameValueSetup (specular rotation.z): the 0x27/0x28/0x29 track shape
-    // bound to the specular element's rotation z (research/xim ParticleGeneratorParser.kt
-    // — 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but
-    // not applied: the engine does not model the specular element's rotation.
     pub(crate) specular_rot_z_track: Option<[u8; 4]>,
-
-    // sec2 0x5F KeyFrameValueSetup (specular color.a): the 0x27/0x28/0x29 track shape
-    // bound to the specular element's color alpha (research/xim
-    // ParticleGeneratorParser.kt — 0x5C..0x5F are the Specular Color r/g/b/a
-    // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
-    // specular element's color.
     pub(crate) specular_color_a_track: Option<[u8; 4]>,
-
-    // sec2 0x79 ParentRotateConfig: a no-payload marker — xim maps 0x79 to the same
-    // class as 0x47 (research/xim ParticleGeneratorParser.kt sec2Handler, comment
-    // "How does it differ from 0x47?"); a second slot so a generator carrying both
-    // keeps both. Parsed but not applied until the child-generator path lands (the
-    // sec2 0x44 ChildGeneratorSetup).
     pub(crate) parent_rotate_2: bool,
-
-    // sec2 0x56 BatchingSetup: one expectZero32 word — xim's apply sets the particle's
-    // batched flag, which skips movement-orientation (research/xim ParticleInitializers.kt
-    // BatchingSetup; Particle.kt applyMovementOrientation). Kept separate from `batched`:
-    // retail's generator walk has no 0x56 case (research/XIClient CYyGenerator.cpp), so the
-    // block does not arm the GEN_FLAG_BATCHED flag's CheckFlag29 behavior — parsed only.
     pub(crate) batching_setup: bool,
-
-    // sec2 0x4A ParentTexCoordConfig: a no-payload marker — a child particle copies the
-    // parent's tex-coord translate (research/xim ParticleInitializers.kt
-    // ParentTexCoordConfig). A no-op without a parent, so parsed but not applied until the
-    // child-generator path lands (as for the 0x45 marker).
     pub(crate) parent_tex_coord: bool,
-
-    // sec2 0x54 PointListPositionSetup: [in-mem ptr, keyframe DAT id, expect zero, in-mem
-    // ptr, point list DAT id] — the spline a particle follows, the keyframe id remapping
-    // its progress and zero when the raw progress drives it (research/xim
-    // ParticleInitializers.kt PointListPositionSetup; retail's ElemGenerate case 0x54
-    // offsets the first emitted elem by the spline's start point, a shared allocation slot
-    // zeroing the delta for later elems). Parsed but not applied until the sec3 0x34
-    // PointListPositionUpdater lands.
     pub(crate) point_list_position: Option<([u8; 4], [u8; 4])>,
-
-    // sec2 0x51 KeyFrameValueSetup (velocity.y): the 0x27/0x28/0x29 track shape bound to
-    // the element's velocity y (research/xim ParticleGeneratorParser.kt sec2Handler —
-    // 0x50/0x51/0x52 are the Velocity x/y/z KeyFrameValueSetup). Parsed but not applied:
-    // the engine does not model a per-frame velocity track.
     pub(crate) velocity_y_track: Option<[u8; 4]>,
-
-    // sec2 0x59 KeyFrameValueSetup (specular rot.x): the 0x27/0x28/0x29 track shape bound
-    // to the specular element's rotation x (research/xim ParticleGeneratorParser.kt —
-    // 0x59/0x5A/0x5B are the Specular Rotation x/y/z KeyFrameValueSetup). Parsed but not
-    // applied: the engine does not model the specular element's rotation.
     pub(crate) specular_rot_x_track: Option<[u8; 4]>,
-
-    // sec2 0x5D KeyFrameValueSetup (specular color.g): the 0x27/0x28/0x29 track shape
-    // bound to the specular element's color green (research/xim
-    // ParticleGeneratorParser.kt — 0x5C..0x5F are the Specular Color r/g/b/a
-    // KeyFrameValueSetup). Parsed but not applied: the engine does not model the
-    // specular element's color.
     pub(crate) specular_color_g_track: Option<[u8; 4]>,
     /// The raw StandardParticleSetup kind byte — which def parser claims this chunk.
     pub(crate) kind_byte: u8,
-    /// sec4 0x01 EmitChildHandler's child generator id (research/xim ParticleExpirationHandlers.kt).
     #[allow(dead_code)]
     pub(crate) emit_child_id: Option<[u8; 4]>,
     /// sec2 0x4C audio range — the sound consumer's near/far.
@@ -1655,8 +1330,11 @@ impl ParticleGeneratorDef {
             auto_run: s.auto_run,
             batched: s.batched,
             attach_type: s.attach_type,
+            attach_mode: s.attach_mode,
             attach_eid: s.attach_eid,
-            attach_source_oriented: s.attach_source_oriented,
+            attach_target_reference: s.attach_target_reference,
+            attach_position_fit: s.attach_position_fit,
+            attach_model_fit: s.attach_model_fit,
             init_scale: s.init_scale,
             single_scale_variance: s.single_scale_variance,
             scale_variance: s.scale_variance,
@@ -1711,8 +1389,8 @@ impl ParticleGeneratorDef {
             parent_position_copy: s.parent_position_copy,
             parent_velocity: s.parent_velocity,
             child_generator: s.child_generator,
+            immediate_generator: s.immediate_generator,
             child_generator_3: s.child_generator_3,
-            once_child_generator: s.once_child_generator,
             emit_child_id: s.emit_child_id,
             child_emit_basic: s.child_emit_basic,
             child_emit_full: s.child_emit_full,
@@ -1795,11 +1473,21 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
 
     let attach_flags = u16_le(body, 0x00);
     let additional_attach = u16_le(body, 0x02);
-    let attach_type = AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default();
-    let attach_eid = (((attach_flags & ATTACH_EID_LOW_MASK) >> ATTACH_EID_LOW_SHIFT)
-        | ((additional_attach & ADDITIONAL_ATTACH_EID_TOP_BIT) >> 2) << 6)
+    let attach_type =
+        AttachType::from_flag(attach_flags & ATTACH_MODE_LOW_MASK).unwrap_or_default();
+    let attach_mode = ((attach_flags & ATTACH_MODE_LOW_MASK)
+        | ((additional_attach & ADDITIONAL_ATTACH_MODE_HIGH_BIT) << ATTACH_MODE_HIGH_SHIFT))
         as u8;
-    let attach_source_oriented = additional_attach & ATTACH_SOURCE_ORIENTED != 0;
+    let attach_eid = (((attach_flags & ATTACH_EID_LOW_MASK) >> ATTACH_EID_LOW_SHIFT)
+        | ((additional_attach & ADDITIONAL_ATTACH_EID_TOP_BIT)
+            >> ADDITIONAL_ATTACH_EID_TOP_BIT.trailing_zeros())
+            << ATTACH_EID_TOP_SHIFT) as u8;
+    let attach_target_reference =
+        ((attach_flags & ATTACH_TARGET_REFERENCE_MASK) >> ATTACH_TARGET_REFERENCE_SHIFT) as u8;
+    let attach_position_fit = ((additional_attach & ADDITIONAL_ATTACH_POSITION_FIT_MASK)
+        >> ADDITIONAL_ATTACH_POSITION_FIT_SHIFT) as u8;
+    let attach_model_fit = ((additional_attach & ADDITIONAL_ATTACH_MODEL_FIT_MASK)
+        >> ADDITIONAL_ATTACH_MODEL_FIT_SHIFT) as u8;
 
     let frames_per_emission = u16_le(body, 0x66) as f32 + 1.0;
     let emission_variance = u16_le(body, 0x64) as f32;
@@ -1902,9 +1590,9 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     let mut parent_position_copy = false;
     let mut parent_velocity = None;
     let mut child_generator = None;
+    let mut immediate_generator = None;
     let mut child_generator_2 = None;
     let mut child_generator_3 = None;
-    let mut once_child_generator = None;
     let mut oscillation_accel_z = None;
     let mut oscillation_accel_x = None;
     let mut oscillation_accel_y = None;
@@ -2271,8 +1959,10 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             SEC2_OPCODE_PARENT_VELOCITY if payload + 4 <= body.len() => {
                 parent_velocity = Some(f32_le(body, payload));
             }
-            // research/xim ParticleInitializers.kt ChildGeneratorSetup: the sibling
-            // generator emitted as a child of each particle.
+            // .agents/skills/retail-observe/references/2026-10-02-level-up-linked-sparkle.md Native immediate emission.
+            SEC2_OPCODE_IMMEDIATE_GENERATOR if payload + 8 <= body.len() => {
+                immediate_generator = track_id(body, payload + 4);
+            }
             SEC2_OPCODE_CHILD_GENERATOR if payload + 8 <= body.len() => {
                 child_generator = track_id(body, payload + 4);
             }
@@ -2285,12 +1975,6 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             // the shared child-generator family; xim maps it to ChildGeneratorSetup.
             SEC2_OPCODE_CHILD_GENERATOR_3 if payload + 8 <= body.len() => {
                 child_generator_3 = track_id(body, payload + 4);
-            }
-            // research/XIClient CYyGenerator.cpp ElemGenerate case 0x3C — the once-at-init
-            // member of the family (research/xim ParticleInitializers.kt
-            // OnceChildGeneratorSetup: expectZero32 then the child id).
-            SEC2_OPCODE_ONCE_CHILD_GENERATOR if payload + 8 <= body.len() => {
-                once_child_generator = track_id(body, payload + 4);
             }
             // research/xim ParticleInitializers.kt ParentRotateConfig: the marker that
             // makes a child particle copy its parent's rotation.
@@ -2706,14 +2390,13 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
                         unlink_out_of_range: u32_le(body, payload + 8) & 1 != 0,
                     });
                 }
-                // research/xim ParticleGeneratorUpdaters.kt AssociationUpdater read:
-                // followPosition(0x1), followFacing(0x2), followFactor(>>2).
                 SEC1_OPCODE_ASSOCIATION if payload + 4 <= body.len() => {
                     let cfg = u32_le(body, payload);
                     association = Some(AssociationFollow {
-                        follow_position: cfg & 1 != 0,
-                        follow_facing: cfg & 2 != 0,
-                        factor: cfg >> 2,
+                        follow_position: cfg & ASSOCIATION_FOLLOW_POSITION_BIT != 0,
+                        follow_facing: cfg & ASSOCIATION_FOLLOW_FACING_BIT != 0,
+                        factor: (cfg >> ASSOCIATION_FOLLOW_RATE_SHIFT)
+                            & ASSOCIATION_FOLLOW_RATE_SNAP,
                     });
                 }
                 _ => decoded = false,
@@ -2789,8 +2472,11 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             auto_run,
             batched,
             attach_type,
+            attach_mode,
             attach_eid,
-            attach_source_oriented,
+            attach_target_reference,
+            attach_position_fit,
+            attach_model_fit,
             init_scale,
             single_scale_variance,
             scale_variance,
@@ -2844,8 +2530,8 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
             parent_position_copy,
             parent_velocity,
             child_generator,
+            immediate_generator,
             child_generator_3,
-            once_child_generator,
             child_emit_basic,
             child_emit_full,
             child_emit_billboard,
@@ -2902,10 +2588,7 @@ fn parse_sections(body: &[u8]) -> Result<Option<(GeneratorSections, Vec<DecodedB
     )))
 }
 
-// research/XIClient/src/XIClient/include/Resource/ResourceType.h `Sep = 61`, dispatched
-// at CYyGenerator.cpp HandleOne (`modelType` = the same setup byte payload+29 the particle kinds
-// come from) and :193 (`case Sep: elem = new CYySoundElem()`).
-pub(crate) const LINKED_DATA_SOUND: u8 = 0x3D;
+pub(crate) const LINKED_DATA_SOUND: u8 = LinkedDataKind::AUDIO;
 
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemGenerate 0x4Cu —
 // initializer 0x4C is the sound elem's setup: `s_far = fpos[1]`, `s_near = fpos[2]`, and
@@ -2973,7 +2656,7 @@ impl SoundGeneratorDef {
         let Some((sections, blocks)) = parse_sections(body)? else {
             return Ok(None);
         };
-        if sections.kind_byte != LINKED_DATA_SOUND {
+        if sections.kind_byte != LinkedDataKind::AUDIO {
             return Ok(None);
         }
         flush_blocks(sink, &blocks);
@@ -3007,10 +2690,6 @@ impl SoundGeneratorDef {
         self.continuous || self.max_life_frames == 0.0
     }
 }
-
-// research/xim ParticleGeneratorSettings.kt LinkedDataType — 0x22 is a screen-space distortion
-// (haze/smear) element, not a mesh particle. [`ParticleGeneratorDef::parse`] rejects the same chunks.
-pub const LINKED_DATA_DISTORTION: u8 = 0x22;
 
 /// A 0x05 Generator whose setup links a 0x22 `Distortion` — a screen-space haze/smear element
 /// rather than a particle. [`ParticleGeneratorDef::parse`] rejects the same chunks, so the two
@@ -3053,7 +2732,7 @@ impl DistortionGeneratorDef {
         let Some((sections, blocks)) = parse_sections(body)? else {
             return Ok(None);
         };
-        if sections.kind_byte != LINKED_DATA_DISTORTION {
+        if sections.kind_byte != LinkedDataKind::DISTORTION {
             return Ok(None);
         }
         flush_blocks(sink, &blocks);
@@ -3258,10 +2937,6 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
-
-    /// The two non-visual LinkedDataType values (PointLight / Null): they reject the mesh.
-    const LINKED_DATA_POINT_LIGHT: u8 = 0x47;
-    const LINKED_DATA_NULL_PARTICLE: u8 = 0x57;
 
     #[test]
     fn parses_particle_generator_header_and_setup() {
@@ -3570,11 +3245,11 @@ mod tests {
 
     #[test]
     fn non_particle_setup_is_none() {
-        let setup = setup_with_link(LINKED_DATA_POINT_LIGHT);
+        let setup = setup_with_link(LinkedDataKind::POINT_LIGHT);
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
 
-        let setup = setup_with_link(LINKED_DATA_NULL_PARTICLE);
+        let setup = setup_with_link(LinkedDataKind::NULL_PARTICLE);
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
     }
@@ -4261,7 +3936,7 @@ mod tests {
     // the shipped river sound authors 'kota'.
     #[test]
     fn tod_volume_track_reads_the_keyframe_id() {
-        let mut setup = setup_with_link(LINKED_DATA_SOUND);
+        let mut setup = setup_with_link(LinkedDataKind::AUDIO);
         setup[4 + 8..4 + 12].copy_from_slice(b"5008");
         let mut payload = [0u8; 12];
         payload[4..8].copy_from_slice(b"kota");
@@ -4276,7 +3951,7 @@ mod tests {
         );
 
         let plain = SoundGeneratorDef::parse(&build(
-            &setup_with_link(LINKED_DATA_SOUND),
+            &setup_with_link(LinkedDataKind::AUDIO),
             30,
             GEN_FLAG_AUTO_RUN,
         ))
@@ -5045,21 +4720,24 @@ mod tests {
         assert_eq!(plain.child_generator_3, None);
     }
 
-    // 0x3C OnceChildGeneratorSetup: [expectZero32, child generator DAT id] (research/xim
-    // ParticleInitializers.kt OnceChildGeneratorSetup).
     #[test]
-    fn once_child_generator_reads_the_child_id() {
+    fn immediate_generator_reads_the_linked_id() {
         let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
         let mut sec2 = setup.clone();
-        sec2.extend(op(0x3C, 3, &[0, 0, 0, 0, b'a', b'8', b'0', b'2']));
+        sec2.extend(op(
+            SEC2_OPCODE_IMMEDIATE_GENERATOR,
+            3,
+            &[0, 0, 0, 0, b'a', b'8', b'0', b'2'],
+        ));
         sec2.extend(op(OPCODE_END, 0, &[]));
         let body = build(&sec2, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.once_child_generator, Some(*b"a802"));
+        assert_eq!(def.immediate_generator, Some(*b"a802"));
+        assert_eq!(def.child_generator, None);
         let plain = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
             .unwrap()
             .unwrap();
-        assert_eq!(plain.once_child_generator, None);
+        assert_eq!(plain.immediate_generator, None);
     }
 
     // sec3 0x25/0x33/0x46 child-emission updaters: no-payload markers (research/xim
@@ -5705,84 +5383,200 @@ mod tests {
         assert!(def.is_singleton());
     }
 
-    // Pins the retail attach-word layout (Attachment.cpp MakeAttachMatrix) against the
-    // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020): type in the low
-    // nibble, ONE EID index in bits 4-9 plus bit 18 — bits 10-15 are not an index.
+    // The attach word is two indices plus a mode and two fit nibbles
+    // (.agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md Inputs),
+    // pinned on the words the record reads out of the installed DATs.
     #[test]
-    fn attach_flags_carry_type_and_one_eid_index() {
+    fn attach_word_carries_mode_two_references_and_fit_nibbles() {
         let setup = setup_with_link(LinkedDataKind::STATIC_MESH);
+        let parse = |attach_flags: u16, additional: u16| {
+            ParticleGeneratorDef::parse(&build_attached(&setup, 1, 1, attach_flags, additional))
+                .unwrap()
+                .unwrap()
+        };
 
-        // 0x5402: type TargetActor, EID low bits 0; the word's bits 10-15 (21) are reserved.
-        let body = build_attached(&setup, 1, 1, 0x5402, ATTACH_SOURCE_ORIENTED);
-        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.attach_type, AttachType::TargetActor);
-        assert_eq!(def.attach_eid, 0);
-        assert!(def.attach_source_oriented);
+        let level_up = parse(0x0011, 0x0000);
+        assert_eq!(level_up.attach_mode, attach_mode::SOURCE);
+        assert_eq!(level_up.attach_type, AttachType::SourceActor);
+        assert_eq!(level_up.attach_eid, 1);
+        assert_eq!(level_up.attach_target_reference, 0);
+        assert_eq!(
+            (level_up.attach_position_fit, level_up.attach_model_fit),
+            (0, 0)
+        );
 
-        let body = build_attached(&setup, 1, 1, 0x5402, 0);
-        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert!(!def.attach_source_oriented);
+        let poison = parse(0x5402, 0x0880);
+        assert_eq!(poison.attach_mode, attach_mode::TARGET);
+        assert_eq!(poison.attach_type, AttachType::TargetActor);
+        assert_eq!(poison.attach_eid, 0);
+        assert_eq!(poison.attach_target_reference, 21);
+        assert_eq!(
+            (poison.attach_position_fit, poison.attach_model_fit),
+            (8, 8)
+        );
 
-        // EID low bits in 4..10, type in the low nibble; bit 18 (additional word bit 2) is the top.
-        let body = build_attached(&setup, 1, 1, 0x0409 | (7 << ATTACH_EID_LOW_SHIFT), 0);
-        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.attach_type, AttachType::SourceActorWeapon);
-        assert_eq!(def.attach_eid, 7);
+        let fits = parse(
+            0x0000,
+            (3 << ADDITIONAL_ATTACH_POSITION_FIT_SHIFT) | (5 << ADDITIONAL_ATTACH_MODEL_FIT_SHIFT),
+        );
+        assert_eq!((fits.attach_position_fit, fits.attach_model_fit), (3, 5));
 
-        // Bit 18 lifts the index past the low six bits: 0x40 in the additional word is bit 2.
-        let body = build_attached(
-            &setup,
-            1,
-            1,
+        let contact = parse(
+            u16::from(attach_mode::TARGET_WITH_SOURCE_YAW) | (49 << ATTACH_TARGET_REFERENCE_SHIFT),
+            0,
+        );
+        assert_eq!(contact.attach_mode, attach_mode::TARGET_WITH_SOURCE_YAW);
+        assert_eq!(contact.attach_target_reference, 49);
+        assert_eq!(contact.attach_eid, 0);
+
+        let weapon = parse(0x0409 | (7 << ATTACH_EID_LOW_SHIFT), 0);
+        assert_eq!(weapon.attach_type, AttachType::SourceActorWeapon);
+        assert_eq!(weapon.attach_mode, 9);
+        assert_eq!(weapon.attach_eid, 7);
+        let high = parse(
             0x0409 | (5 << ATTACH_EID_LOW_SHIFT),
             ADDITIONAL_ATTACH_EID_TOP_BIT,
         );
-        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
-        assert_eq!(def.attach_eid, 69);
+        assert_eq!(high.attach_eid, 69);
 
-        // 0x7 / 0x8 / 0xD are not AttachType flags; XIM warns and falls back to None.
+        let two_point = parse(
+            u16::from(attach_mode::TARGET),
+            ADDITIONAL_ATTACH_MODE_HIGH_BIT,
+        );
+        assert_eq!(two_point.attach_mode, 18);
+        assert_eq!(two_point.attach_type, AttachType::TargetActor);
+
         for unknown in [0x7u16, 0x8, 0xD] {
             assert_eq!(AttachType::from_flag(unknown), None);
-            let body = build_attached(&setup, 1, 1, unknown, 0);
-            let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+            let def = parse(unknown, 0);
             assert_eq!(def.attach_type, AttachType::None);
+            assert_eq!(u16::from(def.attach_mode), unknown);
         }
     }
 
-    // Real-DAT guard: every generator in Poison's completion-effect file attaches to the
-    // target actor with EID index 0 (the word's bits 10-15 read as a phantom 21; Attachment.cpp
-    // MakeAttachMatrix only takes bits 4-9 + bit 18), so the venom cloud lands on the victim's
-    // locator 0.
+    fn real_file(file_id: u32) -> Option<Vec<u8>> {
+        let root = crate::archive::open_test_install()?;
+        let Ok(loc) = root.resolve(file_id) else {
+            eprintln!("SKIP: file {file_id} is unresolvable in this install");
+            return None;
+        };
+        std::fs::read(loc.path_under(&root)).ok()
+    }
+
+    type ScopedDef = ([u8; 4], [u8; 4], ParticleGeneratorDef);
+
+    fn real_particle_defs(file_id: u32) -> Option<Vec<ScopedDef>> {
+        let bytes = real_file(file_id)?;
+        let tree = crate::chunk::walk_tree(&bytes);
+        let mut defs = Vec::new();
+        crate::resource_dir::collect_in_dir(
+            &tree,
+            [0; 4],
+            crate::kind::ChunkKind::Generator as u8,
+            &mut |dir, node| {
+                if let Ok(Some(def)) = ParticleGeneratorDef::parse(node.chunk.data) {
+                    defs.push((dir, node.chunk.name, def));
+                }
+            },
+        );
+        Some(defs)
+    }
+
+    // Real-DAT guard: Poison's completion-effect generators (file 3020) all carry mode 2 with
+    // target reference 21 — the venom cloud sits on the victim's reference 21, scaled by the
+    // victim's size wherever the fit nibbles are set.
     #[test]
-    fn real_dat_poison_generators_attach_to_target() {
+    fn real_dat_poison_generators_attach_to_the_targets_reference_21() {
         const POISON_EFFECT_FILE_ID: u32 = 3020;
-        let Some(root) = crate::archive::open_test_install() else {
+        let Some(defs) = real_particle_defs(POISON_EFFECT_FILE_ID) else {
             return;
         };
-        let Ok(loc) = root.resolve(POISON_EFFECT_FILE_ID) else {
-            return;
-        };
-        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
-            return;
-        };
-        let mut seen = 0;
-        for c in crate::chunk::walk(&bytes).flatten() {
-            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
-                continue;
-            }
-            let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
-                continue;
-            };
-            seen += 1;
-            assert_eq!(
-                def.attach_type,
-                AttachType::TargetActor,
-                "generator {}",
-                String::from_utf8_lossy(&c.name)
+        assert!(
+            !defs.is_empty(),
+            "no particle generators parsed from file 3020"
+        );
+        for (_, name, def) in &defs {
+            let name = String::from_utf8_lossy(name);
+            assert_eq!(def.attach_type, AttachType::TargetActor, "{name}");
+            assert_eq!(def.attach_mode, attach_mode::TARGET, "{name}");
+            assert_eq!(def.attach_eid, 0, "{name}");
+            assert_eq!(def.attach_target_reference, 21, "{name}");
+            assert_eq!(def.attach_position_fit, def.attach_model_fit, "{name}");
+            assert!(
+                matches!(def.attach_position_fit, 0 | 8),
+                "{name} fit nibble {}",
+                def.attach_position_fit
             );
-            assert_eq!(def.attach_eid, 0);
         }
-        assert!(seen > 0, "no particle generators parsed from file 3020");
+    }
+
+    // ROM/0/0.DAT `hit1`: the melee hit sparks are target-side modes 2/2/4/2 carrying target
+    // reference 49, the ring selector nearest the attacker
+    // (.agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md Other
+    // attached effects).
+    #[test]
+    fn real_dat_hit_sparks_carry_target_reference_49() {
+        const GLOBAL_EFFECT_FILE_ID: u32 = 0;
+        const HIT_SPARK_DIR: [u8; 4] = *b"hit1";
+        const NEAREST_RING_TO_OTHER_ACTOR: u8 = 49;
+        let Some(defs) = real_particle_defs(GLOBAL_EFFECT_FILE_ID) else {
+            return;
+        };
+        let expected = [
+            (*b"g010", attach_mode::TARGET),
+            (*b"g011", attach_mode::TARGET),
+            (*b"g012", attach_mode::TARGET_WITH_SOURCE_YAW),
+            (*b"g013", attach_mode::TARGET),
+        ];
+        for (name, mode) in expected {
+            let (_, _, def) = defs
+                .iter()
+                .find(|(dir, n, _)| *dir == HIT_SPARK_DIR && *n == name)
+                .unwrap_or_else(|| panic!("hit1 defines {}", String::from_utf8_lossy(&name)));
+            let name = String::from_utf8_lossy(&name);
+            assert_eq!(def.attach_mode, mode, "{name}");
+            assert_eq!(def.attach_eid, 0, "{name}");
+            assert_eq!(
+                def.attach_target_reference, NEAREST_RING_TO_OTHER_ACTOR,
+                "{name}"
+            );
+            assert_eq!(
+                (def.attach_position_fit, def.attach_model_fit),
+                (0, 0),
+                "{name}"
+            );
+        }
+    }
+
+    // ROM/13/35.DAT, the level-up effect: the attached generators carry mode 1, source
+    // reference 1 and no fit; the lettering ghost `g004` is unattached
+    // (.agents/skills/retail-observe/references/2026-10-05-attached-effect-placement.md The
+    // level-up case).
+    #[test]
+    fn real_dat_level_up_generators_attach_to_the_casters_reference_1() {
+        const LEVEL_UP_EFFECT_PINNED_FILE_ID: u32 = 3310;
+        let Some(defs) = real_particle_defs(LEVEL_UP_EFFECT_PINNED_FILE_ID) else {
+            return;
+        };
+        let by_name = |name: &[u8; 4]| {
+            defs.iter()
+                .find(|(_, n, _)| n == name)
+                .map(|(_, _, def)| def)
+                .unwrap_or_else(|| panic!("3310 defines {}", String::from_utf8_lossy(name)))
+        };
+        for name in [b"g000", b"g001", b"g002"] {
+            let def = by_name(name);
+            let name = String::from_utf8_lossy(name);
+            assert_eq!(def.attach_mode, attach_mode::SOURCE, "{name}");
+            assert_eq!(def.attach_eid, 1, "{name}");
+            assert_eq!(def.attach_target_reference, 0, "{name}");
+            assert_eq!(
+                (def.attach_position_fit, def.attach_model_fit),
+                (0, 0),
+                "{name}"
+            );
+        }
+        assert_eq!(by_name(b"g004").attach_mode, attach_mode::UNATTACHED);
     }
 
     // kuluu-ln1q was filed on the premise that retail gates weat/<tag> activation on a predicate
@@ -5896,7 +5690,7 @@ mod tests {
     // silent everywhere instead of loud everywhere inside far.
     #[test]
     fn sound_setup_reads_far_then_near_and_ignores_the_third_word() {
-        let mut setup = setup_with_link(LINKED_DATA_SOUND);
+        let mut setup = setup_with_link(LinkedDataKind::AUDIO);
         setup[4 + 8..4 + 12].copy_from_slice(b"2024");
         setup[4 + 16..4 + 20].copy_from_slice(&(-293.5f32).to_le_bytes());
         let mut p = Vec::new();
@@ -5924,7 +5718,7 @@ mod tests {
     // the shipped kaw3/skw3 river emitters reference a rail no zone DAT in scope defines.
     #[test]
     fn sound_path_ref_reads_the_rail_name_and_ignores_the_trailing_words() {
-        let mut setup = setup_with_link(LINKED_DATA_SOUND);
+        let mut setup = setup_with_link(LinkedDataKind::AUDIO);
         setup[4 + 8..4 + 12].copy_from_slice(b"5009");
         let mut p = Vec::new();
         p.extend_from_slice(b"kaw3");

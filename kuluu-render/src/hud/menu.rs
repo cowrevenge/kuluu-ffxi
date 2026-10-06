@@ -339,6 +339,12 @@ pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
 /// Gates the party-frame Job column (retail shows none; default off). The row
 /// exists only with `enhanced-job-display`.
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
+/// Debug dev row: [on] = the player character takes knockback displacement
+/// (the retail behavior, the default); off drops the travel only — flinch,
+/// facing and the movement lock still play. The row exists only with
+/// `enhanced-ignore-knockback-self`.
+#[cfg(feature = "enhanced-ignore-knockback-self")]
+pub const RETAIL_KNOCKBACK: &str = "Knockback";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -369,6 +375,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_MOB_HP_UNDER,
     #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
+    #[cfg(feature = "enhanced-ignore-knockback-self")]
+    RETAIL_KNOCKBACK,
 ];
 
 /// The settings pages whose rows are derived from `GraphicsSection` lists.
@@ -1523,6 +1531,17 @@ fn format_row_body(
                     return format!(
                         "{label:<14}[{}]",
                         if settings.job_display { "on" } else { "off" }
+                    );
+                }
+                #[cfg(feature = "enhanced-ignore-knockback-self")]
+                if label == RETAIL_KNOCKBACK {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.ignore_knockback_self {
+                            "off"
+                        } else {
+                            "on"
+                        }
                     );
                 }
                 let on =

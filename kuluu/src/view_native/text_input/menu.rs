@@ -533,15 +533,20 @@ fn toggle_debug_panel(
             !hud_panels.fog_off
         }
         DEBUG_FORCE_18 => {
-            // Edge-triggered: freezing is sticky until thaw, so only act on the
-            // flip (same shape as the weather/fog gates).
-            hud_panels.force_18 = !hud_panels.force_18;
-            if hud_panels.force_18 {
-                vana_clock.freeze_at_hour_minute(18, 0);
-            } else {
+            // Activation takes over another owner's hold; deactivation thaws
+            // whatever the row froze.
+            if vana_clock.debug_hold_active() {
                 vana_clock.thaw();
+                false
+            } else {
+                const FORCE_VANA_HOUR: u32 = 18;
+                vana_clock.freeze_at_hour_minute(
+                    FORCE_VANA_HOUR,
+                    0,
+                    kuluu_render::vana_time::ClockHoldOrigin::DebugRow,
+                );
+                true
             }
-            hud_panels.force_18
         }
         DEBUG_ENTITY_LIST => {
             hud_panels.entity_list = !hud_panels.entity_list;
@@ -1122,6 +1127,69 @@ mod menu_key_tests {
             !world.is_resource_changed::<MapMarkers>(),
             "menu navigation must not dirty MapMarkers"
         );
+    }
+
+    /// The clock is the only truth for the Force_18 row: activation freezes
+    /// with a debug-row origin (taking over another owner's hold), deactivation
+    /// thaws, and `VanaClock::debug_hold_active` alone drives the row.
+    #[test]
+    fn force_18_row_reads_and_writes_only_the_clock() {
+        use kuluu_render::hud::menu::DEBUG_FORCE_18;
+        use kuluu_render::vana_time::{ClockHoldOrigin, VanaClock};
+        let mut hud_panels = kuluu_render::hud::HudPanels::default();
+        let mut net_status = kuluu_render::hud::network_status::NetStatusVisible(false);
+        let mut audio_mute = kuluu_render::audio::AudioMuteState::default();
+        let mut scene_state = SceneState::default();
+        let self_pos = kuluu_snapshot::Vec3::default();
+        let mut clock = VanaClock::default();
+
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(clock.is_frozen());
+        assert_eq!(clock.hold_origin(), Some(ClockHoldOrigin::DebugRow));
+
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(!clock.is_frozen());
+        assert_eq!(clock.hold_origin(), None);
+
+        // A foreign hold reads as off and is taken over; toggling then thaws.
+        clock.freeze(ClockHoldOrigin::Cutscene);
+        assert!(!clock.debug_hold_active());
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert_eq!(clock.hold_origin(), Some(ClockHoldOrigin::DebugRow));
+        toggle_debug_panel(
+            DEBUG_FORCE_18,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut clock,
+            self_pos,
+            &mut scene_state,
+        );
+        assert!(!clock.is_frozen());
     }
 
     #[test]

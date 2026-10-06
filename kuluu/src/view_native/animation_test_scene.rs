@@ -2252,10 +2252,17 @@ fn arm_lamp_room(
         return;
     }
     if !lamp.0 {
-        clock.thaw();
+        // Release only the room's own hold; an authored or debug hold stays.
+        if clock.hold_origin() == Some(kuluu_render::vana_time::ClockHoldOrigin::AnimationRoom) {
+            clock.thaw();
+        }
         return;
     }
-    clock.freeze_at_hour_minute(SG_LAMP_HOUR, 0);
+    clock.freeze_at_hour_minute(
+        SG_LAMP_HOUR,
+        0,
+        kuluu_render::vana_time::ClockHoldOrigin::AnimationRoom,
+    );
     log_line(
         &mut log,
         format!("clock: frozen at {:02}:00 (tkaa gate on)", SG_LAMP_HOUR),
@@ -2641,7 +2648,11 @@ fn tear_down(
         {
             if let Some(mut clock) = world.get_resource_mut::<kuluu_render::vana_time::VanaClock>()
             {
-                clock.thaw();
+                if clock.hold_origin()
+                    == Some(kuluu_render::vana_time::ClockHoldOrigin::AnimationRoom)
+                {
+                    clock.thaw();
+                }
             }
         }
         if let Some(mut sim) =
@@ -2748,7 +2759,11 @@ mod tests {
         sim.set_lamp_halos_lift(0.0);
         sim.set_wash_alpha_lift(0.0);
         let mut clock = kuluu_render::vana_time::VanaClock::default();
-        clock.freeze_at_hour_minute(SG_LAMP_HOUR, 0);
+        clock.freeze_at_hour_minute(
+            SG_LAMP_HOUR,
+            0,
+            kuluu_render::vana_time::ClockHoldOrigin::AnimationRoom,
+        );
 
         let mut app = App::new();
         app.init_resource::<TrackedEntities>()

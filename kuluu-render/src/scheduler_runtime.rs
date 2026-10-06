@@ -1177,53 +1177,91 @@ fn read_global_effect_tiers(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+// The two halves of the global effect tree load as separate tasks so the primary
+// (ROM/0/0.DAT - every combat reaction routine) can serve lookups while the secondary
+// asset-only half still parses.
 #[derive(Resource)]
-pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
+pub(crate) struct GlobalEffectDirPrimaryTask(
+    bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>,
+);
+
+#[derive(Resource)]
+pub(crate) struct GlobalEffectDirSecondaryTask(bevy::tasks::Task<ActionAssets>);
 
 // ROM/0/0.DAT is ~540 KB of ~1000 chunks including many Img decodes; parsing it on the render
-// thread reproduces the actor-load hitch, so it loads once off-thread and every lookup falls
-// back to the pre-global behaviour until it lands.
+// thread reproduces the actor-load hitch, so each half loads off-thread and every lookup falls
+// back to the pre-global behaviour until its half lands.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
-    let root = root.0.clone();
-    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        // The global effect dir is spell effects, not cutscene camera routes
-        // (ffxi-dat/src/scheduler.rs StageKind::CameraRoute); the parse's camera value
-        // does not land here. Both halves of the shared tree load into one asset tier,
-        // earlier files winning name ties.
-        let mut schedulers: Vec<Scheduler> = Vec::new();
-        let mut assets = ActionAssets::default();
-        read_global_effect_tiers(
-            &root,
-            GLOBAL_EFFECT_DIR_FILE_ID,
-            true,
-            &mut schedulers,
-            &mut assets,
-        );
-        read_global_effect_tiers(
-            &root,
-            GLOBAL_EFFECT_DIR_SECONDARY_FILE_ID,
-            false,
-            &mut schedulers,
-            &mut assets,
-        );
-        (schedulers, assets)
-    });
-    commands.insert_resource(GlobalEffectDirTask(task));
+    let primary = {
+        let root = root.0.clone();
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            // The global effect dir is spell effects, not cutscene camera routes
+            // (ffxi-dat/src/scheduler.rs StageKind::CameraRoute); the parse's camera value
+            // does not land here.
+            let mut schedulers: Vec<Scheduler> = Vec::new();
+            let mut assets = ActionAssets::default();
+            read_global_effect_tiers(
+                &root,
+                GLOBAL_EFFECT_DIR_FILE_ID,
+                true,
+                &mut schedulers,
+                &mut assets,
+            );
+            (schedulers, assets)
+        })
+    };
+    let secondary = {
+        let root = root.0.clone();
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            // The secondary half contributes no routines: it only tops up the asset tier
+            // (read_global_effect_tiers gates routine extension to the primary).
+            let mut discarded_schedulers = Vec::new();
+            let mut assets = ActionAssets::default();
+            read_global_effect_tiers(
+                &root,
+                GLOBAL_EFFECT_DIR_SECONDARY_FILE_ID,
+                false,
+                &mut discarded_schedulers,
+                &mut assets,
+            );
+            assets
+        })
+    };
+    commands.insert_resource(GlobalEffectDirPrimaryTask(primary));
+    commands.insert_resource(GlobalEffectDirSecondaryTask(secondary));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn poll_global_effect_dir(
-    task: Option<ResMut<GlobalEffectDirTask>>,
+    mut primary: Option<ResMut<GlobalEffectDirPrimaryTask>>,
+    mut secondary: Option<ResMut<GlobalEffectDirSecondaryTask>>,
+    global: Option<ResMut<GlobalEffectDir>>,
     mut commands: Commands,
 ) {
     use bevy::tasks::futures_lite::future;
-    let Some(mut task) = task else { return };
-    let Some((schedulers, assets)) = future::block_on(future::poll_once(&mut task.0)) else {
+    if let Some(task) = primary.as_mut() {
+        if let Some((schedulers, assets)) = future::block_on(future::poll_once(&mut task.0)) {
+            commands.remove_resource::<GlobalEffectDirPrimaryTask>();
+            commands.insert_resource(GlobalEffectDir { schedulers, assets });
+            // The secondary result can only extend a resource that exists on a later frame:
+            // this frame's insert is not visible to ResMut yet.
+            return;
+        }
+    }
+    let Some(assets) = secondary
+        .as_mut()
+        .and_then(|task| future::block_on(future::poll_once(&mut task.0)))
+    else {
         return;
     };
-    commands.remove_resource::<GlobalEffectDirTask>();
-    commands.insert_resource(GlobalEffectDir { schedulers, assets });
+    commands.remove_resource::<GlobalEffectDirSecondaryTask>();
+    // Same shared tier the primary folded into: earlier files win name ties. A
+    // scenario that dropped GlobalEffectDir (routine-availability tests) simply loses
+    // the top-up.
+    if let Some(mut global) = global {
+        global.assets.extend_missing_from(&assets);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

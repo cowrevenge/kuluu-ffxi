@@ -51,7 +51,7 @@ Headless testing recipes — the options menu (render box vs session-only vs no-
 animationtest box, session drive (MCP / raw stdio / integration tests), accounts,
 evidence, gotchas, Windows + other-OS option lists — live in
 `.agents/skills/verify/references/drive-headless.md` (canonical). Read it before any
-headless run; never open a visible window for agent runs.
+headless run. On Windows the default is the parked offscreen window (presented, but nothing appears on the desktop); hosts that cannot present offscreen escalate there per rule 2 of that file.
 
 noserver_tester (`kuluu_noserver_tester/`) — this is a single event window that can be
 given the AI for faster testing, but only when the user tells the AI to use it and it

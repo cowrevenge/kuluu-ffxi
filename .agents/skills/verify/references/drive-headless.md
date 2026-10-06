@@ -51,9 +51,21 @@ mine old sessions for credentials — pick work that does not need login, or sto
    full local feature batch, exe synced to repo root. Never an ad-hoc `cargo build -p kuluu --features <subset>`: a
    half-feature binary is not what gets verified and behavior can differ. On other OSes the
    equivalent is the same cargo invocation with that feature list (see the bat file header).
-2. **Never open a visible window for agent runs.** Surface A/D: `KULUU_WINDOW_HIDDEN=1`.
-   Surface B: raw stdio / MCP have no window at all; GUI attach (`FFXI_ATTACH=auto`) is only
-   when pixels are required, and then warn first.
+2. **Windows default: offscreen presentation.** Surface A/D: `KULUU_WINDOW_HIDDEN=1`
+   presents the window but parks it at -32000,-32000 — nothing reaches the desktop and the
+   swapchain keeps producing frames. "Hidden" must mean parked, never minimized or occluded:
+   a never-presented HWND produces no frames (see Gotchas), and one that stopped presenting
+   can keep returning the same stale buffer forever. Surface B: raw stdio / MCP have no window
+   at all; GUI attach (`FFXI_ATTACH=auto`) is only when pixels are required, and then warn
+   first. **Black-frame rule:** a capture counts only if it shows content - not all-black or
+   one flat color, which is what a never-presented window yields. A failed check gets exactly
+   one retake; two failures in a row mean presentation is stalled -> escalate. Repeated
+   identical frames are NOT evidence of trouble: static scenes legitimately repeat.
+   **Escalation ladder:** hosts that cannot present offscreen
+   (macOS occlusion stops drawing for invisible windows; X11/Wayland without a compositor)
+   fall back to a visible window on the user's display — warn first, drive focus-free over
+   the agent socket, capture, exit and restore focus. Session-only `--headless` runs are
+   never pixel evidence.
 3. **Always mute** launches (`--mute`): a hidden run still decodes and plays BGM/SFX.
 4. **Kill the process when done.** Windows: `taskkill //F //IM kuluu.exe`. Other OSes:
    `pkill -f kuluu`. Check first — never fire a test if one is already running

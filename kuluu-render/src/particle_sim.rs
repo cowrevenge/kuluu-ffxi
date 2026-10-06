@@ -147,6 +147,8 @@ impl ParticleSimulator {
     // lighting change into a session.
     pub fn reset_test_lighting(&mut self) {
         self.clock.lamp_halos_lift = LAMP_ALPHAMAP_LIFT_DEFAULT;
+        self.clock.lamp_halos_gain = LAMP_HALOS_GAIN_DEFAULT;
+        self.clock.lamp_halos_radius = LAMP_HALOS_RADIUS_DEFAULT;
         self.clock.wash_alpha_lift = WASH_ALPHA_LIFT_DEFAULT;
     }
 
@@ -339,8 +341,10 @@ pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.12;
 // gain ceiling mirrors `LAMP_GAIN_CEILING` in ffxi_particle.wgsl.
 pub const LAMP_HALOS_GAIN_DEFAULT: f32 = 1.0;
 pub const LAMP_HALOS_GAIN_MAX: f32 = 2.0;
-// Wall-wash slider seed (1.0 = authored alpha) and ceiling.
-pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 0.18;
+// Wall-wash slider seed (1.0 = authored alpha) and ceiling. The seed has to be
+// the identity multiplier: it scales authored wash alpha, so any other default
+// dims every wall wash in a normal session rather than only inside the tester.
+pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 1.0;
 pub const WASH_ALPHA_LIFT_MAX: f32 = 2.0;
 pub const LAMP_HALOS_RADIUS_DEFAULT: f32 = 1.0;
 pub const LAMP_HALOS_RADIUS_MAX: f32 = 4.0;
@@ -4240,6 +4244,26 @@ mod tests {
     fn drawn_factor(g: &LiveGenerator, clock: &CelestialClock) -> Vec4 {
         let draw = particle_draw(g, &g.particles[0], clock);
         draw.factor_rgb.extend(draw.factor_alpha)
+    }
+
+    // Outside the tester, mesh particles must draw at their authored alpha: no slider
+    // multiplier rides the default state. This is the regression against the era when
+    // every StaticMesh/WeightedMesh particle inherited the room's 0.18 wash seed.
+    #[test]
+    fn default_mesh_alpha_preserves_authored_factor() {
+        use ffxi_dat::particle_gen::ParticleMeshKind;
+
+        for kind in [ParticleMeshKind::StaticMesh, ParticleMeshKind::WeightedMesh] {
+            let mut generator = live(def(60.0, 1.0, 1), 60.0);
+            generator.def.mesh_kind = kind;
+            advance(&mut generator, 2.0);
+            let factor = drawn_factor(&generator, &CelestialClock::default());
+            assert_eq!(
+                factor.w,
+                expected_factor_alpha(generator.def.init_color[TOD_ALPHA_CHANNEL]),
+                "{kind:?}"
+            );
+        }
     }
 
     // Lamp halos (`lig*` sprite sheets) are LIGHTS: their drawn alpha is the lift knob times the

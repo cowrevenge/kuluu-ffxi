@@ -1114,7 +1114,7 @@ pub(crate) fn register(
 }
 
 fn spawn_launcher_camera(mut commands: Commands) {
-    commands.spawn((Camera2d, LauncherCamera));
+    spawn_launcher_camera_core(&mut commands);
 }
 
 // The AnimationTest box unloads the launcher camera while open and re-spawns it on close;

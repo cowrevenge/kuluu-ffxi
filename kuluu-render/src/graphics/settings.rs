@@ -679,7 +679,9 @@ pub struct GraphicsSettings {
 
     /// Retail+ gate: the player character ignores knockback displacement (the push and the
     /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
-    /// Persisted here so the choice sticks across runs.
+    /// The `enhanced-ignore-knockback-self` feature is its compile-time half: without it this
+    /// field has no effect (the row doesn't exist either). Persisted here so the choice sticks
+    /// across runs.
     #[serde(default)]
     pub ignore_knockback_self: bool,
 
@@ -2168,7 +2170,10 @@ pub fn apply_cascade_config_system(
 pub fn apply_anti_aliasing_system(
     settings: Res<GraphicsSettings>,
     mut commands: Commands,
-    q_cam: Query<(Entity, &Transform), With<OperatorCamera>>,
+    q_cam: Query<
+        (Entity, &Transform),
+        (With<OperatorCamera>, With<crate::components::InGameEntity>),
+    >,
     caps: Option<Res<MsaaCaps>>,
     mut last_applied: Local<Option<(Msaa, bool, bool, bool, DlssQuality)>>,
 ) {
@@ -2553,6 +2558,56 @@ pub fn apply_ui_scale_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anti_aliasing_respawns_only_in_game_owned_cameras() {
+        const ROOM_CAMERA_ORDER: isize = 3;
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .add_systems(Update, apply_anti_aliasing_system);
+        let room_camera = app
+            .world_mut()
+            .spawn((
+                OperatorCamera,
+                Camera3d::default(),
+                Camera {
+                    order: ROOM_CAMERA_ORDER,
+                    ..default()
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        assert!(app.world().get_entity(room_camera).is_ok());
+        assert_eq!(
+            app.world().get::<Camera>(room_camera).unwrap().order,
+            ROOM_CAMERA_ORDER
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<crate::components::InGameEntity>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        app.world_mut().despawn(room_camera);
+        let game_camera = app
+            .world_mut()
+            .spawn((
+                crate::components::InGameEntity,
+                OperatorCamera,
+                Camera3d::default(),
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        assert!(app.world().get_entity(game_camera).is_err());
+        let mut cameras = app.world_mut().query_filtered::<
+            Entity,
+            (With<OperatorCamera>, With<crate::components::InGameEntity>),
+        >();
+        assert_eq!(cameras.iter(app.world()).count(), 1);
+    }
 
     /// Enough cycles to visit every slot of the longest value list.
     const CYCLE_SWEEP_STEPS: usize = 8;

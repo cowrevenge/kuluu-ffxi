@@ -1901,6 +1901,9 @@ fn fire_single_gen(
         random_group: None,
         sound_range: None,
         control_flow: None,
+        actor_rotation: None,
+        animation_mode: None,
+        turn_toward_step_degrees: None,
         local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
     };
     let sched = ffxi_dat::scheduler::Scheduler {
@@ -2076,6 +2079,9 @@ fn fire_zone_i900(
                 random_group: None,
                 sound_range: None,
                 control_flow: None,
+                actor_rotation: None,
+                animation_mode: None,
+                turn_toward_step_degrees: None,
                 local_dir: *b"fefs",
             },
         }],

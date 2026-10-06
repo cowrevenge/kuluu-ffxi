@@ -45,8 +45,10 @@ pub struct TestAlphaOverride(pub std::collections::HashSet<[u8; 4]>);
 // covers the stone instead of lighting it.
 // pub: the AnimationTest box seeds its lantern-alpha slider from this default.
 pub const LAMP_ALPHAMAP_LIFT_DEFAULT: f32 = 0.12;
-// Wall-wash slider seed (1.0 = authored alpha) and ceiling.
-pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 0.18;
+// Wall-wash slider seed and ceiling. The seed has to be the identity multiplier: it scales
+// authored wash alpha, so any other default dims every wall wash in a normal session rather than
+// only inside the tester box.
+pub const WASH_ALPHA_LIFT_DEFAULT: f32 = 1.0;
 pub const WASH_ALPHA_LIFT_MAX: f32 = 2.0;
 
 #[derive(Resource)]
@@ -99,6 +101,22 @@ impl ParticleSimulator {
     /// AnimationTest box wall-wash slider (0..WASH_ALPHA_LIFT_MAX over the track).
     pub fn set_wash_alpha_lift(&mut self, lift: f32) {
         self.wash_alpha_lift = lift.clamp(0.0, WASH_ALPHA_LIFT_MAX);
+    }
+
+    /// Hand every tester lighting slider back to its authored value. The box owns them while it is
+    /// open; a closed box must leave production tuning where it found it.
+    pub fn reset_test_lighting(&mut self) {
+        self.lamp_halos_lift = LAMP_ALPHAMAP_LIFT_DEFAULT;
+        self.wash_alpha_lift = WASH_ALPHA_LIFT_DEFAULT;
+    }
+
+    /// Read-back for the teardown regression.
+    pub fn lamp_halos_lift(&self) -> f32 {
+        self.lamp_halos_lift
+    }
+
+    pub fn wash_alpha_lift(&self) -> f32 {
+        self.wash_alpha_lift
     }
 
     // research/xi-model-viewer/ui/js/particle/runtime.js updateAssociatedPosition:

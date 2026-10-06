@@ -1,3 +1,4 @@
+pub mod animation_test_scene;
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;
@@ -720,8 +721,16 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.insert_resource(crate::graphics_store::GraphicsStateRes {
         store: graphics_store_obj,
     });
+    // The AnimationTest box's shadow suppression reads/writes this gate every Launcher frame;
+    // it must exist before the first Update, not only while the box is open.
+    app.init_resource::<crate::graphics_store::GraphicsPersistSuspended>();
 
     app.insert_resource(crate::marker_store::load_or_default());
+
+    // The room's systems and resources must stay out of a default build entirely: an unregistered
+    // plugin is inert, but registering it puts tester state into every session.
+    #[cfg(feature = "debug-animation_room")]
+    app.add_plugins(animation_test_scene::AnimationTestScenePlugin);
 
     app.add_plugins((
         ViewerCorePlugin::<NativeSource>::default(),

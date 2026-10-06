@@ -2337,7 +2337,10 @@ pub fn dispatch_knockback_stages(
 pub fn tick_knockbacks(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
-    settings: Res<crate::graphics_settings::GraphicsSettings>,
+    // Minimal harness apps (and any pre-settings boot frame) have no GraphicsSettings
+    // resource; the field default means "knockback travels", which is what those
+    // harnesses pin, so absence keeps current behaviour rather than panicking.
+    settings: Option<Res<crate::graphics_settings::GraphicsSettings>>,
     mut self_kb: ResMut<crate::ffxi_actor_render::SelfKnockback>,
     mut q_render: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
 ) {
@@ -2350,8 +2353,12 @@ pub fn tick_knockbacks(
         };
         if Some(actor.world_id) == self_id {
             // Retail+ Ignore_knockback_self: the flinch, facing and movement lock
-            // still play; only the travel is dropped.
-            if !settings.ignore_knockback_self {
+            // still play; only the travel is dropped. Absent settings = field default
+            // (do not ignore).
+            let ignore_travel = settings
+                .as_ref()
+                .is_some_and(|settings| settings.ignore_knockback_self);
+            if !ignore_travel {
                 self_kb.pending += shove;
             }
             self_active |= actor.knockback_active();

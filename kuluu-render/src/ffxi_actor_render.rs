@@ -7477,10 +7477,10 @@ mod pose_resolution_tests {
                 .animations
                 .iter()
                 .flatten()
-                .all(|slot| slot.current_animation.as_ref().is_none_or(|c| !c
-                    .animation
-                    .id
-                    .parameterized_match(&DatId::from_name(&CAST)))),
+                .all(|slot| slot
+                    .current_animation
+                    .as_ref()
+                    .is_none_or(|c| !c.animation.id.parameterized_match(&DatId::from_name(&CAST)))),
             "cleared cast must not survive a pose pass"
         );
     }
@@ -7508,15 +7508,11 @@ mod pose_resolution_tests {
             }
             advance_actor_pose_standalone_locked(&mut actor, 30.0, true);
             if fresh_actor {
-                let still_held = actor
-                    .coordinator
-                    .animations
-                    .iter()
-                    .flatten()
-                    .any(|slot| slot.current_animation.as_ref().is_some_and(|c| c
-                        .animation
-                        .id
-                        .parameterized_match(&DatId::from_name(&CAST))));
+                let still_held = actor.coordinator.animations.iter().flatten().any(|slot| {
+                    slot.current_animation.as_ref().is_some_and(|c| {
+                        c.animation.id.parameterized_match(&DatId::from_name(&CAST))
+                    })
+                });
                 assert!(!still_held, "idle actor never held the cast");
                 continue;
             }

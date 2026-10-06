@@ -2706,8 +2706,7 @@ pub fn dispatch_cutscene_motion(
                     active.with_target(target_entity),
                     &mut q_scheds,
                     &mut pending_inserts,
-                )
-                {
+                ) {
                     commands
                         .entity(actor_entity)
                         .insert_if_new(ActionTarget(target_entity));
@@ -2915,9 +2914,7 @@ impl CutsceneActorState {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.touched.is_empty()
-            && self.walks.is_empty()
-            && self.hidden.is_empty()
+        self.touched.is_empty() && self.walks.is_empty() && self.hidden.is_empty()
     }
 }
 
@@ -3768,11 +3765,7 @@ pub fn dispatch_melee_action_started(
         };
         let armed_by = active.name();
         let victim = target_id.and_then(|id| tracked.by_id.get(&id).copied());
-        enqueue_routine(
-            &mut commands,
-            actor_entity,
-            active.with_target(victim),
-        );
+        enqueue_routine(&mut commands, actor_entity, active.with_target(victim));
         let mut entity = commands.entity(actor_entity);
         entity.try_insert(ActionTarget(victim));
         match resolution {
@@ -4405,8 +4398,7 @@ pub fn dispatch_entity_emoted(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
-        let Some((file_offset, routine)) = emote_routine(emote_id, param)
-        else {
+        let Some((file_offset, routine)) = emote_routine(emote_id, param) else {
             continue;
         };
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));

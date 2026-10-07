@@ -1,7 +1,9 @@
 //! Screen-space distortion (haze/smear) pass — retail's 0x22 `Distortion` generator element
 //! (research/xim ParticleLinkedDataProviders.kt DistortionMeshProvider + GLDrawer.kt hazeSwitch).
 //! It samples the previous frame's processed output with a horizontal bias so motion leaves a
-//! directional ghost, composited over the current frame at low alpha.
+//! directional ghost, composited over the current frame at low alpha. The capture runs BEFORE the
+//! composite each frame — capturing the already-composited image feeds each generation of ghost
+//! into the next and stacks multiple offset copies of every body.
 //!
 //! Scheduled in Core3d AFTER `Core3dSystems::PostProcess` (bloom/DOF/fog/TAA/tonemapping done) and
 //! before upscaling writes the window — the same bounds as [`crate::nameplate_final_pass`]. It is a
@@ -175,8 +177,11 @@ struct DistortionPassGpu {
     sampler: Sampler,
     ghost_uniform: Buffer,
     capture_uniform: Buffer,
-    prev_texture: Option<Texture>,
-    prev_view: Option<TextureView>,
+    /// Ping-pong pair of previous-frame captures. `prev_captured` indexes the slot holding the
+    /// latest capture (the ghost samples it); this frame is captured into the other slot.
+    prev_textures: [Option<Texture>; 2],
+    prev_views: [Option<TextureView>; 2],
+    prev_captured: usize,
     prev_key: Option<(u32, u32, TextureFormat)>,
 }
 
@@ -207,44 +212,58 @@ impl DistortionPassGpu {
                 contents: &distortion_uniform_bytes(CAPTURE_UNIFORM),
                 usage: BufferUsages::UNIFORM,
             }),
-            prev_texture: None,
-            prev_view: None,
+            prev_textures: [None, None],
+            prev_views: [None, None],
+            prev_captured: 0,
             prev_key: None,
         }
     }
 
-    /// Ensure the previous-frame texture exists at (w, h, format); recreate on any change. The old
-    /// view is dropped (refcounted) and the old texture destroyed explicitly.
+    /// Ensure both capture slots exist at (w, h, format); recreate the pair on any change.
+    /// Replaced textures are destroyed explicitly so their GPU memory frees immediately.
     fn ensure_prev(&mut self, device: &RenderDevice, size: Extent3d, format: TextureFormat) {
         let key = (size.width, size.height, format);
-        if self.prev_key == Some(key) && self.prev_texture.is_some() {
+        if self.prev_key == Some(key)
+            && self.prev_textures.iter().all(Option::is_some)
+            && self.prev_views.iter().all(Option::is_some)
+        {
             return;
         }
-        self.prev_view = None;
-        if let Some(old) = self.prev_texture.take() {
-            old.destroy();
+        self.prev_views = [None, None];
+        for slot in &mut self.prev_textures {
+            if let Some(old) = slot.take() {
+                old.destroy();
+            }
         }
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("distortion_prev_frame"),
-            size: Extent3d {
-                width: size.width.max(1),
-                height: size.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&TextureViewDescriptor {
-            label: Some("distortion_prev_frame_view"),
-            ..Default::default()
-        });
+        let make_texture = |label| {
+            device.create_texture(&TextureDescriptor {
+                label: Some(label),
+                size: Extent3d {
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let make_view = |texture: &Texture| {
+            texture.create_view(&TextureViewDescriptor {
+                label: Some("distortion_prev_frame_view"),
+                ..Default::default()
+            })
+        };
+        let first = make_texture("distortion_prev_frame_0");
+        let second = make_texture("distortion_prev_frame_1");
+        let (first_view, second_view) = (make_view(&first), make_view(&second));
+        self.prev_textures = [Some(first), Some(second)];
+        self.prev_views = [Some(first_view), Some(second_view)];
+        self.prev_captured = 0;
         self.prev_key = Some(key);
-        self.prev_texture = Some(texture);
-        self.prev_view = Some(view);
     }
 }
 
@@ -295,10 +314,11 @@ fn distortion_pipeline_descriptor(
     }
 }
 
-/// Core3d sub-schedule (per camera run): ghost last frame's processed output over the CURRENT view
-/// with the horizontal haze bias, then capture the result for next frame. Gated to the operator
-/// camera; every other 3D camera (launcher, minimap bake, ...) runs its own Core3d schedule and
-/// skips — same gate as [`crate::nameplate_final_pass`].
+/// Core3d sub-schedule (per camera run): capture this frame's pre-distortion image into the idle
+/// ping-pong slot, then ghost the latest previous capture over the current view with the horizontal
+/// haze bias, and swap slots. Gated to the operator camera; every other 3D camera (launcher,
+/// minimap bake, ...) runs its own Core3d schedule and skips — same gate as
+/// [`crate::nameplate_final_pass`].
 #[allow(clippy::type_complexity)]
 fn draw_distortion_pass(
     view: ViewQuery<(&ExtractedView, &ViewTarget)>,
@@ -336,9 +356,7 @@ fn draw_distortion_pass(
     let size = target.main_texture().size();
     let first_frame = !*was_active || gpu.prev_key != Some((size.width, size.height, format));
     gpu.ensure_prev(&device, size, format);
-    let Some(prev_view) = &gpu.prev_view else {
-        return;
-    };
+    let next_captured = 1 - gpu.prev_captured;
 
     if pipe_state.as_ref().is_none_or(|(f, _)| *f != format) {
         let id = pipeline_cache.queue_render_pipeline(distortion_pipeline_descriptor(
@@ -355,8 +373,50 @@ fn draw_distortion_pass(
 
     let bgl = pipeline_cache.get_bind_group_layout(&gpu.bgl_descriptor);
 
-    // Pass A: ghost — sample last frame (prev) with the horizontal bias over the current
-    // target. Both the offset and the ghost alpha scale by the sec2 0x2D envelope strength.
+    // Capture into the idle slot before anything is composited — capturing the already-ghosted
+    // image would feed each generation of ghost back into the next.
+    {
+        let Some(write_view) = &gpu.prev_views[next_captured] else {
+            return;
+        };
+        let capture_bg = device.create_bind_group(
+            "distortion_capture",
+            &bgl,
+            &BindGroupEntries::sequential((
+                BufferBinding {
+                    buffer: &gpu.capture_uniform,
+                    offset: 0,
+                    size: None,
+                },
+                target.main_texture_view(),
+                &gpu.sampler,
+            )),
+        );
+        let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("distortion_capture"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: write_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    // wgpu is a native-only dep here; the app color converts to it (bevy's own
+                    // no-camera clear does the same to_linear().into()).
+                    load: LoadOp::Clear(Color::srgba(0.0, 0.0, 0.0, 0.0).to_linear().into()),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_render_pipeline(pipeline);
+        pass.set_bind_group(0, &capture_bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // Ghost: sample last frame's capture with the horizontal bias over the current target.
+    // Both the offset and the ghost alpha scale by the sec2 0x2D envelope strength.
     if !first_frame {
         queue.write_buffer(
             &gpu.ghost_uniform,
@@ -367,6 +427,9 @@ fn draw_distortion_pass(
                 copy_mode: 0.0,
             }),
         );
+        let Some(read_view) = &gpu.prev_views[gpu.prev_captured] else {
+            return;
+        };
         let ghost_bg = device.create_bind_group(
             "distortion_ghost",
             &bgl,
@@ -376,7 +439,7 @@ fn draw_distortion_pass(
                     offset: 0,
                     size: None,
                 },
-                prev_view,
+                read_view,
                 &gpu.sampler,
             )),
         );
@@ -393,42 +456,7 @@ fn draw_distortion_pass(
         pass.draw(0..3, 0..1);
     }
 
-    // Pass B: capture — copy the current target into prev for next frame's ghost.
-    let capture_bg = device.create_bind_group(
-        "distortion_capture",
-        &bgl,
-        &BindGroupEntries::sequential((
-            BufferBinding {
-                buffer: &gpu.capture_uniform,
-                offset: 0,
-                size: None,
-            },
-            target.main_texture_view(),
-            &gpu.sampler,
-        )),
-    );
-    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
-        label: Some("distortion_capture"),
-        color_attachments: &[Some(RenderPassColorAttachment {
-            view: prev_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: Operations {
-                // wgpu is a native-only dep here; the app color converts to it (bevy's own
-                // no-camera clear does the same to_linear().into()).
-                load: LoadOp::Clear(Color::srgba(0.0, 0.0, 0.0, 0.0).to_linear().into()),
-                store: StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    pass.set_render_pipeline(pipeline);
-    pass.set_bind_group(0, &capture_bg, &[]);
-    pass.draw(0..3, 0..1);
-
+    gpu.prev_captured = next_captured;
     *was_active = true;
 }
 

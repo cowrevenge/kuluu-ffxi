@@ -65,9 +65,7 @@ use tokio::runtime::Handle as RtHandle;
 use crate::launcher::Defaults;
 
 use self::bridge::NativeSource;
-use self::input::{
-    AutoRun, CameraAutoRecenter, CommandTx, HeadingTurnAccum, LocalPlayerPrediction,
-};
+use self::input::{AutoRun, CommandTx, HeadingTurnAccum, LocalPlayerPrediction};
 use self::launcher_ui::{LoginErrorMsg, PendingConnect};
 
 fn drive_feathers_cursor(
@@ -582,7 +580,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     app.insert_resource(Time::<Fixed>::from_hz(60.0))
         .init_resource::<AutoRun>()
-        .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
         .init_resource::<entity_list_hud::EntityListScroll>()
@@ -726,6 +723,11 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         store: graphics_store_obj,
     });
     app.insert_resource(crate::marker_store::load_or_default());
+
+    // The room's systems and resources must stay out of a default build entirely: an unregistered
+    // plugin is inert, but registering it puts tester state into every session.
+    #[cfg(feature = "debug-animation_room")]
+    app.add_plugins(animation_test_scene::AnimationTestScenePlugin);
 
     // The room's systems and resources must stay out of a default build entirely: an unregistered
     // plugin is inert, but registering it puts tester state into every session.

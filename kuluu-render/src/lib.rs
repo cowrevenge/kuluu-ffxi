@@ -113,7 +113,7 @@ pub use camera::{
     first_person_eye_y, firstperson_camera_system, heading_for_yaw, nameplate_anchor,
     self_visibility_for_camera_mode_system, spawn_camera, third_person_anchor_y,
     toggle_camera_mode, yaw_for_heading, CameraMode, CameraTransition, ChaseCamera, OperatorCamera,
-    WORLD_GIZMO_LAYER,
+    ViewFov, WheelZoom, ZoomArm, WORLD_GIZMO_LAYER,
 };
 pub use components::{
     CurrRenderPos, EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate,
@@ -429,6 +429,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.init_resource::<combat_stance::WalkMode>();
         app.init_resource::<combat_stance::SelfMoveIntent>();
         app.init_resource::<camera::CameraTransition>();
+        app.init_resource::<camera::ViewFov>();
+        app.add_systems(Update, camera::apply_view_fov_system);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

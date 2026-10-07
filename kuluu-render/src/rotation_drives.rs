@@ -4,7 +4,7 @@
 //! an absolute target rather than adding a delta (`FFXiMain.dll retail-2026-09` RVA 0x5FA64..0x5FA8B
 //! captures the live triple through the orientation accessor at vtable slot byte `0x1C0`, RVA 0x820F0).
 
-use bevy::prelude::{Component, Resource, Vec3};
+use bevy::prelude::{Component, Vec3};
 use ffxi_dat::scheduler::ActorRotation;
 
 /// The degrees→radians factor retail converts each authored angle with in its constructor (`FFXiMain.dll
@@ -123,13 +123,6 @@ pub fn heading_of(applied: [f32; 3]) -> f32 {
     applied[HEADING_COMPONENT]
 }
 
-/// The heading a running drive holds for the local player, written every tick by
-/// `scheduler_runtime::tick_actor_rotation_drives` and taken as the walker's base facing while it runs
-/// (kuluu/src/view_native/input.rs): taken rather than read, so travel re-aims over it on ticks where
-/// the player travels instead of fighting the drive.
-#[derive(Resource, Default)]
-pub struct SelfAuthoredHeading(pub Option<f32>);
-
 /// Retail's re-wrap of one stored angle into ±π (one pass in each direction, [`WRAP_TWO_PI`]).
 fn wrap_component(angle: f32) -> f32 {
     let mut wrapped = angle;
@@ -229,6 +222,11 @@ impl PendingTurn {
     /// Whether anything still permits consumption (`actor+0x86C != 0`).
     pub fn enabled(&self) -> bool {
         !self.enable_frames.is_empty()
+    }
+
+    /// The angle still owed, `actor+0x870`.
+    pub fn remaining_rad(&self) -> f32 {
+        self.remaining_rad
     }
 
     /// Nothing left to travel, so the queue can be dropped with the routine.

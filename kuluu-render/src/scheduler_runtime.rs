@@ -8,7 +8,7 @@ use crate::components::{IsSelf, WorldEntity};
 use crate::cutscene_camera::CutsceneCameraTasks;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rotation_drives::{
-    heading_of, ActorAirborne, ActorRotationDrive, PendingTurn, PlanTurn, SelfAuthoredHeading,
+    heading_of, ActorAirborne, ActorRotationDrive, PendingTurn, PlanTurn,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::scene::BakedActor;
@@ -2697,7 +2697,6 @@ pub fn step_pending_turns(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
     mut prediction: Option<ResMut<crate::combat_stance::EntityPrediction>>,
-    mut self_heading: ResMut<SelfAuthoredHeading>,
     mut q_turns: Query<(Entity, &WorldEntity, &mut PendingTurn)>,
     q_airborne: Query<(), With<ActorAirborne>>,
     mut commands: Commands,
@@ -2724,17 +2723,15 @@ pub fn step_pending_turns(
             continue;
         };
         if let Some(stepped) = turn.advance(current_heading_rad, elapsed_retail_frames) {
-            if is_self {
-                // Same hand-off as a rotation drive: the walker takes this as its base facing, so travel
-                // re-aims the body on a tick where it travels instead of fighting the turn.
-                *self_heading = SelfAuthoredHeading(Some(stepped));
-            } else if let Some(sample) =
-                prediction.as_mut().and_then(|p| p.by_id.get_mut(&world.id))
-            {
-                sample.target_heading = crate::combat_stance::heading_byte_for_rad(stepped);
-                // The integrator writes the orientation accumulator itself, with no ease between it and
-                // what is on screen - retail's consumer has one target: that record.
-                sample.rendered_heading_rad = stepped;
+            // Self keeps its own facing in the walker; only remote actors have an orientation record
+            // for the integrator to write.
+            if !is_self {
+                if let Some(sample) = prediction.as_mut().and_then(|p| p.by_id.get_mut(&world.id)) {
+                    sample.target_heading = crate::combat_stance::heading_byte_for_rad(stepped);
+                    // The integrator writes the orientation accumulator itself, with no ease between it
+                    // and what is on screen - retail's consumer has one target: that record.
+                    sample.rendered_heading_rad = stepped;
+                }
             }
         }
         if turn.is_spent() || !turn.enabled() {
@@ -2785,7 +2782,6 @@ pub fn tick_actor_rotation_drives(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
     mut prediction: Option<ResMut<crate::combat_stance::EntityPrediction>>,
-    mut self_heading: ResMut<SelfAuthoredHeading>,
     q_scheds: Query<&ActiveSchedulers>,
     mut q_drives: Query<(Entity, &WorldEntity, &mut ActorRotationDrives)>,
     mut commands: Commands,
@@ -2809,18 +2805,17 @@ pub fn tick_actor_rotation_drives(
         let Some(heading_rad) = heading_rad else {
             continue;
         };
-        if Some(world.id) == self_id {
-            // The walker takes this as its base facing, so travel still re-aims the body on a tick where
-            // it travels (crate::rotation_drives::SelfAuthoredHeading).
-            *self_heading = SelfAuthoredHeading(Some(heading_rad));
-        } else if let Some(sample) = prediction
-            .as_mut()
-            .and_then(|pred| pred.by_id.get_mut(&world.id))
-        {
-            sample.target_heading = crate::combat_stance::heading_byte_for_rad(heading_rad);
-            // Retail's mode-0 write is on the spot, so the rendered yaw joins it without easing; a
-            // counting-down drive writes its in-progress angle here too.
-            sample.rendered_heading_rad = heading_rad;
+        // Self keeps its own facing in the walker; only remote actors have an orientation record.
+        if Some(world.id) != self_id {
+            if let Some(sample) = prediction
+                .as_mut()
+                .and_then(|pred| pred.by_id.get_mut(&world.id))
+            {
+                sample.target_heading = crate::combat_stance::heading_byte_for_rad(heading_rad);
+                // Retail's mode-0 write is on the spot, so the rendered yaw joins it without easing; a
+                // counting-down drive writes its in-progress angle here too.
+                sample.rendered_heading_rad = heading_rad;
+            }
         }
     }
 }
@@ -5257,7 +5252,6 @@ impl Plugin for SchedulerRuntimePlugin {
             app.init_resource::<PendingKnockbacks>();
             app.init_resource::<MeleeTravel>();
             app.init_resource::<crate::ffxi_actor_render::SelfKnockback>();
-            app.init_resource::<crate::rotation_drives::SelfAuthoredHeading>();
             app.add_systems(Startup, load_global_effect_dir);
             // Ordered ahead of the poll so a root change landing on the same frame as an
             // in-flight dll cannot have the poll's `remove_resource::<ActionMainDllTask>`
@@ -6180,9 +6174,9 @@ mod tests {
         }
     }
 
-    /// The LockLookAt intervals are `(fire frame, half-open end)` pairs rather than a bool, which is how
-    /// kuluu-render's look_at_gates tells two overlapping stages apart and keeps one that ended on its own
-    /// watchdog from being re-armed by the interval still covering it.
+    /// The intervals carry what makes them *that* stage — `(routine instance, slot)` plus the
+    /// half-open frames — so look_at_gates can tell two instances of one routine's stage apart instead
+    /// of merging tasks on a shared frame pair.
     #[test]
     fn lock_look_at_intervals_carry_their_stage_identities() {
         let suppress = || {
@@ -9891,8 +9885,7 @@ mod tests {
         const SELF: u32 = 7;
         let mut app = App::new();
         app.init_resource::<Time>()
-            .init_resource::<crate::snapshot::SceneState>()
-            .init_resource::<SelfAuthoredHeading>();
+            .init_resource::<crate::snapshot::SceneState>();
         app.world_mut()
             .resource_mut::<crate::snapshot::SceneState>()
             .snapshot
@@ -9920,6 +9913,13 @@ mod tests {
                 ActorAirborne,
             ))
             .id();
+        let armed = app
+            .world()
+            .entity(entity)
+            .get::<PendingTurn>()
+            .expect("queued turn")
+            .remaining_rad();
+        assert!(armed > 0.0, "the measured turn has an angle owed");
         app.add_systems(Update, step_pending_turns);
 
         let run =
@@ -9931,15 +9931,27 @@ mod tests {
             };
 
         run(&mut app);
-        assert!(
-            app.world().resource::<SelfAuthoredHeading>().0.is_none(),
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get::<PendingTurn>()
+                .expect("still queued")
+                .remaining_rad(),
+            armed,
             "an airborne actor must not have its heading stepped"
         );
 
         app.world_mut().entity_mut(entity).remove::<ActorAirborne>();
         run(&mut app);
+        // A fully travelled queue is removed by the same system that steps it, so a gone component and
+        // a reduced angle both mean a step happened.
+        let still_owed_the_full_turn = app
+            .world()
+            .entity(entity)
+            .get::<PendingTurn>()
+            .is_some_and(|turn| turn.remaining_rad() >= armed);
         assert!(
-            app.world().resource::<SelfAuthoredHeading>().0.is_some(),
+            !still_owed_the_full_turn,
             "the same turn steps as soon as the actor is on the ground"
         );
     }

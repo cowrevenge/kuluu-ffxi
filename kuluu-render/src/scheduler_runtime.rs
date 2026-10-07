@@ -130,6 +130,10 @@ pub enum MotionStages {
     Suppress,
 }
 
+// Monotonic so no two running routines — even two instances of the same file — ever share an id,
+// which is what lets a LockLookAt task tell its own stage from another routine's identical one.
+static NEXT_ROUTINE_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 // One running routine. Not a component on its own anymore: an entity can run several routines at
 // once - retail runs a hit reaction alongside the swing that caused it (ActionTimer1 counted 2 and
 // 3) - so the runtime keeps them in `ActiveSchedulers`, one entry per routine with its own
@@ -137,6 +141,10 @@ pub enum MotionStages {
 #[derive(Debug, Clone)]
 pub struct ActiveScheduler {
     pub stages: Vec<TimedStage>,
+
+    /// One id for this running routine in [`crate::look_at_gates::LockLookAtInterval`] keys. The stages
+    /// never change after construction, so `(instance, slot)` names one stage for the routine's life.
+    instance: u64,
 
     /// The routine's wire target (spell/victim/cutscene partner the actor acted on),
     /// resolved to an Entity when tracked; sound-origin and attach resolution fall
@@ -166,6 +174,7 @@ impl ActiveScheduler {
         let mut stages = s.stages.clone();
         stages.sort_by_key(|t| t.frame);
         Self {
+            instance: NEXT_ROUTINE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             stages,
             elapsed: 0.0,
             cursor: 0,
@@ -211,6 +220,7 @@ impl ActiveScheduler {
         }
         stages.sort_by_key(|t| t.frame);
         Some(Self {
+            instance: NEXT_ROUTINE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             stages,
             elapsed: 0.0,
             cursor: 0,
@@ -228,6 +238,7 @@ impl ActiveScheduler {
         flatten_routine(lookup, name, 0, motion, &mut path, &mut stages);
         stages.sort_by_key(|t| t.frame);
         Some(Self {
+            instance: NEXT_ROUTINE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             stages,
             elapsed: 0.0,
             cursor: 0,
@@ -278,19 +289,30 @@ impl ActiveScheduler {
         })
     }
 
-    /// The 0x89 LockLookAt intervals covering `frame`, each as `(fire frame, end frame)`. Retail runs
-    /// one suppression task per fired stage (FFXiMain.dll retail-2026-09 RVA 0x5B14C), so callers need
-    /// the stage identities rather than a bool: a task that ended on its own watchdog must not be
-    /// re-spawned by the interval that still covers it.
-    pub fn lock_look_at_intervals_at(&self, frame: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+    /// The 0x89 LockLookAt intervals covering `frame`, each identifying the stage that owns it: its slot
+    /// in this routine's stages and this routine's instance. Retail runs one suppression task per fired
+    /// stage (FFXiMain.dll retail-2026-09 RVA 0x5B14C), so callers need to tell two instances of the
+    /// same stage apart, not just read frames.
+    pub fn lock_look_at_intervals_at(
+        &self,
+        frame: u32,
+    ) -> impl Iterator<Item = crate::look_at_gates::LockLookAtInterval> + '_ {
         self.stages
             .iter()
-            .filter(move |t| {
+            .enumerate()
+            .filter(move |(_, t)| {
                 t.stage.kind == StageKind::LockLookAt
                     && t.frame <= frame
                     && frame < t.frame + t.stage.duration_frames as u32
             })
-            .map(|t| (t.frame, t.frame + t.stage.duration_frames as u32))
+            .map(
+                move |(stage_slot, t)| crate::look_at_gates::LockLookAtInterval {
+                    routine_instance: self.instance,
+                    stage_slot,
+                    fire_frame: t.frame,
+                    end_frame: t.frame + t.stage.duration_frames as u32,
+                },
+            )
     }
 
     /// The 0xA9/0xAA ActorRotation intervals covering `frame`, each as `(fire frame, end frame)`. A
@@ -379,7 +401,7 @@ impl ActiveSchedulers {
 
     /// Every 0x89 LockLookAt interval this entity's running routines cover, each read at its own
     /// routine clock.
-    pub fn lock_look_at_intervals_now(&self) -> Vec<(u32, u32)> {
+    pub fn lock_look_at_intervals_now(&self) -> Vec<crate::look_at_gates::LockLookAtInterval> {
         self.routines
             .iter()
             .flat_map(|r| r.lock_look_at_intervals_at(r.current_frame()))
@@ -6174,8 +6196,12 @@ mod tests {
             0,
             "a stage covers nothing before it fires"
         );
+        let fired = cast.lock_look_at_intervals_at(6).collect::<Vec<_>>();
         assert_eq!(
-            cast.lock_look_at_intervals_at(6).collect::<Vec<_>>(),
+            fired
+                .iter()
+                .map(|i| (i.fire_frame, i.end_frame))
+                .collect::<Vec<_>>(),
             vec![(6, 30)],
             "the operand is the interval length"
         );
@@ -6192,6 +6218,17 @@ mod tests {
             ActiveScheduler::from_scheduler(&make_scheduler(*b"damg", vec![not_a_suppression]));
         assert_eq!(swing.lock_look_at_intervals_at(10).count(), 0);
 
+        // Two instances of the same routine file produce identical frames and must not collide.
+        let other = ActiveScheduler::from_scheduler(&make_scheduler(*b"atk1", vec![suppress()]));
+        let other_fired = other.lock_look_at_intervals_at(6).collect::<Vec<_>>();
+        assert_eq!(other_fired.len(), 1);
+        assert_ne!(fired[0], other_fired[0]);
+        assert_eq!(
+            (fired[0].stage_slot, other_fired[0].stage_slot),
+            (0, 0),
+            "the slot is the stage index in each routine's own timeline"
+        );
+
         let mut probe = ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
             *b"atk1",
             vec![suppress()],
@@ -6199,7 +6236,9 @@ mod tests {
         for r in &mut probe.routines {
             r.elapsed = 6.0 / ROUTINE_FPS;
         }
-        assert_eq!(probe.lock_look_at_intervals_now(), vec![(6, 30)]);
+        let now = probe.lock_look_at_intervals_now();
+        assert_eq!(now.len(), 1);
+        assert_eq!((now[0].fire_frame, now[0].end_frame), (6, 30));
     }
 
     // 0x2E is the movement twin of 0x59: same interval rules, a different lock. The 0x2E

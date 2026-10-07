@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 
-use crate::look_at_gates::{self as look_at_gates, LookAtLockTask};
+use crate::look_at_gates::{self as look_at_gates, LockLookAtInterval, LookAtLockTask};
 use ffxi_actor::actor_state::{self, ActorAnimInputs, RestKind};
 use ffxi_actor::animation::{
     BonePoseScratch, LoopParams, SkeletonAnimationCoordinator, TransitionParams,
@@ -5296,7 +5296,7 @@ pub fn tick_live_ffxi_actors(
 
     // The 0x89 LockLookAt intervals each entity's running routines currently cover, keyed by world id and
     // read at the routine clock; the parallel pass below turns them into per-actor suppression tasks.
-    let mut lock_look_at_intervals: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut lock_look_at_intervals: HashMap<u32, Vec<LockLookAtInterval>> = HashMap::new();
     for (id, entry) in tracked.by_id.iter() {
         let Ok(scheds) = q_scheds.get(*entry) else {
             continue;

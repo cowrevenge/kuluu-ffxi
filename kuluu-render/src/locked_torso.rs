@@ -12,10 +12,14 @@
 //! * On the A/D changeover a spine joint whose two side-step records sit past a right angle on either side blends
 //!   the short way, which is through its back. [`merge_through_front`] takes the other arc for exactly that case, so
 //!   the torso comes round through the target side.
+//! * Both answers above only live inside a blend window or inside the authored neck/chest records, so a side step
+//!   *held* on one key ends with the chest further off the target than the hips carrying it. [`UpperBody::steer_onto_aim`]
+//!   turns the torso - and everything hung off it - back onto the walker's aim for as long as the hold lasts, which
+//!   is what keeps a locked strafing run facing the target instead of wandering 50 degrees round its own spine.
 
 use bevy::math::{Mat4, Quat, Vec3};
 use ffxi_actor::animation::{interpolate_kf, SkeletonAnimationCoordinator};
-use ffxi_actor::skeleton_instance::{pose_world, RootTransform};
+use ffxi_actor::skeleton_instance::{composed_subtree, pose_world, RootTransform};
 use ffxi_dat::skel::{standard_position, Skeleton};
 use ffxi_dat::skel_anim::KeyFrameTransform;
 
@@ -64,6 +68,47 @@ impl UpperBody {
     pub fn chest_facing(&self, pose: &[Mat4]) -> Option<Vec3> {
         let (_, rotation, _) = pose.get(self.chest)?.to_scale_rotation_translation();
         ground(rotation * self.chest_forward)
+    }
+
+    /// Turn the upper body back onto `aim` about the joint where it leaves the hips, for as long as the hold lasts.
+    /// The side-step clips put their twist on the pelvis and one spine joint, so a settled hold leaves the torso tens
+    /// of degrees off the target with nothing else pulling it back. Only the subtree rooted *above* the hips moves:
+    /// every leg joint hangs off the hip itself, so stepping is untouched. Returns whether anything was turned.
+    pub fn steer_onto_aim(
+        &self,
+        skeleton: &Skeleton,
+        parent_overrides: &[(usize, usize)],
+        pose: &mut [Mat4],
+        aim: Vec3,
+        weight: f32,
+    ) -> bool {
+        if weight <= 0.0 || self.spine.len() < 2 {
+            return false;
+        }
+        // `spine` runs neck first and ends at the joint the legs branch from, so the entry above the hips roots
+        // everything the turn may carry.
+        let torso_root = self.spine[self.spine.len() - 2];
+        let (Some(facing), Some(aim_ground)) = (self.chest_facing(pose), ground(aim)) else {
+            return false;
+        };
+        let yaw = signed_yaw(facing, aim_ground) * weight.clamp(0.0, 1.0);
+        if yaw.abs() <= f32::EPSILON {
+            return false;
+        }
+        let Some(mat) = pose.get(torso_root).copied() else {
+            return false;
+        };
+        // A rotation about a point: the pivot itself must not travel, so translate onto it, turn, translate back.
+        let pivot = mat.w_axis.truncate();
+        let about_pivot = Mat4::from_translation(pivot)
+            * Mat4::from_rotation_y(yaw)
+            * Mat4::from_translation(-pivot);
+        for joint in composed_subtree(skeleton, parent_overrides, torso_root) {
+            if let Some(m) = pose.get_mut(joint) {
+                *m = about_pivot * *m;
+            }
+        }
+        true
     }
 
     /// This frame's record for each spine joint whose owning layer is crossfading, merged along
@@ -310,5 +355,59 @@ mod tests {
             "{half:?}"
         );
         assert_eq!(bend_reference(POSE_FORWARD, None, 1.0), POSE_FORWARD);
+    }
+
+    /// A torso wound up by a side-step clip must come back onto the aim, and the turn must stop above the hips: the
+    /// legs hang off the hip itself, so nothing that drives stepping may move.
+    #[test]
+    fn a_steered_torso_faces_the_aim_and_the_legs_stay_put() {
+        let skel = rig();
+        let upper = UpperBody::of(&skel).expect("the rig has chest, neck and feet");
+        let mut pose = pose_world(&skel, |_| None, RootTransform::identity(), &[]);
+        let torso_root = upper.spine[upper.spine.len() - 2];
+        let subtree = composed_subtree(&skel, &[], torso_root);
+        // Wind everything above the hips 70 degrees away from the aim, which is what one side-step clip does.
+        let pivot = pose[torso_root].w_axis.truncate();
+        let twist = Mat4::from_translation(pivot)
+            * Mat4::from_rotation_y(70.0_f32.to_radians())
+            * Mat4::from_translation(-pivot);
+        for joint in &subtree {
+            pose[*joint] = twist * pose[*joint];
+        }
+        let hips = *upper.spine.last().expect("the spine ends at the hips");
+        let off_torso: Vec<usize> = (0..skel.joints.len())
+            .filter(|joint| !subtree.contains(joint))
+            .collect();
+        let off_torso_before: Vec<Mat4> = off_torso.iter().map(|&joint| pose[joint]).collect();
+
+        assert!(upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 1.0));
+
+        let facing = upper
+            .chest_facing(&pose)
+            .expect("the steered chest still has a ground facing");
+        assert!(
+            facing.abs_diff_eq(POSE_FORWARD, 1e-4),
+            "steered chest faces {facing:?}, expected the aim {POSE_FORWARD:?}"
+        );
+        for (index, &joint) in off_torso.iter().enumerate() {
+            assert_eq!(
+                pose[joint], off_torso_before[index],
+                "leg-side joint {joint} moved"
+            );
+        }
+        assert_ne!(
+            pose[hips], pose[torso_root],
+            "the torso did turn relative to its hips"
+        );
+    }
+
+    /// Zero weight (unlocked, or a side step that never ramped in) must not touch the pose at all.
+    #[test]
+    fn an_unweighted_steer_leaves_the_pose_alone() {
+        let skel = rig();
+        let upper = UpperBody::of(&skel).expect("the rig has chest, neck and feet");
+        let bind = pose_world(&skel, |_| None, RootTransform::identity(), &[]);
+        let mut pose = bind;
+        assert!(!upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 0.0));
     }
 }

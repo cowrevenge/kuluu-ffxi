@@ -3622,6 +3622,21 @@ fn advance_actor_pose(
         mount,
     );
 
+    // The look-at can only claw back its own neck/chest records, and the front-arc merge only lives inside a blend,
+    // so a side step *held* on one key ends with the chest further off the target than the hips carrying it. While
+    // that hold is ramped in, turn the upper body onto the walker's aim ([`crate::locked_torso::UpperBody::steer_onto_aim`]).
+    // The turn stops above the hips - every leg joint hangs off the hip itself, so stepping keeps exactly what its
+    // clip gives it.
+    if let Some(upper) = upper_body.as_ref() {
+        upper.steer_onto_aim(
+            skeleton,
+            &handle_overrides,
+            world_pose,
+            POSE_FORWARD,
+            *locked_torso_weight,
+        );
+    }
+
     // Retail removes the actor's yaw from a posed point and nothing else (`FFXiMain.dll retail-2026-09` RVA
     // 0xD5CDA..0xD5D25 — [`look_point_actor_local`]). kuluu composes `world_pose` with the entity transform, so that
     // same rotation is what takes the yaw out here; taking it from anywhere else leaves heading inside the look vector
@@ -7454,14 +7469,15 @@ mod pose_resolution_tests {
         );
     }
 
-    /// Locked on and engaged, an A/D side step turns the torso back toward the target through the look-at and no
-    /// further than its records allow, and the A/D changeover brings the torso round through the front. The side-step
-    /// clips are stood in for by the shape that gives the reported symptom: the lower set turns joint 2 (legs and
-    /// upper body both hang off it) 45 degrees, the upper set counter-twists joint 49 100 degrees the other way, so
-    /// the legs blend through the front and the torso, blended the shortest way, through the back. Unlocked keeps
-    /// exactly that; locked must not. `--nocapture` prints the per-frame yaw table against the body's aim.
+    /// Locked on and engaged, an A/D side step holds the upper body ON the target for as long as the key is held -
+    /// not only inside the crossfade, and not limited to what the neck/chest records can claw back - while stepping
+    /// stays exactly what the clips wrote. The side-step clips are stood in for by the shape that gives the reported
+    /// symptom: the lower set turns joint 2 (legs and upper body both hang off it) 45 degrees, the upper set
+    /// counter-twists joint 49 100 degrees the other way. Unlocked reproduces the defect: blended shortest-arc, the
+    /// torso comes round through the back, and a settled hold leaves it further off target than its own hips.
+    /// `--nocapture` prints the per-frame yaw table (chest free/locked, neck, foot, hips, live spine merges).
     #[test]
-    fn a_locked_side_step_turns_the_torso_to_the_target_inside_the_look_at_limits() {
+    fn a_locked_side_step_holds_the_torso_on_the_target_and_leaves_stepping_alone() {
         let Some(loaded) = load_hume_m() else { return };
         let skeleton = &loaded.skeleton;
         let upper =
@@ -7469,6 +7485,12 @@ mod pose_resolution_tests {
         let reference = |slot: usize| skeleton.reference_at(slot).map(|r| r.index).unwrap();
         let neck = reference(ffxi_dat::skel::standard_position::NECK);
         let foot = reference(ffxi_dat::skel::standard_position::RIGHT_FOOT);
+        // The hips close the spine chain: the upper body hangs off them, so how far they sit from the aim bounds
+        // what the torso is allowed to do.
+        let pelvis = *upper
+            .spine
+            .last()
+            .expect("the spine chain ends at the hips");
         let chest_limit_deg = skeleton
             .look_at_limits
             .get(1)
@@ -7575,11 +7597,16 @@ mod pose_resolution_tests {
                     None,
                 );
                 let pose = actor.world_pose();
+                // `steered` records whether the front-arc spine merge was live this frame: a blend with no
+                // override is the clip's own rotation, which is what let the torso settle off the aim.
+                let steered = upper.steered_spine(&actor.coordinator);
                 rows.push((
                     st,
                     yaw_of(pose, upper.chest),
                     yaw_of(pose, neck),
                     yaw_of(pose, foot),
+                    yaw_of(pose, pelvis),
+                    steered.len(),
                 ));
             }
             rows
@@ -7594,16 +7621,20 @@ mod pose_resolution_tests {
             let free = run(false, middle);
             let held = run(true, middle);
             let right_settled = held.len() - SETTLED_FRAMES..held.len();
-            println!("--- changeover {label}: frame state | chest free | chest locked | neck locked | foot");
+            println!(
+                "--- changeover {label}: frame state | chest free | chest locked | neck locked | foot | hips locked | spine merges"
+            );
             let shown = free.iter().zip(held.iter()).enumerate();
             for (i, (free_row, held_row)) in shown.skip(changeover - SETTLED_FRAMES) {
                 println!(
-                    "{i:>3} {:<7} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1}",
+                    "{i:>3} {:<7} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>2}",
                     held_row.0.label(),
                     free_row.1,
                     held_row.1,
                     held_row.2,
-                    held_row.3
+                    held_row.3,
+                    held_row.4,
+                    held_row.5
                 );
             }
 
@@ -7621,20 +7652,53 @@ mod pose_resolution_tests {
                 held.iter().all(|row| row.1.abs() < 90.0),
                 "{label}: locked, the chest must never pass the back"
             );
-            for i in left_settled.clone().chain(right_settled) {
-                let (free_chest, held_chest, held_neck) = (free[i].1, held[i].1, held[i].2);
-                let turned = (free_chest - held_chest).abs();
+            // The front-arc merge has to be live while the two side-step clips crossfade; if no spine joint is
+            // overridden across the whole window, nothing steered and the pair blended however the clips wrote it.
+            let merged_live = held
+                [changeover..(changeover + LOCOMOTION_XFADE_IN as usize).min(held.len())]
+                .iter()
+                .any(|row| row.5 > 0);
+            assert!(
+                merged_live,
+                "{label}: no spine merge was overridden across the {LOCOMOTION_XFADE_IN}-frame crossfade"
+            );
+            // Locked and side-stepping, the upper body holds the aim for as long as the hold lives - not just
+            // during the crossfade, and not clawed back by however much the look-at records allow. Measured on
+            // shipped Hume M: |chest| reads 0.0 deg every settled frame; 8 leaves room for a rig whose chest axis
+            // is not ground-parallel.
+            const TORSO_ON_AIM_SLACK_DEG: f32 = 8.0;
+            for i in left_settled.clone().chain(right_settled.clone()) {
+                let (chest, neck, hips) = (held[i].1, held[i].2, held[i].4);
                 assert!(
-                    turned <= chest_limit_deg + 1.0,
-                    "{label} frame {i}: the chest turned {turned:.1} deg, past its {chest_limit_deg:.1} deg record"
+                    chest.abs() <= TORSO_ON_AIM_SLACK_DEG,
+                    "{label} frame {i}: locked and side-stepping, the chest sits {chest:.1} deg off the aim while its hips sit at {:.1} (spine merge live this frame: {})",
+                    hips.abs(),
+                    held[i].5 > 0
                 );
+                // The head keeps its own turn and may not be flung past it: measured |neck| <= 1.3 deg here, and
+                // the shoulder record is the widest thing that ever separated them.
+                assert!(
+                    (neck.abs() - chest.abs()).abs() <= chest_limit_deg + 1.0,
+                    "{label} frame {i}: neck at {neck:.1} deg against a {chest:.1} deg chest, past the {chest_limit_deg:.1} deg shoulder record",
+                );
+            }
+            for i in left_settled.clone().chain(right_settled) {
+                let (free_chest, held_chest) = (free[i].1, held[i].1);
                 assert!(
                     held_chest.abs() + 5.0 < free_chest.abs(),
-                    "{label} frame {i}: the look-at must turn the chest toward the target ({free_chest:.1} -> {held_chest:.1})"
+                    "{label} frame {i}: locking on must leave the chest nearer the target than the side-step clip left it ({free_chest:.1} -> {held_chest:.1})"
                 );
-                assert!(
-                    held_neck.abs() < held_chest.abs(),
-                    "{label} frame {i}: the head turns further toward the target than the shoulders"
+            }
+            // The torso turn is rooted above the hips, so nothing that drives stepping may change between locked
+            // and unlocked. Exact equality, not a band: the hip and foot matrices never see the steer.
+            for i in 0..held.len() {
+                assert_eq!(
+                    held[i].4, free[i].4,
+                    "{label} frame {i}: locking on moved the hips"
+                );
+                assert_eq!(
+                    held[i].3, free[i].3,
+                    "{label} frame {i}: locking on moved the foot"
                 );
             }
         }

@@ -11,6 +11,8 @@
 //! RVA 0x201E6..0x20773.
 
 use bevy::prelude::*;
+use kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH;
+use kuluu_render::ViewFov;
 
 use super::camera_collision::rotate_about;
 use super::input::RETAIL_MOVE_TICKS_PER_SEC;
@@ -72,8 +74,8 @@ pub struct LockedCamera {
     pub look: Vec3,
 }
 
-/// What one frame of the lock reads from the world: both actors' feet and camera points, and the view's
-/// focal length (`ViewFov::focal_length`).
+/// What one frame of the lock reads from the world: both actors' feet and camera points, and the focal
+/// length it frames with ([`lock_focal`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LockedWorld {
     pub player: Vec3,
@@ -104,6 +106,14 @@ pub fn lock_frame(span: f32, focal_length: f32) -> LockFrame {
         near: near_base + span * SPAN_HALF,
         far: far_base + span * SPAN_HALF,
     }
+}
+
+/// The focal length the lock frames with: the live focal taken relative to the menu's base FOV and set
+/// on retail's default focal. At the menu's retail FOV that is the live focal itself; a wider menu FOV
+/// keeps retail's cone and band, so the locked view widens with it as the free camera's does, and the
+/// zoom keys still move the band as retail's do.
+pub fn lock_focal(live_focal: f32, menu_fov_deg: f32) -> f32 {
+    live_focal * RETAIL_DEFAULT_FOCAL_LENGTH / ViewFov::focal_for_deg(menu_fov_deg)
 }
 
 /// `offset` turned toward the unit `toward`, about the axis square to both, just far enough that the
@@ -241,6 +251,27 @@ mod tests {
         assert!(
             zoomed.near > near5.near && zoomed.half_angle < near5.half_angle,
             "a longer focal pushes the eye out and narrows the cone"
+        );
+    }
+
+    #[test]
+    fn the_lock_frames_at_retails_focal_whatever_the_menu_fov() {
+        use kuluu_render::graphics_settings::DEFAULT_FOV_DEG;
+        const WIDE_MENU_FOV: f32 = 80.0;
+        const ZOOM: f32 = 2.0;
+        let retail_menu = ViewFov::focal_for_deg(DEFAULT_FOV_DEG);
+        assert!(
+            (lock_focal(retail_menu, DEFAULT_FOV_DEG) - retail_menu).abs() < 1e-3,
+            "the menu's retail FOV reads the live focal"
+        );
+        let wide = ViewFov::focal_for_deg(WIDE_MENU_FOV);
+        assert!(
+            (lock_focal(wide, WIDE_MENU_FOV) - default_focal()).abs() < 1e-3,
+            "a wider menu FOV keeps retail's cone and band"
+        );
+        assert!(
+            (lock_focal(wide * ZOOM, WIDE_MENU_FOV) - default_focal() * ZOOM).abs() < 1e-2,
+            "and the zoom keys still scale them"
         );
     }
 

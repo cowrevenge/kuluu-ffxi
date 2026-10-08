@@ -98,6 +98,13 @@ impl Skeleton {
     pub fn look_at_limit(&self, record: usize) -> Option<&LookAtLimit> {
         self.look_at_limits.get(record)
     }
+
+    /// The vertical extent of the first authored box, its second value less its first (head top to feet in
+    /// the skeleton's y-down space): the span retail's chase camera sets its pivot height from
+    /// (`FFXiMain.dll retail-2026-09`, RVA 0x1F3A2 reads it through RVA 0x35250).
+    pub fn height_span(&self) -> Option<f32> {
+        self.bounding_boxes.first().map(|b| b.y_min - b.y_max)
+    }
 }
 
 fn read_f32(data: &[u8], off: usize) -> f32 {
@@ -314,6 +321,18 @@ mod tests {
         let bb = skel.bounding_boxes[0];
         assert_eq!((bb.y_max, bb.y_min, bb.x_max), (9.0, -9.0, 8.0));
         assert_eq!((bb.x_min, bb.z_max, bb.z_min), (-8.0, 7.0, -7.0));
+    }
+
+    #[test]
+    fn the_height_span_runs_from_the_first_boxs_first_value_to_its_second() {
+        let (top, feet) = (-1.9f32, 0.0f32);
+        let skel = parse(
+            DatId::from_str("0000"),
+            &empty_refs_tail(&[top, feet, 0.7, -0.7, 0.7, -0.7], &[]),
+        );
+        assert_eq!(skel.height_span(), Some(feet - top));
+        let unboxed = parse(DatId::from_str("0000"), &empty_refs_tail(&[], &[]));
+        assert_eq!(unboxed.height_span(), None);
     }
 
     #[test]

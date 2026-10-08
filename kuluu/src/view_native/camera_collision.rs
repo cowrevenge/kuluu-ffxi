@@ -16,8 +16,8 @@ use kuluu_render::mouse::{
 
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 use super::locked_camera::{
-    follow_share, short_of_wall, LockedCamera, LockedWorld, PLAYER_POINT_SLOT, TARGET_POINT_SLOT,
-    WALL_RAY_RISE,
+    follow_share, lock_focal, short_of_wall, LockedCamera, LockedWorld, PLAYER_POINT_SLOT,
+    TARGET_POINT_SLOT, WALL_RAY_RISE,
 };
 
 /// Spring-back orbit rate divisor (dist units): while a facing event holds the
@@ -375,7 +375,7 @@ pub fn resolve_camera(
                 player_point: player_pos + Vec3::Y * player_rise,
                 target_point: target_feet
                     + Vec3::Y * target_rise.unwrap_or_else(|| third_person_anchor_y(target_baked)),
-                focal_length: view_fov.focal_length,
+                focal_length: lock_focal(view_fov.focal_length, settings.fov_deg),
             };
             // A lock begins from the camera as it stands: the eye where it rendered, the look point where
             // it looked.
@@ -1230,6 +1230,40 @@ mod tests {
                 "{elapsed:.2}s: the eye left the cone"
             );
         }
+    }
+
+    /// A wider menu FOV widens the locked view instead of pulling the eye in to cancel it: the lock holds
+    /// the eye exactly where it holds it at the menu's retail FOV, and the wider projection shows more.
+    #[test]
+    fn a_wider_menu_fov_widens_the_lock_instead_of_closing_in() {
+        const WIDE_MENU_FOV: f32 = 80.0;
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let target = Vec3::new(5.0, 1.0, 2.0);
+        let settled_eye = |menu_fov: Option<f32>| {
+            let (mut app, _me, cam) = lock_app(true, player, target);
+            if let Some(fov) = menu_fov {
+                app.world_mut()
+                    .resource_mut::<kuluu_render::GraphicsSettings>()
+                    .fov_deg = fov;
+                app.world_mut()
+                    .resource_mut::<kuluu_render::ViewFov>()
+                    .focal_length = kuluu_render::ViewFov::focal_for_deg(fov);
+            }
+            for _ in 0..10 {
+                app.update();
+            }
+            lock(&mut app, true);
+            for _ in 0..240 {
+                app.update();
+            }
+            camera_of(&app, cam).translation
+        };
+        let retail = settled_eye(None);
+        let wide = settled_eye(Some(WIDE_MENU_FOV));
+        assert!(
+            (wide - retail).length() < 1e-3,
+            "the wide menu FOV moved the locked eye: {retail:?} -> {wide:?}"
+        );
     }
 
     /// A lock is laid over the free camera, never written into it: after locking on a target off to the

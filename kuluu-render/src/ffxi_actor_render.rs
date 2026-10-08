@@ -2823,6 +2823,48 @@ fn self_pose_follows_reactor(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool
     )
 }
 
+/// The body's motion slots, legs, upper body and waist: retail's request walks these three when it drops
+/// played-out one-shots (`FFXiMain.dll retail-2026-09` RVA 0xCDD10).
+const BODY_SLOTS: usize = 3;
+
+/// Let go of the slots a new selection names no clip for. A body slot left out keeps playing what it had:
+/// retail adds the requested motion only to the slots that motion has a clip in (`FFXiMain.dll retail-2026-09`
+/// RVA 0xCD540), and drops a played-out one-shot from a body slot left out only when the request covers slot 0
+/// (RVA 0xCDCC5..0xCDD13, the one-shot test at RVA 0x1B360 taken before the request). A side step that ships
+/// only an upper-body clip therefore leaves the legs and skirt on their own motion instead of on bind. Slots
+/// past the body are cleared.
+fn release_uncovered_slots(
+    coordinator: &mut SkeletonAnimationCoordinator,
+    registered_slots: &mut [Option<(DatId, bool)>; 8],
+    new_mask: u8,
+) {
+    let covers = |slot: usize| new_mask & (1 << slot) != 0;
+    for (slot, reg) in registered_slots.iter_mut().enumerate() {
+        let release = !covers(slot)
+            && (slot >= BODY_SLOTS || (covers(0) && coordinator.holds_finished_one_shot(slot)));
+        if release {
+            coordinator.clear_slot(slot);
+            *reg = None;
+        }
+    }
+}
+
+/// Whether a selection can leave `slot` alone: it already holds this clip (id and set), still playing, so the
+/// clip keeps its frame instead of restarting. This stands in for retail's own anti-restart rule: xim
+/// re-requests the movement clips on every update frame at low priority (research/xim ActorModel.kt
+/// transitionToMoving -> setSkeletonAnimation), and SkeletonAnimator.setNextAnimation returns untouched when
+/// the request carries the same animation object as a low-priority current. kuluu's selection pass clones its
+/// clips, so object identity cannot carry that rule; the (id, set) tuple per slot is the equivalent. A
+/// one-shot that has played out is asked for again, as retail's request would.
+fn slot_keeps_clip(
+    coordinator: &SkeletonAnimationCoordinator,
+    registered_slots: &[Option<(DatId, bool)>; 8],
+    slot: usize,
+    book: (DatId, bool),
+) -> bool {
+    registered_slots[slot] == Some(book) && !coordinator.holds_finished_one_shot(slot)
+}
+
 /// Re-issue the idle-family requests a slot declined, until each lands. The handover gate is
 /// per-animator, so an overlay that has not finished its pass refuses the low-priority request and only
 /// becomes eligible once it has pinned its last pose — one frame later than the selection that asked.
@@ -3383,26 +3425,13 @@ fn advance_actor_pose(
             new_mask |= 1 << slot;
         }
 
-        // Slots the new selection drops are cleared outright; a slot that keeps the same clip
-        // (id and set) is skipped in the register loops below so the clip keeps its frame instead
-        // of restarting. This stands in for retail's own anti-restart rule: xim re-requests the
-        // movement clips on every update frame at low priority (research/xim ActorModel.kt
-        // transitionToMoving -> setSkeletonAnimation), and SkeletonAnimator.setNextAnimation
-        // returns untouched when the request carries the same animation object as a low-priority
-        // current. kuluu's selection pass clones its clips, so object identity cannot carry that
-        // rule — the (id, set) tuple per slot is the equivalent: unchanged slot keeps its playhead.
-        for (slot, reg) in registered_slots.iter_mut().enumerate() {
-            if new_mask & (1 << slot) == 0 {
-                coordinator.clear_slot(slot);
-                *reg = None;
-            }
-        }
+        release_uncovered_slots(coordinator, registered_slots, new_mask);
 
         if is_idle {
             for &clip in &matches {
                 let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
                 let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
-                if registered_slots[slot] == Some((clip.id, from_battle)) {
+                if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
                     continue;
                 }
                 let accepted = if action_just_ended {
@@ -3458,7 +3487,7 @@ fn advance_actor_pose(
             for &clip in &matches {
                 let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
                 let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
-                if registered_slots[slot] == Some((clip.id, from_battle)) {
+                if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
                     continue;
                 }
                 coordinator
@@ -4552,6 +4581,7 @@ pub fn poll_load_actor_tasks(
                 commands.entity(wire_entity).insert(BakedActor {
                     min_mesh_y: lo.y,
                     actor_height: (hi.y - lo.y).max(0.1),
+                    skeleton_span: prepared.loaded.skeleton.height_span(),
                 });
             }
         }
@@ -7465,13 +7495,15 @@ mod pose_resolution_tests {
 
     /// A locked A let go and D taken straight after swings the body round through the front onto the
     /// right side step, whether a stop lands between the two keys or the flip latch runs straight for two
-    /// frames, even with side steps more than a half turn apart. The stop or run blend keeps running under
-    /// the side step coming in (ffxi_actor::animation::PreviousSide::Blending); crossfading from a still of
-    /// it instead took the short arc round the back. Stand-in clips each turn one bone about y.
+    /// frames, even with side steps more than a half turn apart, and gets there a frame at a time. The stop or
+    /// run blend keeps running under the side step coming in (ffxi_actor::animation::PreviousSide::Blending);
+    /// crossfading from a still of it instead took the short arc round the back, and re-picking the short arc
+    /// every frame jumped the body across mid-swing. Stand-in clips each turn one bone about y.
     #[test]
     fn a_locked_side_step_flip_swings_through_the_front() {
         const SIDE_STEP_DEG: f32 = 100.0;
         const RENDER_FRAME: f32 = 0.5;
+        const WIDEST_FRAME_DEG: f32 = 25.0;
         let turned = |id: &[u8; 4], deg: f32| {
             let mut clip = synth_anim(id, 8);
             let half = deg.to_radians() / 2.0;
@@ -7498,16 +7530,26 @@ mod pose_resolution_tests {
                 let deg = (2.0 * q[1].atan2(q[3])).to_degrees();
                 (deg + 180.0).rem_euclid(360.0) - 180.0
             };
+            let mut last = 0.0;
             for _ in 0..40 {
-                yaw(StrafeLeft);
+                last = yaw(StrafeLeft);
             }
-            let mut widest = between.iter().map(|&s| yaw(s).abs()).fold(0.0, f32::max);
-            for _ in 0..40 {
-                widest = widest.max(yaw(StrafeRight).abs());
+            let mut widest: f32 = 0.0;
+            let mut widest_frame: f32 = 0.0;
+            for state in between.iter().copied().chain([StrafeRight; 40]) {
+                let now = yaw(state);
+                widest = widest.max(now.abs());
+                widest_frame =
+                    widest_frame.max(((now - last + 180.0).rem_euclid(360.0) - 180.0).abs());
+                last = now;
             }
             assert!(
                 widest < 150.0,
                 "with {between:?} between the keys the swing went round the back, to {widest} degrees"
+            );
+            assert!(
+                widest_frame < WIDEST_FRAME_DEG,
+                "with {between:?} between the keys the swing jumped {widest_frame} degrees in one frame"
             );
             assert!((yaw(StrafeRight) + SIDE_STEP_DEG).abs() < 1e-2);
         }
@@ -7555,6 +7597,110 @@ mod pose_resolution_tests {
             (frame - (start + 1.0)).abs() < 1e-4,
             "the side step should run on from frame {start}, got {frame}"
         );
+    }
+
+    /// A side step that ships only an upper-body clip leaves the legs on the gait they were running. Retail adds
+    /// a motion only to the slots it has a clip in, so the legs keep their clip and its playhead through the side
+    /// step and back, never dropping to bind or starting over while the upper body steps.
+    #[test]
+    fn a_side_step_with_no_leg_clip_leaves_the_legs_running() {
+        use PoseState::{Run, StrafeRight};
+        const LENGTH: usize = 12;
+        const LEGS: usize = 0;
+        const UPPER_BODY: usize = 1;
+        let keyed = |id: &[u8; 4], joint: usize| {
+            let mut clip = synth_anim(id, LENGTH);
+            clip.key_frame_sets.insert(
+                joint as u32,
+                vec![ffxi_dat::skel_anim::KeyFrameTransform::default(); clip.num_frames],
+            );
+            clip
+        };
+        let clips = vec![
+            keyed(b"run0", LEGS),
+            keyed(b"run1", UPPER_BODY),
+            keyed(b"mvr1", UPPER_BODY),
+        ];
+        let mut actor = render_actor_with_skeleton_clips(1, clips);
+        let length = synth_anim(b"span", LENGTH).length_in_frames();
+        let mut legs_frame: Option<f32> = None;
+        for (frame, state) in [Run; 4]
+            .into_iter()
+            .chain([StrafeRight; 6])
+            .chain([Run; 4])
+            .enumerate()
+        {
+            actor.inputs = inputs_for_pose(state, false);
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            let clip_in = |slot: usize| {
+                actor.coordinator.animations[slot]
+                    .as_ref()
+                    .and_then(|a| a.current_animation.as_ref())
+                    .map(|c| (c.animation.id.as_str().to_string(), c.current_frame))
+            };
+            let (legs, playhead) = clip_in(LEGS).unwrap_or_else(|| {
+                panic!(
+                    "frame {frame} ({}): the legs lost their slot",
+                    state.label()
+                )
+            });
+            assert_eq!(legs, "run0", "frame {frame} ({})", state.label());
+            assert!(
+                actor.coordinator.get_joint_transform(LEGS).is_some(),
+                "frame {frame}: the legs dropped to bind"
+            );
+            if let Some(before) = legs_frame {
+                let drift = (playhead - before - 1.0).rem_euclid(length);
+                assert!(
+                    drift.min(length - drift) < 1e-4,
+                    "frame {frame}: the legs restarted, {before} -> {playhead}"
+                );
+            }
+            legs_frame = Some(playhead);
+            if state == StrafeRight {
+                assert_eq!(clip_in(UPPER_BODY).map(|c| c.0).as_deref(), Some("mvr1"));
+            }
+        }
+    }
+
+    /// A request that covers the legs drops a played-out one-shot from a body slot it leaves out; one that does
+    /// not cover the legs leaves every body slot alone, and a running loop always stays. Slots past the body
+    /// clear whenever a selection leaves them out. A slot already holding the clip asked for keeps it running,
+    /// unless it is a one-shot that has played out.
+    #[test]
+    fn only_a_request_covering_the_legs_drops_a_played_out_one_shot() {
+        let looping = LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        };
+        let once = LoopParams {
+            num_loops: Some(1),
+            ..looping
+        };
+        let mut coordinator = SkeletonAnimationCoordinator::new();
+        let mut registered = [None; 8];
+        for (id, params) in [(b"run1", looping), (b"atk2", once), (b"fac4", looping)] {
+            let clip = synth_anim(id, 2);
+            registered[clip.id.final_digit().unwrap() as usize] = Some((clip.id, false));
+            coordinator.register_animation(clip, params, None, |_| true);
+        }
+        coordinator.update(5.0);
+        assert!(coordinator.holds_finished_one_shot(2));
+        let book = |slot: usize| registered[slot].unwrap();
+        assert!(
+            !slot_keeps_clip(&coordinator, &registered, 2, book(2)),
+            "a played-out one-shot asked for again plays again"
+        );
+        assert!(slot_keeps_clip(&coordinator, &registered, 1, book(1)));
+
+        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 1);
+        assert!(coordinator.animations[2].is_some() && registered[2].is_some());
+        assert!(coordinator.animations[4].is_none() && registered[4].is_none());
+
+        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 0);
+        assert!(coordinator.animations[2].is_none() && registered[2].is_none());
+        assert!(coordinator.animations[1].is_some() && registered[1].is_some());
     }
 
     /// Strafing engaged must not shrink the upper body. Two mechanisms, both measured on shipped Hume clips:

@@ -1150,6 +1150,7 @@ mod tests {
         let baked = BakedActor {
             min_mesh_y: 0.0,
             actor_height: 2.0,
+            skeleton_span: None,
         };
         assert!(
             (eid_model_point(2, Some(&baked), None).unwrap() - Vec3::new(0.0, 2.1, 0.0)).length()
@@ -1483,6 +1484,7 @@ mod tests {
                 BakedActor {
                     min_mesh_y: 0.0,
                     actor_height: 2.0,
+                    skeleton_span: None,
                 },
             ))
             .with_children(|parent| {

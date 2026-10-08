@@ -49,37 +49,30 @@ pub fn reset_camera_follow(
     *step = CameraStepSmoothing::default();
 }
 
-/// Retail's chase-camera pivot-height law (`FFXiMain.dll retail-2026-09` `0x1F3A2..0x1F446`):
-/// the followed actor's attach-node record (element chosen by Status through the byte-map
-/// `0xCFBD0` + switch in predicate `0xCFB40`) supplies a vertical span `[+4] − [+0]`; when that
-/// span is below `2.5` (.rdata 0x329ea0) it is forced to exactly `4.0` (imm store at 0x1F3D4,
-/// gated on actor predicate vt+0x14C — ported as always-on, its identity is [I]); the pivot bias
-/// is then span × `0.6` (.rdata 0x329a30). kuluu's measured DAT mesh extent (`BakedActor::
-/// actor_height`, max_y − min_y from the model records) stands in for the node span — closest
-/// data-driven equivalent of the same authored quantity.
-const ANCHOR_QUANT_MIN_SPAN: f32 = 2.5;
-const ANCHOR_FORCED_SPAN: f32 = 4.0;
+/// Retail's chase-camera pivot-height law (`FFXiMain.dll retail-2026-09`, RVAs
+/// `0x1F3A2..0x1F446`): the followed actor's skeleton box (vt+0x3CC, read as
+/// `ffxi_dat::skel::Skeleton::height_span`) supplies a vertical span, capped at `2.5` (compare
+/// against .rdata 0x329ea0, imm store at 0x1F3CC) when actor predicate vt+0x14C holds (ported as
+/// always-on, its identity is [I]); the pivot sits span × `0.6` (.rdata 0x329a30) above the feet.
+const ANCHOR_MAX_SPAN: f32 = 2.5;
 const ANCHOR_SPAN_SCALE: f32 = 0.6;
 
 #[inline]
 pub fn anchor_bias_y(h_span: f32) -> f32 {
-    let span = if h_span < ANCHOR_QUANT_MIN_SPAN {
-        ANCHOR_FORCED_SPAN
-    } else {
-        h_span
-    };
-    span * ANCHOR_SPAN_SCALE
+    h_span.min(ANCHOR_MAX_SPAN) * ANCHOR_SPAN_SCALE
 }
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
 
 pub const FALLBACK_ACTOR_HEIGHT: f32 = 2.3;
 
+/// The pivot height over the actor's feet: from its skeleton's span, else from its measured mesh
+/// extent when it was built without one.
 #[inline]
 pub fn third_person_anchor_y(baked: Option<&BakedActor>) -> f32 {
     anchor_bias_y(
         baked
-            .map(|b| b.actor_height)
+            .map(|b| b.skeleton_span.unwrap_or(b.actor_height))
             .unwrap_or(FALLBACK_ACTOR_HEIGHT),
     )
 }
@@ -1100,11 +1093,42 @@ mod tests {
     }
 
     #[test]
-    fn anchor_bias_follows_the_retail_quantiser() {
-        // Spans below 2.5 are forced to exactly 4.0 (bias 2.4); at/above, bias = span × 0.6.
-        assert!((anchor_bias_y(0.1) - 2.4).abs() < 1e-6);
-        assert!((anchor_bias_y(2.3) - 2.4).abs() < 1e-6); // hume-sized: quantised up
-        assert!((anchor_bias_y(2.5) - 1.5).abs() < 1e-6);
-        assert!((anchor_bias_y(5.0) - 3.0).abs() < 1e-6);
+    fn anchor_bias_is_six_tenths_of_the_span_capped_at_retails_limit() {
+        let bias = |span: f32| span * ANCHOR_SPAN_SCALE;
+        for span in [0.1, FALLBACK_ACTOR_HEIGHT, ANCHOR_MAX_SPAN] {
+            assert!(
+                (anchor_bias_y(span) - bias(span)).abs() < 1e-6,
+                "span {span}"
+            );
+        }
+        for span in [ANCHOR_MAX_SPAN + 0.01, 2.0 * ANCHOR_MAX_SPAN] {
+            assert!(
+                (anchor_bias_y(span) - bias(ANCHOR_MAX_SPAN)).abs() < 1e-6,
+                "span {span} sits at the cap"
+            );
+        }
+        assert!(
+            anchor_bias_y(FALLBACK_ACTOR_HEIGHT) < FALLBACK_ACTOR_HEIGHT,
+            "a hume-sized pivot sits inside the body, not above the head"
+        );
+    }
+
+    #[test]
+    fn the_pivot_reads_the_skeleton_span_before_the_mesh_extent() {
+        const MESH_EXTENT: f32 = 2.3;
+        const SKELETON_SPAN: f32 = 1.9;
+        let baked = |skeleton_span| BakedActor {
+            min_mesh_y: 0.0,
+            actor_height: MESH_EXTENT,
+            skeleton_span,
+        };
+        assert_eq!(
+            third_person_anchor_y(Some(&baked(Some(SKELETON_SPAN)))),
+            anchor_bias_y(SKELETON_SPAN)
+        );
+        assert_eq!(
+            third_person_anchor_y(Some(&baked(None))),
+            anchor_bias_y(MESH_EXTENT)
+        );
     }
 }

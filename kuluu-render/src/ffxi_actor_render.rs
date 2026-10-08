@@ -7621,7 +7621,6 @@ mod pose_resolution_tests {
         ] {
             let free = run(false, middle);
             let held = run(true, middle);
-            let right_settled = held.len() - SETTLED_FRAMES..held.len();
             println!(
                 "--- changeover {label}: frame state | chest free | chest locked | neck locked | foot | hips locked | spine merges"
             );
@@ -7663,12 +7662,13 @@ mod pose_resolution_tests {
                 merged_live,
                 "{label}: no spine merge was overridden across the {LOCOMOTION_XFADE_IN}-frame crossfade"
             );
-            // Locked and side-stepping, the upper body holds the aim for as long as the hold lives - not just
-            // during the crossfade, and not clawed back by however much the look-at records allow. Measured on
-            // shipped Hume M: |chest| reads 0.0 deg every settled frame; 8 leaves room for a rig whose chest axis
-            // is not ground-parallel.
+            // Locked and side-stepping, the upper body holds the aim on every frame of the hold - settled
+            // frames, the crossfade window itself included - not clawed back by however much the look-at records
+            // allow. Measured on shipped Hume M: |chest| reads 0.0 deg every frame; 8 leaves room for a rig whose
+            // chest axis is not ground-parallel.
             const TORSO_ON_AIM_SLACK_DEG: f32 = 8.0;
-            for i in left_settled.clone().chain(right_settled.clone()) {
+            let window = left_settled.start..held.len();
+            for i in window.clone() {
                 let (chest, neck, hips) = (held[i].1, held[i].2, held[i].4);
                 assert!(
                     chest.abs() <= TORSO_ON_AIM_SLACK_DEG,
@@ -7683,7 +7683,7 @@ mod pose_resolution_tests {
                     "{label} frame {i}: neck at {neck:.1} deg against a {chest:.1} deg chest, past the {chest_limit_deg:.1} deg shoulder record",
                 );
             }
-            for i in left_settled.clone().chain(right_settled) {
+            for i in window {
                 let (free_chest, held_chest) = (free[i].1, held[i].1);
                 assert!(
                     held_chest.abs() + 5.0 < free_chest.abs(),

@@ -1569,10 +1569,14 @@ pub fn dispatch_movement_system(
 
     let moving = forward != 0 || strafe != 0 || steer_in_chase;
     let (intent_forward, intent_strafe) = pose_intent(locked, moving, forward, strafe);
+    // The lock flag travels with the intent: it is what arms the locked-torso law downstream
+    // (kuluu-render's `locked_on`), so a tick where this fell back to its default left the upper body
+    // on raw side-step clips through the crossfade.
     **move_intent = kuluu_render::combat_stance::SelfMoveIntent {
         moving,
         forward: intent_forward,
         strafe: intent_strafe,
+        locked,
         ..default()
     };
 
@@ -3846,6 +3850,44 @@ mod tests {
         });
         assert_eq!(r.strafe, 1);
         assert_eq!(r.steer, 0);
+    }
+
+    /// The lock flag must reach animation selection through the pose intent: it alone arms the
+    /// locked-torso law in the pose pass (front-arc spine merges and the torso steer). Without it a
+    /// walker that squares correctly on the target still leaves its upper body on raw side-step clips
+    /// across an A→D changeover.
+    #[test]
+    fn locked_side_step_reports_the_lock_in_pose_intent() {
+        use kuluu_render::combat_stance::SelfMoveIntent;
+        let mut drive = MoveDrive::new();
+        // The latch state the toggle system would leave behind; this harness drives dispatch directly.
+        *drive.app.world_mut().resource_mut::<LockOn>() = LockOn { target_id: Some(1) };
+        drive.press(KeyCode::KeyD);
+        for _ in 0..SETTLE_TICKS {
+            drive.tick();
+            let intent = *drive.app.world().resource::<SelfMoveIntent>();
+            assert!(intent.moving, "held D keeps the actor moving");
+            assert_ne!(
+                intent.strafe, 0.0,
+                "locked turn-right travels on the strafe axis"
+            );
+            assert!(
+                intent.locked,
+                "a locked-on side step must arm the torso law in pose intent"
+            );
+        }
+
+        drive.release(KeyCode::KeyD);
+        drive.tick();
+        *drive.app.world_mut().resource_mut::<LockOn>() = LockOn::default();
+        drive.press(KeyCode::KeyD);
+        for _ in 0..3 {
+            drive.tick();
+            assert!(
+                !drive.app.world().resource::<SelfMoveIntent>().locked,
+                "free motion never arms the torso law"
+            );
+        }
     }
 
     #[test]

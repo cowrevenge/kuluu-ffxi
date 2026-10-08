@@ -115,28 +115,48 @@ pub struct LeashState {
     focus: Option<Vec2>,
     eye: Option<Vec2>,
     yaw: Option<f32>,
-    /// The chase pitch this system last wrote, so a different value next frame is a tilt the player made.
+    /// The chase pitch at the end of last frame, so a different value now is a tilt the player made.
     pitch: Option<f32>,
     /// The point the camera looked at last frame: a lock begins from it.
     look: Option<Vec3>,
-    /// The previous frame was locked on: the release frame re-seeds the free
-    /// camera from the live eye (see resolve_camera) and starts the release
-    /// ease, so unlocking never teleports the eye.
+    /// The previous frame was locked on: the release frame starts the release
+    /// ease and the handoff.
     was_locked: bool,
     /// Yaw the just-released camera eases back to (behind the body's
-    /// heading): the lock leaves the eye off the line behind the body, and the
+    /// heading): the lock leaves the rig on the locked view's bearing, and the
     /// released camera closes that with a fast catch-up turn instead of
-    /// parking where the lock left it or snapping. A manual turn, a new lock,
-    /// or a zone snap takes the camera back.
+    /// parking there or snapping. A manual turn, a new lock, or a zone snap
+    /// takes the camera back.
     release_yaw: Option<f32>,
     /// Retail's locked camera ([`super::locked_camera`]) while a lock holds.
-    locked: Option<super::locked_camera::LockedCamera>,
+    locked: Option<LockedCamera>,
     /// The locked target and the height of its camera point, read once per lock as retail does.
     target_rise: Option<(u32, f32)>,
-    /// How far the look point still sits from the player after a lock released: retail's look point
-    /// closes on the player's at the same quarter per tick it chased the lock's midpoint with, so the
-    /// view swings home instead of cutting to the player.
-    look_glide: Option<Vec3>,
+    /// How far the rendered view still sits from the chase rig's after a lock released.
+    handoff: Option<Handoff>,
+}
+
+/// The rendered eye and look point minus the chase rig's. Retail runs one camera, so its free camera
+/// starts wherever the lock left the eye. Kuluu's chase rig keeps its own distance and pitch through a
+/// lock, so on release the view eases from the locked camera back onto the rig instead of cutting to
+/// it, at the share per tick retail's look point follows its goal with
+/// ([`super::locked_camera::follow_share`]).
+#[derive(Clone, Copy, Default)]
+struct Handoff {
+    eye: Vec3,
+    look: Vec3,
+}
+
+impl Handoff {
+    fn eased(self, dt: f32) -> Option<Self> {
+        let keep = 1.0 - follow_share(dt);
+        let next = Self {
+            eye: self.eye * keep,
+            look: self.look * keep,
+        };
+        (next.eye.length() > HANDOFF_SETTLED_YALMS || next.look.length() > HANDOFF_SETTLED_YALMS)
+            .then_some(next)
+    }
 }
 
 /// Whether the chase camera should collide with zone MMB static placements (Mog
@@ -181,8 +201,8 @@ const OUTWARD_LERP: f32 = 0.18;
 
 const INWARD_LERP: f32 = 0.45;
 
-/// The look point a lock left behind counts as home once it is this close to the player's.
-const LOOK_GLIDE_SETTLED_YALMS: f32 = 1e-3;
+/// The released view counts as back on the chase rig once both offsets are this short.
+const HANDOFF_SETTLED_YALMS: f32 = 1e-3;
 
 /// The single chase-camera authority: a leash with slack at both ends, the
 /// camera spring that decides how fast the eye reaches the leash's goal, the
@@ -214,17 +234,18 @@ const LOOK_GLIDE_SETTLED_YALMS: f32 = 1e-3;
 /// where something else wrote chase.yaw (the mouse, the yaw keys, Q/E, a stair
 /// warp) swings the eye around the focus to that yaw at once.
 ///
-/// Locked on, retail's locked camera owns the view instead
+/// Locked on, retail's locked camera renders the view instead
 /// ([`super::locked_camera`]): it looks at the point midway between the player
 /// and the target and holds the eye inside a cone round the line from the
 /// target through the player, so the lock begins with the eye wherever it was
 /// (pulled only to the cone's edge) and a side step carries the player a few
 /// yalms before the camera follows. The yaw keys and the mouse still turn and
-/// tilt that eye inside the cone. On release the free camera takes over at the
-/// rendered eye (no teleport), its look point glides back onto the player and
-/// its yaw eases back behind the body's heading in well under a second
-/// (LeashState::release_yaw); a manual turn, a new lock, or a zone snap takes
-/// the camera back.
+/// tilt that eye inside the cone. The chase rig runs on underneath on the
+/// locked view's bearing, its eye carried on the boom at its own distance and
+/// pitch, so the lock never changes the free camera. On release the view eases
+/// back onto the rig (LeashState::handoff) and the rig's yaw eases back behind
+/// the body's heading in well under a second (LeashState::release_yaw); a
+/// manual turn, a new lock, or a zone snap takes the camera back.
 ///
 /// Init sync aligns yaw behind the player on the first frame.
 /// snap_to_anchor (zone/warp) resets the leash to the exact position.
@@ -339,104 +360,79 @@ pub fn resolve_camera(
         .target_id
         .and_then(|id| target_q.iter().find(|(we, ..)| we.id == id))
         .filter(|_| !chase.snap_to_anchor);
-    if let Some((target_we, target_t, target_baked, target_children)) = lock_target {
-        let target_feet = target_t.translation;
-        let target_rise = match leash_state.target_rise {
-            Some((id, rise)) if id == target_we.id => Some(rise),
-            _ => point_rise(target_children, &render_q, TARGET_POINT_SLOT, target_feet),
-        };
-        let player_rise = point_rise(self_children, &render_q, PLAYER_POINT_SLOT, player_pos)
-            .unwrap_or(anchor_y.y);
-        let world = LockedWorld {
-            player: player_pos,
-            target: target_feet,
-            player_point: player_pos + Vec3::Y * player_rise,
-            target_point: target_feet
-                + Vec3::Y * target_rise.unwrap_or_else(|| third_person_anchor_y(target_baked)),
-            focal_length: view_fov.focal_length,
-        };
-        // A lock begins from the camera as it stands: the eye where it rendered, the look point where it
-        // looked.
-        let held = leash_state.locked.unwrap_or(LockedCamera {
-            eye: cam_t.translation,
-            look: leash_state
-                .look
-                .unwrap_or(Vec3::new(focus.x, pivot_y, focus.y)),
-        });
-        // The player's own turns and tilts still move the eye (`FFXiMain.dll retail-2026-09` RVA
-        // 0x1F01F..0x1F14A): a turn swings it round the look point at the orbit rate normalised by its
-        // distance, which the free-run byte the lock cleared switches on, and a tilt lifts it by the rise
-        // the input system priced into its pitch step.
-        let last_pitch = leash_state.pitch.unwrap_or(chase.pitch);
-        let orbit = manual_yaw
-            * camera_orbit_yaw_rate_rad_per_sec(1.0, false, Some(held.distance()))
-            / camera_orbit_yaw_rate_rad_per_sec(1.0, true, None);
-        let tilt_rate = camera_height_pitch_rate_rad_per_sec(1.0, last_pitch, Some(chase.distance));
-        let rise = if tilt_rate == 0.0 {
-            0.0
-        } else {
-            (chase.pitch - last_pitch) / tilt_rate * CAMERA_EYE_RISE_YALMS_PER_SEC
-        };
-        let mut locked = held.orbit(orbit).lift(rise).step(&world, dt);
-        // Retail's wall test runs from just above the player's feet to the eye and keeps the eye short of a
-        // hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
-        if let Some(bvh) = zone_bvh.0.as_ref() {
-            let origin = player_pos + Vec3::Y * WALL_RAY_RISE;
-            let to_eye = locked.eye - origin;
-            let reach = to_eye.length();
-            if reach > f32::EPSILON {
-                if let Some(hit) = bvh.ray_cast(origin, to_eye / reach, reach) {
-                    locked.eye = short_of_wall(origin, locked.eye, hit);
+    let locked_view = match lock_target {
+        Some((target_we, target_t, target_baked, target_children)) => {
+            let target_feet = target_t.translation;
+            let target_rise = match leash_state.target_rise {
+                Some((id, rise)) if id == target_we.id => Some(rise),
+                _ => point_rise(target_children, &render_q, TARGET_POINT_SLOT, target_feet),
+            };
+            let player_rise = point_rise(self_children, &render_q, PLAYER_POINT_SLOT, player_pos)
+                .unwrap_or(anchor_y.y);
+            let world = LockedWorld {
+                player: player_pos,
+                target: target_feet,
+                player_point: player_pos + Vec3::Y * player_rise,
+                target_point: target_feet
+                    + Vec3::Y * target_rise.unwrap_or_else(|| third_person_anchor_y(target_baked)),
+                focal_length: view_fov.focal_length,
+            };
+            // A lock begins from the camera as it stands: the eye where it rendered, the look point where
+            // it looked.
+            let held = leash_state.locked.unwrap_or(LockedCamera {
+                eye: cam_t.translation,
+                look: leash_state
+                    .look
+                    .unwrap_or(Vec3::new(focus.x, pivot_y, focus.y)),
+            });
+            // The player's own turns and tilts still move the eye (`FFXiMain.dll retail-2026-09` RVA
+            // 0x1F01F..0x1F14A): a turn swings it round the look point at the orbit rate normalised by
+            // its distance, which the free-run byte the lock cleared switches on, and a tilt lifts it by
+            // the rise the input system priced into its pitch step.
+            let last_pitch = leash_state.pitch.unwrap_or(chase.pitch);
+            let orbit = manual_yaw
+                * camera_orbit_yaw_rate_rad_per_sec(1.0, false, Some(held.distance()))
+                / camera_orbit_yaw_rate_rad_per_sec(1.0, true, None);
+            let tilt_rate =
+                camera_height_pitch_rate_rad_per_sec(1.0, last_pitch, Some(chase.distance));
+            let rise = if tilt_rate == 0.0 {
+                0.0
+            } else {
+                (chase.pitch - last_pitch) / tilt_rate * CAMERA_EYE_RISE_YALMS_PER_SEC
+            };
+            let mut view = held.orbit(orbit).lift(rise).step(&world, dt);
+            // Retail's wall test runs from just above the player's feet to the eye and keeps the eye
+            // short of a hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
+            if let Some(bvh) = zone_bvh.0.as_ref() {
+                let origin = player_pos + Vec3::Y * WALL_RAY_RISE;
+                let to_eye = view.eye - origin;
+                let reach = to_eye.length();
+                if reach > f32::EPSILON {
+                    if let Some(hit) = bvh.ray_cast(origin, to_eye / reach, reach) {
+                        view.eye = short_of_wall(origin, view.eye, hit);
+                    }
                 }
             }
+            // The chase yaw follows the view, so whatever reads it sees where the camera faces and the rig
+            // underneath stays on the locked bearing.
+            let ground = Vec2::new(view.eye.x, view.eye.z) - pivot_xz;
+            if ground.length_squared() > f32::EPSILON {
+                chase.yaw = continuous_yaw(chase.yaw, ground.x.atan2(ground.y));
+            }
+            Some((view, target_rise.map(|rise| (target_we.id, rise))))
         }
-        cam_t.translation = locked.eye;
-        cam_t.look_at(locked.look, Vec3::Y);
+        None => None,
+    };
+    let locked = locked_view.is_some();
 
-        // The chase rig keeps describing the rendered eye about the player: whatever reads the chase yaw
-        // sees the view, and a release hands the free camera exactly this eye.
-        let pivot = Vec3::new(pivot_xz.x, pivot_y, pivot_xz.y);
-        let boom = locked.eye - pivot;
-        let ground = Vec2::new(boom.x, boom.z);
-        chase.yaw = continuous_yaw(chase.yaw, ground.x.atan2(ground.y));
-        chase.pitch = boom
-            .y
-            .atan2(ground.length())
-            .clamp(ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX);
-        *smoothed_effective = Some(boom.length());
-        *leash_state = LeashState {
-            focus: Some(pivot_xz),
-            eye: Some(Vec2::new(locked.eye.x, locked.eye.z)),
-            yaw: Some(chase.yaw),
-            pitch: Some(chase.pitch),
-            look: Some(locked.look),
-            was_locked: true,
-            release_yaw: None,
-            locked: Some(locked),
-            target_rise: target_rise.map(|rise| (target_we.id, rise)),
-            look_glide: None,
-        };
-        chase.snap_to_anchor = false;
-        return;
-    }
-
-    // Lock release: the free camera takes over where the locked eye rendered
-    // (re-seed the leash from the live camera so nothing carried or reset
-    // during the lock can move it), its look point glides back onto the
-    // player, and its yaw springs back behind the body's heading in well under
-    // a second.
-    if leash_state.was_locked {
-        leash_state.eye = Some(Vec2::new(cam_t.translation.x, cam_t.translation.z));
-        leash_state.yaw = Some(chase.yaw);
-        leash_state.look_glide = leash_state
-            .locked
-            .map(|locked| locked.look - Vec3::new(focus.x, pivot_y, focus.y));
-        if manual_yaw == 0.0 {
-            leash_state.release_yaw = Some(yaw_for_heading(scene_state.snapshot.self_pos.heading));
-        }
+    // Lock release: the rig is already where the free camera left it, on the
+    // lock's last bearing, and springs back behind the body's heading in well
+    // under a second.
+    if leash_state.was_locked && !locked && manual_yaw == 0.0 {
+        leash_state.release_yaw = Some(yaw_for_heading(scene_state.snapshot.self_pos.heading));
     }
     if let Some(release) = leash_state.release_yaw {
-        if manual_yaw != 0.0 || chase.snap_to_anchor {
+        if manual_yaw != 0.0 || locked || chase.snap_to_anchor {
             leash_state.release_yaw = None;
         } else {
             let next = lock_turn(chase.yaw, release, dt);
@@ -461,8 +457,12 @@ pub fn resolve_camera(
     // mode=0 — e.g. 0xA6A46): the eye just keeps its spot until the band
     // clamps it. The lock-release ease feeds the same latch: retail's release
     // catch behaves like the regular spring with a small ref (playtest).
+
+    // Locked on, the locked view owns the yaw outright, so the rig's eye is carried on the boom at its
+    // own distance and the spring's reference exists only for the free camera: orbiting the rig's eye
+    // while the yaw is driven elsewhere would only turn it off the boom.
     let steer_event = manual_yaw != 0.0;
-    let spring_ref = if !settings.camera_spring || chase.snap_to_anchor {
+    let spring_ref = if !settings.camera_spring || chase.snap_to_anchor || locked {
         None
     } else if steer_event {
         Some(manual_yaw)
@@ -470,6 +470,9 @@ pub fn resolve_camera(
         None
     };
     let (focus, eye_prev) = match (leash_state.eye, leash_state.yaw) {
+        (Some(e), _) if !chase.snap_to_anchor && locked => {
+            (focus, focus + yaw_dir(chase.yaw) * (e - focus).length())
+        }
         (Some(e), Some(last_yaw)) if !chase.snap_to_anchor => {
             if last_yaw == chase.yaw {
                 (focus, e)
@@ -495,28 +498,11 @@ pub fn resolve_camera(
     };
     let eye = leash(eye_orbited, focus, min_h, max_h, yaw_dir(chase.yaw));
     let to_eye = eye - focus;
-    chase.yaw = continuous_yaw(chase.yaw, to_eye.x.atan2(to_eye.y));
+    if !locked {
+        chase.yaw = continuous_yaw(chase.yaw, to_eye.x.atan2(to_eye.y));
+    }
 
     let pivot = Vec3::new(focus.x, pivot_y, focus.y);
-    let look_glide = leash_state
-        .look_glide
-        .filter(|_| !chase.snap_to_anchor)
-        .map(|glide| glide * (1.0 - follow_share(dt)))
-        .filter(|glide| glide.length() > LOOK_GLIDE_SETTLED_YALMS);
-    let look = pivot + look_glide.unwrap_or(Vec3::ZERO);
-    *leash_state = LeashState {
-        focus: Some(focus),
-        eye: Some(eye),
-        yaw: Some(chase.yaw),
-        pitch: Some(chase.pitch),
-        look: Some(look),
-        was_locked: false,
-        release_yaw: leash_state.release_yaw,
-        locked: None,
-        target_rise: None,
-        look_glide,
-    };
-
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
     let wanted = to_eye.length().max(min_h) / cos_p;
 
@@ -544,9 +530,41 @@ pub fn resolve_camera(
         effective = effective.min((EYE_FLOOR_BELOW_PIVOT / -dir.y).max(CAMERA_MIN_DISTANCE));
     }
     *smoothed_effective = Some(effective);
+    let rig_eye = pivot + dir * effective;
 
-    cam_t.translation = pivot + dir * effective;
-    cam_t.look_at(look, Vec3::Y);
+    let handoff = match (leash_state.was_locked, leash_state.locked) {
+        _ if locked || chase.snap_to_anchor => None,
+        (true, Some(last)) => Handoff {
+            eye: last.eye - rig_eye,
+            look: last.look - pivot,
+        }
+        .eased(dt),
+        _ => leash_state.handoff.and_then(|h| h.eased(dt)),
+    };
+    let (view_eye, view_look) = match (locked_view, handoff) {
+        (Some((view, _)), _) => (view.eye, view.look),
+        (None, Some(h)) => (rig_eye + h.eye, pivot + h.look),
+        (None, None) => (rig_eye, pivot),
+    };
+    cam_t.translation = view_eye;
+    cam_t.look_at(view_look, Vec3::Y);
+
+    *leash_state = LeashState {
+        focus: Some(focus),
+        eye: Some(eye),
+        yaw: Some(chase.yaw),
+        pitch: Some(chase.pitch),
+        look: Some(view_look),
+        was_locked: locked,
+        release_yaw: if locked {
+            None
+        } else {
+            leash_state.release_yaw
+        },
+        locked: locked_view.map(|(view, _)| view),
+        target_rise: locked_view.and_then(|(_, rise)| rise),
+        handoff,
+    };
     chase.snap_to_anchor = false;
 }
 
@@ -1214,9 +1232,64 @@ mod tests {
         }
     }
 
-    /// Lock release: the eye is not teleported - the free camera takes over
-    /// at the rendered eye - and the yaw eases back behind the body's heading
-    /// in well under a second instead of parking where the lock left it.
+    /// A lock is laid over the free camera, never written into it: after locking on a target off to the
+    /// side and letting go, the free camera ends exactly where it stood going in, at the same distance
+    /// and pitch, looking at the player from behind the body.
+    #[test]
+    fn a_lock_leaves_the_free_camera_as_it_found_it() {
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, cam) = lock_app(true, player, Vec3::new(5.0, 1.0, 2.0));
+        for _ in 0..10 {
+            app.update();
+        }
+        let before = camera_of(&app, cam);
+        let pitch_before = app.world().resource::<ChaseCamera>().pitch;
+
+        lock(&mut app, true);
+        for _ in 0..240 {
+            app.update();
+        }
+        let locked = camera_of(&app, cam);
+        assert!(
+            (locked.translation - before.translation).length() > 1.0,
+            "the lock frames the pair from its own eye: {:?} -> {:?}",
+            before.translation,
+            locked.translation
+        );
+        assert_eq!(
+            app.world().resource::<ChaseCamera>().pitch,
+            pitch_before,
+            "the lock leaves the chase pitch alone"
+        );
+
+        lock(&mut app, false);
+        for _ in 0..120 {
+            app.update();
+        }
+        let after = camera_of(&app, cam);
+        // The release catch stops inside its own settle gap, a thousandth of a radian.
+        assert!(
+            (after.translation - before.translation).length() < 1e-2,
+            "the free camera is back where it was: {:?} -> {:?}",
+            before.translation,
+            after.translation
+        );
+        assert!(
+            (after.translation.y - before.translation.y).abs() < 1e-4,
+            "at the same height, so the same distance and pitch: {} -> {}",
+            before.translation.y,
+            after.translation.y
+        );
+        assert!(
+            after.forward().angle_between(*before.forward()) < 2e-3,
+            "and looks where it looked"
+        );
+    }
+
+    /// Lock release: the eye is not teleported - the view eases from the
+    /// locked eye back onto the chase rig - and the yaw eases back behind the
+    /// body's heading in well under a second instead of parking where the
+    /// lock left it.
     #[test]
     fn lock_release_keeps_the_eye_and_eases_the_yaw_home() {
         let player = Vec3::new(0.0, 1.0, 0.0);

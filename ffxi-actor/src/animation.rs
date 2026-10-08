@@ -201,6 +201,10 @@ pub struct TransitionParams {
     pub transition_in_time: f32,
     pub transition_out_time: f32,
     pub eager_transition_out: bool,
+    /// Start the clip in step with the one it replaces in its slot ([`in_step_start`]) instead of on its
+    /// first frame. A request without parameters of its own takes this from the clip it replaces, the way
+    /// it takes that clip's out time.
+    pub in_step: bool,
 }
 
 impl Default for TransitionParams {
@@ -209,8 +213,37 @@ impl Default for TransitionParams {
             transition_in_time: 7.5,
             transition_out_time: 7.5,
             eager_transition_out: false,
+            in_step: false,
         }
     }
+}
+
+/// An outgoing clip shorter than this many frames hands no step on (`FFXiMain.dll retail-2026-09`
+/// `.rdata` RVA 0x32A22C, read at RVA 0x1AE87).
+const IN_STEP_MIN_SPAN: f32 = 0.001;
+
+/// Where a clip requested in step starts: the outgoing clip's key position plus the keys the incoming clip
+/// plays over the blend, scaled by the ratio of the two clips' spans (frame count over key rate) and
+/// wrapped into the incoming span, with the result read as a playhead. That is the arithmetic retail's
+/// motion queue runs when a request that asks for it joins a slot already holding a motion (`FFXiMain.dll
+/// retail-2026-09` RVA 0x1AE01..0x1AF18 in the queue add at RVA 0x1AD00, taken over the RVA 0xCD650
+/// branch), and every idle, walk, run and side step request asks, a jump aside (RVA 0xC861B..0xC8686). It
+/// mixes key positions with frame spans exactly as retail does, so clips whose key rate is not one land
+/// where retail puts them, not on the matching fraction of the cycle.
+pub fn in_step_start(
+    outgoing: &SkeletonAnimationContext,
+    incoming: &SkeletonAnimation,
+    blend_frames: f32,
+) -> f32 {
+    let span = |clip: &SkeletonAnimation| clip.num_frames as f32 / clip.key_frame_duration;
+    let (from, to) = (span(&outgoing.animation), span(incoming));
+    let spans_usable = from > IN_STEP_MIN_SPAN && to > 0.0 && to.is_finite();
+    if !spans_usable {
+        return 0.0;
+    }
+    let keys = outgoing.current_frame * outgoing.animation.key_frame_duration
+        + incoming.key_frame_duration * blend_frames;
+    (keys * to / from).rem_euclid(to)
 }
 
 #[derive(Clone)]
@@ -480,24 +513,35 @@ impl SkeletonAnimator {
             return;
         }
 
-        if self.animation_slot != 5 {
-            let transition_duration = if let Some(tp) = transition_params {
-                tp.transition_in_time
-            } else if current
+        let transition_duration = if let Some(tp) = transition_params {
+            tp.transition_in_time
+        } else if current
+            .transition_params
+            .as_ref()
+            .map(|t| t.transition_out_time > 0.0)
+            .unwrap_or(false)
+        {
+            current
                 .transition_params
                 .as_ref()
-                .map(|t| t.transition_out_time > 0.0)
-                .unwrap_or(false)
-            {
-                current
-                    .transition_params
-                    .as_ref()
-                    .unwrap()
-                    .transition_out_time
-            } else {
-                7.5
-            };
+                .unwrap()
+                .transition_out_time
+        } else {
+            7.5
+        };
+        let in_step = match transition_params {
+            Some(tp) => tp.in_step,
+            None => current
+                .transition_params
+                .as_ref()
+                .is_some_and(|t| t.in_step),
+        };
+        let mut ctx = ctx;
+        if in_step {
+            ctx.current_frame = in_step_start(current, &ctx.animation, transition_duration);
+        }
 
+        if self.animation_slot != 5 {
             let previous = match self.transition.take() {
                 Some(mut running) => {
                     running.make_room();
@@ -508,7 +552,7 @@ impl SkeletonAnimator {
 
             self.transition = Some(AnimationTransition::new(
                 previous,
-                clone_context_at_frame0(&ctx),
+                fresh_copy(&ctx),
                 transition_duration,
             ));
         }
@@ -541,12 +585,15 @@ fn same_animation(a: &SkeletonAnimation, b: &SkeletonAnimation) -> bool {
     a.id == b.id
 }
 
-fn clone_context_at_frame0(ctx: &SkeletonAnimationContext) -> SkeletonAnimationContext {
-    SkeletonAnimationContext::new(
+/// A copy of a freshly requested clip with its counters at zero, starting where the request put its playhead.
+fn fresh_copy(ctx: &SkeletonAnimationContext) -> SkeletonAnimationContext {
+    let mut copy = SkeletonAnimationContext::new(
         ctx.animation.clone(),
         ctx.loop_params,
         ctx.transition_params.clone(),
-    )
+    );
+    copy.current_frame = ctx.current_frame;
+    copy
 }
 
 #[derive(Default)]
@@ -1341,6 +1388,81 @@ mod tests {
             "the oldest is gone and the next stands at full weight: got {}",
             x_of(&animator)
         );
+    }
+
+    fn request_in_step(animator: &mut SkeletonAnimator, clip: SkeletonAnimation, blend: f32) {
+        let tp = TransitionParams {
+            in_step: true,
+            ..locomotion_blend(blend)
+        };
+        let looping = LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        };
+        animator.set_next_animation(
+            SkeletonAnimationContext::new(clip, looping, Some(tp.clone())),
+            Some(&tp),
+        );
+    }
+
+    fn playhead(animator: &SkeletonAnimator) -> f32 {
+        animator.current_animation.as_ref().unwrap().current_frame
+    }
+
+    /// A request in step starts where the outgoing clip hands it on: its key position plus the keys the incoming
+    /// clip plays over the blend, scaled from one clip's span (frame count over key rate) to the other's. The
+    /// slot's clip and the blend's incoming side both start there.
+    #[test]
+    fn a_request_in_step_starts_where_the_outgoing_clip_hands_it_on() {
+        // Outgoing: 20 keys at one per frame, six frames in. Incoming: 12 keys at half a key per frame, a span of
+        // 24. Six keys plus the four played over an 8-frame blend is 10, scaled by 24/20 to 12.
+        let mut animator = SkeletonAnimator::new(0);
+        request(&mut animator, anim("aaa0", 20, 1.0), None);
+        animator.update(6.0);
+        request_in_step(&mut animator, anim("bbb0", 12, 0.5), 8.0);
+        assert!((playhead(&animator) - 12.0).abs() < 1e-5);
+        let incoming = &animator.transition.as_ref().unwrap().next;
+        assert!((incoming.current_frame - 12.0).abs() < 1e-5);
+    }
+
+    /// Retail reads the outgoing playhead in keys against frame spans, so a key rate off one does not land on
+    /// the matching fraction of the cycle; kuluu lands where retail does, wrapped into the incoming span.
+    #[test]
+    fn a_key_rate_off_one_lands_where_retail_does() {
+        // Outgoing: 20 keys at two per frame (span 10), three frames in, so six keys. Incoming: 10 keys at one
+        // per frame (span 10). Six keys plus eight over the blend is 14, which wraps to 4.
+        let mut animator = SkeletonAnimator::new(0);
+        request(&mut animator, anim("aaa0", 20, 2.0), None);
+        animator.update(3.0);
+        request_in_step(&mut animator, anim("bbb0", 10, 1.0), 8.0);
+        assert!((playhead(&animator) - 4.0).abs() < 1e-5);
+    }
+
+    /// The idle a stop brings in carries no parameters of its own, so it takes the step from the clip it
+    /// replaces, as it takes that clip's out time. A request out of step starts on its first frame.
+    #[test]
+    fn an_idle_return_takes_its_step_from_the_clip_it_replaces() {
+        let mut animator = SkeletonAnimator::new(0);
+        request(&mut animator, anim("idl0", 20, 1.0), None);
+        // From the idle on frame 0: eight keys over the blend, so the run starts on frame 8.
+        request_in_step(&mut animator, anim("run0", 20, 1.0), 8.0);
+        assert!((playhead(&animator) - 8.0).abs() < 1e-5);
+        animator.update(10.0);
+
+        // The run on frame 18 hands on 18 keys plus 7.5 over its out time: 25.5, wrapped to 5.5.
+        animator.set_next_animation(
+            SkeletonAnimationContext::new(
+                anim("idl0", 20, 1.0),
+                LoopParams::low_priority_loop(),
+                None,
+            ),
+            None,
+        );
+        assert!((playhead(&animator) - 5.5).abs() < 1e-4);
+
+        request(&mut animator, anim("act0", 20, 1.0), Some(8.0));
+        assert_eq!(playhead(&animator), 0.0);
     }
 
     /// One bone turned about y, so a test can read which way a blend swings it.

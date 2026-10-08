@@ -91,9 +91,15 @@ pub struct FfxiRenderRoot(pub Entity);
 pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
 
-pub const LOCOMOTION_XFADE_IN: f32 = 9.0;
+/// Retail requests every idle, walk, run and side step with a 16-tick blend, a tick being a 60 Hz routine
+/// frame (`FFXiMain.dll retail-2026-09` RVA 0xC8613, the request at RVA 0xC867A; the weight ramps by the
+/// tick delta at RVA 0x1B67B), so the blend runs the same in either direction.
+const LOCOMOTION_XFADE_TICKS: f32 = 16.0;
 
-pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
+pub const LOCOMOTION_XFADE_IN: f32 =
+    LOCOMOTION_XFADE_TICKS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
+
+pub const LOCOMOTION_XFADE_OUT: f32 = LOCOMOTION_XFADE_IN;
 
 fn special_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
@@ -3421,6 +3427,7 @@ fn advance_actor_pose(
             let tp = TransitionParams {
                 transition_in_time: action.map_or(LOCOMOTION_XFADE_IN, |a| a.transition_in),
                 transition_out_time: action.map_or(LOCOMOTION_XFADE_OUT, |a| a.transition_out),
+                in_step: action.is_none() && matches!(selected_tier, PoseTier::Locomotion),
                 ..Default::default()
             };
             // Fishing resolution clips (fsh2..fsh6) have no ActionPlayback, so without an
@@ -7504,6 +7511,50 @@ mod pose_resolution_tests {
             );
             assert!((yaw(StrafeRight) + SIDE_STEP_DEG).abs() < 1e-2);
         }
+    }
+
+    /// A side step taken from the run starts in step with it over retail's 16-tick blend
+    /// (ffxi_actor::animation::in_step_start), while the first clip a model plays starts on its first frame.
+    /// Stand-in clips at one key per frame, so a clip's span is its frame count.
+    #[test]
+    fn a_side_step_from_the_run_starts_in_step_with_it() {
+        const RUN_LENGTH: usize = 8;
+        const SIDE_STEP_LENGTH: usize = 12;
+        let keyed = |id: &[u8; 4], length: usize| {
+            let mut clip = synth_anim(id, length);
+            clip.key_frame_sets.insert(
+                0,
+                vec![ffxi_dat::skel_anim::KeyFrameTransform::default(); clip.num_frames],
+            );
+            clip
+        };
+        let clips = vec![
+            keyed(b"idl0", RUN_LENGTH),
+            keyed(b"run0", RUN_LENGTH),
+            keyed(b"mvl0", SIDE_STEP_LENGTH),
+        ];
+        let mut actor = render_actor_with_skeleton_clips(1, clips);
+        let mut step = |state: PoseState| {
+            actor.inputs = inputs_for_pose(state, false);
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            let slot = actor.coordinator.animations[0].as_ref().unwrap();
+            let clip = slot.current_animation.as_ref().unwrap();
+            (clip.animation.id.as_str(), clip.current_frame)
+        };
+
+        assert_eq!(step(PoseState::Run), ("run0".into(), 1.0));
+        step(PoseState::Run);
+        assert_eq!(step(PoseState::Run), ("run0".into(), 3.0));
+
+        let span = |length: usize| synth_anim(b"span", length).num_frames as f32;
+        let start = ((3.0 + LOCOMOTION_XFADE_IN) * span(SIDE_STEP_LENGTH) / span(RUN_LENGTH))
+            .rem_euclid(span(SIDE_STEP_LENGTH));
+        let (id, frame) = step(PoseState::StrafeLeft);
+        assert_eq!(id, "mvl0");
+        assert!(
+            (frame - (start + 1.0)).abs() < 1e-4,
+            "the side step should run on from frame {start}, got {frame}"
+        );
     }
 
     /// Strafing engaged must not shrink the upper body. Two mechanisms, both measured on shipped Hume clips:

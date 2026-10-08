@@ -1490,15 +1490,9 @@ pub struct FfxiRenderActor {
 
     head_look: HeadLook,
 
-    /// Locked on and moving this frame (self only): the walker aimed the body at the target, so a side step's
-    /// look-at measures from the chest and its spine blends come round through the front ([`crate::locked_torso`]).
-    pub locked_on: bool,
-
-    /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
-    locked_torso_weight: f32,
-
-    /// The chest axis and spine chain of this rig; `None` for a rig without chest, neck and feet references.
-    upper_body: Option<crate::locked_torso::UpperBody>,
+    /// What the motion-name chooser read last frame, and the straight frames a side-step flip still owes
+    /// ([`actor_state::SideStepFlipLatch`]).
+    side_step_latch: actor_state::SideStepFlipLatch,
 
     /// The entity's wire animation byte this frame — the byte retail reads for both of its look-at
     /// gates and for the bend's record count (crate::look_at_gates).
@@ -2272,9 +2266,7 @@ pub fn make_render_actor(
         event_idle: None,
         action_clips: Vec::new(),
         head_look: HeadLook::default(),
-        locked_on: false,
-        locked_torso_weight: 0.0,
-        upper_body: crate::locked_torso::UpperBody::of(&loaded.skeleton),
+        side_step_latch: actor_state::SideStepFlipLatch::default(),
         wire_animation: ffxi_proto::decode::animation::NONE,
         anim_modes: ActorAnimModes::default(),
         look_at_tasks: Vec::new(),
@@ -2996,6 +2988,7 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
     actor.current_clip = None;
     actor.registered_slots = [None; 8];
     actor.pending_idle_registrations = [None; 8];
+    actor.side_step_latch = actor_state::SideStepFlipLatch::default();
     advance_actor_pose(
         actor,
         elapsed_frames,
@@ -3042,9 +3035,7 @@ fn advance_actor_pose(
         event_idle,
         action_clips,
         head_look,
-        locked_on,
-        locked_torso_weight,
-        upper_body,
+        side_step_latch,
         wire_animation,
         last_clip,
         last_frame,
@@ -3248,6 +3239,12 @@ fn advance_actor_pose(
             None
         }
     };
+    // The chooser reads travel through the side-step flip latch, which steps every frame whatever tier ends
+    // up owning the pose. It counts retail's rendered frames, so the skeleton-frame step is converted.
+    let travel = side_step_latch.advance(
+        inputs.travel(),
+        elapsed_frames * crate::scheduler_runtime::RETAIL_FPS / FRAME_RATE,
+    );
     let chosen = collapse_id
         .and_then(|id| try_tier(id, false, PoseTier::Death))
         .or_else(|| action_id.and_then(|id| try_tier(id, false, PoseTier::Action)))
@@ -3265,7 +3262,7 @@ fn advance_actor_pose(
             Some(chosen)
         })
         .or_else(|| {
-            let s = actor_state::selected_animation(inputs);
+            let s = actor_state::selected_animation(inputs, travel);
             s.idle
                 .then_some(*event_idle)
                 .flatten()
@@ -3583,39 +3580,11 @@ fn advance_actor_pose(
         handle_overrides.extend(weapon_handles.iter().copied());
     }
 
-    // Keyed on the clip that is actually playing, not on the travel direction. The torso machinery
-    // below exists only to reconcile a side-step clip's authored spine turn with the walker's aim,
-    // and retail never plays one: `actor_state::movement_animation` stopped naming `mvl?`/`mvr?`
-    // once the write census on the state word gating their fourccs (RVA 0xC8DAF/0xC8DB7, actor
-    // +0x598 ∈ {2,3,4}, ctor zero at RVA 0xA8A4D) showed them unreachable. Reading the selected id
-    // keeps this consistent with whatever a model does play.
-    let side_step =
-        matches!(selected_tier, PoseTier::Locomotion) && inputs.moving && !inputs.walking && {
-            let selected = selected_id.as_str();
-            selected.starts_with("mvl") || selected.starts_with("mvr")
-        };
-    let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
-    *locked_torso_weight = if *locked_on && side_step {
-        (*locked_torso_weight + torso_step).min(1.0)
-    } else {
-        (*locked_torso_weight - torso_step).max(0.0)
-    };
-    let steered_spine = match upper_body.as_ref() {
-        Some(upper) if *locked_on || *locked_torso_weight > 0.0 => upper.steered_spine(coordinator),
-        _ => Vec::new(),
-    };
-
     pose_world_mounted_into(
         world_pose,
         pose_work,
         skeleton,
-        |joint| {
-            steered_spine
-                .iter()
-                .find(|(steered, _)| *steered == joint)
-                .map(|(_, record)| *record)
-                .or_else(|| pose_scratch.get(joint))
-        },
+        |joint| pose_scratch.get(joint),
         RootTransform {
             facing_dir: *facing_dir,
             skew: 0.0,
@@ -3625,21 +3594,6 @@ fn advance_actor_pose(
         &handle_overrides,
         mount,
     );
-
-    // The look-at can only claw back its own neck/chest records, and the front-arc merge only lives inside a blend,
-    // so a side step *held* on one key ends with the chest further off the target than the hips carrying it. While
-    // that hold is ramped in, turn the upper body onto the walker's aim ([`crate::locked_torso::UpperBody::steer_onto_aim`]).
-    // The turn stops above the hips - every leg joint hangs off the hip itself, so stepping keeps exactly what its
-    // clip gives it.
-    if let Some(upper) = upper_body.as_ref() {
-        upper.steer_onto_aim(
-            skeleton,
-            &handle_overrides,
-            world_pose,
-            POSE_FORWARD,
-            *locked_torso_weight,
-        );
-    }
 
     // Retail removes the actor's yaw from a posed point and nothing else (`FFXiMain.dll retail-2026-09` RVA
     // 0xD5CDA..0xD5D25 — [`look_point_actor_local`]). kuluu composes `world_pose` with the entity transform, so that
@@ -3659,48 +3613,19 @@ fn advance_actor_pose(
     let aiming = look_state == crate::look_at_gates::LookState::Aiming
         && target_pose.is_some_and(|p| !look_at_release(p));
     head_look.advance(aiming, target_pose, elapsed_frames);
-    // While the torso steer owns the chest's turn onto the aim - bounded by that same chest record - the chest
-    // record must not bend it further past the limit; what is left over for look-at is its own neck turn.
-    let bend_records = if side_step && *locked_torso_weight > 0.0 {
-        HEAD_ONLY_BEND_RECORDS
-    } else {
-        look_at_gates::look_at_bend_records(*wire_animation)
-    };
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
-    // reaches the bend untouched and every authored limit opens along this actor's own nose.
-    // Locked and side-stepping, the bend measures from where the chest really faces, and it runs even under a status
-    // that holds the look-at off: the walker keeps the target dead ahead of the root, so with nothing else aiming the
-    // point is that target at neck height.
-    let bend_forward = crate::locked_torso::bend_reference(
+    // reaches the bend untouched and every authored limit opens along this actor's own nose. A side step bends no
+    // differently: the clip's own spine twist plus this same bend, each record stopping at its own ellipse limit.
+    apply_look_bends(
+        world_pose,
+        skeleton,
+        &handle_overrides,
+        head_look.chased_pose,
         POSE_FORWARD,
-        upper_body
-            .as_ref()
-            .and_then(|upper| upper.chest_facing(world_pose)),
-        *locked_torso_weight,
+        head_look.weight,
+        look_at_gates::look_at_bend_records(*wire_animation),
+        look_at_gates::look_at_anchor_y_drop(*wire_animation),
     );
-    let bend_point = if head_look.weight > 0.0 {
-        Some(head_look.chased_pose)
-    } else {
-        ffxi_actor::look_bend::attach_frame(
-            world_pose,
-            skeleton,
-            ffxi_dat::skel::standard_position::NECK,
-        )
-        .map(|neck| neck.origin + POSE_FORWARD * HEAD_LOOK_NEUTRAL_AHEAD)
-    };
-
-    if let Some(bend_point) = bend_point {
-        apply_look_bends(
-            world_pose,
-            skeleton,
-            &handle_overrides,
-            bend_point,
-            bend_forward,
-            head_look.weight.max(*locked_torso_weight),
-            bend_records,
-            look_at_gates::look_at_anchor_y_drop(*wire_animation),
-        );
-    }
 
     if let Some(detail) = bone_log_detail() {
         bone_trace_frame(
@@ -3884,10 +3809,6 @@ const HEAD_LOOK_CHASE_FRACTION: f32 = 1.0 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
 const HEAD_LOOK_NEUTRAL_AHEAD: f32 = 20.0;
-
-/// Records counting just the neck - retail's own one-record set uses this same count, and so does the pose while
-/// the torso steer owns the chest record.
-const HEAD_ONLY_BEND_RECORDS: usize = 1;
 
 /// The two-stage settle: [`HeadLook::weight`] opens the gate, [`HeadLook::chased_pose`] moves the
 /// point retail keeps at `model+0xB0..B8`.
@@ -5373,12 +5294,8 @@ pub fn tick_live_ffxi_actors(
         .is_some_and(|c| !c.interrupted);
     let self_walking = self_move.walking(walk_mode.walking);
     let self_target_id = target.id;
-    let (self_move_forward, self_move_strafe, self_move_moving, self_move_locked) = (
-        self_move.forward,
-        self_move.strafe,
-        self_move.moving,
-        self_move.locked,
-    );
+    let (self_move_forward, self_move_strafe, self_move_moving) =
+        (self_move.forward, self_move.strafe, self_move.moving);
 
     let motion = &*motion;
     q_actors.par_iter_mut().for_each(
@@ -5510,7 +5427,6 @@ pub fn tick_live_ffxi_actors(
             };
 
             actor.facing_dir = 0.0;
-            actor.locked_on = drives_from_self_input && !self_reactor_driven && self_move_locked;
             let modes = actor.anim_modes;
             actor.inputs = ActorAnimInputs {
                 moving: moving_flag,
@@ -6550,7 +6466,7 @@ mod pose_resolution_tests {
         };
         let selected_id = match actor_state::rest_animation_id(inputs.rest) {
             Some(rest_id) => rest_id,
-            None => actor_state::selected_animation(inputs).id,
+            None => actor_state::selected_animation(inputs, inputs.travel()).id,
         };
         // The live path's layered resolution: the requested id first, then the idle family
         // (ffxi-actor/src/actor_state.rs idle_animation_id).
@@ -7456,23 +7372,18 @@ mod pose_resolution_tests {
             actor.inputs = inputs_for_pose(PoseState::Run, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
-        // This used to drive `PoseState::StrafeLeft` and expect an `mvl?` register. Directional
-        // locomotion clips are unreachable in retail (see actor_state::movement_animation's census:
-        // the fourcc stores at RVA 0xC8DAF/0xC8DB7 need actor+0x598 ∈ {2,3,4}, which nothing can
-        // write), so strafe travel now runs the gait family it came from - no fresh register, and
-        // nothing to check. `wlk?` opens one just as cleanly.
-        actor.inputs = inputs_for_pose(PoseState::Walk, false);
+        actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
         advance_actor_pose_standalone(&mut actor, 1.0, None);
 
-        let Some(slot) = animator_on(&actor, "wlk") else {
-            panic!("Walk must select a wlk? clip on hume");
+        let Some(slot) = animator_on(&actor, "mvl") else {
+            panic!("StrafeLeft must select an mvl? clip on hume");
         };
         let transition = actor.coordinator.animations[slot]
             .as_ref()
             .and_then(|a| a.transition.as_ref())
             .expect("the strafe entry is a fresh register, so its slot transitions");
         assert!(
-            transition.next.animation.id.as_str().starts_with("wlk"),
+            transition.next.animation.id.as_str().starts_with("mvl"),
             "the incoming side of the blend must be the requested movement clip"
         );
 
@@ -7487,6 +7398,55 @@ mod pose_resolution_tests {
         assert!(
             !live.iter().any(|id| id.starts_with("idl")),
             "no idle clip may be live while strafing — the waypoint put one there: {live:?}"
+        );
+    }
+
+    /// A held A straight into D, camera locked: the pose shows the plain run for two frames before
+    /// `mvr?` (actor_state::SideStepFlipLatch), so it never goes from one side step straight to the
+    /// other. Reaching a side step from the run, or after a stop, takes it at once. Stand-in clips with
+    /// one keyed bone each: the clip choice is the subject, not the pose.
+    #[test]
+    fn a_side_step_flip_runs_straight_for_two_frames_before_the_new_side_step() {
+        let keyed = |id: &[u8; 4]| {
+            let mut clip = synth_anim(id, 8);
+            clip.key_frame_sets.insert(
+                0,
+                vec![ffxi_dat::skel_anim::KeyFrameTransform::default(); clip.num_frames],
+            );
+            clip
+        };
+        let clips = [b"idl0", b"run0", b"mvl0", b"mvr0"]
+            .into_iter()
+            .map(keyed)
+            .collect();
+        let mut actor = render_actor_with_skeleton_clips(1, clips);
+        let mut step = |state: PoseState| {
+            actor.inputs = inputs_for_pose(state, false);
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            actor.current_clip.map(|(id, _)| id.as_str())
+        };
+        let mut chosen = |script: &[PoseState]| -> Vec<String> {
+            script
+                .iter()
+                .map(|&state| step(state).unwrap_or_default())
+                .collect()
+        };
+
+        use PoseState::{Idle, Run, StrafeLeft, StrafeRight};
+        assert_eq!(
+            chosen(&[Run, StrafeLeft, StrafeLeft]),
+            ["run?", "mvl?", "mvl?"],
+            "from the run the side step starts at once"
+        );
+        assert_eq!(
+            chosen(&[StrafeRight, StrafeRight, StrafeRight, StrafeRight]),
+            ["run?", "run?", "mvr?", "mvr?"],
+            "a direct flip runs straight for two frames first"
+        );
+        assert_eq!(
+            chosen(&[Idle, StrafeLeft]),
+            ["idl?", "mvl?"],
+            "a stop in between is no flip"
         );
     }
 
@@ -7531,7 +7491,7 @@ mod pose_resolution_tests {
         }
 
         let mut best: Vec<f32> = Vec::new();
-        let mut saw_keyed_clip = false;
+        let mut saw_strafe_clip = false;
         for (i, (st, eng)) in script.iter().enumerate() {
             actor.inputs = inputs_for_pose(*st, *eng);
             advance_engage(
@@ -7553,20 +7513,15 @@ mod pose_resolution_tests {
                 None,
             );
 
-            // Coverage guard: these are the clips that key `hum_` joint 89 (ffxi-dat/src/skel_anim.rs
-            // records idl1/wlk1/mvl1/mvr1 as the ones authored with the zero scale channel that caused
-            // the collapse). Directional travel stopped naming mvl?/mvr? once the retail census showed
-            // those fourccs unreachable (actor_state::movement_animation), so the guard takes any clip of
-            // the family that still exercises the same joint - and fails loudly if none of them ran.
+            // These are the clips that key `hum_` joint 89; without one of them on screen this script proves
+            // nothing about the collapse.
             if actor.coordinator.animations.iter().flatten().any(|a| {
                 a.current_animation.as_ref().is_some_and(|c| {
                     let id = c.animation.id.as_str();
-                    ["idl", "wlk", "mvl", "mvr"]
-                        .iter()
-                        .any(|p| id.starts_with(p))
+                    id.starts_with("mvl") || id.starts_with("mvr")
                 })
             }) {
-                saw_keyed_clip = true;
+                saw_strafe_clip = true;
             }
 
             let scales: Vec<f32> = actor
@@ -7593,8 +7548,8 @@ mod pose_resolution_tests {
             }
         }
         assert!(
-            saw_keyed_clip,
-            "no idl?/wlk?/mvl?/mvr? clip ever ran, so this script never exercised the bone that collapsed"
+            saw_strafe_clip,
+            "no mvl?/mvr? clip ever ran, so this script never exercised the bone that collapsed"
         );
     }
 

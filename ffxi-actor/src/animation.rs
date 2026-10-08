@@ -418,18 +418,6 @@ impl AnimationTransition {
         self.progress >= self.transition_duration
     }
 
-    /// What the merge sees for one bone this frame: the outgoing record, the incoming record and the weight.
-    pub fn sides(
-        &self,
-        joint: usize,
-    ) -> (Option<KeyFrameTransform>, Option<KeyFrameTransform>, f32) {
-        (
-            self.previous.get_joint_transform(joint),
-            self.next.get_joint_transform(joint),
-            self.progress / self.transition_duration,
-        )
-    }
-
     pub fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
         let t = self.progress / self.transition_duration;
 

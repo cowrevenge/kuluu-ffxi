@@ -352,8 +352,6 @@ pub struct SelfMoveIntent {
     pub forward: f32,
     pub strafe: f32,
     pub scripted_speed: Option<f32>,
-    /// The camera was locked on for this moving tick, so the walker aimed the body at the target.
-    pub locked: bool,
 }
 
 impl SelfMoveIntent {

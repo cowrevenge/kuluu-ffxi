@@ -55,9 +55,6 @@ pub const POSE_FORWARD: Vec3 = Vec3::X;
 /// the slot-7 joint is the slot-3 joint's parent, which is how the shoulder share sits under the head turn.
 const BEND_SLOTS: [usize; BEND_RECORDS_MAX] = [standard_position::NECK, standard_position::CHEST];
 
-/// The chest/shoulder record's index through [`Skeleton::look_at_limits`]: records follow [`BEND_SLOTS`] order.
-pub const CHEST_RECORD: usize = 1;
-
 /// The frame a reference names. `FFXiMain.dll retail-2026-09` RVA 0x2A750 builds one per slot through RVA 0x2A780:
 /// zero the rotation (RVA 0x279B0), rotate about X, then Y, then Z by the reference's three authored floats at
 /// +2 / +6 / +0xA (RVA 0x27B80 / 0x27BD0 / 0x27C20 — radians), set the translation from its position offset (RVA

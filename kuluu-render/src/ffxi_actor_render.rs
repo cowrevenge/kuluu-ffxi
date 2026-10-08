@@ -3655,7 +3655,13 @@ fn advance_actor_pose(
     let aiming = look_state == crate::look_at_gates::LookState::Aiming
         && target_pose.is_some_and(|p| !look_at_release(p));
     head_look.advance(aiming, target_pose, elapsed_frames);
-    let bend_records = look_at_gates::look_at_bend_records(*wire_animation);
+    // While the torso steer owns the chest's turn onto the aim - bounded by that same chest record - the chest
+    // record must not bend it further past the limit; what is left over for look-at is its own neck turn.
+    let bend_records = if side_step && *locked_torso_weight > 0.0 {
+        HEAD_ONLY_BEND_RECORDS
+    } else {
+        look_at_gates::look_at_bend_records(*wire_animation)
+    };
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
     // reaches the bend untouched and every authored limit opens along this actor's own nose.
     // Locked and side-stepping, the bend measures from where the chest really faces, and it runs even under a status
@@ -3678,6 +3684,7 @@ fn advance_actor_pose(
         )
         .map(|neck| neck.origin + POSE_FORWARD * HEAD_LOOK_NEUTRAL_AHEAD)
     };
+
     if let Some(bend_point) = bend_point {
         apply_look_bends(
             world_pose,
@@ -3873,6 +3880,10 @@ const HEAD_LOOK_CHASE_FRACTION: f32 = 1.0 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
 const HEAD_LOOK_NEUTRAL_AHEAD: f32 = 20.0;
+
+/// Records counting just the neck - retail's own one-record set uses this same count, and so does the pose while
+/// the torso steer owns the chest record.
+const HEAD_ONLY_BEND_RECORDS: usize = 1;
 
 /// The two-stage settle: [`HeadLook::weight`] opens the gate, [`HeadLook::chased_pose`] moves the
 /// point retail keeps at `model+0xB0..B8`.
@@ -7492,11 +7503,14 @@ mod pose_resolution_tests {
             .spine
             .last()
             .expect("the spine chain ends at the hips");
-        let chest_limit_deg = skeleton
-            .look_at_limits
-            .get(1)
-            .map(|l| (l.x_limit / l.scale).atan().to_degrees())
-            .expect("Hume M authors a chest record");
+        let yaw_limit_of = |record: usize| {
+            skeleton
+                .look_at_limits
+                .get(record)
+                .map(|l| (l.x_limit / l.scale).atan().to_degrees())
+        };
+        let chest_limit_deg = yaw_limit_of(1).expect("Hume M authors a chest record");
+        let head_limit_deg = yaw_limit_of(0).expect("Hume M authors a neck record");
 
         let bind = ffxi_actor::skeleton_instance::pose_world(
             skeleton,
@@ -7622,7 +7636,7 @@ mod pose_resolution_tests {
             let free = run(false, middle);
             let held = run(true, middle);
             println!(
-                "--- changeover {label}: frame state | chest free | chest locked | neck locked | foot | hips locked | spine merges"
+                "--- changeover {label} (torso record +/-{chest_limit_deg:.1} deg, neck record +/-{head_limit_deg:.1} deg): frame state | chest free | chest locked | neck locked | foot | hips locked | spine merges"
             );
             let shown = free.iter().zip(held.iter()).enumerate();
             for (i, (free_row, held_row)) in shown.skip(changeover - SETTLED_FRAMES) {
@@ -7662,32 +7676,33 @@ mod pose_resolution_tests {
                 merged_live,
                 "{label}: no spine merge was overridden across the {LOCOMOTION_XFADE_IN}-frame crossfade"
             );
-            // Locked and side-stepping, the upper body holds the aim on every frame of the hold - settled
-            // frames, the crossfade window itself included - not clawed back by however much the look-at records
-            // allow. Measured on shipped Hume M: |chest| reads 0.0 deg every frame; 8 leaves room for a rig whose
-            // chest axis is not ground-parallel.
-            const TORSO_ON_AIM_SLACK_DEG: f32 = 8.0;
-            let window = left_settled.start..held.len();
-            for i in window.clone() {
+            // Locked and side-stepping, the torso turns toward the aim to exactly as far as its own authored
+            // chest record reaches from where the hips point at that moment, and holds there: every settled frame,
+            // plus every frame of a direct changeover (the steer runs at full weight through it), must satisfy
+            // deviation == clamp(need, +/- record). It may not be pinned onto the aim past the record - that is
+            // what read as breaking its back - nor left wandering further off.
+            const DEV_SLACK_DEG: f32 = 3.0;
+            let wrap180 = |deg: f32| (deg + 180.0).rem_euclid(360.0) - 180.0;
+            let right_settled = held.len() - SETTLED_FRAMES..held.len();
+            let strict_frames: Vec<usize> = if label == "direct" {
+                (left_settled.start..held.len()).collect()
+            } else {
+                left_settled.clone().chain(right_settled).collect()
+            };
+            for &i in &strict_frames {
                 let (chest, neck, hips) = (held[i].1, held[i].2, held[i].4);
+                let deviation = wrap180(chest - hips);
+                let need = wrap180(0.0 - hips);
                 assert!(
-                    chest.abs() <= TORSO_ON_AIM_SLACK_DEG,
-                    "{label} frame {i}: locked and side-stepping, the chest sits {chest:.1} deg off the aim while its hips sit at {:.1} (spine merge live this frame: {})",
-                    hips.abs(),
-                    held[i].5 > 0
+                    (deviation - need.clamp(-chest_limit_deg, chest_limit_deg)).abs() <= DEV_SLACK_DEG,
+                    "{label} frame {i}: chest sits {deviation:.1} deg from hips at {hips:.1}, aim wants {} but the record caps it at +/-{chest_limit_deg:.1} (merge live: {})",
+                    need,
+                    held[i].5 > 0,
                 );
-                // The head keeps its own turn and may not be flung past it: measured |neck| <= 1.3 deg here, and
-                // the shoulder record is the widest thing that ever separated them.
+                // The head keeps its own turn on top, inside its own authored neck record.
                 assert!(
-                    (neck.abs() - chest.abs()).abs() <= chest_limit_deg + 1.0,
-                    "{label} frame {i}: neck at {neck:.1} deg against a {chest:.1} deg chest, past the {chest_limit_deg:.1} deg shoulder record",
-                );
-            }
-            for i in window {
-                let (free_chest, held_chest) = (free[i].1, held[i].1);
-                assert!(
-                    held_chest.abs() + 5.0 < free_chest.abs(),
-                    "{label} frame {i}: locking on must leave the chest nearer the target than the side-step clip left it ({free_chest:.1} -> {held_chest:.1})"
+                    (neck - chest).abs() <= head_limit_deg + 2.0,
+                    "{label} frame {i}: neck at {neck:.1} deg against a {chest:.1} deg chest, past the {head_limit_deg:.1} deg neck record",
                 );
             }
             // The torso turn is rooted above the hips, so nothing that drives stepping may change between locked

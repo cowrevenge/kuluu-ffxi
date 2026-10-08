@@ -14,8 +14,9 @@
 //!   the torso comes round through the target side.
 //! * Both answers above only live inside a blend window or inside the authored neck/chest records, so a side step
 //!   *held* on one key ends with the chest further off the target than the hips carrying it. [`UpperBody::steer_onto_aim`]
-//!   turns the torso - and everything hung off it - back onto the walker's aim for as long as the hold lasts, which
-//!   is what keeps a locked strafing run facing the target instead of wandering 50 degrees round its own spine.
+//!   turns the torso toward the walker's aim and no further from where its hips point than the authored chest record
+//!   allows - holding at that limit while the target stays beyond it, rather than pinning the chest dead ahead past
+//!   what the spine was built to bend.
 
 use bevy::math::{Mat4, Quat, Vec3};
 use ffxi_actor::animation::{interpolate_kf, SkeletonAnimationCoordinator};
@@ -26,7 +27,8 @@ use ffxi_dat::skel_anim::KeyFrameTransform;
 /// The body's forward in pose space before the actor's facing is applied (every humanoid rig faces `+X`).
 const POSE_FORWARD: Vec3 = ffxi_actor::look_bend::POSE_FORWARD;
 
-/// What the pass needs from one rig: how to read the chest's facing, and which joints turn the torso round.
+/// What the pass needs from one rig: how to read the chest's facing, which joints turn the torso round, and how
+/// far the authored skeleton lets the chest turn away from where the hips point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpperBody {
     /// The chest reference's joint.
@@ -36,6 +38,11 @@ pub struct UpperBody {
     /// The neck reference's joint and its ancestors down to the joint the legs branch from, inclusive: every joint
     /// whose turn swings the torso round.
     pub spine: Vec<usize>,
+    hip: usize,
+    hip_forward: Vec3,
+    /// The authored chest record's yaw semi-axis as an angle - how far this skeleton may turn its chest from its
+    /// hips at all. `None` when there is no second bend record, so nothing bounds a torso turn.
+    torso_yaw_cap: Option<f32>,
 }
 
 impl UpperBody {
@@ -57,10 +64,19 @@ impl UpperBody {
 
         let bind = pose_world(skeleton, |_| None, RootTransform::identity(), &[]);
         let (_, chest_bind, _) = bind.get(chest)?.to_scale_rotation_translation();
+        let hip = *spine.last()?;
+        let (_, hip_bind, _) = bind.get(hip)?.to_scale_rotation_translation();
+        let torso_yaw_cap = skeleton
+            .look_at_limits
+            .get(ffxi_actor::look_bend::CHEST_RECORD)
+            .map(|l| (l.x_limit / l.scale).atan());
         Some(Self {
             chest,
             chest_forward: chest_bind.inverse() * POSE_FORWARD,
+            hip,
+            hip_forward: hip_bind.inverse() * POSE_FORWARD,
             spine,
+            torso_yaw_cap,
         })
     }
 
@@ -70,10 +86,20 @@ impl UpperBody {
         ground(rotation * self.chest_forward)
     }
 
-    /// Turn the upper body back onto `aim` about the joint where it leaves the hips, for as long as the hold lasts.
-    /// The side-step clips put their twist on the pelvis and one spine joint, so a settled hold leaves the torso tens
-    /// of degrees off the target with nothing else pulling it back. Only the subtree rooted *above* the hips moves:
-    /// every leg joint hangs off the hip itself, so stepping is untouched. Returns whether anything was turned.
+    /// Where the hips point - the line every torso turn is measured from.
+    fn hip_facing(&self, pose: &[Mat4]) -> Option<Vec3> {
+        let (_, rotation, _) = pose.get(self.hip)?.to_scale_rotation_translation();
+        ground(rotation * self.hip_forward)
+    }
+
+    /// Turn the upper body toward `aim` about the joint where it leaves the hips, for as long as the hold lasts,
+    /// and no further from where its hips point than the authored chest record allows. An unbounded turn pins the
+    /// chest dead ahead however the side-step clips sit the pelvis, bending the spine past what the rig authored -
+    /// it reads on screen as breaking its back. Bounded instead: hold `hip facing + clamp(need, +/- the authored
+    /// yaw limit)`, which stays at that limit (never snapping back) while the target is beyond it. Only the subtree
+    /// rooted *above* the hips moves; every leg joint hangs off the hip itself, so stepping is untouched. A rig
+    /// with no second bend record authors no torso turn, so nothing bounds one and none is made here.
+    /// Returns whether anything was turned.
     pub fn steer_onto_aim(
         &self,
         skeleton: &Skeleton,
@@ -88,10 +114,17 @@ impl UpperBody {
         // `spine` runs neck first and ends at the joint the legs branch from, so the entry above the hips roots
         // everything the turn may carry.
         let torso_root = self.spine[self.spine.len() - 2];
-        let (Some(facing), Some(aim_ground)) = (self.chest_facing(pose), ground(aim)) else {
+        let (Some(facing), Some(aim_ground), Some(hip_facing), Some(cap)) = (
+            self.chest_facing(pose),
+            ground(aim),
+            self.hip_facing(pose),
+            self.torso_yaw_cap,
+        ) else {
             return false;
         };
-        let yaw = signed_yaw(facing, aim_ground) * weight.clamp(0.0, 1.0);
+        let deviation_now = signed_yaw(hip_facing, facing);
+        let yaw_needed = signed_yaw(hip_facing, aim_ground).clamp(-cap, cap);
+        let yaw = (yaw_needed - deviation_now) * weight.clamp(0.0, 1.0);
         if yaw.abs() <= f32::EPSILON {
             return false;
         }
@@ -252,6 +285,19 @@ mod tests {
         }
     }
 
+    const NECK_CAP_DEG: f32 = 15.0;
+    const TORSO_CAP_DEG: f32 = 30.0;
+
+    /// One authored record yaw-capable of `yaw_deg`, with the minor axis and scale left nominal.
+    fn bend_record(yaw_deg: f32) -> ffxi_dat::skel::LookAtLimit {
+        let x_limit = yaw_deg.to_radians().tan();
+        ffxi_dat::skel::LookAtLimit {
+            x_limit,
+            y_limit: x_limit * 0.4,
+            scale: 1.0,
+        }
+    }
+
     /// root(0) -> hips(1) -> { spine(2) -> chest(3) -> neck(4), leg(5) -> foot(6) }.
     fn rig() -> Skeleton {
         let mut references = vec![reference(0); standard_position::LEFT_FOOT + 1];
@@ -272,7 +318,7 @@ mod tests {
             ],
             references,
             bounding_boxes: Vec::new(),
-            look_at_limits: Vec::new(),
+            look_at_limits: vec![bend_record(NECK_CAP_DEG), bend_record(TORSO_CAP_DEG)],
         }
     }
 
@@ -409,5 +455,79 @@ mod tests {
         let bind = pose_world(&skel, |_| None, RootTransform::identity(), &[]);
         let mut pose = bind;
         assert!(!upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 0.0));
+    }
+
+    /// With the hips themselves wound off the aim - which is what a side-step clip does to joint 2 - the torso may
+    /// only close that gap by as far as its authored chest record reaches: it holds at that limit toward the target
+    /// instead of being pinned onto the aim, and holding there means nothing left for a repeat steer to do.
+    #[test]
+    fn a_torso_beyond_its_authored_yaw_holds_at_the_limit_not_the_target() {
+        let skel = rig();
+        let upper = UpperBody::of(&skel).expect("the rig has chest, neck and feet");
+        let mut pose = pose_world(&skel, |_| None, RootTransform::identity(), &[]);
+        let hips = *upper.spine.last().expect("the spine ends at the hips");
+        let torso_root = upper.spine[upper.spine.len() - 2];
+        let pivot = pose[hips].w_axis.truncate();
+        let wind = Mat4::from_translation(pivot)
+            * Mat4::from_rotation_y(45.0_f32.to_radians())
+            * Mat4::from_translation(-pivot);
+        for joint in composed_subtree(&skel, &[], hips) {
+            pose[joint] = wind * pose[joint];
+        }
+        let legs: Vec<usize> = {
+            let all = composed_subtree(&skel, &[], hips);
+            let torso: std::collections::HashSet<usize> = composed_subtree(&skel, &[], torso_root)
+                .into_iter()
+                .collect();
+            all.into_iter().filter(|j| !torso.contains(j)).collect()
+        };
+        let legs_before: Vec<Mat4> = legs.iter().map(|&joint| pose[joint]).collect();
+
+        assert!(upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 1.0));
+
+        let hip_facing = upper.hip_facing(&pose).expect("hips face somewhere");
+        let chest_facing = upper
+            .chest_facing(&pose)
+            .expect("the chest faces somewhere");
+        let deviation = signed_yaw(hip_facing, chest_facing).to_degrees();
+        assert!(
+            (deviation.abs() - TORSO_CAP_DEG).abs() < 1e-3,
+            "chest sits {deviation:.2} deg from its hips, expected the {TORSO_CAP_DEG} deg record"
+        );
+        // ...and toward the target: nearer it than the hips are, by exactly that record.
+        let hip_off = signed_yaw(hip_facing, Vec3::X).abs().to_degrees();
+        let chest_off = signed_yaw(chest_facing, Vec3::X).abs().to_degrees();
+        assert!(
+            (chest_off + 1e-2 < hip_off) && (hip_off - TORSO_CAP_DEG - chest_off).abs() < 1e-2,
+            "hips {hip_off:.2} deg off the aim, chest left at {chest_off:.2}"
+        );
+
+        for (index, &joint) in legs.iter().enumerate() {
+            assert_eq!(pose[joint], legs_before[index], "leg joint {joint} moved");
+        }
+        assert!(
+            !upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 1.0),
+            "holding at the limit leaves nothing to turn"
+        );
+    }
+
+    /// A rig with no second bend record authors no torso turn, so there is nothing to bound it by and none is taken.
+    #[test]
+    fn a_rig_without_a_chest_record_takes_no_torso_turn() {
+        let mut skel = rig();
+        skel.look_at_limits.truncate(1);
+        let upper = UpperBody::of(&skel).expect("the rig has chest, neck and feet");
+        let mut pose = pose_world(&skel, |_| None, RootTransform::identity(), &[]);
+        let torso_root = upper.spine[upper.spine.len() - 2];
+        let pivot = pose[torso_root].w_axis.truncate();
+        let twist = Mat4::from_translation(pivot)
+            * Mat4::from_rotation_y(70.0_f32.to_radians())
+            * Mat4::from_translation(-pivot);
+        for joint in composed_subtree(&skel, &[], torso_root) {
+            pose[joint] = twist * pose[joint];
+        }
+        let before: Vec<Mat4> = pose.clone();
+        assert!(!upper.steer_onto_aim(&skel, &[], &mut pose, POSE_FORWARD, 1.0));
+        assert_eq!(pose, before, "nothing in the pose moved");
     }
 }

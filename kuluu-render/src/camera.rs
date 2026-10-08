@@ -1040,56 +1040,65 @@ mod tests {
 
     /// An unrelated `GraphicsSettings` change must not stomp a live view zoom
     /// (the blink seen while walking with the Commands UI open): only a real
-    /// `fov_deg` change re-seats, so the menu FOV row still wins.
+    /// `fov_deg` change re-seats, so the menu FOV row still wins. The app runs
+    /// the two systems unordered, so the zoom has to survive either order.
     #[test]
     fn unrelated_settings_changes_cannot_stomp_a_view_zoom() {
         use crate::graphics_settings::{apply_projection_system, GraphicsSettings};
-        let mut app = App::new();
-        app.init_resource::<GraphicsSettings>()
-            .init_resource::<ViewFov>()
-            .init_resource::<crate::cutscene::CutsceneMode>();
-        let cam = app
-            .world_mut()
-            .spawn((
-                OperatorCamera,
-                Projection::from(PerspectiveProjection {
-                    fov: crate::graphics_settings::DEFAULT_FOV_DEG.to_radians(),
-                    ..default()
-                }),
-            ))
-            .id();
-        app.add_systems(
-            Update,
-            (apply_projection_system, apply_view_fov_system).chain(),
-        );
-        // Frame 1 establishes the re-seat baseline.
-        app.update();
-        app.world_mut().resource_mut::<ViewFov>().focal_length = ViewFov::focal_for_deg(80.0);
-        // A settings write that leaves fov_deg alone — what every menu key
-        // used to do on its way through handle_menu_key's deref-mut handoffs.
-        app.world_mut()
-            .resource_mut::<GraphicsSettings>()
-            .bloom_intensity += 0.01;
-        app.update();
-        let fov_after_unrelated = {
-            let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
-                panic!("perspective projection expected")
+        for projection_last in [false, true] {
+            let mut app = App::new();
+            app.init_resource::<GraphicsSettings>()
+                .init_resource::<ViewFov>()
+                .init_resource::<crate::cutscene::CutsceneMode>();
+            let cam = app
+                .world_mut()
+                .spawn((
+                    OperatorCamera,
+                    Projection::from(PerspectiveProjection {
+                        fov: crate::graphics_settings::DEFAULT_FOV_DEG.to_radians(),
+                        ..default()
+                    }),
+                ))
+                .id();
+            if projection_last {
+                app.add_systems(
+                    Update,
+                    (apply_view_fov_system, apply_projection_system).chain(),
+                );
+            } else {
+                app.add_systems(
+                    Update,
+                    (apply_projection_system, apply_view_fov_system).chain(),
+                );
+            }
+            let fov_now = |app: &App| {
+                let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
+                    panic!("perspective projection expected")
+                };
+                p.fov.to_degrees()
             };
-            p.fov.to_degrees()
-        };
-        assert!(
-            (fov_after_unrelated - 80.0).abs() < 1e-3,
-            "a held zoom must survive unrelated settings changes, got {fov_after_unrelated}"
-        );
-        app.world_mut().resource_mut::<GraphicsSettings>().fov_deg = 45.0;
-        app.update();
-        let Projection::Perspective(p) = app.world().get::<Projection>(cam).unwrap() else {
-            panic!("perspective projection expected")
-        };
-        assert!(
-            (p.fov.to_degrees() - 45.0).abs() < 1e-3,
-            "a base fov_deg change must re-seat the zoom"
-        );
+            // Frame 1 establishes the re-seat baseline.
+            app.update();
+            app.world_mut().resource_mut::<ViewFov>().focal_length = ViewFov::focal_for_deg(80.0);
+            // A settings write that leaves fov_deg alone: what every menu key
+            // does on its way through handle_menu_key's deref-mut handoffs.
+            app.world_mut()
+                .resource_mut::<GraphicsSettings>()
+                .bloom_intensity += 0.01;
+            app.update();
+            assert!(
+                (fov_now(&app) - 80.0).abs() < 1e-3,
+                "a held zoom must survive unrelated settings changes (projection last: \
+                 {projection_last}), got {}",
+                fov_now(&app)
+            );
+            app.world_mut().resource_mut::<GraphicsSettings>().fov_deg = 45.0;
+            app.update();
+            assert!(
+                (fov_now(&app) - 45.0).abs() < 1e-3,
+                "a base fov_deg change must re-seat the zoom (projection last: {projection_last})"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod launcher_backdrop;
 // until then.
 #[allow(deprecated)]
 pub mod launcher_ui;
+pub mod locked_camera;
 #[allow(deprecated)]
 pub mod model_viewer;
 pub mod nameplate_occlude;

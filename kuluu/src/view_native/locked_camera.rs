@@ -1,0 +1,418 @@
+//! Retail's following camera while it is locked on to a target. The camera looks at the point midway
+//! between the player and the target, and its eye is held inside a cone around the line from the target
+//! through the player: inside the cone the eye stays exactly where it is, at the cone's edge the line drags
+//! it round, so a lock begins with the camera off to whichever side it was on and a side step around the
+//! target carries the player a few yalms before the camera follows. The eye's distance from the look point
+//! is held in a band set by that same player-target span and the view's focal length.
+//!
+//! Provenance (`FFXiMain.dll retail-2026-09`): the following-camera update at RVA 0x1EE60 takes this
+//! branch whenever the player's free-run byte is clear (RVA 0x1F60B), which every lock handler clears
+//! (RVA 0xC5440, RVA 0xC54C0); the look point is built at RVA 0x1F44B..0x1F5F6 and the eye law runs at
+//! RVA 0x201E6..0x20773.
+
+use bevy::prelude::*;
+
+use super::camera_collision::rotate_about;
+use super::input::RETAIL_MOVE_TICKS_PER_SEC;
+
+/// The player's camera point is its skeleton reference 13, one of the torso-height ring points
+/// (`FFXiMain.dll retail-2026-09` RVA 0x1F4F8 pushes it to the actor's reference lookup); only its height
+/// enters the look point.
+pub const PLAYER_POINT_SLOT: usize = 13;
+
+/// The target's camera point is its chest reference, read once when the lock begins (`FFXiMain.dll
+/// retail-2026-09` RVA 0xD66D2 / RVA 0xD6700 push 7, RVA 0xD66E1 / RVA 0xD670F store its height); only its
+/// height enters the look point.
+pub const TARGET_POINT_SLOT: usize = ffxi_dat::skel::standard_position::CHEST;
+
+/// The look point blends the two camera points half and half (`FFXiMain.dll retail-2026-09` RVA 0x1F50F).
+const LOOK_BLEND: f32 = 0.5;
+
+/// The look point and the eye's distance each close this share of what is left per camera tick
+/// (`FFXiMain.dll retail-2026-09` immediate at RVA 0x1F5D3, `.rdata` RVA 0x329CE4 read at RVA 0x205CD).
+const FOLLOW_PER_TICK: f32 = 0.25;
+
+/// The cone's half-angle is `atan(CONE_REACH / (near base + span))` (`FFXiMain.dll retail-2026-09`
+/// `.rdata` RVA 0x32A3A0 read at RVA 0x20412).
+const CONE_REACH: f32 = 4.0;
+
+/// The near and far distance bases before the focal scale (`FFXiMain.dll retail-2026-09` `.rdata` RVA
+/// 0x32A3A8 read at RVA 0x203EB, RVA 0x32A3A4 read at RVA 0x203F9).
+const NEAR_BASE: f32 = 7.2;
+const FAR_BASE: f32 = 8.6;
+
+/// The share of the player-target span both bases grow by (`FFXiMain.dll retail-2026-09` `.rdata` RVA
+/// 0x32A3BC read at RVA 0x203D4).
+const SPAN_SHARE: f32 = 0.125;
+
+/// The focal length's scale into those bases (`FFXiMain.dll retail-2026-09` `.rdata` RVA 0x32A22C read at
+/// RVA 0x203CA): the default 350 focal reads as 0.35, so zooming the view in pushes the eye out.
+const FOCAL_SCALE: f32 = 0.001;
+
+/// Half the player-target span joins both distance edges (`FFXiMain.dll retail-2026-09` `.rdata` RVA
+/// 0x329A08 read at RVA 0x20561).
+const SPAN_HALF: f32 = 0.5;
+
+/// Distances under this floor read as it: the same `.rdata` floor the aim laws guard with, read here at
+/// `FFXiMain.dll retail-2026-09` RVA 0x20277 and RVA 0x2028C.
+const DIST_FLOOR: f32 = kuluu_render::mouse::CAMERA_AIM_MIN_DISTANCE_YALMS;
+
+/// The wall test casts from this far above the player's feet toward the eye (`FFXiMain.dll retail-2026-09`
+/// `.rdata` RVA 0x32961C subtracted at RVA 0x20691).
+pub const WALL_RAY_RISE: f32 = 1.0;
+
+/// A wall between the player and the eye pulls the eye in to this short of the hit (`FFXiMain.dll
+/// retail-2026-09` `.rdata` RVA 0x32A39C read at RVA 0x2072F).
+const WALL_PULL: f32 = 0.2;
+
+/// The locked camera's two world points, carried frame to frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LockedCamera {
+    pub eye: Vec3,
+    pub look: Vec3,
+}
+
+/// What one frame of the lock reads from the world: both actors' feet and camera points, and the view's
+/// focal length (`ViewFov::focal_length`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LockedWorld {
+    pub player: Vec3,
+    pub target: Vec3,
+    pub player_point: Vec3,
+    pub target_point: Vec3,
+    pub focal_length: f32,
+}
+
+/// The cone half-angle and the eye's distance band one player-target span sets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LockFrame {
+    pub half_angle: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// The cone and band for a player-target `span` at `focal_length` (`FFXiMain.dll retail-2026-09` RVA
+/// 0x203C5..0x2041C, RVA 0x2052B..0x205AD). A lock taken with H adds nothing for the target's size to the
+/// span share.
+pub fn lock_frame(span: f32, focal_length: f32) -> LockFrame {
+    let focal = focal_length * FOCAL_SCALE;
+    let reach = span * SPAN_SHARE;
+    let near_base = (NEAR_BASE + reach) * focal;
+    let far_base = (FAR_BASE + reach) * focal;
+    LockFrame {
+        half_angle: (CONE_REACH / (near_base + span)).atan(),
+        near: near_base + span * SPAN_HALF,
+        far: far_base + span * SPAN_HALF,
+    }
+}
+
+/// `offset` turned toward the unit `toward`, about the axis square to both, just far enough that the
+/// angle between them is at most `half_angle` (`FFXiMain.dll retail-2026-09` RVA 0x20469..0x20505); inside
+/// the cone it is returned
+/// untouched. A pair that spans no plane (parallel, anti-parallel, or no line at all because the player
+/// stands on the target) is left alone too, as retail's zero cross product leaves it.
+pub fn hold_in_cone(offset: Vec3, toward: Vec3, half_angle: f32) -> Vec3 {
+    let length = offset.length();
+    if length <= f32::EPSILON || toward.length_squared() <= f32::EPSILON {
+        return offset;
+    }
+    let dir = offset / length;
+    let cos = dir.dot(toward).clamp(-1.0, 1.0);
+    if cos.acos() <= half_angle {
+        return offset;
+    }
+    let Some(across) = (dir - toward * cos).try_normalize() else {
+        return offset;
+    };
+    (toward * half_angle.cos() + across * half_angle.sin()) * length
+}
+
+/// The share of what is left that the look point closes in `dt` seconds: the per-tick follow factor
+/// carried as frame-rate independent time.
+pub fn follow_share(dt: f32) -> f32 {
+    1.0 - (1.0 - FOLLOW_PER_TICK).powf(dt * RETAIL_MOVE_TICKS_PER_SEC)
+}
+
+/// Where the eye lands when the wall test from `origin` meets geometry `hit` along the way to it.
+pub fn short_of_wall(origin: Vec3, eye: Vec3, hit: f32) -> Vec3 {
+    origin + (eye - origin).normalize_or_zero() * (hit - WALL_PULL)
+}
+
+impl LockedCamera {
+    /// The eye's distance from the look point, floored.
+    pub fn distance(&self) -> f32 {
+        (self.eye - self.look).length().max(DIST_FLOOR)
+    }
+
+    /// A camera turn: the eye swings round the look point on the ground plane by `angle` of chase yaw,
+    /// keeping its height and its ground distance (`FFXiMain.dll retail-2026-09` RVA 0x1EBB0).
+    pub fn orbit(self, angle: f32) -> Self {
+        if angle == 0.0 {
+            return self;
+        }
+        let eye = rotate_about(
+            Vec2::new(self.eye.x, self.eye.z),
+            Vec2::new(self.look.x, self.look.z),
+            angle,
+        );
+        Self {
+            eye: Vec3::new(eye.x, self.eye.y, eye.y),
+            ..self
+        }
+    }
+
+    /// A camera tilt: the eye rises by `rise` yalms and nothing else moves (`FFXiMain.dll retail-2026-09`
+    /// RVA 0x1F147).
+    pub fn lift(self, rise: f32) -> Self {
+        Self {
+            eye: self.eye + Vec3::Y * rise,
+            ..self
+        }
+    }
+
+    /// One frame of `dt` seconds: the look point follows the blend of the two camera points, the eye is
+    /// held inside the cone round the target-to-player line, and its distance eases into the band. The
+    /// band push runs along the eye's direction from before the cone turn, as retail's does.
+    pub fn step(self, world: &LockedWorld, dt: f32) -> Self {
+        let share = follow_share(dt);
+        let goal = world.player_point.lerp(world.target_point, LOOK_BLEND);
+        let look = self.look + (goal - self.look) * share;
+
+        let offset = self.eye - look;
+        let distance = offset.length().max(DIST_FLOOR);
+        let along = offset / distance;
+        let line = world.player - world.target;
+        let span = line.length().max(DIST_FLOOR);
+        let frame = lock_frame(span, world.focal_length);
+        let held = hold_in_cone(offset, line / span, frame.half_angle);
+        let push = (distance.clamp(frame.near, frame.far) - distance) * share;
+
+        Self {
+            eye: look + held + along * push,
+            look,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Retail's default focal length (`RETAIL_DEFAULT_FOCAL_LENGTH`).
+    fn default_focal() -> f32 {
+        kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH
+    }
+
+    const FRAME_30: f32 = 1.0 / 30.0;
+
+    fn world(player: Vec3, target: Vec3) -> LockedWorld {
+        const PLAYER_RISE: f32 = 1.4;
+        const TARGET_RISE: f32 = 1.1;
+        LockedWorld {
+            player,
+            target,
+            player_point: player + Vec3::Y * PLAYER_RISE,
+            target_point: target + Vec3::Y * TARGET_RISE,
+            focal_length: default_focal(),
+        }
+    }
+
+    fn angle_off_line(cam: &LockedCamera, w: &LockedWorld) -> f32 {
+        (cam.eye - cam.look)
+            .normalize()
+            .angle_between((w.player - w.target).normalize())
+    }
+
+    /// The numbers the lock reads at the default 350 focal, worked by hand from the provenance constants:
+    /// five yalms from the target the cone is 27.3 degrees and the band runs 5.24 to 5.73 from the look
+    /// point; doubling the span narrows the cone and pushes the band out.
+    #[test]
+    fn the_cone_and_band_follow_the_span_and_the_focal_length() {
+        let near5 = lock_frame(5.0, default_focal());
+        assert!(
+            (near5.half_angle.to_degrees() - 27.33).abs() < 0.01,
+            "{near5:?}"
+        );
+        assert!((near5.near - 5.2388).abs() < 1e-3, "{near5:?}");
+        assert!((near5.far - 5.7288).abs() < 1e-3, "{near5:?}");
+        let far10 = lock_frame(10.0, default_focal());
+        assert!(far10.half_angle < near5.half_angle && far10.near > near5.near);
+        let zoomed = lock_frame(5.0, default_focal() * 2.0);
+        assert!(
+            zoomed.near > near5.near && zoomed.half_angle < near5.half_angle,
+            "a longer focal pushes the eye out and narrows the cone"
+        );
+    }
+
+    #[test]
+    fn the_cone_turns_an_eye_outside_it_onto_its_edge_and_leaves_one_inside_alone() {
+        let toward = Vec3::Z;
+        let half = 30_f32.to_radians();
+        let inside = Vec3::new(1.0, 0.0, 4.0);
+        assert_eq!(hold_in_cone(inside, toward, half), inside);
+        let outside = Vec3::new(4.0, 0.5, 1.0);
+        let held = hold_in_cone(outside, toward, half);
+        assert!(
+            (held.length() - outside.length()).abs() < 1e-4,
+            "the turn keeps the distance"
+        );
+        assert!(
+            (held.angle_between(toward) - half).abs() < 1e-4,
+            "lands on the edge"
+        );
+        assert!(held.x > 0.0, "and stays on the side it came from");
+        assert_eq!(hold_in_cone(-toward * 3.0, toward, half), -toward * 3.0);
+        assert_eq!(hold_in_cone(Vec3::X, Vec3::ZERO, half), Vec3::X);
+    }
+
+    /// Locking on to a target off to the player's side with the camera behind the player: the first frame
+    /// swings the eye only to the cone's edge on the side it was already on, so the view opens off to that
+    /// side of the target line instead of squarely behind the player.
+    #[test]
+    fn a_lock_begins_on_the_cameras_own_side_of_the_line() {
+        let player = Vec3::ZERO;
+        let target = Vec3::new(5.0, 0.0, 0.0);
+        let w = world(player, target);
+        let band = lock_frame(5.0, default_focal());
+        // The camera sat behind a player facing -Z, a little up, at a distance already inside the band so
+        // only the cone moves it.
+        let free_look = w.player_point;
+        let back = Vec3::new(0.0, 0.15, 1.0).normalize() * (band.near + band.far) * 0.5;
+        let begun = LockedCamera {
+            eye: free_look + back,
+            look: free_look,
+        };
+        let cam = begun.step(&w, FRAME_30);
+        assert!(
+            (angle_off_line(&cam, &w) - band.half_angle).abs() < 1e-3,
+            "first frame lands on the cone's edge: {} vs {}",
+            angle_off_line(&cam, &w).to_degrees(),
+            band.half_angle.to_degrees()
+        );
+        assert!(
+            cam.eye.z > cam.look.z + 1.0,
+            "and stays on its own (+Z) side of the line: {cam:?}"
+        );
+    }
+
+    /// A side step round the target with the eye centred behind the player: while the line swings inside
+    /// the cone the eye does not move at all, then it is carried at the edge. Starting centred the slack is
+    /// one half-angle of swing; from the far edge it is two, which is why a reversed side step travels
+    /// about twice as far before the camera catches.
+    #[test]
+    fn a_side_step_runs_free_inside_the_cone_then_drags_the_eye() {
+        const RADIUS: f32 = 5.0;
+        const STEP_YALMS: f32 = 0.125;
+        let target = Vec3::ZERO;
+        let at = |travel: f32| {
+            let a = travel / RADIUS;
+            Vec3::new(RADIUS * a.sin(), 0.0, RADIUS * a.cos())
+        };
+        let w0 = world(at(0.0), target);
+        let look0 = w0.player_point.lerp(w0.target_point, LOOK_BLEND);
+        let mut cam = LockedCamera {
+            eye: look0 + Vec3::Z * 5.5,
+            look: look0,
+        };
+        for _ in 0..120 {
+            cam = cam.step(&w0, FRAME_30);
+        }
+        let settled = cam.eye;
+        let mut first_moved = None;
+        let mut travel = 0.0;
+        while travel < 12.0 {
+            travel += STEP_YALMS;
+            let w = world(at(travel), target);
+            let before = cam.eye;
+            cam = cam.step(&w, FRAME_30);
+            let half = lock_frame((w.player - w.target).length(), w.focal_length).half_angle;
+            assert!(
+                angle_off_line(&cam, &w) <= half + 1e-3,
+                "the eye never sits outside the cone ({travel} yalms)"
+            );
+            if first_moved.is_none() && (cam.eye - before).length() > 1e-3 {
+                first_moved = Some(travel);
+            }
+        }
+        let first_moved = first_moved.expect("the cone edge must catch the eye");
+        assert!(
+            first_moved > 1.0,
+            "the eye held still for {first_moved} yalms of side step from {settled:?}"
+        );
+    }
+
+    /// The look point's follow and the band's ease are time, not frames: the same 1.5 seconds at 30 and at
+    /// 60 frames a second lands both in the same place. (The cone itself is a hold, not a rate: it acts on
+    /// whichever frame finds the eye outside it.)
+    #[test]
+    fn the_follow_and_the_band_are_frame_rate_independent() {
+        let w = world(Vec3::ZERO, Vec3::new(0.0, 0.0, -4.0));
+        let start = LockedCamera {
+            eye: Vec3::new(0.0, 1.6, 8.0),
+            look: Vec3::new(0.0, 1.4, 0.0),
+        };
+        let mut slow = start;
+        for _ in 0..45 {
+            slow = slow.step(&w, FRAME_30);
+        }
+        let mut fast = start;
+        for _ in 0..90 {
+            fast = fast.step(&w, FRAME_30 / 2.0);
+        }
+        assert!((slow.look - fast.look).length() < 1e-3);
+        assert!(
+            (slow.eye - fast.eye).length() < 0.02,
+            "{slow:?} vs {fast:?}"
+        );
+    }
+
+    /// The eye eases into the band a quarter of the gap per tick and holds still inside it.
+    #[test]
+    fn the_distance_eases_into_the_band_and_holds_inside_it() {
+        let w = world(Vec3::ZERO, Vec3::new(0.0, 0.0, -5.0));
+        let look = w.player_point.lerp(w.target_point, LOOK_BLEND);
+        let band = lock_frame(5.0, default_focal());
+        let close = LockedCamera {
+            eye: look + Vec3::Z * 2.0,
+            look,
+        };
+        let one_tick = close.step(&w, 1.0 / RETAIL_MOVE_TICKS_PER_SEC);
+        let want = 2.0 + (band.near - 2.0) * FOLLOW_PER_TICK;
+        assert!(
+            (one_tick.distance() - want).abs() < 1e-3,
+            "{}",
+            one_tick.distance()
+        );
+        let inside = LockedCamera {
+            eye: look + Vec3::Z * (band.near + band.far) * 0.5,
+            look,
+        };
+        assert_eq!(inside.step(&w, FRAME_30).eye, inside.eye);
+    }
+
+    #[test]
+    fn a_wall_pulls_the_eye_in_short_of_the_hit() {
+        let origin = Vec3::new(0.0, 1.0, 0.0);
+        let eye = Vec3::new(0.0, 1.0, 6.0);
+        assert_eq!(
+            short_of_wall(origin, eye, 4.0),
+            Vec3::new(0.0, 1.0, 4.0 - WALL_PULL)
+        );
+    }
+
+    #[test]
+    fn a_turn_swings_the_eye_round_the_look_point_on_the_ground() {
+        let cam = LockedCamera {
+            eye: Vec3::new(0.0, 3.0, 5.0),
+            look: Vec3::new(0.0, 1.0, 0.0),
+        };
+        let turned = cam.orbit(std::f32::consts::FRAC_PI_2);
+        assert_eq!(turned.eye.y, cam.eye.y);
+        let ground = |v: Vec3| Vec2::new(v.x, v.z);
+        assert!(
+            (ground(turned.eye - turned.look).length() - ground(cam.eye - cam.look).length()).abs()
+                < 1e-4
+        );
+        assert_eq!(cam.lift(0.5).eye, Vec3::new(0.0, 3.5, 5.0));
+    }
+}

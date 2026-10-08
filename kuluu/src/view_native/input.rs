@@ -183,9 +183,10 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
-// A pure exponential barely moves out of a wide gap, so the lock-on camera
-// behind its target reads as a snap then a long glide: turn at a constant
-// max rate until the gap is this small, then let the exponential settle in.
+// A pure exponential barely moves out of a wide gap, so the camera released
+// from a lock reads as a snap then a long glide on its way back behind the
+// body: turn at a constant max rate until the gap is this small, then let the
+// exponential settle in.
 pub(crate) const LOCK_CAM_MAX_TURN_RAD_PER_SEC: f32 = 4.5;
 pub(crate) const LOCK_CAM_ARRIVAL_GAP_RAD: f32 = 0.35;
 

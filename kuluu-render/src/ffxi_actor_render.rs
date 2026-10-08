@@ -1556,6 +1556,12 @@ impl FfxiRenderActor {
         &self.world_pose
     }
 
+    /// The posed point of skeleton reference `slot`, in the space [`Self::world_pose`] lives in; None when the
+    /// skeleton has no such reference.
+    pub fn standard_point(&self, slot: usize) -> Option<Vec3> {
+        standard_joint_world_position(&self.world_pose, &self.skeleton, slot)
+    }
+
     /// The clip id the pose pass currently has selected (None before its first run).
     pub fn current_clip_id(&self) -> Option<&DatId> {
         self.current_clip.as_ref().map(|(id, _)| id)

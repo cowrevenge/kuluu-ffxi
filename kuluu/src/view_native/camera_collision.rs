@@ -8,7 +8,17 @@ use kuluu_render::{
     third_person_anchor_y, yaw_for_heading, CameraMode, ChaseCamera, OperatorCamera,
 };
 
+use kuluu_render::ffxi_actor_render::FfxiRenderActor;
+use kuluu_render::mouse::{
+    camera_height_pitch_rate_rad_per_sec, camera_orbit_yaw_rate_rad_per_sec,
+    CAMERA_EYE_RISE_YALMS_PER_SEC,
+};
+
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
+use super::locked_camera::{
+    follow_share, short_of_wall, LockedCamera, LockedWorld, PLAYER_POINT_SLOT, TARGET_POINT_SLOT,
+    WALL_RAY_RISE,
+};
 
 /// Spring-back orbit rate divisor (dist units): while a facing event holds the
 /// spring engaged, each frame rotates the eye about its focus by `ref ×
@@ -23,20 +33,15 @@ const SPRING_ORBIT_RATE: f32 = 6.0;
 /// [0x10329A18], consumer gate at RVA 0x1F1E3).
 const SPRING_DIST_EPS: f32 = 0.01;
 
-/// Locked on, the camera settles onto the target bearing at this rate
-/// (framerate-independent exponential) once the gap is inside
-/// super::input::LOCK_CAM_ARRIVAL_GAP_RAD; wider gaps turn at
-/// super::input::LOCK_CAM_MAX_TURN_RAD_PER_SEC. The same rate eases the
-/// released camera back behind the body (the lock-release catch). Retail's
-/// spring-back expression IS decodable: each facing event stores a reference
-/// angle = axis·(π/2)·turn (engage site FFXiMain.dll retail-2026-09 RVA
-/// 0xA6998, operand staged at [esp+0xC] 0xA6936 → eax 0xA697E), and the
-/// consumer orbits the look-at point by −ref × 6/max(dist, .01) per frame
-/// while a non-zero turn mode is set (applier 0x1EBB0). Every steering frame
-/// re-stores the ref term and any steer-zero frame calls the mode=0 release;
-/// that engage/release pair drives the free-camera spring here. This lock-mode
-/// rate stays playtest-tuned — retail drives the lock bearing through its own
-/// steer, not an exponential of this kind.
+/// The released camera eases back behind the body at this rate (framerate-independent exponential)
+/// once the gap is inside super::input::LOCK_CAM_ARRIVAL_GAP_RAD; wider gaps turn at
+/// super::input::LOCK_CAM_MAX_TURN_RAD_PER_SEC (the lock-release catch). Retail's spring-back
+/// expression IS decodable: each facing event stores a reference angle = axis·(π/2)·turn (engage site
+/// FFXiMain.dll retail-2026-09 RVA 0xA6998, operand staged at [esp+0xC] 0xA6936 → eax 0xA697E), and
+/// the consumer orbits the look-at point by −ref × 6/max(dist, .01) per frame while a non-zero turn
+/// mode is set (applier 0x1EBB0). Every steering frame re-stores the ref term and any steer-zero frame
+/// calls the mode=0 release; that engage/release pair drives the free-camera spring here. This catch
+/// rate stays playtest-tuned.
 const LOCK_TURN_RATE: f32 = 12.0;
 
 /// One tick of retail's spring-back consumer: rotate `eye` about `focus` by
@@ -58,67 +63,12 @@ pub fn spring_orbit(eye: Vec2, focus: Vec2, ref_angle: f32) -> Vec2 {
     rotate_about(eye, focus, delta)
 }
 
-/// The chase yaw that puts `target` straight ahead of the camera from behind
-/// `player` (bevy xz; the boom direction is `(sin yaw, cos yaw)`, so the
-/// camera looks along `-(sin yaw, cos yaw)`). `None` when they coincide.
-pub fn lock_yaw(player: Vec2, target: Vec2) -> Option<f32> {
-    let away = player - target;
-    (away.length_squared() > 1e-6).then(|| away.x.atan2(away.y))
-}
-
 /// The band's inner edge sits at zero, not a fraction of the zoom: no ratio
 /// constant exists in FFXiMain.dll retail-2026-09's camera event block — the
 /// half-zoom figure came from XIClient's CameraManager, which is a different
 /// build. The eye's distance is set by the zoom (and clamped below by
 /// CAMERA_MIN_DISTANCE through the wall pipeline); re-anchor events move it.
 const LEASH_INNER_EDGE: f32 = 0.0;
-
-/// Locked on, retail holds the eye inside a soft distance band against the anchor, not at edges:
-/// in the chase-camera body (function `0x1EE60..0x20B9B`, re-anchor loop from `0x1FA34`) the
-/// eye-to-point distance `d` (recomputed as sqrt-of-dot each pass, e.g. `0x1FDFB..0x1FE00`) is
-/// eased toward `[3.0, 6.0]` yalms and the corrected point is written straight to the camera eye
-/// by the setter `0x1E760` (which copies its argument into camera +0x44/+0x48/+0x4C). Beyond the
-/// band: pull-in `(d − 6.0) × 0.012` per tick (`0x1FD2E..0x1FD5A`, .rdata 0x32a3e8 = 6.0,
-/// 0x32a3c4 = 0.012). Inside it: push-out `(3.0 − d) × 0.125` per tick (`0x1FDD4..0x1FDAF`,
-/// .rdata 0x329d38 = 3.0, 0x32a3c0 = −0.125; the product lands on the eye−anchor vector and
-/// separates them). Retail gates the push-out on a local byte `[esp+0x17]` at `0x1FD79` that has
-/// no writer in the function — an uninitialized stack read, so retail fires it inconsistently;
-/// kuluu treats it as deterministically armed while locked (the playtest-stable branch). The per-
-/// tick factors are carried as continuous-time rates fitted at retail's ~30 fps tick, so raising
-/// the frame rate makes this smoother, never faster — kuluu's standing fps law. Applied while
-/// locked only; free-cam keeps its zoom controls uncontested.
-const LOCKED_BAND_MIN_YALMS: f32 = 3.0;
-const LOCKED_BAND_MAX_YALMS: f32 = 6.0;
-/// Continuous-time rates equivalent to retail's per-tick factors at its ~30 fps tick:
-/// inner λ = −30·ln(1−0.125) = 4.0157/s, outer λ = −30·ln(1−0.012) = 0.3622/s — the exact
-/// same deficit decay per second as `0x1FDAF`/`0x1FD4C`, independent of kuluu's frame rate.
-const BAND_INNER_RATE_PER_SEC: f32 = 4.0157;
-const BAND_OUTER_RATE_PER_SEC: f32 = 0.3622;
-
-/// One pass of retail's chase-camera distance band (`0x1FD2E`/`0x1FDD4`, see the constants).
-/// Outside `[min, max]` from `focus` the eye moves toward that bound exponentially at the
-/// per-second rate; inside it, nothing happens. Frame-rate independent by construction.
-pub(crate) fn band_spring(eye: Vec2, focus: Vec2, dt: f32) -> Vec2 {
-    let to_eye = eye - focus;
-    let d = to_eye.length();
-    if d <= 1e-4 {
-        return eye; // degenerate boom: no direction to push along
-    }
-    let dir = to_eye / d;
-    let (deficit, rate) = if d < LOCKED_BAND_MIN_YALMS {
-        (LOCKED_BAND_MIN_YALMS - d, BAND_INNER_RATE_PER_SEC)
-    } else if d > LOCKED_BAND_MAX_YALMS {
-        (d - LOCKED_BAND_MAX_YALMS, BAND_OUTER_RATE_PER_SEC)
-    } else {
-        return eye;
-    };
-    let ease = 1.0 - (-rate * dt).exp();
-    if d < LOCKED_BAND_MIN_YALMS {
-        eye + dir * (deficit * ease)
-    } else {
-        eye - dir * (deficit * ease)
-    }
-}
 
 /// Drag `point` toward `anchor` until it is no farther than `max` and no nearer
 /// than `min`; inside the band it does not move. `fallback` is the direction
@@ -144,9 +94,8 @@ fn continuous_yaw(yaw: f32, next: f32) -> f32 {
         - std::f32::consts::PI)
 }
 
-/// One step of the lock-on camera turn: a wide gap turns at the constant max
-/// rate (the behind-the-target case), the exponential settles in inside the
-/// arrival gap.
+/// One step of the released camera's turn home: a wide gap turns at the
+/// constant max rate, the exponential settles in inside the arrival gap.
 pub(crate) fn lock_turn(chase_yaw: f32, want: f32, dt: f32) -> f32 {
     let gap = continuous_yaw(chase_yaw, want) - chase_yaw;
     if gap.abs() > super::input::LOCK_CAM_ARRIVAL_GAP_RAD {
@@ -166,16 +115,28 @@ pub struct LeashState {
     focus: Option<Vec2>,
     eye: Option<Vec2>,
     yaw: Option<f32>,
+    /// The chase pitch this system last wrote, so a different value next frame is a tilt the player made.
+    pitch: Option<f32>,
+    /// The point the camera looked at last frame: a lock begins from it.
+    look: Option<Vec3>,
     /// The previous frame was locked on: the release frame re-seeds the free
     /// camera from the live eye (see resolve_camera) and starts the release
     /// ease, so unlocking never teleports the eye.
     was_locked: bool,
     /// Yaw the just-released camera eases back to (behind the body's
-    /// heading): the lock bearing leaves a small residual against the body
-    /// facing, and the released camera closes it with a fast catch-up turn
-    /// instead of parking at the lock bearing or snapping. A manual turn,
-    /// a new lock, or a zone snap takes the camera back.
+    /// heading): the lock leaves the eye off the line behind the body, and the
+    /// released camera closes that with a fast catch-up turn instead of
+    /// parking where the lock left it or snapping. A manual turn, a new lock,
+    /// or a zone snap takes the camera back.
     release_yaw: Option<f32>,
+    /// Retail's locked camera ([`super::locked_camera`]) while a lock holds.
+    locked: Option<super::locked_camera::LockedCamera>,
+    /// The locked target and the height of its camera point, read once per lock as retail does.
+    target_rise: Option<(u32, f32)>,
+    /// How far the look point still sits from the player after a lock released: retail's look point
+    /// closes on the player's at the same quarter per tick it chased the lock's midpoint with, so the
+    /// view swings home instead of cutting to the player.
+    look_glide: Option<Vec3>,
 }
 
 /// Whether the chase camera should collide with zone MMB static placements (Mog
@@ -220,10 +181,13 @@ const OUTWARD_LERP: f32 = 0.18;
 
 const INWARD_LERP: f32 = 0.45;
 
+/// The look point a lock left behind counts as home once it is this close to the player's.
+const LOOK_GLIDE_SETTLED_YALMS: f32 = 1e-3;
+
 /// The single chase-camera authority: a leash with slack at both ends, the
 /// camera spring that decides how fast the eye reaches the leash's goal, the
-/// lock look-at behind the player, and the wall pull-in against the zone MZB
-/// BVH, with one transform write at the end.
+/// locked-on camera, and the wall pull-in against the zone MZB BVH, with one
+/// transform write at the end.
 ///
 /// While a running event holds the camera (CutsceneMode::camera_locked) this
 /// system writes nothing: the cutscene camera route (kuluu-render's
@@ -248,15 +212,19 @@ const INWARD_LERP: f32 = 0.45;
 /// 0x1EBB0). The yaw
 /// is the direction from the focus to the eye; with the spring off, a frame
 /// where something else wrote chase.yaw (the mouse, the yaw keys, Q/E, a stair
-/// warp) swings the eye around the focus to that yaw at once. Locked on, the camera instead
-/// sits behind the player aimed at the target and turns onto that bearing
-/// (max rate from a wide gap, LOCK_TURN_RATE to settle in); the yaw does
-/// not come back from the eye and the eye rides the boom at its distance, so
-/// the spring is out of play. On release the free camera takes over at the
-/// rendered eye (no teleport) and its yaw eases back behind the body's
-/// heading - the lock bearing leaves a small residual against the body
-/// facing that closes in well under a second (LeashState::release_yaw);
-/// a manual turn, a new lock, or a zone snap takes the camera back.
+/// warp) swings the eye around the focus to that yaw at once.
+///
+/// Locked on, retail's locked camera owns the view instead
+/// ([`super::locked_camera`]): it looks at the point midway between the player
+/// and the target and holds the eye inside a cone round the line from the
+/// target through the player, so the lock begins with the eye wherever it was
+/// (pulled only to the cone's edge) and a side step carries the player a few
+/// yalms before the camera follows. The yaw keys and the mouse still turn and
+/// tilt that eye inside the cone. On release the free camera takes over at the
+/// rendered eye (no teleport), its look point glides back onto the player and
+/// its yaw eases back behind the body's heading in well under a second
+/// (LeashState::release_yaw); a manual turn, a new lock, or a zone snap takes
+/// the camera back.
 ///
 /// Init sync aligns yaw behind the player on the first frame.
 /// snap_to_anchor (zone/warp) resets the leash to the exact position.
@@ -286,13 +254,23 @@ pub fn resolve_camera(
     scene_state: Res<SceneState>,
     cutscene: Res<kuluu_render::cutscene::CutsceneMode>,
     zone_bvh: Res<ZoneCollisionBvh>,
-    self_q: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
+    self_q: Query<
+        (&Transform, Option<&BakedActor>, Option<&Children>),
+        (With<IsSelf>, Without<OperatorCamera>),
+    >,
     mut cam_q: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
     lock_on: Res<kuluu_render::lock_on::LockOn>,
     target_q: Query<
-        (&kuluu_render::components::WorldEntity, &Transform),
+        (
+            &kuluu_render::components::WorldEntity,
+            &Transform,
+            Option<&BakedActor>,
+            Option<&Children>,
+        ),
         (Without<IsSelf>, Without<OperatorCamera>),
     >,
+    view_fov: Res<kuluu_render::ViewFov>,
+    render_q: Query<(&FfxiRenderActor, &GlobalTransform)>,
     mut smoothed_effective: Local<Option<f32>>,
     mut leash_state: Local<LeashState>,
 ) {
@@ -309,7 +287,7 @@ pub fn resolve_camera(
         *leash_state = LeashState::default();
         return;
     }
-    let Ok((self_t, baked)) = self_q.single() else {
+    let Ok((self_t, baked, self_children)) = self_q.single() else {
         *smoothed_effective = None;
         *leash_state = LeashState::default();
         return;
@@ -349,38 +327,116 @@ pub fn resolve_camera(
         _ => pivot_xz,
     };
 
-    // Locked on: the camera sits behind the player aimed at the target and
-    // turns onto that bearing: max rate from a wide gap, LOCK_TURN_RATE to
-    // settle in inside the arrival gap.
-    let locked_yaw = lock_on
-        .target_id
-        .and_then(|id| target_q.iter().find(|(we, _)| we.id == id))
-        .and_then(|(_, t)| lock_yaw(pivot_xz, Vec2::new(t.translation.x, t.translation.z)));
     // Yaw something else wrote since last frame (Q/E, arrows, mouse): the eye
-    // branch below treats it as a manual turn, and it takes the camera back from the release ease. While
-    // locked on, this is only ever the lock turn's own correction of chase.yaw, so it is not a steer
-    // event there.
+    // branch below treats it as a manual turn, and it takes the camera back
+    // from the release ease.
     let manual_yaw = leash_state
         .yaw
         .map(|ly| continuous_yaw(ly, chase.yaw) - ly)
         .unwrap_or(0.0);
-    if let Some(want) = locked_yaw {
-        chase.yaw = lock_turn(chase.yaw, want, dt);
+
+    let lock_target = lock_on
+        .target_id
+        .and_then(|id| target_q.iter().find(|(we, ..)| we.id == id))
+        .filter(|_| !chase.snap_to_anchor);
+    if let Some((target_we, target_t, target_baked, target_children)) = lock_target {
+        let target_feet = target_t.translation;
+        let target_rise = match leash_state.target_rise {
+            Some((id, rise)) if id == target_we.id => Some(rise),
+            _ => point_rise(target_children, &render_q, TARGET_POINT_SLOT, target_feet),
+        };
+        let player_rise = point_rise(self_children, &render_q, PLAYER_POINT_SLOT, player_pos)
+            .unwrap_or(anchor_y.y);
+        let world = LockedWorld {
+            player: player_pos,
+            target: target_feet,
+            player_point: player_pos + Vec3::Y * player_rise,
+            target_point: target_feet
+                + Vec3::Y * target_rise.unwrap_or_else(|| third_person_anchor_y(target_baked)),
+            focal_length: view_fov.focal_length,
+        };
+        // A lock begins from the camera as it stands: the eye where it rendered, the look point where it
+        // looked.
+        let held = leash_state.locked.unwrap_or(LockedCamera {
+            eye: cam_t.translation,
+            look: leash_state
+                .look
+                .unwrap_or(Vec3::new(focus.x, pivot_y, focus.y)),
+        });
+        // The player's own turns and tilts still move the eye (`FFXiMain.dll retail-2026-09` RVA
+        // 0x1F01F..0x1F14A): a turn swings it round the look point at the orbit rate normalised by its
+        // distance, which the free-run byte the lock cleared switches on, and a tilt lifts it by the rise
+        // the input system priced into its pitch step.
+        let last_pitch = leash_state.pitch.unwrap_or(chase.pitch);
+        let orbit = manual_yaw
+            * camera_orbit_yaw_rate_rad_per_sec(1.0, false, Some(held.distance()))
+            / camera_orbit_yaw_rate_rad_per_sec(1.0, true, None);
+        let tilt_rate = camera_height_pitch_rate_rad_per_sec(1.0, last_pitch, Some(chase.distance));
+        let rise = if tilt_rate == 0.0 {
+            0.0
+        } else {
+            (chase.pitch - last_pitch) / tilt_rate * CAMERA_EYE_RISE_YALMS_PER_SEC
+        };
+        let mut locked = held.orbit(orbit).lift(rise).step(&world, dt);
+        // Retail's wall test runs from just above the player's feet to the eye and keeps the eye short of a
+        // hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
+        if let Some(bvh) = zone_bvh.0.as_ref() {
+            let origin = player_pos + Vec3::Y * WALL_RAY_RISE;
+            let to_eye = locked.eye - origin;
+            let reach = to_eye.length();
+            if reach > f32::EPSILON {
+                if let Some(hit) = bvh.ray_cast(origin, to_eye / reach, reach) {
+                    locked.eye = short_of_wall(origin, locked.eye, hit);
+                }
+            }
+        }
+        cam_t.translation = locked.eye;
+        cam_t.look_at(locked.look, Vec3::Y);
+
+        // The chase rig keeps describing the rendered eye about the player: whatever reads the chase yaw
+        // sees the view, and a release hands the free camera exactly this eye.
+        let pivot = Vec3::new(pivot_xz.x, pivot_y, pivot_xz.y);
+        let boom = locked.eye - pivot;
+        let ground = Vec2::new(boom.x, boom.z);
+        chase.yaw = continuous_yaw(chase.yaw, ground.x.atan2(ground.y));
+        chase.pitch = boom
+            .y
+            .atan2(ground.length())
+            .clamp(ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX);
+        *smoothed_effective = Some(boom.length());
+        *leash_state = LeashState {
+            focus: Some(pivot_xz),
+            eye: Some(Vec2::new(locked.eye.x, locked.eye.z)),
+            yaw: Some(chase.yaw),
+            pitch: Some(chase.pitch),
+            look: Some(locked.look),
+            was_locked: true,
+            release_yaw: None,
+            locked: Some(locked),
+            target_rise: target_rise.map(|rise| (target_we.id, rise)),
+            look_glide: None,
+        };
+        chase.snap_to_anchor = false;
+        return;
     }
+
     // Lock release: the free camera takes over where the locked eye rendered
     // (re-seed the leash from the live camera so nothing carried or reset
-    // during the lock can move it) and then springs back behind the body's
-    // heading - the lock bearing leaves a small residual against the body
-    // facing that the released camera closes in well under a second.
-    if leash_state.was_locked && locked_yaw.is_none() {
+    // during the lock can move it), its look point glides back onto the
+    // player, and its yaw springs back behind the body's heading in well under
+    // a second.
+    if leash_state.was_locked {
         leash_state.eye = Some(Vec2::new(cam_t.translation.x, cam_t.translation.z));
         leash_state.yaw = Some(chase.yaw);
+        leash_state.look_glide = leash_state
+            .locked
+            .map(|locked| locked.look - Vec3::new(focus.x, pivot_y, focus.y));
         if manual_yaw == 0.0 {
             leash_state.release_yaw = Some(yaw_for_heading(scene_state.snapshot.self_pos.heading));
         }
     }
     if let Some(release) = leash_state.release_yaw {
-        if manual_yaw != 0.0 || locked_yaw.is_some() || chase.snap_to_anchor {
+        if manual_yaw != 0.0 || chase.snap_to_anchor {
             leash_state.release_yaw = None;
         } else {
             let next = lock_turn(chase.yaw, release, dt);
@@ -393,7 +449,7 @@ pub fn resolve_camera(
     }
 
     // Eye: with the spring off, where it was, swung straight to the yaw when
-    // something else (arrows, mouse drag, Q/E, the lock turn) wrote chase.yaw
+    // something else (arrows, mouse drag, Q/E, the release ease) wrote chase.yaw
     // since last frame — a manual turn moves the whole rig, eye and focus
     // together, so nothing jumps. With the spring on retail replaces that
     // swing: each facing event latches its heading change as the reference
@@ -405,15 +461,8 @@ pub fn resolve_camera(
     // mode=0 — e.g. 0xA6A46): the eye just keeps its spot until the band
     // clamps it. The lock-release ease feeds the same latch: retail's release
     // catch behaves like the regular spring with a small ref (playtest).
-
-    // Locked on, `lock_turn` owns the yaw outright: the rendered boom direction is chase.yaw and the
-    // eye only contributes its distance. The spring cannot run on top of that - orbiting the eye by
-    // any reference while the yaw is driven elsewhere only turns the eye off the boom, and once it
-    // sits beside the player the strafe step runs along the boom and the distance pumps in and out
-    // on every circuit (6 → 3.4 → 6 at the run speed). So while locked the eye is carried on the boom
-    // at its current distance, and the spring's reference exists only for the free camera.
     let steer_event = manual_yaw != 0.0;
-    let spring_ref = if !settings.camera_spring || chase.snap_to_anchor || locked_yaw.is_some() {
+    let spring_ref = if !settings.camera_spring || chase.snap_to_anchor {
         None
     } else if steer_event {
         Some(manual_yaw)
@@ -421,9 +470,6 @@ pub fn resolve_camera(
         None
     };
     let (focus, eye_prev) = match (leash_state.eye, leash_state.yaw) {
-        (Some(e), _) if !chase.snap_to_anchor && locked_yaw.is_some() => {
-            (focus, focus + yaw_dir(chase.yaw) * (e - focus).length())
-        }
         (Some(e), Some(last_yaw)) if !chase.snap_to_anchor => {
             if last_yaw == chase.yaw {
                 (focus, e)
@@ -447,34 +493,30 @@ pub fn resolve_camera(
         Some(r) => spring_orbit(eye_prev, focus, r),
         None => eye_prev,
     };
-    // Retail pulls the eye positionally: locked on, it eases inside [3.0, 6.0] of the anchor
-    // through the band spring (see LOCKED_BAND_* for the law and its RVAs); the settings leash
-    // clamp stays behind it as the user-dialed outer safety net.
-    let eye_banded = if locked_yaw.is_some() {
-        band_spring(eye_orbited, focus, dt)
-    } else {
-        eye_orbited
-    };
-    let eye = leash(eye_banded, focus, min_h, max_h, yaw_dir(chase.yaw));
+    let eye = leash(eye_orbited, focus, min_h, max_h, yaw_dir(chase.yaw));
     let to_eye = eye - focus;
-    if locked_yaw.is_none() {
-        chase.yaw = continuous_yaw(chase.yaw, to_eye.x.atan2(to_eye.y));
-    }
-    let was_locked = locked_yaw.is_some();
-    let release_yaw = if was_locked {
-        None
-    } else {
-        leash_state.release_yaw
-    };
+    chase.yaw = continuous_yaw(chase.yaw, to_eye.x.atan2(to_eye.y));
+
+    let pivot = Vec3::new(focus.x, pivot_y, focus.y);
+    let look_glide = leash_state
+        .look_glide
+        .filter(|_| !chase.snap_to_anchor)
+        .map(|glide| glide * (1.0 - follow_share(dt)))
+        .filter(|glide| glide.length() > LOOK_GLIDE_SETTLED_YALMS);
+    let look = pivot + look_glide.unwrap_or(Vec3::ZERO);
     *leash_state = LeashState {
         focus: Some(focus),
         eye: Some(eye),
         yaw: Some(chase.yaw),
-        was_locked,
-        release_yaw,
+        pitch: Some(chase.pitch),
+        look: Some(look),
+        was_locked: false,
+        release_yaw: leash_state.release_yaw,
+        locked: None,
+        target_rise: None,
+        look_glide,
     };
 
-    let pivot = Vec3::new(focus.x, pivot_y, focus.y);
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
     let wanted = to_eye.length().max(min_h) / cos_p;
 
@@ -504,8 +546,27 @@ pub fn resolve_camera(
     *smoothed_effective = Some(effective);
 
     cam_t.translation = pivot + dir * effective;
-    cam_t.look_at(pivot, Vec3::Y);
+    cam_t.look_at(look, Vec3::Y);
     chase.snap_to_anchor = false;
+}
+
+/// How far above `feet` the posed skeleton reference `slot` of an entity's render actor sits; None while
+/// the entity has no posed render actor or its skeleton has no such reference.
+fn point_rise(
+    children: Option<&Children>,
+    render_q: &Query<(&FfxiRenderActor, &GlobalTransform)>,
+    slot: usize,
+    feet: Vec3,
+) -> Option<f32> {
+    children?
+        .iter()
+        .find_map(|child| render_q.get(child).ok())
+        .and_then(|(actor, root)| {
+            actor
+                .standard_point(slot)
+                .map(|point| root.transform_point(point).y - feet.y)
+        })
+        .filter(|rise| rise.is_finite())
 }
 
 /// `point` turned about `center` by `d` radians of chase yaw (bevy xz, the
@@ -609,11 +670,6 @@ pub fn draw_camera_collision_debug(
 mod tests {
     use super::*;
 
-    fn heading_byte_for_rad(rad: f32) -> u8 {
-        let turns = rad / std::f32::consts::TAU;
-        (turns * 256.0).round().rem_euclid(256.0) as u8
-    }
-
     #[test]
     fn camera_distance_never_collapses_into_the_anchor() {
         // XIM PolarCamera.kt getAdjustedRadiusFromCollision collisionDistance: (distance - 0.25).coerceAtLeast(0.5) — a wall
@@ -674,6 +730,7 @@ mod tests {
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<kuluu_render::lock_on::LockOn>()
+            .init_resource::<kuluu_render::ViewFov>()
             .insert_resource(ChaseCamera {
                 snap_to_anchor: true,
                 ..Default::default()
@@ -745,6 +802,7 @@ mod tests {
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .init_resource::<kuluu_render::lock_on::LockOn>()
+            .init_resource::<kuluu_render::ViewFov>()
             .insert_resource(ChaseCamera {
                 pitch: ChaseCamera::PITCH_MIN,
                 ..Default::default()
@@ -785,6 +843,7 @@ mod tests {
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked())
             .init_resource::<kuluu_render::lock_on::LockOn>()
+            .init_resource::<kuluu_render::ViewFov>()
             .insert_resource(ChaseCamera::default())
             .add_systems(Update, resolve_camera);
 
@@ -966,21 +1025,6 @@ mod tests {
         );
     }
 
-    /// Locked, the camera's forward points at the target from behind the player.
-    #[test]
-    fn lock_yaw_puts_the_target_ahead() {
-        let player = Vec2::new(1.0, 2.0);
-        let target = Vec2::new(4.0, -2.0);
-        let yaw = lock_yaw(player, target).expect("distinct points");
-        let forward = -Vec2::new(yaw.sin(), yaw.cos());
-        let to_target = (target - player).normalize();
-        assert!(
-            forward.dot(to_target) > 0.9999,
-            "forward {forward:?}, target {to_target:?}"
-        );
-        assert!(lock_yaw(player, player).is_none());
-    }
-
     /// The rig turns rigidly about the player: the focus keeps its offset
     /// from the player, the eye keeps its distance from the focus, and the
     /// eye-to-focus direction lands on the new yaw.
@@ -1021,17 +1065,17 @@ mod tests {
         assert!((focus - (player + Vec2::new(0.45, 0.0))).length() < 1e-2);
     }
 
-    /// Lock release: the eye is not teleported - the free camera takes over
-    /// at the rendered eye - and the yaw eases back behind the body's heading
-    /// (the residual the lock bearing leaves against the body facing) in well
-    /// under a second instead of parking at the lock bearing.
-    #[test]
-    fn lock_release_keeps_the_eye_and_eases_the_yaw_home() {
+    /// One 60 Hz frame per update, so the lock tests step the same time on any machine.
+    const TEST_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+
+    /// A chase app with the camera, the player at `player` and a mob (world id 7) at `target`.
+    fn lock_app(camera_spring: bool, player: Vec3, target: Vec3) -> (App, Entity, Entity) {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(TEST_FRAME))
             .insert_resource(CameraMode::Chase)
             .insert_resource(kuluu_render::GraphicsSettings {
-                camera_spring: false,
+                camera_spring,
                 ..Default::default()
             })
             .insert_resource(SceneState::default())
@@ -1039,66 +1083,162 @@ mod tests {
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .init_resource::<kuluu_render::cutscene::CutsceneMode>()
             .insert_resource(kuluu_render::lock_on::LockOn::default())
+            .init_resource::<kuluu_render::ViewFov>()
             .insert_resource(ChaseCamera::default())
             .add_systems(Update, resolve_camera);
-
-        let player = Vec3::new(0.0, 1.0, 0.0);
-        app.world_mut()
-            .spawn((IsSelf, Transform::from_translation(player)));
+        let me = app
+            .world_mut()
+            .spawn((IsSelf, Transform::from_translation(player)))
+            .id();
         let cam = app
             .world_mut()
             .spawn((OperatorCamera, Transform::from_translation(Vec3::ZERO)))
             .id();
-        // The target sits off to the side of the body heading, so the lock
-        // turns the camera a quarter turn to behind the player aimed at it.
         app.world_mut().spawn((
             kuluu_render::components::WorldEntity {
                 id: 7,
                 act_index: 0,
                 kind: kuluu_snapshot::EntityKind::Mob,
             },
-            Transform::from_translation(Vec3::new(0.0, 1.0, 5.0)),
+            Transform::from_translation(target),
         ));
+        (app, me, cam)
+    }
 
+    fn lock(app: &mut App, on: bool) {
         app.world_mut()
             .resource_mut::<kuluu_render::lock_on::LockOn>()
-            .target_id = Some(7);
-        let bearing = lock_yaw(Vec2::new(0.0, 0.0), Vec2::new(0.0, 5.0)).expect("distinct");
-        for _ in 0..20_000 {
+            .target_id = on.then_some(7);
+    }
+
+    fn camera_of(app: &App, cam: Entity) -> Transform {
+        *app.world().entity(cam).get::<Transform>().unwrap()
+    }
+
+    /// How far off the line from the target through the player the camera looks back at itself.
+    fn angle_off_the_line(cam: &Transform, player: Vec3, target: Vec3) -> f32 {
+        (-*cam.forward()).angle_between(player - target)
+    }
+
+    /// H with the target off to the side of the free camera: the eye is pulled only as far as the
+    /// lock cone's edge, on the side it was already on, so the view opens off to that side instead
+    /// of squarely behind the player, and stays off the line once the look point has slid to the
+    /// midpoint. Without a model the camera points fall back to the anchor height on both actors.
+    #[test]
+    fn a_lock_opens_off_the_line_on_the_cameras_own_side() {
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, cam) = lock_app(false, player, Vec3::new(0.0, 1.0, 50.0));
+        for _ in 0..10 {
             app.update();
-            let chase = app.world().resource::<ChaseCamera>();
-            if (continuous_yaw(bearing, chase.yaw) - bearing).abs() < 0.02 {
-                break;
-            }
         }
-        let chase = app.world().resource::<ChaseCamera>();
-        let gap = (continuous_yaw(bearing, chase.yaw) - bearing).abs();
-        assert!(gap < 0.02, "the lock must settle on the bearing, gap {gap}");
-        let eye_locked = app
-            .world()
-            .entity(cam)
-            .get::<Transform>()
-            .unwrap()
-            .translation;
-
-        app.world_mut()
-            .resource_mut::<kuluu_render::lock_on::LockOn>()
-            .target_id = None;
+        // Put the target square to the camera's side: the free eye sits a quarter turn off the line.
+        let eye = camera_of(&app, cam).translation;
+        let back = Vec3::new(eye.x - player.x, 0.0, eye.z - player.z).normalize();
+        let target = player + Vec3::new(back.z, 0.0, -back.x) * 5.0;
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<kuluu_render::components::WorldEntity>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation = target;
+        }
+        let half = super::super::locked_camera::lock_frame(
+            (player - target).length(),
+            kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH,
+        )
+        .half_angle;
+        lock(&mut app, true);
         app.update();
+        let first = camera_of(&app, cam);
+        assert!(
+            (angle_off_the_line(&first, player, target) - half).abs() < 0.03,
+            "the first locked frame pulls the eye to the cone edge: {} deg against {} deg",
+            angle_off_the_line(&first, player, target).to_degrees(),
+            half.to_degrees()
+        );
+        for _ in 0..240 {
+            app.update();
+        }
+        let view = camera_of(&app, cam);
+        let off = angle_off_the_line(&view, player, target);
+        assert!(
+            off > half * 0.5 && off <= half + 1e-3,
+            "settled off the line inside the cone: {} deg against {} deg",
+            off.to_degrees(),
+            half.to_degrees()
+        );
+        assert!(
+            (view.translation - player).dot(back) > 0.0,
+            "on the side the camera started on, not swung through the target"
+        );
+    }
 
-        let eye_released = app
-            .world()
-            .entity(cam)
-            .get::<Transform>()
-            .unwrap()
-            .translation;
+    /// Circling a locked target, every frame keeps the eye inside the cone round the line from the
+    /// target through the player, and with the eye held centred the side step travels before the
+    /// camera moves at all.
+    #[test]
+    fn circling_a_locked_target_holds_the_cone() {
+        const RADIUS: f32 = 5.0;
+        let target = Vec3::new(0.0, 1.0, 0.0);
+        let at = |angle: f32| target + Vec3::new(RADIUS * angle.sin(), 0.0, RADIUS * angle.cos());
+        let (mut app, me, cam) = lock_app(true, at(0.0), target);
+        for _ in 0..10 {
+            app.update();
+        }
+        lock(&mut app, true);
+        for _ in 0..240 {
+            app.update();
+        }
+        let half = super::super::locked_camera::lock_frame(
+            RADIUS,
+            kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH,
+        )
+        .half_angle;
+        // The locked side step: 3.75 y/s round the circle.
+        let rate = 3.75 / RADIUS;
+        let t0 = app.world().resource::<Time>().elapsed_secs();
+        let mut elapsed = 0.0;
+        while elapsed < 4.0 {
+            app.update();
+            elapsed = app.world().resource::<Time>().elapsed_secs() - t0;
+            let player = at(rate * elapsed);
+            app.world_mut()
+                .entity_mut(me)
+                .get_mut::<Transform>()
+                .unwrap()
+                .translation = player;
+            let view = camera_of(&app, cam);
+            assert!(
+                angle_off_the_line(&view, player, target) <= half + 0.05,
+                "{elapsed:.2}s: the eye left the cone"
+            );
+        }
+    }
+
+    /// Lock release: the eye is not teleported - the free camera takes over
+    /// at the rendered eye - and the yaw eases back behind the body's heading
+    /// in well under a second instead of parking where the lock left it.
+    #[test]
+    fn lock_release_keeps_the_eye_and_eases_the_yaw_home() {
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, cam) = lock_app(false, player, Vec3::new(5.0, 1.0, 0.0));
+        // The free camera places the eye first, as it has before any lock in play.
+        for _ in 0..10 {
+            app.update();
+        }
+        lock(&mut app, true);
+        for _ in 0..240 {
+            app.update();
+        }
+        let eye_locked = camera_of(&app, cam).translation;
+
+        lock(&mut app, false);
+        app.update();
+        let eye_released = camera_of(&app, cam).translation;
         assert!(
             (eye_released - eye_locked).length() < 1.0,
             "the release frame must not teleport the eye: {eye_locked:?} -> {eye_released:?}"
         );
 
-        // The yaw springs back behind the body's heading in well under a
-        // second of game time, not parked at the lock bearing.
         let home = yaw_for_heading(
             app.world()
                 .resource::<SceneState>()
@@ -1121,152 +1261,6 @@ mod tests {
         assert!(
             elapsed < 1.0,
             "the ease home must close in well under a second, took {elapsed}s"
-        );
-    }
-
-    /// Locked on with the spring enabled, a player circling the target keeps the camera at one
-    /// distance: the lock turn owns the yaw, so the eye rides the boom instead of being orbited off it
-    /// (which left it beside the player, where every strafe step ran along the boom and pumped the
-    /// distance between the zoom and half of it on each circuit).
-    #[test]
-    fn circling_a_locked_target_keeps_the_camera_distance() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(CameraMode::Chase)
-            .insert_resource(kuluu_render::GraphicsSettings {
-                camera_spring: true,
-                ..Default::default()
-            })
-            .insert_resource(SceneState::default())
-            .init_resource::<ZoneCollisionBvh>()
-            .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
-            .init_resource::<kuluu_render::cutscene::CutsceneMode>()
-            .insert_resource(kuluu_render::lock_on::LockOn::default())
-            .insert_resource(ChaseCamera::default())
-            .add_systems(Update, resolve_camera);
-
-        let radius = 3.0_f32;
-        let player = app
-            .world_mut()
-            .spawn((
-                IsSelf,
-                Transform::from_translation(Vec3::new(radius, 1.0, 0.0)),
-            ))
-            .id();
-        let cam = app
-            .world_mut()
-            .spawn((OperatorCamera, Transform::from_translation(Vec3::ZERO)))
-            .id();
-        app.world_mut().spawn((
-            kuluu_render::components::WorldEntity {
-                id: 7,
-                act_index: 0,
-                kind: kuluu_snapshot::EntityKind::Mob,
-            },
-            Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
-        ));
-        app.world_mut()
-            .resource_mut::<kuluu_render::lock_on::LockOn>()
-            .target_id = Some(7);
-        // Let the lock settle before measuring.
-        for _ in 0..200 {
-            app.update();
-        }
-
-        // The locked-on side step: 3.75 y/s on a 3-yalm circle, body re-aimed at the target each
-        // frame the way input.rs does it.
-        let angular_rate = 3.75 / radius;
-        let t0 = app.world().resource::<Time>().elapsed_secs();
-        let mut min_d = f32::MAX;
-        let mut max_d = 0.0_f32;
-        let mut elapsed = 0.0;
-        while elapsed < 6.0 {
-            app.update();
-            elapsed = app.world().resource::<Time>().elapsed_secs() - t0;
-            let angle = angular_rate * elapsed;
-            let pos = Vec3::new(radius * angle.cos(), 1.0, radius * angle.sin());
-            app.world_mut()
-                .entity_mut(player)
-                .get_mut::<Transform>()
-                .unwrap()
-                .translation = pos;
-            let heading = heading_byte_for_rad((-pos.z).atan2(-pos.x));
-            app.world_mut()
-                .resource_mut::<SceneState>()
-                .snapshot
-                .self_pos
-                .heading = heading;
-            let eye = app
-                .world()
-                .entity(cam)
-                .get::<Transform>()
-                .unwrap()
-                .translation;
-            let d = Vec2::new(eye.x - pos.x, eye.z - pos.z).length();
-            min_d = min_d.min(d);
-            max_d = max_d.max(d);
-        }
-        assert!(
-            max_d - min_d < 0.25,
-            "the locked camera distance must hold while circling, got {min_d}..{max_d}"
-        );
-    }
-
-    #[test]
-    fn band_spring_holds_the_band_and_moves_only_outside_it() {
-        let focus = Vec2::ZERO;
-        // Inside the band: untouched.
-        for d in [3.0, 4.5, 6.0] {
-            let eye = Vec2::new(0.0, d);
-            assert_eq!(band_spring(eye, focus, 1.0 / 60.0), eye);
-        }
-        // Under the inner bound: pushed straight out along the boom toward 3.0, never past it.
-        let mut eye = Vec2::new(0.0, 1.5);
-        for step in 0..900 {
-            let prev = eye.length();
-            let next = band_spring(eye, focus, 1.0 / 60.0);
-            assert!(next.length() >= prev && next.length() <= LOCKED_BAND_MIN_YALMS + 1e-3);
-            if step == 0 {
-                assert!(next.length() > prev, "first pass must move");
-            }
-            // Direction is held: the push runs along the boom only.
-            assert_eq!(next.x, eye.x);
-            eye = next;
-        }
-        assert!(
-            (eye.length() - LOCKED_BAND_MIN_YALMS).abs() < 0.05,
-            "inner spring converges to the inner bound, got {}",
-            eye.length()
-        );
-        // Over the outer bound: eased in toward 6.0 slowly (τ ≈ 2.8 s), not snapped.
-        let mut eye = Vec2::new(0.0, 9.0);
-        for _ in 0..60 {
-            eye = band_spring(eye, focus, 1.0 / 30.0);
-            assert!(eye.length() < 9.0 && eye.length() > LOCKED_BAND_MAX_YALMS);
-        }
-        let after_2s = eye.length();
-        assert!(
-            (after_2s - (6.0 + 3.0 * (-BAND_OUTER_RATE_PER_SEC * 2.0).exp())).abs() < 1e-3,
-            "outer ease follows the fitted exponential, got {after_2s}"
-        );
-    }
-
-    #[test]
-    fn band_spring_is_frame_rate_independent() {
-        let focus = Vec2::ZERO;
-        let mut slow = Vec2::new(0.0, 1.0);
-        for _ in 0..60 {
-            slow = band_spring(slow, focus, 1.0 / 30.0);
-        }
-        let mut fast = Vec2::new(0.0, 1.0);
-        for _ in 0..120 {
-            fast = band_spring(fast, focus, 1.0 / 60.0);
-        }
-        assert!(
-            (slow - fast).length() < 0.05,
-            "same wall-clock time must give the same eye at 30 and 60 fps: {} vs {}",
-            slow.length(),
-            fast.length()
         );
     }
 }

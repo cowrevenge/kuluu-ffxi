@@ -1,14 +1,17 @@
 //! Retail's following camera while it is locked on to a target. The camera looks at the point midway
 //! between the player and the target, and its eye is held inside a cone around the line from the target
-//! through the player: inside the cone the eye stays exactly where it is, at the cone's edge the line drags
-//! it round, so a lock begins with the camera off to whichever side it was on and a side step around the
-//! target carries the player a few yalms before the camera follows. The eye's distance from the look point
-//! is held in a band set by that same player-target span and the view's focal length.
+//! through the player. A lock opens with the eye on the cone's edge, off to whichever side of the line it
+//! sits nearer; after that, inside the cone the eye stays exactly where it is and at the edge the line
+//! drags it round, so a side step around the target carries the player a few yalms before the camera
+//! follows. The eye's distance from the look point is held in a band set by that same player-target span
+//! and the view's focal length.
 //!
 //! Provenance (`FFXiMain.dll retail-2026-09`): the following-camera update at RVA 0x1EE60 takes this
 //! branch whenever the player's free-run byte is clear (RVA 0x1F60B), which every lock handler clears
 //! (RVA 0xC5440, RVA 0xC54C0); the look point is built at RVA 0x1F44B..0x1F5F6 and the eye law runs at
 //! RVA 0x201E6..0x20773.
+
+use std::f32::consts::{PI, TAU};
 
 use bevy::prelude::*;
 use kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH;
@@ -85,6 +88,15 @@ pub struct LockedWorld {
     pub focal_length: f32,
 }
 
+impl LockedWorld {
+    /// The unit line from the target through the player, and the cone and band its span sets.
+    fn cone(&self) -> (Vec3, LockFrame) {
+        let line = self.player - self.target;
+        let span = line.length().max(DIST_FLOOR);
+        (line / span, lock_frame(span, self.focal_length))
+    }
+}
+
 /// The cone half-angle and the eye's distance band one player-target span sets.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LockFrame {
@@ -135,6 +147,32 @@ pub fn hold_in_cone(offset: Vec3, toward: Vec3, half_angle: f32) -> Vec3 {
         return offset;
     };
     (toward * half_angle.cos() + across * half_angle.sin()) * length
+}
+
+/// The ground turn, in chase-yaw radians as [`LockedCamera::orbit`] takes it, that swings `offset` round
+/// the vertical out to the edge of the cone of `half_angle` round the unit `toward`, on whichever side of
+/// the line it already leans (the player's right, facing the target, when it leans neither way). None
+/// when no turn out is wanted or possible: the offset is already at or past the edge, it rises so steeply
+/// that no turn reaches the edge, or it or the line has no run on the ground to turn.
+pub fn turn_to_edge(offset: Vec3, toward: Vec3, half_angle: f32) -> Option<f32> {
+    let ground = Vec2::new(offset.x, offset.z);
+    let line = Vec2::new(toward.x, toward.z);
+    let (reach, run) = (ground.length(), line.length());
+    if reach <= f32::EPSILON || run <= f32::EPSILON {
+        return None;
+    }
+    let yaw = |v: Vec2| v.x.atan2(v.y);
+    let bearing = (yaw(ground) - yaw(line) + PI).rem_euclid(TAU) - PI;
+    let edge_cos = (offset.length() * half_angle.cos() - offset.y * toward.y) / (reach * run);
+    if edge_cos > 1.0 {
+        return None;
+    }
+    let edge = edge_cos.max(-1.0).acos();
+    if bearing.abs() >= edge {
+        return None;
+    }
+    let side = if bearing < 0.0 { -1.0 } else { 1.0 };
+    Some(side * edge - bearing)
 }
 
 /// The share of what is left that the look point closes in `dt` seconds: the per-tick follow factor
@@ -191,10 +229,8 @@ impl LockedCamera {
         let offset = self.eye - look;
         let distance = offset.length().max(DIST_FLOOR);
         let along = offset / distance;
-        let line = world.player - world.target;
-        let span = line.length().max(DIST_FLOOR);
-        let frame = lock_frame(span, world.focal_length);
-        let held = hold_in_cone(offset, line / span, frame.half_angle);
+        let (toward, frame) = world.cone();
+        let held = hold_in_cone(offset, toward, frame.half_angle);
         let push = (distance.clamp(frame.near, frame.far) - distance) * share;
 
         Self {
@@ -202,11 +238,27 @@ impl LockedCamera {
             look,
         }
     }
+
+    /// The first frame of a lock: one [`Self::step`], then an eye that step left inside the cone swung
+    /// round the look point on the ground, at its height and distance, out to the cone's edge on the side
+    /// of the line it sits nearer ([`turn_to_edge`]). Retail opens every lock off to that side (seen in
+    /// play): the hold alone lands a camera that starts off the line on the edge, and this lands one that
+    /// starts behind the player there too, so both settle the same once the look point reaches the
+    /// midpoint.
+    pub fn open(self, world: &LockedWorld, dt: f32) -> Self {
+        let stepped = self.step(world, dt);
+        let (toward, frame) = world.cone();
+        match turn_to_edge(stepped.eye - stepped.look, toward, frame.half_angle) {
+            Some(turn) => stepped.orbit(turn),
+            None => stepped,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuluu_render::ChaseCamera;
 
     /// Retail's default focal length (`RETAIL_DEFAULT_FOCAL_LENGTH`).
     fn default_focal() -> f32 {
@@ -313,7 +365,7 @@ mod tests {
             eye: free_look + back,
             look: free_look,
         };
-        let cam = begun.step(&w, FRAME_30);
+        let cam = begun.open(&w, FRAME_30);
         assert!(
             (angle_off_line(&cam, &w) - band.half_angle).abs() < 1e-3,
             "first frame lands on the cone's edge: {} vs {}",
@@ -324,6 +376,96 @@ mod tests {
             cam.eye.z > cam.look.z + 1.0,
             "and stays on its own (+Z) side of the line: {cam:?}"
         );
+    }
+
+    /// An eye inside the cone turns on the ground out to the edge on the side it leans to, at its own
+    /// height and distance; one square on the line goes to the player's right, and one already at or past
+    /// the edge, or rising too steeply to reach it by turning, is not turned.
+    #[test]
+    fn an_eye_inside_the_cone_turns_out_to_the_edge_on_its_own_side() {
+        // The player stands on +Z of the target, so facing it the player's right is +X.
+        let toward = Vec3::Z;
+        let half = 30_f32.to_radians();
+        let look = Vec3::new(0.0, 1.0, 0.0);
+        let turned = |offset: Vec3| {
+            let turn = turn_to_edge(offset, toward, half)?;
+            Some(
+                LockedCamera {
+                    eye: look + offset,
+                    look,
+                }
+                .orbit(turn)
+                .eye - look,
+            )
+        };
+        for (offset, side) in [
+            (Vec3::new(0.3, 0.5, 5.0), 1.0),
+            (Vec3::new(-0.3, 0.5, 5.0), -1.0),
+            (Vec3::new(0.0, 0.5, 5.0), 1.0),
+        ] {
+            let out = turned(offset).expect("an eye inside the cone turns out");
+            assert!(
+                (out.angle_between(toward) - half).abs() < 1e-4,
+                "{offset:?} lands on the edge: {} deg",
+                out.angle_between(toward).to_degrees()
+            );
+            assert!(
+                (out.y - offset.y).abs() < 1e-5,
+                "{offset:?} keeps its height"
+            );
+            assert!(
+                (out.length() - offset.length()).abs() < 1e-4,
+                "{offset:?} keeps its distance"
+            );
+            assert!(
+                out.x * side > 1.0,
+                "{offset:?} turns out to its own side: {out:?}"
+            );
+        }
+        assert_eq!(turn_to_edge(Vec3::new(4.0, 0.0, 1.0), toward, half), None);
+        assert_eq!(turn_to_edge(Vec3::new(0.0, 5.0, 1.0), toward, half), None);
+        assert_eq!(turn_to_edge(Vec3::Y * 5.0, toward, half), None);
+        assert_eq!(turn_to_edge(Vec3::Z * 5.0, Vec3::Y, half), None);
+    }
+
+    /// A lock taken with the camera square behind the player, the target straight ahead, opens off to the
+    /// side instead of staying behind, and settles where a lock taken with the camera off to the side
+    /// settles: the same angle off the line, the same side.
+    #[test]
+    fn a_lock_from_behind_opens_to_the_side_and_settles_like_one_from_off_the_line() {
+        let w = world(Vec3::ZERO, Vec3::new(0.0, 0.0, -5.0));
+        let half = lock_frame(5.0, default_focal()).half_angle;
+        let free_look = w.player_point;
+        let settle = |from: Vec3| {
+            let begun = LockedCamera {
+                eye: free_look + from.normalize() * ChaseCamera::DIST_MAX,
+                look: free_look,
+            };
+            let first = begun.open(&w, FRAME_30);
+            let mut cam = first;
+            for _ in 0..240 {
+                cam = cam.step(&w, FRAME_30);
+            }
+            (first, cam)
+        };
+        let (first, from_behind) = settle(Vec3::new(0.0, 0.15, 1.0));
+        assert!(
+            (angle_off_line(&first, &w) - half).abs() < 1e-3,
+            "the first locked frame opens on the cone's edge: {} vs {} deg",
+            angle_off_line(&first, &w).to_degrees(),
+            half.to_degrees()
+        );
+        assert!(first.eye.x > 1.0, "to the player's right: {first:?}");
+        let (_, from_the_side) = settle(Vec3::new(1.0, 0.15, 0.0));
+        let behind = angle_off_line(&from_behind, &w);
+        let side = angle_off_line(&from_the_side, &w);
+        assert!(
+            behind > half * 0.5 && (behind - side).abs() < 1_f32.to_radians(),
+            "settled {} deg off the line from behind, {} deg from the side",
+            behind.to_degrees(),
+            side.to_degrees()
+        );
+        assert!(from_behind.eye.x > 1.0 && from_the_side.eye.x > 1.0);
     }
 
     /// A side step round the target with the eye centred behind the player: while the line swings inside

@@ -128,8 +128,9 @@ pub struct LeashState {
     /// parking there or snapping. A manual turn, a new lock, or a zone snap
     /// takes the camera back.
     release_yaw: Option<f32>,
-    /// Retail's locked camera ([`super::locked_camera`]) while a lock holds.
-    locked: Option<LockedCamera>,
+    /// Retail's locked camera ([`super::locked_camera`]) and the target it is locked on, while a lock
+    /// holds.
+    locked: Option<(u32, LockedCamera)>,
     /// The locked target and the height of its camera point, read once per lock as retail does.
     target_rise: Option<(u32, f32)>,
     /// How far the rendered view still sits from the chase rig's after a lock released.
@@ -237,10 +238,10 @@ const HANDOFF_SETTLED_YALMS: f32 = 1e-3;
 /// Locked on, retail's locked camera renders the view instead
 /// ([`super::locked_camera`]): it looks at the point midway between the player
 /// and the target and holds the eye inside a cone round the line from the
-/// target through the player, so the lock begins with the eye wherever it was
-/// (pulled only to the cone's edge) and a side step carries the player a few
-/// yalms before the camera follows. The yaw keys and the mouse still turn and
-/// tilt that eye inside the cone. The chase rig runs on underneath on the
+/// target through the player. The lock opens with the eye on the cone's edge,
+/// off to whichever side of the line it sat nearer, and a side step carries the
+/// player a few yalms before the camera follows. The mouse and the pad stick
+/// still turn and tilt that eye inside the cone. The chase rig runs on underneath on the
 /// locked view's bearing, its eye carried on the boom at its own distance and
 /// pitch, so the lock never changes the free camera. On release the view eases
 /// back onto the rig (LeashState::handoff) and the rig's yaw eases back behind
@@ -378,13 +379,19 @@ pub fn resolve_camera(
                 focal_length: lock_focal(view_fov.focal_length, settings.fov_deg),
             };
             // A lock begins from the camera as it stands: the eye where it rendered, the look point where
-            // it looked.
-            let held = leash_state.locked.unwrap_or(LockedCamera {
-                eye: cam_t.translation,
-                look: leash_state
-                    .look
-                    .unwrap_or(Vec3::new(focus.x, pivot_y, focus.y)),
-            });
+            // it looked. A new target opens the lock again from wherever the last one left the camera.
+            let (held, opening) = match leash_state.locked {
+                Some((id, view)) => (view, id != target_we.id),
+                None => (
+                    LockedCamera {
+                        eye: cam_t.translation,
+                        look: leash_state
+                            .look
+                            .unwrap_or(Vec3::new(focus.x, pivot_y, focus.y)),
+                    },
+                    true,
+                ),
+            };
             // The player's own turns and tilts still move the eye (`FFXiMain.dll retail-2026-09` RVA
             // 0x1F01F..0x1F14A): a turn swings it round the look point at the orbit rate normalised by
             // its distance, which the free-run byte the lock cleared switches on, and a tilt lifts it by
@@ -400,7 +407,12 @@ pub fn resolve_camera(
             } else {
                 (chase.pitch - last_pitch) / tilt_rate * CAMERA_EYE_RISE_YALMS_PER_SEC
             };
-            let mut view = held.orbit(orbit).lift(rise).step(&world, dt);
+            let turned = held.orbit(orbit).lift(rise);
+            let mut view = if opening {
+                turned.open(&world, dt)
+            } else {
+                turned.step(&world, dt)
+            };
             // Retail's wall test runs from just above the player's feet to the eye and keeps the eye
             // short of a hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
             if let Some(bvh) = zone_bvh.0.as_ref() {
@@ -419,7 +431,7 @@ pub fn resolve_camera(
             if ground.length_squared() > f32::EPSILON {
                 chase.yaw = continuous_yaw(chase.yaw, ground.x.atan2(ground.y));
             }
-            Some((view, target_rise.map(|rise| (target_we.id, rise))))
+            Some((target_we.id, view, target_rise))
         }
         None => None,
     };
@@ -534,7 +546,7 @@ pub fn resolve_camera(
 
     let handoff = match (leash_state.was_locked, leash_state.locked) {
         _ if locked || chase.snap_to_anchor => None,
-        (true, Some(last)) => Handoff {
+        (true, Some((_, last))) => Handoff {
             eye: last.eye - rig_eye,
             look: last.look - pivot,
         }
@@ -542,7 +554,7 @@ pub fn resolve_camera(
         _ => leash_state.handoff.and_then(|h| h.eased(dt)),
     };
     let (view_eye, view_look) = match (locked_view, handoff) {
-        (Some((view, _)), _) => (view.eye, view.look),
+        (Some((_, view, _)), _) => (view.eye, view.look),
         (None, Some(h)) => (rig_eye + h.eye, pivot + h.look),
         (None, None) => (rig_eye, pivot),
     };
@@ -561,8 +573,8 @@ pub fn resolve_camera(
         } else {
             leash_state.release_yaw
         },
-        locked: locked_view.map(|(view, _)| view),
-        target_rise: locked_view.and_then(|(_, rise)| rise),
+        locked: locked_view.map(|(id, view, _)| (id, view)),
+        target_rise: locked_view.and_then(|(id, _, rise)| rise.map(|rise| (id, rise))),
         handoff,
     };
     chase.snap_to_anchor = false;
@@ -1190,9 +1202,63 @@ mod tests {
         );
     }
 
+    /// H with the free camera square behind the player and the target straight ahead, a hair to the
+    /// camera's left, so the eye sits a hair left of the line through the player: the lock does not
+    /// stay behind the player, it opens on the cone's edge on that nearer left side and settles there,
+    /// well off the line.
+    #[test]
+    fn a_lock_from_behind_opens_off_to_the_nearer_side() {
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, cam) = lock_app(false, player, Vec3::new(0.0, 1.0, 50.0));
+        for _ in 0..10 {
+            app.update();
+        }
+        let eye = camera_of(&app, cam).translation;
+        let back = Vec3::new(eye.x - player.x, 0.0, eye.z - player.z).normalize();
+        let left = Vec3::new(-back.z, 0.0, back.x);
+        let target = player - back * 5.0 + left * 0.1;
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<kuluu_render::components::WorldEntity>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation = target;
+        }
+        let half = super::super::locked_camera::lock_frame(
+            (player - target).length(),
+            kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH,
+        )
+        .half_angle;
+        lock(&mut app, true);
+        app.update();
+        let first = camera_of(&app, cam);
+        assert!(
+            (angle_off_the_line(&first, player, target) - half).abs() < 0.03,
+            "the first locked frame opens on the cone edge: {} deg against {} deg",
+            angle_off_the_line(&first, player, target).to_degrees(),
+            half.to_degrees()
+        );
+        let left_of_player = |at: Vec3| (at - player).dot(left);
+        assert!(
+            left_of_player(first.translation) > 1.0,
+            "off to the left, the side the camera sat nearer: {:?}",
+            first.translation
+        );
+        for _ in 0..240 {
+            app.update();
+        }
+        let view = camera_of(&app, cam);
+        let off = angle_off_the_line(&view, player, target);
+        assert!(
+            off > half * 0.5 && left_of_player(view.translation) > 1.0,
+            "settled off the line on that side: {} deg against {} deg, {:?}",
+            off.to_degrees(),
+            half.to_degrees(),
+            view.translation
+        );
+    }
+
     /// Circling a locked target, every frame keeps the eye inside the cone round the line from the
-    /// target through the player, and with the eye held centred the side step travels before the
-    /// camera moves at all.
+    /// target through the player.
     #[test]
     fn circling_a_locked_target_holds_the_cone() {
         const RADIUS: f32 = 5.0;

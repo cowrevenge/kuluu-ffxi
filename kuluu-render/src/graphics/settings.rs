@@ -839,10 +839,13 @@ pub const DEFAULT_FOV_DEG: f32 = 57.495_83;
 
 // Debug menu Camera_leash row (camera_collision.rs resolve_camera): the
 // focus dead zone in yalms. The row steps it by 0.1 yalms; 0 turns the
-// leash off, 2.0 is the row's top.
+// leash off. The top used to be 2.0, which capped the row below the slack a locked
+// chase camera shows in retail (see LOCKED_EYE_INNER_EDGE_YALMS in view_native/
+// camera_collision.rs for the retail-side bounds), so it is 4.0 now; nothing that
+// shipped at 2.0 changes value.
 pub const DEFAULT_CAMERA_LEASH_YALMS: f32 = 0.0;
 pub const CAMERA_LEASH_STEP_YALMS: f32 = 0.1;
-pub const CAMERA_LEASH_MAX_YALMS: f32 = 2.0;
+pub const CAMERA_LEASH_MAX_YALMS: f32 = 4.0;
 
 // The FOV row steps in whole degrees, so anything inside half a step of the
 // derived default is the default.

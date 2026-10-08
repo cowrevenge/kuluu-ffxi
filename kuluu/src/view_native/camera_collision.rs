@@ -73,6 +73,53 @@ pub fn lock_yaw(player: Vec2, target: Vec2) -> Option<f32> {
 /// CAMERA_MIN_DISTANCE through the wall pipeline); re-anchor events move it.
 const LEASH_INNER_EDGE: f32 = 0.0;
 
+/// Locked on, retail holds the eye inside a soft distance band against the anchor, not at edges:
+/// in the chase-camera body (function `0x1EE60..0x20B9B`, re-anchor loop from `0x1FA34`) the
+/// eye-to-point distance `d` (recomputed as sqrt-of-dot each pass, e.g. `0x1FDFB..0x1FE00`) is
+/// eased toward `[3.0, 6.0]` yalms and the corrected point is written straight to the camera eye
+/// by the setter `0x1E760` (which copies its argument into camera +0x44/+0x48/+0x4C). Beyond the
+/// band: pull-in `(d − 6.0) × 0.012` per tick (`0x1FD2E..0x1FD5A`, .rdata 0x32a3e8 = 6.0,
+/// 0x32a3c4 = 0.012). Inside it: push-out `(3.0 − d) × 0.125` per tick (`0x1FDD4..0x1FDAF`,
+/// .rdata 0x329d38 = 3.0, 0x32a3c0 = −0.125; the product lands on the eye−anchor vector and
+/// separates them). Retail gates the push-out on a local byte `[esp+0x17]` at `0x1FD79` that has
+/// no writer in the function — an uninitialized stack read, so retail fires it inconsistently;
+/// kuluu treats it as deterministically armed while locked (the playtest-stable branch). The per-
+/// tick factors are carried as continuous-time rates fitted at retail's ~30 fps tick, so raising
+/// the frame rate makes this smoother, never faster — kuluu's standing fps law. Applied while
+/// locked only; free-cam keeps its zoom controls uncontested.
+const LOCKED_BAND_MIN_YALMS: f32 = 3.0;
+const LOCKED_BAND_MAX_YALMS: f32 = 6.0;
+/// Continuous-time rates equivalent to retail's per-tick factors at its ~30 fps tick:
+/// inner λ = −30·ln(1−0.125) = 4.0157/s, outer λ = −30·ln(1−0.012) = 0.3622/s — the exact
+/// same deficit decay per second as `0x1FDAF`/`0x1FD4C`, independent of kuluu's frame rate.
+const BAND_INNER_RATE_PER_SEC: f32 = 4.0157;
+const BAND_OUTER_RATE_PER_SEC: f32 = 0.3622;
+
+/// One pass of retail's chase-camera distance band (`0x1FD2E`/`0x1FDD4`, see the constants).
+/// Outside `[min, max]` from `focus` the eye moves toward that bound exponentially at the
+/// per-second rate; inside it, nothing happens. Frame-rate independent by construction.
+pub(crate) fn band_spring(eye: Vec2, focus: Vec2, dt: f32) -> Vec2 {
+    let to_eye = eye - focus;
+    let d = to_eye.length();
+    if d <= 1e-4 {
+        return eye; // degenerate boom: no direction to push along
+    }
+    let dir = to_eye / d;
+    let (deficit, rate) = if d < LOCKED_BAND_MIN_YALMS {
+        (LOCKED_BAND_MIN_YALMS - d, BAND_INNER_RATE_PER_SEC)
+    } else if d > LOCKED_BAND_MAX_YALMS {
+        (d - LOCKED_BAND_MAX_YALMS, BAND_OUTER_RATE_PER_SEC)
+    } else {
+        return eye;
+    };
+    let ease = 1.0 - (-rate * dt).exp();
+    if d < LOCKED_BAND_MIN_YALMS {
+        eye + dir * (deficit * ease)
+    } else {
+        eye - dir * (deficit * ease)
+    }
+}
+
 /// Drag `point` toward `anchor` until it is no farther than `max` and no nearer
 /// than `min`; inside the band it does not move. `fallback` is the direction
 /// used when the two coincide. Instant: a clamp to a distance, never a rate.
@@ -400,8 +447,15 @@ pub fn resolve_camera(
         Some(r) => spring_orbit(eye_prev, focus, r),
         None => eye_prev,
     };
-    // Band clamp only — no positional pull exists in retail.
-    let eye = leash(eye_orbited, focus, min_h, max_h, yaw_dir(chase.yaw));
+    // Retail pulls the eye positionally: locked on, it eases inside [3.0, 6.0] of the anchor
+    // through the band spring (see LOCKED_BAND_* for the law and its RVAs); the settings leash
+    // clamp stays behind it as the user-dialed outer safety net.
+    let eye_banded = if locked_yaw.is_some() {
+        band_spring(eye_orbited, focus, dt)
+    } else {
+        eye_orbited
+    };
+    let eye = leash(eye_banded, focus, min_h, max_h, yaw_dir(chase.yaw));
     let to_eye = eye - focus;
     if locked_yaw.is_none() {
         chase.yaw = continuous_yaw(chase.yaw, to_eye.x.atan2(to_eye.y));
@@ -1155,6 +1209,64 @@ mod tests {
         assert!(
             max_d - min_d < 0.25,
             "the locked camera distance must hold while circling, got {min_d}..{max_d}"
+        );
+    }
+
+    #[test]
+    fn band_spring_holds_the_band_and_moves_only_outside_it() {
+        let focus = Vec2::ZERO;
+        // Inside the band: untouched.
+        for d in [3.0, 4.5, 6.0] {
+            let eye = Vec2::new(0.0, d);
+            assert_eq!(band_spring(eye, focus, 1.0 / 60.0), eye);
+        }
+        // Under the inner bound: pushed straight out along the boom toward 3.0, never past it.
+        let mut eye = Vec2::new(0.0, 1.5);
+        for step in 0..900 {
+            let prev = eye.length();
+            let next = band_spring(eye, focus, 1.0 / 60.0);
+            assert!(next.length() >= prev && next.length() <= LOCKED_BAND_MIN_YALMS + 1e-3);
+            if step == 0 {
+                assert!(next.length() > prev, "first pass must move");
+            }
+            // Direction is held: the push runs along the boom only.
+            assert_eq!(next.x, eye.x);
+            eye = next;
+        }
+        assert!(
+            (eye.length() - LOCKED_BAND_MIN_YALMS).abs() < 0.05,
+            "inner spring converges to the inner bound, got {}",
+            eye.length()
+        );
+        // Over the outer bound: eased in toward 6.0 slowly (τ ≈ 2.8 s), not snapped.
+        let mut eye = Vec2::new(0.0, 9.0);
+        for _ in 0..60 {
+            eye = band_spring(eye, focus, 1.0 / 30.0);
+            assert!(eye.length() < 9.0 && eye.length() > LOCKED_BAND_MAX_YALMS);
+        }
+        let after_2s = eye.length();
+        assert!(
+            (after_2s - (6.0 + 3.0 * (-BAND_OUTER_RATE_PER_SEC * 2.0).exp())).abs() < 1e-3,
+            "outer ease follows the fitted exponential, got {after_2s}"
+        );
+    }
+
+    #[test]
+    fn band_spring_is_frame_rate_independent() {
+        let focus = Vec2::ZERO;
+        let mut slow = Vec2::new(0.0, 1.0);
+        for _ in 0..60 {
+            slow = band_spring(slow, focus, 1.0 / 30.0);
+        }
+        let mut fast = Vec2::new(0.0, 1.0);
+        for _ in 0..120 {
+            fast = band_spring(fast, focus, 1.0 / 60.0);
+        }
+        assert!(
+            (slow - fast).length() < 0.05,
+            "same wall-clock time must give the same eye at 30 and 60 fps: {} vs {}",
+            slow.length(),
+            fast.length()
         );
     }
 }

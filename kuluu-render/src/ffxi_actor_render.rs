@@ -7456,6 +7456,56 @@ mod pose_resolution_tests {
         );
     }
 
+    /// A locked A let go and D taken straight after swings the body round through the front onto the
+    /// right side step, whether a stop lands between the two keys or the flip latch runs straight for two
+    /// frames, even with side steps more than a half turn apart. The stop or run blend keeps running under
+    /// the side step coming in (ffxi_actor::animation::PreviousSide::Blending); crossfading from a still of
+    /// it instead took the short arc round the back. Stand-in clips each turn one bone about y.
+    #[test]
+    fn a_locked_side_step_flip_swings_through_the_front() {
+        const SIDE_STEP_DEG: f32 = 100.0;
+        const RENDER_FRAME: f32 = 0.5;
+        let turned = |id: &[u8; 4], deg: f32| {
+            let mut clip = synth_anim(id, 8);
+            let half = deg.to_radians() / 2.0;
+            let key = ffxi_dat::skel_anim::KeyFrameTransform {
+                rotation: [0.0, half.sin(), 0.0, half.cos()],
+                ..Default::default()
+            };
+            clip.key_frame_sets.insert(0, vec![key; clip.num_frames]);
+            clip
+        };
+        use PoseState::{Idle, StrafeLeft, StrafeRight};
+        for between in [&[Idle][..], &[][..]] {
+            let clips = vec![
+                turned(b"idl0", 0.0),
+                turned(b"run0", 0.0),
+                turned(b"mvl0", SIDE_STEP_DEG),
+                turned(b"mvr0", -SIDE_STEP_DEG),
+            ];
+            let mut actor = render_actor_with_skeleton_clips(1, clips);
+            let mut yaw = |state: PoseState| {
+                actor.inputs = inputs_for_pose(state, false);
+                advance_actor_pose_standalone(&mut actor, RENDER_FRAME, None);
+                let q = actor.coordinator.get_joint_transform(0).unwrap().rotation;
+                let deg = (2.0 * q[1].atan2(q[3])).to_degrees();
+                (deg + 180.0).rem_euclid(360.0) - 180.0
+            };
+            for _ in 0..40 {
+                yaw(StrafeLeft);
+            }
+            let mut widest = between.iter().map(|&s| yaw(s).abs()).fold(0.0, f32::max);
+            for _ in 0..40 {
+                widest = widest.max(yaw(StrafeRight).abs());
+            }
+            assert!(
+                widest < 150.0,
+                "with {between:?} between the keys the swing went round the back, to {widest} degrees"
+            );
+            assert!((yaw(StrafeRight) + SIDE_STEP_DEG).abs() < 1e-2);
+        }
+    }
+
     /// Strafing engaged must not shrink the upper body. Two mechanisms, both measured on shipped Hume clips:
     ///
     /// * `hum_` joint 89 carries constant-only zero scale channels in the locomotion set (unwritten). Applying

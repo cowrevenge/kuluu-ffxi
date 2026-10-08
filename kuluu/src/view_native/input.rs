@@ -1108,8 +1108,13 @@ pub fn dispatch_movement_system(
         CameraMode::Chase => (ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX),
         CameraMode::FirstPerson => (ChaseCamera::FP_PITCH_MIN, ChaseCamera::FP_PITCH_MAX),
     };
-    let pitch_up = !in_picker && bindings.pressed(Action::CameraPitchUp, keys);
-    let pitch_down = !in_picker && bindings.pressed(Action::CameraPitchDown, keys);
+    // Retail turns the camera from its camera keys only while the actor runs free, which every lock
+    // handler clears: the key yaw (`FFXiMain.dll retail-2026-09` RVA 0x25E100 / 0x25E170) is taken only
+    // when the actor's free-run byte holds (RVA 0x1EFC8), and no key reaches the tilt. The analog axes,
+    // pad stick and mouse, keep turning a locked camera.
+    let camera_keys = !in_picker && lock_on.target_id.is_none();
+    let pitch_up = camera_keys && bindings.pressed(Action::CameraPitchUp, keys);
+    let pitch_down = camera_keys && bindings.pressed(Action::CameraPitchDown, keys);
     let aim_rig = matches!(*camera_mode, CameraMode::Chase).then_some(chase.distance);
     if pitch_up && pitch_down {
         // Both pitch keys held: ease toward vertical — kuluu's product mirror of zoom's
@@ -1128,10 +1133,10 @@ pub fn dispatch_movement_system(
     let mut yaw_d = 0.0;
     let yaw_step = camera_orbit_yaw_rate_rad_per_sec(1.0, FOLLOW_ACTOR_FREE_RUN_DEFAULT, aim_rig)
         * time.delta_secs();
-    if !in_picker && bindings.pressed(Action::CameraYawLeft, keys) {
+    if camera_keys && bindings.pressed(Action::CameraYawLeft, keys) {
         yaw_d -= yaw_step;
     }
-    if !in_picker && bindings.pressed(Action::CameraYawRight, keys) {
+    if camera_keys && bindings.pressed(Action::CameraYawRight, keys) {
         yaw_d += yaw_step;
     }
     yaw_d += pad_cam.x * yaw_step;
@@ -3880,6 +3885,62 @@ mod tests {
                 0.0,
                 "free motion never reaches the side-step bucket"
             );
+        }
+    }
+
+    /// A lock takes the camera keys away, as retail's does: the arrows neither turn nor tilt a locked
+    /// camera, while the pad stick, one of the analog axes retail keeps reading, still turns it. Unlocked,
+    /// the arrows turn and tilt it again.
+    #[test]
+    fn camera_keys_leave_a_locked_camera_alone() {
+        const ARROWS: [KeyCode; 4] = [
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+        ];
+        let mut drive = MoveDrive::new();
+        let aim = |drive: &MoveDrive| {
+            let chase = drive.app.world().resource::<ChaseCamera>();
+            (chase.yaw, chase.pitch)
+        };
+        let hold = |drive: &mut MoveDrive, key: KeyCode| {
+            drive.press(key);
+            drive.tick();
+            drive.tick();
+            drive.release(key);
+            drive.tick();
+        };
+
+        *drive.app.world_mut().resource_mut::<LockOn>() = LockOn { target_id: Some(1) };
+        let locked = aim(&drive);
+        for key in ARROWS {
+            hold(&mut drive, key);
+            assert_eq!(aim(&drive), locked, "{key:?} moved the locked camera");
+        }
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<super::super::gamepad_input::PadStickIntent>()
+            .camera = Vec2::X;
+        drive.tick();
+        assert_ne!(
+            drive.camera_yaw(),
+            locked.0,
+            "the stick turns a locked camera"
+        );
+        drive
+            .app
+            .world_mut()
+            .resource_mut::<super::super::gamepad_input::PadStickIntent>()
+            .camera = Vec2::ZERO;
+        drive.tick();
+
+        *drive.app.world_mut().resource_mut::<LockOn>() = LockOn::default();
+        for key in ARROWS {
+            let before = aim(&drive);
+            hold(&mut drive, key);
+            assert_ne!(aim(&drive), before, "{key:?} turns a free camera");
         }
     }
 

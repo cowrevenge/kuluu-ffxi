@@ -49,7 +49,27 @@ pub fn reset_camera_follow(
     *step = CameraStepSmoothing::default();
 }
 
-const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
+/// Retail's chase-camera pivot-height law (`FFXiMain.dll retail-2026-09` `0x1F3A2..0x1F446`):
+/// the followed actor's attach-node record (element chosen by Status through the byte-map
+/// `0xCFBD0` + switch in predicate `0xCFB40`) supplies a vertical span `[+4] − [+0]`; when that
+/// span is below `2.5` (.rdata 0x329ea0) it is forced to exactly `4.0` (imm store at 0x1F3D4,
+/// gated on actor predicate vt+0x14C — ported as always-on, its identity is [I]); the pivot bias
+/// is then span × `0.6` (.rdata 0x329a30). kuluu's measured DAT mesh extent (`BakedActor::
+/// actor_height`, max_y − min_y from the model records) stands in for the node span — closest
+/// data-driven equivalent of the same authored quantity.
+const ANCHOR_QUANT_MIN_SPAN: f32 = 2.5;
+const ANCHOR_FORCED_SPAN: f32 = 4.0;
+const ANCHOR_SPAN_SCALE: f32 = 0.6;
+
+#[inline]
+pub fn anchor_bias_y(h_span: f32) -> f32 {
+    let span = if h_span < ANCHOR_QUANT_MIN_SPAN {
+        ANCHOR_FORCED_SPAN
+    } else {
+        h_span
+    };
+    span * ANCHOR_SPAN_SCALE
+}
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
 
@@ -57,10 +77,11 @@ pub const FALLBACK_ACTOR_HEIGHT: f32 = 2.3;
 
 #[inline]
 pub fn third_person_anchor_y(baked: Option<&BakedActor>) -> f32 {
-    baked
-        .map(|b| b.actor_height)
-        .unwrap_or(FALLBACK_ACTOR_HEIGHT)
-        * THIRD_PERSON_ANCHOR_FRAC
+    anchor_bias_y(
+        baked
+            .map(|b| b.actor_height)
+            .unwrap_or(FALLBACK_ACTOR_HEIGHT),
+    )
 }
 
 #[inline]
@@ -1076,5 +1097,14 @@ mod tests {
             (p.fov.to_degrees() - 45.0).abs() < 1e-3,
             "a base fov_deg change must re-seat the zoom"
         );
+    }
+
+    #[test]
+    fn anchor_bias_follows_the_retail_quantiser() {
+        // Spans below 2.5 are forced to exactly 4.0 (bias 2.4); at/above, bias = span × 0.6.
+        assert!((anchor_bias_y(0.1) - 2.4).abs() < 1e-6);
+        assert!((anchor_bias_y(2.3) - 2.4).abs() < 1e-6); // hume-sized: quantised up
+        assert!((anchor_bias_y(2.5) - 1.5).abs() < 1e-6);
+        assert!((anchor_bias_y(5.0) - 3.0).abs() < 1e-6);
     }
 }

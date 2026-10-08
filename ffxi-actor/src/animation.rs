@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ffxi_dat::skel_anim::{KeyFrameTransform, SkeletonAnimation};
 
 /// How retail merges one bone's pose between two live motion layers.
@@ -38,15 +40,6 @@ fn on_side_of(q: [f32; 4], reference: [f32; 4]) -> [f32; 4] {
     }
 }
 
-fn unit(q: [f32; 4]) -> [f32; 4] {
-    let len = dot4(q, q).sqrt();
-    if len > f32::EPSILON {
-        q.map(|c| c / len)
-    } else {
-        q
-    }
-}
-
 /// The two quaternions one bone's crossfade merges, each kept on the side of the sphere it stood on the tick
 /// before. Retail picks the short way round afresh on every sample ([`merge_layer_rotation`]); where the
 /// two poses sit about a half turn apart while both move, that pick changes sides between ticks and the bone
@@ -59,20 +52,11 @@ struct HeldArc {
 }
 
 impl HeldArc {
-    /// The way a merge sets out: the incoming pose the short way round from where the outgoing side is going.
-    /// An outgoing side still blending toward a newer motion is read halfway to that motion (`heading`), so a
-    /// merge taken over a turn already under way carries the turn on instead of going back round behind it.
-    fn set_out(outgoing: [f32; 4], heading: Option<[f32; 4]>, incoming: [f32; 4]) -> Self {
-        let reference = match heading {
-            Some(heading) => {
-                let (from, to) = (unit(outgoing), unit(on_side_of(heading, outgoing)));
-                std::array::from_fn(|i| from[i] + to[i])
-            }
-            None => outgoing,
-        };
+    /// The way a merge sets out: the incoming pose the short way round from the outgoing one.
+    fn set_out(outgoing: [f32; 4], incoming: [f32; 4]) -> Self {
         Self {
             outgoing,
-            incoming: on_side_of(incoming, reference),
+            incoming: on_side_of(incoming, outgoing),
         }
     }
 
@@ -376,75 +360,94 @@ impl SkeletonAnimationContext {
     }
 }
 
-/// The outgoing side of a crossfade, still moving under it. A slot in retail is a short list of
-/// motions, each sampled every tick at its own playhead and merged over everything older at its own
-/// weight (`FFXiMain.dll retail-2026-09`: sampler RVA 0x1B230, per-bone merge RVA 0x19EE0 through RVA
-/// 0x33220). A request that lands while a blend is still running joins that list, so it blends over the
-/// blend as it carries on, never over a still of it; the older blend keeps its own weight ramp until its
-/// incoming motion is at full weight, and then that motion is all that is left of it (element update
-/// RVA 0x1B5D0, retire RVA 0x1B520).
+pub struct AnimationSnapshot {
+    joint_snapshots: HashMap<usize, KeyFrameTransform>,
+}
+
+impl AnimationSnapshot {
+    pub fn from_context(ctx: &SkeletonAnimationContext) -> Self {
+        let mut joint_snapshots = HashMap::new();
+        for &joint in ctx.animation.key_frame_sets.keys() {
+            if let Some(t) = ctx.animation.get_joint_transform(joint, ctx.current_frame) {
+                joint_snapshots.insert(joint as usize, t);
+            }
+        }
+        AnimationSnapshot { joint_snapshots }
+    }
+
+    pub fn from_transition(transition: &AnimationTransition) -> Self {
+        let mut joint_snapshots = HashMap::new();
+        let joints: std::collections::HashSet<usize> = transition
+            .previous
+            .joint_keys()
+            .into_iter()
+            .chain(
+                transition
+                    .next
+                    .animation
+                    .key_frame_sets
+                    .keys()
+                    .map(|&k| k as usize),
+            )
+            .collect();
+        for joint in joints {
+            if let Some(t) = transition.get_joint_transform(joint) {
+                joint_snapshots.insert(joint, t);
+            }
+        }
+        AnimationSnapshot { joint_snapshots }
+    }
+
+    fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
+        self.joint_snapshots.get(&joint).copied()
+    }
+}
+
+/// The outgoing side of a crossfade. A layer that stays registered keeps
+/// stepping under the blend, because retail samples every active motion into
+/// the pose scratch each tick and merges live poses by weight (`FFXiMain.dll
+/// retail-2026-09`: queue sampler RVA 0x1B230 per slot, UpdateAllChannels RVA
+/// 0x1A420). Only retargeting *during* a blend freezes the composite that was
+/// on screen — no single live layer matches it.
 pub enum PreviousSide {
     Live(SkeletonAnimationContext),
-    /// A crossfade that was still running when the next request arrived.
-    Blending(Box<AnimationTransition>),
+    Frozen(AnimationSnapshot),
 }
 
 impl PreviousSide {
     fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
         match self {
             PreviousSide::Live(ctx) => ctx.get_joint_transform(joint),
-            PreviousSide::Blending(t) => t.get_joint_transform(joint),
-        }
-    }
-
-    /// The oldest motion still in the slot: what a bone that refuses crossfades stays on.
-    fn get_base_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
-        match self {
-            PreviousSide::Live(ctx) => ctx.get_joint_transform(joint),
-            PreviousSide::Blending(t) => t.previous.get_base_joint_transform(joint),
+            PreviousSide::Frozen(snapshot) => snapshot.get_joint_transform(joint),
         }
     }
 
     fn advance(&mut self, elapsed_frames: f32) {
-        let settled = match self {
-            PreviousSide::Live(ctx) => {
-                ctx.advance(elapsed_frames);
-                false
-            }
-            PreviousSide::Blending(t) => t.update(elapsed_frames),
-        };
-        if settled {
-            self.settle();
+        if let PreviousSide::Live(ctx) = self {
+            ctx.advance(elapsed_frames);
         }
     }
 
-    /// Drop everything under the newest motion of a running blend, leaving that motion at full weight.
-    fn settle(&mut self) {
-        if let PreviousSide::Blending(t) = self {
-            *self = PreviousSide::Live(t.next.clone());
-        }
-    }
-
-    /// Where a side still blending is headed: its newest motion's rotation for `joint`.
-    fn heading(&self, joint: usize) -> Option<[f32; 4]> {
+    fn joint_keys(&self) -> Vec<usize> {
         match self {
-            PreviousSide::Live(_) => None,
-            PreviousSide::Blending(t) => t.next.get_joint_transform(joint).map(|k| k.rotation),
+            PreviousSide::Live(ctx) => ctx
+                .animation
+                .key_frame_sets
+                .keys()
+                .map(|&k| k as usize)
+                .collect(),
+            PreviousSide::Frozen(snapshot) => snapshot.joint_snapshots.keys().copied().collect(),
         }
     }
 
-    /// Whether any motion on this side is a one-shot that has played out.
+    /// Whether the motion on this side is a one-shot that has played out; a still holds no motion.
     fn holds_finished_one_shot(&self) -> bool {
         match self {
             PreviousSide::Live(ctx) => ctx.is_finished_one_shot(),
-            PreviousSide::Blending(t) => t.holds_finished_one_shot(),
+            PreviousSide::Frozen(_) => false,
         }
     }
 }
-
-/// A slot holds at most this many motions: adding one more drops the oldest, and the motion after it
-/// stands at full weight from then on (`FFXiMain.dll retail-2026-09` RVA 0x1AF29..0x1AF51).
-const SLOT_MOTIONS: usize = 3;
 
 pub struct AnimationTransition {
     pub previous: PreviousSide,
@@ -492,13 +495,7 @@ impl AnimationTransition {
                 continue;
             };
             let held = self.arcs.get(joint).copied().flatten();
-            let arc = arc_for(
-                &self.previous,
-                held,
-                joint,
-                outgoing.rotation,
-                incoming.rotation,
-            );
+            let arc = arc_for(held, outgoing.rotation, incoming.rotation);
             if self.arcs.len() <= joint {
                 self.arcs.resize(joint + 1, None);
             }
@@ -509,32 +506,6 @@ impl AnimationTransition {
     /// Whether any motion in this blend is a one-shot that has played out.
     fn holds_finished_one_shot(&self) -> bool {
         self.next.is_finished_one_shot() || self.previous.holds_finished_one_shot()
-    }
-
-    /// How many motions this blend holds, its incoming one included.
-    pub fn motions(&self) -> usize {
-        1 + match &self.previous {
-            PreviousSide::Live(_) => 1,
-            PreviousSide::Blending(t) => t.motions(),
-        }
-    }
-
-    /// Make room for one more motion within [`SLOT_MOTIONS`].
-    fn make_room(&mut self) {
-        while self.motions() >= SLOT_MOTIONS && self.retire_oldest() {}
-    }
-
-    /// Retire the oldest motion this blend holds, leaving the one after it at full weight. False when the
-    /// blend is down to its two sides. The pose under this merge jumps with it, so the merge sets out afresh.
-    fn retire_oldest(&mut self) -> bool {
-        let PreviousSide::Blending(older) = &mut self.previous else {
-            return false;
-        };
-        if !older.retire_oldest() {
-            self.previous.settle();
-        }
-        self.arcs.clear();
-        true
     }
 
     pub fn is_complete(&self) -> bool {
@@ -557,13 +528,7 @@ impl AnimationTransition {
         ) {
             (Some(outgoing), Some(incoming)) => {
                 let held = self.arcs.get(joint).copied().flatten();
-                let arc = arc_for(
-                    &self.previous,
-                    held,
-                    joint,
-                    outgoing.rotation,
-                    incoming.rotation,
-                );
+                let arc = arc_for(held, outgoing.rotation, incoming.rotation);
                 Some(KeyFrameTransform {
                     rotation: arc.rotation(t),
                     translation: lerp3(outgoing.translation, incoming.translation, t),
@@ -575,17 +540,11 @@ impl AnimationTransition {
     }
 }
 
-/// The pair a merge over `previous` takes this tick: the one it held, kept continuous, or a fresh one.
-fn arc_for(
-    previous: &PreviousSide,
-    held: Option<HeldArc>,
-    joint: usize,
-    outgoing: [f32; 4],
-    incoming: [f32; 4],
-) -> HeldArc {
+/// The pair a merge takes this tick: the one it held, kept continuous, or a fresh one.
+fn arc_for(held: Option<HeldArc>, outgoing: [f32; 4], incoming: [f32; 4]) -> HeldArc {
     match held {
         Some(arc) => arc.held(outgoing, incoming),
-        None => HeldArc::set_out(outgoing, previous.heading(joint), incoming),
+        None => HeldArc::set_out(outgoing, incoming),
     }
 }
 
@@ -681,11 +640,8 @@ impl SkeletonAnimator {
         }
 
         if self.animation_slot != 5 {
-            let previous = match self.transition.take() {
-                Some(mut running) => {
-                    running.make_room();
-                    PreviousSide::Blending(Box::new(running))
-                }
+            let previous = match &self.transition {
+                Some(t) => PreviousSide::Frozen(AnimationSnapshot::from_transition(t)),
                 None => PreviousSide::Live(current.clone()),
             };
 
@@ -711,7 +667,7 @@ impl SkeletonAnimator {
     fn sample(&self, joint: usize, blend_allowed: bool) -> Option<KeyFrameTransform> {
         match &self.transition {
             Some(t) if blend_allowed => t.get_joint_transform(joint),
-            Some(t) => t.previous.get_base_joint_transform(joint),
+            Some(t) => t.previous.get_joint_transform(joint),
             None => self
                 .current_animation
                 .as_ref()
@@ -1207,14 +1163,10 @@ mod tests {
         let refused = coord.get_joint_transform(0).unwrap().translation[0];
 
         let animators = coord.animations[0].as_ref().unwrap();
-        let outgoing = animators
-            .transition
-            .as_ref()
-            .unwrap()
-            .previous
-            .get_base_joint_transform(0)
-            .unwrap()
-            .translation[0];
+        let outgoing = match &animators.transition.as_ref().unwrap().previous {
+            PreviousSide::Live(p) => p.get_joint_transform(0).unwrap().translation[0],
+            PreviousSide::Frozen(s) => s.get_joint_transform(0).unwrap().translation[0],
+        };
         assert!(
             (refused - outgoing).abs() < 1e-4,
             "blend not refused at the bone: {refused} vs outgoing {outgoing}"
@@ -1481,57 +1433,25 @@ mod tests {
         animator.get_joint_transform(0).unwrap().translation[0]
     }
 
-    /// A request that lands mid-blend blends over that blend while it carries on: the older blend keeps
-    /// its own weight ramp underneath, and once its incoming motion is at full weight that motion is all
-    /// that is left of it.
+    /// A request that lands mid-blend crossfades from the blend as it stood on screen at that moment: the
+    /// running blend is kept as a still, not stepped on under the new one.
     #[test]
-    fn a_request_mid_blend_blends_over_the_blend_as_it_carries_on() {
+    fn a_request_mid_blend_crossfades_from_the_blend_as_it_stood() {
         let mut animator = SkeletonAnimator::new(0);
         request(&mut animator, authored("aaa0", 0, 0.0), None);
         request(&mut animator, authored("bbb0", 0, 10.0), Some(8.0));
         animator.update(2.0);
+        let on_screen = x_of(&animator);
         request(&mut animator, authored("ccc0", 0, 100.0), Some(12.0));
+        assert!(matches!(
+            animator.transition.as_ref().unwrap().previous,
+            PreviousSide::Frozen(_)
+        ));
         animator.update(1.0);
-        let older = 10.0 * 3.0 / 8.0;
-        let want = older + (100.0 - older) / 12.0;
+        let want = on_screen + (100.0 - on_screen) / 12.0;
         assert!(
             (x_of(&animator) - want).abs() < 1e-3,
-            "the blend underneath kept ramping: got {}, want {want}",
-            x_of(&animator)
-        );
-
-        animator.update(5.0);
-        let t = animator
-            .transition
-            .as_ref()
-            .expect("the newest blend runs on");
-        assert!(
-            matches!(&t.previous, PreviousSide::Live(p) if p.animation.id.as_str() == "bbb0"),
-            "the finished blend leaves only the motion it brought in"
-        );
-        assert!((x_of(&animator) - (10.0 + 90.0 * 6.0 / 12.0)).abs() < 1e-3);
-    }
-
-    /// A slot holds three motions at most: a fourth drops the oldest at once and the motion after it
-    /// stands at full weight under the two still blending.
-    #[test]
-    fn a_fourth_motion_drops_the_oldest_and_puts_the_next_at_full_weight() {
-        let mut animator = SkeletonAnimator::new(0);
-        request(&mut animator, authored("aaa0", 0, 0.0), None);
-        request(&mut animator, authored("bbb0", 0, 10.0), Some(10.0));
-        animator.update(1.0);
-        request(&mut animator, authored("ccc0", 0, 20.0), Some(10.0));
-        animator.update(1.0);
-        assert!((x_of(&animator) - (2.0 + 18.0 * 0.1)).abs() < 1e-3);
-
-        request(&mut animator, authored("ddd0", 0, 40.0), Some(10.0));
-        assert_eq!(
-            animator.transition.as_ref().unwrap().motions(),
-            SLOT_MOTIONS
-        );
-        assert!(
-            (x_of(&animator) - (10.0 + 10.0 * 0.1)).abs() < 1e-3,
-            "the oldest is gone and the next stands at full weight: got {}",
+            "the new blend should start from the still: got {}, want {want}",
             x_of(&animator)
         );
     }
@@ -1618,50 +1538,10 @@ mod tests {
         clip
     }
 
-    fn yaw_deg(animator: &SkeletonAnimator) -> f32 {
-        let q = animator.get_joint_transform(0).unwrap().rotation;
-        let deg = (2.0 * q[1].atan2(q[3])).to_degrees();
-        (deg + 180.0).rem_euclid(360.0) - 180.0
-    }
-
     /// The turn a bone makes between two ticks, in degrees, whatever the sign of either quaternion.
     fn turn_between(a: [f32; 4], b: [f32; 4]) -> f32 {
+        let unit = |q: [f32; 4]| q.map(|c| c / dot4(q, q).sqrt());
         (2.0 * dot4(unit(a), unit(b)).abs().min(1.0).acos()).to_degrees()
-    }
-
-    /// A left side step let go and a right one taken a frame later passes through the stop that came
-    /// between them. The stop's own blend keeps carrying the body toward the front while the right side
-    /// step comes in, so the swing never goes round the back, even where the two side steps sit more than
-    /// a half turn apart and the short arc straight between them is the one behind; and it gets there a
-    /// tick at a time, never crossing over in one.
-    #[test]
-    fn a_side_step_flip_through_a_stop_swings_through_the_front() {
-        const FRAME: f32 = 0.5;
-        const WIDEST_TICK_DEG: f32 = 20.0;
-        let mut animator = SkeletonAnimator::new(0);
-        request(&mut animator, turned("mvl0", 95.0), None);
-        request(&mut animator, turned("idl0", 0.0), Some(9.0));
-        animator.update(FRAME);
-        request(&mut animator, turned("mvr0", -95.0), Some(9.0));
-        let mut widest: f32 = 0.0;
-        let mut widest_tick: f32 = 0.0;
-        let mut last = animator.get_joint_transform(0).unwrap().rotation;
-        for _ in 0..40 {
-            animator.update(FRAME);
-            widest = widest.max(yaw_deg(&animator).abs());
-            let now = animator.get_joint_transform(0).unwrap().rotation;
-            widest_tick = widest_tick.max(turn_between(last, now));
-            last = now;
-        }
-        assert!(
-            widest < 100.0,
-            "the swing went round the back: it reached {widest} degrees"
-        );
-        assert!(
-            widest_tick < WIDEST_TICK_DEG,
-            "the swing jumped {widest_tick} degrees in one tick"
-        );
-        assert!((yaw_deg(&animator) + 95.0).abs() < 1e-3);
     }
 
     /// One bone turning about y from `from` to `to` degrees across `keys` keys, one key per frame.

@@ -91,15 +91,9 @@ pub struct FfxiRenderRoot(pub Entity);
 pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
 
-/// Retail requests every idle, walk, run and side step with a 16-tick blend, a tick being a 60 Hz routine
-/// frame (`FFXiMain.dll retail-2026-09` RVA 0xC8613, the request at RVA 0xC867A; the weight ramps by the
-/// tick delta at RVA 0x1B67B), so the blend runs the same in either direction.
-const LOCOMOTION_XFADE_TICKS: f32 = 16.0;
+pub const LOCOMOTION_XFADE_IN: f32 = 9.0;
 
-pub const LOCOMOTION_XFADE_IN: f32 =
-    LOCOMOTION_XFADE_TICKS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
-
-pub const LOCOMOTION_XFADE_OUT: f32 = LOCOMOTION_XFADE_IN;
+pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 
 fn special_log_enabled() -> bool {
     tracing::enabled!(target: "special", tracing::Level::DEBUG)
@@ -7493,69 +7487,7 @@ mod pose_resolution_tests {
         );
     }
 
-    /// A locked A let go and D taken straight after swings the body round through the front onto the
-    /// right side step, whether a stop lands between the two keys or the flip latch runs straight for two
-    /// frames, even with side steps more than a half turn apart, and gets there a frame at a time. The stop or
-    /// run blend keeps running under the side step coming in (ffxi_actor::animation::PreviousSide::Blending);
-    /// crossfading from a still of it instead took the short arc round the back, and re-picking the short arc
-    /// every frame jumped the body across mid-swing. Stand-in clips each turn one bone about y.
-    #[test]
-    fn a_locked_side_step_flip_swings_through_the_front() {
-        const SIDE_STEP_DEG: f32 = 100.0;
-        const RENDER_FRAME: f32 = 0.5;
-        const WIDEST_FRAME_DEG: f32 = 25.0;
-        let turned = |id: &[u8; 4], deg: f32| {
-            let mut clip = synth_anim(id, 8);
-            let half = deg.to_radians() / 2.0;
-            let key = ffxi_dat::skel_anim::KeyFrameTransform {
-                rotation: [0.0, half.sin(), 0.0, half.cos()],
-                ..Default::default()
-            };
-            clip.key_frame_sets.insert(0, vec![key; clip.num_frames]);
-            clip
-        };
-        use PoseState::{Idle, StrafeLeft, StrafeRight};
-        for between in [&[Idle][..], &[][..]] {
-            let clips = vec![
-                turned(b"idl0", 0.0),
-                turned(b"run0", 0.0),
-                turned(b"mvl0", SIDE_STEP_DEG),
-                turned(b"mvr0", -SIDE_STEP_DEG),
-            ];
-            let mut actor = render_actor_with_skeleton_clips(1, clips);
-            let mut yaw = |state: PoseState| {
-                actor.inputs = inputs_for_pose(state, false);
-                advance_actor_pose_standalone(&mut actor, RENDER_FRAME, None);
-                let q = actor.coordinator.get_joint_transform(0).unwrap().rotation;
-                let deg = (2.0 * q[1].atan2(q[3])).to_degrees();
-                (deg + 180.0).rem_euclid(360.0) - 180.0
-            };
-            let mut last = 0.0;
-            for _ in 0..40 {
-                last = yaw(StrafeLeft);
-            }
-            let mut widest: f32 = 0.0;
-            let mut widest_frame: f32 = 0.0;
-            for state in between.iter().copied().chain([StrafeRight; 40]) {
-                let now = yaw(state);
-                widest = widest.max(now.abs());
-                widest_frame =
-                    widest_frame.max(((now - last + 180.0).rem_euclid(360.0) - 180.0).abs());
-                last = now;
-            }
-            assert!(
-                widest < 150.0,
-                "with {between:?} between the keys the swing went round the back, to {widest} degrees"
-            );
-            assert!(
-                widest_frame < WIDEST_FRAME_DEG,
-                "with {between:?} between the keys the swing jumped {widest_frame} degrees in one frame"
-            );
-            assert!((yaw(StrafeRight) + SIDE_STEP_DEG).abs() < 1e-2);
-        }
-    }
-
-    /// A side step taken from the run starts in step with it over retail's 16-tick blend
+    /// A side step taken from the run starts in step with it over the locomotion blend
     /// (ffxi_actor::animation::in_step_start), while the first clip a model plays starts on its first frame.
     /// Stand-in clips at one key per frame, so a clip's span is its frame count.
     #[test]

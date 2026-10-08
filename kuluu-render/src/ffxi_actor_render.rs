@@ -3583,13 +3583,17 @@ fn advance_actor_pose(
         handle_overrides.extend(weapon_handles.iter().copied());
     }
 
-    let side_step = matches!(selected_tier, PoseTier::Locomotion)
-        && inputs.moving
-        && !inputs.walking
-        && matches!(
-            actor_state::movement_direction(inputs.forward_vel, inputs.strafe_vel),
-            actor_state::Direction::Left | actor_state::Direction::Right
-        );
+    // Keyed on the clip that is actually playing, not on the travel direction. The torso machinery
+    // below exists only to reconcile a side-step clip's authored spine turn with the walker's aim,
+    // and retail never plays one: `actor_state::movement_animation` stopped naming `mvl?`/`mvr?`
+    // once the write census on the state word gating their fourccs (RVA 0xC8DAF/0xC8DB7, actor
+    // +0x598 ∈ {2,3,4}, ctor zero at RVA 0xA8A4D) showed them unreachable. Reading the selected id
+    // keeps this consistent with whatever a model does play.
+    let side_step =
+        matches!(selected_tier, PoseTier::Locomotion) && inputs.moving && !inputs.walking && {
+            let selected = selected_id.as_str();
+            selected.starts_with("mvl") || selected.starts_with("mvr")
+        };
     let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
     *locked_torso_weight = if *locked_on && side_step {
         (*locked_torso_weight + torso_step).min(1.0)
@@ -7452,18 +7456,23 @@ mod pose_resolution_tests {
             actor.inputs = inputs_for_pose(PoseState::Run, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
-        actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
+        // This used to drive `PoseState::StrafeLeft` and expect an `mvl?` register. Directional
+        // locomotion clips are unreachable in retail (see actor_state::movement_animation's census:
+        // the fourcc stores at RVA 0xC8DAF/0xC8DB7 need actor+0x598 ∈ {2,3,4}, which nothing can
+        // write), so strafe travel now runs the gait family it came from - no fresh register, and
+        // nothing to check. `wlk?` opens one just as cleanly.
+        actor.inputs = inputs_for_pose(PoseState::Walk, false);
         advance_actor_pose_standalone(&mut actor, 1.0, None);
 
-        let Some(slot) = animator_on(&actor, "mvl") else {
-            panic!("StrafeLeft must select an mvl? clip on hume");
+        let Some(slot) = animator_on(&actor, "wlk") else {
+            panic!("Walk must select a wlk? clip on hume");
         };
         let transition = actor.coordinator.animations[slot]
             .as_ref()
             .and_then(|a| a.transition.as_ref())
             .expect("the strafe entry is a fresh register, so its slot transitions");
         assert!(
-            transition.next.animation.id.as_str().starts_with("mvl"),
+            transition.next.animation.id.as_str().starts_with("wlk"),
             "the incoming side of the blend must be the requested movement clip"
         );
 
@@ -7479,245 +7488,6 @@ mod pose_resolution_tests {
             !live.iter().any(|id| id.starts_with("idl")),
             "no idle clip may be live while strafing — the waypoint put one there: {live:?}"
         );
-    }
-
-    /// Locked on and engaged, an A/D side step holds the upper body ON the target for as long as the key is held -
-    /// not only inside the crossfade, and not limited to what the neck/chest records can claw back - while stepping
-    /// stays exactly what the clips wrote. The side-step clips are stood in for by the shape that gives the reported
-    /// symptom: the lower set turns joint 2 (legs and upper body both hang off it) 45 degrees, the upper set
-    /// counter-twists joint 49 100 degrees the other way. Unlocked reproduces the defect: blended shortest-arc, the
-    /// torso comes round through the back, and a settled hold leaves it further off target than its own hips.
-    /// `--nocapture` prints the per-frame yaw table (chest free/locked, neck, foot, hips, live spine merges).
-    #[test]
-    fn a_locked_side_step_holds_the_torso_on_the_target_and_leaves_stepping_alone() {
-        let Some(loaded) = load_hume_m() else { return };
-        let skeleton = &loaded.skeleton;
-        let upper =
-            crate::locked_torso::UpperBody::of(skeleton).expect("Hume M has chest, neck and feet");
-        let reference = |slot: usize| skeleton.reference_at(slot).map(|r| r.index).unwrap();
-        let neck = reference(ffxi_dat::skel::standard_position::NECK);
-        let foot = reference(ffxi_dat::skel::standard_position::RIGHT_FOOT);
-        // The hips close the spine chain: the upper body hangs off them, so how far they sit from the aim bounds
-        // what the torso is allowed to do.
-        let pelvis = *upper
-            .spine
-            .last()
-            .expect("the spine chain ends at the hips");
-        let yaw_limit_of = |record: usize| {
-            skeleton
-                .look_at_limits
-                .get(record)
-                .map(|l| (l.x_limit / l.scale).atan().to_degrees())
-        };
-        let chest_limit_deg = yaw_limit_of(1).expect("Hume M authors a chest record");
-        let head_limit_deg = yaw_limit_of(0).expect("Hume M authors a neck record");
-
-        let bind = ffxi_actor::skeleton_instance::pose_world(
-            skeleton,
-            |_| None,
-            ffxi_actor::skeleton_instance::RootTransform::identity(),
-            &[],
-        );
-        let yaw_of = |pose: &[Mat4], joint: usize| {
-            let axis = bind[joint].to_scale_rotation_translation().1.inverse() * POSE_FORWARD;
-            let f = pose[joint].to_scale_rotation_translation().1 * axis;
-            (-f.z).atan2(f.x).to_degrees()
-        };
-
-        /// Long enough for `in 0`, the engage draw, to finish and hand the pose to locomotion.
-        const ENGAGE_SETTLE_FRAMES: usize = 80;
-        const STRAFE_FRAMES: usize = 40;
-        /// The tail of each side's strafe, past the crossfade and the lock ramp.
-        const SETTLED_FRAMES: usize = 10;
-        const PELVIS_TURN_DEG: f32 = 45.0;
-        const SPINE_COUNTER_TWIST_DEG: f32 = 100.0;
-        const PELVIS: u32 = 2;
-        const SPINE: u32 = 49;
-        let shipped = |id: &str| {
-            loaded
-                .battle_clips
-                .iter()
-                .find(|c| c.id.as_str() == id)
-                .unwrap_or_else(|| panic!("Hume M battle set ships {id}"))
-                .clone()
-        };
-        let constant = |deg: f32, frames: usize| {
-            let q = Quat::from_rotation_y(deg.to_radians());
-            vec![
-                ffxi_dat::skel_anim::KeyFrameTransform {
-                    rotation: [q.x, q.y, q.z, q.w],
-                    translation: [0.0; 3],
-                    scale: [1.0; 3],
-                };
-                frames
-            ]
-        };
-        let stand_in = |id: &str, from: &str, joint: u32, deg: f32| {
-            let mut clip = shipped(from);
-            clip.id = DatId::from_str(id);
-            if id.ends_with('0') {
-                clip.key_frame_sets = HashMap::new();
-            }
-            clip.key_frame_sets
-                .insert(joint, constant(deg, clip.num_frames));
-            clip
-        };
-        let stand_ins = vec![
-            stand_in("mvl0", "mvl1", PELVIS, PELVIS_TURN_DEG),
-            stand_in("mvr0", "mvr1", PELVIS, -PELVIS_TURN_DEG),
-            stand_in("mvl1", "mvl1", SPINE, -SPINE_COUNTER_TWIST_DEG),
-            stand_in("mvr1", "mvr1", SPINE, SPINE_COUNTER_TWIST_DEG),
-        ];
-
-        let run = |locked: bool, middle: &[PoseState]| {
-            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
-            let mut battle = stand_ins.clone();
-            battle.extend(
-                actor
-                    .battle_clips
-                    .iter()
-                    .filter(|c| {
-                        !matches!(c.id.as_str().as_str(), "mvl0" | "mvr0" | "mvl1" | "mvr1")
-                    })
-                    .cloned(),
-            );
-            actor.battle_clips = Arc::new(battle);
-            let mut script: Vec<PoseState> = Vec::new();
-            // Engaging plays the weapon draw first, which owns the pose until it ends; the side step starts after it.
-            script.extend(std::iter::repeat_n(PoseState::Idle, ENGAGE_SETTLE_FRAMES));
-            script.extend(std::iter::repeat_n(PoseState::StrafeLeft, STRAFE_FRAMES));
-            script.extend_from_slice(middle);
-            script.extend(std::iter::repeat_n(PoseState::StrafeRight, STRAFE_FRAMES));
-            let mut rows = Vec::new();
-            for st in script {
-                actor.inputs = inputs_for_pose(st, true);
-                actor.locked_on = locked && actor.inputs.moving;
-                advance_engage(
-                    &mut actor.engage,
-                    true,
-                    &actor.routines,
-                    &actor.rejected_routines,
-                    &actor.battle_clips,
-                    &actor.animations,
-                    1.0,
-                );
-                // Engaged, retail's status gate holds the look-at itself off (crate::look_at_gates::look_at_allowed).
-                advance_actor_pose(
-                    &mut actor,
-                    1.0,
-                    crate::look_at_gates::LookState::Suppressed,
-                    None,
-                    None,
-                    false,
-                    None,
-                );
-                let pose = actor.world_pose();
-                // `steered` records whether the front-arc spine merge was live this frame: a blend with no
-                // override is the clip's own rotation, which is what let the torso settle off the aim.
-                let steered = upper.steered_spine(&actor.coordinator);
-                rows.push((
-                    st,
-                    yaw_of(pose, upper.chest),
-                    yaw_of(pose, neck),
-                    yaw_of(pose, foot),
-                    yaw_of(pose, pelvis),
-                    steered.len(),
-                ));
-            }
-            rows
-        };
-
-        let changeover = ENGAGE_SETTLE_FRAMES + STRAFE_FRAMES;
-        let left_settled = changeover - SETTLED_FRAMES..changeover;
-        for (label, middle) in [
-            ("direct", &[][..]),
-            ("gap", &[PoseState::Idle, PoseState::Idle][..]),
-        ] {
-            let free = run(false, middle);
-            let held = run(true, middle);
-            println!(
-                "--- changeover {label} (torso record +/-{chest_limit_deg:.1} deg, neck record +/-{head_limit_deg:.1} deg): frame state | chest free | chest locked | neck locked | foot | hips locked | spine merges"
-            );
-            let shown = free.iter().zip(held.iter()).enumerate();
-            for (i, (free_row, held_row)) in shown.skip(changeover - SETTLED_FRAMES) {
-                println!(
-                    "{i:>3} {:<7} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>7.1} | {:>2}",
-                    held_row.0.label(),
-                    free_row.1,
-                    held_row.1,
-                    held_row.2,
-                    held_row.3,
-                    held_row.4,
-                    held_row.5
-                );
-            }
-
-            if label == "direct" {
-                assert!(
-                    free.iter().any(|row| row.1.abs() > 90.0),
-                    "unlocked, the stand-ins must reproduce the torso swinging through the back"
-                );
-            }
-            assert!(
-                free.iter().all(|row| row.3.abs() < 90.0),
-                "{label}: the legs come through the front on their own"
-            );
-            assert!(
-                held.iter().all(|row| row.1.abs() < 90.0),
-                "{label}: locked, the chest must never pass the back"
-            );
-            // The front-arc merge has to be live while the two side-step clips crossfade; if no spine joint is
-            // overridden across the whole window, nothing steered and the pair blended however the clips wrote it.
-            let merged_live = held
-                [changeover..(changeover + LOCOMOTION_XFADE_IN as usize).min(held.len())]
-                .iter()
-                .any(|row| row.5 > 0);
-            assert!(
-                merged_live,
-                "{label}: no spine merge was overridden across the {LOCOMOTION_XFADE_IN}-frame crossfade"
-            );
-            // Locked and side-stepping, the torso turns toward the aim to exactly as far as its own authored
-            // chest record reaches from where the hips point at that moment, and holds there: every settled frame,
-            // plus every frame of a direct changeover (the steer runs at full weight through it), must satisfy
-            // deviation == clamp(need, +/- record). It may not be pinned onto the aim past the record - that is
-            // what read as breaking its back - nor left wandering further off.
-            const DEV_SLACK_DEG: f32 = 3.0;
-            let wrap180 = |deg: f32| (deg + 180.0).rem_euclid(360.0) - 180.0;
-            let right_settled = held.len() - SETTLED_FRAMES..held.len();
-            let strict_frames: Vec<usize> = if label == "direct" {
-                (left_settled.start..held.len()).collect()
-            } else {
-                left_settled.clone().chain(right_settled).collect()
-            };
-            for &i in &strict_frames {
-                let (chest, neck, hips) = (held[i].1, held[i].2, held[i].4);
-                let deviation = wrap180(chest - hips);
-                let need = wrap180(0.0 - hips);
-                assert!(
-                    (deviation - need.clamp(-chest_limit_deg, chest_limit_deg)).abs() <= DEV_SLACK_DEG,
-                    "{label} frame {i}: chest sits {deviation:.1} deg from hips at {hips:.1}, aim wants {} but the record caps it at +/-{chest_limit_deg:.1} (merge live: {})",
-                    need,
-                    held[i].5 > 0,
-                );
-                // The head keeps its own turn on top, inside its own authored neck record.
-                assert!(
-                    (neck - chest).abs() <= head_limit_deg + 2.0,
-                    "{label} frame {i}: neck at {neck:.1} deg against a {chest:.1} deg chest, past the {head_limit_deg:.1} deg neck record",
-                );
-            }
-            // The torso turn is rooted above the hips, so nothing that drives stepping may change between locked
-            // and unlocked. Exact equality, not a band: the hip and foot matrices never see the steer.
-            for i in 0..held.len() {
-                assert_eq!(
-                    held[i].4, free[i].4,
-                    "{label} frame {i}: locking on moved the hips"
-                );
-                assert_eq!(
-                    held[i].3, free[i].3,
-                    "{label} frame {i}: locking on moved the foot"
-                );
-            }
-        }
     }
 
     /// Strafing engaged must not shrink the upper body. Two mechanisms, both measured on shipped Hume clips:
@@ -7761,7 +7531,7 @@ mod pose_resolution_tests {
         }
 
         let mut best: Vec<f32> = Vec::new();
-        let mut saw_strafe_clip = false;
+        let mut saw_keyed_clip = false;
         for (i, (st, eng)) in script.iter().enumerate() {
             actor.inputs = inputs_for_pose(*st, *eng);
             advance_engage(
@@ -7783,15 +7553,20 @@ mod pose_resolution_tests {
                 None,
             );
 
-            // These are the clips that key `hum_` joint 89; without one of them on screen this script proves
-            // nothing about the collapse.
+            // Coverage guard: these are the clips that key `hum_` joint 89 (ffxi-dat/src/skel_anim.rs
+            // records idl1/wlk1/mvl1/mvr1 as the ones authored with the zero scale channel that caused
+            // the collapse). Directional travel stopped naming mvl?/mvr? once the retail census showed
+            // those fourccs unreachable (actor_state::movement_animation), so the guard takes any clip of
+            // the family that still exercises the same joint - and fails loudly if none of them ran.
             if actor.coordinator.animations.iter().flatten().any(|a| {
                 a.current_animation.as_ref().is_some_and(|c| {
                     let id = c.animation.id.as_str();
-                    id.starts_with("mvl") || id.starts_with("mvr")
+                    ["idl", "wlk", "mvl", "mvr"]
+                        .iter()
+                        .any(|p| id.starts_with(p))
                 })
             }) {
-                saw_strafe_clip = true;
+                saw_keyed_clip = true;
             }
 
             let scales: Vec<f32> = actor
@@ -7818,8 +7593,8 @@ mod pose_resolution_tests {
             }
         }
         assert!(
-            saw_strafe_clip,
-            "no mvl?/mvr? clip ever ran, so this script never exercised the bone that collapsed"
+            saw_keyed_clip,
+            "no idl?/wlk?/mvl?/mvr? clip ever ran, so this script never exercised the bone that collapsed"
         );
     }
 

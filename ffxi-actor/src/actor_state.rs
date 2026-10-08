@@ -368,13 +368,24 @@ pub fn movement_animation(inputs: &ActorAnimInputs) -> Vec<DatId> {
         return animation_mode_variant(DatId::from_str("wlk?"), inputs.walking_mode, "lk");
     }
 
+    // Lateral and rearward travel never names a directional clip. Retail's only writer of the
+    // `mvl `/`mvb `/`mvr ` fourccs sits in its motion-name chooser (`FFXiMain.dll retail-2026-09`
+    // RVA 0xC8DAF/0xC8DB7/0xC8DBF) and every one of those stores is gated on the actor's target
+    // state word `+0x598` being 2, 3 or 4. The whole-`.text` write census gives seven writers:
+    // the constructor zeroes it (RVA 0xA8A4D with ebx zeroed at 0xA89FD), three stores propagate a
+    // 0 sentinel (RVA 0xA65B3/0xA6C05/0xA7319), one stores the literal 1 (RVA 0xA7F23), and two
+    // store the bracket classifier's return (RVA 0xA6EE4→0xA6EE9, RVA 0xA7EF1→0xA7EF9) which can
+    // only answer 0 or 1 in this build (movement.md/target_track.md T15: its 2/3/4 exits are gated
+    // on the FPU overflow flag). So no actor - local player or remote - ever reaches those fourccs,
+    // and travel sideways or backwards runs the ordinary gait. Directional *speed* scaling still
+    // reads `Direction` (kuluu-5s84); only the clip choice stops honouring it.
     match movement_direction(inputs.forward_vel, inputs.strafe_vel) {
-        Direction::None | Direction::Forward => {
+        Direction::None | Direction::Forward | Direction::Left | Direction::Right => {
             animation_mode_variant(DatId::from_str("run?"), inputs.running_mode, "un")
         }
-        Direction::Left => vec![DatId::from_str("mvl?")],
-        Direction::Right => vec![DatId::from_str("mvr?")],
-        Direction::Backward => vec![DatId::from_str("mvb?")],
+        Direction::Backward => {
+            animation_mode_variant(DatId::from_str("run?"), inputs.running_mode, "un")
+        }
     }
 }
 
@@ -665,26 +676,29 @@ mod tests {
         let none = ActorAnimInputs::default();
         assert_eq!(idstr(movement_animation(&none)[0]), "run?");
 
+        // Sideways and rearward travel runs the ordinary gait (see `movement_animation`: retail's
+        // directional fourccs are unreachable, RVA 0xC8DAF/0xC8DB7/0xC8DBF gated on a state word
+        // that only ever holds 0/1).
         let left = ActorAnimInputs {
             forward_vel: -0.5,
             strafe_vel: -1.0,
             ..Default::default()
         };
-        assert_eq!(idstr(movement_animation(&left)[0]), "mvl?");
+        assert_eq!(idstr(movement_animation(&left)[0]), "run?");
 
         let right = ActorAnimInputs {
             forward_vel: 0.0,
             strafe_vel: 1.0,
             ..Default::default()
         };
-        assert_eq!(idstr(movement_animation(&right)[0]), "mvr?");
+        assert_eq!(idstr(movement_animation(&right)[0]), "run?");
 
         let back = ActorAnimInputs {
             forward_vel: -1.0,
             strafe_vel: 0.0,
             ..Default::default()
         };
-        assert_eq!(idstr(movement_animation(&back)[0]), "mvb?");
+        assert_eq!(idstr(movement_animation(&back)[0]), "run?");
     }
 
     #[test]

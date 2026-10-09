@@ -142,6 +142,12 @@ pub struct ChaseCamera {
     /// Set on zone-in: the player teleported, so the next chase update places
     /// the eye directly behind them instead of smoothing across zones.
     pub snap_to_anchor: bool,
+
+    /// Yaw a Q/E turn has given the camera that it has yet to swing through:
+    /// the chase update pays it round the player at the lock-release catch,
+    /// so the camera trails the turn a little and settles once the keys come
+    /// up. A lock, a zone snap or a manual camera turn drops it.
+    pub turn_owed: f32,
 }
 
 impl ChaseCamera {
@@ -224,6 +230,7 @@ impl Default for ChaseCamera {
             smoothing: 0.18,
             synced_initial: false,
             snap_to_anchor: false,
+            turn_owed: 0.0,
         }
     }
 }

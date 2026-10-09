@@ -94,17 +94,21 @@ fn continuous_yaw(yaw: f32, next: f32) -> f32 {
         - std::f32::consts::PI)
 }
 
-/// One step of the released camera's turn home: a wide gap turns at the
+/// One step of the catch closing `gap` radians of turn: a wide gap turns at the
 /// constant max rate, the exponential settles in inside the arrival gap.
-pub(crate) fn lock_turn(chase_yaw: f32, want: f32, dt: f32) -> f32 {
-    let gap = continuous_yaw(chase_yaw, want) - chase_yaw;
+fn catch_step(gap: f32, dt: f32) -> f32 {
     if gap.abs() > super::input::LOCK_CAM_ARRIVAL_GAP_RAD {
         let step = super::input::LOCK_CAM_MAX_TURN_RAD_PER_SEC * dt;
-        chase_yaw + gap.signum() * step.min(gap.abs())
+        gap.signum() * step.min(gap.abs())
     } else {
         let alpha = 1.0 - (-LOCK_TURN_RATE * dt).exp();
-        chase_yaw + gap * alpha
+        gap * alpha
     }
+}
+
+/// One step of the released camera's turn home ([`catch_step`]).
+pub(crate) fn lock_turn(chase_yaw: f32, want: f32, dt: f32) -> f32 {
+    chase_yaw + catch_step(continuous_yaw(chase_yaw, want) - chase_yaw, dt)
 }
 
 /// Where the camera's focus and eye sit in the world, bevy xz, carried frame
@@ -214,6 +218,9 @@ const INWARD_LERP: f32 = 0.45;
 /// The released view counts as back on the chase rig once both offsets are this short.
 const HANDOFF_SETTLED_YALMS: f32 = 1e-3;
 
+/// A Q/E turn the camera owes lands outright once the catch leaves less than this of it.
+const TURN_OWED_SETTLED_RAD: f32 = 1e-3;
+
 /// The single chase-camera authority: a leash with slack at both ends, the
 /// camera spring that decides how fast the eye reaches the leash's goal, the
 /// locked-on camera, and the wall pull-in against the zone MZB BVH, with one
@@ -241,8 +248,10 @@ const HANDOFF_SETTLED_YALMS: f32 = 1e-3;
 /// consumer at FFXiMain.dll retail-2026-09 RVA 0x1F14D.. through applier
 /// 0x1EBB0). The yaw
 /// is the direction from the focus to the eye; with the spring off, a frame
-/// where something else wrote chase.yaw (the mouse, the yaw keys, Q/E, a stair
-/// warp) swings the eye around the focus to that yaw at once.
+/// where something else wrote chase.yaw (the mouse, the yaw keys, a stair
+/// warp) swings the eye around the focus to that yaw at once. A Q/E turn
+/// is paid separately (ChaseCamera::turn_owed): the rig swings round the
+/// player after it at the lock-release catch, with the spring on or off.
 ///
 /// Locked on, retail's locked camera renders the view instead
 /// ([`super::locked_camera`]): it looks at the point midway between the player
@@ -309,6 +318,7 @@ pub fn resolve_camera(
     if !matches!(*mode, CameraMode::Chase) {
         *smoothed_effective = None;
         *leash_state = LeashState::default();
+        chase.turn_owed = 0.0;
         return;
     }
     // A running event holding the camera owns the operator camera (the
@@ -317,11 +327,13 @@ pub fn resolve_camera(
     if cutscene.camera_locked {
         *smoothed_effective = None;
         *leash_state = LeashState::default();
+        chase.turn_owed = 0.0;
         return;
     }
     let Ok((self_t, baked, self_children)) = self_q.single() else {
         *smoothed_effective = None;
         *leash_state = LeashState::default();
+        chase.turn_owed = 0.0;
         return;
     };
     let Ok(mut cam_t) = cam_q.single_mut() else {
@@ -359,9 +371,9 @@ pub fn resolve_camera(
         _ => pivot_xz,
     };
 
-    // Yaw something else wrote since last frame (Q/E, arrows, mouse): the eye
+    // Yaw something else wrote since last frame (arrows, mouse): the eye
     // branch below treats it as a manual turn, and it takes the camera back
-    // from the release ease.
+    // from the release ease and from a Q/E turn it still owes.
     let manual_yaw = leash_state
         .yaw
         .map(|ly| continuous_yaw(ly, chase.yaw) - ly)
@@ -455,6 +467,22 @@ pub fn resolve_camera(
     };
     let locked = locked_view.is_some();
 
+    // Q/E's turn: the rig swings round the player toward the yaw the keys gave it, at the release catch,
+    // so it trails a standing turn a little and settles once they come up. A release ease under way
+    // turns with it, so the camera still comes home behind the turned body.
+    if locked || chase.snap_to_anchor || manual_yaw != 0.0 {
+        chase.turn_owed = 0.0;
+    }
+    let qe_catch = match catch_step(chase.turn_owed, dt) {
+        step if (chase.turn_owed - step).abs() < TURN_OWED_SETTLED_RAD => chase.turn_owed,
+        step => step,
+    };
+    chase.turn_owed -= qe_catch;
+    chase.yaw += qe_catch;
+    if let Some(release) = leash_state.release_yaw.as_mut() {
+        *release += qe_catch;
+    }
+
     // Lock release: the rig is already where the free camera left it, on the
     // lock's last bearing, and springs back behind the body's heading in well
     // under a second.
@@ -475,7 +503,7 @@ pub fn resolve_camera(
     }
 
     // Eye: with the spring off, where it was, swung straight to the yaw when
-    // something else (arrows, mouse drag, Q/E, the release ease) wrote chase.yaw
+    // something else (arrows, mouse drag, Q/E's catch, the release ease) wrote chase.yaw
     // since last frame — a manual turn moves the whole rig, eye and focus
     // together, so nothing jumps. With the spring on retail replaces that
     // swing: each facing event latches its heading change as the reference
@@ -1478,6 +1506,130 @@ mod tests {
         assert!(
             elapsed < 1.0,
             "the ease home must close in well under a second, took {elapsed}s"
+        );
+    }
+
+    /// The input system's Q/E turn: yaw the camera now owes.
+    fn owe(app: &mut App, turn: f32) {
+        app.world_mut().resource_mut::<ChaseCamera>().turn_owed += turn;
+    }
+
+    /// A Q/E turn the camera owes swings the whole rig round the player, with the spring on or off: the
+    /// first frame pays only part of it, so the camera trails the body, and then it lands exactly on the
+    /// turn with the eye at its own distance and height.
+    #[test]
+    fn an_owed_rotate_turn_swings_the_rig_round_the_player_and_settles() {
+        const TURN: f32 = 0.3;
+        const SETTLE_FRAMES: usize = 60;
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let bearing =
+            |t: &Transform| (t.translation.x - player.x).atan2(t.translation.z - player.z);
+        let reach = |t: &Transform| {
+            Vec2::new(t.translation.x - player.x, t.translation.z - player.z).length()
+        };
+        for spring in [true, false] {
+            let (mut app, _me, cam) = lock_app(spring, player, Vec3::new(0.0, 1.0, 50.0));
+            for _ in 0..10 {
+                app.update();
+            }
+            let before = camera_of(&app, cam);
+            let yaw_before = app.world().resource::<ChaseCamera>().yaw;
+            owe(&mut app, TURN);
+            app.update();
+            let first = app.world().resource::<ChaseCamera>().yaw - yaw_before;
+            assert!(
+                first > 0.0 && first < TURN * 0.5,
+                "spring {spring}: the first frame pays {first} rad of {TURN}"
+            );
+            for _ in 0..SETTLE_FRAMES {
+                app.update();
+            }
+            let chase = app.world().resource::<ChaseCamera>();
+            assert_eq!(chase.turn_owed, 0.0, "spring {spring}: the turn is paid");
+            assert!(
+                (chase.yaw - yaw_before - TURN).abs() < 1e-4,
+                "spring {spring}: the camera turned {} rad, want {TURN}",
+                chase.yaw - yaw_before
+            );
+            let after = camera_of(&app, cam);
+            let swung = continuous_yaw(0.0, bearing(&after) - bearing(&before));
+            assert!(
+                (swung - TURN).abs() < 1e-4,
+                "spring {spring}: the eye swung {swung} rad round the player, want {TURN}"
+            );
+            assert!(
+                (reach(&after) - reach(&before)).abs() < 1e-4
+                    && (after.translation.y - before.translation.y).abs() < 1e-4,
+                "spring {spring}: the swing kept the eye's distance and height: {:?} -> {:?}",
+                before.translation,
+                after.translation
+            );
+        }
+    }
+
+    /// A lock, or the player turning the camera, takes it back from a Q/E turn it still owes.
+    #[test]
+    fn a_lock_or_a_manual_turn_drops_an_owed_rotate_turn() {
+        const TURN: f32 = 1.0;
+        const MANUAL_TURN: f32 = 0.1;
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, _cam) = lock_app(true, player, Vec3::new(5.0, 1.0, 2.0));
+        for _ in 0..10 {
+            app.update();
+        }
+        owe(&mut app, TURN);
+        lock(&mut app, true);
+        app.update();
+        assert_eq!(
+            app.world().resource::<ChaseCamera>().turn_owed,
+            0.0,
+            "a lock takes the camera"
+        );
+        lock(&mut app, false);
+        for _ in 0..120 {
+            app.update();
+        }
+        owe(&mut app, TURN);
+        app.world_mut().resource_mut::<ChaseCamera>().yaw += MANUAL_TURN;
+        app.update();
+        assert_eq!(
+            app.world().resource::<ChaseCamera>().turn_owed,
+            0.0,
+            "a manual turn takes the camera"
+        );
+    }
+
+    /// A Q/E turn while a released camera eases home turns its home with it, so the camera still comes
+    /// to rest behind the turned body.
+    #[test]
+    fn a_rotate_turn_during_the_release_ease_carries_its_home_round() {
+        const TURN: f32 = 0.3;
+        let player = Vec3::new(0.0, 1.0, 0.0);
+        let (mut app, _me, _cam) = lock_app(false, player, Vec3::new(5.0, 1.0, 0.0));
+        for _ in 0..10 {
+            app.update();
+        }
+        lock(&mut app, true);
+        for _ in 0..240 {
+            app.update();
+        }
+        lock(&mut app, false);
+        app.update();
+        owe(&mut app, TURN);
+        for _ in 0..120 {
+            app.update();
+        }
+        let home = yaw_for_heading(
+            app.world()
+                .resource::<SceneState>()
+                .snapshot
+                .self_pos
+                .heading,
+        ) + TURN;
+        let yaw = app.world().resource::<ChaseCamera>().yaw;
+        assert!(
+            (continuous_yaw(home, yaw) - home).abs() < 2e-3,
+            "the camera came to rest at {yaw} rad, want {home} rad"
         );
     }
 }

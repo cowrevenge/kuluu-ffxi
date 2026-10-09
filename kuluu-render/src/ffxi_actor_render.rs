@@ -1491,13 +1491,13 @@ pub struct FfxiRenderActor {
     head_look: HeadLook,
 
     /// Locked on and moving this frame (self only): the walker aimed the body at the target, so a side step's
-    /// look-at measures from the chest and its spine blends come round through the front ([`crate::locked_torso`]).
+    /// look-at measures from the chest ([`crate::locked_torso`]).
     pub locked_on: bool,
 
     /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
     locked_torso_weight: f32,
 
-    /// The chest axis and spine chain of this rig; `None` for a rig without chest, neck and feet references.
+    /// The chest joint and axis of this rig; `None` for a rig without a chest reference.
     upper_body: Option<crate::locked_torso::UpperBody>,
 
     /// What the motion-name chooser read last frame, and the straight frames a side-step flip still owes
@@ -3639,8 +3639,8 @@ fn advance_actor_pose(
         handle_overrides.extend(weapon_handles.iter().copied());
     }
 
-    // Keyed on the clip that is actually playing, not on the travel direction: the torso machinery below
-    // reconciles a side-step clip's authored spine turn with the walker's aim.
+    // Keyed on the clip that is actually playing, not on the travel direction: a side-step clip turns the chest off
+    // the walker's aim, and the look-at below measures from the chest while one plays.
     let side_step =
         matches!(selected_tier, PoseTier::Locomotion) && inputs.moving && !inputs.walking && {
             let selected = selected_id.as_str();
@@ -3652,22 +3652,12 @@ fn advance_actor_pose(
     } else {
         (*locked_torso_weight - torso_step).max(0.0)
     };
-    let steered_spine = match upper_body.as_ref() {
-        Some(upper) if *locked_on || *locked_torso_weight > 0.0 => upper.steered_spine(coordinator),
-        _ => Vec::new(),
-    };
 
     pose_world_mounted_into(
         world_pose,
         pose_work,
         skeleton,
-        |joint| {
-            steered_spine
-                .iter()
-                .find(|(steered, _)| *steered == joint)
-                .map(|(_, record)| *record)
-                .or_else(|| pose_scratch.get(joint))
-        },
+        |joint| pose_scratch.get(joint),
         RootTransform {
             facing_dir: *facing_dir,
             skew: 0.0,
@@ -3677,21 +3667,6 @@ fn advance_actor_pose(
         &handle_overrides,
         mount,
     );
-
-    // The look-at can only claw back its own neck/chest records, and the front-arc merge only lives inside a blend,
-    // so a side step *held* on one key ends with the chest further off the target than the hips carrying it. While
-    // that hold is ramped in, turn the upper body onto the walker's aim ([`crate::locked_torso::UpperBody::steer_onto_aim`]).
-    // The turn stops above the hips - every leg joint hangs off the hip itself, so stepping keeps exactly what its
-    // clip gives it.
-    if let Some(upper) = upper_body.as_ref() {
-        upper.steer_onto_aim(
-            skeleton,
-            &handle_overrides,
-            world_pose,
-            POSE_FORWARD,
-            *locked_torso_weight,
-        );
-    }
 
     // Retail removes the actor's yaw from a posed point and nothing else (`FFXiMain.dll retail-2026-09` RVA
     // 0xD5CDA..0xD5D25 — [`look_point_actor_local`]). kuluu composes `world_pose` with the entity transform, so that
@@ -3711,13 +3686,6 @@ fn advance_actor_pose(
     let aiming = look_state == crate::look_at_gates::LookState::Aiming
         && target_pose.is_some_and(|p| !look_at_release(p));
     head_look.advance(aiming, target_pose, elapsed_frames);
-    // While the torso steer owns the chest's turn onto the aim - bounded by that same chest record - the chest
-    // record must not bend it further past the limit; what is left over for look-at is its own neck turn.
-    let bend_records = if side_step && *locked_torso_weight > 0.0 {
-        HEAD_ONLY_BEND_RECORDS
-    } else {
-        look_at_gates::look_at_bend_records(*wire_animation)
-    };
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
     // reaches the bend untouched and every authored limit opens along this actor's own nose.
     // Locked and side-stepping, the bend measures from where the chest really faces, and it runs even under a status
@@ -3749,7 +3717,7 @@ fn advance_actor_pose(
             bend_point,
             bend_forward,
             head_look.weight.max(*locked_torso_weight),
-            bend_records,
+            look_at_gates::look_at_bend_records(*wire_animation),
             look_at_gates::look_at_anchor_y_drop(*wire_animation),
         );
     }
@@ -3936,10 +3904,6 @@ const HEAD_LOOK_CHASE_FRACTION: f32 = 1.0 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
 const HEAD_LOOK_NEUTRAL_AHEAD: f32 = 20.0;
-
-/// Records counting just the neck - retail's own one-record set uses this same count, and so does the pose while
-/// the torso steer owns the chest record.
-const HEAD_ONLY_BEND_RECORDS: usize = 1;
 
 /// The two-stage settle: [`HeadLook::weight`] opens the gate, [`HeadLook::chased_pose`] moves the
 /// point retail keeps at `model+0xB0..B8`.

@@ -76,14 +76,6 @@ impl HeldArc {
     }
 }
 
-pub fn interpolate_kf(a: &KeyFrameTransform, b: &KeyFrameTransform, t: f32) -> KeyFrameTransform {
-    KeyFrameTransform {
-        rotation: merge_layer_rotation(a.rotation, b.rotation, t),
-        translation: lerp3(a.translation, b.translation, t),
-        scale: lerp3(a.scale, b.scale, t),
-    }
-}
-
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     let inv = 1.0 - t;
     [
@@ -518,18 +510,6 @@ impl AnimationTransition {
 
     pub fn is_complete(&self) -> bool {
         self.progress >= self.transition_duration
-    }
-
-    /// What the merge sees for one bone this frame: the outgoing record, the incoming record and the weight.
-    pub fn sides(
-        &self,
-        joint: usize,
-    ) -> (Option<KeyFrameTransform>, Option<KeyFrameTransform>, f32) {
-        (
-            self.previous.get_joint_transform(joint),
-            self.next.get_joint_transform(joint),
-            self.progress / self.transition_duration,
-        )
     }
 
     /// One weighted sum of the outgoing and incoming bone records, with no third pose in it (`FFXiMain.dll

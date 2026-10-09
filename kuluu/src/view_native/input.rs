@@ -1609,9 +1609,9 @@ pub fn dispatch_movement_system(
 
     let moving = forward != 0 || strafe != 0 || steer_in_chase;
     let (intent_forward, intent_strafe) = pose_intent(locked, moving, forward, strafe);
-    // The lock flag travels with the intent: it is what arms the locked-torso law downstream
-    // (kuluu-render's `locked_on`), so a tick where this fell back to its default left the upper body
-    // on raw side-step clips through the crossfade.
+    // The lock flag travels with the intent: it is what arms the locked look-at downstream
+    // (kuluu-render's `locked_on`), so a tick where this fell back to its default left the head and
+    // chest off the target through the crossfade.
     **move_intent = kuluu_render::combat_stance::SelfMoveIntent {
         moving,
         forward: intent_forward,
@@ -3902,9 +3902,8 @@ mod tests {
     }
 
     /// The lock flag must reach animation selection through the pose intent: it alone arms the
-    /// locked-torso law in the pose pass (front-arc spine merges and the torso steer). Without it a
-    /// walker that squares correctly on the target still leaves its upper body on raw side-step clips
-    /// across an A→D changeover.
+    /// locked look-at in the pose pass, which keeps the head and chest on the target through a side
+    /// step. Without it a walker that squares correctly on the target still leaves them off it.
     #[test]
     fn locked_side_step_reports_the_lock_in_pose_intent() {
         use kuluu_render::combat_stance::SelfMoveIntent;
@@ -3922,7 +3921,7 @@ mod tests {
             );
             assert!(
                 intent.locked,
-                "a locked-on side step must arm the torso law in pose intent"
+                "a locked-on side step must arm the locked look-at in pose intent"
             );
         }
 
@@ -3934,7 +3933,7 @@ mod tests {
             drive.tick();
             assert!(
                 !drive.app.world().resource::<SelfMoveIntent>().locked,
-                "free motion never arms the torso law"
+                "free motion never arms the locked look-at"
             );
         }
     }

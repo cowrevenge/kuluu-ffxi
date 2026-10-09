@@ -7587,6 +7587,43 @@ mod pose_resolution_tests {
         );
     }
 
+    /// Travel back from the target, the locked S, plays the back step `mvb?`, walking or running, from
+    /// the run or from a stop. Stand-in clips with one keyed bone each: the clip choice is the subject,
+    /// not the pose.
+    #[test]
+    fn a_locked_back_step_plays_the_back_step_clip() {
+        let keyed = |id: &[u8; 4]| {
+            let mut clip = synth_anim(id, 8);
+            clip.key_frame_sets.insert(
+                0,
+                vec![ffxi_dat::skel_anim::KeyFrameTransform::default(); clip.num_frames],
+            );
+            clip
+        };
+        let clips = [b"idl0", b"run0", b"wlk0", b"mvb0"]
+            .into_iter()
+            .map(keyed)
+            .collect();
+        let mut actor = render_actor_with_skeleton_clips(1, clips);
+        let mut step = |state: PoseState, walking: bool| {
+            actor.inputs = ActorAnimInputs {
+                walking,
+                ..inputs_for_pose(state, false)
+            };
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            actor
+                .current_clip
+                .map(|(id, _)| id.as_str())
+                .unwrap_or_default()
+        };
+
+        use PoseState::{Back, Idle, Run};
+        assert_eq!(step(Run, false), "run?");
+        assert_eq!(step(Back, false), "mvb?", "from the run");
+        assert_eq!(step(Idle, false), "idl?");
+        assert_eq!(step(Back, true), "mvb?", "walking, from a stop");
+    }
+
     /// A side step taken from the run starts in step with it over the locomotion blend
     /// (ffxi_actor::animation::in_step_start), while the first clip a model plays starts on its first frame.
     /// Stand-in clips at one key per frame, so a clip's span is its frame count.

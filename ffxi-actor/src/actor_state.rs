@@ -374,27 +374,28 @@ pub fn movement_direction_toward(
 }
 
 /// The motion-name chooser: `travel` is the bucket after [`SideStepFlipLatch`], which is what the
-/// chooser reads. A run that buckets left or right of the line to the target names the side-step
-/// clips (`mvl?`/`mvr?`); forward travel keeps the gait. The local player's free motion never
-/// reaches those buckets (the walker turns the body onto its travel), so for it they show with the
-/// camera locked on, weapon out or not. Backward keeps the gait here for now; retail names its own
-/// back-step clip for that bucket.
+/// chooser reads. Travel back from the target names the back-step clip (`mvb?`), walking or
+/// running; a run that buckets left or right of the line to the target names the side-step clips
+/// (`mvl?`/`mvr?`); forward travel keeps the gait. The local player's free motion never reaches
+/// those buckets (the walker turns the body onto its travel), so for it they show with the camera
+/// locked on, weapon out or not.
 ///
 /// Provenance (`FFXiMain.dll retail-2026-09`): the chooser at RVA 0xC8D36..0xC8DC5 names `mvl `
 /// (RVA 0xC8DAF) for bucket 4, `mvb ` (RVA 0xC8DB7) for 3 and `mvr ` (RVA 0xC8DBF) for 2 whenever
 /// auto-run is on or free-run is off; the lock handlers clear free-run (RVA 0xC5440, RVA 0xC54C0)
-/// and the release sets it (RVA 0xC5410). The buckets come from the classifier at RVA 0xA80D0,
-/// whose 2/3/4 exits test x87 C0 (`fnstsw` then `and eax, 0x100`), the less-than flag, so all
-/// four exits are live.
+/// and the release sets it (RVA 0xC5410). Its other naming path (RVA 0xC8DC7) names `wlk ` for the
+/// side buckets but still jumps to the `mvb ` store for bucket 3 (RVA 0xC8DD3). The buckets come
+/// from the classifier at RVA 0xA80D0, whose 2/3/4 exits test x87 C0 (`fnstsw` then
+/// `and eax, 0x100`), the less-than flag, so all four exits are live.
 pub fn movement_animation(inputs: &ActorAnimInputs, travel: Direction) -> Vec<DatId> {
-    if inputs.walking {
-        return animation_mode_variant(DatId::from_str("wlk?"), inputs.walking_mode, "lk");
-    }
-
     match travel {
+        Direction::Backward => vec![DatId::from_str("mvb?")],
+        _ if inputs.walking => {
+            animation_mode_variant(DatId::from_str("wlk?"), inputs.walking_mode, "lk")
+        }
         Direction::Left => vec![DatId::from_str("mvl?")],
         Direction::Right => vec![DatId::from_str("mvr?")],
-        Direction::None | Direction::Forward | Direction::Backward => {
+        Direction::None | Direction::Forward => {
             animation_mode_variant(DatId::from_str("run?"), inputs.running_mode, "un")
         }
     }
@@ -737,19 +738,29 @@ mod tests {
             idstr(movement_animation(&inputs, inputs.travel())[0])
         };
 
-        let walk = ActorAnimInputs {
-            moving: true,
-            walking: true,
-            strafe_vel: -1.0,
-            ..Default::default()
+        let walk = |forward_vel: f32, strafe_vel: f32| {
+            let inputs = ActorAnimInputs {
+                moving: true,
+                walking: true,
+                forward_vel,
+                strafe_vel,
+                ..Default::default()
+            };
+            idstr(movement_animation(&inputs, inputs.travel())[0])
         };
-        assert_eq!(idstr(movement_animation(&walk, walk.travel())[0]), "wlk?");
+        assert_eq!(walk(0.0, -1.0), "wlk?");
+        assert_eq!(walk(1.0, 0.0), "wlk?");
+        assert_eq!(
+            walk(-1.0, 0.0),
+            "mvb?",
+            "a walking back step is the back step"
+        );
 
         assert_eq!(run(1.0, 0.0), "run?");
         assert_eq!(run(0.0, 0.0), "run?");
         assert_eq!(run(-0.5, -1.0), "mvl?");
         assert_eq!(run(0.0, 1.0), "mvr?");
-        assert_eq!(run(-1.0, 0.0), "run?", "backward keeps the gait");
+        assert_eq!(run(-1.0, 0.0), "mvb?", "backward names the back step");
     }
 
     #[test]

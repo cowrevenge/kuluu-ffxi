@@ -468,7 +468,7 @@ pub fn resolve_camera(
     let locked = locked_view.is_some();
 
     // Q/E's turn: the rig swings round the player toward the yaw the keys gave it, at the release catch,
-    // so it trails a standing turn a little and settles once they come up. A release ease under way
+    // so it trails the player's turn a little and settles once they come up. A release ease under way
     // turns with it, so the camera still comes home behind the turned body.
     if locked || chase.snap_to_anchor || manual_yaw != 0.0 {
         chase.turn_owed = 0.0;

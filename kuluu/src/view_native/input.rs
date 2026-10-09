@@ -957,11 +957,11 @@ fn snapshot_drives_movement(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool 
 /// the camera owing the same turn (ChaseCamera::turn_owed), so it follows
 /// round from wherever it sits; a player who cannot move (dead, resting or
 /// standing up, the weapon draw or sheathe, a knockback) turns the camera
-/// alone. Travelling they steer the player: the run holds its world direction
-/// and Q/E turn it, the camera untouched, so neither the camera frame nor a
-/// camera pan re-aims it while they are held. A/D carve and camera panning
-/// recompute the run direction against the live camera every frame; anything
-/// else holds the latch.
+/// alone. Travelling they steer the player and the camera owes the same turn,
+/// paired as it is standing: the run holds its world direction and Q/E turn
+/// it, so neither the camera frame nor a camera pan re-aims it while they are
+/// held. A/D carve and camera panning recompute the run direction against the
+/// live camera every frame; anything else holds the latch.
 ///
 /// The one speed variable (yalms/s) paces the horizontal step and every
 /// vertical move inside the step band (walk mode merges slower than run).
@@ -1638,8 +1638,8 @@ pub fn dispatch_movement_system(
     let mut turn_dy: f32 = 0.0;
     if steer_in_chase {
         // A pure W/S run keeps its latched run direction and a held Q/E turns
-        // it, the camera untouched; a held A/D or a deliberate camera pan
-        // re-aims the run in the live camera frame.
+        // it, the camera owing the same turn; a held A/D or a deliberate camera
+        // pan re-aims the run in the live camera frame.
         let camera_forward_h = heading_for_yaw(chase.yaw);
         let pf_sign = if pf > 0.0 { 1 } else { -1 };
         let latched = match locals.steer_latch {
@@ -1651,6 +1651,7 @@ pub fn dispatch_movement_system(
                 yaw_for_heading(camera_relative_motion_heading(camera_forward_h, pf, ps))
             }) + qe;
             locals.steer_latch = Some((pf_sign, yaw));
+            chase.turn_owed += qe;
             heading_for_yaw(yaw)
         } else if ps != 0.0 || camera_panning {
             camera_relative_motion_heading(camera_forward_h, pf, ps)
@@ -4128,8 +4129,8 @@ mod tests {
 
     /// A W/S run keeps going once it starts, and a held Q steers it: the run
     /// turns left by the key sweep every tick while every tick still travels a
-    /// full run step in the current heading direction, and the camera is left
-    /// where it is.
+    /// full run step in the current heading direction, and the camera owes the
+    /// same turn, paired with it.
     fn assert_steering_run(move_key: KeyCode) {
         let mut drive = MoveDrive::new();
         drive.press(move_key);
@@ -4163,12 +4164,13 @@ mod tests {
             "{move_key:?}+Q steered the run {body_turned} rad, want {} rad",
             orbit_radians()
         );
-        assert_eq!(
-            drive.camera_yaw(),
-            yaw_start,
-            "steering a run leaves the camera alone"
+        assert_eq!(drive.camera_yaw(), yaw_start);
+        assert!(
+            (drive.turn_owed() - orbit_radians()).abs() < 1e-4,
+            "{move_key:?}+Q left the camera owing {} rad, want {} rad",
+            drive.turn_owed(),
+            orbit_radians()
         );
-        assert_eq!(drive.turn_owed(), 0.0, "and owes it no turn");
     }
 
     #[test]
@@ -4307,7 +4309,7 @@ mod tests {
             "a held Q must keep the autorun running, not cancel it"
         );
         // `turning` is every Q-hold tick (both halves): the held Q steers the
-        // autorun by the key sweep and leaves the camera alone.
+        // autorun by the key sweep and the camera owes the same turn.
         let (end_turning, _) = *turning.last().expect("ticks");
         let body_turned = turned(start_heading, end_turning);
         assert!(
@@ -4316,6 +4318,7 @@ mod tests {
             orbit_radians()
         );
         assert_eq!(drive.camera_yaw(), yaw_start);
+        assert!((drive.turn_owed() - orbit_radians()).abs() < 1e-4);
         let (_, before_release) = *turning.last().expect("ticks");
         let (_, settled) = *after.last().expect("ticks");
         assert!(

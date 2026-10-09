@@ -8092,9 +8092,27 @@ mod tests {
             "the cast's pose must clear by the routine's authored end (lock {} frames, routine end frame {end_frame})",
             active_lock_frames(&lookup)
         );
+        // The action clip may hold its finished loop for a frame or two before retail's
+        // drop-uncovered rule sees it played out on a request (pose-pass) frame.
+        let mut idle = actor.is_pose_idle();
+        const RELEASE_TO_IDLE_FRAMES: u32 = 8;
+        let mut idle_frames = 0;
+        while !idle && idle_frames < RELEASE_TO_IDLE_FRAMES {
+            app.world_mut().resource_mut::<Time>().advance_by(step);
+            app.update();
+            idle = app
+                .world()
+                .entity(child)
+                .get::<crate::ffxi_actor_render::FfxiRenderActor>()
+                .unwrap()
+                .is_pose_idle();
+            idle_frames += 1;
+        }
         assert!(
-            actor.is_pose_idle(),
-            "the caster is idle by the routine's authored end"
+            idle,
+            "the caster reaches idle within {RELEASE_TO_IDLE_FRAMES} frames of the pose clearing — a \
+             finished one-shot left uncovered must be dropped on a later request frame, not only the \
+             selection-change frame (27807b2 drop rule; this regressed once)"
         );
 
         // CutsceneEnded: release whatever the routine still holds.

@@ -3384,6 +3384,21 @@ fn advance_actor_pose(
     // an unchanged gait does not reach this branch. There is no per-frame or per-update
     // re-registration path for an unchanged locomotion clip: coordinator.update below advances
     // the cursor monotonically instead.
+    // Retail's drop-uncovered rule rides every request, and retail requests continuously — a kuluu pose-pass
+    // frame is one too. Registration stays inside the selection-change gate below (re-registering an unchanged
+    // gait would restart its clip), but the release must be evaluated every frame: evaluating it only on the
+    // change frame gave a retiring actor exactly one drop chance, and if that fired before a body-slot one-shot
+    // had played out, the finished pose was kept forever. AnimationLock-pinned poses skip the pass — they hold
+    // their end frame until the lock lapses (buried/emerged dig), as retail's mechanism does.
+    let mut new_mask = 0u8;
+    for clip in &matches {
+        let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
+        new_mask |= 1 << slot;
+    }
+    if !matches.is_empty() && !animation_locked {
+        release_uncovered_slots(coordinator, registered_slots, new_mask);
+    }
+
     if !matches.is_empty() && *current_clip != Some((selected_id, use_battle)) {
         if let Some(resolved) = matches.iter().find(|a| is_usable_clip(a)) {
             clip_ok(actor.world_id, &selected_id, resolved, actor.movement_type);
@@ -3412,14 +3427,6 @@ fn advance_actor_pose(
         for pending in pending_idle_registrations.iter_mut() {
             *pending = None;
         }
-
-        let mut new_mask = 0u8;
-        for clip in &matches {
-            let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
-            new_mask |= 1 << slot;
-        }
-
-        release_uncovered_slots(coordinator, registered_slots, new_mask);
 
         if is_idle {
             for &clip in &matches {

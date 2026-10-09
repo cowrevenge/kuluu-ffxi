@@ -1094,20 +1094,36 @@ pub fn load_pc(
     let weapon_handles =
         weapon_handle_overrides(&skeleton, main_weapon_cib.as_ref(), sub_weapon_cib.as_ref());
     let mut battle_dirs = Vec::new();
+    let mut waist_battle_clips = Vec::new();
     if let Some(base) = combat_stance::motion_dat_for_race(dll.as_deref(), race) {
         // One weapon pairing block per actor in the body's motion pool: `battle base + main-hand byte`, or
-        // that pairing's dual-wield main-hand base. The off-hand and waist/cloth blocks from the same tables
-        // stay out: they author a new member of an existing id family (files 9928/9929/9930 carry `btl2` next
-        // to at02/at12/at22 where race-wide 9672 carries btl0/btl1) and pose_clip_matches registers every clip
-        // matching a parameterized id as a simultaneous layer, so merging them poses cloth motion over the
-        // battle stance and moves an equipped mesh off its hand. They need their own masked slot (gaps §G.12).
-        let stance_block = combat_stance::BattleMotionBlocks::resolve(
+        // that pairing's dual-wield main-hand base. The off-hand block stays out: it authors a new member of an
+        // existing id family and pose_clip_matches registers every clip matching a parameterized id as a
+        // simultaneous layer, so merging it would pose a second stance and move an equipped mesh off its hand.
+        let blocks = combat_stance::BattleMotionBlocks::resolve(
             dll.as_deref(),
             race,
             weapon_anim_type,
             sub_weapon_anim_type,
-        )
-        .map(|blocks| blocks.main);
+        );
+        let stance_block = blocks.map(|blocks| blocks.main);
+        // The waist/cloth block's waist-slot clips join it: the battle stance's own `btl2` and the swings'
+        // waist parts (files 9928/9929/9930 carry `btl2` next to at02/at12/at22 where race-wide 9672 carries
+        // btl0/btl1 only). Only waist-slot clips are taken, and the lowest slot keying a bone owns it, so they
+        // move only what the legs and upper body leave unkeyed: never the stance or the weapon hand.
+        if weapon_anim_type != CIB_MOTION_INDEX_NONE {
+            if let Some(dir) = blocks
+                .and_then(|blocks| blocks.skirt_battle)
+                .and_then(|file| read_dat(root, file))
+                .map(ResourceDir::from_bytes)
+            {
+                waist_battle_clips = dir
+                    .collect_animations()
+                    .into_iter()
+                    .filter(|clip| clip.id.final_digit() == Some(WAIST_SLOT))
+                    .collect();
+            }
+        }
         if weapon_anim_type != 0 && weapon_anim_type != CIB_MOTION_INDEX_NONE {
             let file = stance_block.unwrap_or(base + u32::from(weapon_anim_type));
             if let Some(dir) = read_dat(root, file)
@@ -1138,6 +1154,17 @@ pub fn load_pc(
 
     let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &battle_dirs);
+    let battle_clips = if waist_battle_clips.is_empty() {
+        battle_clips
+    } else {
+        let mut clips = battle_clips.as_ref().clone();
+        for clip in waist_battle_clips {
+            if !clips.iter().any(|known| known.id == clip.id) {
+                clips.push(clip);
+            }
+        }
+        Arc::new(clips)
+    };
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
         skel_meshes,
@@ -2833,6 +2860,9 @@ fn self_pose_follows_reactor(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool
 /// The body's motion slots, legs, upper body and waist: retail's request walks these three when it drops
 /// played-out one-shots (`FFXiMain.dll retail-2026-09` RVA 0xCDD10).
 const BODY_SLOTS: usize = 3;
+
+/// The waist's motion slot: the last digit of a waist clip's id (`run2`, `btl2`).
+const WAIST_SLOT: u32 = 2;
 
 /// Let go of the slots a new selection names no clip for. A body slot left out keeps playing what it had:
 /// retail adds the requested motion only to the slots that motion has a clip in (`FFXiMain.dll retail-2026-09`
@@ -8223,12 +8253,12 @@ mod pose_resolution_tests {
                 "model {} anchor {}: {} loaded clips key it, pinned {}",
                 pinned.model_id, pinned.anchor, keyed, pinned.writers
             );
-            // One member set per id family: pose_clip_matches registers every clip matching a parameterized id
-            // as a simultaneous layer, so a second `btl?` poses two stances at once.
-            assert_eq!(
-                stance,
-                vec!["btl0".to_string(), "btl1".to_string()],
-                "model {} resolved a second battle-stance family member",
+            // One member per slot: pose_clip_matches registers every clip matching a parameterized id as a
+            // simultaneous layer, so a second `btl?` on a slot poses two stances at once. The waist block's
+            // `btl2` is the waist slot's own member.
+            assert!(
+                stance == ["btl0", "btl1"] || stance == ["btl0", "btl1", "btl2"],
+                "model {} resolved a second battle-stance family member: {stance:?}",
                 pinned.model_id
             );
         }

@@ -2838,17 +2838,21 @@ const BODY_SLOTS: usize = 3;
 /// retail adds the requested motion only to the slots that motion has a clip in (`FFXiMain.dll retail-2026-09`
 /// RVA 0xCD540), and drops a played-out one-shot from a body slot left out only when the request covers slot 0
 /// (RVA 0xCDCC5..0xCDD13, the one-shot test at RVA 0x1B360 taken before the request). A side step that ships
-/// only an upper-body clip therefore leaves the legs and skirt on their own motion instead of on bind. Slots
-/// past the body are cleared.
+/// only an upper-body clip therefore leaves the legs and skirt on their own motion instead of on bind. An idle
+/// selection lets go of every slot it leaves out: the battle idle ships no waist clip, so a waist kept from the
+/// run would go on running under an actor standing still. Slots past the body are cleared.
 fn release_uncovered_slots(
     coordinator: &mut SkeletonAnimationCoordinator,
     registered_slots: &mut [Option<(DatId, bool)>; 8],
     new_mask: u8,
+    idle: bool,
 ) {
     let covers = |slot: usize| new_mask & (1 << slot) != 0;
     for (slot, reg) in registered_slots.iter_mut().enumerate() {
         let release = !covers(slot)
-            && (slot >= BODY_SLOTS || (covers(0) && coordinator.holds_finished_one_shot(slot)));
+            && (idle
+                || slot >= BODY_SLOTS
+                || (covers(0) && coordinator.holds_finished_one_shot(slot)));
         if release {
             coordinator.clear_slot(slot);
             *reg = None;
@@ -3412,7 +3416,7 @@ fn advance_actor_pose(
         new_mask |= 1 << slot;
     }
     if !matches.is_empty() && !animation_locked {
-        release_uncovered_slots(coordinator, registered_slots, new_mask);
+        release_uncovered_slots(coordinator, registered_slots, new_mask, is_idle);
     }
 
     if !matches.is_empty() && *current_clip != Some((selected_id, use_battle)) {
@@ -7728,13 +7732,56 @@ mod pose_resolution_tests {
         );
         assert!(slot_keeps_clip(&coordinator, &registered, 1, book(1)));
 
-        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 1);
+        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 1, false);
         assert!(coordinator.animations[2].is_some() && registered[2].is_some());
         assert!(coordinator.animations[4].is_none() && registered[4].is_none());
 
-        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 0);
+        release_uncovered_slots(&mut coordinator, &mut registered, 1 << 0, false);
         assert!(coordinator.animations[2].is_none() && registered[2].is_none());
         assert!(coordinator.animations[1].is_some() && registered[1].is_some());
+    }
+
+    /// Stopping into a battle idle that ships legs and upper body but no waist clip: the waist the run left
+    /// looping is let go, where a travelling selection that leaves it out keeps it running.
+    #[test]
+    fn an_idle_selection_lets_go_of_the_body_slots_it_leaves_out() {
+        const WAIST: usize = 2;
+        let looping = LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        };
+        let running = || {
+            let mut coordinator = SkeletonAnimationCoordinator::new();
+            let mut registered = [None; 8];
+            for id in [b"run0", b"run1", b"run2"] {
+                let clip = synth_anim(id, 2);
+                registered[clip.id.final_digit().unwrap() as usize] = Some((clip.id, false));
+                coordinator.register_animation(clip, looping, None, |_| true);
+            }
+            (coordinator, registered)
+        };
+        let legs_and_upper_body = (1 << 0) | (1 << 1);
+
+        let (mut coordinator, mut registered) = running();
+        release_uncovered_slots(
+            &mut coordinator,
+            &mut registered,
+            legs_and_upper_body,
+            false,
+        );
+        assert!(
+            coordinator.animations[WAIST].is_some() && registered[WAIST].is_some(),
+            "travelling, the waist keeps running"
+        );
+
+        let (mut coordinator, mut registered) = running();
+        release_uncovered_slots(&mut coordinator, &mut registered, legs_and_upper_body, true);
+        assert!(
+            coordinator.animations[WAIST].is_none() && registered[WAIST].is_none(),
+            "standing in the battle idle, the waist stops"
+        );
+        assert!(coordinator.animations[0].is_some() && coordinator.animations[1].is_some());
     }
 
     /// Strafing engaged must not shrink the upper body. Two mechanisms, both measured on shipped Hume clips:

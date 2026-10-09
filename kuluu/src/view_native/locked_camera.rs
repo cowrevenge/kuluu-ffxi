@@ -1,9 +1,9 @@
 //! Retail's following camera while it is locked on to a target. The camera looks at the point midway
 //! between the player and the target, and its eye is held inside a cone around the line from the target
-//! through the player. A lock opens with the eye on the cone's edge, off to whichever side of the line it
-//! sits nearer; after that, inside the cone the eye stays exactly where it is and at the edge the line
-//! drags it round, so a side step around the target carries the player a few yalms before the camera
-//! follows. The eye's distance from the look point is held in a band set by that same player-target span
+//! through the player. A lock opens by swinging the eye out to the cone's edge, off to whichever side of
+//! the line it sits nearer, a quarter of what is left per tick; after that, inside the cone the eye stays
+//! exactly where it is and at the edge the line drags it round, so a side step around the target carries
+//! the player a few yalms before the camera follows. The eye's distance from the look point is held in a band set by that same player-target span
 //! and the view's focal length.
 //!
 //! Provenance (`FFXiMain.dll retail-2026-09`): the following-camera update at RVA 0x1EE60 takes this
@@ -65,6 +65,9 @@ const DIST_FLOOR: f32 = kuluu_render::mouse::CAMERA_AIM_MIN_DISTANCE_YALMS;
 /// The wall test casts from this far above the player's feet toward the eye (`FFXiMain.dll retail-2026-09`
 /// `.rdata` RVA 0x32961C subtracted at RVA 0x20691).
 pub const WALL_RAY_RISE: f32 = 1.0;
+
+/// The swing a lock's opening still owes, in radians, under which it lands the eye on the cone's edge.
+const OPENING_SETTLED_RAD: f32 = 1e-3;
 
 /// A wall between the player and the eye pulls the eye in to this short of the hit (`FFXiMain.dll
 /// retail-2026-09` `.rdata` RVA 0x32A39C read at RVA 0x2072F).
@@ -239,18 +242,50 @@ impl LockedCamera {
         }
     }
 
-    /// The first frame of a lock: one [`Self::step`], then an eye that step left inside the cone swung
-    /// round the look point on the ground, at its height and distance, out to the cone's edge on the side
-    /// of the line it sits nearer ([`turn_to_edge`]). Retail opens every lock off to that side (seen in
-    /// play): the hold alone lands a camera that starts off the line on the edge, and this lands one that
-    /// starts behind the player there too, so both settle the same once the look point reaches the
-    /// midpoint.
-    pub fn open(self, world: &LockedWorld, dt: f32) -> Self {
-        let stepped = self.step(world, dt);
+    /// One frame of a lock's opening: [`Self::step`]'s look point and distance band, with the eye swung
+    /// toward the cone's edge on the side of the line it sits nearer by the share of what is left that the
+    /// look point closes ([`follow_share`]). From outside the cone it comes in along the hold's arc, which
+    /// retail's hold covers in one frame; from inside it turns out round the look point on the ground at
+    /// its own height and distance ([`turn_to_edge`]). Retail opens every lock off to that side (seen in
+    /// play), so a camera that starts behind the player reaches the edge the way one that starts off the
+    /// line does, and both settle the same once the look point reaches the midpoint. Returns the camera
+    /// and whether the eye has reached the edge, after which [`Self::step`] holds it there.
+    pub fn open(self, world: &LockedWorld, dt: f32) -> (Self, bool) {
+        let share = follow_share(dt);
+        let goal = world.player_point.lerp(world.target_point, LOOK_BLEND);
+        let look = self.look + (goal - self.look) * share;
+
+        let offset = self.eye - look;
+        let distance = offset.length().max(DIST_FLOOR);
+        let along = offset / distance;
         let (toward, frame) = world.cone();
-        match turn_to_edge(stepped.eye - stepped.look, toward, frame.half_angle) {
-            Some(turn) => stepped.orbit(turn),
-            None => stepped,
+        let push = along * (distance.clamp(frame.near, frame.far) - distance) * share;
+        let at = |held: Vec3| Self {
+            eye: look + held + push,
+            look,
+        };
+        if toward.length_squared() <= f32::EPSILON {
+            return (at(offset), true);
+        }
+
+        let excess = along.angle_between(toward) - frame.half_angle;
+        if excess > OPENING_SETTLED_RAD {
+            let on_edge = hold_in_cone(offset, toward, frame.half_angle);
+            if on_edge == offset {
+                return (at(offset), true);
+            }
+            let eased = hold_in_cone(offset, toward, frame.half_angle + excess * (1.0 - share));
+            return (at(eased), share >= 1.0);
+        }
+        if excess > 0.0 {
+            return (at(hold_in_cone(offset, toward, frame.half_angle)), true);
+        }
+        match turn_to_edge(offset, toward, frame.half_angle) {
+            Some(turn) if turn.abs() > OPENING_SETTLED_RAD => {
+                (at(offset).orbit(turn * share), share >= 1.0)
+            }
+            Some(turn) => (at(offset).orbit(turn), true),
+            None => (at(offset), true),
         }
     }
 }
@@ -283,6 +318,19 @@ mod tests {
         (cam.eye - cam.look)
             .normalize()
             .angle_between((w.player - w.target).normalize())
+    }
+
+    /// Runs a lock's opening on from `cam` until it lands the eye on the cone's edge.
+    fn open_until_landed(mut cam: LockedCamera, w: &LockedWorld) -> LockedCamera {
+        const FRAMES_MAX: usize = 120;
+        for _ in 0..FRAMES_MAX {
+            let (next, landed) = cam.open(w, FRAME_30);
+            cam = next;
+            if landed {
+                return cam;
+            }
+        }
+        panic!("the opening never landed: {cam:?}");
     }
 
     /// The numbers the lock reads at the default 350 focal, worked by hand from the provenance constants:
@@ -348,9 +396,9 @@ mod tests {
         assert_eq!(hold_in_cone(Vec3::X, Vec3::ZERO, half), Vec3::X);
     }
 
-    /// Locking on to a target off to the player's side with the camera behind the player: the first frame
-    /// swings the eye only to the cone's edge on the side it was already on, so the view opens off to that
-    /// side of the target line instead of squarely behind the player.
+    /// Locking on to a target off to the player's side with the camera behind the player: the opening
+    /// swings the eye part of the way each frame, and only to the cone's edge on the side it was already
+    /// on, so the view opens off to that side of the target line instead of squarely behind the player.
     #[test]
     fn a_lock_begins_on_the_cameras_own_side_of_the_line() {
         let player = Vec3::ZERO;
@@ -365,10 +413,17 @@ mod tests {
             eye: free_look + back,
             look: free_look,
         };
-        let cam = begun.open(&w, FRAME_30);
+        let (first, landed) = begun.open(&w, FRAME_30);
+        assert!(
+            !landed && angle_off_line(&first, &w) > band.half_angle + 0.1,
+            "the first frame swings only part of the way in: {} vs {}",
+            angle_off_line(&first, &w).to_degrees(),
+            band.half_angle.to_degrees()
+        );
+        let cam = open_until_landed(first, &w);
         assert!(
             (angle_off_line(&cam, &w) - band.half_angle).abs() < 1e-3,
-            "first frame lands on the cone's edge: {} vs {}",
+            "the opening lands on the cone's edge: {} vs {}",
             angle_off_line(&cam, &w).to_degrees(),
             band.half_angle.to_degrees()
         );
@@ -441,22 +496,29 @@ mod tests {
                 eye: free_look + from.normalize() * ChaseCamera::DIST_MAX,
                 look: free_look,
             };
-            let first = begun.open(&w, FRAME_30);
-            let mut cam = first;
+            let (first, _) = begun.open(&w, FRAME_30);
+            let opened = open_until_landed(first, &w);
+            let mut cam = opened;
             for _ in 0..240 {
                 cam = cam.step(&w, FRAME_30);
             }
-            (first, cam)
+            (first, opened, cam)
         };
-        let (first, from_behind) = settle(Vec3::new(0.0, 0.15, 1.0));
+        let (first, opened, from_behind) = settle(Vec3::new(0.0, 0.15, 1.0));
         assert!(
-            (angle_off_line(&first, &w) - half).abs() < 1e-3,
-            "the first locked frame opens on the cone's edge: {} vs {} deg",
+            angle_off_line(&first, &w) < half - 0.05 && first.eye.x > 0.0,
+            "the first locked frame starts out toward the edge on the player's right: {} vs {} deg, {first:?}",
             angle_off_line(&first, &w).to_degrees(),
             half.to_degrees()
         );
-        assert!(first.eye.x > 1.0, "to the player's right: {first:?}");
-        let (_, from_the_side) = settle(Vec3::new(1.0, 0.15, 0.0));
+        assert!(
+            (angle_off_line(&opened, &w) - half).abs() < 1e-3,
+            "the opening lands on the cone's edge: {} vs {} deg",
+            angle_off_line(&opened, &w).to_degrees(),
+            half.to_degrees()
+        );
+        assert!(opened.eye.x > 1.0, "to the player's right: {opened:?}");
+        let (_, _, from_the_side) = settle(Vec3::new(1.0, 0.15, 0.0));
         let behind = angle_off_line(&from_behind, &w);
         let side = angle_off_line(&from_the_side, &w);
         assert!(
@@ -466,6 +528,35 @@ mod tests {
             side.to_degrees()
         );
         assert!(from_behind.eye.x > 1.0 && from_the_side.eye.x > 1.0);
+    }
+
+    /// The opening swing closes a quarter of what is left per tick, from outside the cone and from inside
+    /// it alike, with the look point already at the midpoint and the eye inside the band so that nothing
+    /// else moves it.
+    #[test]
+    fn a_lock_opening_swings_a_quarter_of_the_way_per_tick() {
+        let w = world(Vec3::ZERO, Vec3::new(0.0, 0.0, -5.0));
+        let band = lock_frame(5.0, default_focal());
+        let look = w.player_point.lerp(w.target_point, LOOK_BLEND);
+        let off_line = |angle: f32| LockedCamera {
+            eye: look + Vec3::new(angle.sin(), 0.0, angle.cos()) * (band.near + band.far) * 0.5,
+            look,
+        };
+        let from_edge = |cam: &LockedCamera| (angle_off_line(cam, &w) - band.half_angle).abs();
+        for start in [band.half_angle * 3.0, band.half_angle * 0.2] {
+            let begun = off_line(start);
+            let (cam, landed) = begun.open(&w, 1.0 / RETAIL_MOVE_TICKS_PER_SEC);
+            assert!(!landed, "{} deg is not on the edge yet", start.to_degrees());
+            assert!(
+                (from_edge(&cam) - from_edge(&begun) * (1.0 - FOLLOW_PER_TICK)).abs() < 1e-4,
+                "from {} deg one tick leaves {} deg of {} deg to swing",
+                start.to_degrees(),
+                from_edge(&cam).to_degrees(),
+                from_edge(&begun).to_degrees()
+            );
+            assert_eq!(cam.look, look);
+            assert!((cam.distance() - begun.distance()).abs() < 1e-4);
+        }
     }
 
     /// A side step round the target with the eye centred behind the player: while the line swings inside

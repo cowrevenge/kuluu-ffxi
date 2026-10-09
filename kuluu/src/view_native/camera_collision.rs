@@ -130,11 +130,20 @@ pub struct LeashState {
     release_yaw: Option<f32>,
     /// Retail's locked camera ([`super::locked_camera`]) and the target it is locked on, while a lock
     /// holds.
-    locked: Option<(u32, LockedCamera)>,
+    locked: Option<Lock>,
     /// The locked target and the height of its camera point, read once per lock as retail does.
     target_rise: Option<(u32, f32)>,
     /// How far the rendered view still sits from the chase rig's after a lock released.
     handoff: Option<Handoff>,
+}
+
+/// A lock in play: the target, the locked camera, and whether the lock's opening
+/// ([`LockedCamera::open`]) is still swinging the eye out to the cone's edge.
+#[derive(Clone, Copy)]
+struct Lock {
+    target: u32,
+    view: LockedCamera,
+    opening: bool,
 }
 
 /// The rendered eye and look point minus the chase rig's. Retail runs one camera, so its free camera
@@ -238,9 +247,10 @@ const HANDOFF_SETTLED_YALMS: f32 = 1e-3;
 /// Locked on, retail's locked camera renders the view instead
 /// ([`super::locked_camera`]): it looks at the point midway between the player
 /// and the target and holds the eye inside a cone round the line from the
-/// target through the player. The lock opens with the eye on the cone's edge,
-/// off to whichever side of the line it sat nearer, and a side step carries the
-/// player a few yalms before the camera follows. The mouse and the pad stick
+/// target through the player. The lock opens by swinging the eye out to the
+/// cone's edge, off to whichever side of the line it sat nearer, a quarter of
+/// the way per tick, and a side step carries the player a few yalms before the
+/// camera follows. The mouse and the pad stick
 /// still turn and tilt that eye inside the cone. The chase rig runs on underneath on the
 /// locked view's bearing, its eye carried on the boom at its own distance and
 /// pitch, so the lock never changes the free camera. On release the view eases
@@ -381,7 +391,7 @@ pub fn resolve_camera(
             // A lock begins from the camera as it stands: the eye where it rendered, the look point where
             // it looked. A new target opens the lock again from wherever the last one left the camera.
             let (held, opening) = match leash_state.locked {
-                Some((id, view)) => (view, id != target_we.id),
+                Some(lock) => (lock.view, lock.opening || lock.target != target_we.id),
                 None => (
                     LockedCamera {
                         eye: cam_t.translation,
@@ -408,10 +418,11 @@ pub fn resolve_camera(
                 (chase.pitch - last_pitch) / tilt_rate * CAMERA_EYE_RISE_YALMS_PER_SEC
             };
             let turned = held.orbit(orbit).lift(rise);
-            let mut view = if opening {
-                turned.open(&world, dt)
+            let (mut view, opening) = if opening {
+                let (view, landed) = turned.open(&world, dt);
+                (view, !landed)
             } else {
-                turned.step(&world, dt)
+                (turned.step(&world, dt), false)
             };
             // Retail's wall test runs from just above the player's feet to the eye and keeps the eye
             // short of a hit (`FFXiMain.dll retail-2026-09` RVA 0x20651..0x20765).
@@ -431,7 +442,14 @@ pub fn resolve_camera(
             if ground.length_squared() > f32::EPSILON {
                 chase.yaw = continuous_yaw(chase.yaw, ground.x.atan2(ground.y));
             }
-            Some((target_we.id, view, target_rise))
+            Some((
+                Lock {
+                    target: target_we.id,
+                    view,
+                    opening,
+                },
+                target_rise,
+            ))
         }
         None => None,
     };
@@ -546,15 +564,15 @@ pub fn resolve_camera(
 
     let handoff = match (leash_state.was_locked, leash_state.locked) {
         _ if locked || chase.snap_to_anchor => None,
-        (true, Some((_, last))) => Handoff {
-            eye: last.eye - rig_eye,
-            look: last.look - pivot,
+        (true, Some(last)) => Handoff {
+            eye: last.view.eye - rig_eye,
+            look: last.view.look - pivot,
         }
         .eased(dt),
         _ => leash_state.handoff.and_then(|h| h.eased(dt)),
     };
     let (view_eye, view_look) = match (locked_view, handoff) {
-        (Some((_, view, _)), _) => (view.eye, view.look),
+        (Some((lock, _)), _) => (lock.view.eye, lock.view.look),
         (None, Some(h)) => (rig_eye + h.eye, pivot + h.look),
         (None, None) => (rig_eye, pivot),
     };
@@ -573,8 +591,8 @@ pub fn resolve_camera(
         } else {
             leash_state.release_yaw
         },
-        locked: locked_view.map(|(id, view, _)| (id, view)),
-        target_rise: locked_view.and_then(|(id, _, rise)| rise.map(|rise| (id, rise))),
+        locked: locked_view.map(|(lock, _)| lock),
+        target_rise: locked_view.and_then(|(lock, rise)| rise.map(|rise| (lock.target, rise))),
         handoff,
     };
     chase.snap_to_anchor = false;
@@ -1150,10 +1168,14 @@ mod tests {
         (-*cam.forward()).angle_between(player - target)
     }
 
-    /// H with the target off to the side of the free camera: the eye is pulled only as far as the
-    /// lock cone's edge, on the side it was already on, so the view opens off to that side instead
-    /// of squarely behind the player, and stays off the line once the look point has slid to the
-    /// midpoint. Without a model the camera points fall back to the anchor height on both actors.
+    /// Frames (at [`TEST_FRAME`]) a lock's opening is given to land the eye on the cone's edge.
+    const OPENING_FRAMES: usize = 60;
+
+    /// H with the target off to the side of the free camera: the eye swings in part of the way each
+    /// frame and only as far as the lock cone's edge, on the side it was already on, so the view opens
+    /// off to that side instead of squarely behind the player, and stays off the line once the look
+    /// point has slid to the midpoint. Without a model the camera points fall back to the anchor height
+    /// on both actors.
     #[test]
     fn a_lock_opens_off_the_line_on_the_cameras_own_side() {
         let player = Vec3::new(0.0, 1.0, 0.0);
@@ -1176,13 +1198,25 @@ mod tests {
             kuluu_render::graphics_settings::RETAIL_DEFAULT_FOCAL_LENGTH,
         )
         .half_angle;
+        let start = angle_off_the_line(&camera_of(&app, cam), player, target);
         lock(&mut app, true);
         app.update();
-        let first = camera_of(&app, cam);
+        let first = angle_off_the_line(&camera_of(&app, cam), player, target);
         assert!(
-            (angle_off_the_line(&first, player, target) - half).abs() < 0.03,
-            "the first locked frame pulls the eye to the cone edge: {} deg against {} deg",
-            angle_off_the_line(&first, player, target).to_degrees(),
+            first > half + 0.1 && first < start - 0.1,
+            "the first locked frame swings the eye only part of the way in: {} deg from {} deg against {} deg",
+            first.to_degrees(),
+            start.to_degrees(),
+            half.to_degrees()
+        );
+        for _ in 0..OPENING_FRAMES {
+            app.update();
+        }
+        let opened = angle_off_the_line(&camera_of(&app, cam), player, target);
+        assert!(
+            (opened - half).abs() < 0.03,
+            "the opening lands the eye on the cone edge: {} deg against {} deg",
+            opened.to_degrees(),
             half.to_degrees()
         );
         for _ in 0..240 {
@@ -1204,8 +1238,8 @@ mod tests {
 
     /// H with the free camera square behind the player and the target straight ahead, a hair to the
     /// camera's left, so the eye sits a hair left of the line through the player: the lock does not
-    /// stay behind the player, it opens on the cone's edge on that nearer left side and settles there,
-    /// well off the line.
+    /// stay behind the player, it swings out part of the way each frame to the cone's edge on that
+    /// nearer left side and settles there, well off the line.
     #[test]
     fn a_lock_from_behind_opens_off_to_the_nearer_side() {
         let player = Vec3::new(0.0, 1.0, 0.0);
@@ -1231,17 +1265,27 @@ mod tests {
         lock(&mut app, true);
         app.update();
         let first = camera_of(&app, cam);
-        assert!(
-            (angle_off_the_line(&first, player, target) - half).abs() < 0.03,
-            "the first locked frame opens on the cone edge: {} deg against {} deg",
-            angle_off_the_line(&first, player, target).to_degrees(),
-            half.to_degrees()
-        );
         let left_of_player = |at: Vec3| (at - player).dot(left);
         assert!(
-            left_of_player(first.translation) > 1.0,
-            "off to the left, the side the camera sat nearer: {:?}",
+            angle_off_the_line(&first, player, target) < half - 0.03
+                && left_of_player(first.translation) > 0.0,
+            "the first locked frame starts out toward the edge on the left, the side the camera sat \
+             nearer: {} deg against {} deg, {:?}",
+            angle_off_the_line(&first, player, target).to_degrees(),
+            half.to_degrees(),
             first.translation
+        );
+        for _ in 0..OPENING_FRAMES {
+            app.update();
+        }
+        let opened = camera_of(&app, cam);
+        assert!(
+            (angle_off_the_line(&opened, player, target) - half).abs() < 0.03
+                && left_of_player(opened.translation) > 1.0,
+            "the opening lands the eye on the cone edge on the left: {} deg against {} deg, {:?}",
+            angle_off_the_line(&opened, player, target).to_degrees(),
+            half.to_degrees(),
+            opened.translation
         );
         for _ in 0..240 {
             app.update();

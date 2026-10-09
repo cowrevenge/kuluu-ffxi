@@ -48,6 +48,7 @@ pub mod input_mode;
 pub mod keybinds;
 pub mod lens_flare;
 pub mod lock_on;
+pub mod locked_torso;
 /// Retail's gates on an actor's look-at pass and the `0x89` LockLookAt tasks that suppress it.
 pub mod look_at_gates;
 #[cfg(not(target_arch = "wasm32"))]

@@ -3474,6 +3474,7 @@ fn advance_actor_pose(
                 transition_in_time: action.map_or(LOCOMOTION_XFADE_IN, |a| a.transition_in),
                 transition_out_time: action.map_or(LOCOMOTION_XFADE_OUT, |a| a.transition_out),
                 in_step: action.is_none() && matches!(selected_tier, PoseTier::Locomotion),
+                turn_toward_target: *locked_on,
                 ..Default::default()
             };
             // Fishing resolution clips (fsh2..fsh6) have no ActionPlayback, so without an

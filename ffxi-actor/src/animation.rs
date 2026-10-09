@@ -40,11 +40,20 @@ fn on_side_of(q: [f32; 4], reference: [f32; 4]) -> [f32; 4] {
     }
 }
 
+/// `|w|` of `q` normalised: 1 at the bind orientation, 0 half a turn away. A sum with no length counts as furthest.
+fn nearness_to_bind(q: [f32; 4]) -> f32 {
+    let length = dot4(q, q).sqrt();
+    if length <= f32::EPSILON {
+        0.0
+    } else {
+        q[3].abs() / length
+    }
+}
+
 /// The two quaternions one bone's crossfade merges, each kept on the side of the sphere it stood on the tick
 /// before. Retail picks the short way round afresh on every sample ([`merge_layer_rotation`]); where the
 /// two poses sit about a half turn apart while both move, that pick changes sides between ticks and the bone
-/// jumps across mid-blend. Holding the pair keeps the blend on the way it set out, which is retail's own way
-/// wherever its pick holds still.
+/// jumps across mid-blend. Holding the pair keeps the blend on the way it set out ([`HeldArc::set_out`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct HeldArc {
     outgoing: [f32; 4],
@@ -52,11 +61,29 @@ struct HeldArc {
 }
 
 impl HeldArc {
-    /// The way a merge sets out: the incoming pose the short way round from the outgoing one.
-    fn set_out(outgoing: [f32; 4], incoming: [f32; 4]) -> Self {
+    /// The way a merge sets out: the incoming pose the short way round from the outgoing one. Turning toward
+    /// the target ([`TransitionParams::turn_toward_target`]), where the short way swings the bone round behind
+    /// both poses it blends between, it sets out the opposite way instead, which comes round through the bind
+    /// orientation: the body faces its target, so a left/right side-step crossfade turns through the target.
+    fn set_out(outgoing: [f32; 4], incoming: [f32; 4], toward_target: bool) -> Self {
+        let short = on_side_of(incoming, outgoing);
+        if !toward_target {
+            return Self {
+                outgoing,
+                incoming: short,
+            };
+        }
+        let opposite = short.map(|c| -c);
+        let short_mid = nearness_to_bind(weighted_sum(outgoing, short, 0.5));
+        let behind_both = short_mid < nearness_to_bind(outgoing).min(nearness_to_bind(incoming));
+        let through_bind = nearness_to_bind(weighted_sum(outgoing, opposite, 0.5)) > short_mid;
         Self {
             outgoing,
-            incoming: on_side_of(incoming, outgoing),
+            incoming: if behind_both && through_bind {
+                opposite
+            } else {
+                short
+            },
         }
     }
 
@@ -226,6 +253,9 @@ pub struct TransitionParams {
     /// first frame. A request without parameters of its own takes this from the clip it replaces, the way
     /// it takes that clip's out time.
     pub in_step: bool,
+    /// The crossfade turns toward the target rather than the short way round where the short way would swing
+    /// a bone behind both poses ([`HeldArc::set_out`]): set while the actor is locked on, facing its target.
+    pub turn_toward_target: bool,
 }
 
 impl Default for TransitionParams {
@@ -235,6 +265,7 @@ impl Default for TransitionParams {
             transition_out_time: 7.5,
             eager_transition_out: false,
             in_step: false,
+            turn_toward_target: false,
         }
     }
 }
@@ -456,6 +487,8 @@ pub struct AnimationTransition {
     progress: f32,
     /// Per bone, the pair this merge stood on at its last tick; empty until its first.
     arcs: Vec<Option<HeldArc>>,
+    /// Whether a bone's merge sets out toward the target ([`TransitionParams::turn_toward_target`]).
+    toward_target: bool,
 }
 
 impl AnimationTransition {
@@ -463,6 +496,7 @@ impl AnimationTransition {
         previous: PreviousSide,
         next: SkeletonAnimationContext,
         transition_duration: f32,
+        toward_target: bool,
     ) -> Self {
         AnimationTransition {
             previous,
@@ -470,6 +504,7 @@ impl AnimationTransition {
             transition_duration,
             progress: 0.0,
             arcs: Vec::new(),
+            toward_target,
         }
     }
 
@@ -495,7 +530,12 @@ impl AnimationTransition {
                 continue;
             };
             let held = self.arcs.get(joint).copied().flatten();
-            let arc = arc_for(held, outgoing.rotation, incoming.rotation);
+            let arc = arc_for(
+                held,
+                outgoing.rotation,
+                incoming.rotation,
+                self.toward_target,
+            );
             if self.arcs.len() <= joint {
                 self.arcs.resize(joint + 1, None);
             }
@@ -528,7 +568,12 @@ impl AnimationTransition {
         ) {
             (Some(outgoing), Some(incoming)) => {
                 let held = self.arcs.get(joint).copied().flatten();
-                let arc = arc_for(held, outgoing.rotation, incoming.rotation);
+                let arc = arc_for(
+                    held,
+                    outgoing.rotation,
+                    incoming.rotation,
+                    self.toward_target,
+                );
                 Some(KeyFrameTransform {
                     rotation: arc.rotation(t),
                     translation: lerp3(outgoing.translation, incoming.translation, t),
@@ -541,10 +586,15 @@ impl AnimationTransition {
 }
 
 /// The pair a merge takes this tick: the one it held, kept continuous, or a fresh one.
-fn arc_for(held: Option<HeldArc>, outgoing: [f32; 4], incoming: [f32; 4]) -> HeldArc {
+fn arc_for(
+    held: Option<HeldArc>,
+    outgoing: [f32; 4],
+    incoming: [f32; 4],
+    toward_target: bool,
+) -> HeldArc {
     match held {
         Some(arc) => arc.held(outgoing, incoming),
-        None => HeldArc::set_out(outgoing, incoming),
+        None => HeldArc::set_out(outgoing, incoming, toward_target),
     }
 }
 
@@ -649,6 +699,7 @@ impl SkeletonAnimator {
                 previous,
                 fresh_copy(&ctx),
                 transition_duration,
+                transition_params.is_some_and(|tp| tp.turn_toward_target),
             ));
         }
 
@@ -1582,6 +1633,47 @@ mod tests {
         assert!(
             widest_tick < WIDEST_TICK_DEG,
             "the bone jumped {widest_tick} degrees in one tick"
+        );
+    }
+
+    /// A crossfade between poses turned past a right angle either side, a left side step to a right one, turns
+    /// through the target when it turns toward it: it sets out the opposite way to the short one, which swings the
+    /// bone round behind both. Any other crossfade keeps the short way.
+    #[test]
+    fn a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way() {
+        const BLEND: f32 = 8.0;
+        const FRONT_NEARNESS: f32 = 0.9;
+        const BACK_NEARNESS: f32 = 0.1;
+        let mid_blend = |toward_target: bool| {
+            let mut animator = SkeletonAnimator::new(0);
+            request(&mut animator, turned("mvl1", 100.0), None);
+            let tp = TransitionParams {
+                turn_toward_target: toward_target,
+                ..locomotion_blend(BLEND)
+            };
+            let looping = LoopParams {
+                loop_duration: None,
+                num_loops: None,
+                low_priority: false,
+            };
+            animator.set_next_animation(
+                SkeletonAnimationContext::new(turned("mvr1", -100.0), looping, Some(tp.clone())),
+                Some(&tp),
+            );
+            animator.update(BLEND / 2.0);
+            nearness_to_bind(animator.get_joint_transform(0).unwrap().rotation)
+        };
+        let toward = mid_blend(true);
+        assert!(
+            toward > FRONT_NEARNESS,
+            "turning toward the target, mid-crossfade sits {} deg off it",
+            (2.0 * toward.acos()).to_degrees()
+        );
+        let short = mid_blend(false);
+        assert!(
+            short < BACK_NEARNESS,
+            "any other crossfade keeps the short way round the back: {} deg",
+            (2.0 * short.acos()).to_degrees()
         );
     }
 

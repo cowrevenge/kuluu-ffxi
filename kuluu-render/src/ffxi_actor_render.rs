@@ -1525,8 +1525,13 @@ pub struct FfxiRenderActor {
     /// look-at measures from the chest ([`crate::locked_torso`]).
     pub locked_on: bool,
 
-    /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
+    /// How far that applies; it eases on and off by [`HEAD_LOOK_CHASE_FRACTION`] a tick, as the head look turns.
     locked_torso_weight: f32,
+
+    /// Where that look-at reads the chest as facing: it chases the posed chest by [`HEAD_LOOK_CHASE_FRACTION`] a
+    /// tick instead of taking it whole every frame, so the hold never snaps the side step's own chest swing onto
+    /// the target.
+    held_chest_facing: Vec3,
 
     /// The chest joint and axis of this rig; `None` for a rig without a chest reference.
     upper_body: Option<crate::locked_torso::UpperBody>,
@@ -2322,6 +2327,7 @@ pub fn make_render_actor(
         head_look: HeadLook::default(),
         locked_on: false,
         locked_torso_weight: 0.0,
+        held_chest_facing: POSE_FORWARD,
         upper_body: crate::locked_torso::UpperBody::of(&loaded.skeleton),
         side_step_latch: actor_state::SideStepFlipLatch::default(),
         wire_animation: ffxi_proto::decode::animation::NONE,
@@ -3191,6 +3197,7 @@ fn advance_actor_pose(
         head_look,
         locked_on,
         locked_torso_weight,
+        held_chest_facing,
         upper_body,
         side_step_latch,
         wire_animation,
@@ -3766,12 +3773,8 @@ fn advance_actor_pose(
             let selected = selected_id.as_str();
             selected.starts_with("mvl") || selected.starts_with("mvr")
         };
-    let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
-    *locked_torso_weight = if *locked_on && side_step {
-        (*locked_torso_weight + torso_step).min(1.0)
-    } else {
-        (*locked_torso_weight - torso_step).max(0.0)
-    };
+    let hold_goal = if *locked_on && side_step { 1.0 } else { 0.0 };
+    *locked_torso_weight += (hold_goal - *locked_torso_weight) * HEAD_LOOK_CHASE_FRACTION;
 
     // The release edge: joints with a record this tick keep one; joints whose last writer retired
     // mid-playback ride theirs to rest over the gait handover window instead of dropping into bind in
@@ -3863,14 +3866,19 @@ fn advance_actor_pose(
     head_look.advance(aiming, target_pose, elapsed_frames);
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
     // reaches the bend untouched and every authored limit opens along this actor's own nose.
-    // Locked and side-stepping, the bend measures from where the chest really faces, and it runs even under a status
-    // that holds the look-at off: the walker keeps the target dead ahead of the root, so with nothing else aiming the
-    // point is that target at neck height.
+    // Locked and side-stepping, the bend measures from where the hold has chased the chest to, and it runs even under a
+    // status that holds the look-at off: the walker keeps the target dead ahead of the root, so with nothing else
+    // aiming the point is that target at neck height.
+    let chest_facing = upper_body
+        .as_ref()
+        .and_then(|upper| upper.chest_facing(world_pose));
+    if let Some(chest) = chest_facing {
+        *held_chest_facing =
+            crate::locked_torso::chase_facing(*held_chest_facing, chest, HEAD_LOOK_CHASE_FRACTION);
+    }
     let bend_forward = crate::locked_torso::bend_reference(
         POSE_FORWARD,
-        upper_body
-            .as_ref()
-            .and_then(|upper| upper.chest_facing(world_pose)),
+        chest_facing.map(|_| *held_chest_facing),
         *locked_torso_weight,
     );
     let bend_point = if head_look.weight > 0.0 {
@@ -4099,9 +4107,11 @@ const LOOK_RELEASE_FORWARD: f32 = -0.5;
 /// RVA 0x84B80 = `[actor+0x70] → [+0xE0]`, which defaults to **100** when there is no such object, so the arm
 /// reproduces the same 0.04 by default and kuluu has no producer for a different percentage.
 const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 0.04;
-/// The look point chases the target at 1/32 of what is left per tick (`FFXiMain.dll
-/// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71).
-const HEAD_LOOK_CHASE_FRACTION: f32 = 1.0 / 32.0;
+/// The look point chases the target by this share of what is left per tick. Retail chases 1/32 (`FFXiMain.dll
+/// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71); kuluu turns the head half again
+/// as fast, a playtest call that retail's share leaves the head trailing its target. The locked torso hold eases
+/// on the same share.
+const HEAD_LOOK_CHASE_FRACTION: f32 = 1.5 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
 const HEAD_LOOK_NEUTRAL_AHEAD: f32 = 20.0;
@@ -8594,13 +8604,10 @@ mod pose_resolution_tests {
         }
     }
 
-    /// Releasing a locked side step ramps the torso look weight down on the gait blend's clock, so
-    /// chest and legs settle on (nearly) the same tick — one shared ramp constant, pinned here
-    /// because their separate easing is exactly what desynced once.
+    /// The locked torso hold eases on and off by the head look's own chase share, so no tick takes the whole step
+    /// onto or off the target.
     #[test]
-    fn the_locked_torso_settles_on_the_gaits_blend_clock() {
-        const RELEASE_TICK_TOLERANCE: i32 = 1;
-
+    fn the_locked_torso_hold_eases_by_the_head_looks_chase_share() {
         let keyed = |id: &[u8; 4]| {
             let mut clip = synth_anim(id, 8);
             clip.key_frame_sets.insert(
@@ -8613,35 +8620,21 @@ mod pose_resolution_tests {
         let mut actor = render_actor_with_skeleton_clips(1, clips);
         actor.locked_on = true;
 
-        for _ in 0..(LOCOMOTION_XFADE_IN as u32 + 8) {
+        let mut eased = 0.0_f32;
+        for _ in 0..(LOCOMOTION_XFADE_IN as u32) {
             actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
+            eased += (1.0 - eased) * HEAD_LOOK_CHASE_FRACTION;
+            assert_eq!(actor.locked_torso_weight, eased, "the hold eases on");
         }
-        assert_eq!(actor.locked_torso_weight, 1.0, "saturated by the strafe");
 
-        // Still locked, forward: the side step ends by selection, starting both ramps together.
-        let mut torso_released = None;
-        let mut blend_settled = None;
-        for tick in 1..=(LOCOMOTION_XFADE_IN as i32 + 4) {
+        // Still locked, forward: the side step ends by selection and the hold eases back off.
+        for _ in 0..(LOCOMOTION_XFADE_IN as u32) {
             actor.inputs = inputs_for_pose(PoseState::Run, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
-            if torso_released.is_none() && actor.locked_torso_weight == 0.0 {
-                torso_released = Some(tick);
-            }
-            if blend_settled.is_none() && !actor.coordinator.is_transitioning() {
-                blend_settled = Some(tick);
-            }
+            eased += (0.0 - eased) * HEAD_LOOK_CHASE_FRACTION;
+            assert_eq!(actor.locked_torso_weight, eased, "the hold eases off");
         }
-        let (torso, gait) = match (torso_released, blend_settled) {
-            (Some(torso), Some(gait)) => (torso, gait),
-            _ => panic!(
-                "release never finished: torso {torso_released:?}, gait blend {blend_settled:?}"
-            ),
-        };
-        assert!(
-            (torso - gait).abs() <= RELEASE_TICK_TOLERANCE,
-            "the legs settled on tick {gait} but the chest kept easing to tick {torso}"
-        );
     }
 
     /// A side step that ships only an upper-body clip leaves the legs on the gait they were running. Retail adds

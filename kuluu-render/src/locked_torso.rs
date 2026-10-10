@@ -3,9 +3,9 @@
 //! The walker aims the body at the locked target on every moving tick (`kuluu/src/view_native/input.rs`, the
 //! `locked_bearing` re-aim), but the side-step clips turn the chest off that aim. The look-at measures from the
 //! root's forward, so a target the walker keeps dead ahead of the root reads as "straight on" and the bend does
-//! nothing while the chest and head face somewhere else. [`bend_reference`] hands the bend the chest's real facing
-//! instead, so the authored neck and chest records turn the head and shoulders back toward the target, each stopping
-//! at its own ellipse limit. The side-step clips themselves play as authored.
+//! nothing while the chest and head face somewhere else. [`bend_reference`] hands the bend the chest's facing instead,
+//! as the hold has chased it ([`chase_facing`]), so the authored neck and chest records turn the head and shoulders
+//! back toward the target, each stopping at its own ellipse limit. The side-step clips themselves play as authored.
 
 use bevy::math::{Mat4, Quat, Vec3};
 use ffxi_actor::skeleton_instance::{pose_world, RootTransform};
@@ -52,6 +52,12 @@ pub fn bend_reference(aim: Vec3, chest_facing: Option<Vec3>, weight: f32) -> Vec
         return aim;
     }
     Quat::from_rotation_y(signed_yaw(aim_ground, facing) * weight.min(1.0)) * aim
+}
+
+/// One tick of the hold catching up with the chest: `held` turned toward `chest` by `share` of the way, so a chest
+/// that swings is followed rather than matched on the frame it moves.
+pub fn chase_facing(held: Vec3, chest: Vec3, share: f32) -> Vec3 {
+    bend_reference(held, Some(chest), share)
 }
 
 /// The rotation about `+Y` that carries ground direction `from` onto `to`, in `(-PI, PI]`.

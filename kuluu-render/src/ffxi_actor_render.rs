@@ -17,7 +17,6 @@ use ffxi_actor::actor_state::{self, ActorAnimInputs, RestKind};
 use ffxi_actor::animation::{
     BonePoseScratch, LoopParams, SkeletonAnimationCoordinator, TransitionParams,
 };
-use ffxi_actor::look_bend::apply_look_bends;
 use ffxi_actor::skeleton_instance::{
     pose_world, pose_world_mounted_into, standard_joint_world_position, MountAttach, PoseScratch,
     RootTransform,
@@ -39,6 +38,7 @@ pub use crate::combat_stance::{infers_walk_gait, WALK_RUN_BOUNDARY};
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::scene::BakedActor;
 use crate::scheduler_runtime::main_dll_for_root;
+use crate::skeleton_authority::{Composition, Correction, Look, SkeletonAuthority};
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
     FfxiSkinSlot, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0,
@@ -1522,19 +1522,11 @@ pub struct FfxiRenderActor {
     head_look: HeadLook,
 
     /// Locked on and moving this frame (self only): the walker aimed the body at the target, so a side step's
-    /// look-at measures from the chest ([`crate::locked_torso`]).
+    /// look-at turns each record from the bone it carries ([`Correction::Held`]).
     pub locked_on: bool,
 
-    /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
-    locked_torso_weight: f32,
-
-    /// Where that look-at reads the chest as facing: it chases the posed chest by [`HEAD_LOOK_CHASE_FRACTION`] a
-    /// skeleton frame instead of taking it whole every frame, so the hold never snaps the side step's own chest
-    /// swing onto the target.
-    held_chest_facing: Vec3,
-
-    /// The chest joint and axis of this rig; `None` for a rig without a chest reference.
-    upper_body: Option<crate::locked_torso::UpperBody>,
+    /// The final say over this actor's bones each pose pass ([`crate::skeleton_authority`]).
+    skeleton_authority: SkeletonAuthority,
 
     /// What the motion-name chooser read last frame, and the straight frames a side-step flip still owes
     /// ([`actor_state::SideStepFlipLatch`]).
@@ -1573,13 +1565,6 @@ pub struct FfxiRenderActor {
     /// resource/SkeletonInstance.kt updateCurrentJointTransform). Kept on the actor only so the record
     /// buffer is not reallocated per frame.
     pose_scratch: BonePoseScratch,
-
-    /// Per joint, who wrote it at the last pose pass — and when a keyed joint loses its last live
-    /// writer mid-playback ([`BoneRelease::Released`]), its final record glides to rest instead of
-    /// vanishing into bind in one frame. Measured on Hume M: the second-layer locomotion clips cover
-    /// joints 38..47 but `idl2` keys only {38,40,42,43,44,47}, so a locked stop handed those away at
-    /// blend completion as a one-frame ~30 deg snap past the gait's own reach — the flicker at side-step end.
-    release_states: Vec<BoneRelease>,
 
     /// The `(handle joint, hand bone)` pairs this actor's equipped weapons resolve to; empty unless
     /// the model loaded with a weapon naming a handle. Applied while display-engaged - see
@@ -2326,9 +2311,7 @@ pub fn make_render_actor(
         action_clips: Vec::new(),
         head_look: HeadLook::default(),
         locked_on: false,
-        locked_torso_weight: 0.0,
-        held_chest_facing: POSE_FORWARD,
-        upper_body: crate::locked_torso::UpperBody::of(&loaded.skeleton),
+        skeleton_authority: SkeletonAuthority::of(&loaded.skeleton),
         side_step_latch: actor_state::SideStepFlipLatch::default(),
         wire_animation: ffxi_proto::decode::animation::NONE,
         anim_modes: ActorAnimModes::default(),
@@ -2339,7 +2322,6 @@ pub fn make_render_actor(
         world_pose: Vec::new(),
         pose_work: PoseScratch::default(),
         pose_scratch: BonePoseScratch::new(),
-        release_states: Vec::new(),
         weapon_handles: loaded.weapon_handles.clone(),
         point_light_selection: None,
     }
@@ -3096,9 +3078,9 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
     actor.wire_animation = ffxi_proto::decode::animation::NONE;
     actor.coordinator.clear();
     // A carried record belongs to the clip that wrote it, so a reset drops them with the layers: the
-    // next pose pass starts from the bind pose again. Released records are held poses too.
+    // next pose pass starts from the bind pose again. What the bones were still owed goes with them.
     actor.pose_scratch.clear();
-    actor.release_states.clear();
+    actor.skeleton_authority.reset();
     actor.current_clip = None;
     actor.registered_slots = [None; 8];
     actor.pending_idle_registrations = [None; 8];
@@ -3113,39 +3095,6 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
         name,
     );
     actor.death_phase = actor_state::DeathPhase::Unobserved;
-}
-
-/// Who wrote a joint at the last pose pass (see `FfxiRenderActor::release_states`).
-#[derive(Clone, Copy)]
-enum BoneRelease {
-    /// Sampled a record this frame — or the last frame, kept for the release edge.
-    Held(KeyFrameTransform),
-    /// Every live layer that keyed it is gone mid-playback: its held record rides to rest over
-    /// `LOCOMOTION_XFADE_IN`, so the handover settles like every other gait blend lands.
-    Released {
-        from: KeyFrameTransform,
-        elapsed_frames: f32,
-    },
-    /// Nothing has keyed it yet, or its glide landed: bind composes it until a record returns.
-    Rest,
-}
-
-/// A released record at fraction `t` of its settle. Animation records are multiplicative overlays on the
-/// bind data (`update_joint`, ffxi-actor/src/skeleton_instance.rs), so rest is the default record itself:
-/// rotation takes the short arc home, translation and scale give their offsets back.
-fn settled_toward_rest(from: &KeyFrameTransform, t: f32) -> KeyFrameTransform {
-    let [x, y, z, w] = from.rotation;
-    let held = Quat::from_xyzw(x, y, z, w);
-    if !held.is_finite() {
-        return KeyFrameTransform::default();
-    }
-    let glide_back = |values: &[f32; 3], rest: f32| values.map(|v| v + (rest - v) * t);
-    let home = held.slerp(Quat::IDENTITY, t).to_array();
-    KeyFrameTransform {
-        rotation: [home[0], home[1], home[2], home[3]],
-        translation: glide_back(&from.translation, 0.0),
-        scale: glide_back(&from.scale, 1.0),
-    }
 }
 
 /// Whether this request replaces one side step with its opposite, the only re-gait whose crossfade
@@ -3196,9 +3145,7 @@ fn advance_actor_pose(
         action_clips,
         head_look,
         locked_on,
-        locked_torso_weight,
-        held_chest_facing,
-        upper_body,
+        skeleton_authority,
         side_step_latch,
         wire_animation,
         last_clip,
@@ -3206,7 +3153,6 @@ fn advance_actor_pose(
         world_pose,
         pose_work,
         pose_scratch,
-        release_states,
         weapon_handles,
         rejected_clips,
         rejected_routines,
@@ -3774,89 +3720,34 @@ fn advance_actor_pose(
         handle_overrides.extend(weapon_handles.iter().copied());
     }
 
-    // Keyed on the clip that is actually playing, not on the travel direction: a side-step clip turns the chest off
-    // the walker's aim, and the look-at below measures from the chest while one plays.
+    // Keyed on the clip that is actually playing, not on the travel direction: a side-step clip (the DAT's own `mvl` /
+    // `mvr` motions) turns the body off the walker's aim, and locked on, the authority turns each look-at record from
+    // the bone it carries while one plays.
     let side_step =
         matches!(selected_tier, PoseTier::Locomotion) && inputs.moving && !inputs.walking && {
             let selected = selected_id.as_str();
             selected.starts_with("mvl") || selected.starts_with("mvr")
         };
-    let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
-    *locked_torso_weight = if *locked_on && side_step {
-        (*locked_torso_weight + torso_step).min(1.0)
-    } else {
-        (*locked_torso_weight - torso_step).max(0.0)
-    };
 
-    // The release edge: joints with a record this tick keep one; joints whose last writer retired
-    // mid-playback ride theirs to rest over the gait handover window instead of dropping into bind in
-    // one frame (`FfxiRenderActor::release_states` — the leg/hem pop at side-step end). Rest is where an
-    // unkeyed joint composes anyway; the glide only decides how fast it gets there.
-    if release_states.len() != skeleton.joints.len() {
-        release_states.resize(skeleton.joints.len(), BoneRelease::Rest);
-    }
-    let elapsed_frames_step = elapsed_frames.min(LOCOMOTION_XFADE_IN);
-    let mut settling: Vec<(usize, KeyFrameTransform)> = Vec::new();
-    for (bone, state) in release_states
-        .iter_mut()
-        .enumerate()
-        .take(skeleton.joints.len())
-    {
-        *state = match (pose_scratch.get(bone), *state) {
-            (Some(record), _) => BoneRelease::Held(record),
-            (None, BoneRelease::Rest) => BoneRelease::Rest,
-            (None, BoneRelease::Held(from)) => {
-                settling.push((bone, from));
-                BoneRelease::Released {
-                    from,
-                    elapsed_frames: 0.0,
-                }
-            }
-            (
-                None,
-                BoneRelease::Released {
-                    from,
-                    elapsed_frames,
-                },
-            ) => {
-                // Clamped so a long frame lands on rest exactly once rather than extrapolating.
-                let settled = (elapsed_frames + elapsed_frames_step).min(LOCOMOTION_XFADE_IN);
-                settling.push((
-                    bone,
-                    settled_toward_rest(&from, settled / LOCOMOTION_XFADE_IN),
-                ));
-                if settled >= LOCOMOTION_XFADE_IN {
-                    BoneRelease::Rest
-                } else {
-                    BoneRelease::Released {
-                        from,
-                        elapsed_frames: settled,
-                    }
-                }
-            }
-        };
-    }
-
-    pose_world_mounted_into(
-        world_pose,
-        pose_work,
-        skeleton,
-        |joint| {
-            pose_scratch.get(joint).or_else(|| {
-                settling
-                    .iter()
-                    .find(|(bone, _)| *bone == joint)
-                    .map(|(_, record)| *record)
-            })
-        },
-        RootTransform {
+    // The clips' pose, as the coordinator wrote it this frame.
+    let composition = Composition {
+        root: RootTransform {
             facing_dir: *facing_dir,
             skew: 0.0,
             slope_oriented: false,
             scale: Vec3::splat(*scale),
         },
-        &handle_overrides,
+        parent_overrides: &handle_overrides,
         mount,
+    };
+    pose_world_mounted_into(
+        world_pose,
+        pose_work,
+        skeleton,
+        |joint| pose_scratch.get(joint),
+        composition.root,
+        composition.parent_overrides,
+        composition.mount,
     );
 
     // Retail removes the actor's yaw from a posed point and nothing else (`FFXiMain.dll retail-2026-09` RVA
@@ -3877,23 +3768,9 @@ fn advance_actor_pose(
         && target_pose.is_some_and(|p| !look_at_release(p));
     head_look.advance(aiming, target_pose, elapsed_frames);
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
-    // reaches the bend untouched and every authored limit opens along this actor's own nose.
-    // Locked and side-stepping, the bend measures from where the hold has chased the chest to, and it runs even under a
-    // status that holds the look-at off: the walker keeps the target dead ahead of the root, so with nothing else
-    // aiming the point is that target at neck height.
-    let chest_facing = upper_body
-        .as_ref()
-        .and_then(|upper| upper.chest_facing(world_pose));
-    if let Some(chest) = chest_facing {
-        // The share compounds per skeleton frame, so the chase keeps one pace whatever the render rate.
-        let share = 1.0 - (1.0 - HEAD_LOOK_CHASE_FRACTION).powf(elapsed_frames);
-        *held_chest_facing = crate::locked_torso::chase_facing(*held_chest_facing, chest, share);
-    }
-    let bend_forward = crate::locked_torso::bend_reference(
-        POSE_FORWARD,
-        chest_facing.map(|_| *held_chest_facing),
-        *locked_torso_weight,
-    );
+    // reaches the bend untouched and every authored limit opens along this actor's own nose. Locked on a side step the
+    // correction runs even under a status that holds the look-at off: the walker keeps the target dead ahead of the
+    // root, so with nothing else aiming the point is that target at neck height.
     let bend_point = if head_look.weight > 0.0 {
         Some(head_look.chased_pose)
     } else {
@@ -3904,19 +3781,27 @@ fn advance_actor_pose(
         )
         .map(|neck| neck.origin + POSE_FORWARD * HEAD_LOOK_NEUTRAL_AHEAD)
     };
-
-    if let Some(bend_point) = bend_point {
-        apply_look_bends(
-            world_pose,
-            skeleton,
-            &handle_overrides,
-            bend_point,
-            bend_forward,
-            head_look.weight.max(*locked_torso_weight),
-            look_at_gates::look_at_bend_records(*wire_animation),
-            look_at_gates::look_at_anchor_y_drop(*wire_animation),
-        );
-    }
+    skeleton_authority.settle(
+        world_pose,
+        pose_work,
+        skeleton,
+        pose_scratch,
+        coordinator,
+        composition,
+        bend_point.map(|point| Look {
+            point,
+            weight: head_look.weight,
+            pace: HEAD_LOOK_WEIGHT_PER_FRAME,
+            records: look_at_gates::look_at_bend_records(*wire_animation),
+            anchor_drop: look_at_gates::look_at_anchor_y_drop(*wire_animation),
+        }),
+        if *locked_on && side_step {
+            Correction::Held
+        } else {
+            Correction::Free
+        },
+        elapsed_frames,
+    );
 
     if let Some(detail) = bone_log_detail() {
         bone_trace_frame(
@@ -3925,6 +3810,7 @@ fn advance_actor_pose(
             selected_id,
             registered_slots,
             coordinator,
+            skeleton_authority,
             skeleton,
             world_pose,
         );
@@ -4019,13 +3905,16 @@ fn bone_log_detail() -> Option<&'static [usize]> {
     spec.as_deref()
 }
 
-/// One frame's bone trace: positions of the whole skeleton, then axes/keying for the named joints.
+/// One frame's bone trace: positions of the whole skeleton, then axes/keying for the named joints with what the
+/// skeleton authority did to each (the law in force, the slot that wrote it, the correction's turn on it and what it
+/// is still owed).
 fn bone_trace_frame(
     detail: &[usize],
     world_id: u32,
     selected: DatId,
     registered_slots: &[Option<(DatId, bool)>; 8],
     coordinator: &SkeletonAnimationCoordinator,
+    authority: &SkeletonAuthority,
     skeleton: &ffxi_dat::skel::Skeleton,
     world_pose: &[Mat4],
 ) {
@@ -4096,7 +3985,7 @@ fn bone_trace_frame(
         let (col0, col1, col2) = (m.x_axis, m.y_axis, m.z_axis);
         tracing::debug!(
             target: "bone",
-            "BONE_DET id={:#x} j={} bind_t=({:.3},{:.3},{:.3}) pose_t=({:.3},{:.3},{:.3}) fwd=({:.2},{:.2},{:.2}) up=({:.2},{:.2},{:.2}) side=({:.2},{:.2},{:.2}) keyed_by=[{}]",
+            "BONE_DET id={:#x} j={} bind_t=({:.3},{:.3},{:.3}) pose_t=({:.3},{:.3},{:.3}) fwd=({:.2},{:.2},{:.2}) up=({:.2},{:.2},{:.2}) side=({:.2},{:.2},{:.2}) keyed_by=[{}] {}",
             world_id,
             joint,
             skeleton.joints[joint].translation[0],
@@ -4107,6 +3996,7 @@ fn bone_trace_frame(
             -col1.x, -col1.y, -col1.z,
             col2.x, col2.y, col2.z,
             keyed_by.trim_end(),
+            authority.describe(joint),
         );
     }
 }
@@ -4152,8 +4042,7 @@ const LOOK_RELEASE_FORWARD: f32 = -0.5;
 const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 0.04;
 /// The look point chases the target by this share of what is left per tick. Retail chases 1/32 (`FFXiMain.dll
 /// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71); kuluu turns the head half again
-/// as fast, a playtest call that retail's share leaves the head trailing its target. The locked torso hold chases
-/// the chest on the same share.
+/// as fast, a playtest call that retail's share leaves the head trailing its target.
 const HEAD_LOOK_CHASE_FRACTION: f32 = 1.5 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
@@ -8137,8 +8026,8 @@ mod pose_resolution_tests {
     }
     /// A locked stop must not hand a joint back in one frame. The second-layer locomotion clips key
     /// joints 38..47 while `idl2` keys only {38,40,42,43,44,47}, so every stop releases joints
-    /// {39,41,45,46} mid-playback; their final records now ride to rest over the gait handover window
-    /// (`BoneRelease`). Joint 46's pose is watched relative to its parent against the bind-local
+    /// {39,41,45,46} mid-playback; their final records now ride to rest over the handover that let them go
+    /// ([`crate::skeleton_authority`]). Joint 46's pose is watched relative to its parent against the bind-local
     /// placement. The tick after the stop blend dies was measured at -15.9 deg with no glide (identical
     /// across drives and modes), then frozen for good; a live side-step steps at most ~10 deg/tick by
     /// its own motion, so the boundary is asserted continuous while gait ticks are left alone.
@@ -8647,53 +8536,124 @@ mod pose_resolution_tests {
         }
     }
 
-    /// Releasing a locked side step ramps the torso look weight down on the gait blend's clock, so
-    /// chest and legs settle on (nearly) the same tick: one shared ramp constant, pinned here
-    /// because their separate easing is exactly what desynced once.
-    #[test]
-    fn the_locked_torso_settles_on_the_gaits_blend_clock() {
-        const RELEASE_TICK_TOLERANCE: i32 = 1;
+    /// A rig carrying both look-at records the way Hume M authors them (neck on reference 3, chest on reference 7),
+    /// standing up `-Y` and facing `+X`: root, hips, spine, chest, neck, head.
+    fn look_rig() -> Skeleton {
+        use ffxi_dat::skel::{Joint, JointReference, LookAtLimit};
+        let joint = |parent: Option<usize>, rise: f32| Joint {
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            translation: [0.0, -rise, 0.0],
+            parent,
+        };
+        let reference = |index: usize| JointReference {
+            index,
+            rotation: [0.0; 3],
+            position_offset: [0.0; 3],
+        };
+        let mut references: Vec<JointReference> = (0..=ffxi_dat::skel::standard_position::CHEST)
+            .map(|_| reference(0))
+            .collect();
+        references[ffxi_dat::skel::standard_position::NECK] = reference(4);
+        references[ffxi_dat::skel::standard_position::CHEST] = reference(3);
+        Skeleton {
+            id: DatId::from_str("look"),
+            joints: vec![
+                joint(None, 0.0),
+                joint(Some(0), 1.0),
+                joint(Some(1), 0.1),
+                joint(Some(2), 0.2),
+                joint(Some(3), 0.25),
+                joint(Some(4), 0.12),
+            ],
+            references,
+            bounding_boxes: Vec::new(),
+            look_at_limits: vec![
+                LookAtLimit {
+                    x_limit: 0.24,
+                    y_limit: 0.16,
+                    scale: 0.5,
+                },
+                LookAtLimit {
+                    x_limit: 0.16,
+                    y_limit: 0.06,
+                    scale: 0.5,
+                },
+            ],
+        }
+    }
 
-        let keyed = |id: &[u8; 4]| {
+    /// Stopping a locked side step hands the correction back on the stop's own blend: no record bone is still owed
+    /// anything past the tick the coordinator's handover lands, so chest and legs settle together.
+    #[test]
+    fn a_locked_stop_hands_the_correction_back_on_its_own_blend() {
+        const LAND_TOLERANCE_TICKS: i32 = 1;
+        const CHEST: usize = 3;
+        const NECK: usize = 4;
+
+        let keyed = |id: &[u8; 4], chest_twist: f32| {
             let mut clip = synth_anim(id, 8);
-            clip.key_frame_sets.insert(
-                0,
-                vec![ffxi_dat::skel_anim::KeyFrameTransform::default(); clip.num_frames],
-            );
+            for joint in 0..6_u32 {
+                let rotation = if joint as usize == CHEST {
+                    Quat::from_rotation_y(chest_twist).to_array()
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                };
+                clip.key_frame_sets.insert(
+                    joint,
+                    vec![
+                        KeyFrameTransform {
+                            rotation,
+                            ..Default::default()
+                        };
+                        clip.num_frames
+                    ],
+                );
+            }
             clip
         };
-        let clips = vec![keyed(b"idl0"), keyed(b"run0"), keyed(b"mvl0")];
-        let mut actor = render_actor_with_skeleton_clips(1, clips);
-        actor.locked_on = true;
+        let loaded = empty_loaded_actor(look_rig(), None);
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        actor.animations = Arc::new(vec![
+            keyed(b"idl0", 0.0),
+            keyed(b"run0", 0.0),
+            keyed(b"mvl0", 0.7),
+        ]);
 
         for _ in 0..(LOCOMOTION_XFADE_IN as u32 + 8) {
             actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
+            actor.locked_on = true;
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
-        assert_eq!(actor.locked_torso_weight, 1.0, "saturated by the strafe");
-
-        // Still locked, forward: the side step ends by selection, starting both ramps together.
-        let mut torso_released = None;
-        let mut blend_settled = None;
-        for tick in 1..=(LOCOMOTION_XFADE_IN as i32 + 4) {
-            actor.inputs = inputs_for_pose(PoseState::Run, false);
-            advance_actor_pose_standalone(&mut actor, 1.0, None);
-            if torso_released.is_none() && actor.locked_torso_weight == 0.0 {
-                torso_released = Some(tick);
-            }
-            if blend_settled.is_none() && !actor.coordinator.is_transitioning() {
-                blend_settled = Some(tick);
-            }
-        }
-        let (torso, gait) = match (torso_released, blend_settled) {
-            (Some(torso), Some(gait)) => (torso, gait),
-            _ => panic!(
-                "release never finished: torso {torso_released:?}, gait blend {blend_settled:?}"
-            ),
-        };
         assert!(
-            (torso - gait).abs() <= RELEASE_TICK_TOLERANCE,
-            "the legs settled on tick {gait} but the chest kept easing to tick {torso}"
+            !actor.coordinator.is_transitioning(),
+            "the side step settled before the stop"
+        );
+
+        // Standing again: the lock flag goes with the movement and the side step settles into idle.
+        let mut owed_until = None;
+        let mut blend_until = None;
+        for tick in 1..=(LOCOMOTION_XFADE_IN as i32 + 4) {
+            actor.inputs = inputs_for_pose(PoseState::Idle, false);
+            actor.locked_on = false;
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            let owed = [CHEST, NECK]
+                .iter()
+                .any(|&joint| actor.skeleton_authority.owes(joint));
+            if owed_until.is_none() && !owed {
+                owed_until = Some(tick);
+            }
+            if blend_until.is_none() && !actor.coordinator.is_transitioning() {
+                blend_until = Some(tick);
+            }
+        }
+        let (owed, blend) = match (owed_until, blend_until) {
+            (Some(owed), Some(blend)) => (owed, blend),
+            _ => panic!("the stop never landed: owed {owed_until:?}, blend {blend_until:?}"),
+        };
+        assert!(owed > 1, "the correction was dropped in one frame");
+        assert!(
+            (owed - blend).abs() <= LAND_TOLERANCE_TICKS,
+            "the blend landed on tick {blend} but the correction was still owed until tick {owed}"
         );
     }
 

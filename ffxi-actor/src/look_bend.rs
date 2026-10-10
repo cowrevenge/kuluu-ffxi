@@ -309,6 +309,28 @@ pub fn apply_look_bends(
     if weight <= 0.0 {
         return;
     }
+    for (joint, rot) in look_bends(
+        pose,
+        skeleton,
+        look_point_pose,
+        forward,
+        records,
+        anchor_origin_y_drop,
+    ) {
+        rotate_about_pivot(pose, skeleton, parent_overrides, joint, rot, weight);
+    }
+}
+
+/// Pass 1 of the bend on its own: each authored record's full-weight turn in `pose`'s space, shallow-first, for a
+/// caller that composes the bends itself ([`apply_look_bends`] turns `pose` by them).
+pub fn look_bends(
+    pose: &[Mat4],
+    skeleton: &Skeleton,
+    look_point_pose: Vec3,
+    forward: Vec3,
+    records: usize,
+    anchor_origin_y_drop: f32,
+) -> Vec<(usize, Quat)> {
     let Some(frame) = BendFrame::new(
         pose,
         skeleton,
@@ -316,7 +338,7 @@ pub fn apply_look_bends(
         forward,
         anchor_origin_y_drop,
     ) else {
-        return;
+        return Vec::new();
     };
     // Pass 1 (`FFXiMain.dll retail-2026-09` RVA 0x2AED1..0x2AF90) clamps every record against the SAME operands.
     // Pass 2 (RVA 0x2AFBD..0x2B0F4) multiplies each bend onto that bone's own node orientation and stores it in a
@@ -350,15 +372,16 @@ pub fn apply_look_bends(
         ));
     }
     bends.sort_by_key(|(_, _, depth)| *depth);
-    for (joint, rot, _) in bends {
-        rotate_about_pivot(pose, skeleton, parent_overrides, joint, rot, weight);
-    }
+    bends
+        .into_iter()
+        .map(|(joint, rot, _)| (joint, rot))
+        .collect()
 }
 
 /// Hops to the root of a joint's parent chain; used only to order bends shallow-first so a bone is rotated after its
 /// ancestors (`FFXiMain.dll retail-2026-09` composes local orientations through the hierarchy at RVA 0x2AFBD..0x2B0F4
 /// rather than rotating world-space subtrees).
-fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
+pub fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
     let mut depth = 0;
     let mut current = skeleton.joints.get(joint).and_then(|j| j.parent);
     while let Some(parent) = current {
@@ -373,7 +396,7 @@ fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
 
 /// Rigid subtree rotation about the joint's own pivot: re-posing descendants without recomposing the whole hierarchy
 /// for a look.
-fn rotate_about_pivot(
+pub fn rotate_about_pivot(
     pose: &mut [Mat4],
     skeleton: &Skeleton,
     parent_overrides: &[(usize, usize)],

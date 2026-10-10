@@ -176,6 +176,8 @@ impl BoneMotionMask {
 #[derive(Default)]
 pub struct BonePoseScratch {
     records: Vec<Option<KeyFrameTransform>>,
+    /// The slot whose layer wrote each record this frame.
+    writers: Vec<Option<usize>>,
 }
 
 impl BonePoseScratch {
@@ -189,6 +191,8 @@ impl BonePoseScratch {
         if self.records.len() != bones {
             self.records.clear();
             self.records.resize(bones, None);
+            self.writers.clear();
+            self.writers.resize(bones, None);
         }
     }
 
@@ -210,18 +214,29 @@ impl BonePoseScratch {
         self.records.get(bone).copied().flatten()
     }
 
+    /// The slot whose layer wrote this frame's record; `None` with no record.
+    pub fn writer(&self, bone: usize) -> Option<usize> {
+        self.writers.get(bone).copied().flatten()
+    }
+
     /// Drop every carried record (pose-state reset or model swap).
     pub fn clear(&mut self) {
         for record in self.records.iter_mut() {
             *record = None;
         }
+        for writer in self.writers.iter_mut() {
+            *writer = None;
+        }
     }
 
     /// Record what this frame sampled for one bone, including the empty case: an unkeyed bone is cleared,
     /// not inherited.
-    fn write(&mut self, bone: usize, sampled: Option<KeyFrameTransform>) {
+    fn write(&mut self, bone: usize, sampled: Option<(usize, KeyFrameTransform)>) {
         if let Some(slot) = self.records.get_mut(bone) {
-            *slot = sampled;
+            *slot = sampled.map(|(_, record)| record);
+        }
+        if let Some(writer) = self.writers.get_mut(bone) {
+            *writer = sampled.map(|(slot, _)| slot);
         }
     }
 }
@@ -550,6 +565,11 @@ impl AnimationTransition {
 
     pub fn is_complete(&self) -> bool {
         self.progress >= self.transition_duration
+    }
+
+    /// Frames this blend has run.
+    pub fn progress(&self) -> f32 {
+        self.progress
     }
 
     /// One weighted sum of the outgoing and incoming bone records, with no third pose in it (`FFXiMain.dll
@@ -919,14 +939,22 @@ impl SkeletonAnimationCoordinator {
     }
 
     pub fn sample_joint(&self, joint: usize) -> Option<KeyFrameTransform> {
+        self.sample_joint_by_slot(joint).map(|(_, record)| record)
+    }
+
+    /// [`Self::sample_joint`] with the slot whose layer wrote the bone.
+    pub fn sample_joint_by_slot(&self, joint: usize) -> Option<(usize, KeyFrameTransform)> {
         let mask = self.mask_at(joint);
         if !mask.writable() {
             return None;
         }
         let blend_allowed = mask.accepts_blend_layers();
-        for animator in self.animations.iter().flatten() {
+        for (slot, animator) in self.animations.iter().enumerate() {
+            let Some(animator) = animator else {
+                continue;
+            };
             if let Some(t) = animator.sample(joint, blend_allowed) {
-                return Some(t);
+                return Some((slot, t));
             }
         }
         None
@@ -939,7 +967,7 @@ impl SkeletonAnimationCoordinator {
         self.set_bone_count(bones);
         scratch.begin_frame(bones);
         for bone in 0..scratch.bone_count() {
-            let sampled = self.sample_joint(bone);
+            let sampled = self.sample_joint_by_slot(bone);
             scratch.write(bone, sampled);
         }
     }

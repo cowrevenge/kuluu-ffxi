@@ -1525,12 +1525,12 @@ pub struct FfxiRenderActor {
     /// look-at measures from the chest ([`crate::locked_torso`]).
     pub locked_on: bool,
 
-    /// How far that applies; it eases on and off by [`HEAD_LOOK_CHASE_FRACTION`] a tick, as the head look turns.
+    /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
     locked_torso_weight: f32,
 
     /// Where that look-at reads the chest as facing: it chases the posed chest by [`HEAD_LOOK_CHASE_FRACTION`] a
-    /// tick instead of taking it whole every frame, so the hold never snaps the side step's own chest swing onto
-    /// the target.
+    /// skeleton frame instead of taking it whole every frame, so the hold never snaps the side step's own chest
+    /// swing onto the target.
     held_chest_facing: Vec3,
 
     /// The chest joint and axis of this rig; `None` for a rig without a chest reference.
@@ -3547,26 +3547,34 @@ fn advance_actor_pose(
         }
 
         if is_idle {
+            // A stop settles instead of playing out: the locomotion on screen is frozen at this
+            // tick and idle rises from its own key frame closest to that pose. Letting the held
+            // gait keep running under the crossfade made limbs wind back past what they were
+            // holding before landing forward in idle - 15-30 deg of fresh swing after release
+            // against holds of 20 deg or less, on spine and arm joints alike
+            // (`stopping_a_held_movement_never_winds_the_arms_up_after_release`). Every settling
+            // layer enters on the one frame closest over all of them: legs, upper body and waist
+            // idle are one authored motion, and a frame matched per layer plays them out of step.
+            let mut settling = Vec::new();
             for &clip in &matches {
                 let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
                 let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
                 if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
                     continue;
                 }
-                // A stop settles instead of playing out: the locomotion on screen is frozen at this
-                // tick and idle rises from its own key frame closest to that pose. Letting the held
-                // gait keep running under the crossfade made limbs wind back past what they were
-                // holding before landing forward in idle - 15-30 deg of fresh swing after release
-                // against holds of 20 deg or less, on spine and arm joints alike
-                // (`stopping_a_held_movement_never_winds_the_arms_up_after_release`).
-                let settled_from = coordinator.animations[slot]
-                    .as_ref()
-                    .and_then(|a| a.current_animation.as_ref())
-                    .filter(|c| {
-                        let id = c.animation.id.as_str();
-                        id.starts_with("mv") || id.starts_with("run") || id.starts_with("wlk")
-                    })
-                    .and_then(|outgoing| matched_idle_start(outgoing, clip));
+                if let Some(outgoing) = settling_locomotion(coordinator, slot) {
+                    settling.push((outgoing, clip));
+                }
+            }
+            let shared_start = matched_idle_start(&settling);
+            for &clip in &matches {
+                let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
+                let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
+                if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
+                    continue;
+                }
+                let settled_from =
+                    shared_start.filter(|_| settling_locomotion(coordinator, slot).is_some());
                 let accepted = if action_just_ended {
                     coordinator.register_idle_animation_eager(clip.clone())
                 } else if let Some(frame) = settled_from {
@@ -3773,8 +3781,12 @@ fn advance_actor_pose(
             let selected = selected_id.as_str();
             selected.starts_with("mvl") || selected.starts_with("mvr")
         };
-    let hold_goal = if *locked_on && side_step { 1.0 } else { 0.0 };
-    *locked_torso_weight += (hold_goal - *locked_torso_weight) * HEAD_LOOK_CHASE_FRACTION;
+    let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
+    *locked_torso_weight = if *locked_on && side_step {
+        (*locked_torso_weight + torso_step).min(1.0)
+    } else {
+        (*locked_torso_weight - torso_step).max(0.0)
+    };
 
     // The release edge: joints with a record this tick keep one; joints whose last writer retired
     // mid-playback ride theirs to rest over the gait handover window instead of dropping into bind in
@@ -3873,8 +3885,9 @@ fn advance_actor_pose(
         .as_ref()
         .and_then(|upper| upper.chest_facing(world_pose));
     if let Some(chest) = chest_facing {
-        *held_chest_facing =
-            crate::locked_torso::chase_facing(*held_chest_facing, chest, HEAD_LOOK_CHASE_FRACTION);
+        // The share compounds per skeleton frame, so the chase keeps one pace whatever the render rate.
+        let share = 1.0 - (1.0 - HEAD_LOOK_CHASE_FRACTION).powf(elapsed_frames);
+        *held_chest_facing = crate::locked_torso::chase_facing(*held_chest_facing, chest, share);
     }
     let bend_forward = crate::locked_torso::bend_reference(
         POSE_FORWARD,
@@ -3918,36 +3931,66 @@ fn advance_actor_pose(
     }
 }
 
-/// The idle clip's own key frame whose shared keys sit closest to where the outgoing layer stands this
-/// tick - summed degrees of rotation over every joint both clips key (`register_idle_animation_matched`).
-/// None when they share nothing to compare, which leaves the plain idle handover in place.
+/// The locomotion layer a stop freezes in `slot`, when one is playing there.
+fn settling_locomotion(
+    coordinator: &SkeletonAnimationCoordinator,
+    slot: usize,
+) -> Option<&ffxi_actor::animation::SkeletonAnimationContext> {
+    coordinator.animations[slot]
+        .as_ref()
+        .and_then(|a| a.current_animation.as_ref())
+        .filter(|c| {
+            let id = c.animation.id.as_str();
+            id.starts_with("mv") || id.starts_with("run") || id.starts_with("wlk")
+        })
+}
+
+/// The one key frame every idle layer of a stop enters on: the frame whose keys sit closest to where the
+/// outgoing layers stand this tick - summed degrees of rotation over every joint each idle clip shares with
+/// the layer it replaces (`register_idle_animation_matched`). Each clip reads that frame on its own loop, as
+/// layers registered together at frame 0 do. None when no layer shares a joint to compare, which leaves the
+/// plain idle handover in place.
 fn matched_idle_start(
-    outgoing: &ffxi_actor::animation::SkeletonAnimationContext,
-    idle: &SkeletonAnimation,
+    layers: &[(
+        &ffxi_actor::animation::SkeletonAnimationContext,
+        &SkeletonAnimation,
+    )],
 ) -> Option<f32> {
-    let joints: Vec<u32> = idle.key_frame_sets.keys().copied().collect();
-    let outgoing_poses: Vec<(u32, KeyFrameTransform)> = joints
+    let compared: Vec<(&SkeletonAnimation, Vec<(u32, KeyFrameTransform)>)> = layers
         .iter()
-        .filter_map(|j| Some((*j, outgoing.get_joint_transform(*j as usize)?)))
+        .filter(|(_, idle)| idle.length_in_frames() >= 1.0)
+        .map(|(outgoing, idle)| {
+            let poses: Vec<(u32, KeyFrameTransform)> = idle
+                .key_frame_sets
+                .keys()
+                .filter_map(|j| Some((*j, outgoing.get_joint_transform(*j as usize)?)))
+                .collect();
+            (*idle, poses)
+        })
+        .filter(|(_, poses)| !poses.is_empty())
         .collect();
-    if outgoing_poses.is_empty() {
-        return None;
-    }
-    let mut best: Option<(f32, f32)> = None; // (total angle from the frozen pose, frame)
-    for frame in 0..idle.length_in_frames().floor() as u32 {
+    let frames = compared
+        .iter()
+        .map(|(idle, _)| idle.length_in_frames().floor() as u32)
+        .max()?;
+    let mut best: Option<(f32, f32)> = None; // (total angle from the frozen poses, frame)
+    for frame in 0..frames {
         let mut total = 0.0_f32;
-        for (joint, from) in &outgoing_poses {
-            let Some(to) = idle.get_joint_transform(*joint, frame as f32) else {
-                continue;
-            };
-            // Shortest rotation between the two authored quaternions, per joint.
-            let dot: f32 = from
-                .rotation
-                .iter()
-                .zip(&to.rotation)
-                .map(|(a, b)| a * b)
-                .sum();
-            total += (2.0 * dot.abs().clamp(0.0, 1.0).acos()).to_degrees();
+        for (idle, outgoing_poses) in &compared {
+            let at = (frame as f32).rem_euclid(idle.length_in_frames());
+            for (joint, from) in outgoing_poses {
+                let Some(to) = idle.get_joint_transform(*joint, at) else {
+                    continue;
+                };
+                // Shortest rotation between the two authored quaternions, per joint.
+                let dot: f32 = from
+                    .rotation
+                    .iter()
+                    .zip(&to.rotation)
+                    .map(|(a, b)| a * b)
+                    .sum();
+                total += (2.0 * dot.abs().clamp(0.0, 1.0).acos()).to_degrees();
+            }
         }
         if best.is_none_or(|(best_total, _)| total < best_total) {
             best = Some((total, frame as f32));
@@ -4109,8 +4152,8 @@ const LOOK_RELEASE_FORWARD: f32 = -0.5;
 const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 0.04;
 /// The look point chases the target by this share of what is left per tick. Retail chases 1/32 (`FFXiMain.dll
 /// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71); kuluu turns the head half again
-/// as fast, a playtest call that retail's share leaves the head trailing its target. The locked torso hold eases
-/// on the same share.
+/// as fast, a playtest call that retail's share leaves the head trailing its target. The locked torso hold chases
+/// the chest on the same share.
 const HEAD_LOOK_CHASE_FRACTION: f32 = 1.5 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
@@ -8604,10 +8647,13 @@ mod pose_resolution_tests {
         }
     }
 
-    /// The locked torso hold eases on and off by the head look's own chase share, so no tick takes the whole step
-    /// onto or off the target.
+    /// Releasing a locked side step ramps the torso look weight down on the gait blend's clock, so
+    /// chest and legs settle on (nearly) the same tick: one shared ramp constant, pinned here
+    /// because their separate easing is exactly what desynced once.
     #[test]
-    fn the_locked_torso_hold_eases_by_the_head_looks_chase_share() {
+    fn the_locked_torso_settles_on_the_gaits_blend_clock() {
+        const RELEASE_TICK_TOLERANCE: i32 = 1;
+
         let keyed = |id: &[u8; 4]| {
             let mut clip = synth_anim(id, 8);
             clip.key_frame_sets.insert(
@@ -8620,21 +8666,35 @@ mod pose_resolution_tests {
         let mut actor = render_actor_with_skeleton_clips(1, clips);
         actor.locked_on = true;
 
-        let mut eased = 0.0_f32;
-        for _ in 0..(LOCOMOTION_XFADE_IN as u32) {
+        for _ in 0..(LOCOMOTION_XFADE_IN as u32 + 8) {
             actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
-            eased += (1.0 - eased) * HEAD_LOOK_CHASE_FRACTION;
-            assert_eq!(actor.locked_torso_weight, eased, "the hold eases on");
         }
+        assert_eq!(actor.locked_torso_weight, 1.0, "saturated by the strafe");
 
-        // Still locked, forward: the side step ends by selection and the hold eases back off.
-        for _ in 0..(LOCOMOTION_XFADE_IN as u32) {
+        // Still locked, forward: the side step ends by selection, starting both ramps together.
+        let mut torso_released = None;
+        let mut blend_settled = None;
+        for tick in 1..=(LOCOMOTION_XFADE_IN as i32 + 4) {
             actor.inputs = inputs_for_pose(PoseState::Run, false);
             advance_actor_pose_standalone(&mut actor, 1.0, None);
-            eased += (0.0 - eased) * HEAD_LOOK_CHASE_FRACTION;
-            assert_eq!(actor.locked_torso_weight, eased, "the hold eases off");
+            if torso_released.is_none() && actor.locked_torso_weight == 0.0 {
+                torso_released = Some(tick);
+            }
+            if blend_settled.is_none() && !actor.coordinator.is_transitioning() {
+                blend_settled = Some(tick);
+            }
         }
+        let (torso, gait) = match (torso_released, blend_settled) {
+            (Some(torso), Some(gait)) => (torso, gait),
+            _ => panic!(
+                "release never finished: torso {torso_released:?}, gait blend {blend_settled:?}"
+            ),
+        };
+        assert!(
+            (torso - gait).abs() <= RELEASE_TICK_TOLERANCE,
+            "the legs settled on tick {gait} but the chest kept easing to tick {torso}"
+        );
     }
 
     /// A side step that ships only an upper-body clip leaves the legs on the gait they were running. Retail adds

@@ -279,7 +279,7 @@ line per TCP connection:
 | `{"query":"knobs"}` | what this build can drive: cases, env knobs and clock spacing — on a live session, where the offline `animtest --knobs` answer cannot see runtime state |
 | `{"key":"printscreen"}` | in-app GPU readback → numbered `screenshot-<n>.png` **in the working directory**; move each into your dated folder immediately. Names accepted by `KeyMsg::resolve`: `printscreen`, `prtsc`, `prtscn` |
 | `{"text":"//warp 123.4 -56.7"}` then `{"key":"enter"}` | dev commands take a **double** slash (`//warp`, `//whereami`, `//zones`, `//pathto`, `//endevent`); single `/cmd` is rejected with a suggestion |
-| `{"text":"/shutdown"}` then `{"key":"enter"}` | GM single-slash commands (see §Cleanup) |
+| `{"text":"/shutdown"}` then `{"key":"enter"}` | normal player logout — LeaveGame wait (~30 s; skipped at GM rank), then the client closes itself. This is how every run ends; see §Cleanup |
 
 - **Positioning:** `//pathto <x> <y>` (wire coords) is the reliable mover; raw walking into
   props wastes cycles. `//zones` lists zonelines with rects — warping *into* a rect does not
@@ -333,20 +333,29 @@ InEvent. If those symptoms return, check that header/sync invariant first.
 
 ## Cleanup and ownership
 
+End every run as every player does — chat command, never a kill:
+
 ```bash
-# Set OWNED_PID to the PID recorded when this run launched its client.
-taskkill //PID "$OWNED_PID"      # Windows Git Bash
-kill -TERM "$OWNED_PID"         # Unix
+# send() is the §B key-drive helper (printf one JSON line > /dev/tcp/127.0.0.1/<port>)
+send '{"text":"/shutdown"}'; send '{"key":"enter"}'
 ```
 
-- **Prefer a clean disconnect** (MCP `disconnect`, the Unix agent socket, or client exit) over a
-  kill: a hard kill leaves the map server holding the char for minutes and the next lobby login
-  times out. `references/stack.md` owns that failure mode and its single-row repair — including why
-  the `WHERE` clause is not optional.
-- **GM `/shutdown` restarts the shared server.** It is not client cleanup. Use it only for
-  an explicitly authorized server-restart test; record the interruption in the report.
-- **Never kill a kuluu process you did not start.** The user plays on this machine too; confirm
-  ownership before any taskkill.
+`/shutdown` is a normal retail player command, not an admin tool: it sends packet
+`GP_CLI_COMMAND_REQLOGOUT` (`vendor/server/src/map/packets/c2s/0x0e7_reqlogout.cpp`, no GM gate),
+the server applies LeaveGame, the char takes its rest pose through the wait (~30 s; GM rank skips
+it) — **and then the client closes itself.** Wait for your own PID to disappear on its own and
+confirm the log tail ends with exit-watchdog checkpoints; the map side records the logout
+(`chars.last_logout`). Measured here: `/shutdown` sent → process gone ~40 s later.
+
+- **Never kill a kuluu — not even one you launched.** `taskkill`/`kill -TERM` skips LeaveGame, and
+  depending on how the socket dies the map server holds the char while the next lobby login times
+  out; `references/stack.md` owns that failure mode and its single-row repair — including why the
+  `WHERE` clause is not optional. If your own client ignores `/shutdown`, treat it as wedged,
+  stop, and report — do not kill it.
+- **`/exit` closes the window now** instead of completing LeaveGame; never normal cleanup on a
+  live session.
+- Nothing typed in char chat stops the shared server (an earlier note here claiming otherwise was
+  wrong); stack lifecycle belongs to `scripts/lsb-stack.sh`.
 
 ## Gotchas
 

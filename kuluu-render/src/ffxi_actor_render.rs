@@ -92,10 +92,13 @@ pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
 
 /// The blend retail's motion queue runs when a locomotion request retakes a slot (`FFXiMain.dll
-/// retail-2026-09` RVA 0xC85F8..0xC8613, [`research/cow_ffxi_disassembly/Disassembly_Docs/
-/// locomotion_motion_camera_k_pass.md`] K6). A shorter blend lands the incoming gait ahead of its
-/// in-step point, so every bone races through the handover.
-pub const LOCOMOTION_XFADE_IN: f32 = 16.0;
+/// retail-2026-09` RVA 0xC85F8..0xC8613, K6, see [`research/cow_ffxi_disassembly/Disassembly_Docs/locomotion_motion_camera_k_pass.md`]).
+pub const RETAIL_LOCOMOTION_XFADE_IN: f32 = 16.0;
+
+/// The blend clock every locomotion handover runs on. Playtest pace choice: half retail.
+/// Downstream consumers (carry-over-blend, hold ramps, matched idle entry) all read this one
+/// constant, so the settle stays internally consistent at either length.
+pub const LOCOMOTION_XFADE_IN: f32 = RETAIL_LOCOMOTION_XFADE_IN / 2.0;
 
 pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 
@@ -8378,7 +8381,9 @@ mod pose_resolution_tests {
     fn a_locked_stop_keeps_mithras_head_on_the_target() {
         // Measured at most 1.9 deg off the target from the last strafe tick through the stop, against 9.9 while
         // standing and stepping aimed apart.
-        const HEAD_OFF_TARGET_MAX_DEG: f32 = 2.5;
+        // Measured at handover speed: 1.9 deg on the retail clock, 2.8 on this half one (was 9.9
+        // before one-aim). Re-measure if LOCOMOTION_XFADE_IN moves.
+        const HEAD_OFF_TARGET_MAX_DEG: f32 = 4.0;
         // 60 fps in skeleton frames.
         const DT: f32 = 0.5;
 
@@ -8715,7 +8720,11 @@ mod pose_resolution_tests {
     fn releasing_a_side_step_hands_off_without_a_pose_snap() {
         // The window that holds the landing tick and the frames straight after it.
         const HANDOFF_WATCH_TICKS: u32 = 4;
-        const HANDOFF_POSE_SLEW_RATIO_LIMIT: f32 = 1.5;
+        // A handover must not swing more than half again what the running gait reaches per tick;
+        // shorter blends compress the same pose travel into fewer ticks, so the ratio scales by
+        // retail/handover length and any surprise twist still trips it.
+        const HANDOFF_POSE_SLEW_RATIO_LIMIT: f32 =
+            1.5 * (RETAIL_LOCOMOTION_XFADE_IN / LOCOMOTION_XFADE_IN);
 
         let Some(loaded) = load_hume_m() else { return };
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);

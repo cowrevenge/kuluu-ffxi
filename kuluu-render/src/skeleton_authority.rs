@@ -13,6 +13,9 @@
 //!   outgoing key outright to the end of the fade and lets go on the landing frame, which on a rig whose side step is
 //!   the only motion keying the upper body's root (Mithra's joint 36) holds the whole torso in the strafe twist for
 //!   the length of the stop and then drops it.
+//! - Out of a clip that plays once and has played out (a weapon draw or sheathe, an action's motion), bones change
+//!   hands exactly as the clips write them. That clip was authored to end where the next motion takes over; carrying
+//!   its handover on top kept the weapon moving after the draw or sheathe had finished, as if it played again.
 //! - The correction on top is the look-at, measured from the pose the bones stand in under those handovers, from the
 //!   skeleton's own records, their limits and the reference joints they name, with the wire status choosing how many
 //!   apply. Every state aims the same way: each record turns from where the bone it carries faces (where its subtree
@@ -191,6 +194,9 @@ struct SlotWatch {
     asked: Option<f32>,
     /// It takes every request outright, whatever the request names.
     outright: bool,
+    /// It is handing on from a clip that plays once and has played out, which ends where the next motion takes over:
+    /// its bones change hands as the clips write them.
+    authored: bool,
 }
 
 impl SlotWatch {
@@ -209,6 +215,7 @@ impl SlotWatch {
                 .and_then(|context| context.transition_params.as_ref())
                 .map(|params| params.transition_in_time),
             outright: layer.replaces_outright(),
+            authored: layer.holds_finished_one_shot(),
         }
     }
 
@@ -331,14 +338,22 @@ impl SkeletonAuthority {
             };
             match handover {
                 Some(handover) => {
-                    let window = carry_window(
-                        watch.writer,
-                        writer,
-                        &slots,
-                        &last_slots,
-                        &requested,
-                        elapsed_frames,
-                    );
+                    let authored = [watch.writer, writer]
+                        .into_iter()
+                        .flatten()
+                        .any(|slot| slots.get(slot).is_some_and(|slot| slot.authored));
+                    let window = if authored {
+                        0.0
+                    } else {
+                        carry_window(
+                            watch.writer,
+                            writer,
+                            &slots,
+                            &last_slots,
+                            &requested,
+                            elapsed_frames,
+                        )
+                    };
                     watch.carry = Residue::between(watch.carried, record, window)
                         .map(|residue| (residue, handover));
                 }
@@ -503,7 +518,8 @@ impl SkeletonAuthority {
 /// A bone the blend running in its slot is handing on: only the outgoing clip keys it, so once the blend lands the
 /// layers under that slot write it, or nothing does and it rests. It goes there with the blend, as far as the blend has
 /// run, instead of holding the outgoing key to the end and jumping. A bone whose mask refuses blend layers keeps the
-/// outgoing key, as the sampler does. The record, and how far the handover has run.
+/// outgoing key, as the sampler does, and so does a slot blending away from a clip that played once and has played
+/// out: that clip ends where the next takes over. The record, and how far the handover has run.
 fn handed_on(
     motions: &SkeletonAnimationCoordinator,
     writer: Option<usize>,
@@ -513,15 +529,14 @@ fn handed_on(
     let Some(slot) = writer else {
         return (record, None);
     };
-    let Some(blend) = motions
-        .animations
-        .get(slot)
-        .and_then(Option::as_ref)
-        .and_then(|layer| layer.transition.as_ref())
-    else {
+    let Some(layer) = motions.animations.get(slot).and_then(Option::as_ref) else {
         return (record, None);
     };
-    if !motions.mask_at(bone).accepts_blend_layers()
+    let Some(blend) = layer.transition.as_ref() else {
+        return (record, None);
+    };
+    if layer.holds_finished_one_shot()
+        || !motions.mask_at(bone).accepts_blend_layers()
         || blend
             .next
             .animation
@@ -1052,6 +1067,61 @@ mod tests {
         assert!(!bench.motions.is_transitioning());
         assert_eq!(bench.clips.writer(HEAD), Some(1));
         assert!(!bench.authority.owes(HEAD));
+    }
+
+    /// A clip that plays once and has played out (a weapon draw or sheathe) was authored to end where the next motion
+    /// takes over, so what it hands on changes hands as the clips write it: a bone only the next clip keys is on its
+    /// record from the first pass, and one only the played-out clip keys holds its key, as the sampler holds it. Out
+    /// of a loop the same request is carried.
+    #[test]
+    fn a_handover_out_of_a_played_out_one_shot_goes_as_the_clips_write_it() {
+        let taken_deg = 40.0_f32;
+        let held_deg = 30.0_f32;
+        let blend = 8.0_f32;
+        for one_shot in [true, false] {
+            let mut bench = Bench::new();
+            bench.motions.register_animation(
+                clip(b"ind0", &[(1, 0.0), (HEAD, held_deg.to_radians())]),
+                LoopParams {
+                    num_loops: one_shot.then_some(1),
+                    ..looping()
+                },
+                Some(TransitionParams {
+                    transition_in_time: 0.0,
+                    ..Default::default()
+                }),
+                |_| true,
+            );
+            // Past the clip's own length, so a one-shot has played out.
+            for _ in 0..12 {
+                bench.pass(None, Correction::Free);
+            }
+            assert_eq!(bench.motions.holds_finished_one_shot(0), one_shot);
+            bench.play(
+                clip(b"btl0", &[(1, 0.0), (NECK, taken_deg.to_radians())]),
+                blend,
+            );
+            let mut widest_gap = 0.0_f32;
+            for _ in 0..blend as usize {
+                let clips = bench.clips_pose();
+                let shown = bench.settle(None, Correction::Free);
+                for joint in [NECK, HEAD] {
+                    widest_gap = widest_gap
+                        .max((clip_yaw_deg(&shown, joint) - clip_yaw_deg(&clips, joint)).abs());
+                }
+            }
+            if one_shot {
+                assert!(
+                    widest_gap < TOLERANCE_DEG,
+                    "out of a played-out one-shot the pose left the clips' by {widest_gap:.2} deg"
+                );
+            } else {
+                assert!(
+                    widest_gap > taken_deg / 2.0,
+                    "out of a loop the handover is carried: only {widest_gap:.2} deg off the clips' pose"
+                );
+            }
+        }
     }
 
     #[test]

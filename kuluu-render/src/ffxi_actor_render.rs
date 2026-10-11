@@ -7617,6 +7617,86 @@ mod pose_resolution_tests {
         );
     }
 
+    /// A weapon draw and sheathe play once and hold their end frame
+    /// (`engage_transition_clips_play_once_and_hold_their_last_frame`), and each is authored to end where the next
+    /// motion takes over, so the bones it hands on change hands as the clips write them: while a slot blends away
+    /// from a played-out transition clip, every bone that slot writes stands on its own record. The skeleton
+    /// authority carried those handovers on top, which kept the weapon moving after the draw or sheathe had
+    /// finished, as if it played again: on Hume M's race-wide battle set the bone the drawn weapon rides on stood up
+    /// to 84 deg off its record after the draw.
+    #[test]
+    fn a_finished_draw_or_sheathe_hands_its_bones_on_as_the_clips_write_them() {
+        const RECORD_TOLERANCE_DEG: f32 = 0.5;
+        let Some(loaded) = load_hume_m() else { return };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let step = 0.5_f32;
+        let mut work = PoseScratch::default();
+        let mut clips_pose = Vec::new();
+        let mut checked = 0_usize;
+
+        let script: Vec<bool> = std::iter::repeat_n(false, 4)
+            .chain(std::iter::repeat_n(true, 200))
+            .chain(std::iter::repeat_n(false, 200))
+            .collect();
+        for (index, want) in script.into_iter().enumerate() {
+            actor.inputs = inputs_for_pose(PoseState::Idle, want);
+            advance_engage(
+                &mut actor.engage,
+                want,
+                &actor.routines,
+                &actor.rejected_routines,
+                &actor.battle_clips,
+                &actor.animations,
+                step,
+            );
+            advance_actor_pose_standalone(&mut actor, step, None);
+
+            // The clips' pose this pass, as the coordinator wrote it.
+            pose_world_mounted_into(
+                &mut clips_pose,
+                &mut work,
+                &actor.skeleton,
+                |joint| actor.pose_scratch.get(joint),
+                RootTransform {
+                    facing_dir: actor.facing_dir,
+                    skew: 0.0,
+                    slope_oriented: false,
+                    scale: Vec3::splat(actor.scale),
+                },
+                &[],
+                None,
+            );
+            let shown = actor.world_pose();
+            let local = |pose: &[Mat4], joint: usize| match actor.skeleton.joints[joint].parent {
+                Some(parent) => pose[parent].inverse() * pose[joint],
+                None => pose[joint],
+            };
+            for slot in 0..actor.coordinator.animations.len() {
+                if !actor.coordinator.holds_finished_one_shot(slot) {
+                    continue;
+                }
+                for joint in 0..actor.skeleton.joints.len() {
+                    if actor.pose_scratch.writer(joint) != Some(slot) {
+                        continue;
+                    }
+                    let (_, on, _) = local(shown, joint).to_scale_rotation_translation();
+                    let (_, record, _) = local(&clips_pose, joint).to_scale_rotation_translation();
+                    let off_deg = on.angle_between(record).to_degrees();
+                    assert!(
+                        off_deg < RECORD_TOLERANCE_DEG,
+                        "step {index}: joint {joint} of slot {slot} stands {off_deg:.2} deg off its record \
+                         while the slot hands on a played-out transition clip"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no slot ever handed on from a played-out transition clip"
+        );
+    }
+
     /// A transition window that outlasts its own clip must not hand it a second pass. Live, the
     /// crossing comes from dt drift (the render step is 0.49-0.52 authored frames, never exactly
     /// 0.5), and the authored Motion stage for `in 0`/`out0` runs longer than the clip it names

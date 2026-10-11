@@ -3884,14 +3884,7 @@ fn advance_actor_pose(
     let chest_facing = upper_body
         .as_ref()
         .and_then(|upper| upper.chest_facing(world_pose));
-    // A locked stop anchors the hold while its gait handoff settles: chasing this frame's chest through a clip
-    // swap trails that motion by its chase share, leaving an offset in the bend reference when the ramp ends -
-    // one last-frame pay-off for the shoulder records, which is the arm overshoot of issue #1023. Anchor while
-    // the weight runs down with no side-step clip playing, so only the ramp moves it and the landing pose is
-    // exactly what a locked idle composes. The strafe itself keeps chasing; that chase is what tracks the chest
-    // turning off its aim.
-    let stop_settling = *locked_on && !side_step && *locked_torso_weight > 0.0;
-    if let Some(chest) = chest_facing.filter(|_| !stop_settling) {
+    if let Some(chest) = chest_facing {
         // The share compounds per skeleton frame, so the chase keeps one pace whatever the render rate.
         let share = 1.0 - (1.0 - HEAD_LOOK_CHASE_FRACTION).powf(elapsed_frames);
         *held_chest_facing = crate::locked_torso::chase_facing(*held_chest_facing, chest, share);
@@ -8701,107 +8694,6 @@ mod pose_resolution_tests {
         assert!(
             (torso - gait).abs() <= RELEASE_TICK_TOLERANCE,
             "the legs settled on tick {gait} but the chest kept easing to tick {torso}"
-        );
-    }
-
-    /// The hold of a locked stop keeps its facing anchored while the gait handoff runs out: re-chasing it
-    /// through the swap trails that motion by its chase share, and the offset left when the ramp ends is the
-    /// one-frame pay-off at the last frame (issue #1023). Pinned both ways - while the weight runs down nothing
-    /// but the ramp moves the reference, and once it lands the chase resumes on the idle chest.
-    #[test]
-    fn a_locked_stop_anchors_the_hold_instead_of_chasing_through_the_swap() {
-        let yaw = |deg: f32| -> [f32; 4] {
-            let h = deg.to_radians() * 0.5;
-            [0.0, h.sin(), 0.0, h.cos()]
-        };
-        // A one-joint rig with a CHEST reference: the idle and run clips hold it straight, the side-step
-        // clip turns it 50 degrees, which is what makes the chase move for real on both sides of the swap.
-        let mut references = Vec::new();
-        references.resize_with(ffxi_dat::skel::standard_position::CHEST + 1, || {
-            ffxi_dat::skel::JointReference {
-                index: 0,
-                rotation: [0.0, 0.0, 0.0],
-                position_offset: [0.0, 0.0, 0.0],
-            }
-        });
-        let skeleton = ffxi_dat::skel::Skeleton {
-            id: DatId::from_str("anch"),
-            joints: vec![ffxi_dat::skel::Joint {
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                translation: [0.0, 0.0, 0.0],
-                parent: None,
-            }],
-            references,
-            bounding_boxes: Vec::new(),
-            look_at_limits: Vec::new(),
-        };
-        let clip = |id: &[u8; 4], chest_yaw: [f32; 4]| {
-            let mut anim = synth_anim(id, 8);
-            anim.num_joints = 1;
-            let frames = (0..anim.num_frames)
-                .map(|_| ffxi_dat::skel_anim::KeyFrameTransform {
-                    rotation: chest_yaw,
-                    ..Default::default()
-                })
-                .collect();
-            anim.key_frame_sets.insert(0, frames);
-            anim
-        };
-        let clips = vec![
-            clip(b"idl0", [0.0, 0.0, 0.0, 1.0]),
-            clip(b"run0", [0.0, 0.0, 0.0, 1.0]),
-            clip(b"mvl0", yaw(50.0)),
-        ];
-        let mut actor = FfxiRenderActor {
-            animations: Arc::new(clips),
-            ..make_render_actor(
-                &empty_loaded_actor(skeleton, None),
-                0,
-                Vec::new(),
-                1,
-                0.0,
-                1.0,
-            )
-        };
-        actor.locked_on = true;
-
-        for _ in 0..(LOCOMOTION_XFADE_IN as u32 * 4) {
-            actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
-            advance_actor_pose_standalone(&mut actor, 1.0, None);
-        }
-        assert!(
-            actor.locked_torso_weight > 0.99,
-            "the strafe saturates the hold"
-        );
-        let angle_off_forward = |v: Vec3| {
-            v.angle_between(Vec3::new(POSE_FORWARD.x, 0.0, POSE_FORWARD.z))
-                .to_degrees()
-        };
-        assert!(
-            angle_off_forward(actor.held_chest_facing) > 20.0,
-            "the chase followed the turned chest off its aim: {:.1} deg",
-            angle_off_forward(actor.held_chest_facing)
-        );
-        let pinned = actor.held_chest_facing;
-
-        let mut landed_weightless = None;
-        for _ in 0..(LOCOMOTION_XFADE_IN as u32 + 4) {
-            actor.inputs = inputs_for_pose(PoseState::Run, false);
-            advance_actor_pose_standalone(&mut actor, 1.0, None);
-            if actor.locked_torso_weight > 0.0 {
-                assert_eq!(
-                    actor.held_chest_facing, pinned,
-                    "the hold was re-chased mid-handoff; only the ramp may move it now"
-                );
-            } else {
-                landed_weightless = Some(actor.held_chest_facing);
-                break;
-            }
-        }
-        let after_landing = landed_weightless.expect("the ramp never ran out");
-        assert_ne!(
-            after_landing, pinned,
-            "the chase stayed frozen past the landing instead of picking the idle chest back up"
         );
     }
 

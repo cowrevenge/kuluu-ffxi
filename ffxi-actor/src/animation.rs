@@ -769,6 +769,12 @@ impl SkeletonAnimator {
         self.sample(joint, true)
     }
 
+    /// Whether this layer takes every request outright, with no blend: slot 5 does, in
+    /// [`Self::set_next_animation`] and [`Self::set_settled_animation`] alike.
+    pub fn replaces_outright(&self) -> bool {
+        self.animation_slot == 5
+    }
+
     /// Sample this layer for one bone, refusing the crossfade when the bone's mask has cleared bit 7.
     /// A refused blend leaves the bone on whichever side was already in the slot: retail runs a blend
     /// as an extra layer over the base sample and skips that merge entirely when bit 7 is clear
@@ -958,6 +964,30 @@ impl SkeletonAnimationCoordinator {
             }
         }
         None
+    }
+
+    /// The bone as the layers under `slot` alone would write it: who owns it once `slot` stops writing it, under
+    /// the same law as [`Self::sample_joint_by_slot`]. `None` is nothing, so the bone would rest on its bind data.
+    pub fn sample_joint_under(
+        &self,
+        slot: usize,
+        joint: usize,
+    ) -> Option<(usize, KeyFrameTransform)> {
+        let mask = self.mask_at(joint);
+        if !mask.writable() {
+            return None;
+        }
+        let blend_allowed = mask.accepts_blend_layers();
+        self.animations
+            .iter()
+            .enumerate()
+            .skip(slot + 1)
+            .find_map(|(under, animator)| {
+                animator
+                    .as_ref()?
+                    .sample(joint, blend_allowed)
+                    .map(|record| (under, record))
+            })
     }
 
     /// A frame of the pose pass: retail's reset pass first (`FFXiMain.dll retail-2026-09` RVA
@@ -1395,6 +1425,41 @@ mod tests {
             scratch.get(5).is_none(),
             "the weapon bone outlived every layer that keyed it"
         );
+    }
+
+    /// Who writes a bone once a slot stops writing it: the next layer down that keys it, under the same ownership
+    /// law, or nothing.
+    #[test]
+    fn the_layers_under_a_slot_name_the_bone_s_next_owner() {
+        let mut coord = SkeletonAnimationCoordinator::new();
+        let loops = LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        };
+        coord.register_animation(authored("aaa0", 5, 1.0), loops, None, |_| true);
+        coord.register_animation(authored("bbb2", 5, 2.0), loops, None, |_| true);
+        coord.update(1.0);
+        assert_eq!(coord.sample_joint_by_slot(5).map(|(slot, _)| slot), Some(0));
+        let (slot, record) = coord.sample_joint_under(0, 5).expect("slot 2 keys bone 5");
+        assert_eq!(slot, 2);
+        assert!((record.translation[0] - 2.0).abs() < 1e-6);
+        assert!(
+            coord.sample_joint_under(2, 5).is_none(),
+            "nothing under slot 2 keys bone 5"
+        );
+        coord.set_mask(5, BoneMotionMask::BLOCKED);
+        assert!(
+            coord.sample_joint_under(0, 5).is_none(),
+            "a bone nothing may write has no owner under any slot"
+        );
+    }
+
+    #[test]
+    fn slot_five_alone_takes_every_request_outright() {
+        for slot in 0..8 {
+            assert_eq!(SkeletonAnimator::new(slot).replaces_outright(), slot == 5);
+        }
     }
 
     /// The other direction: when only the incoming side keys a bone, that side owns the bone outright —

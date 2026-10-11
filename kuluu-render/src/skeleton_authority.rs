@@ -3,26 +3,34 @@
 //! Everything it decides is read from what is loaded and what was requested, so a swapped DAT, another rig or a
 //! motion a cutscene opcode asked for runs through it unchanged:
 //!
-//! - The pose is the clips': the coordinator's records, written the way retail writes them, so a bone a motion keys
-//!   is that motion's outright from its first frame.
-//! - The correction on top is the look-at, from the skeleton's own records, their limits and the reference joints
-//!   they name, with the wire status choosing how many apply. [`Correction::Free`] is retail's law: every record
-//!   turned from the actor's forward against one pre-bend frame. [`Correction::Held`], locked on a side step, turns
-//!   each record from where the bone it carries faces (where its subtree fans out: the head for the neck record, the
-//!   chest itself for the chest record), shallow bone first in the pose the turns above it left. A bone only takes
-//!   what is still owed, so a head the side step already turns back toward the target lands on the look point
-//!   instead of past it.
-//! - Nothing the clips did not author moves a bone faster than the handover that caused it. A bone whose last writer
-//!   lets go is given back to rest over the blend of the motion that let it go; a change of correction is given back
-//!   over the blend running in the slot that writes the bone, or over the look-at's own opening when none runs. A
-//!   handover requested as instant stays instant.
+//! - The pose is the clips': the coordinator's records, written the way retail writes them.
+//! - No bone changes hands faster than the request that moved it. A bone's source is the slot that writes it and that
+//!   slot's clip. When it changes (a slot takes a bone nothing wrote, lets one go to rest, hands one to another slot,
+//!   or has its clip swapped in with no blend) the bone is carried from where it stood to its new record over that
+//!   request's blend. Only a request that asks for no blend gets none.
+//! - A bone only the outgoing clip of a running blend keys is on its way to whoever writes it once the blend lands:
+//!   the layers under its slot, or nothing, which rests it. It goes there with the blend. The sampler keeps the
+//!   outgoing key outright to the end of the fade and lets go on the landing frame, which on a rig whose side step is
+//!   the only motion keying the upper body's root (Mithra's joint 36) holds the whole torso in the strafe twist for
+//!   the length of the stop and then drops it.
+//! - The correction on top is the look-at, measured from the pose the bones stand in under those handovers, from the
+//!   skeleton's own records, their limits and the reference joints they name, with the wire status choosing how many
+//!   apply. [`Correction::Free`] is retail's law: every record turned from the actor's forward against one pre-bend
+//!   frame. [`Correction::Held`], locked on a side step, turns each record from where the bone it carries faces (where
+//!   its subtree fans out: the head for the neck record, the chest itself for the chest record), shallow bone first in
+//!   the pose the turns above it left. A bone only takes what is still owed, so a head the side step already turns
+//!   back toward the target lands on the look point instead of past it. A change of correction is given back over the
+//!   blend running in the slot that writes the bone, or over the look-at's own opening when none runs.
 
 use bevy::math::{Mat4, Quat, Vec3};
-use ffxi_actor::animation::{BonePoseScratch, SkeletonAnimationCoordinator};
+use ffxi_actor::animation::{
+    BonePoseScratch, SkeletonAnimationCoordinator, SkeletonAnimator, TransitionParams,
+};
 use ffxi_actor::look_bend::{self, BendFrame, POSE_FORWARD};
 use ffxi_actor::skeleton_instance::{
     pose_world, pose_world_mounted_into, MountAttach, PoseScratch, RootTransform,
 };
+use ffxi_dat::datid::DatId;
 use ffxi_dat::skel::Skeleton;
 use ffxi_dat::skel_anim::KeyFrameTransform;
 
@@ -63,16 +71,48 @@ struct Law {
     open: bool,
 }
 
+/// How a bone's source changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handover {
+    /// A slot took a bone nothing wrote.
+    Taken,
+    /// Its slot let it go and nothing writes it now, so it rests.
+    Dropped,
+    /// Another slot writes it now.
+    Moved,
+    /// Its slot's clip was swapped with no blend.
+    Swapped,
+}
+
+impl Handover {
+    fn name(self) -> &'static str {
+        match self {
+            Handover::Taken => "taken",
+            Handover::Dropped => "dropped",
+            Handover::Moved => "moved",
+            Handover::Swapped => "swapped",
+        }
+    }
+}
+
 /// One bone as the last pass left it.
 #[derive(Debug, Clone, Copy, Default)]
 struct Watch {
     /// The slot whose layer wrote it; `None` when nothing did.
     writer: Option<usize>,
+    /// Its record under the handovers, before the correction; `None` is its bind data.
+    carried: Option<KeyFrameTransform>,
     /// The record it was shown with; `None` is its bind data.
     shown: Option<KeyFrameTransform>,
+    /// What its last change of source still owes it, and how the source changed.
+    carry: Option<(Residue, Handover)>,
+    /// What its last change of correction still owes it.
     residue: Option<Residue>,
-    /// For the bone log: the correction's turn on it and what its residue still owes, in degrees.
+    /// For the bone log: how far a running blend has handed it on, the correction's turn on it, and what its carry and
+    /// its residue still owe, in degrees.
+    handed: Option<f32>,
     turned_deg: f32,
+    carried_deg: f32,
     owed_deg: f32,
 }
 
@@ -112,6 +152,14 @@ impl Residue {
         })
     }
 
+    fn advance(&mut self, elapsed_frames: f32) {
+        self.elapsed = (self.elapsed + elapsed_frames.clamp(0.0, self.window)).min(self.window);
+    }
+
+    fn done(&self) -> bool {
+        self.elapsed >= self.window
+    }
+
     fn share_left(&self) -> f32 {
         1.0 - (self.elapsed / self.window).clamp(0.0, 1.0)
     }
@@ -132,6 +180,43 @@ impl Residue {
     }
 }
 
+/// One coordinator slot as a pass found it.
+#[derive(Debug, Clone, Copy, Default)]
+struct SlotWatch {
+    clip: Option<DatId>,
+    /// Its live blend: its length and how far it has run, in frames.
+    blend: Option<(f32, f32)>,
+    /// The blend the request behind its clip named, when it named one.
+    asked: Option<f32>,
+    /// It takes every request outright, whatever the request names.
+    outright: bool,
+}
+
+impl SlotWatch {
+    fn of(layer: Option<&SkeletonAnimator>) -> Self {
+        let Some(layer) = layer else {
+            return Self::default();
+        };
+        let current = layer.current_animation.as_ref();
+        Self {
+            clip: current.map(|context| context.animation.id),
+            blend: layer
+                .transition
+                .as_ref()
+                .map(|blend| (blend.transition_duration, blend.progress())),
+            asked: current
+                .and_then(|context| context.transition_params.as_ref())
+                .map(|params| params.transition_in_time),
+            outright: layer.replaces_outright(),
+        }
+    }
+
+    /// What is left of its live blend.
+    fn left(&self) -> Option<f32> {
+        self.blend.map(|(length, run)| (length - run).max(0.0))
+    }
+}
+
 /// One joint a look-at record turns, and the bone it faces by.
 #[derive(Debug, Clone, Copy)]
 struct RecordBone {
@@ -148,10 +233,13 @@ struct RecordBone {
 pub struct SkeletonAuthority {
     record_bones: Vec<RecordBone>,
     bones: Vec<Watch>,
-    /// Each slot's live blend at the last pass, by its length in frames.
-    blends: Vec<Option<f32>>,
+    /// Each coordinator slot at the last pass.
+    slots: Vec<SlotWatch>,
     law: Option<Law>,
+    carried: Vec<Option<KeyFrameTransform>>,
     shown: Vec<Option<KeyFrameTransform>>,
+    /// The pose the bones stand in under the handovers, composed while one is being carried.
+    carried_pose: Vec<Mat4>,
 }
 
 impl SkeletonAuthority {
@@ -180,7 +268,7 @@ impl SkeletonAuthority {
     /// Forget every bone's history (a pose-state reset): the next pass shows the clips as they stand.
     pub fn reset(&mut self) {
         self.bones.clear();
-        self.blends.clear();
+        self.slots.clear();
         self.law = None;
     }
 
@@ -204,16 +292,93 @@ impl SkeletonAuthority {
             self.bones.clear();
             self.bones.resize(bone_count, Watch::default());
         }
-        // Each slot's live blend: its length and how far it has run.
-        let blends: Vec<Option<(f32, f32)>> = motions
+        let slots: Vec<SlotWatch> = motions
             .animations
             .iter()
-            .map(|slot| {
-                slot.as_ref()
-                    .and_then(|animator| animator.transition.as_ref())
-                    .map(|blend| (blend.transition_duration, blend.progress()))
+            .map(|layer| SlotWatch::of(layer.as_ref()))
+            .collect();
+        let last_slots = std::mem::take(&mut self.slots);
+        // A slot holding another clip than at the last pass took a request since.
+        let requested: Vec<bool> = slots
+            .iter()
+            .enumerate()
+            .map(|(slot, now)| {
+                last_slots
+                    .get(slot)
+                    .is_some_and(|last| last.clip != now.clip)
             })
             .collect();
+
+        // Each bone under the handovers: the clips' record, handed on by a blend running in its slot and carried
+        // through any change of source.
+        self.carried.clear();
+        self.carried.resize(bone_count, None);
+        let mut carrying = false;
+        for bone in 0..bone_count {
+            let writer = clips.writer(bone);
+            let (record, handed) = handed_on(motions, writer, bone, clips.get(bone));
+            let watch = &mut self.bones[bone];
+            let handover = match (watch.writer, writer) {
+                _ if !primed => None,
+                (None, Some(_)) => Some(Handover::Taken),
+                (Some(_), None) => Some(Handover::Dropped),
+                (Some(was), Some(now)) if was != now => Some(Handover::Moved),
+                (_, Some(now)) if requested[now] && slots[now].blend.is_none() => {
+                    Some(Handover::Swapped)
+                }
+                _ => None,
+            };
+            match handover {
+                Some(handover) => {
+                    let window = carry_window(
+                        watch.writer,
+                        writer,
+                        &slots,
+                        &last_slots,
+                        &requested,
+                        elapsed_frames,
+                    );
+                    watch.carry = Residue::between(watch.carried, record, window)
+                        .map(|residue| (residue, handover));
+                }
+                None => {
+                    if let Some((residue, _)) = watch.carry.as_mut() {
+                        residue.advance(elapsed_frames);
+                    }
+                }
+            }
+            let carried = match &watch.carry {
+                Some((residue, _)) => Some(residue.over(record)),
+                None => record,
+            };
+            carrying |= handed.is_some() || watch.carry.is_some();
+            watch.carried_deg = watch
+                .carry
+                .map_or(0.0, |(residue, _)| degrees(residue.rotation_left()));
+            if watch.carry.is_some_and(|(residue, _)| residue.done()) {
+                watch.carry = None;
+            }
+            watch.handed = handed;
+            watch.writer = writer;
+            watch.carried = carried;
+            self.carried[bone] = carried;
+        }
+
+        // The look-at measures from the pose the bones stand in, so it turns from what is shown, not from a clip pose a
+        // handover has not reached yet.
+        if carrying {
+            let carried = &self.carried;
+            pose_world_mounted_into(
+                &mut self.carried_pose,
+                work,
+                skeleton,
+                |bone| carried.get(bone).copied().flatten(),
+                composition.root,
+                composition.parent_overrides,
+                composition.mount,
+            );
+        }
+        let standing: &[Mat4] = if carrying { &self.carried_pose } else { pose };
         let law = look.map(|look| Law {
             correction,
             records: look.records,
@@ -223,7 +388,7 @@ impl SkeletonAuthority {
         let law_changed = primed && law != self.law;
         let turns = match look {
             Some(look) => record_turns(
-                pose,
+                standing,
                 skeleton,
                 composition.parent_overrides,
                 &look,
@@ -232,78 +397,58 @@ impl SkeletonAuthority {
             ),
             None => Vec::new(),
         };
+        let pace = look.map_or(0.0, |look| look.pace);
 
         self.shown.clear();
         self.shown.resize(bone_count, None);
-        let mut recompose = !turns.is_empty();
+        let mut recompose = carrying || !turns.is_empty();
         for bone in 0..bone_count {
-            let clip = clips.get(bone);
-            let writer = clips.writer(bone);
+            let carried = self.carried[bone];
             let turn = turns
                 .iter()
                 .find(|(joint, _)| *joint == bone)
                 .map(|(_, turn)| *turn);
             let goal = match turn {
                 Some(turn) => {
-                    let base = clip.unwrap_or_default();
+                    let base = carried.unwrap_or_default();
                     Some(KeyFrameTransform {
                         rotation: (turn * unit(base.rotation)).to_array(),
                         ..base
                     })
                 }
-                None => clip,
+                None => carried,
             };
-            let watch = &mut self.bones[bone];
-            let let_go = primed && watch.writer.is_some() && writer.is_none();
             let recorrected =
                 law_changed && self.record_bones.iter().any(|record| record.joint == bone);
-            if let_go || recorrected {
-                let mut window = 0.0_f32;
-                if let_go {
-                    window = window.max(let_go_window(watch.writer, &blends, &self.blends));
-                }
-                if recorrected {
-                    window = window.max(recorrect_window(
-                        writer.or(watch.writer),
-                        &blends,
-                        look.map_or(0.0, |look| look.pace),
-                    ));
-                }
-                watch.residue = Residue::between(watch.shown, goal, window);
-            } else if writer.is_some() && watch.writer.is_none() {
-                // Taken outright: a motion writes a bone it keys from its first frame.
-                watch.residue = None;
+            let watch = &mut self.bones[bone];
+            if recorrected {
+                watch.residue = Residue::between(
+                    watch.shown,
+                    goal,
+                    recorrect_window(watch.writer, &slots, pace),
+                );
             } else if let Some(residue) = watch.residue.as_mut() {
-                residue.elapsed = (residue.elapsed + elapsed_frames.clamp(0.0, residue.window))
-                    .min(residue.window);
+                residue.advance(elapsed_frames);
             }
             let shown = match &watch.residue {
                 Some(residue) => {
                     recompose = true;
-                    watch.owed_deg = degrees(residue.rotation_left());
                     Some(residue.over(goal))
                 }
-                None => {
-                    watch.owed_deg = 0.0;
-                    goal
-                }
+                None => goal,
             };
-            if watch
+            watch.owed_deg = watch
                 .residue
-                .is_some_and(|residue| residue.elapsed >= residue.window)
-            {
+                .map_or(0.0, |residue| degrees(residue.rotation_left()));
+            if watch.residue.is_some_and(|residue| residue.done()) {
                 watch.residue = None;
             }
             watch.turned_deg = turn.map_or(0.0, degrees);
-            watch.writer = writer;
             watch.shown = shown;
             self.shown[bone] = shown;
         }
         self.law = law;
-        self.blends = blends
-            .iter()
-            .map(|blend| blend.map(|(length, _)| length))
-            .collect();
+        self.slots = slots;
 
         if recompose {
             let shown = &self.shown;
@@ -319,15 +464,16 @@ impl SkeletonAuthority {
         }
     }
 
-    /// Whether `joint` still carries something it is being given back from.
+    /// Whether `joint` still carries a handover or a change of correction it is being given back from.
     pub fn owes(&self, joint: usize) -> bool {
         self.bones
             .get(joint)
-            .is_some_and(|watch| watch.residue.is_some())
+            .is_some_and(|watch| watch.carry.is_some() || watch.residue.is_some())
     }
 
-    /// One bone's line for the bone log: the law in force, who wrote it, the correction's turn on it and what it
-    /// is still owed.
+    /// One bone's line for the bone log: the law in force, who wrote it, the correction's turn on it and what it is
+    /// still owed, then the handover it is carried through (how its source changed and what that still owes) and how
+    /// far a running blend has handed it on.
     pub fn describe(&self, joint: usize) -> String {
         let law = match self.law.map(|law| law.correction) {
             Some(Correction::Free) => "free",
@@ -336,45 +482,140 @@ impl SkeletonAuthority {
         };
         match self.bones.get(joint) {
             Some(watch) => format!(
-                "law={law} writer={} turned={:.1} owed={:.1}",
+                "law={law} writer={} turned={:.1} owed={:.1} carry={} carried={:.1} handed={}",
                 watch
                     .writer
                     .map_or_else(|| "-".to_string(), |slot| slot.to_string()),
                 watch.turned_deg,
-                watch.owed_deg
+                watch.owed_deg,
+                watch.carry.map_or("-", |(_, handover)| handover.name()),
+                watch.carried_deg,
+                watch
+                    .handed
+                    .map_or_else(|| "-".to_string(), |share| format!("{share:.2}")),
             ),
             None => format!("law={law}"),
         }
     }
 }
 
-/// A bone let go is given back over the blend of the motion that let it go: what is left of that slot's blend, the
-/// whole of it when it landed this pass, or, for a slot swapped or cleared outright, the blend the request that did
-/// it runs in its other slots. Nothing blending means the handover was instant.
-fn let_go_window(
-    slot: Option<usize>,
-    blends: &[Option<(f32, f32)>],
-    last_blends: &[Option<f32>],
-) -> f32 {
-    if let Some(slot) = slot {
-        if let Some(Some((length, run))) = blends.get(slot) {
-            return (length - run).max(0.0);
-        }
-        if let Some(Some(length)) = last_blends.get(slot) {
-            return *length;
-        }
+/// A bone the blend running in its slot is handing on: only the outgoing clip keys it, so once the blend lands the
+/// layers under that slot write it, or nothing does and it rests. It goes there with the blend, as far as the blend has
+/// run, instead of holding the outgoing key to the end and jumping. A bone whose mask refuses blend layers keeps the
+/// outgoing key, as the sampler does. The record, and how far the handover has run.
+fn handed_on(
+    motions: &SkeletonAnimationCoordinator,
+    writer: Option<usize>,
+    bone: usize,
+    record: Option<KeyFrameTransform>,
+) -> (Option<KeyFrameTransform>, Option<f32>) {
+    let Some(slot) = writer else {
+        return (record, None);
+    };
+    let Some(blend) = motions
+        .animations
+        .get(slot)
+        .and_then(Option::as_ref)
+        .and_then(|layer| layer.transition.as_ref())
+    else {
+        return (record, None);
+    };
+    if !motions.mask_at(bone).accepts_blend_layers()
+        || blend
+            .next
+            .animation
+            .key_frame_sets
+            .contains_key(&(bone as u32))
+    {
+        return (record, None);
     }
-    running_blend(blends).unwrap_or(0.0)
+    let share = if blend.transition_duration > 0.0 {
+        (blend.progress() / blend.transition_duration).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let under = motions
+        .sample_joint_under(slot, bone)
+        .map(|(_, under)| under);
+    (
+        Some(mix(
+            record.unwrap_or_default(),
+            under.unwrap_or_default(),
+            share,
+        )),
+        Some(share),
+    )
+}
+
+/// `share` of the way from one record to another.
+fn mix(from: KeyFrameTransform, to: KeyFrameTransform, share: f32) -> KeyFrameTransform {
+    KeyFrameTransform {
+        rotation: unit(from.rotation)
+            .slerp(unit(to.rotation), share)
+            .to_array(),
+        translation: Vec3::from(from.translation)
+            .lerp(Vec3::from(to.translation), share)
+            .to_array(),
+        scale: Vec3::from(from.scale)
+            .lerp(Vec3::from(to.scale), share)
+            .to_array(),
+    }
+}
+
+/// The blend a change of source is carried over: the one of the request that made it. A slot holding another clip than
+/// at the last pass took a request, and a bone that request moves goes with it (the slot that took the bone first,
+/// then the one that let it go): what is left of the blend the request started in that slot; with none running there
+/// (an empty slot takes its clip outright, and a blend shorter than the pass is already over) what is left of the
+/// blend the request named, so a request for no blend gets none; for a request that named none, the blend it runs in
+/// its other slots, or the coordinator's own handover. A layer that takes every request outright stays outright. With
+/// no request behind it, a blend landed and its outgoing clip stopped writing the bone: what that blend still had to
+/// run.
+fn carry_window(
+    from: Option<usize>,
+    to: Option<usize>,
+    slots: &[SlotWatch],
+    last_slots: &[SlotWatch],
+    requested: &[bool],
+    elapsed_frames: f32,
+) -> f32 {
+    let request = [to, from]
+        .into_iter()
+        .flatten()
+        .find(|&slot| requested.get(slot).copied().unwrap_or(false));
+    if let Some(slot) = request.and_then(|slot| slots.get(slot)) {
+        return match (slot.left(), slot.asked) {
+            (Some(left), _) => left,
+            _ if slot.outright => 0.0,
+            (None, Some(asked)) => (asked - elapsed_frames).max(0.0),
+            (None, None) => running_blend(slots).unwrap_or_else(default_handover),
+        };
+    }
+    [from, to]
+        .into_iter()
+        .flatten()
+        .filter(|&slot| slots.get(slot).is_some_and(|now| now.blend.is_none()))
+        .find_map(|slot| last_slots.get(slot).and_then(SlotWatch::left))
+        .map(|left| (left - elapsed_frames).max(0.0))
+        .or_else(|| running_blend(slots))
+        .unwrap_or_else(default_handover)
+}
+
+/// The handover the coordinator gives a request that names no blend of its own.
+fn default_handover() -> f32 {
+    TransitionParams::default().transition_in_time
 }
 
 /// A change of correction is given back over what is left of the handover that changed it: the blend in the slot
 /// that writes the bone, or the one the request runs in its other slots for a bone no clip writes. With no blend
 /// running it is a change of the look-at alone, given back over the span the look-at opens or closes in.
-fn recorrect_window(slot: Option<usize>, blends: &[Option<(f32, f32)>], pace: f32) -> f32 {
-    if let Some(Some((length, run))) = slot.and_then(|slot| blends.get(slot)) {
-        return (length - run).max(0.0);
+fn recorrect_window(slot: Option<usize>, slots: &[SlotWatch], pace: f32) -> f32 {
+    if let Some(left) = slot
+        .and_then(|slot| slots.get(slot))
+        .and_then(SlotWatch::left)
+    {
+        return left;
     }
-    if let Some(left) = running_blend(blends) {
+    if let Some(left) = running_blend(slots) {
         return left;
     }
     if pace > 0.0 {
@@ -385,12 +626,8 @@ fn recorrect_window(slot: Option<usize>, blends: &[Option<(f32, f32)>], pace: f3
 }
 
 /// What is left of the longest blend running in any slot.
-fn running_blend(blends: &[Option<(f32, f32)>]) -> Option<f32> {
-    blends
-        .iter()
-        .flatten()
-        .map(|(length, run)| (length - run).max(0.0))
-        .reduce(f32::max)
+fn running_blend(slots: &[SlotWatch]) -> Option<f32> {
+    slots.iter().filter_map(SlotWatch::left).reduce(f32::max)
 }
 
 /// The correction as multipliers on the records of the bones it turns.
@@ -569,11 +806,11 @@ fn ground(v: Vec3) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffxi_actor::animation::{LoopParams, TransitionParams};
-    use ffxi_dat::datid::DatId;
+    use ffxi_actor::animation::LoopParams;
     use ffxi_dat::skel::{standard_position, Joint, JointReference, LookAtLimit};
     use ffxi_dat::skel_anim::SkeletonAnimation;
 
+    const SPINE: usize = 2;
     const CHEST: usize = 3;
     const NECK: usize = 4;
     const HEAD: usize = 5;
@@ -652,6 +889,14 @@ mod tests {
         }
     }
 
+    fn looping() -> LoopParams {
+        LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        }
+    }
+
     struct Bench {
         skeleton: Skeleton,
         motions: SkeletonAnimationCoordinator,
@@ -678,11 +923,7 @@ mod tests {
         fn play(&mut self, clip: SkeletonAnimation, blend: f32) {
             self.motions.register_animation(
                 clip,
-                LoopParams {
-                    loop_duration: None,
-                    num_loops: None,
-                    low_priority: false,
-                },
+                looping(),
                 Some(TransitionParams {
                     transition_in_time: blend,
                     ..Default::default()
@@ -751,8 +992,13 @@ mod tests {
         facing.z.atan2(facing.x).to_degrees()
     }
 
+    /// [`yaw_deg`] signed the way [`clip`] writes a yaw (about `+Y`).
+    fn clip_yaw_deg(pose: &[Mat4], joint: usize) -> f32 {
+        -yaw_deg(pose, joint)
+    }
+
     #[test]
-    fn a_bone_let_go_rests_over_the_blend_that_let_it_go_and_an_instant_one_snaps() {
+    fn a_bone_only_the_outgoing_clip_keys_goes_to_rest_with_the_blend_and_an_instant_one_snaps() {
         let held_deg = 30.0_f32;
         for blend in [6.0_f32, 0.0] {
             let mut bench = Bench::new();
@@ -761,26 +1007,188 @@ mod tests {
                 bench.pass(None, Correction::Free);
             }
             bench.play(clip(b"bbb0", &[(1, 0.0)]), blend);
-            let mut shown = Vec::new();
-            let mut blending = Vec::new();
-            for _ in 0..(blend as usize + 10) {
+            // Every pass of the blend takes its share of the way home, the pass it lands on included, so nothing is
+            // held to the end and nothing is left over after it.
+            for pass in 1..=(blend as usize).max(1) {
                 let pose = bench.pass(None, Correction::Free);
-                shown.push(yaw_deg(&pose, HEAD).abs());
-                blending.push(bench.motions.is_transitioning());
-            }
-            // The outgoing clip holds the bone outright while the blend runs; the pass it lands is still the held
-            // pose, and from there it walks home in equal steps over the blend's own length.
-            let landed = blending.iter().position(|live| !live).unwrap();
-            for step in 0..=blend as usize {
-                let expected = held_deg * (1.0 - step as f32 / blend.max(1.0));
-                let expected = if blend == 0.0 { 0.0 } else { expected };
+                let expected = if blend == 0.0 {
+                    0.0
+                } else {
+                    held_deg * (1.0 - pass as f32 / blend)
+                };
                 assert!(
-                    (shown[landed + step] - expected).abs() < TOLERANCE_DEG,
-                    "blend {blend}: {step} passes after landing the head read {:.2}, expected {expected:.2}",
-                    shown[landed + step]
+                    (clip_yaw_deg(&pose, HEAD) - expected).abs() < TOLERANCE_DEG,
+                    "blend {blend}: pass {pass} read the head at {:.2}, expected {expected:.2}",
+                    clip_yaw_deg(&pose, HEAD)
                 );
             }
-            assert!(shown[landed + blend as usize + 1] < TOLERANCE_DEG);
+            assert!(!bench.motions.is_transitioning());
+            assert!(!bench.authority.owes(HEAD));
+            let pose = bench.pass(None, Correction::Free);
+            assert!(yaw_deg(&pose, HEAD).abs() < TOLERANCE_DEG);
+        }
+    }
+
+    #[test]
+    fn a_bone_handed_to_the_slot_under_it_goes_there_with_the_blend() {
+        let over_deg = 30.0_f32;
+        let under_deg = -20.0_f32;
+        let blend = 8.0_f32;
+        let mut bench = Bench::new();
+        bench.play(clip(b"aaa0", &[(HEAD, over_deg.to_radians())]), 0.0);
+        bench.play(clip(b"uuu1", &[(HEAD, under_deg.to_radians())]), 0.0);
+        for _ in 0..3 {
+            bench.pass(None, Correction::Free);
+        }
+        bench.play(clip(b"bbb0", &[(1, 0.0)]), blend);
+        for pass in 1..=blend as usize {
+            let pose = bench.pass(None, Correction::Free);
+            let expected = over_deg + (under_deg - over_deg) * pass as f32 / blend;
+            assert!(
+                (clip_yaw_deg(&pose, HEAD) - expected).abs() < TOLERANCE_DEG,
+                "pass {pass} read the head at {:.2}, expected {expected:.2}",
+                clip_yaw_deg(&pose, HEAD)
+            );
+        }
+        assert!(!bench.motions.is_transitioning());
+        assert_eq!(bench.clips.writer(HEAD), Some(1));
+        assert!(!bench.authority.owes(HEAD));
+    }
+
+    #[test]
+    fn a_bone_only_the_incoming_clip_keys_comes_in_over_the_blend_that_brought_it() {
+        let taken_deg = 30.0_f32;
+        let blend = 8.0_f32;
+        let mut bench = Bench::new();
+        bench.play(clip(b"aaa0", &[(1, 0.0)]), 0.0);
+        for _ in 0..3 {
+            bench.pass(None, Correction::Free);
+        }
+        bench.play(
+            clip(b"bbb0", &[(1, 0.0), (HEAD, taken_deg.to_radians())]),
+            blend,
+        );
+        let mut last = 0.0_f32;
+        for pass in 1..=blend as usize {
+            let pose = bench.pass(None, Correction::Free);
+            let now = clip_yaw_deg(&pose, HEAD);
+            assert!(
+                (0.0..=taken_deg / (blend - 1.0) + TOLERANCE_DEG).contains(&(now - last)),
+                "pass {pass}: the head stepped {:.2}",
+                now - last
+            );
+            last = now;
+        }
+        // It arrives with the blend that brought it.
+        assert!(!bench.motions.is_transitioning());
+        assert!((last - taken_deg).abs() < TOLERANCE_DEG);
+        assert!(!bench.authority.owes(HEAD));
+    }
+
+    /// An empty slot takes its clip outright whatever the request names, so the bones it takes come in on the
+    /// request's own blend: the one it named, or with none named the blend it runs in its other slots. Named instant,
+    /// they snap.
+    #[test]
+    fn a_clip_put_in_an_empty_slot_comes_in_on_its_request_s_blend() {
+        let taken_deg = 30.0_f32;
+        let legs_blend = 8.0_f32;
+        // What the upper body's request names, and the pass its bone lands on.
+        for (asked, lands) in [(None, 8_usize), (Some(4.0_f32), 4), (Some(0.0), 1)] {
+            let mut bench = Bench::new();
+            bench.play(clip(b"aaa0", &[(1, 0.0)]), 0.0);
+            for _ in 0..3 {
+                bench.pass(None, Correction::Free);
+            }
+            // One request: the legs blend on, and the upper body's slot had nothing, so its clip goes in outright.
+            bench.play(clip(b"bbb0", &[(1, 0.0)]), legs_blend);
+            bench.motions.register_animation(
+                clip(b"bbb1", &[(HEAD, taken_deg.to_radians())]),
+                looping(),
+                asked.map(|blend| TransitionParams {
+                    transition_in_time: blend,
+                    ..Default::default()
+                }),
+                |_| true,
+            );
+            let step_limit = taken_deg / (lands.max(2) - 1) as f32 + TOLERANCE_DEG;
+            let mut last = 0.0_f32;
+            for pass in 1..=legs_blend as usize {
+                let pose = bench.pass(None, Correction::Free);
+                let now = clip_yaw_deg(&pose, HEAD);
+                if lands > 1 {
+                    assert!(
+                        now - last <= step_limit,
+                        "asked {asked:?}: pass {pass} stepped the head {:.2}",
+                        now - last
+                    );
+                }
+                assert_eq!(
+                    (now - taken_deg).abs() < TOLERANCE_DEG,
+                    pass >= lands,
+                    "asked {asked:?}: pass {pass} read the head at {now:.2}, landing on pass {lands}"
+                );
+                last = now;
+            }
+            assert!(!bench.authority.owes(HEAD));
+        }
+    }
+
+    #[test]
+    fn under_a_handover_the_look_at_is_retails_on_the_pose_the_bones_stand_in() {
+        let spine = 0.7_f32;
+        let blend = 8.0_f32;
+        let off_side = Look {
+            point: Vec3::new(10.0, -1.2, 6.0),
+            weight: 0.7,
+            ..ahead()
+        };
+        let mut bench = Bench::new();
+        bench.play(clip(b"aaa0", &[(SPINE, spine), (CHEST, 0.2)]), 0.0);
+        for _ in 0..4 {
+            bench.pass(Some(off_side), Correction::Free);
+        }
+        bench.play(clip(b"bbb0", &[(CHEST, 0.2)]), blend);
+        for pass in 1..blend as usize {
+            bench.clips_pose();
+            // Where the spine stands this pass: handed on toward rest by the blend's share.
+            let share = pass as f32 / blend;
+            let standing = |bone: usize| {
+                if bone == SPINE {
+                    Some(KeyFrameTransform {
+                        rotation: Quat::from_rotation_y(spine * (1.0 - share)).to_array(),
+                        ..Default::default()
+                    })
+                } else {
+                    bench.clips.get(bone)
+                }
+            };
+            let mut retail = Vec::new();
+            pose_world_mounted_into(
+                &mut retail,
+                &mut PoseScratch::default(),
+                &bench.skeleton,
+                standing,
+                RootTransform::identity(),
+                &[],
+                None,
+            );
+            look_bend::apply_look_bends(
+                &mut retail,
+                &bench.skeleton,
+                &[],
+                off_side.point,
+                POSE_FORWARD,
+                off_side.weight,
+                off_side.records,
+                off_side.anchor_drop,
+            );
+            let shown = bench.settle(Some(off_side), Correction::Free);
+            for (joint, (a, b)) in shown.iter().zip(&retail).enumerate() {
+                assert!(
+                    a.abs_diff_eq(*b, 1e-4),
+                    "pass {pass}, joint {joint}: authority {a:?} against retail's bend {b:?}"
+                );
+            }
         }
     }
 

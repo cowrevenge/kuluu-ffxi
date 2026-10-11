@@ -4033,13 +4033,15 @@ const LOOK_RELEASE_HORIZON: f32 = 0.3;
 /// ... or a forward component past half a unit behind the shoulder line (`FFXiMain.dll
 /// retail-2026-09 RVA 0xD5DBF`, `-0.5f` from `.rdata`).
 const LOOK_RELEASE_FORWARD: f32 = -0.5;
-/// The blend weight opens and closes at ±0.04 per frame (`FFXiMain.dll retail-2026-09`: the immediate
+/// The blend weight opens and closes at ±0.04 per frame in retail (`FFXiMain.dll retail-2026-09`: the immediate
 /// `0x3d23d70a` written at RVA 0xD5D33). A second arm replaces it with a percent: when the gate call
 /// `0x87060` passes and `[vt+0x144]()` returns non-zero (RVA 0xD5D44..0xD5D70), the step becomes
 /// `[vt+0x144]() × .rdata 0x10329A18 (= 0.01) × .rdata 0x1032a85c (= 0.04)`; `vt+0x144` is the getter at
 /// RVA 0x84B80 = `[actor+0x70] → [+0xE0]`, which defaults to **100** when there is no such object, so the arm
-/// reproduces the same 0.04 by default and kuluu has no producer for a different percentage.
-const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 0.04;
+/// reproduces the same 0.04 by default and kuluu has no producer for a different percentage. kuluu opens and closes
+/// it half again as fast, the same playtest call as [`HEAD_LOOK_CHASE_FRACTION`]: retail's 25 frames left the head
+/// trailing every turn.
+const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 1.5 * 0.04;
 /// The look point chases the target by this share of what is left per tick. Retail chases 1/32 (`FFXiMain.dll
 /// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71); kuluu turns the head half again
 /// as fast, a playtest call that retail's share leaves the head trailing its target.
@@ -4512,7 +4514,7 @@ mod head_look_tests {
     }
 
     #[test]
-    fn weight_opens_over_about_25_frames_and_closes_the_same_way() {
+    fn weight_opens_over_about_17_frames_and_closes_the_same_way() {
         let target = Vec3::new(4.0, 0.0, 0.0);
         let mut head = HeadLook::default();
         let mut open_frames = 0;
@@ -4527,10 +4529,10 @@ mod head_look_tests {
             close_frames += 1;
             assert!(close_frames < 60, "weight stuck at {}", head.weight);
         }
-        // ±1 frame of the 25 that 0.04/frame implies at 60 fps.
-        assert!((24..=27).contains(&open_frames), "opened in {open_frames}");
+        // ±1 frame of the 17 that 0.06/frame implies, half again as fast as retail's 25.
+        assert!((16..=18).contains(&open_frames), "opened in {open_frames}");
         assert!(
-            (24..=27).contains(&close_frames),
+            (16..=18).contains(&close_frames),
             "closed in {close_frames}"
         );
     }
@@ -6877,6 +6879,14 @@ mod pose_resolution_tests {
         Some(load_pc(&root, 1, false, &[], None, None, None).expect("load Hume M"))
     }
 
+    const MITHRA: u8 = 7;
+
+    fn load_mithra() -> Option<LoadedActor> {
+        let root = ffxi_dat::archive::open_test_install()?;
+
+        Some(load_pc(&root, MITHRA, false, &[], None, None, None).expect("load Mithra"))
+    }
+
     const HUME_M: u8 = 1;
     /// The main-hand slot's model id for the dagger whose mesh binds every vertex to joint 10.
     const DAGGER_MODEL: u16 = 2;
@@ -8211,6 +8221,149 @@ mod pose_resolution_tests {
                     .iter()
                     .take(3)
                     .map(|(j, d, t)| format!("joint {j} +{d:.1} deg at tick +{}", t - release_at))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Mithra's side steps are the only motions that key joint 36, the spine base her whole upper body hangs from
+    /// (`mvl1`/`mvr1` twist it 40 deg and no idle clip keys it), so every locked side step hands that joint over
+    /// twice: the side step taking it, and the stop's settle letting it go. Measured on her shipped clips at 30, 60
+    /// and 144 fps before the skeleton authority carried those handovers: the torso snapped into the twist on the
+    /// first strafe tick (26.6 deg past both neighbouring ticks, a finger bone 90), stood frozen in it for the whole
+    /// settle with the hip-hung sword passing through her, and the neck snapped 7.5 to 9.7 deg on the tick the
+    /// settle landed, the look-at turning from a clip pose the twist had already left. The joints are read off the
+    /// clips, not named, so another rig runs through the same law.
+    #[test]
+    fn a_locked_side_step_hands_over_the_bones_only_it_keys_with_its_blends() {
+        // A tick past both of its neighbours by more than this is a jump, not a blend: measured at most 1.5 deg on
+        // every joint once the handovers are carried, against the 7.5 to 90 above.
+        const SPIKE_LIMIT_DEG: f32 = 3.0;
+        // Half way through the settle a bone it hands to rest has gone about half way; held, it has gone nowhere.
+        const HALF_SETTLE_SHARE_MOVED: f32 = 0.25;
+        // A bone the side step barely turns says nothing about whether it was held.
+        const HELD_TURN_MIN_DEG: f32 = 5.0;
+        // 60 fps in skeleton frames.
+        const DT: f32 = 0.5;
+
+        let Some(loaded) = load_mithra() else { return };
+        let keyed = |prefix: &str| -> std::collections::BTreeSet<usize> {
+            loaded
+                .all_animations()
+                .iter()
+                .filter(|clip| clip.id.as_str().starts_with(prefix))
+                .flat_map(|clip| clip.key_frame_sets.keys().map(|&joint| joint as usize))
+                .collect()
+        };
+        let side_only: Vec<usize> = keyed("mvl").difference(&keyed("idl")).copied().collect();
+        assert!(
+            side_only.contains(&36),
+            "Mithra's side step should be all that keys her upper body's root; side-only joints {side_only:?}"
+        );
+        let disp = |a: &Mat4, b: &Mat4| -> f32 {
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            (one(a.x_axis.truncate(), b.x_axis.truncate())
+                + one(a.y_axis.truncate(), b.y_axis.truncate())
+                + one(a.z_axis.truncate(), b.z_axis.truncate()))
+                / 3.0
+        };
+        let local = |pose: &[Mat4], joint: usize| -> Mat4 {
+            pose[loaded.skeleton.joints[joint].parent.unwrap()].inverse() * pose[joint]
+        };
+        let bind = ffxi_actor::skeleton_instance::pose_world(
+            &loaded.skeleton,
+            |_| None,
+            RootTransform::identity(),
+            &[],
+        );
+        let parented: Vec<usize> = (0..loaded.skeleton.joints.len())
+            .filter(|j| loaded.skeleton.joints[*j].parent.is_some() && *j != 2)
+            .collect();
+        let idle_ticks = 60_usize;
+        let settle_ticks = (LOCOMOTION_XFADE_IN / DT) as usize;
+
+        for strafe_ticks in [78_usize, 120, 186] {
+            let release_at = idle_ticks + strafe_ticks;
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            actor.locked_on = true;
+            let mut steps: Vec<Vec<f32>> = vec![Vec::new(); loaded.skeleton.joints.len()];
+            let mut held: Vec<(usize, f32)> = Vec::new();
+            let mut previous: Option<Vec<Mat4>> = None;
+            for tick in 0..release_at + 2 * settle_ticks {
+                actor.inputs = inputs_for_pose(
+                    if (idle_ticks..release_at).contains(&tick) {
+                        PoseState::StrafeLeft
+                    } else {
+                        PoseState::Idle
+                    },
+                    false,
+                );
+                advance_actor_pose(
+                    &mut actor,
+                    DT,
+                    crate::look_at_gates::LookState::Aiming,
+                    Some(LookAtInput {
+                        pose_rotation: Quat::IDENTITY,
+                        actor_world: Vec3::ZERO,
+                        target_attach_world: Vec3::new(5.0, -0.3, 0.0),
+                    }),
+                    None,
+                    false,
+                    None,
+                );
+                let pose = actor.world_pose().to_vec();
+                if let Some(past) = &previous {
+                    if tick + 5 >= idle_ticks {
+                        for &joint in &parented {
+                            steps[joint].push(disp(&local(past, joint), &local(&pose, joint)));
+                        }
+                    }
+                    if tick == release_at {
+                        held = side_only
+                            .iter()
+                            .map(|&joint| (joint, disp(&local(&bind, joint), &local(past, joint))))
+                            .filter(|&(_, turned)| turned >= HELD_TURN_MIN_DEG)
+                            .collect();
+                    }
+                }
+                if tick == release_at + settle_ticks / 2 {
+                    for &(joint, turned) in &held {
+                        let left = disp(&local(&bind, joint), &local(&pose, joint));
+                        assert!(
+                            left <= turned * (1.0 - HALF_SETTLE_SHARE_MOVED),
+                            "strafe={strafe_ticks}: half way through the settle joint {joint} still stands \
+                             {left:.1} of the {turned:.1} deg only the side step keys"
+                        );
+                    }
+                }
+                previous = Some(pose);
+            }
+            assert!(
+                held.iter().any(|&(joint, _)| joint == 36),
+                "strafe={strafe_ticks}: the side step never turned joint 36"
+            );
+            let mut spikes: Vec<(usize, f32, usize)> = Vec::new();
+            for &joint in &parented {
+                let series = &steps[joint];
+                for tick in 1..series.len().saturating_sub(1) {
+                    let spike = series[tick] - series[tick - 1].max(series[tick + 1]);
+                    if spike > SPIKE_LIMIT_DEG {
+                        spikes.push((joint, spike, tick));
+                    }
+                }
+            }
+            spikes.sort_by(|a, c| c.1.total_cmp(&a.1));
+            assert!(
+                spikes.is_empty(),
+                "strafe={strafe_ticks}: {} ticks jumped a joint past both neighbours; worst: {:?}",
+                spikes.len(),
+                spikes
+                    .iter()
+                    .take(4)
+                    .map(|(joint, spike, tick)| format!(
+                        "joint {joint} +{spike:.1} deg at tick {:+}",
+                        *tick as i64 - 5 - strafe_ticks as i64
+                    ))
                     .collect::<Vec<_>>()
             );
         }

@@ -8369,6 +8369,98 @@ mod pose_resolution_tests {
         }
     }
 
+    /// Locked on, a stop leaves Mithra's head on the target and only untwists her body: the target did not move, so
+    /// neither does the head. Measured on her shipped clips before standing and stepping shared one aim, standing put
+    /// her head twice as far round as the point (19.8 deg for a point 10 deg off, 37.1 for 20) while the locked side
+    /// step put it on the point, so every stop swung her head 10 to 28 deg with the target standing still. The head
+    /// is where the neck record's chain fans out, read off the rig.
+    #[test]
+    fn a_locked_stop_keeps_mithras_head_on_the_target() {
+        // Measured at most 1.9 deg off the target from the last strafe tick through the stop, against 9.9 while
+        // standing and stepping aimed apart.
+        const HEAD_OFF_TARGET_MAX_DEG: f32 = 2.5;
+        // 60 fps in skeleton frames.
+        const DT: f32 = 0.5;
+
+        let Some(loaded) = load_mithra() else { return };
+        let skeleton = &loaded.skeleton;
+        let mut head = skeleton
+            .reference_at(ffxi_dat::skel::standard_position::NECK)
+            .map(|reference| reference.index)
+            .expect("Mithra's neck reference");
+        loop {
+            let mut children =
+                (0..skeleton.joints.len()).filter(|&j| skeleton.joints[j].parent == Some(head));
+            match (children.next(), children.next()) {
+                (Some(only), None) => head = only,
+                _ => break,
+            }
+        }
+        let bind = ffxi_actor::skeleton_instance::pose_world(
+            skeleton,
+            |_| None,
+            RootTransform::identity(),
+            &[],
+        );
+        let (_, head_bind, _) = bind[head].to_scale_rotation_translation();
+        let head_axis = head_bind.inverse() * POSE_FORWARD;
+        let ground_yaw = |v: Vec3| v.z.atan2(v.x).to_degrees();
+
+        for state in [PoseState::StrafeLeft, PoseState::StrafeRight] {
+            // Locked, the target sits about dead ahead of her.
+            for target_deg in [0.0_f32, 10.0, -10.0] {
+                let yaw = target_deg.to_radians();
+                let target = Vec3::new(19.0 * yaw.cos(), -1.4, 19.0 * yaw.sin());
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = true;
+                let idle_ticks = 90_usize;
+                let release_at = idle_ticks + 120;
+                let mut worst = 0.0_f32;
+                for tick in 0..release_at + 90 {
+                    actor.inputs = inputs_for_pose(
+                        if (idle_ticks..release_at).contains(&tick) {
+                            state
+                        } else {
+                            PoseState::Idle
+                        },
+                        false,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        DT,
+                        crate::look_at_gates::LookState::Aiming,
+                        Some(LookAtInput {
+                            pose_rotation: Quat::IDENTITY,
+                            actor_world: Vec3::ZERO,
+                            target_attach_world: target,
+                        }),
+                        None,
+                        false,
+                        None,
+                    );
+                    if tick + 1 < release_at {
+                        continue;
+                    }
+                    let pose = actor.world_pose();
+                    let (_, rotation, _) = pose[head].to_scale_rotation_translation();
+                    let neck = ffxi_actor::look_bend::attach_frame(
+                        pose,
+                        skeleton,
+                        ffxi_dat::skel::standard_position::NECK,
+                    )
+                    .expect("Mithra's neck frame");
+                    let off = ground_yaw(rotation * head_axis) - ground_yaw(target - neck.origin);
+                    worst = worst.max(off.abs());
+                }
+                assert!(
+                    worst <= HEAD_OFF_TARGET_MAX_DEG,
+                    "{} with the target at {target_deg} deg: her head turned {worst:.1} deg off it through the stop",
+                    state.label()
+                );
+            }
+        }
+    }
+
     /// A stop freezes the locomotion it leaves. The registration that hands a slot from a held gait
     /// clip to idle must carry its outgoing side as a snapshot - `PreviousSide::Frozen` - so nothing
     /// plays after the intent ends: whatever swing a joint had left becomes where the settle starts,

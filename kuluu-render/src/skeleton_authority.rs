@@ -15,12 +15,13 @@
 //!   the length of the stop and then drops it.
 //! - The correction on top is the look-at, measured from the pose the bones stand in under those handovers, from the
 //!   skeleton's own records, their limits and the reference joints they name, with the wire status choosing how many
-//!   apply. [`Correction::Free`] is retail's law: every record turned from the actor's forward against one pre-bend
-//!   frame. [`Correction::Held`], locked on a side step, turns each record from where the bone it carries faces (where
-//!   its subtree fans out: the head for the neck record, the chest itself for the chest record), shallow bone first in
-//!   the pose the turns above it left. A bone only takes what is still owed, so a head the side step already turns
-//!   back toward the target lands on the look point instead of past it. A change of correction is given back over the
-//!   blend running in the slot that writes the bone, or over the look-at's own opening when none runs.
+//!   apply. Every state aims the same way: each record turns from where the bone it carries faces (where its subtree
+//!   fans out: the head for the neck record, the chest itself for the chest record), shallow bone first in the pose
+//!   the turns above it left, so a bone only takes what is still owed and the head lands on the look point instead of
+//!   past it. Standing, stepping or locked on a side step, one point gives one head, so a stop leaves the head where
+//!   it was looking and only untwists the body under it. [`Correction::Free`] opens that aim by the look-at's own
+//!   weight; [`Correction::Held`], locked on a side step, holds it whole. A change of correction is given back over
+//!   the blend running in the slot that writes the bone, or over the look-at's own opening when none runs.
 
 use bevy::math::{Mat4, Quat, Vec3};
 use ffxi_actor::animation::{
@@ -37,10 +38,10 @@ use ffxi_dat::skel_anim::KeyFrameTransform;
 /// The correction the actor's state puts in force this pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Correction {
-    /// Retail's look-at, opened by its own weight.
+    /// The look-at, opened by its own weight.
     Free,
-    /// Locked on a side step: the clip turns the body off the walker's aim, so each record turns from the bone it
-    /// carries, whole.
+    /// Locked on a side step: the walker keeps the target dead ahead while the clip turns the body off it, so the
+    /// look-at holds whole.
     Held,
 }
 
@@ -630,7 +631,13 @@ fn running_blend(slots: &[SlotWatch]) -> Option<f32> {
     slots.iter().filter_map(SlotWatch::left).reduce(f32::max)
 }
 
-/// The correction as multipliers on the records of the bones it turns.
+/// The correction as multipliers on the records of the bones it turns: the one aim every state shares
+/// ([`aim_turns`]), opened by the look-at's weight under [`Correction::Free`] and whole under [`Correction::Held`], so
+/// at full weight the two are the same turn and a locked stop changes nothing about where the head looks. Turning
+/// every record by its full clamp from the actor's forward against one pre-bend frame instead stacked the chest's turn
+/// under the neck's: on Mithra's clips the head stood at 19.8 deg for a point 10 deg off and 37.1 for 20, twice as far
+/// round as the point, while the locked side step put it on the point, so every stop swung the head with the target
+/// standing still.
 fn record_turns(
     pose: &[Mat4],
     skeleton: &Skeleton,
@@ -639,32 +646,24 @@ fn record_turns(
     correction: Correction,
     record_bones: &[RecordBone],
 ) -> Vec<(usize, Quat)> {
-    let turns: Vec<(usize, Quat)> = match correction {
-        Correction::Free => {
-            if look.weight <= 0.0 {
-                return Vec::new();
-            }
-            let weight = look.weight.min(1.0);
-            look_bend::look_bends(
-                pose,
-                skeleton,
-                look.point,
-                POSE_FORWARD,
-                look.records,
-                look.anchor_drop,
-            )
-            .into_iter()
-            .map(|(joint, turn)| (joint, Quat::IDENTITY.slerp(turn, weight)))
-            .collect()
-        }
-        Correction::Held => held_turns(pose, skeleton, parent_overrides, look, record_bones),
+    let strength = match correction {
+        Correction::Free => look.weight.clamp(0.0, 1.0),
+        Correction::Held => 1.0,
     };
+    if strength <= 0.0 {
+        return Vec::new();
+    }
+    let turns: Vec<(usize, Quat)> = aim_turns(pose, skeleton, parent_overrides, look, record_bones)
+        .into_iter()
+        .map(|(joint, turn)| (joint, Quat::IDENTITY.slerp(turn, strength)))
+        .collect();
     into_records(pose, skeleton, parent_overrides, &turns)
 }
 
-/// [`Correction::Held`]: each record turns from where the bone it carries faces toward the look point, inside its
-/// own ellipse, shallow bone first and measured in the pose the turns before it left.
-fn held_turns(
+/// The aim: each record turns from where the bone it carries faces toward the look point, inside its own ellipse,
+/// shallow bone first and measured in the pose the turns before it left, so the neck only takes what the chest left
+/// owing and the head lands on the point.
+fn aim_turns(
     pose: &[Mat4],
     skeleton: &Skeleton,
     parent_overrides: &[(usize, usize)],
@@ -1133,62 +1132,140 @@ mod tests {
         }
     }
 
+    /// A point at the neck's height, `yaw_deg` round from the actor's forward as [`yaw_deg`] reads it.
+    fn point_at(yaw_deg: f32) -> Vec3 {
+        let yaw = yaw_deg.to_radians();
+        Vec3::new(20.0 * yaw.cos(), -1.55, 20.0 * yaw.sin())
+    }
+
+    /// The look-at measures from the pose the bones stand in, so while a handover turns the spine under it the head
+    /// stays on the point instead of riding the turn.
     #[test]
-    fn under_a_handover_the_look_at_is_retails_on_the_pose_the_bones_stand_in() {
+    fn under_a_handover_the_head_stays_on_the_point() {
         let spine = 0.7_f32;
         let blend = 8.0_f32;
-        let off_side = Look {
-            point: Vec3::new(10.0, -1.2, 6.0),
-            weight: 0.7,
+        let point_deg = -30.0_f32;
+        let look = Look {
+            point: point_at(point_deg),
             ..ahead()
         };
         let mut bench = Bench::new();
         bench.play(clip(b"aaa0", &[(SPINE, spine), (CHEST, 0.2)]), 0.0);
         for _ in 0..4 {
-            bench.pass(Some(off_side), Correction::Free);
+            bench.pass(Some(look), Correction::Free);
         }
         bench.play(clip(b"bbb0", &[(CHEST, 0.2)]), blend);
-        for pass in 1..blend as usize {
-            bench.clips_pose();
-            // Where the spine stands this pass: handed on toward rest by the blend's share.
-            let share = pass as f32 / blend;
-            let standing = |bone: usize| {
-                if bone == SPINE {
-                    Some(KeyFrameTransform {
-                        rotation: Quat::from_rotation_y(spine * (1.0 - share)).to_array(),
-                        ..Default::default()
-                    })
-                } else {
-                    bench.clips.get(bone)
-                }
+        for pass in 1..=(blend as usize + 2) {
+            let pose = bench.pass(Some(look), Correction::Free);
+            assert!(
+                (yaw_deg(&pose, HEAD) - point_deg).abs() < TOLERANCE_DEG,
+                "pass {pass}: the head read {:.2} with the point at {point_deg}",
+                yaw_deg(&pose, HEAD)
+            );
+        }
+        assert!(
+            bench.clips.get(SPINE).is_none(),
+            "the spine went to rest under the head"
+        );
+    }
+
+    /// One point gives one head: the look-at lands the head on the point wherever the clip has the body, and stops at
+    /// its records' reach rather than ever turning past it. Half open, it turns half way.
+    #[test]
+    fn the_head_lands_on_the_point_and_never_past_it() {
+        let idle = || clip(b"idl0", &[(CHEST, 0.2), (NECK, -0.1), (HEAD, 0.05)]);
+        let mut bench = Bench::new();
+        bench.play(idle(), 0.0);
+        let clip_head = yaw_deg(&bench.pass(None, Correction::Free), HEAD);
+        let reach = 0.16_f32.atan2(0.5).to_degrees() + 0.24_f32.atan2(0.5).to_degrees();
+        for point_deg in [-40.0_f32, -20.0, -10.0, 10.0, 20.0, 30.0] {
+            let mut bench = Bench::new();
+            bench.play(idle(), 0.0);
+            let look = Look {
+                point: point_at(point_deg),
+                ..ahead()
             };
-            let mut retail = Vec::new();
-            pose_world_mounted_into(
-                &mut retail,
-                &mut PoseScratch::default(),
-                &bench.skeleton,
-                standing,
-                RootTransform::identity(),
-                &[],
-                None,
+            let pose = bench.pass(Some(look), Correction::Free);
+            assert!(
+                (yaw_deg(&pose, HEAD) - point_deg).abs() < TOLERANCE_DEG,
+                "a point at {point_deg}: the head read {:.2}",
+                yaw_deg(&pose, HEAD)
             );
-            look_bend::apply_look_bends(
-                &mut retail,
-                &bench.skeleton,
-                &[],
-                off_side.point,
-                POSE_FORWARD,
-                off_side.weight,
-                off_side.records,
-                off_side.anchor_drop,
+            let half = bench.pass(
+                Some(Look {
+                    weight: 0.5,
+                    ..look
+                }),
+                Correction::Free,
             );
-            let shown = bench.settle(Some(off_side), Correction::Free);
-            for (joint, (a, b)) in shown.iter().zip(&retail).enumerate() {
+            let halfway = clip_head + (point_deg - clip_head) * 0.5;
+            assert!(
+                (yaw_deg(&half, HEAD) - halfway).abs() < 2.0 * TOLERANCE_DEG,
+                "half open on a point at {point_deg}: the head read {:.2}, half way is {halfway:.2}",
+                yaw_deg(&half, HEAD)
+            );
+        }
+        let mut bench = Bench::new();
+        bench.play(idle(), 0.0);
+        let far = Look {
+            point: point_at(60.0),
+            ..ahead()
+        };
+        let pose = bench.pass(Some(far), Correction::Free);
+        assert!(
+            (yaw_deg(&pose, HEAD) - (clip_head + reach)).abs() < TOLERANCE_DEG,
+            "out of reach the head stops at its records' reach; read {:.2}",
+            yaw_deg(&pose, HEAD)
+        );
+    }
+
+    /// The rule a locked stop has to keep: the target did not move, so the head does not either. The side step's
+    /// twist comes out of the body under a head that stays on the point.
+    #[test]
+    fn a_locked_stop_keeps_the_head_on_the_point_and_untwists_the_body_under_it() {
+        let blend = 8.0_f32;
+        for point_deg in [0.0_f32, -15.0, 15.0] {
+            let look = Look {
+                point: point_at(point_deg),
+                ..ahead()
+            };
+            let mut bench = Bench::new();
+            bench.play(
+                clip(
+                    b"mvl0",
+                    &[(CHEST, 40_f32.to_radians()), (NECK, -28.6_f32.to_radians())],
+                ),
+                0.0,
+            );
+            let mut pose = Vec::new();
+            for _ in 0..4 {
+                pose = bench.pass(Some(look), Correction::Held);
+            }
+            let twisted = yaw_deg(&pose, CHEST);
+            let idle = || clip(b"idl0", &[(CHEST, 0.0), (NECK, 0.0)]);
+            bench.play(idle(), blend);
+            for pass in 1..=(blend as usize + 3) {
+                pose = bench.pass(Some(look), Correction::Free);
                 assert!(
-                    a.abs_diff_eq(*b, 1e-4),
-                    "pass {pass}, joint {joint}: authority {a:?} against retail's bend {b:?}"
+                    (yaw_deg(&pose, HEAD) - point_deg).abs() < TOLERANCE_DEG,
+                    "point {point_deg}, pass {pass}: the head read {:.2}",
+                    yaw_deg(&pose, HEAD)
                 );
             }
+            // The stop lands on exactly the pose standing still gives the same point, the twist gone from the body.
+            let mut standing = Bench::new();
+            standing.play(idle(), 0.0);
+            let still = standing.pass(Some(look), Correction::Free);
+            for (joint, (a, b)) in pose.iter().zip(&still).enumerate() {
+                assert!(
+                    a.abs_diff_eq(*b, 1e-3),
+                    "point {point_deg}: joint {joint} stopped at {a:?}, standing still is {b:?}"
+                );
+            }
+            assert!(
+                (yaw_deg(&still, CHEST) - twisted).abs() > 5.0,
+                "point {point_deg}: the chest stood the same twisted as still ({twisted:.1})"
+            );
         }
     }
 
@@ -1222,7 +1299,7 @@ mod tests {
             yaw_deg(&pose, CHEST)
         );
 
-        // Retail's look-at measures from the actor's forward, so a point dead ahead turns nothing.
+        // Unlocked at full weight the look-at aims the same way: one point, one pose.
         let mut free = Bench::new();
         free.play(
             clip(
@@ -1234,7 +1311,32 @@ mod tests {
             ),
             0.0,
         );
-        let pose = free.pass(Some(ahead()), Correction::Free);
+        let unlocked = free.pass(Some(ahead()), Correction::Free);
+        for (joint, (a, b)) in unlocked.iter().zip(&pose).enumerate() {
+            assert!(
+                a.abs_diff_eq(*b, 1e-4),
+                "joint {joint}: unlocked {a:?} against locked {b:?}"
+            );
+        }
+        // With the look-at closed only the lock aims; the clip's head stands where the clip put it.
+        let mut closed = Bench::new();
+        closed.play(
+            clip(
+                b"mvl0",
+                &[
+                    (CHEST, chest_deg.to_radians()),
+                    (NECK, neck_deg.to_radians()),
+                ],
+            ),
+            0.0,
+        );
+        let pose = closed.pass(
+            Some(Look {
+                weight: 0.0,
+                ..ahead()
+            }),
+            Correction::Free,
+        );
         assert!((yaw_deg(&pose, HEAD) - clip_head_deg).abs() < TOLERANCE_DEG);
     }
 
@@ -1269,37 +1371,5 @@ mod tests {
             }
         }
         assert_eq!(owed_until, blend_until);
-    }
-
-    #[test]
-    fn free_is_retails_look_at() {
-        let off_side = Look {
-            point: Vec3::new(10.0, -1.2, 6.0),
-            weight: 0.7,
-            ..ahead()
-        };
-        let mut bench = Bench::new();
-        bench.play(
-            clip(b"idl0", &[(CHEST, 0.2), (NECK, -0.1), (HEAD, 0.05)]),
-            0.0,
-        );
-        let mut retail = bench.clips_pose();
-        look_bend::apply_look_bends(
-            &mut retail,
-            &bench.skeleton,
-            &[],
-            off_side.point,
-            POSE_FORWARD,
-            off_side.weight,
-            off_side.records,
-            off_side.anchor_drop,
-        );
-        let shown = bench.settle(Some(off_side), Correction::Free);
-        for (joint, (a, b)) in shown.iter().zip(&retail).enumerate() {
-            assert!(
-                a.abs_diff_eq(*b, 1e-4),
-                "joint {joint}: authority {a:?} against retail's bend {b:?}"
-            );
-        }
     }
 }

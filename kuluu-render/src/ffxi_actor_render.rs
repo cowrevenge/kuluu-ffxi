@@ -3100,17 +3100,11 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
     actor.death_phase = actor_state::DeathPhase::Unobserved;
 }
 
-/// Whether this request replaces one side step with its opposite, the only re-gait whose crossfade
-/// turns through the target under lock.
-fn flips_side_step(previous: &Option<(DatId, bool)>, next: DatId) -> bool {
-    let Some((previous, _)) = previous else {
-        return false;
-    };
-    let side = |id: &DatId| id.as_str().strip_prefix("mv")?.chars().next();
-    matches!(
-        (side(previous), side(&next)),
-        (Some('l'), Some('r')) | (Some('r'), Some('l'))
-    )
+/// Whether this request brings in a side step (`mvl` / `mvr`), the crossfade that turns toward the target
+/// under lock.
+fn brings_in_side_step(next: DatId) -> bool {
+    let id = next.as_str();
+    id.starts_with("mvl") || id.starts_with("mvr")
 }
 
 /// Runs inside the parallel per-actor pass: it touches only the actor's own fields, leaving the
@@ -3488,7 +3482,6 @@ fn advance_actor_pose(
                     .join(" "),
             );
         }
-        let previous_selection = *current_clip;
         *current_clip = Some((selected_id, use_battle));
         // Any outstanding low-priority request belongs to the selection that made it.
         for pending in pending_idle_registrations.iter_mut() {
@@ -3553,11 +3546,14 @@ fn advance_actor_pose(
                 transition_in_time: action.map_or(LOCOMOTION_XFADE_IN, |a| a.transition_in),
                 transition_out_time: action.map_or(LOCOMOTION_XFADE_OUT, |a| a.transition_out),
                 in_step: action.is_none() && matches!(selected_tier, PoseTier::Locomotion),
-                // The long way through bind belongs to one situation only: a locked flip from one side
-                // step to its opposite (`a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way`
-                // in ffxi-actor). Any other locked re-gait keeps the short route: measured on Hume M, routing
-                // wide pairs long-way swings the chest chain 30+ deg/tick past anything the gait itself reaches.
-                turn_toward_target: *locked_on && flips_side_step(&previous_selection, selected_id),
+                // Locked on, a crossfade into a side step turns toward the target, through the clip the slot
+                // holds as it is asked for (`a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way`
+                // in ffxi-actor). The flip latch puts the straight gait between two side steps (idle when the feet
+                // stop in between), so only a flip comes at it from the far side; from the gait or a stop the
+                // short way already passes through it. A release into the gait keeps the short route: measured on
+                // Hume M, routing wide pairs long-way swings the chest chain 30+ deg/tick past anything the gait
+                // itself reaches.
+                turn_toward_target: *locked_on && brings_in_side_step(selected_id),
                 ..Default::default()
             };
             // Fishing resolution clips (fsh2..fsh6) have no ActionPlayback, so without an
@@ -7850,6 +7846,73 @@ mod pose_resolution_tests {
             ["idl?", "mvl?"],
             "a stop in between is no flip"
         );
+    }
+
+    /// A locked A held straight into D turns the body through the target, never round its back, and so does a
+    /// let-go of A with D pressed a couple of frames later, on every race's own clips. The chooser shows the
+    /// straight gait for two frames between the side steps (actor_state::SideStepFlipLatch), or idle when the
+    /// feet stop, so the side step that lands the flip crossfades from a still that is nearly all the other
+    /// side step. A rig whose side steps key a bone past a right angle either way swung the chest round its
+    /// back on the short way; one whose side steps do not came round the front either way.
+    #[test]
+    fn a_locked_side_step_flip_turns_the_body_through_the_target() {
+        // How far the chest may face off the target before the body has turned its back on it.
+        const BEHIND_DEG: f32 = 90.0;
+        use PoseState::{Idle, StrafeLeft, StrafeRight};
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        for race in 1..=8u8 {
+            let loaded = load_pc(&root, race, false, &[], None, None, None).expect("bare PC");
+            let chest = loaded
+                .skeleton
+                .reference_at(ffxi_dat::skel::standard_position::CHEST)
+                .map(|reference| reference.index)
+                .expect("chest reference");
+            let bind = pose_world(&loaded.skeleton, |_| None, RootTransform::identity(), &[]);
+            let (_, bind_rotation, _) = bind[chest].to_scale_rotation_translation();
+            let chest_forward = bind_rotation.inverse() * POSE_FORWARD;
+            for (from, to) in [(StrafeLeft, StrafeRight), (StrafeRight, StrafeLeft)] {
+                for still in [0_usize, 2] {
+                    let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                    actor.locked_on = true;
+                    for tick in 0..90_usize {
+                        actor.inputs = inputs_for_pose(
+                            if tick < 60 {
+                                from
+                            } else if tick < 60 + still {
+                                Idle
+                            } else {
+                                to
+                            },
+                            false,
+                        );
+                        advance_actor_pose(
+                            &mut actor,
+                            0.5,
+                            crate::look_at_gates::LookState::Aiming,
+                            Some(LookAtInput {
+                                pose_rotation: Quat::IDENTITY,
+                                actor_world: Vec3::ZERO,
+                                target_attach_world: Vec3::new(19.0, -1.4, 0.0),
+                            }),
+                            None,
+                            false,
+                            None,
+                        );
+                        let (_, rotation, _) =
+                            actor.world_pose()[chest].to_scale_rotation_translation();
+                        let facing = rotation * chest_forward;
+                        let off_deg = facing.z.atan2(facing.x).to_degrees().abs();
+                        assert!(
+                            off_deg < BEHIND_DEG,
+                            "race {race}: {from:?} into {to:?} with {still} still frames between turned the \
+                             chest {off_deg:.1} deg off the target at tick {tick}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Travel back from the target, the locked S, plays the back step `mvb?`, walking or running, from

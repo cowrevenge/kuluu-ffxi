@@ -694,26 +694,32 @@ pub(super) fn handle_menu_key(
     let entry_count = kuluu_render::hud::menu::entry_count(kind, dynamic, graphics.dlss_supported);
 
     // Menu context (not text input), so reading the raw keycode is correct.
-    // "-" flips the Command menu's two pages (retail HorizonXI); single-list
-    // submenus have no pages, and the Map screen handles "-" in its own path.
+    // "-" advances the Command menu's pages (retail HorizonXI flips two; kuluu
+    // cycles three); single-list submenus have no pages, and the Map screen
+    // handles "-" in its own path.
     if key_code == KeyCode::Minus {
         if kind == MenuKind::Root {
             if let Some(level) = stack.current_mut() {
-                level.cursor = kuluu_render::hud::menu::root_other_page_cursor(level.cursor);
+                level.cursor = kuluu_render::hud::menu::root_next_page_cursor(level.cursor);
             }
         }
         return None;
     }
 
-    // Root Command menu paging: Left/Right flip pages (like "-"); Up/Down wrap
-    // within the current page so navigation never crosses a page boundary.
+    // Root Command menu paging: Right advances like "-", Left steps back through
+    // the pages; Up/Down wrap within the current page so row navigation never
+    // crosses a page boundary.
     if kind == MenuKind::Root {
         let (start, end) = kuluu_render::hud::menu::root_page_bounds(cursor);
-        if bindings.matches_logical(Action::NavLeft, key)
-            || bindings.matches_logical(Action::NavRight, key)
-        {
+        if bindings.matches_logical(Action::NavRight, key) {
             if let Some(level) = stack.current_mut() {
-                level.cursor = kuluu_render::hud::menu::root_other_page_cursor(level.cursor);
+                level.cursor = kuluu_render::hud::menu::root_next_page_cursor(level.cursor);
+            }
+            return None;
+        }
+        if bindings.matches_logical(Action::NavLeft, key) {
+            if let Some(level) = stack.current_mut() {
+                level.cursor = kuluu_render::hud::menu::root_prev_page_cursor(level.cursor);
             }
             return None;
         }
@@ -1421,7 +1427,20 @@ mod menu_dispatch_tests {
 
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
-        for label in ["Party", "Search", "Macros"] {
+        for label in [
+            "Synthesis",
+            "Trade",
+            "Linkshell",
+            "Region Info",
+            "Party",
+            "Search",
+            "Missions",
+            "View House",
+            "Bazaar",
+            "Edit Macros",
+            "Config",
+            "Help Desk",
+        ] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::Root, label),
                 MenuDispatch::NotImplemented(label.into()),

@@ -9,68 +9,113 @@ use crate::input_mode::{InputMode, MenuKind, MenuStack};
 
 pub const ROOT_LOG_OUT: &str = "Log Out";
 pub const ROOT_SHUT_DOWN: &str = "Shut Down";
-// Label and position are provisional pending a retail main-menu capture
-// (bead kuluu-y5hq retail_unknowns).
+// Caption strings verbatim from the client's UI caption DAT (ROM/165/76.DAT
+// d_msg entries), which also carries `Commands` as the window title.
 pub const ROOT_CURRENT_TIME: &str = "Current Time";
-
-// "Communication" position is provisional pending a retail main-menu capture
-// (bead kuluu-d4u retail_unknowns).
 pub const ROOT_COMMUNICATION: &str = "Communication";
 pub const COMM_EMOTE_LIST: &str = "Emote List";
 
-/// Retail's Command menu is a single pane with two pages, flipped with "-" (or
-/// the Left/Right arrows). ROOT_ENTRIES is page 1 followed by page 2; the page a
-/// cursor is on is derived from its index (root_page_bounds), so no separate page
-/// state is needed. Order mirrors retail HorizonXI for the commands we implement
-/// (Synthesis/Trade/Linkshell/Region Info/Missions/Quests/View House/Bazaar/Help
-/// Desk are dropped; Graphics/Debug are ours, grouped with the page-2 config-like
-/// commands). The Debug entry renders only when built with `--features
-/// debug-menu` — opt-in and off by default, so retail parity holds as long as
-/// shipped builds do not enable the flag; local test batches (build_cowland.bat)
-/// pass it on RELEASE builds on purpose.
+/// Retail's Command menu (windows `menuwind`/`socialme`) shows twelve rows per
+/// page across two pages; kuluu appends a third page of its own entries. "-"
+/// and Right advance 1→2→3→1, Left steps back. A flip between the retail pages
+/// keeps the cursor on the same screen row — retail carries it through an
+/// explicit pair table (FFXiMain.dll retail-2026-09 RVA 0x36FF98), whose rows
+/// line up with display order, so in this layout both retail pages share the
+/// row index; entering or leaving page 3 keeps the row number clamped to its
+/// length. ROOT_ENTRIES is page 1, then page 2 (retail display order, pinned by
+/// `root_pages_match_retail_pair_table`), then page 3; the page a cursor is on
+/// follows from its index (root_page_bounds), so no separate page state exists.
+/// The Debug entry renders only when built with `--features debug-menu` —
+/// opt-in and off by default, so retail parity holds as long as shipped builds
+/// do not enable the flag; local test batches (build_cowland.bat) pass it on
+/// RELEASE builds on purpose.
 const ROOT_ENTRIES: &[&str] = &[
-    // Page 1
+    // Page 1 (`menuwind`): Status, Equipment, Magic, Items, Synthesis,
+    // Abilities, Party, Trade, Search, Linkshell, Region Info, Map.
     "Status",
     "Equipment",
     "Magic",
     "Items",
+    "Synthesis",
     "Abilities",
     "Party",
+    "Trade",
     "Search",
+    "Linkshell",
+    "Region Info",
     "Map",
-    // Page 2
+    // Page 2 (`socialme`): Missions, Quests, Key Items, View House, Bazaar,
+    // Edit Macros (the caption for the mcrmenu row - no bare `Macros` exists
+    // in the client's caption catalog), Config, Help Desk, Current Time,
+    // Communication, Shut Down, Log Out.
+    "Missions",
+    "Quests",
     "Key Items",
-    "Macros",
+    "View House",
+    "Bazaar",
+    "Edit Macros",
     "Config",
+    "Help Desk",
     ROOT_CURRENT_TIME,
     ROOT_COMMUNICATION,
-    "Graphics",
-    #[cfg(feature = "debug-menu")]
-    "Debug",
     ROOT_SHUT_DOWN,
     ROOT_LOG_OUT,
+    // Page 3 (kuluu-only).
+    "Graphics",
+    "Interface",
+    "Controls",
+    #[cfg(feature = "debug-menu")]
+    "Debug",
 ];
 
-const ROOT_PAGE_1_LEN: usize = 8;
+const ROOT_PAGE_1_LEN: usize = 12;
+const ROOT_PAGE_2_LEN: usize = 12;
 
-/// The half-open `[start, end)` range of `ROOT_ENTRIES` the page containing
-/// `cursor` occupies. The Command menu shows one page at a time; "-" and the
-/// Left/Right arrows flip between them, Up/Down wrap within the current page.
-pub fn root_page_bounds(cursor: usize) -> (usize, usize) {
+/// The Command menu cycles three pages: retail's two plus kuluu's.
+pub const ROOT_PAGE_COUNT: usize = 3;
+
+fn root_page_ranges() -> [(usize, usize); ROOT_PAGE_COUNT] {
+    let p2 = ROOT_PAGE_1_LEN;
+    let p3 = ROOT_PAGE_1_LEN + ROOT_PAGE_2_LEN;
+    [(0, p2), (p2, p3), (p3, ROOT_ENTRIES.len())]
+}
+
+fn root_page_index(cursor: usize) -> usize {
     if cursor < ROOT_PAGE_1_LEN {
-        (0, ROOT_PAGE_1_LEN)
+        0
+    } else if cursor < ROOT_PAGE_1_LEN + ROOT_PAGE_2_LEN {
+        1
     } else {
-        (ROOT_PAGE_1_LEN, ROOT_ENTRIES.len())
+        2
     }
 }
 
-/// The cursor index that flips to the other Root page, landing on its first row.
-pub fn root_other_page_cursor(cursor: usize) -> usize {
-    if cursor < ROOT_PAGE_1_LEN {
-        ROOT_PAGE_1_LEN
-    } else {
-        0
-    }
+/// The half-open `[start, end)` range of `ROOT_ENTRIES` the page containing
+/// `cursor` occupies. The Command menu shows one page at a time; "-" and Right
+/// flip forward, Left steps back, Up/Down wrap within the current page.
+pub fn root_page_bounds(cursor: usize) -> (usize, usize) {
+    let cursor = cursor.min(ROOT_ENTRIES.len() - 1);
+    root_page_ranges()[root_page_index(cursor)]
+}
+
+/// The cursor index one page forward ('-' / Right): page 1→2→3→1.
+pub fn root_next_page_cursor(cursor: usize) -> usize {
+    root_row_on_target_page(cursor, (root_page_index(cursor) + 1) % ROOT_PAGE_COUNT)
+}
+
+/// The cursor index one page back (Left), wrapping backwards through the pages.
+pub fn root_prev_page_cursor(cursor: usize) -> usize {
+    root_row_on_target_page(
+        cursor,
+        (root_page_index(cursor) + ROOT_PAGE_COUNT - 1) % ROOT_PAGE_COUNT,
+    )
+}
+
+fn root_row_on_target_page(cursor: usize, target_page: usize) -> usize {
+    let ranges = root_page_ranges();
+    let row_in_page = cursor - ranges[root_page_index(cursor)].0;
+    let (start, end) = ranges[target_page];
+    start + row_in_page.min(end - start - 1)
 }
 
 /// The Root command list, for callers that enumerate the top-level entries
@@ -622,7 +667,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 pub fn menu_title(kind: MenuKind) -> &'static str {
     match kind {
         MenuKind::Root => "Commands",
-        MenuKind::Config => "Config",
+        MenuKind::Config => "Interface",
         MenuKind::Controls => "Controls",
         MenuKind::Debug => "Debug",
         MenuKind::Graphics => "Graphics",
@@ -660,7 +705,10 @@ pub fn root_child_kind(label: &str) -> Option<MenuKind> {
         "Status" => MenuKind::Status,
         ROOT_COMMUNICATION => MenuKind::Communication,
         "Graphics" => MenuKind::Graphics,
-        "Config" => MenuKind::Config,
+        // The page-2 `Config` row is retail's configwi window (not built yet);
+        // kuluu's own settings pages live on page 3 as Interface/Controls.
+        "Interface" => MenuKind::Config,
+        "Controls" => MenuKind::Controls,
         "Debug" => MenuKind::Debug,
         _ => return None,
     })
@@ -1385,8 +1433,8 @@ pub fn update_main_menu(
 fn root_aware_title(view: &PaneView) -> String {
     let title = menu_title(view.kind);
     if view.kind == MenuKind::Root {
-        let page = if view.cursor < ROOT_PAGE_1_LEN { 1 } else { 2 };
-        format!("{title}  \u{2039}{page}/2\u{203a}")
+        let page = root_page_index(view.cursor) + 1;
+        format!("{title}  \u{2039}{page}/{ROOT_PAGE_COUNT}\u{203a}")
     } else {
         title.to_string()
     }
@@ -1657,21 +1705,125 @@ mod tests {
     }
 
     #[test]
-    fn root_pages_split_and_flip_by_cursor() {
-        // Page 1 is the first ROOT_PAGE_1_LEN entries; page 2 the rest.
-        let (s1, e1) = root_page_bounds(0);
-        assert_eq!((s1, e1), (0, ROOT_PAGE_1_LEN));
-        let (s2, e2) = root_page_bounds(ROOT_PAGE_1_LEN);
-        assert_eq!((s2, e2), (ROOT_PAGE_1_LEN, ROOT_ENTRIES.len()));
+    fn root_pages_split_three_ways_by_cursor() {
+        let p2 = ROOT_PAGE_1_LEN;
+        let p3 = ROOT_PAGE_1_LEN + ROOT_PAGE_2_LEN;
+        assert_eq!(root_page_bounds(0), (0, ROOT_PAGE_1_LEN));
+        assert_eq!(root_page_bounds(p2 - 1), (0, ROOT_PAGE_1_LEN));
+        assert_eq!(root_page_bounds(p2), (p2, p3));
+        assert_eq!(root_page_bounds(p3), (p3, ROOT_ENTRIES.len()));
 
-        // "Map" lives on page 1, "Config" on page 2 (retail grouping).
+        // "Map" lives on page 1, retail's "Config" row on page 2.
         let map = ROOT_ENTRIES.iter().position(|e| *e == "Map").unwrap();
         let config = ROOT_ENTRIES.iter().position(|e| *e == "Config").unwrap();
-        assert!(map < ROOT_PAGE_1_LEN && config >= ROOT_PAGE_1_LEN);
+        assert!(map < p2 && (p2..p3).contains(&config));
 
-        // Flipping from either page lands on the other page's first row.
-        assert_eq!(root_other_page_cursor(0), ROOT_PAGE_1_LEN);
-        assert_eq!(root_other_page_cursor(ROOT_PAGE_1_LEN), 0);
+        // '-' / Right: 1->2->3->1, Left steps back; page 3's first row wraps to
+        // page 1 keeping its (row-0) cursor.
+        assert_eq!(root_next_page_cursor(0), p2);
+        assert_eq!(root_prev_page_cursor(p2), 0);
+        assert_eq!(root_next_page_cursor(p3), 0);
+
+        // Same-row carry between the retail pages, and a clamp to page 3's last
+        // row when its length is shorter.
+        for row in 0..ROOT_PAGE_1_LEN.min(ROOT_PAGE_2_LEN) {
+            assert_eq!(root_next_page_cursor(row), p2 + row);
+            assert_eq!(root_prev_page_cursor(p2 + row), row);
+        }
+        let p3_last = ROOT_ENTRIES.len() - 1;
+        let row_in_p3 = p3_last - p3;
+        assert_eq!(
+            root_next_page_cursor(p3_last),
+            row_in_p3.min(ROOT_PAGE_1_LEN - 1)
+        );
+        // Page 1 -> Left enters page 3 at the same row number, clamped: its
+        // first row is page 3's first; page 1's deepest rows land on page 3's last.
+        assert_eq!(root_prev_page_cursor(0), p3);
+        assert_eq!(
+            root_prev_page_cursor(ROOT_PAGE_1_LEN - 1),
+            p3_last,
+            "page-1 last row clamps onto page 3's last row"
+        );
+    }
+
+    /// Retail carries the cursor across the menuwind<->socialme flip through an
+    /// explicit pair table of per-page item ids (FFXiMain.dll retail-2026-09 RVA
+    /// 0x36FF98, read by the page handlers at RVA 0x140423 / 0x14E7D3). The
+    /// pages' display orders pair up row-for-row, which is what makes this
+    /// layout's plain same-index carry correct; pin both readings.
+    #[test]
+    fn root_pages_match_retail_pair_table() {
+        // Byte pairs (menuwind id, socialme id) at FFXiMain.dll retail-2026-09
+        // RVA 0x36FF98, before the terminating 00 00.
+        const PAIRS: [(u8, u8); 12] = [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 6),
+            (6, 7),
+            (7, 8),
+            (8, 0xA),
+            (9, 9),
+            (0xA, 5),
+            (0xB, 0xB),
+            (0xC, 0xC),
+        ];
+        // Each screen row's handler item id per page: menuwind fires Synthesis as
+        // item id 0xA (screen row 5) and linkshell as 9; socialme fires Current
+        // Time as 10 (row 9) and Communication as 9. A pair (a,b) carries the
+        // flip from a's row to b's row - always the same screen line.
+        const P1_ROWS_BY_ID: [u8; 12] = [1, 2, 3, 4, 0xA, 5, 6, 7, 8, 9, 0xB, 0xC];
+        const P2_ROWS_BY_ID: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 0xA, 9, 0xB, 0xC];
+        assert!(
+            P1_ROWS_BY_ID
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == 12
+        );
+        for (p1_id, p2_id) in PAIRS {
+            let r1 = P1_ROWS_BY_ID.iter().position(|id| *id == p1_id).unwrap();
+            let r2 = P2_ROWS_BY_ID.iter().position(|id| *id == p2_id).unwrap();
+            assert_eq!(
+                r1, r2,
+                "pair ({p1_id:#x},{p2_id:#x}) must be the same screen row"
+            );
+        }
+
+        // Kuluu's pages hold retail's rows in that display order (labels are the
+        // client caption catalog strings).
+        const RETAIL_P1: [&str; 12] = [
+            "Status",
+            "Equipment",
+            "Magic",
+            "Items",
+            "Synthesis",
+            "Abilities",
+            "Party",
+            "Trade",
+            "Search",
+            "Linkshell",
+            "Region Info",
+            "Map",
+        ];
+        const RETAIL_P2: [&str; 12] = [
+            "Missions",
+            "Quests",
+            "Key Items",
+            "View House",
+            "Bazaar",
+            "Edit Macros",
+            "Config",
+            "Help Desk",
+            "Current Time",
+            "Communication",
+            "Shut Down",
+            "Log Out",
+        ];
+        assert_eq!(&ROOT_ENTRIES[..12], &RETAIL_P1);
+        assert_eq!(&ROOT_ENTRIES[12..24], &RETAIL_P2);
     }
 
     fn root_menu_app(cursor: usize) -> App {
@@ -1765,10 +1917,10 @@ mod tests {
     #[test]
     fn single_pane_shows_only_the_cursors_root_page() {
         // Cursor on page 1 (Status at index 0): only page-1 entries render, and
-        // the title carries the ‹1/2› marker.
+        // the title carries the ‹1/3› marker.
         let mut app = root_menu_app(0);
         assert!(title_text(&mut app).contains("Commands"));
-        assert!(title_text(&mut app).contains("1/2"));
+        assert!(title_text(&mut app).contains("1/3"));
         let rows = visible_rows(&mut app);
         assert_eq!(rows.len(), ROOT_PAGE_1_LEN, "only page 1 rows: {rows:?}");
         assert_eq!(rows[0].1, "> Status");
@@ -1781,11 +1933,23 @@ mod tests {
         // Cursor on page 2 (Config): only page-2 entries render, marker flips.
         let config = ROOT_ENTRIES.iter().position(|e| *e == "Config").unwrap();
         let mut app = root_menu_app(config);
-        assert!(title_text(&mut app).contains("2/2"));
+        assert!(title_text(&mut app).contains("2/3"));
         let rows = visible_rows(&mut app);
-        assert_eq!(rows.len(), ROOT_ENTRIES.len() - ROOT_PAGE_1_LEN);
+        assert_eq!(rows.len(), ROOT_PAGE_2_LEN);
         assert!(rows.iter().any(|(_, t)| t.contains("Config")));
         assert!(!rows.iter().any(|(_, t)| t.contains("Status")));
+
+        // Cursor on page 3 (Graphics): kuluu's own rows only, marker ‹3/3›.
+        let graphics = ROOT_ENTRIES.iter().position(|e| *e == "Graphics").unwrap();
+        let mut app = root_menu_app(graphics);
+        assert!(title_text(&mut app).contains("3/3"));
+        let rows = visible_rows(&mut app);
+        assert_eq!(
+            rows.len(),
+            ROOT_ENTRIES.len() - ROOT_PAGE_1_LEN - ROOT_PAGE_2_LEN
+        );
+        assert!(rows.iter().any(|(_, t)| t.contains("Graphics")));
+        assert!(!rows.iter().any(|(_, t)| t.contains("Missions")));
     }
 
     #[test]
@@ -2320,10 +2484,13 @@ mod tests {
         assert_eq!(
             rows.last(),
             Some(&MenuRow::Action(MenuAction::Controls)),
-            "Controls must stay the last row of Config"
+            "Controls must stay the last row of the settings page"
         );
         assert!(matches!(rows.first(), Some(MenuRow::Header(_))));
-        assert_eq!(root_child_kind("Config"), Some(MenuKind::Config));
+        // The kuluu settings page hangs off the page-3 "Interface" row; the
+        // page-2 "Config" row is retail's configwi and stays unbuilt.
+        assert_eq!(root_child_kind("Interface"), Some(MenuKind::Config));
+        assert_eq!(root_child_kind("Config"), None);
         assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
     }

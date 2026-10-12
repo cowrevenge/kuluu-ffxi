@@ -106,6 +106,33 @@ pub const PARTICLE_DAMPEN_OPCODE: u8 = 0x1E;
 // on the actor (EffectRoutineInstance.kt handleSpellEffect).
 const SPELL_EFFECT_OPCODE: u8 = 0x19;
 const ELEVATOR_TRAVEL_OPCODE: u8 = 0x1D;
+// The three stages that move one hand's weapon-hold override, the byte pair at actor +0x83E (main) / +0x83F (sub) the
+// PC actor class writes through vtable slot byte `0x324` (FFXiMain.dll retail-2026-09 RVA 0xA4A70) and reads through
+// slot byte `0x328` (RVA 0xA4A60). Each takes the hand from the dword after delay/duration and sends 2 and up to the main
+// hand (`cmp 2 / jl / xor`: RVA 0x5C6AC..0x5C6B4, RVA 0x5C6E5..0x5C6ED, RVA 0x61E48..0x61E4D). 0x9B (case 0x99, handler
+// RVA 0x5C647) builds a 0x7C-byte task whose constructor (RVA 0x61E00) raises the override and whose destructor (RVA
+// 0x61DB0) drops it, so the hand holds for the stage's duration; 0xA7 (case 0xA5, RVA 0x5C697) raises it and 0xA8 (case
+// 0xA6, RVA 0x5C6D0) drops it, each at once.
+const WEAPON_HOLD_FOR_OPCODE: u8 = 0x9B;
+const WEAPON_HOLD_OPCODE: u8 = 0xA7;
+const WEAPON_RELEASE_OPCODE: u8 = 0xA8;
+// FFXiMain.dll retail-2026-09 case 0x82, handler RVA 0x5AA93: start one hand's draw or sheathe routine. The record's
+// signed word at +8 picks draw (0) or sheathe (1) and the word at +0xA the hand (0 main, 1 sub); `draw | hand * 2`
+// indexes `in10` / `ot10` / `in20` / `ot20` (built at RVA 0x5AA96..0x5AAB0, indexed at RVA 0x5AAE3..0x5AAED), so only
+// 0 and 1 name an entry. The id's last byte takes that hand's Info byte 0x04 as a digit (main +0x87C through RVA
+// 0x5E2B0, sub +0x87F through RVA 0x5E2C0, a negative byte reading as 0 at RVA 0x5AB08..0x5AB0C); it is looked up as a
+// routine on the actor (RVA 0x5AB26) and run as a child (RVA 0x5AB5E).
+const HAND_ROUTINE_OPCODE: u8 = 0x84;
+const HAND_ROUTINE_SHEATHE_OFFSET: usize = ID_OFFSET;
+const HAND_ROUTINE_HAND_OFFSET: usize = ID_OFFSET + 2;
+// FFXiMain.dll retail-2026-09 case 0x1D (jump-table cell RVA 0x5DC90, handler RVA 0x5A31A): keep the routine's actor
+// busy for the stage's duration. The handler builds a 0x78-byte task (constructor RVA 0x601F0) that raises the actor's
+// busy count, the word at entity +0x11C, as it is built (through RVA 0x83300, `inc` at RVA 0xA4140), counts the
+// duration down on the routine clock (RVA 0x602A0) and drops the count in its destructor (RVA 0x602D0, through RVA
+// 0x83310). The engage machine does not step while that count is up (RVA 0x8B49B..0x8B4C1 reads it through RVA
+// 0x83320). The handler reads nothing past delay/duration; Hume M's draw and sheathe routines (ROM/32/13 `in 0`,
+// `in 1`, `out0`, `out1`) carry the stage as three dwords, the third zero.
+const BUSY_FOR_OPCODE: u8 = 0x1F;
 
 // research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
@@ -287,6 +314,50 @@ pub struct AnimationMode {
     pub variant: u32,
 }
 
+/// The hand a hand stage acts on: the main-hand weapon (equipment slot 6, held in the right hand) or the sub weapon
+/// (slot 7, left hand).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponHand {
+    Main,
+    Sub,
+}
+
+impl WeaponHand {
+    /// The index retail keeps per-hand state at: +0 main, +1 sub.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Main => 0,
+            Self::Sub => 1,
+        }
+    }
+}
+
+/// Payload of the four hand stages ([`StageKind::WeaponHoldFor`], [`StageKind::WeaponHold`],
+/// [`StageKind::WeaponRelease`], [`StageKind::HandRoutine`]). `sheathe` is the hand routine's draw/sheathe word and
+/// is false on the three hold stages, which carry only a hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandStage {
+    pub hand: WeaponHand,
+    pub sheathe: bool,
+}
+
+impl HandStage {
+    /// The routine a [`StageKind::HandRoutine`] stage starts, given each hand's Info byte 0x04: `in1` / `ot1` plus the
+    /// main hand's byte, `in2` / `ot2` plus the sub hand's, a negative byte reading as 0 (see `HAND_ROUTINE_OPCODE`).
+    pub fn routine_name(self, main_option: u8, sub_option: u8) -> [u8; 4] {
+        let (hand_digit, option) = match self.hand {
+            WeaponHand::Main => (b'1', main_option),
+            WeaponHand::Sub => (b'2', sub_option),
+        };
+        let digit = b'0' + (option as i8).max(0) as u8;
+        if self.sheathe {
+            [b'o', b't', hand_digit, digit]
+        } else {
+            [b'i', b'n', hand_digit, digit]
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchedulerStage {
     pub kind: StageKind,
@@ -353,6 +424,10 @@ pub struct SchedulerStage {
 
     /// `Some` exactly for [`StageKind::AnimationMode`]: the +8 dword is the variant value, not a DatId.
     pub animation_mode: Option<AnimationMode>,
+
+    /// `Some` for the four hand kinds when their +8 payload names a hand retail can act on: the dword is a hand
+    /// (or, for [`StageKind::HandRoutine`], two words), not a DatId.
+    pub hand: Option<HandStage>,
 
     // `Some` exactly for `SpellEffect`: the +8 dword is the spell animation index, not a
     // DatId (research/xim EffectRoutineParser.kt parseSection2 0x19); `id` is
@@ -513,6 +588,22 @@ pub enum StageKind {
     /// duration (research/xim EffectRoutineParser.kt parseSection2 SetModelVisibilityRoutine);
     /// the payload is [`SchedulerStage::model_visibility`].
     SetModelVisibility,
+
+    /// 0x9B - the hand in [`SchedulerStage::hand`] holds its weapon for `duration_frames`, whatever the actor's
+    /// engaged state says (see `WEAPON_HOLD_FOR_OPCODE`).
+    WeaponHoldFor,
+
+    /// 0xA7 / 0xA8 - the hand in [`SchedulerStage::hand`] takes its weapon from here on, or lets it go.
+    WeaponHold,
+    WeaponRelease,
+
+    /// 0x84 - run one hand's own draw or sheathe routine (`in1n` / `in2n` / `ot1n` / `ot2n`, see
+    /// [`HandStage::routine_name`]) as a child of this one; how a weapon in each hand draws and sheathes.
+    HandRoutine,
+
+    /// 0x1F - the routine's actor is busy for `duration_frames` (see `BUSY_FOR_OPCODE`). The engage machine does not
+    /// step while any of these runs, so a draw raises the engaged flag only as its own busy stages end.
+    BusyFor,
 
     /// 0x15 - ActorPositionSnapshot: argument-less. From this stage on, the routine's effect
     /// context freezes the actor's position and joints at their current values, so effects
@@ -740,6 +831,11 @@ impl StageKind {
             | ADJUST_ANIM_MODE_WALKING_OPCODE
             | ADJUST_ANIM_MODE_RUNNING_OPCODE => Self::AnimationMode,
             LOCK_LOOK_AT_OPCODE => Self::LockLookAt,
+            WEAPON_HOLD_FOR_OPCODE => Self::WeaponHoldFor,
+            WEAPON_HOLD_OPCODE => Self::WeaponHold,
+            WEAPON_RELEASE_OPCODE => Self::WeaponRelease,
+            HAND_ROUTINE_OPCODE => Self::HandRoutine,
+            BUSY_FOR_OPCODE => Self::BusyFor,
             ACTOR_ROTATION_OPCODE | ACTOR_ROTATION_ALT_OPCODE
                 if length_words * 4 >= ACTOR_ROTATION_PAYLOAD_LEN =>
             {
@@ -919,6 +1015,35 @@ impl Scheduler {
                         slot,
                         variant: read_u32(ID_OFFSET),
                     });
+                // The hold stages read their hand as a signed dword and send 2 and up to the main hand; a negative
+                // hand would index outside the pair, so it acts on nothing here. The hand routine takes two words
+                // that index a four-entry table, so only 0 and 1 in each name a routine (`HAND_ROUTINE_OPCODE`).
+                let hand = match kind {
+                    StageKind::WeaponHoldFor | StageKind::WeaponHold | StageKind::WeaponRelease => {
+                        match read_u32(ID_OFFSET) as i32 {
+                            1 => Some(WeaponHand::Sub),
+                            n if n >= 0 => Some(WeaponHand::Main),
+                            _ => None,
+                        }
+                        .map(|hand| HandStage {
+                            hand,
+                            sheathe: false,
+                        })
+                    }
+                    StageKind::HandRoutine => {
+                        let sheathe = read_u16(HAND_ROUTINE_SHEATHE_OFFSET);
+                        let hand = read_u16(HAND_ROUTINE_HAND_OFFSET);
+                        (sheathe <= 1 && hand <= 1).then_some(HandStage {
+                            hand: if hand == 0 {
+                                WeaponHand::Main
+                            } else {
+                                WeaponHand::Sub
+                            },
+                            sheathe: sheathe == 1,
+                        })
+                    }
+                    _ => None,
+                };
                 // research/xim EffectRoutineParser.kt parseSection2 0x19 - the +8 dword is
                 // the spell animation index, not a DatId.
                 let spell_effect = payload
@@ -976,6 +1101,10 @@ impl Scheduler {
                             | StageKind::Knockback
                             | StageKind::JointSnapshot
                             | StageKind::SpellEffect
+                            | StageKind::WeaponHoldFor
+                            | StageKind::WeaponHold
+                            | StageKind::WeaponRelease
+                            | StageKind::HandRoutine
                     );
                 let id = match payload {
                     Some(bytes) if !non_id_payload => bytes,
@@ -1022,6 +1151,7 @@ impl Scheduler {
                         actor_rotation,
                         turn_toward_step_degrees,
                         animation_mode,
+                        hand,
                         spell_effect,
                         sound_range,
                         control_flow,
@@ -2791,6 +2921,112 @@ mod vehicle_contract_tests {
             zone_scene_file_id(&root, 242, *b"hshi"),
             Some(partner),
             "242's hshi resolves in partner zone 170's model DAT"
+        );
+    }
+
+    /// One three-dword stage: opcode and length, delay and duration, then the payload dword.
+    fn three_word_stage(opcode: u8, delay: u16, duration: u16, payload: [u8; 4]) -> Vec<u8> {
+        let mut stage = vec![opcode, 0x03, 0, 0];
+        stage.extend_from_slice(&delay.to_le_bytes());
+        stage.extend_from_slice(&duration.to_le_bytes());
+        stage.extend_from_slice(&payload);
+        stage
+    }
+
+    #[test]
+    fn the_hold_stages_carry_a_hand_and_no_dat_id() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(three_word_stage(0x9B, 4, 30, 1u32.to_le_bytes()));
+        body.extend(three_word_stage(0xA7, 6, 0, 0u32.to_le_bytes()));
+        // Retail sends 2 and up to the main hand; a negative hand indexes outside the pair.
+        body.extend(three_word_stage(0xA8, 0, 0, 5u32.to_le_bytes()));
+        body.extend(three_word_stage(0xA7, 0, 0, (-1i32).to_le_bytes()));
+
+        let s = Scheduler::parse(*b"ot13", &body).unwrap();
+        let got: Vec<_> = s
+            .stages
+            .iter()
+            .map(|t| (t.frame, t.stage.kind, t.stage.hand, t.stage.id))
+            .collect();
+        let held = |hand| {
+            Some(HandStage {
+                hand,
+                sheathe: false,
+            })
+        };
+        assert_eq!(
+            got,
+            vec![
+                (
+                    0,
+                    StageKind::WeaponHoldFor,
+                    held(WeaponHand::Sub),
+                    NO_STAGE_ID
+                ),
+                (
+                    4,
+                    StageKind::WeaponHold,
+                    held(WeaponHand::Main),
+                    NO_STAGE_ID
+                ),
+                (
+                    10,
+                    StageKind::WeaponRelease,
+                    held(WeaponHand::Main),
+                    NO_STAGE_ID
+                ),
+                (10, StageKind::WeaponHold, None, NO_STAGE_ID),
+            ]
+        );
+        assert_eq!(s.stages[0].stage.duration_frames, 30);
+    }
+
+    #[test]
+    fn a_hand_routine_names_its_hands_draw_or_sheathe() {
+        let words = |sheathe: u16, hand: u16| {
+            let mut payload = [0u8; 4];
+            payload[..2].copy_from_slice(&sheathe.to_le_bytes());
+            payload[2..].copy_from_slice(&hand.to_le_bytes());
+            payload
+        };
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(three_word_stage(0x84, 0, 0, words(0, 0)));
+        body.extend(three_word_stage(0x84, 0, 0, words(1, 1)));
+        // Only 0 and 1 index the client's four-entry table.
+        body.extend(three_word_stage(0x84, 0, 0, words(2, 0)));
+
+        let s = Scheduler::parse(*b"in 3", &body).unwrap();
+        let hands: Vec<_> = s.stages.iter().map(|t| t.stage.hand).collect();
+        assert!(s
+            .stages
+            .iter()
+            .all(|t| t.stage.kind == StageKind::HandRoutine && t.stage.id == NO_STAGE_ID));
+        let draw_main = hands[0].unwrap();
+        let sheathe_sub = hands[1].unwrap();
+        assert_eq!(hands[2], None);
+
+        // Main hand's Info byte 0x04 = 3, sub hand's = 1; a negative byte reads as 0.
+        assert_eq!(&draw_main.routine_name(3, 1), b"in13");
+        assert_eq!(&sheathe_sub.routine_name(3, 1), b"ot21");
+        assert_eq!(&sheathe_sub.routine_name(3, 0xFF), b"ot20");
+    }
+
+    /// The busy stage as Hume M's `in 1` carries it: busy for 72 frames from the routine's start.
+    #[test]
+    fn a_busy_stage_keeps_its_duration() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(three_word_stage(0x1F, 36, 72, [0; 4]));
+
+        let s = Scheduler::parse(*b"in 1", &body).unwrap();
+        let busy = s.stages[0];
+        assert_eq!(
+            (
+                busy.frame,
+                busy.stage.kind,
+                busy.stage.duration_frames,
+                busy.stage.id
+            ),
+            (0, StageKind::BusyFor, 72, NO_STAGE_ID)
         );
     }
 }

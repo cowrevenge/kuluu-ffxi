@@ -8873,6 +8873,7 @@ mod tests {
                 random_group: None,
                 actor_rotation: None,
                 animation_mode: None,
+                hand: None,
                 turn_toward_step_degrees: None,
                 local_dir: HIT_SPARK_DIR,
                 model_transform: None,

@@ -1011,6 +1011,15 @@ mod tests {
         -yaw_deg(pose, joint)
     }
 
+    /// How far above level the joint faces (up is `-Y`).
+    fn pitch_deg(pose: &[Mat4], joint: usize) -> f32 {
+        let (_, rotation, _) = pose[joint].to_scale_rotation_translation();
+        let facing = rotation * POSE_FORWARD;
+        (-facing.y)
+            .atan2((facing.x * facing.x + facing.z * facing.z).sqrt())
+            .to_degrees()
+    }
+
     #[test]
     fn a_bone_only_the_outgoing_clip_keys_goes_to_rest_with_the_blend_and_an_instant_one_snaps() {
         let held_deg = 30.0_f32;
@@ -1287,6 +1296,36 @@ mod tests {
             "out of reach the head stops at its records' reach; read {:.2}",
             yaw_deg(&pose, HEAD)
         );
+    }
+
+    /// A point rising through either record's up/down reach turns the head smoothly: inside its ellipse each record turns
+    /// toward the point as it was given, the way retail's clamp hands it back, so nothing changes as the point reaches a
+    /// rim. A clamp handing back its stretched projection inside the rim lifts the aim by the record's aspect ratio right
+    /// up to the rim and drops it there, a jump of the head by 8 and 11 deg on these records.
+    #[test]
+    fn a_point_rising_through_a_records_reach_turns_the_head_smoothly() {
+        const STEP_DEG: f32 = 0.1;
+        let mut bench = Bench::new();
+        bench.play(clip(b"idl0", &[(CHEST, 0.0), (NECK, 0.0)]), 0.0);
+        let mut last: Option<f32> = None;
+        // Level to 30 deg up, past both records' up/down reach (6.8 and 17.7 deg).
+        for step in 0..=300 {
+            let rise = (step as f32 * STEP_DEG).to_radians();
+            let look = Look {
+                point: Vec3::new(20.0, -1.55 - 20.0 * rise.tan(), 0.0),
+                ..ahead()
+            };
+            let now = pitch_deg(&bench.pass(Some(look), Correction::Free), HEAD);
+            if let Some(last) = last {
+                assert!(
+                    (now - last).abs() < 1.0,
+                    "the head jumped {:.2} deg with the point {:.1} deg up",
+                    now - last,
+                    rise.to_degrees()
+                );
+            }
+            last = Some(now);
+        }
     }
 
     /// The rule a locked stop has to keep: the target did not move, so the head does not either. The side step's

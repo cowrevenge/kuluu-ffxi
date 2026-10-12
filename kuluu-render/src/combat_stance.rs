@@ -23,17 +23,16 @@ pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) 
 }
 
 /// The battle-motion blocks one weapon pairing owns: `main` always, `off_hand` only with a weapon in
-/// the sub slot, and `skirt_battle` (the waist/cloth block for this pairing) while engaged.
+/// each hand, and `skirt_battle` (the waist/cloth block for this pairing) while engaged.
 /// research/xim poc/Model.kt PcModel.getMainBattleAnimationDirectory /
 /// getSubBattleAnimationDirectory / getSkirtBattleAnimationResource: both count by the weapon's own
-/// animation-type byte, and a sub slot holding anything other than `CIB_MOTION_INDEX_NONE` switches the
-/// main hand off [`motion_dat_for_race`] onto the dual-wield main-hand block.
+/// animation-type byte, and a dual wielder takes the main hand off [`motion_dat_for_race`] onto the
+/// dual-wield main-hand block (`FFXiMain.dll retail-2026-09` RVA 0xD2E30 indexes the three tables by kind,
+/// RVA 0xD1970 loads kinds 1 and 2 for a dual wielder where RVA 0xD16C0 loads kind 0 alone).
 ///
-/// Only `main` may be merged into the body's motion clip pool: these blocks do not extend an id family, they
-/// author a new member of it - the waist/cloth files 9928/9929/9930 carry `btl2` (with at02/at12/at22) where the
-/// race-wide file 9672 carries btl0/btl1 only, and every clip matching a parameterized id becomes a simultaneous
-/// layer, so merging them poses cloth motion over the body's stance and drags an equipped mesh off its hand.
-/// `off_hand`/`skirt_battle` need their own bone-masked animation slot (gaps §G.12) first.
+/// The skirt block authors new members of the body's families rather than extending them - the waist/cloth files
+/// 9928/9929/9930 carry `btl2` (with at02/at12/at22) where the race-wide file 9672 carries btl0/btl1 only - so only its
+/// waist-slot clips join the pool, where the lowest slot keying a bone owns it.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BattleMotionBlocks {
@@ -46,16 +45,19 @@ pub struct BattleMotionBlocks {
 impl BattleMotionBlocks {
     /// `None` for a race with no battle block at all, and for the parts of the law an unread
     /// FFXiMain.dll cannot answer (the dual-wield and skirt tables have no shipped fallback).
+    /// `dual_wield` is the caller's call (retail reads it off the sub slot's model); the off-hand block
+    /// then counts by the sub weapon's own byte, and an unset byte names none (`FFXiMain.dll
+    /// retail-2026-09` RVA 0xD2E6A..0xD2E73 returns no file for a negative type).
     pub fn resolve(
         dll: Option<&ffxi_dat::main_dll::MainDll>,
         race: u8,
         main_type: u8,
         sub_type: Option<u8>,
+        dual_wield: bool,
     ) -> Option<Self> {
         let base = motion_dat_for_race(dll, race)?;
-        // xim's isDualWield reads the sub slot's animation byte and calls 0xFF "unset".
         let none = ffxi_dat::cib::CIB_UNSET;
-        let dual_wield = dll.is_some() && sub_type.is_some_and(|b| b != none);
+        let dual_wield = dll.is_some() && dual_wield;
         let main_base = match (dual_wield, dll) {
             (true, Some(dll)) => dll
                 .base_dual_wield_main_hand_animation_index(race)
@@ -64,7 +66,7 @@ impl BattleMotionBlocks {
         }?;
         let main_type = u32::from(main_type);
         let off_hand = match (dual_wield, sub_type, dll) {
-            (true, Some(sub_type), Some(dll)) => dll
+            (true, Some(sub_type), Some(dll)) if sub_type != none => dll
                 .base_dual_wield_off_hand_animation_index(race)
                 .map(|file| file as u32 + u32::from(sub_type)),
             _ => None,
@@ -1756,11 +1758,11 @@ mod tests {
         assert_eq!(dll.base_skirt_animation_index(HUME_M, true), Some(41071));
     }
 
-    /// A single-wielded weapon takes the race battle base plus its own animation byte; a second
-    /// weapon switches both hands onto the dual-wield bases instead (`Model.kt isDualWield`, whose
-    /// operand treats `CIB_UNSET` as "no off hand"). The waist/cloth block always comes from the
-    /// skirt table, offset by the *main* hand's byte. This math decides which DATs a held weapon's
-    /// anchor joints can ever be keyed in, so it is pinned rather than left to the loader.
+    /// A single-wielded weapon takes the race battle base plus its own animation byte; a dual
+    /// wielder switches both hands onto the dual-wield bases instead, the off hand counting by the
+    /// sub weapon's byte. The waist/cloth block always comes from the skirt table, offset by the
+    /// *main* hand's byte. This math decides which DATs a held weapon's anchor joints can ever be
+    /// keyed in, so it is pinned rather than left to the loader.
     #[test]
     fn battle_motion_blocks_add_the_animation_byte_to_the_matching_base() {
         let Some(root) = ffxi_dat::archive::open_test_install() else {
@@ -1770,30 +1772,37 @@ mod tests {
         const HUME_M: u8 = 1;
         const MAIN_BYTE: u8 = 3;
 
-        let one_hand = BattleMotionBlocks::resolve(Some(&dll), HUME_M, MAIN_BYTE, None)
+        let one_hand = BattleMotionBlocks::resolve(Some(&dll), HUME_M, MAIN_BYTE, None, false)
             .expect("Hume M has a battle block");
         assert_eq!(one_hand.main, 9672 + u32::from(MAIN_BYTE));
         assert_eq!(one_hand.off_hand, None);
         assert_eq!(one_hand.skirt_battle, Some(9928 + u32::from(MAIN_BYTE)));
 
-        let two_hand = BattleMotionBlocks::resolve(Some(&dll), HUME_M, MAIN_BYTE, Some(1))
+        let two_hand = BattleMotionBlocks::resolve(Some(&dll), HUME_M, MAIN_BYTE, Some(1), true)
             .expect("Hume M has a battle block");
         assert_eq!(two_hand.main, 40815 + u32::from(MAIN_BYTE));
         assert_eq!(two_hand.off_hand, Some(40431 + 1));
         assert_eq!(two_hand.skirt_battle, Some(41071 + u32::from(MAIN_BYTE)));
 
-        // An unset sub byte is not a second weapon: it keeps the single-wield selection.
+        // A sub weapon that is not a second weapon keeps the single-wield selection whatever its byte.
+        let shield = BattleMotionBlocks::resolve(Some(&dll), HUME_M, MAIN_BYTE, Some(1), false)
+            .expect("Hume M has a battle block");
+        assert_eq!(shield, one_hand);
+
+        // A dual wielder whose sub byte is unset takes the dual-wield main block and no off-hand block.
         let unset_sub = BattleMotionBlocks::resolve(
             Some(&dll),
             HUME_M,
             MAIN_BYTE,
             Some(ffxi_dat::cib::CIB_UNSET),
+            true,
         )
         .expect("Hume M has a battle block");
-        assert_eq!(unset_sub, one_hand);
+        assert_eq!(unset_sub.main, two_hand.main);
+        assert_eq!(unset_sub.off_hand, None);
 
         // Without the DLL the loader keeps its pre-table behaviour: race base only.
-        let no_dll = BattleMotionBlocks::resolve(None, HUME_M, MAIN_BYTE, Some(1))
+        let no_dll = BattleMotionBlocks::resolve(None, HUME_M, MAIN_BYTE, Some(1), true)
             .expect("the fallback block exists for a PC race");
         assert_eq!(no_dll.main, 9672 + u32::from(MAIN_BYTE));
         assert_eq!(no_dll.off_hand, None);

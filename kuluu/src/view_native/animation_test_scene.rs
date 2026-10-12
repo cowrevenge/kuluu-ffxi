@@ -1031,6 +1031,7 @@ fn activate_test_scene(
             body: None,
             main_weapon: Some(TEST_SWORD_FILE),
             sub_weapon: None,
+            sub_model: None,
         },
     });
 
@@ -1965,6 +1966,7 @@ fn synth_particle_stage(
                 control_flow: None,
                 actor_rotation: None,
                 animation_mode: None,
+                hand: None,
                 turn_toward_step_degrees: None,
                 local_dir,
             },

@@ -4792,6 +4792,9 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             None,
             &mut command_rx,
             &events,
+            // No macro store in these fixtures (bead kuluu-o9qt7.19.2).
+            None,
+            "",
             None,
         ),
     )
@@ -4944,6 +4947,9 @@ async fn enterzone_in_gameok_reply() {
             None,
             &mut command_rx,
             &events,
+            // No macro store in these fixtures (bead kuluu-o9qt7.19.2).
+            None,
+            "",
             None,
         ),
     )

@@ -2515,6 +2515,40 @@ fn trade_phases_fold_into_the_state_field() {
     assert!(!state.apply_event(&AgentEvent::TradeRes { kind: K::Cancell }));
 }
 
+/// The client-local macro store law (bead kuluu-o9qt7.19.2, vault
+/// main_menu.md §41): MacrosLoaded replaces the folded list wholesale — a
+/// later commit that dropped slots must not linger beside the old ones.
+#[test]
+fn macros_loaded_replaces_wholesale() {
+    use kuluu_snapshot::MacroSlot;
+    let mut state = SessionState::default();
+    let first = vec![
+        MacroSlot {
+            block: 0,
+            index: 1,
+            text: "/ra".to_string(),
+        },
+        MacroSlot {
+            block: 1,
+            index: 2,
+            text: "/heal".to_string(),
+        },
+    ];
+    assert!(state.apply_event(&AgentEvent::MacrosLoaded {
+        slots: first.clone()
+    }));
+    assert_eq!(state.macros, first);
+    let second = vec![MacroSlot {
+        block: 0,
+        index: 1,
+        text: "/reraise".to_string(),
+    }];
+    assert!(state.apply_event(&AgentEvent::MacrosLoaded {
+        slots: second.clone()
+    }));
+    assert_eq!(state.macros, second);
+}
+
 /// AgentCommand is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2537,6 +2571,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MogHouseExit { .. } => (),
         AgentCommand::ChangeJob { .. } => (),
         AgentCommand::OpenMogMenu { .. } => (),
+        AgentCommand::CommitMacros { .. } => (),
         AgentCommand::TreasureLot { .. } => (),
         AgentCommand::TreasurePass { .. } => (),
         AgentCommand::MarkKeyItemsSeen { .. } => (),
@@ -2870,6 +2905,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::ConfigUpdated { .. } => (),
         AgentEvent::MonstrosityUpdated { .. } => (),
         AgentEvent::Connected { .. } => (),
+        AgentEvent::MacrosLoaded { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),
         AgentEvent::SubAreaSynced { .. } => (),

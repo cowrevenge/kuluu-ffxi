@@ -311,6 +311,34 @@ pub async fn run(
         cli_lang: 0,
     };
 
+    // The client-local macro store (bead kuluu-o9qt7.19.2): the wire never
+    // carries macros (vault main_menu.md §41), so world entry is where saved
+    // slots come back — a missing file simply means empty, an unreadable one
+    // must not kill the session.
+    let macro_store = match crate::macro_store::MacroStore::default_path() {
+        Ok(path) => Some(crate::macro_store::MacroStore::new(path)),
+        Err(e) => {
+            tracing::warn!(error = %e, "no config dir for the client-local macro store");
+            None
+        }
+    };
+    let macro_char_key = crate::macro_store::PersistedMacros::key(char_name_for_bootstrap);
+    if let Some(store) = &macro_store {
+        match store.load() {
+            Ok(persisted) => {
+                let slots = persisted.slots_for(char_name_for_bootstrap);
+                if !slots.is_empty() {
+                    let _ = event_tx.send(AgentEvent::MacrosLoaded { slots });
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %store.path().display(),
+                "macro store unreadable — starting with empty macros"
+            ),
+        }
+    }
+
     let mut current_seed = key3;
     let mut iteration: u32 = 0;
 
@@ -343,6 +371,8 @@ pub async fn run(
             spawn_fallback.take(),
             &mut cmd_rx,
             &event_tx,
+            macro_store.as_ref(),
+            &macro_char_key,
             spell_table.clone(),
         )
         .await?;
@@ -401,6 +431,10 @@ async fn run_map_session(
     spawn_fallback: Option<Vec3>,
     cmd_rx: &mut mpsc::Receiver<AgentCommand>,
     event_tx: &broadcast::Sender<AgentEvent>,
+    // Client-local macro store + key (bead kuluu-o9qt7.19.2) — carried down to
+    // the command pump, which commits edits without ever touching the wire.
+    macro_store: Option<&crate::macro_store::MacroStore>,
+    macro_char_key: &str,
     spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>>,
 ) -> Result<MapOutcome> {
     map.send_bootstrap(bootstrap).await?;
@@ -693,6 +727,8 @@ async fn run_map_session(
         self_act_index,
         cmd_rx,
         event_tx.clone(),
+        macro_store.cloned(),
+        macro_char_key.to_string(),
         cfg.user_driven_events,
         name_cache,
         target_cache,
@@ -2851,6 +2887,10 @@ async fn keepalive_loop(
     mut self_act_index: Option<u16>,
     cmd_rx: &mut mpsc::Receiver<AgentCommand>,
     event_tx: broadcast::Sender<AgentEvent>,
+    // Client-local macro store + this character's key in it (bead
+    // kuluu-o9qt7.19.2); one cheap clone per map connection.
+    macro_store: Option<crate::macro_store::MacroStore>,
+    macro_char_key: String,
     user_driven_events: bool,
     mut name_cache: std::collections::HashMap<u32, String>,
     mut target_cache: std::collections::HashMap<u16, u32>,
@@ -4593,6 +4633,37 @@ async fn keepalive_loop(
                             &event_tx,
                         )
                         .await;
+                    }
+                    Some(AgentCommand::CommitMacros { slots }) => {
+                        // Macros are client-local (vault main_menu.md §41 [V-
+                        // negative wire]): no packet here — normalize under the
+                        // DAT capacity law, rewrite this character's entry in
+                        // the store file, then fold so runtime and file agree by
+                        // construction. A failed write warns but keeps the
+                        // session running (the next commit retries); a folded
+                        // edit that never hit disk survives until that retry.
+                        let normalized =
+                            crate::macro_store::normalize_macro_slots(&slots);
+                        match &macro_store {
+                            None => tracing::warn!("CommitMacros dropped: no store path"),
+                            Some(store) => {
+                                let mut persisted = store.load().unwrap_or_else(|e| {
+                                    tracing::warn!(error = %e, "macro store unreadable for commit — rewriting from scratch");
+                                    crate::macro_store::PersistedMacros::default()
+                                });
+                                persisted
+                                    .by_character
+                                    .insert(macro_char_key.clone(), normalized.clone());
+                                if let Err(e) = store.save(&persisted) {
+                                    tracing::warn!(
+                                        error = %e,
+                                        path = %store.path().display(),
+                                        "macro commit not persisted (runtime still updated)"
+                                    );
+                                }
+                                let _ = event_tx.send(AgentEvent::MacrosLoaded { slots: normalized });
+                            }
+                        }
                     }
                     Some(AgentCommand::MarkKeyItemsSeen { table_index, ids }) => {
                         // LSB blockedBy(InEvent) rejects 0x064 while an event is

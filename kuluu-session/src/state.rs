@@ -1708,6 +1708,13 @@ impl SessionState {
                 self.zone_id = Some(*zone_id);
                 true
             }
+            // The client-local macro store (bead kuluu-o9qt7.19.2): nothing on
+            // the wire ever carries macros (vault main_menu.md §41), so this is
+            // the only way they enter folded state.
+            AgentEvent::MacrosLoaded { slots } => {
+                self.macros = slots.clone();
+                true
+            }
             AgentEvent::StageChanged { stage } => {
                 let changed = self.stage != *stage || self.diagnostics.stage != Some(*stage);
                 self.stage = *stage;
@@ -3872,6 +3879,13 @@ pub enum AgentEvent {
         ok: bool,
         result: u8,
     },
+
+    /// Wholesale replacement of the client-local macro list (loaded at world
+    /// entry from `macro_store`, or after a commit) — no wire origin, see
+    /// vendor/server packet index [V-negative] and vault main_menu.md §41.
+    MacrosLoaded {
+        slots: Vec<kuluu_snapshot::MacroSlot>,
+    },
 }
 
 pub const GROUND_CORRECTION_XY_EPSILON_YALMS: f32 = 0.05;
@@ -4023,6 +4037,14 @@ pub enum AgentCommand {
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers
     /// (vendor/server/src/map/packets/s2c/0x02e_openmogmenu.h).
     OpenMogMenu,
+
+    /// Commit the character's whole macro set: persisted to the client-local
+    /// store file and folded into state together, so runtime and user file can
+    /// never disagree (bead kuluu-o9qt7.19.2; retail keeps macros in its own
+    /// per-user files, vault main_menu.md §41/§53).
+    CommitMacros {
+        slots: Vec<kuluu_snapshot::MacroSlot>,
+    },
 
     /// Cast lots on a treasure-pool slot — c2s 0x041 TROPHY_ENTRY. The server
     /// rolls the value, so there is nothing to send but the slot.

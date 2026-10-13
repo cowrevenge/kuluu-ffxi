@@ -956,7 +956,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::ItemAction { .. } => &[],
         MenuKind::ItemDropConfirm { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::PowerPrompt { .. } => DROP_CONFIRM_ENTRIES,
-        MenuKind::EquipSlot(_) => &["(loading equippable items…)"],
+        // The pick list is always snapshot-built (equip_slot_rows); an empty bag
+        // renders the `empty_dynamic_hint` for this kind, never a loading stub.
+        MenuKind::EquipSlot(_) => &[],
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
         // Retail law: the friend roster is POL-era account data with no modern
@@ -2406,43 +2408,7 @@ pub fn refresh_dynamic_menu_rows(
             index,
             item_no,
         } => item_action_rows(snap, container, index, item_no),
-        MenuKind::EquipSlot(equip_slot) => {
-            let (main_job, main_lv) = snap
-                .self_char_id
-                .and_then(|id| snap.party.iter().find(|m| m.id == id))
-                .map(|m| (m.main_job, m.main_job_lv))
-                .unwrap_or((0, 0));
-            snap.inventory_main()
-                .iter()
-                .filter_map(|slot| {
-                    let info = ffxi_vocab::equip_info::lookup(slot.item_no)?;
-                    if !ffxi_vocab::equip_info::fits_slot(&info, equip_slot) {
-                        return None;
-                    }
-                    if main_job != 0 && !ffxi_vocab::equip_info::fits_job(&info, main_job) {
-                        return None;
-                    }
-                    if main_lv != 0 && info.level > main_lv {
-                        return None;
-                    }
-                    let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
-                    let label = if info.level > 0 {
-                        format!("{name} (Lv{})", info.level)
-                    } else {
-                        name.to_string()
-                    };
-                    Some(DynamicMenuRow {
-                        label,
-                        action: DynamicMenuAction::EquipItem {
-                            container: slot.container,
-                            container_index: slot.index,
-                            equip_slot,
-                            item_no: slot.item_no,
-                        },
-                    })
-                })
-                .collect()
-        }
+        MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot),
         _ => Vec::new(),
     };
 
@@ -2504,6 +2470,61 @@ fn order_dynamic_rows(kind: MenuKind, auto_sort: bool, rows: &mut [DynamicMenuRo
         MenuKind::ItemAction { .. } | MenuKind::KeyItems | MenuKind::EmoteList => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
+}
+
+/// The equip window's slot pick list (`FFXiMain.dll retail-2026-09 RVA 0x1322B0`
+/// event-id 8 state==2; vault main_menu.md §20/§50): every inventory slot whose
+/// item can legally land in `equip_slot`.
+///
+/// The candidate predicate mirrors the server's own acceptance gate, which is the
+/// authority for what a select can succeed at: `EquipArmor` refuses items whose
+/// equip-slot bit (`slot`), job bit (`1 << (GetMJob() - 1)`) or `level` fails
+/// (vendor/server/src/map/utils/charutils.cpp EquipArmor). Those three are the
+/// columns kuluu scrapes into `ffxi_vocab::equip_info`; the two remaining server
+/// gates (superior-level mod, race mod) live in item *mods*, not in
+/// vendor/server/sql/item_equipment.sql, so they cannot be filtered here yet —
+/// vault main_menu.md §50 records that as the pick list's known gap.
+pub fn equip_slot_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    equip_slot: u8,
+) -> Vec<DynamicMenuRow> {
+    let (main_job, main_lv) = snap
+        .self_char_id
+        .and_then(|id| snap.party.iter().find(|m| m.id == id))
+        .map(|m| (m.main_job, m.main_job_lv))
+        .unwrap_or((0, 0));
+    let rows: Vec<DynamicMenuRow> = snap
+        .inventory_main()
+        .iter()
+        .filter_map(|slot| {
+            let info = ffxi_vocab::equip_info::lookup(slot.item_no)?;
+            if !ffxi_vocab::equip_info::fits_slot(&info, equip_slot) {
+                return None;
+            }
+            if main_job != 0 && !ffxi_vocab::equip_info::fits_job(&info, main_job) {
+                return None;
+            }
+            if main_lv != 0 && info.level > main_lv {
+                return None;
+            }
+            let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
+            let label = if info.level > 0 {
+                format!("{name} (Lv{})", info.level)
+            } else {
+                name.to_string()
+            };
+            Some(DynamicMenuRow {
+                label,
+                action: DynamicMenuAction::EquipItem {
+                    container: slot.container,
+                    container_index: slot.index,
+                    equip_slot,
+                    item_no: slot.item_no,
+                },
+            })
+        })
+        .collect();
+    rows
 }
 
 /// One row per owned key item, ascending global id, name from the scraped LSB
@@ -4436,6 +4457,115 @@ mod tests {
         let mut snap = slot_snapshot(c::LOC_INVENTORY, 13327, true);
         snap.equipped[11] = Some(13327);
         assert!(!item_usable_now(&snap, only_slot(&snap)));
+    }
+
+    /// `vendor/server/sql/item_equipment.sql` rows used by the equip pick-list
+    /// tests, with their (`level`, `jobs`, `slot`) columns: bronze cap (1, WAR,
+    /// head), Pummelers Mask +2 (99, WAR-only, head), white belt (1, MNK-only,
+    /// waist), bronze dagger (1, WAR, main+sub).
+    const BRONZE_CAP: u16 = 12448;
+    const PM_MASK_PLUS_2: u16 = 23040;
+    const WHITE_BELT: u16 = 13184;
+    const BRONZE_DAGGER: u16 = 16448;
+
+    /// Main-bag snapshot holding those four pieces, self rostered as `main_job`
+    /// at level `main_job_lv` (the pair the server's gate reads).
+    fn equip_bag_snapshot(main_job: u8, main_job_lv: u8) -> kuluu_snapshot::SceneSnapshot {
+        let gear = |index: u8, item_no: u16| kuluu_snapshot::InventoryItem {
+            container: 0,
+            index,
+            item_no,
+            quantity: 1,
+            locked: false,
+            unselectable: false,
+            charges_remaining: None,
+            next_use_vana_ts: None,
+            use_delay_end_vana_ts: None,
+            ready: None,
+        };
+        let mut member = war_party_member(7);
+        member.main_job = main_job;
+        member.main_job_lv = main_job_lv;
+        kuluu_snapshot::SceneSnapshot {
+            self_char_id: Some(7),
+            party: vec![member],
+            containers: vec![kuluu_snapshot::ContainerView {
+                id: 0,
+                capacity: 30,
+                items: vec![
+                    gear(4, BRONZE_CAP),
+                    gear(5, PM_MASK_PLUS_2),
+                    gear(6, WHITE_BELT),
+                    gear(7, BRONZE_DAGGER),
+                ],
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// What the window actually shows: `equip_slot_rows` then the refresh pass's
+    /// ordering step for this kind.
+    fn equip_pick_labels(snap: &kuluu_snapshot::SceneSnapshot, equip_slot: u8) -> Vec<String> {
+        let mut rows = equip_slot_rows(snap, equip_slot);
+        order_dynamic_rows(MenuKind::EquipSlot(equip_slot), true, &mut rows);
+        rows.iter().map(|r| r.label.clone()).collect()
+    }
+
+    /// The pick list is the bag filtered by the server's own acceptance gate
+    /// (`EquipArmor`: equip-slot bit, main-job bit, required level) — vault
+    /// main_menu.md §50. A wrong-slot item never shows; an over-level or
+    /// wrong-job item never shows.
+    #[test]
+    fn equip_pick_list_filters_by_slot_job_and_level() {
+        let war40 = equip_bag_snapshot(1, 40);
+        assert_eq!(
+            equip_pick_labels(&war40, 4),
+            ["Bronze Cap (Lv1)"],
+            "head: the level-99 mask is gated and the belt/dagger are wrong-slot"
+        );
+        assert_eq!(equip_pick_labels(&war40, 0), ["Bronze Dagger (Lv1)"]);
+        assert!(
+            equip_pick_labels(&war40, 10).is_empty(),
+            "a white belt is MNK-only: WAR must not be offered it"
+        );
+
+        let mnk99 = equip_bag_snapshot(2, 99);
+        assert_eq!(
+            equip_pick_labels(&mnk99, 10),
+            ["White Belt (Lv1)"],
+            "MNK gets the belt it can wear"
+        );
+        assert_eq!(
+            equip_pick_labels(&mnk99, 4),
+            ["Bronze Cap (Lv1)"],
+            "the WAR-only mask stays out even at level 99"
+        );
+    }
+
+    /// Rows carry the exact c2s 0x050 field triple (bag, bag index, equip slot)
+    /// so a select equips that very slot, and the empty state renders the
+    /// grounded hint rather than any loading placeholder.
+    #[test]
+    fn equip_pick_rows_carry_the_equip_set_fields_and_hint_when_empty() {
+        let snap = equip_bag_snapshot(1, 40);
+        let rows = equip_slot_rows(&snap, 4);
+        assert_eq!(
+            rows.iter().map(|r| r.action).collect::<Vec<_>>(),
+            vec![DynamicMenuAction::EquipItem {
+                container: 0,
+                container_index: 4,
+                equip_slot: 4,
+                item_no: BRONZE_CAP,
+            }],
+            "one row, and it must name the bag slot the packet carries"
+        );
+
+        let empty = DynamicMenu::default();
+        assert!(static_entries(MenuKind::EquipSlot(4)).is_empty());
+        assert_eq!(
+            entry_label(MenuKind::EquipSlot(4), 0, &empty),
+            "(no equippable items for this slot)"
+        );
     }
 
     /// The quick-menu Items rows fire Use directly and skip unusable slots;

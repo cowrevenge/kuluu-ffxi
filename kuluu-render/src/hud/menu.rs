@@ -935,9 +935,11 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Debug => DEBUG_ENTRIES,
         MenuKind::Graphics => &[],
 
-        MenuKind::Magic => &["(Magic — data pending)"],
+        // Both magic lists are snapshot-built (`spell_rows` / `magic_school_rows`):
+        // an empty one renders its `empty_dynamic_hint`, never a stub.
+        MenuKind::Magic => &[],
         MenuKind::MagicGroups => MAGIC_CATEGORY_LABELS,
-        MenuKind::MagicGroup(_) => &["(Magic — data pending)"],
+        MenuKind::MagicGroup(_) => &[],
         MenuKind::Abilities => &["(Abilities — data pending)"],
         MenuKind::AbilitiesGroups => ABILITIES_CATEGORY_LABELS,
         MenuKind::AbilitiesGroup(_) => &["(Abilities — data pending)"],
@@ -1854,6 +1856,21 @@ fn lsb_group_to_school(group: u8) -> Option<u8> {
     }
 }
 
+/// The `magic` window's unfiltered list — kuluu's flat view of it, reached with
+/// the Retail+ toggle (retail always drills a category first, vault
+/// main_menu.md §21): every spell the snapshot reports as known.
+pub fn spell_rows(spells_known: &[u16]) -> Vec<DynamicMenuRow> {
+    spells_known
+        .iter()
+        .filter_map(|&id| {
+            ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
+                label: name.to_string(),
+                action: DynamicMenuAction::CastSpell { spell_id: id },
+            })
+        })
+        .collect()
+}
+
 /// The `magic` spell list for one school: known spells whose bucket matches.
 pub fn magic_school_rows(
     spells_known: &[u16],
@@ -2321,16 +2338,7 @@ pub fn refresh_dynamic_menu_rows(
     };
     let snap = &scene.snapshot;
     let rows: Vec<DynamicMenuRow> = match kind {
-        MenuKind::Magic => snap
-            .spells_known
-            .iter()
-            .filter_map(|&id| {
-                ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
-                    label: name.to_string(),
-                    action: DynamicMenuAction::CastSpell { spell_id: id },
-                })
-            })
-            .collect(),
+        MenuKind::Magic => spell_rows(&snap.spells_known),
         MenuKind::MagicGroup(school) => {
             school_table.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
             magic_school_rows(&snap.spells_known, school, |id| school_table.school_of(id))
@@ -4167,6 +4175,68 @@ mod tests {
         let unknown_school = magic_school_rows(&[], 8, |id| table.school_of(id));
         assert!(unknown_school.is_empty());
         assert!(is_dynamic(MenuKind::MagicGroup(2)));
+    }
+
+    /// One real spell per school bucket (ids are the first row of each
+    /// `spell_list.group` value in vendor/server/sql/spell_list.sql). The client's
+    /// school numbering is a shuffled bijection of `xi.magic.spellGroup`
+    /// (vault main_menu.md §21), so pinning all eight keeps the picker → list link
+    /// from silently drifting when either enum changes.
+    #[test]
+    fn every_school_bucket_maps_real_spells_to_the_client_number() {
+        let table = MagicSchoolTable::default();
+        const PINNED: &[(u16, u8, &str)] = &[
+            (1, MAGIC_CAT_WHITE, "cure (lsb group 6)"),
+            (144, MAGIC_CAT_BLACK, "fire (2)"),
+            (368, MAGIC_CAT_SONGS, "foe requiem (1)"),
+            (318, MAGIC_CAT_NINJUTSU, "monomi ichi (4)"),
+            (288, MAGIC_CAT_SUMMONING, "fire spirit (5)"),
+            (513, MAGIC_CAT_BLUE, "venom shell (3)"),
+            (768, MAGIC_CAT_GEOMANCY, "indi-regen (7)"),
+            (896, MAGIC_CAT_TRUST, "shantotto (8)"),
+        ];
+        for (id, school, what) in PINNED {
+            assert_eq!(table.school_of(*id), Some(*school), "{what}");
+        }
+        let all: Vec<u16> = PINNED.iter().map(|(id, _, _)| *id).collect();
+        for (school, label) in MAGIC_CATEGORY_ROWS {
+            let rows = magic_school_rows(&all, *school, |id| table.school_of(id));
+            assert_eq!(
+                rows.len(),
+                1,
+                "the {label} list must hold exactly one of the pinned spells"
+            );
+        }
+    }
+
+    /// The flat spell list (kuluu's Retail+ view) names every known spell from the
+    /// scraped table and casts it by id; unknown ids drop out. Neither magic kind
+    /// carries a static placeholder, so an empty one shows its grounded hint.
+    #[test]
+    fn magic_lists_build_from_data_and_keep_no_placeholder() {
+        let rows = spell_rows(&[1, 144]);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.label.as_str(), r.action))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Cure", DynamicMenuAction::CastSpell { spell_id: 1 }),
+                ("Fire", DynamicMenuAction::CastSpell { spell_id: 144 }),
+            ]
+        );
+        assert!(spell_rows(&[0]).is_empty(), "unknown spell ids drop out");
+
+        let none = DynamicMenu::default();
+        assert!(static_entries(MenuKind::Magic).is_empty());
+        assert!(static_entries(MenuKind::MagicGroup(2)).is_empty());
+        assert_eq!(
+            entry_label(MenuKind::Magic, 0, &none),
+            "(no spells learned yet)"
+        );
+        assert_eq!(
+            entry_label(MenuKind::MagicGroup(2), 0, &none),
+            "(no spells learned in this school)"
+        );
     }
 
     #[test]

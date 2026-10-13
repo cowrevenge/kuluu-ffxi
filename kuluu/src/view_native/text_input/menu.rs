@@ -61,6 +61,12 @@ fn resolve_menu_entry(kind: MenuKind, label: &str, flat_magic: bool) -> MenuDisp
         // has no handler and never sees it on the wire.
         (MenuKind::Root, l) if l == ROOT_CURRENT_TIME => MenuDispatch::TextCommand("/clock"),
 
+        // Page 2 row 3 runs the text command "/keyitem" through the same runner
+        // (FFXiMain.dll retail-2026-09 RVA 0x14E855, literal .data 0x371B40;
+        // registry record /keyitem = id 0x4C in vault §12). Client-side: LSB has
+        // no handler and never sees it on the wire.
+        (MenuKind::Root, "Key Items") => MenuDispatch::TextCommand("/keyitem"),
+
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
         (MenuKind::Root, "Map") => MenuDispatch::OpenSubmenu(MenuKind::Map),
@@ -386,7 +392,7 @@ pub(super) fn confirm_menu_at_cursor(
     }
     match resolve_menu_entry(kind, label, graphics.magic_flat_list) {
         MenuDispatch::TextCommand(cmd) => {
-            run_client_text_command(cmd, vana_clock, vana_clock_visible, scene_state);
+            run_client_text_command(cmd, stack, vana_clock, vana_clock_visible, scene_state);
             // Mirrors the Debug toggles: the menu stays open (provisional
             // pending retail capture, bead kuluu-y5hq retail_unknowns).
             None
@@ -435,6 +441,7 @@ pub(super) fn confirm_menu_at_cursor(
 /// identical (bead kuluu-o9qt7.28 - full parse_slash routing is that bead's remaining half).
 pub(super) fn run_client_text_command(
     cmd: &str,
+    stack: &mut MenuStack,
     vana_clock: &kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     scene_state: &mut SceneState,
@@ -443,6 +450,10 @@ pub(super) fn run_client_text_command(
         "/clock" => {
             super::slash_apply::activate_current_time(vana_clock, vana_clock_visible, scene_state)
         }
+        // Retail's client-side /keyitem opens the key-item list window (vault
+        // main_menu.md §12 registry id 0x4C); typed input reaches the same kind
+        // through parse_slash → SlashOutcome::OpenMenu(MenuKind::KeyItems).
+        "/keyitem" => stack.push(MenuKind::KeyItems),
         other => push_system_chat_line(scene_state, format!("[menu] {other} — not implemented")),
     }
 }
@@ -1596,9 +1607,12 @@ mod menu_dispatch_tests {
     fn root_drill_matches_preview_child_kind() {
         use kuluu_render::hud::menu::{self, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
         for &label in menu::root_entries() {
-            // Log Out / Shut Down open the yes/no prompt and Current Time runs
-            // a text command - none of them has a right-pane preview.
-            if matches!(label, ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME) {
+            // Log Out / Shut Down open the yes/no prompt and Current Time/Key
+            // Items run text commands - none of them has a right-pane preview.
+            if matches!(
+                label,
+                ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME | "Key Items"
+            ) {
                 continue;
             }
             match (
@@ -1675,7 +1689,8 @@ mod menu_dispatch_tests {
         let clock = VanaClock::anchored_at_hour(12.0);
         let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
         let mut scene_state = SceneState::default();
-        run_client_text_command("/clock", &clock, &mut visible, &mut scene_state);
+        let mut stack = MenuStack::root();
+        run_client_text_command("/clock", &mut stack, &clock, &mut visible, &mut scene_state);
         assert!(
             scene_state
                 .local_toasts
@@ -1684,11 +1699,35 @@ mod menu_dispatch_tests {
             "{}",
             scene_state.local_toasts.len()
         );
-        run_client_text_command("/nope", &clock, &mut visible, &mut scene_state);
+        run_client_text_command("/nope", &mut stack, &clock, &mut visible, &mut scene_state);
         assert!(scene_state
             .local_toasts
             .iter()
             .any(|l| { l.text.starts_with("[menu] /nope") && l.text.contains("not implemented") }));
+    }
+
+    /// Retail's Key Items row runs "/keyitem" (FFXiMain.dll retail-2026-09 RVA
+    /// 0x14E855, .data 0x371B40; vault §12 id 0x4C): the dispatch hands over the
+    /// literal and the runner opens the key-item list window.
+    #[test]
+    fn key_items_row_runs_the_retail_keyitem_literal() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Key Items", false),
+            MenuDispatch::TextCommand("/keyitem"),
+        );
+
+        let clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
+        let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
+        let mut scene_state = SceneState::default();
+        let mut stack = MenuStack::root();
+        run_client_text_command(
+            "/keyitem",
+            &mut stack,
+            &clock,
+            &mut visible,
+            &mut scene_state,
+        );
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::KeyItems));
     }
 
     /// Retail persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60), so the

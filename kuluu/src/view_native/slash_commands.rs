@@ -708,6 +708,24 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
+            // Retail's page-2 Key Items row runs this literal (FFXiMain.dll
+            // retail-2026-09 RVA 0x14E855, .data 0x371B40); the client registry
+            // knows /keyitem = id 0x4C and LSB has no server handler for it —
+            // the window fills from data the client already holds (vault
+            // main_menu.md §12).
+            Command {
+                names: &["keyitem"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "open the key-item list",
+                handler: |c| {
+                    if c.rest.is_empty() {
+                        SlashOutcome::OpenMenu(MenuKind::KeyItems)
+                    } else {
+                        unknown_command(c.cmd)
+                    }
+                },
+            },
             #[cfg(debug_assertions)]
             Command {
                 names: &["widescan", "wscan"],
@@ -3349,6 +3367,7 @@ mod tests {
             (&["shutdown"], 0x0044),
             (&["clock"], 0x003f),
             (&["map"], 0x004f),
+            (&["keyitem"], 0x004c),
             (&["bank"], 0x006c),
             (&["follow"], 0x005b),
             (&["nod", "yes"], 0x00a9),
@@ -3575,6 +3594,18 @@ mod tests {
         }
         assert!(matches!(
             parse_slash_t("/map foo", &empty_entities(), origin(), None, None),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    #[test]
+    fn keyitem_opens_the_key_item_list() {
+        assert!(matches!(
+            parse_slash_t("/keyitem", &empty_entities(), origin(), None, None),
+            SlashOutcome::OpenMenu(MenuKind::KeyItems)
+        ));
+        assert!(matches!(
+            parse_slash_t("/keyitem foo", &empty_entities(), origin(), None, None),
             SlashOutcome::SystemMessage(_)
         ));
     }

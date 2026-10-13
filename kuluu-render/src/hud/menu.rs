@@ -783,8 +783,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
 /// Root → submenu mapping: `text_input::resolve_menu_entry` drills through this
 /// so the client dispatch and the preview can't disagree (guarded by a test in
 /// the client). `None` = a Root entry with no browsable submenu (Party/Search/
-/// Macros fire commands or aren't built; Current Time/Log Out/Shut Down act
-/// directly), so the right pane shows no preview.
+/// Macros fire commands or aren't built; Current Time/Key Items run their retail
+/// text commands, Log Out/Shut Down act directly), so the right pane shows no
+/// preview.
 /// `flat_magic` is the Retail+ "Flat Magic List" gate
 /// ([`RETAIL_MAGIC_FLAT_LIST`] in GraphicsSettings): on, kuluu's one-step spell
 /// list replaces retail's two-window flow (vault main_menu.md §21).
@@ -794,7 +795,9 @@ pub fn root_child_kind(label: &str, flat_magic: bool) -> Option<MenuKind> {
         "Magic" => MenuKind::MagicGroups,
         "Abilities" => MenuKind::Abilities,
         "Items" => MenuKind::Items,
-        "Key Items" => MenuKind::KeyItems,
+        // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
+        // text command instead of drilling (vault main_menu.md §5 row id 3 /
+        // §12 runner), handled as a TextCommand in `resolve_menu_entry`.
         "Equipment" => MenuKind::Equipment,
         "Status" => MenuKind::Status,
         ROOT_COMMUNICATION => MenuKind::Communication,

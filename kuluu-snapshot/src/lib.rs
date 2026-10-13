@@ -1109,6 +1109,15 @@ pub struct SceneSnapshot {
     /// Trailing on purpose.
     #[serde(default)]
     pub macros: Vec<MacroSlot>,
+
+    /// The four `SAVE_CONF` bitfield bytes the server last reported for this
+    /// character (s2c 0x0B4 GP_SERV_COMMAND_CONFIG; layout vendor/server/src/
+    /// common/mmo.h — decode with ffxi_proto::config::parse_config_flags; vault
+    /// main_menu.md §42). `None` until the packet arrives (it follows login's
+    /// gameok per vendor/server/src/map/packets/c2s/0x00c_gameok.cpp). Trailing
+    /// on purpose.
+    #[serde(default)]
+    pub config_confdata: Option<[u8; 4]>,
 }
 
 /// The automaton record folded from one s2c 0x044 EXTENDED_JOB PUP frame
@@ -2661,6 +2670,7 @@ mod tests {
             automaton: None,
             monstrosity: None,
             macros: Vec::new(),
+            config_confdata: None,
         }
     }
 
@@ -3228,6 +3238,7 @@ mod tests {
             "automaton",
             "monstrosity",
             "macros",
+            "config_confdata",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3236,7 +3247,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

@@ -589,6 +589,13 @@ pub struct SessionState {
     #[serde(default)]
     pub macros: Vec<kuluu_snapshot::MacroSlot>,
 
+    /// The four SAVE_CONF bitfield bytes from the newest s2c 0x0B4 CONFIG
+    /// (vendor/server/src/common/mmo.h; vault main_menu.md §42). LSB echoes a
+    /// fresh copy after every c2s CONFIG, so optimistic kuluu toggles reconcile
+    /// without extra bookkeeping.
+    #[serde(default)]
+    pub config_confdata: Option<[u8; 4]>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2968,6 +2975,15 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::ConfigUpdated { confdata } => {
+                // The server restates the whole SAVE_CONF prefix, so the newest
+                // frame replaces it wholesale (vault main_menu.md §42).
+                let changed = self.config_confdata != Some(*confdata);
+                if changed {
+                    self.config_confdata = Some(*confdata);
+                }
+                changed
+            }
             AgentEvent::MonstrosityUpdated { monstrosity } => {
                 // One s2c 0x044 MON frame replaces the record whole (vault
                 // main_menu.md §39).
@@ -3788,6 +3804,12 @@ pub enum AgentEvent {
         automaton: kuluu_snapshot::AutomatonInfo,
     },
 
+    /// The s2c 0x0B4 CONFIG answer restates the four SAVE_CONF bitfield bytes
+    /// whole (vendor/server/src/common/mmo.h; vault main_menu.md §42).
+    ConfigUpdated {
+        confdata: [u8; 4],
+    },
+
     /// One s2c 0x044 EXTENDED_JOB MON frame replaces the monstrosity record
     /// whole (vault main_menu.md §39).
     MonstrosityUpdated {
@@ -4283,6 +4305,15 @@ pub enum AgentCommand {
     OpenBazaar {
         target_id: u32,
         target_index: u16,
+    },
+
+    /// Flip one server-visible option flag (c2s 0x0DC GP_CLI_COMMAND_CONFIG;
+    /// vendor/server/src/map/packets/c2s/0x0dc_config.cpp). No optimistic fold:
+    /// LSB always answers with a fresh s2c 0x0B4 CONFIG (vault main_menu.md
+    /// §42), and that echo reconciles the snapshot.
+    SetConfigFlag {
+        flag: ffxi_proto::config::ConfigBit,
+        on: bool,
     },
 
     /// Buy `quantity` of the browsed bazaar's row `index` (c2s 0x106). The

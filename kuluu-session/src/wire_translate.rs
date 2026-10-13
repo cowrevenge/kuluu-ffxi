@@ -141,6 +141,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // The client-local macro store (vault main_menu.md §41) has no wire of
         // its own; it rides the shared snapshot like the extended-job records.
         macros: s.macros.clone(),
+        config_confdata: s.config_confdata,
     }
 }
 
@@ -1609,6 +1610,17 @@ mod tests {
         let snap = state_to_snapshot(&s);
         assert_eq!(snap.macros.len(), 1);
         assert_eq!((snap.macros[0].block, snap.macros[0].index), (0, 3));
+    }
+
+    #[test]
+    fn config_confdata_crosses_the_wire_boundary() {
+        let mut s = SessionState::default();
+        assert!(state_to_snapshot(&s).config_confdata.is_none());
+        s.config_confdata = Some([0x02, 0x80, 0x00, 0x01]);
+        assert_eq!(
+            state_to_snapshot(&s).config_confdata,
+            Some([0x02, 0x80, 0x00, 0x01])
+        );
     }
 
     #[test]

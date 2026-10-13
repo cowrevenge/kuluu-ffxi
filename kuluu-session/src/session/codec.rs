@@ -263,6 +263,22 @@ pub fn build_subpacket_bazaar_exit(sync: u16) -> Vec<u8> {
     buf
 }
 
+// GP_CLI_COMMAND_CONFIG, vendor/server/src/map/packets/c2s/0x0dc_config.h:
+// four SAVE_CONF mask bytes, two reserved uint32s, SetFlg, padding — the body
+// law lives in ffxi_proto::config::build_config_change; only the named flag's
+// bit is set and LSB applies guarded bits alone (vault main_menu.md §42).
+pub fn build_subpacket_config(sync: u16, flag: ffxi_proto::config::ConfigBit, on: bool) -> Vec<u8> {
+    let body = ffxi_proto::config::build_config_change(flag, on);
+    let mut buf = vec![0u8; 20];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::CONFIG,
+        5,
+        sync,
+    ));
+    buf[4..20].copy_from_slice(&body);
+    buf
+}
+
 // GP_CLI_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/c2s/
 // 0x0eb_reqsubmapnum.h: header only. The event VM's 0xA6 case 0 sends it to
 // fetch the event's sub-map number; the server answers with s2c 0x10E when

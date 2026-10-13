@@ -2,6 +2,7 @@ pub mod autotranslate;
 pub mod bitstream;
 pub mod blowfish;
 pub mod checksum;
+pub mod config;
 pub mod decode;
 pub mod entity_stream;
 pub mod fishing_messages;

@@ -2590,6 +2590,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::CloseShop { .. } => (),
         AgentCommand::CheckTarget { .. } => (),
         AgentCommand::OpenBazaar { .. } => (),
+        AgentCommand::SetConfigFlag { .. } => (),
         AgentCommand::BuyBazaarItem { .. } => (),
         AgentCommand::CloseBazaar { .. } => (),
         AgentCommand::Heal { .. } => (),
@@ -2801,6 +2802,24 @@ fn mission_battery_folds_whole_per_port() {
     assert_eq!(state.missions.tvr, 7);
 }
 
+/// The s2c 0x0B4 CONFIG fold (vault main_menu.md §42): each frame restates the
+/// SAVE_CONF prefix whole; only an actual byte change reports as changed.
+#[test]
+fn config_confdata_folds_whole() {
+    let mut state = SessionState::default();
+    assert!(state.config_confdata.is_none());
+    assert!(state.apply_event(&AgentEvent::ConfigUpdated {
+        confdata: [0x01, 0, 0, 0]
+    }));
+    assert_eq!(state.config_confdata, Some([0x01, 0, 0, 0]));
+    assert!(!state.apply_event(&AgentEvent::ConfigUpdated {
+        confdata: [0x01, 0, 0, 0]
+    }));
+    assert!(state.apply_event(&AgentEvent::ConfigUpdated {
+        confdata: [0x03, 0x40, 0, 0x20]
+    }));
+}
+
 /// The s2c 0x044 folds (vault main_menu.md §39): one PUP frame lands the whole
 /// automaton record and repeats are no-ops; same law for MON.
 #[test]
@@ -2848,6 +2867,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::PlayerSearchCompleted { .. } => (),
         AgentEvent::LinkShellSlotChanged { .. } => (),
         AgentEvent::AutomatonUpdated { .. } => (),
+        AgentEvent::ConfigUpdated { .. } => (),
         AgentEvent::MonstrosityUpdated { .. } => (),
         AgentEvent::Connected { .. } => (),
         AgentEvent::StageChanged { .. } => (),

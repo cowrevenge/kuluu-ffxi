@@ -9,6 +9,12 @@ pub const MAX_DATAGRAM: usize = 2500;
 pub mod c2s {
     pub const LOGIN: u16 = 0x00A;
 
+    // GP_CLI_COMMAND_CONFIG — change client option flags (bitfield mask +
+    // SetFlg; vendor/server/src/map/packets/c2s/0x0dc_config.h). Direction
+    // sibling of s2c GROUP_SOLICIT_REQ at the same number: the two never
+    // collide because each lives in its own direction's table.
+    pub const CONFIG: u16 = 0x0DC;
+
     // GP_CLI_COMMAND_CLISTATUS, vendor/server/src/map/packets/c2s/0x061_clistatus.h.
     // Requests the local player's status block; the server answers with
     // SendLocalPlayerPackets (charutils.cpp) — s2c GROUP_ATTR (0x0DF) for self +
@@ -563,6 +569,12 @@ pub mod s2c {
     // GP_SERV_COMMAND_MISSION, vendor/server/src/map/packets/s2c/0x056_mission.h;
     // vault main_menu.md section 30.
     pub const MISSION: u16 = 0x056;
+
+    // GP_SERV_COMMAND_CONFIG — the server's copy of the client option flags
+    // (SAVE_CONF prefix; vendor/server/src/map/packets/s2c/0x0b4_config.h).
+    // Answered back after every c2s CONFIG, on login gameok, and on party law
+    // pushes (party.cpp) [V].
+    pub const CONFIG: u16 = 0x0B4;
 
     // GP_SERV_COMMAND_EXTENDED_JOB — BLU/PUP/MON extended info
     // (vendor/server/src/map/packets/s2c/0x044_extended_job_pup.h and friends;

@@ -2002,6 +2002,18 @@ fn handle_sub_packet(
             // modeled yet (vault main_menu.md §39 covers PUP/MON only).
             Some(ffxi_proto::puppet::ExtendedJobFrame::Other { .. }) | None => {}
         },
+        // The server restates the whole SAVE_CONF prefix on login gameok, after
+        // every c2s CONFIG, and on party pushes (vendor/server/src/map/packets/
+        // s2c/0x0b4_config.h senders; vault main_menu.md §42). kuluu keeps the
+        // four named bytes verbatim; bit law decode lives in ffxi_proto::config.
+        s2c::CONFIG => match ffxi_proto::config::parse_config_flags(sub.data) {
+            Some(_) if sub.data.len() >= 4 => {
+                let mut confdata = [0u8; 4];
+                confdata.copy_from_slice(&sub.data[..4]);
+                let _ = event_tx.send(AgentEvent::ConfigUpdated { confdata });
+            }
+            Some(_) | None => {}
+        },
         s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {
@@ -3977,6 +3989,21 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: format!("check send: {e}"),
                             });
+                        }
+                    }
+                    // The server echoes a fresh s2c 0x0B4 CONFIG after every
+                    // c2s CONFIG regardless of change (always-push law in
+                    // vendor/server/src/map/packets/c2s/0x0dc_config.cpp), so no
+                    // optimistic fold here — the echo lands via the route arm
+                    // (vault main_menu.md §42).
+                    Some(AgentCommand::SetConfigFlag { flag, on }) => {
+                        let payload = build_subpacket_config(sub_seq, flag, on);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "config send failed");
                         }
                     }
                     Some(AgentCommand::OpenBazaar {

@@ -1001,6 +1001,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
             idx if idx < RETAIL_CONFIG_PAGE_ROWS.len() => RETAIL_CONFIG_PAGE_ROWS[idx],
             _ => &[],
         },
+        MenuKind::RetailConfigSub(sub) => match usize::from(sub) {
+            idx if idx < RETAIL_CONFIG_SUB_ROWS.len() => RETAIL_CONFIG_SUB_ROWS[idx],
+            _ => &[],
+        },
         // The faqsub Help Desk panel rows (vault main_menu.md §36: the
         // big-widget caption builder loads exactly these destination strings).
         MenuKind::HelpDeskPanel => HELPDESK_PANEL_ENTRIES,
@@ -1060,6 +1064,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // No config page window carries a usable comwin title token (vault
         // main_menu.md §47), so each inherits the hub's grounded title.
         MenuKind::RetailConfigPage(_) => "Config",
+        MenuKind::RetailConfigSub(_) => "Config",
         // The `faqs` DAT record carries no title (token -1); the grounded
         // caption is catalog string 60 `Help Desk` in ROM/165/76.DAT — same as
         // the Root row's own label (§36).
@@ -1459,6 +1464,39 @@ pub const RETAIL_CONFIG_PAGE_ROWS: [&[&str]; 12] = [
     RETAIL_CONFIG_ROWS_CONF11M,
     RETAIL_CONFIG_ROWS_CONF12WI,
     RETAIL_CONFIG_ROWS_EMPTY,
+];
+
+pub const CONFIG_ROW_SHARED_LOG_WINDOWS: &str = "Adjust shared window settings.";
+pub const CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS: &str = "Adjust individual window settings.";
+
+/// `conf5win` — its DAT chunk rows (vault main_menu.md §47, chunk 'co11' root
+/// `conf5`).
+pub const RETAIL_CONFIG_ROWS_CONF5WIN: &[&str] = &[
+    "Display separate log windows.",
+    "Display only one log window.",
+    "Display time stamps down to the minute in the log window.",
+    "Display time stamps down to the second in the log window.",
+    "Stop displaying timestamps in the log window(s).",
+    "Display opening/closing visual effects for windows.",
+    "Do not display opening/closing visual effects for windows.",
+];
+/// `conf5w1` and `conf5w2` — the two per-window log pages (DAT chunks 'co16'
+/// root `conf5p1` and 'co17' root `conf5p2`; the p1↔w1 / p2↔w2 pairing is by
+/// record suffix, [I] in vault main_menu.md §47).
+pub const RETAIL_CONFIG_ROWS_LOG_PAGE: &[&str] = &[
+    "Automatically adjust log window's size to match amount of text.",
+    "Fix log window to set size.",
+    "Set the time interval for automatic log window adjustment.",
+];
+
+/// Indexed by `MenuKind::RetailConfigSub` index. `k1assign`/`k2assign` carry only
+/// key-slot chrome in their DAT records, so they have no captioned rows yet.
+pub const RETAIL_CONFIG_SUB_ROWS: [&[&str]; 5] = [
+    RETAIL_CONFIG_ROWS_CONF5WIN,
+    RETAIL_CONFIG_ROWS_LOG_PAGE,
+    RETAIL_CONFIG_ROWS_LOG_PAGE,
+    &[],
+    &[],
 ];
 
 /// Which `configwi` page window a hub row opens, per the handler's jump table

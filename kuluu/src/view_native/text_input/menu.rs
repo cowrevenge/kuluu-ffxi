@@ -64,6 +64,21 @@ fn resolve_menu_entry(
         }
     }
     match (kind, label) {
+        // `conf5m`'s rows name-open the per-window log pages: select-id 1 →
+        // `menu    conf5w2 `, select-id 2 → `menu    conf5w1 ` (handler
+        // FFXiMain.dll retail-2026-09 RVA 0x199240, arms 0x199264 / 0x19927A; its
+        // third arm opens `menu    conf5win` but has no captioned row of its own —
+        // vault main_menu.md §47).
+        (MenuKind::RetailConfigPage(3), l)
+            if l == kuluu_render::hud::menu::CONFIG_ROW_SHARED_LOG_WINDOWS =>
+        {
+            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(2))
+        }
+        (MenuKind::RetailConfigPage(3), l)
+            if l == kuluu_render::hud::menu::CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS =>
+        {
+            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(1))
+        }
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
             MenuDispatch::OpenSubmenu(MenuKind::Controls)
         }
@@ -2289,12 +2304,56 @@ mod menu_dispatch_tests {
             for label in
                 kuluu_render::hud::menu::entries_for(MenuKind::RetailConfigPage(page), false)
             {
+                let dispatch =
+                    resolve_menu_entry(MenuKind::RetailConfigPage(page), label, false, false);
+                if page == 3 {
+                    // `conf5m` is the log-window launcher: its two rows name-open
+                    // their per-window pages instead of answering an option.
+                    assert!(
+                        matches!(
+                            dispatch,
+                            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(_))
+                        ),
+                        "launcher page row {label:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(dispatch, MenuDispatch::NotImplemented(_)),
+                        "page {page} row {label:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn log_window_launcher_rows_drill_the_two_per_window_pages() {
+        // Handler 0x199240: select-id 1 → conf5w2, select-id 2 → conf5w1 (vault
+        // main_menu.md §47). Each page shows its own DAT chunk rows and answers.
+        use kuluu_render::hud::menu::{
+            CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS, CONFIG_ROW_SHARED_LOG_WINDOWS,
+            RETAIL_CONFIG_ROWS_CONF5WIN, RETAIL_CONFIG_ROWS_LOG_PAGE,
+        };
+        assert_eq!(RETAIL_CONFIG_ROWS_CONF5WIN.len(), 7);
+        assert_eq!(RETAIL_CONFIG_ROWS_LOG_PAGE.len(), 3);
+        for (label, sub) in [
+            (CONFIG_ROW_SHARED_LOG_WINDOWS, 2u8),
+            (CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS, 1),
+        ] {
+            assert_eq!(
+                resolve_menu_entry(MenuKind::RetailConfigPage(3), label, false, false),
+                MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(sub))
+            );
+        }
+        for sub in 0..5u8 {
+            for label in kuluu_render::hud::menu::entries_for(MenuKind::RetailConfigSub(sub), false)
+            {
                 assert!(
                     matches!(
-                        resolve_menu_entry(MenuKind::RetailConfigPage(page), label, false, false),
+                        resolve_menu_entry(MenuKind::RetailConfigSub(sub), label, false, false),
                         MenuDispatch::NotImplemented(_)
                     ),
-                    "page {page} row {label:?}"
+                    "sub {sub} row {label:?}"
                 );
             }
         }

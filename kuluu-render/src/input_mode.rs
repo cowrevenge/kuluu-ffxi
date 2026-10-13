@@ -335,6 +335,11 @@ pub enum MenuKind {
     /// RVA 0x196770; vault main_menu.md §47). Its rows are that window's own
     /// `windowpsNNN` option widgets, in DAT file order.
     RetailConfigPage(u8),
+    /// A config sub-window reached from a page row rather than the hub: 0 =
+    /// `conf5win`, 1 = `conf5w1`, 2 = `conf5w2`, 3 = `k1assign`, 4 = `k2assign`
+    /// (name-opens in FFXiMain.dll retail-2026-09 RVA 0x199240 / 0x196E40 /
+    /// 0x19B200; vault main_menu.md §47).
+    RetailConfigSub(u8),
     /// The `faqsub` Help Desk panel opened by the page-2 row's trampoline
     /// (vault main_menu.md §36); three destinations per the transfer-message law.
     HelpDeskPanel,

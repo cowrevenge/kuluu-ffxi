@@ -14,6 +14,9 @@ pub const ROOT_SHUT_DOWN: &str = "Shut Down";
 pub const ROOT_CURRENT_TIME: &str = "Current Time";
 pub const ROOT_COMMUNICATION: &str = "Communication";
 pub const COMM_EMOTE_LIST: &str = "Emote List";
+/// Page-2 row 4. The caption is catalog id 107, which the `mogcont` window
+/// record itself carries as its comwin title token (vault main_menu.md §32).
+pub const ROOT_VIEW_HOUSE: &str = "View House";
 
 /// Retail's Command menu (windows `menuwind`/`socialme`) shows twelve rows per
 /// page across two pages; kuluu appends a third page of its own entries. "-"
@@ -51,7 +54,7 @@ const ROOT_ENTRIES: &[&str] = &[
     "Missions",
     "Quests",
     "Key Items",
-    "View House",
+    ROOT_VIEW_HOUSE,
     "Bazaar",
     "Edit Macros",
     "Config",
@@ -2684,6 +2687,31 @@ pub fn debug_panel_state(
     }
 }
 
+/// The Mog-house capital zones whose View House arm is gated (vault main_menu.md
+/// §32): the `socialme` arm runs its veto predicate FFXiMain.dll retail-2026-09
+/// RVA 0xF9680 only through this zone table — Chateau d'Oraguille and Metalworks
+/// are allow-always, every other capital needs the in-house byte, all non-
+/// capitals are unconditionally allowed. Same set as LSB's
+/// `scripts/globals/moghouse.lua` moghouseZones ∩ capitals.
+pub const MOGHOUSE_CAPITAL_ZONE_MIN: u16 = 230;
+pub const MOGHOUSE_CAPITAL_ZONE_MAX: u16 = 241;
+pub const CHATEAU_DORAGUILLE_ZONE: u16 = 233;
+pub const METALWORKS_ZONE: u16 = 237;
+
+/// View House (page-2 row 4) refuses with the arm's error sound when standing
+/// in a Mog-house capital without being inside your own Mog House — the
+/// FFXiMain.dll retail-2026-09 RVA 0x14E8F5 veto law read off handler 0x14E7B0
+/// (vault main_menu.md §32). `self_in_mog_house` is the snapshot reading of the
+/// predicate's byte operand.
+pub fn view_house_blocked(zone_id: Option<u16>, self_in_mog_house: bool) -> bool {
+    zone_id.is_some_and(|zone| {
+        (MOGHOUSE_CAPITAL_ZONE_MIN..=MOGHOUSE_CAPITAL_ZONE_MAX).contains(&zone)
+            && zone != CHATEAU_DORAGUILLE_ZONE
+            && zone != METALWORKS_ZONE
+            && !self_in_mog_house
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4489,5 +4517,22 @@ mod tests {
         );
         // Retail opens the list through the "/quest" text command, never a row drill.
         assert_eq!(root_child_kind("Quests", false, false), None);
+    }
+
+    #[test]
+    fn view_house_veto_follows_the_capital_zone_table() {
+        // Gate law pinned from the FFXiMain.dll retail-2026-09 RVA 0xF9680 zone
+        // map (vault main_menu.md §32): ten capitals need the in-house operand,
+        // Chateau d'Oraguille and Metalworks never do, anything else is free.
+        assert!(view_house_blocked(Some(230), false));
+        assert!(view_house_blocked(Some(241), false));
+        assert!(!view_house_blocked(Some(233), false));
+        assert!(!view_house_blocked(Some(237), false));
+        assert!(!view_house_blocked(Some(229), false));
+        assert!(!view_house_blocked(Some(242), false));
+        // In your own Mog House the predicate passes in a capital too.
+        assert!(!view_house_blocked(Some(230), true));
+        // Unknown zone (not yet reported) never vetoes.
+        assert!(!view_house_blocked(None, false));
     }
 }

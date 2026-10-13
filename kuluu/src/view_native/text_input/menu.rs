@@ -14,6 +14,13 @@ enum MenuDispatch {
 
     KeybindUpdate(KeybindUpdate),
 
+    /// View House (page-2 row 4): the retail arm opens the Mog Menu locally —
+    /// FFXiMain.dll retail-2026-09 RVA 0x14E8F5 name-opens `menu    mogcont`
+    /// with no packet on the wire; kuluu's built Mog Menu is the session dialog
+    /// surface fed by s2c 0x02E OPENMOGMENU (vault main_menu.md §32), so this
+    /// routes through the same `AgentCommand::OpenMogMenu` seam.
+    OpenMogMenu,
+
     NotImplemented(String),
 }
 
@@ -44,7 +51,7 @@ fn resolve_menu_entry(
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
         magic_category_for_label, COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
-        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
@@ -81,6 +88,12 @@ fn resolve_menu_entry(
         // the quest-window filter word and name-opens menu quest00 — vault
         // main_menu.md §31). Client-side: LSB has no handler and never sees it.
         (MenuKind::Root, "Quests") => MenuDispatch::TextCommand("/quest"),
+
+        // Page-2 row 4 name-opens `menu    mogcont` — the Mog Menu — after the
+        // arm's veto predicate passes (FFXiMain.dll retail-2026-09 RVA 0x14E8F5;
+        // vault main_menu.md §32). The gate itself runs at confirm time because
+        // it reads snapshot state, like the Trade row's target check.
+        (MenuKind::Root, ROOT_VIEW_HOUSE) => MenuDispatch::OpenMogMenu,
 
         // Page-1 row 11 name-opens `menu    region` with no gate (FFXiMain.dll
         // retail-2026-09 RVA 0x140691; vault main_menu.md §29): kuluu drills its
@@ -549,6 +562,26 @@ pub(super) fn confirm_menu_at_cursor(
         graphics.magic_flat_list,
         graphics.abilities_flat_list,
     ) {
+        MenuDispatch::OpenMogMenu => {
+            // The arm's veto: in a Mog-house capital without being inside your
+            // own house it ends at the error sound (FFXiMain.dll retail-2026-09
+            // RVA 0x14E8F5/0xF9680; vault main_menu.md §32) — kuluu's analog is
+            // this hint line, same as the Trade gate above.
+            if kuluu_render::hud::menu::view_house_blocked(
+                scene_state.snapshot.zone_id,
+                scene_state.snapshot.self_in_mog_house(),
+            ) {
+                push_system_chat_line(
+                    scene_state,
+                    "[menu] View House — not available from here".to_string(),
+                );
+                return None;
+            }
+            if let Err(e) = cmd_tx.try_send(AgentCommand::OpenMogMenu) {
+                push_system_chat_line(scene_state, format!("[menu] Mog Menu open dropped: {e}"));
+            }
+            None
+        }
         MenuDispatch::TextCommand(cmd) => {
             run_client_text_command(cmd, stack, vana_clock, vana_clock_visible, scene_state);
             // Mirrors the Debug toggles: the menu stays open (provisional
@@ -2104,15 +2137,27 @@ mod menu_dispatch_tests {
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24), so
-        // are Search (§26), Region Info (§29) and Missions (§30); everything else
-        // here still answers "Not supported yet".
-        for label in ["View House", "Bazaar", "Edit Macros", "Config", "Help Desk"] {
+        // are Search (§26), Region Info (§29), Missions (§30) and View House —
+        // the Mog Menu row (§32); everything else still answers
+        // "Not supported yet".
+        for label in ["Bazaar", "Edit Macros", "Config", "Help Desk"] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::Root, label, false, false),
                 MenuDispatch::NotImplemented(label.into()),
                 "{label} should still be a stub"
             );
         }
+    }
+
+    #[test]
+    fn view_house_row_opens_the_mog_menu() {
+        // Retail arm FFXiMain.dll retail-2026-09 RVA 0x14E8F5 name-opens
+        // `menu    mogcont` (vault main_menu.md §32); kuluu routes the same
+        // open through AgentCommand::OpenMogMenu at confirm time.
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "View House", false, false),
+            MenuDispatch::OpenMogMenu
+        );
     }
 
     /// The right-pane preview (`menu::root_child_kind`) and the drill dispatch
@@ -2124,9 +2169,16 @@ mod menu_dispatch_tests {
             // Log Out / Shut Down open the yes/no prompt and Current Time, Key
             // Items and Quests run text commands - none of them has a right-pane
             // preview (vault main_menu.md §31 for the quest arm).
+            // View House dispatches OpenMogMenu (dialog surface, no submenu),
+            // like the power/text rows it takes no right-pane preview.
             if matches!(
                 label,
-                ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME | "Key Items" | "Quests"
+                ROOT_LOG_OUT
+                    | ROOT_SHUT_DOWN
+                    | ROOT_CURRENT_TIME
+                    | "Key Items"
+                    | "Quests"
+                    | "View House"
             ) {
                 continue;
             }

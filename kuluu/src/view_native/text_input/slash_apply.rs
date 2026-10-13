@@ -805,6 +805,12 @@ pub(super) fn apply_slash_outcome(
                 }
                 kuluu_render::MenuKind::EquipSlot(slot) => format!("EquipSlot({slot})").into(),
                 kuluu_render::MenuKind::Map => "Map".into(),
+                kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
+                    "ShutDownPrompt"
+                } else {
+                    "LogOutPrompt"
+                }
+                .into(),
             };
             push_system_chat_line(scene_state, format!("[menu] opened {label}"));
         }

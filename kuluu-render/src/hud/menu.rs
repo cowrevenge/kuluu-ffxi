@@ -654,6 +654,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::ItemAction { .. } => &[],
         MenuKind::ItemDropConfirm { .. } => DROP_CONFIRM_ENTRIES,
+        MenuKind::PowerPrompt { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::EquipSlot(_) => &["(loading equippable items…)"],
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
@@ -679,6 +680,13 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::UsableItems => "Items",
         MenuKind::ItemAction { .. } => "Item",
         MenuKind::ItemDropConfirm { .. } => "Drop",
+        // Retail titles the prompt after the command row that opened it.
+        MenuKind::PowerPrompt {
+            shut_down: true, ..
+        } => ROOT_SHUT_DOWN,
+        MenuKind::PowerPrompt {
+            shut_down: false, ..
+        } => ROOT_LOG_OUT,
         MenuKind::Status => "Status",
         MenuKind::EquipSlot(_) => "Equip",
         MenuKind::Communication => "Communication",
@@ -2475,6 +2483,24 @@ mod tests {
         rows.swap(0, 1); // start Zeta-first so the sort has work to do
         order_dynamic_rows(MenuKind::Magic, true, &mut rows);
         assert_eq!(labels(&rows), ["Apple", "Zeta"]);
+    }
+
+    /// Retail's Log Out / Shut Down rows answer through a yes/no prompt titled
+    /// after the row, sharing the Drop confirm's Yes/No law (cursor default No).
+    #[test]
+    fn power_prompts_share_the_yes_no_law_and_take_the_row_name() {
+        for shut_down in [false, true] {
+            let kind = MenuKind::PowerPrompt { shut_down };
+            assert_eq!(static_entries(kind), DROP_CONFIRM_ENTRIES);
+        }
+        assert_eq!(
+            menu_title(MenuKind::PowerPrompt { shut_down: false }),
+            ROOT_LOG_OUT
+        );
+        assert_eq!(
+            menu_title(MenuKind::PowerPrompt { shut_down: true }),
+            ROOT_SHUT_DOWN
+        );
     }
 
     #[test]

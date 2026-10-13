@@ -269,6 +269,14 @@ pub enum MenuKind {
         quantity: u32,
     },
 
+    /// Retail's Log Out / Shut Down command rows answer through an in-game
+    /// yes/no prompt before the action runs (FFXiMain.dll retail-2026-09
+    /// RVA 0x160960 / 0x1609F0 route caption ids through text table 0xE into a
+    /// shared system-menu singleton; its cancel companion sits at RVA 0x1609C0).
+    PowerPrompt {
+        shut_down: bool,
+    },
+
     Equipment,
 
     Status,

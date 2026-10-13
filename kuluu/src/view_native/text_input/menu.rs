@@ -4,8 +4,6 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
 enum MenuDispatch {
-    CommandWithToast { cmd: AgentCommand, toast: String },
-
     OpenSubmenu(MenuKind),
 
     KeybindUpdate(KeybindUpdate),
@@ -37,23 +35,15 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
         (MenuKind::Communication, l) if l == COMM_EMOTE_LIST => {
             MenuDispatch::OpenSubmenu(MenuKind::EmoteList)
         }
-        (MenuKind::Root, ROOT_LOG_OUT) => MenuDispatch::CommandWithToast {
-            cmd: AgentCommand::ReqLogout {
-                kind: ReqLogoutKind::LogoutToggle,
-            },
-            toast: "[menu] Log Out requested (~30s; instant in Mog House). \
-                    Select again or `/logout off` to cancel."
-                .into(),
-        },
-
-        (MenuKind::Root, ROOT_SHUT_DOWN) => MenuDispatch::CommandWithToast {
-            cmd: AgentCommand::ReqLogout {
-                kind: ReqLogoutKind::ShutdownToggle,
-            },
-            toast: "[menu] Shut Down requested (~30s; instant in Mog House). \
-                    Select again or `/shutdown off` to cancel."
-                .into(),
-        },
+        // Both power rows open the retail yes/no prompt first (Vault-grounded
+        // reading at FFXiMain.dll retail-2026-09 RVA 0x160960 / 0x1609F0); the
+        // request goes out only on Yes.
+        (MenuKind::Root, ROOT_LOG_OUT) => {
+            MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: false })
+        }
+        (MenuKind::Root, ROOT_SHUT_DOWN) => {
+            MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: true })
+        }
 
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
@@ -323,6 +313,35 @@ pub(super) fn confirm_menu_at_cursor(
         return None;
     }
     let label = kuluu_render::hud::menu::entry_label(kind, cursor, dynamic);
+    if let MenuKind::PowerPrompt { shut_down } = kind {
+        if label == kuluu_render::hud::menu::DROP_CONFIRM_YES {
+            let (cmd, toast) = if shut_down {
+                (
+                    AgentCommand::ReqLogout {
+                        kind: ReqLogoutKind::ShutdownToggle,
+                    },
+                    "[menu] Shut Down requested (~30s; instant in Mog House). \
+                    `/shutdown off` to cancel.",
+                )
+            } else {
+                (
+                    AgentCommand::ReqLogout {
+                        kind: ReqLogoutKind::LogoutToggle,
+                    },
+                    "[menu] Log Out requested (~30s; instant in Mog House). \
+                    `/logout off` to cancel.",
+                )
+            };
+            if let Err(e) = cmd_tx.try_send(cmd) {
+                push_system_chat_line(scene_state, format!("[menu] dispatch dropped: {e}"));
+            } else {
+                push_system_chat_line(scene_state, toast.to_string());
+            }
+        }
+        // No (or any other answer) just dismisses the prompt.
+        stack.pop();
+        return None;
+    }
     if let MenuKind::ItemDropConfirm {
         container,
         index,
@@ -344,19 +363,20 @@ pub(super) fn confirm_menu_at_cursor(
         return None;
     }
     match resolve_menu_entry(kind, label) {
-        MenuDispatch::CommandWithToast { cmd, toast } => {
-            if let Err(e) = cmd_tx.try_send(cmd) {
-                push_system_chat_line(scene_state, format!("[menu] dispatch dropped: {e}"));
-            } else {
-                push_system_chat_line(scene_state, toast);
-            }
-            Some(InputMode::World)
-        }
         MenuDispatch::OpenSubmenu(submenu) => {
             // Refresh the job-emote/chair unlock bits whenever the Emote List
             // opens (c2s 0x119 → s2c 0x11A gates the Job row).
             if submenu == MenuKind::EmoteList {
                 let _ = cmd_tx.try_send(AgentCommand::RequestEmoteList);
+            }
+            // The power prompts open with the cursor on No, like every other
+            // retail confirm.
+            if matches!(submenu, MenuKind::PowerPrompt { .. }) {
+                stack.push(submenu);
+                if let Some(level) = stack.current_mut() {
+                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
+                }
+                return None;
             }
             // The Map screen opens on its command submenu; the wide-scan request
             // (0x0F4) fires only when the player selects "Wide Scan", not on open.
@@ -1269,6 +1289,61 @@ mod menu_key_tests {
         assert_eq!(markers.for_zone(ZONE)[0].label, "Camp");
     }
 
+    #[test]
+    fn power_prompt_opens_on_no_then_yes_only_requests_on_yes() {
+        use kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
+
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = menu_root_log_out_index();
+
+        // First Enter on the Log Out row pushes the prompt, cursor on No.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        {
+            let level = stack.current().expect("prompt pushed");
+            assert!(
+                matches!(level.kind, MenuKind::PowerPrompt { shut_down: false }),
+                "Log Out must open its yes/no prompt, got {:?}",
+                level.kind
+            );
+            assert_eq!(level.cursor, DROP_CONFIRM_DEFAULT, "prompt opens on No");
+        }
+
+        // Confirming while on No answers nothing and dismisses the prompt.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(stack.levels.len(), 1, "No dismisses back to Root");
+        assert!(
+            harness._cmd_rx.try_recv().is_err(),
+            "No must not send a logout request"
+        );
+
+        // Re-open and answer Yes: the toggle goes out exactly once.
+        stack.current_mut().unwrap().cursor = menu_root_log_out_index();
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        stack.current_mut().unwrap().cursor = 0; // Yes
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(stack.levels.len(), 1, "answer dismisses the prompt");
+        assert_eq!(
+            harness._cmd_rx.try_recv().expect("Yes must send"),
+            AgentCommand::ReqLogout {
+                kind: ReqLogoutKind::LogoutToggle,
+            }
+        );
+    }
+
+    fn menu_root_log_out_index() -> usize {
+        use kuluu_render::hud::menu::ROOT_LOG_OUT;
+        kuluu_render::hud::menu::root_entries()
+            .iter()
+            .position(|e| *e == ROOT_LOG_OUT)
+            .unwrap()
+    }
+
     /// kuluu-u8p1: the Change Map list the key handler indexes and the one the
     /// panel draws must be the same list, and it must only offer floors the
     /// zone's DLL records describe -- POLUtils lists a third Windurst Waters map
@@ -1386,43 +1461,21 @@ mod menu_dispatch_tests {
     use super::*;
 
     #[test]
-    fn log_out_dispatches_reqlogout_with_toast() {
+    fn log_out_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_LOG_OUT;
-        match resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT) {
-            MenuDispatch::CommandWithToast { cmd, toast } => {
-                assert_eq!(
-                    cmd,
-                    AgentCommand::ReqLogout {
-                        kind: ReqLogoutKind::LogoutToggle,
-                    }
-                );
-                assert!(
-                    toast.to_lowercase().contains("log out"),
-                    "toast should mention log out, got {toast:?}"
-                );
-            }
-            other => panic!("expected CommandWithToast for Log Out, got {other:?}"),
-        }
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT),
+            MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: false })
+        );
     }
 
     #[test]
-    fn shut_down_dispatches_shutdown_reqlogout_with_toast() {
+    fn shut_down_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_SHUT_DOWN;
-        match resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN) {
-            MenuDispatch::CommandWithToast { cmd, toast } => {
-                assert_eq!(
-                    cmd,
-                    AgentCommand::ReqLogout {
-                        kind: ReqLogoutKind::ShutdownToggle,
-                    }
-                );
-                assert!(
-                    toast.to_lowercase().contains("shut down"),
-                    "toast should mention shut down, got {toast:?}"
-                );
-            }
-            other => panic!("expected CommandWithToast for Shut Down, got {other:?}"),
-        }
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN),
+            MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: true })
+        );
     }
 
     #[test]
@@ -1455,7 +1508,7 @@ mod menu_dispatch_tests {
     fn root_drill_matches_preview_child_kind() {
         use kuluu_render::hud::menu::{self, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
         for &label in menu::root_entries() {
-            // Log Out / Shut Down fire commands, not a browsable submenu.
+            // Log Out / Shut Down open the yes/no prompt (no right-pane preview).
             if label == ROOT_LOG_OUT || label == ROOT_SHUT_DOWN {
                 continue;
             }

@@ -1385,10 +1385,13 @@ pub const RETAIL_CONFIG_ENTRIES: &[&str] = &[
 /// vault main_menu.md §47 shows is also the row-set law: the same ids are the option
 /// ids the page handler writes through the shared option store at [0x106626CC]).
 ///
-/// Three pages carry no named rows — `cfilter` and `fxfilter` repeat anonymous
-/// sub-records (the filter word slots / the per-effect toggles), and `conf6win` and
-/// `conf13wi` have no DAT record at all in ROM/0/1.DAT (vault main_menu.md §47).
-/// Those pages render empty until their rows are recovered; they stay open work.
+/// Two page windows (`conf6win`, `conf13wi`) have no record at all in the
+/// ROM/0/1.DAT generation, so their lists come from the newer DAT set where each
+/// root matches the DLL's name-open verbatim (vault main_menu.md §49).
+///
+/// Two pages stay empty — `cfilter` and `fxfilter` repeat anonymous sub-records
+/// (the filter word slots / the per-effect toggles) in **both** generations, so
+/// their rows have to be recovered from the shared handler's arms; open work.
 pub const RETAIL_CONFIG_ROWS_CONF2WIN: &[&str] = &[
     "Automatically lock on to target at the start of battle.",
     "Do not automatically lock on to target.",
@@ -1450,20 +1453,55 @@ pub const RETAIL_CONFIG_ROWS_CONF12WI: &[&str] = &[
     "Disable camera collision on Mog House furniture.",
 ];
 
-/// Indexed by hub row (0-based). `conf6win` and `conf13wi` have no grounded rows yet.
+/// `conf6win` — this window has no record at all in ROM/0/1.DAT; its rows come
+/// from the newer DAT generation where every record root matches the DLL's
+/// name-open literal (chunk 'co13' root `conf6win`, ROM/119/51.DAT file-off
+/// 0x28B470 size 0x470; vault main_menu.md §49), captions from table 11.
+pub const RETAIL_CONFIG_ROWS_CONF6WIN: &[&str] = &[
+    "Adjust the distance of the back clipping plane of the 3D view.",
+    "Display footstep effects such as footprints and ripples.",
+    "Remove footstep effects to increase frame rate.",
+    "Limit character animation rate to maintain frame rate.",
+    "Normal input method for full-sized keyboards.",
+    "Specialized input method for compact keyboards without numeric keypads.",
+    "Adjust the background screen proportions to match your monitor's aspect ratio. Recommended for monitors with an aspect ratio other than 4:3.",
+    "Assign keys for movement, cursor, and camera controls. (Compact keyboard only)",
+    "Assign keys for shortcut commands.",
+    "Return key assignments to default settings.",
+    "New input method supporting scroll wheel and keyboard/mouse combination controls.",
+    "Adjust the size of the macro palette.",
+    "Shift macro palette to the right during combat.",
+    "Lock macro palette to the right at all times.",
+];
+/// `conf13wi` — likewise record-less in ROM/0/1.DAT; grounded from chunk 'co22'
+/// root `conf13wi` (ROM/119/51.DAT file-off 0x29D920 size 0x200) per vault
+/// main_menu.md §49.
+pub const RETAIL_CONFIG_ROWS_CONF13WI: &[&str] = &[
+    "Disable software keyboard.",
+    "Use standard software keyboard.",
+    "Use compact software keyboard.",
+    "Hide certain chat messages that contain terms designated by your filter settings. Presssing this button will reflect your edits.",
+    "Hide certain chat messages sent by player characters designated by your filter settings. Pressing this button will reflect your edits.",
+    "Term Filter disabled.",
+];
+
+/// Indexed by hub row (0-based). The two empty entries are `cfilter` and
+/// `fxfilter`: those windows carry only anonymous repeated sub-records in both
+/// DAT generations, so their rows have to come from the handler side
+/// (`FFXiMain.dll retail-2026-09 RVA 0x197BE0`; vault main_menu.md §47/§49).
 pub const RETAIL_CONFIG_PAGE_ROWS: [&[&str]; 12] = [
     RETAIL_CONFIG_ROWS_CONF2WIN,
     RETAIL_CONFIG_ROWS_EMPTY,
     RETAIL_CONFIG_ROWS_CONFTXT,
     RETAIL_CONFIG_ROWS_CONF5M,
     RETAIL_CONFIG_ROWS_CONF3WIN,
-    RETAIL_CONFIG_ROWS_EMPTY,
+    RETAIL_CONFIG_ROWS_CONF6WIN,
     RETAIL_CONFIG_ROWS_EMPTY,
     RETAIL_CONFIG_ROWS_CONF7,
     RETAIL_CONFIG_ROWS_CONF4,
     RETAIL_CONFIG_ROWS_CONF11M,
     RETAIL_CONFIG_ROWS_CONF12WI,
-    RETAIL_CONFIG_ROWS_EMPTY,
+    RETAIL_CONFIG_ROWS_CONF13WI,
 ];
 
 pub const CONFIG_ROW_SHARED_LOG_WINDOWS: &str = "Adjust shared window settings.";
@@ -4775,6 +4813,28 @@ mod tests {
             root_child_kind("Config", false, false),
             Some(MenuKind::RetailConfig)
         );
+    }
+
+    #[test]
+    fn retail_config_page_rows_track_each_window_dat_chunk() {
+        // Page rows are the option widgets of each window's own DAT chunk (vault
+        // main_menu.md §47, and §49 for the two windows that exist only in the newer
+        // DAT generation). Counts pin which page is which; empty pages are `cfilter`
+        // and `fxfilter`, whose rows still have to come from handler 0x197BE0.
+        let counts: Vec<usize> = (0..12u8)
+            .map(|page| entries_for(MenuKind::RetailConfigPage(page), false).len())
+            .collect();
+        assert_eq!(counts, vec![11, 0, 1, 2, 11, 14, 0, 12, 1, 1, 6, 6]);
+        let conf6win = entries_for(MenuKind::RetailConfigPage(5), false);
+        assert_eq!(
+            conf6win[0],
+            "Adjust the distance of the back clipping plane of the 3D view."
+        );
+        let conf13wi = entries_for(MenuKind::RetailConfigPage(11), false);
+        assert_eq!(conf13wi[0], "Disable software keyboard.");
+        for page in 0..12u8 {
+            assert_eq!(menu_title(MenuKind::RetailConfigPage(page)), "Config");
+        }
     }
 
     /// The faqsub panel law (vault main_menu.md §36): three destinations

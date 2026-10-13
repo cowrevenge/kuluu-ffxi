@@ -938,9 +938,11 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::EquipSlot(_) => &["(loading equippable items…)"],
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
-        // The friend list has no data source yet (LSB implements only the
-        // black-list c2s 0x03c, not a friends list [V-negative]) — rows arrive
-        // with the local store in `.23.1`.
+        // Retail law: the friend roster is POL-era account data with no modern
+        // wire — LSB carries SearchType Friend 0x0C enum-only (no handler case)
+        // and ships no friends table, so on any LSB server the list is always
+        // empty (vault main_menu.md §38.5; the live system of that family is the
+        // black list, which kuluu may surface separately — not via this row).
         MenuKind::FriendList => &[],
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
@@ -4433,7 +4435,9 @@ mod tests {
 
     /// The commenu law (vault main_menu.md §37): two list widgets in DAT order —
     /// Friend List (catalog 61) then Emote List (catalog 180) — under the grounded
-    /// title Communication (comwin token 179).
+    /// title Communication (comwin token 179). The friend window's own row set is
+    /// retail-empty on LSB servers (§38.5): no friends table, SearchType Friend
+    /// 0x0C has no handler case there, so kuluu shows an empty grounded window.
     #[test]
     fn communication_menu_rows_track_the_commen_law() {
         assert_eq!(

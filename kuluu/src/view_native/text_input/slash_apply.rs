@@ -96,6 +96,8 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
         kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
         kuluu_render::MenuKind::RetailConfig => "Config".into(),
+        // A config page window inherits the hub's caption (vault main_menu.md §47).
+        kuluu_render::MenuKind::RetailConfigPage(_) => "Config".into(),
         kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
         // commenu Friend List widget (vault main_menu.md §37).
         kuluu_render::MenuKind::FriendList => "Friend List".into(),

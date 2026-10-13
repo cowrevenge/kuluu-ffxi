@@ -330,6 +330,11 @@ pub enum MenuKind {
     /// The retail `configwi` page hub: twelve rows = handler item ids 1..12
     /// (vault main_menu.md §35).
     RetailConfig,
+    /// One `configwi` page window, indexed by the hub row that opens it
+    /// (`page` 0..11 = select-id 1..12 of handler FFXiMain.dll retail-2026-09
+    /// RVA 0x196770; vault main_menu.md §47). Its rows are that window's own
+    /// `windowpsNNN` option widgets, in DAT file order.
+    RetailConfigPage(u8),
     /// The `faqsub` Help Desk panel opened by the page-2 row's trampoline
     /// (vault main_menu.md §36); three destinations per the transfer-message law.
     HelpDeskPanel,

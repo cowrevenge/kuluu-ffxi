@@ -50,10 +50,19 @@ fn resolve_menu_entry(
 ) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
-        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE,
-        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        magic_category_for_label, retail_config_page_for_row, COMM_EMOTE_LIST, COMM_FRIEND_LIST,
+        MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT,
+        ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
+    // Every `configwi` hub row name-opens its own page window: select-id i of the
+    // hub handler jumps to the branch pushing that page's name literal
+    // (FFXiMain.dll retail-2026-09 RVA 0x196770, jump table .text 0x1968A4; vault
+    // main_menu.md §47). kuluu drills the window as its own menu kind.
+    if matches!(kind, MenuKind::RetailConfig) {
+        if let Some(page) = retail_config_page_for_row(label) {
+            return MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(page));
+        }
+    }
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
             MenuDispatch::OpenSubmenu(MenuKind::Controls)
@@ -2245,16 +2254,50 @@ mod menu_dispatch_tests {
             resolve_menu_entry(MenuKind::Root, "Config", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::RetailConfig)
         );
-        // Hub captions are the DAT windowpsNNN strings (vault main_menu.md §43).
-        assert!(matches!(
+        // Hub captions are the DAT windowpsNNN strings (vault main_menu.md §43),
+        // and each row's select-id names the page it opens (§47's jump table).
+        assert_eq!(
             resolve_menu_entry(
                 MenuKind::RetailConfig,
                 "Adjust the keyboard settings.",
                 false,
                 false
             ),
-            MenuDispatch::NotImplemented(_)
-        ));
+            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(0))
+        );
+        for (idx, label) in kuluu_render::hud::menu::RETAIL_CONFIG_ENTRIES
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                resolve_menu_entry(MenuKind::RetailConfig, label, false, false),
+                MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(idx as u8)),
+                "hub row {idx} must drill its own page window"
+            );
+        }
+    }
+
+    #[test]
+    fn config_page_windows_show_their_dat_option_rows_and_answer() {
+        // Each page's rows are the `windowpsNNN` widgets of its own DAT chunk,
+        // captioned from catalog table 11 (vault main_menu.md §47); selects stay
+        // "not supported yet" until the option-store writes land on the wire.
+        use kuluu_render::hud::menu::{RETAIL_CONFIG_ROWS_CONF3WIN, RETAIL_CONFIG_ROWS_CONF7};
+        assert_eq!(RETAIL_CONFIG_ROWS_CONF3WIN.len(), 11);
+        assert_eq!(RETAIL_CONFIG_ROWS_CONF7.len(), 12);
+        for page in 0..12u8 {
+            for label in
+                kuluu_render::hud::menu::entries_for(MenuKind::RetailConfigPage(page), false)
+            {
+                assert!(
+                    matches!(
+                        resolve_menu_entry(MenuKind::RetailConfigPage(page), label, false, false),
+                        MenuDispatch::NotImplemented(_)
+                    ),
+                    "page {page} row {label:?}"
+                );
+            }
+        }
     }
 
     #[test]

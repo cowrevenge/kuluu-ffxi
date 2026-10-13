@@ -995,6 +995,12 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The configwi hub's twelve page rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x196770; vault main_menu.md §35).
         MenuKind::RetailConfig => RETAIL_CONFIG_ENTRIES,
+        // A page window's rows are its own DAT option widgets (handler per
+        // vault main_menu.md §47; the empty pages carry only anonymous records).
+        MenuKind::RetailConfigPage(page) => match usize::from(page) {
+            idx if idx < RETAIL_CONFIG_PAGE_ROWS.len() => RETAIL_CONFIG_PAGE_ROWS[idx],
+            _ => &[],
+        },
         // The faqsub Help Desk panel rows (vault main_menu.md §36: the
         // big-widget caption builder loads exactly these destination strings).
         MenuKind::HelpDeskPanel => HELPDESK_PANEL_ENTRIES,
@@ -1051,6 +1057,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // DAT `conf` carries comwin title token 54 = catalog id 54 `Config`
         // (vault main_menu.md §35) — the grounded title.
         MenuKind::RetailConfig => "Config",
+        // No config page window carries a usable comwin title token (vault
+        // main_menu.md §47), so each inherits the hub's grounded title.
+        MenuKind::RetailConfigPage(_) => "Config",
         // The `faqs` DAT record carries no title (token -1); the grounded
         // caption is catalog string 60 `Help Desk` in ROM/165/76.DAT — same as
         // the Root row's own label (§36).
@@ -1348,7 +1357,7 @@ const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACR
 /// Row order is the chunk's widget file order [V]; the handler arms of FFXiMain.dll
 /// retail-2026-09 RVA 0x196792.. name each row's page window (§35/§42 literal run
 /// .data 0x37A618..), and that arm↔widget pairing stays [I] until the arms are walked.
-const RETAIL_CONFIG_ENTRIES: &[&str] = &[
+pub const RETAIL_CONFIG_ENTRIES: &[&str] = &[
     "Adjust the keyboard settings.",
     "Adjust in-game settings exclusive to FINAL FANTASY XI.",
     "Adjust the filter settings for text in the log window.",
@@ -1362,6 +1371,105 @@ const RETAIL_CONFIG_ENTRIES: &[&str] = &[
     "Designate which messages appear in which window. Only active when multiple log windows are displayed.",
     "Adjust further miscellaneous settings for FINAL FANTASY XI.",
 ];
+
+/// The twelve `configwi` page windows' option rows, indexed by hub row (0..11 = the
+/// hub handler's select-id 1..12; FFXiMain.dll retail-2026-09 RVA 0x196770 jump table
+/// .text 0x1968A4 → name-open). Each list is that page window's own kind-30 DAT chunk
+/// in ROM/0/1.DAT, `menu    windowpsNNN` records in file order, with the caption read
+/// from catalog table 11 = ROM/165/75.DAT at the suffix id (the §43 caption law, which
+/// vault main_menu.md §47 shows is also the row-set law: the same ids are the option
+/// ids the page handler writes through the shared option store at [0x106626CC]).
+///
+/// Three pages carry no named rows — `cfilter` and `fxfilter` repeat anonymous
+/// sub-records (the filter word slots / the per-effect toggles), and `conf6win` and
+/// `conf13wi` have no DAT record at all in ROM/0/1.DAT (vault main_menu.md §47).
+/// Those pages render empty until their rows are recovered; they stay open work.
+pub const RETAIL_CONFIG_ROWS_CONF2WIN: &[&str] = &[
+    "Automatically lock on to target at the start of battle.",
+    "Do not automatically lock on to target.",
+    "Play music in stereo.",
+    "Play music in monaural sound.",
+    "Set the volume of sound effects.",
+    "Set the volume of the background music.",
+    "Set the level of screen flicker reduction.",
+    "Automatically sort items as they enter your inventory.",
+    "Disable the autosort function, and opt to manually sort your inventory.",
+    "Sort items by category when organizing them.",
+    "Sort items by name when organizing them and stacking them when possible.",
+];
+const RETAIL_CONFIG_ROWS_EMPTY: &[&str] = &[];
+const RETAIL_CONFIG_ROWS_CONFTXT: &[&str] =
+    &["Set the font colors for actions that affect others."];
+const RETAIL_CONFIG_ROWS_CONF5M: &[&str] = &[
+    "Adjust shared window settings.",
+    "Adjust individual window settings.",
+];
+pub const RETAIL_CONFIG_ROWS_CONF3WIN: &[&str] = &[
+    "Display damage in the log window only.",
+    "Display damage on the game screen and in the log window.",
+    "Make FINAL FANTASY XI character data public for party searches and Friend List searches.",
+    "Hide FINAL FANTASY XI character data from Friend List searches.",
+    "Turn on the DUALSHOCKi2 analog controller vibration function.",
+    "Turn off the DUALSHOCKi2 analog controller vibration function.",
+    "Adjust the strength of the vibration function.",
+    "Set display to standard TV screen size.",
+    "Set display to wide-screen TV size.",
+    "Display damage as pop-up graphics on the game screen only. Damage will not be shown in the log window.",
+    "Adjust the screen's brightness.",
+];
+pub const RETAIL_CONFIG_ROWS_CONF7: &[&str] = &[
+    "Use cursor as point of reference for movement.",
+    "Use your character as point of reference for movement.",
+    "The camera will rotate when the mouse pointer is moved to the edge of the screen.",
+    "The camera will not rotate when the mouse pointer is moved to the edge of the screen.",
+    "Allows unrestricted movement of the third-person camera.",
+    "Locks the third-person camera behind your character.",
+    "Reset third-person camera controls to the default setting.",
+    "Invert third-person camera controls on the Y axis.",
+    "Invert third-person camera controls on the X axis.",
+    "Reset first-person camera controls to the default setting.",
+    "Invert first-person camera controls on the Y axis.",
+    "Invert first-person camera controls on the X axis.",
+];
+const RETAIL_CONFIG_ROWS_CONF4: &[&str] =
+    &["Filter out words that could be interpreted as offensive."];
+const RETAIL_CONFIG_ROWS_CONF11M: &[&str] = &[
+    "Designate which logs appear in which window. Only active when multiple windows are displayed.",
+];
+pub const RETAIL_CONFIG_ROWS_CONF12WI: &[&str] = &[
+    "Display party member status icons.",
+    "Hide party member status icons.",
+    "Display status icon timers.",
+    "Hide status icon timers.",
+    "Enable camera collision on Mog House furniture.",
+    "Disable camera collision on Mog House furniture.",
+];
+
+/// Indexed by hub row (0-based). `conf6win` and `conf13wi` have no grounded rows yet.
+pub const RETAIL_CONFIG_PAGE_ROWS: [&[&str]; 12] = [
+    RETAIL_CONFIG_ROWS_CONF2WIN,
+    RETAIL_CONFIG_ROWS_EMPTY,
+    RETAIL_CONFIG_ROWS_CONFTXT,
+    RETAIL_CONFIG_ROWS_CONF5M,
+    RETAIL_CONFIG_ROWS_CONF3WIN,
+    RETAIL_CONFIG_ROWS_EMPTY,
+    RETAIL_CONFIG_ROWS_EMPTY,
+    RETAIL_CONFIG_ROWS_CONF7,
+    RETAIL_CONFIG_ROWS_CONF4,
+    RETAIL_CONFIG_ROWS_CONF11M,
+    RETAIL_CONFIG_ROWS_CONF12WI,
+    RETAIL_CONFIG_ROWS_EMPTY,
+];
+
+/// Which `configwi` page window a hub row opens, per the handler's jump table
+/// (FFXiMain.dll retail-2026-09 RVA 0x1968A4; vault main_menu.md §47). Returns the
+/// 0-based page index for a hub caption.
+pub fn retail_config_page_for_row(label: &str) -> Option<u8> {
+    RETAIL_CONFIG_ENTRIES
+        .iter()
+        .position(|row| *row == label)
+        .and_then(|idx| u8::try_from(idx).ok())
+}
 
 /// The faqsub Help Desk panel's destinations. The DAT `faqs` chunk is
 /// chrome-only with an empty title token (-1), so labels come from the

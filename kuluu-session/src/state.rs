@@ -469,6 +469,14 @@ pub struct SessionState {
 
     pub party: Vec<PartyMember>,
 
+    /// An incoming party/alliance invite (s2c 0x0DC GROUP_SOLICIT_REQ) not yet
+    /// answered with c2s GROUP_SOLICIT_RES (0x074). The Party-row helper in the
+    /// retail client reads exactly this pending state to open `prtyjoin` (YES/NO)
+    /// instead of a roster window — FFXiMain.dll retail-2026-09 RVA 0x2016E0,
+    /// vault main_menu.md section 24.
+    #[serde(default)]
+    pub party_invite: Option<PartyInvite>,
+
     /// Monotonically increasing counter, bumped on every `ZoneChanged`. The
     /// renderer's party-frame content key includes this so a zone transition
     /// forces a UI rebuild, even when the party data looks identical.
@@ -1518,6 +1526,19 @@ pub struct NameExtractionMiss {
 
 const NAME_MISSES_CAP: usize = 64;
 
+/// Pending invite carried from s2c 0x0DC
+/// (vendor/server/src/map/packets/s2c/0x0dc_group_solicit_req.h) to the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartyInvite {
+    /// Inviter's char id (`UniqueNo`).
+    pub char_id: u32,
+    /// Inviter's display name (`sName`).
+    pub name: String,
+    /// Kind == PartyKind::Alliance (5) rather than Party (0).
+    #[serde(default)]
+    pub alliance: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartyMember {
     pub id: u32,
@@ -2019,6 +2040,30 @@ impl SessionState {
                     }
                 }
                 before != self.party
+            }
+            AgentEvent::PartySolicitReceived {
+                char_id,
+                name,
+                alliance,
+            } => {
+                // s2c 0x0DC: retail parks the invite on static party state and
+                // (re)opens `prtyjoin` when its Party-row helper runs; we stamp
+                // it here so the snapshot carries it the same way `party` does.
+                let next = Some(PartyInvite {
+                    char_id: *char_id,
+                    name: name.clone(),
+                    alliance: *alliance,
+                });
+                let changed = self.party_invite != next;
+                self.party_invite = next;
+                changed
+            }
+            AgentEvent::PartySolicitWithdrawn => {
+                // s2c 0x0DE GROUP_SOLICIT_NO: drop the pending invite (the retail
+                // helper's `alarm`-close pairing, vault main_menu.md section 24).
+                let had = self.party_invite.is_some();
+                self.party_invite = None;
+                had
             }
             AgentEvent::PartyMemberUpdated { member } => {
                 if let Some(existing) = self.party.iter_mut().find(|m| m.id == member.id) {
@@ -3039,6 +3084,18 @@ pub enum AgentEvent {
         members: Vec<ffxi_proto::decode::GroupTblEntry>,
     },
 
+    /// s2c 0x0DC GROUP_SOLICIT_REQ: an incoming party/alliance invite awaiting
+    /// the c2s 0x074 answer (vendor/server/src/map/packets/s2c/
+    /// 0x0dc_group_solicit_req.h).
+    PartySolicitReceived {
+        char_id: u32,
+        name: String,
+        alliance: bool,
+    },
+
+    /// s2c 0x0DE GROUP_SOLICIT_NO: the pending invite is withdrawn/expired.
+    PartySolicitWithdrawn,
+
     LowHp {
         pct: u8,
     },
@@ -3458,6 +3515,14 @@ pub fn apply_ground_height_correction(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum AgentCommand {
+    /// Answer to the pending party invite (`prtyjoin` YES/NO in retail,
+    /// FFXiMain.dll retail-2026-09 RVA 0x2016E0 opens it; vault main_menu.md
+    /// section 24). Sends c2s GROUP_SOLICIT_RES (vendor/server/src/map/packets/
+    /// c2s/0x074_group_solicit_res.h: Res { Decline = 0, Accept = 1 }).
+    PartyInviteRespond {
+        accept: bool,
+    },
+
     Move {
         x: f32,
         y: f32,

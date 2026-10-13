@@ -267,6 +267,12 @@ pub enum MenuKind {
     /// [I-pending]).
     AbilitiesGroup(u8),
 
+    /// The Party window — one surface for the prtyN family: `prtyjoin`'s YES/NO
+    /// rows while an invite is pending, else the member roster; retail's Party-row
+    /// helper picks per party state (FFXiMain.dll retail-2026-09 RVA 0x2016E0;
+    /// vault main_menu.md §24).
+    Party,
+
     Items,
 
     KeyItems,

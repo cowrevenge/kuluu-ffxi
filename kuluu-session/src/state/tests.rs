@@ -2412,6 +2412,37 @@ fn apply_event_dedupes_identical_self_position() {
     assert!(!s.apply_event(&AgentEvent::PositionChanged { pos }));
 }
 
+#[test]
+fn party_solicit_lands_and_clears_on_the_state_field() {
+    // s2c 0x0DC arrives → pending invite on the state (the snapshot carries it
+    // to the Party row's helper law — FFXiMain.dll retail-2026-09 RVA 0x2016E0,
+    // vault main_menu.md section 24); s2c 0x0DE clears it.
+    let mut state = SessionState::default();
+    assert!(state.party_invite.is_none());
+    assert!(state.apply_event(&AgentEvent::PartySolicitReceived {
+        char_id: 0x00A1_0002,
+        name: "Pruneo".into(),
+        alliance: false,
+    }));
+    let invite = state.party_invite.clone().unwrap();
+    assert_eq!(
+        (invite.char_id, invite.name.as_str(), invite.alliance),
+        (0x00A1_0002, "Pruneo", false)
+    );
+
+    // Re-stamping the same invite is not a change.
+    assert!(!state.apply_event(&AgentEvent::PartySolicitReceived {
+        char_id: 0x00A1_0002,
+        name: "Pruneo".into(),
+        alliance: false,
+    }));
+
+    assert!(state.apply_event(&AgentEvent::PartySolicitWithdrawn));
+    assert!(state.party_invite.is_none());
+    // With nothing pending, withdrawing changes nothing.
+    assert!(!state.apply_event(&AgentEvent::PartySolicitWithdrawn));
+}
+
 /// AgentCommand is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2442,6 +2473,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::EndEventBack { .. } => (),
         AgentCommand::EndEventChoice { .. } => (),
         AgentCommand::CustomMenuRespond { .. } => (),
+        AgentCommand::PartyInviteRespond { .. } => (),
         AgentCommand::Disconnect { .. } => (),
         AgentCommand::ReqLogout { .. } => (),
         AgentCommand::Snapshot { .. } => (),
@@ -2618,6 +2650,8 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::NetStats { .. } => (),
         AgentEvent::PartyMemberUpdated { .. } => (),
         AgentEvent::PartyTableReset { .. } => (),
+        AgentEvent::PartySolicitReceived { .. } => (),
+        AgentEvent::PartySolicitWithdrawn => (),
         AgentEvent::LowHp { .. } => (),
         AgentEvent::PartyMemberLowHp { .. } => (),
         AgentEvent::EngagedBy { .. } => (),

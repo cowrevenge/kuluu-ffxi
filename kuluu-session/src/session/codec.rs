@@ -656,6 +656,24 @@ pub(crate) fn build_subpacket_group_list_req(sync: u16) -> Vec<u8> {
     buf
 }
 
+// c2s GROUP_LEAVE (0x06F)/GROUP_BREAKUP (0x070) builders arrive with their prtyN
+// rows once the member/leader select mapping is dug (vault main_menu.md §24).
+
+// c2s 0x074 GP_CLI_COMMAND_GROUP_SOLICIT_RES: Res u8 @4 (Decline = 0, Accept = 1;
+// vendor/server/src/map/packets/c2s/0x074_group_solicit_res.h
+// GP_CLI_COMMAND_GROUP_SOLICIT_RES_RES) + padding[3]. 8 bytes total.
+pub(crate) fn build_subpacket_group_solicit_res(sync: u16, accept: bool) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::GROUP_SOLICIT_RES,
+        2,
+        sync,
+    ));
+    // GP_CLI_COMMAND_GROUP_SOLICIT_RES_RES { Decline = 0, Accept = 1 }.
+    buf[4] = u8::from(accept);
+    buf
+}
+
 pub(crate) fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -1104,5 +1122,21 @@ mod tests {
         assert_auc_frame(&buf, 0x0042, decode::AuctionCommand::WorkCheck);
         assert_eq!(buf[AUC_WORK_INDEX_OFFSET] as i8, AUCTION_WORK_INDEX_NONE);
         assert_eq!(&buf[8..20], &[0u8; 12], "GP_AUC_PARAM unused");
+    }
+
+    #[test]
+    fn group_solicit_res_bytes_match_lsb_packet() {
+        // vendor/server/src/map/packets/c2s/0x074_group_solicit_res.h:
+        // Res u8 { Decline = 0, Accept = 1 } + padding[3]; header says 2 words.
+        for (accept, want) in [(false, 0u8), (true, 1)] {
+            let buf = build_subpacket_group_solicit_res(0x7E, accept);
+            assert_eq!(buf.len(), 8);
+            let hdr = u16::from_le_bytes([buf[0], buf[1]]);
+            assert_eq!(hdr & 0x01FF, ffxi_proto::map::c2s::GROUP_SOLICIT_RES);
+            assert_eq!((hdr >> 9) as usize, 2, "size_words");
+            assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x7E, "sync");
+            assert_eq!(buf[4], want, "Res");
+            assert_eq!(&buf[5..8], &[0u8; 3], "padding");
+        }
     }
 }

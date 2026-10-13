@@ -43,6 +43,9 @@ fn merge(mut previous: wire::SceneDelta, mut next: wire::SceneDelta) -> wire::Sc
             .into_iter()
             .chain(next.party_upserted)
             .collect(),
+        // Last writer wins for the pending invite (a chain must not resurrect a
+        // cleared one).
+        set_party_invite: next.set_party_invite.or(previous.set_party_invite),
         chat_appended: previous
             .chat_appended
             .into_iter()

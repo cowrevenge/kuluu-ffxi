@@ -2043,6 +2043,26 @@ fn handle_sub_packet(
                 });
             }
         }
+        s2c::GROUP_SOLICIT_REQ => {
+            if let Ok(sol) = decode::GroupSolicitReq::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                tracing::info!(
+                    char_id = sol.unique_no,
+                    name = %sol.name,
+                    "0x0DC GROUP_SOLICIT_REQ (party invite)"
+                );
+                let _ = event_tx.send(AgentEvent::PartySolicitReceived {
+                    char_id: sol.unique_no,
+                    name: sol.name,
+                    alliance: matches!(sol.kind, decode::GroupKind::Alliance),
+                });
+            }
+        }
+        s2c::GROUP_SOLICIT_NO => {
+            tracing::info!("0x0DE GROUP_SOLICIT_NO (withdraw pending invite)");
+            let _ = event_tx.send(AgentEvent::PartySolicitWithdrawn);
+        }
         s2c::GROUP_LIST => {
             if let Ok((attrs, extra)) = decode::PartyAttrs::decode_group_list(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
@@ -3235,6 +3255,23 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: format!("tell send: {e}"),
                             });
+                        }
+                    }
+                    Some(AgentCommand::PartyInviteRespond { accept }) => {
+                        // c2s 0x074: Res byte Decline = 0 / Accept = 1
+                        // (vendor/server/src/map/packets/c2s/0x074_group_solicit_res.h).
+                        let payload = build_subpacket_group_solicit_res(sub_seq, accept);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "party invite answer send failed");
+                        } else {
+                            // Retail clears its pending-solicit state the moment
+                            // prtyjoin answers (vault main_menu.md section 24), so
+                            // do the same here rather than waiting for a follow-up.
+                            let _ = event_tx.send(AgentEvent::PartySolicitWithdrawn);
                         }
                     }
                     Some(AgentCommand::CustomMenuRespond { title, option }) => {

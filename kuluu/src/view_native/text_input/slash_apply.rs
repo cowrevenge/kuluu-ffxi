@@ -838,6 +838,8 @@ pub(super) fn apply_slash_outcome(
                 }
                 kuluu_render::MenuKind::EquipSlot(slot) => format!("EquipSlot({slot})").into(),
                 kuluu_render::MenuKind::Map => "Map".into(),
+                // One surface for the prtyN family (vault main_menu.md section 24).
+                kuluu_render::MenuKind::Party => "Party".into(),
                 kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
                     "ShutDownPrompt"
                 } else {

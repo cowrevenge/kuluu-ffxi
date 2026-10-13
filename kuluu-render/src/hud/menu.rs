@@ -167,6 +167,20 @@ pub enum DynamicMenuAction {
     /// through the same sub-target cursor as a weapon skill.
     RangedAttack,
 
+    /// The two answers `prtyjoin` offers over a pending invite; sent as c2s
+    /// GROUP_SOLICIT_RES (Res 1/0). Retail opens that window from the Party row's
+    /// helper whenever its static state holds an unresolved solicit
+    /// (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault main_menu.md section 24).
+    AcceptPartyInvite,
+    DeclinePartyInvite,
+
+    /// One roster slot of the party window. Selecting a slot is inert until its
+    /// member sub-action mapping is dug out of the prtyN select family
+    /// (0x2059A0.., vault main_menu.md section 24 [I]).
+    PartyMemberRow {
+        char_id: u32,
+    },
+
     /// Get off the mount (c2s action 0x12).
     /// GP_CLI_COMMAND_ACTION_ACTIONID,
     /// vendor/server/src/map/packets/c2s/0x01a_action.h.
@@ -622,6 +636,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::MagicGroup(_)
             | MenuKind::Abilities
             | MenuKind::AbilitiesGroup(_)
+            | MenuKind::Party
             | MenuKind::Items
             | MenuKind::KeyItems
             | MenuKind::UsableItems
@@ -727,6 +742,7 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
             .get(group as usize)
             .map(|g| ability_group_empty_hint(*g))
             .unwrap_or("(empty)"),
+        MenuKind::Party => "(not in a party)",
         MenuKind::Items => "(bag empty)",
         MenuKind::KeyItems => "(no key items)",
         MenuKind::UsableItems => "(no usable items)",
@@ -759,6 +775,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Abilities => &["(Abilities — data pending)"],
         MenuKind::AbilitiesGroups => ABILITIES_CATEGORY_LABELS,
         MenuKind::AbilitiesGroup(_) => &["(Abilities — data pending)"],
+        MenuKind::Party => &[],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
         MenuKind::KeyItems => &[],
         MenuKind::UsableItems => &[],
@@ -799,6 +816,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // list window is titled by the row it answers (vault §23).
         MenuKind::AbilitiesGroups => "Abilities",
         MenuKind::AbilitiesGroup(_) => "Ability List",
+        // The prtyN family's DAT records carry no inline captions (§24); the
+        // Root-row caption is the grounded title choice.
+        MenuKind::Party => "Party",
         MenuKind::Items => "Items",
         MenuKind::KeyItems => "Key Items",
         MenuKind::UsableItems => "Items",
@@ -820,11 +840,39 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
     }
 }
 
+/// MenuKind::Party rows, following the Party-row helper's state dispatch
+/// (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault main_menu.md §24): while a
+/// solicit is unresolved it opens `prtyjoin`, whose answer rows are YES/NO
+/// (c2s GROUP_SOLICIT_RES Res=1/0, vendor/server/src/map/packets/c2s/
+/// 0x074_group_solicit_res.h); otherwise the window shows the member roster,
+/// and a solo player sees the display-only empty state (`prty1`).
+pub fn party_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    if let Some(invite) = &snap.party_invite {
+        return vec![
+            DynamicMenuRow {
+                label: format!("Yes (join {})", invite.name),
+                action: DynamicMenuAction::AcceptPartyInvite,
+            },
+            DynamicMenuRow {
+                label: "No".to_string(),
+                action: DynamicMenuAction::DeclinePartyInvite,
+            },
+        ];
+    }
+    snap.party
+        .iter()
+        .map(|m| DynamicMenuRow {
+            label: m.name.clone().unwrap_or_else(|| format!("{:08X}", m.id)),
+            action: DynamicMenuAction::PartyMemberRow { char_id: m.id },
+        })
+        .collect()
+}
+
 /// The submenu a Root category drills into, and thus the level the right pane
 /// previews while that category is highlighted at Root. Single source for the
 /// Root → submenu mapping: `text_input::resolve_menu_entry` drills through this
 /// so the client dispatch and the preview can't disagree (guarded by a test in
-/// the client). `None` = a Root entry with no browsable submenu (Party/Search/
+/// the client). `None` = a Root entry with no browsable submenu (Search/
 /// Macros fire commands or aren't built; Current Time/Key Items run their retail
 /// text commands, Log Out/Shut Down act directly), so the right pane shows no
 /// preview.
@@ -839,6 +887,10 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         "Magic" => MenuKind::MagicGroups,
         "Abilities" if flat_abilities => MenuKind::Abilities,
         "Abilities" => MenuKind::AbilitiesGroups,
+        // Retail's Party row opens the prtyN window chosen by party state
+        // (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault main_menu.md §24) —
+        // one kuluu window whose rows follow that same state.
+        "Party" => MenuKind::Party,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1068,6 +1120,10 @@ pub fn refresh_dynamic_menu_rows(
             school_table.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
             magic_school_rows(&snap.spells_known, school, |id| school_table.school_of(id))
         }
+        // Party window (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault
+        // main_menu.md §24): invite pending → prtyjoin's YES/NO; else the party
+        // roster as display rows; not in a party → empty-hint state.
+        MenuKind::Party => party_window_rows(snap),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
         MenuKind::AbilitiesGroup(group) => crate::hud::action_model::AbilityGroup::ALL
@@ -2864,6 +2920,54 @@ mod tests {
         assert!(is_dynamic(MenuKind::AbilitiesGroup(2)));
         assert_eq!(menu_title(MenuKind::AbilitiesGroups), "Abilities");
         assert_eq!(menu_title(MenuKind::AbilitiesGroup(1)), "Ability List");
+    }
+
+    /// The Party window's rows follow the helper's state dispatch (FFXiMain.dll
+    /// retail-2026-09 RVA 0x2016E0; vault main_menu.md §24): a pending solicit
+    /// yields prtyjoin's YES/NO answer rows, else the roster renders as display
+    /// rows, and solo leaves no rows so the "(not in a party)" hint stands.
+    #[test]
+    fn party_window_rows_follow_the_helper_law() {
+        let solo = kuluu_snapshot::SceneSnapshot::default();
+        assert!(
+            party_window_rows(&solo).is_empty(),
+            "solo shows the empty hint"
+        );
+
+        let rostered = kuluu_snapshot::SceneSnapshot {
+            party: vec![war_party_member(7)],
+            ..Default::default()
+        };
+        let rows = party_window_rows(&rostered);
+        assert_eq!(labels(&rows), ["Kupo"]);
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::PartyMemberRow { char_id: 7 }
+        );
+
+        let invited = kuluu_snapshot::SceneSnapshot {
+            party_invite: Some(kuluu_snapshot::PartyInvite {
+                char_id: 9,
+                name: "Pruneo".into(),
+                alliance: false,
+            }),
+            party: vec![war_party_member(7)],
+            ..Default::default()
+        };
+        let rows = party_window_rows(&invited);
+        assert_eq!(labels(&rows), ["Yes (join Pruneo)", "No"]);
+        assert_eq!(rows[0].action, DynamicMenuAction::AcceptPartyInvite);
+        assert_eq!(rows[1].action, DynamicMenuAction::DeclinePartyInvite);
+    }
+
+    #[test]
+    fn party_root_row_drills_into_the_party_window() {
+        assert_eq!(
+            root_child_kind("Party", false, false),
+            Some(MenuKind::Party)
+        );
+        assert_eq!(menu_title(MenuKind::Party), "Party");
+        assert!(is_dynamic(MenuKind::Party));
     }
 
     #[test]

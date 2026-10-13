@@ -858,6 +858,13 @@ pub struct SceneSnapshot {
     pub entities: Vec<Entity>,
     pub party: Vec<PartyMember>,
 
+    /// An incoming party/alliance invite (s2c 0x0DC) not yet answered with c2s
+    /// GROUP_SOLICIT_RES. Retail parks this in the static party state that the
+    /// Party row's helper reads to open `prtyjoin` instead of a roster window
+    /// (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault main_menu.md section 24).
+    #[serde(default)]
+    pub party_invite: Option<PartyInvite>,
+
     /// Monotonically increasing counter, bumped on every zone change. Forces
     /// the party-frame content key to differ after a zone transition even when
     /// the party data is byte-identical.
@@ -1590,6 +1597,19 @@ pub struct ShopState {
     pub pending_sale: Option<ShopSale>,
 }
 
+/// A pending party/alliance invite, from GroupSolicitReq (s2c 0x0DC,
+/// vendor/server/src/map/packets/s2c/0x0dc_group_solicit_req.h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartyInvite {
+    /// Inviter's char id (`UniqueNo`).
+    pub char_id: u32,
+    /// Inviter's display name (`sName`).
+    pub name: String,
+    /// True when Kind is PartyKind::Alliance (5); party invites are false.
+    #[serde(default)]
+    pub alliance: bool,
+}
+
 /// A sale appraised by s2c 0x03D and not yet confirmed with c2s 0x085.
 /// vendor/server/src/map/packets/s2c/0x03d_shop_sell.cpp, c2s/0x085_shop_sell_set.cpp
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1626,6 +1646,13 @@ pub struct SceneDelta {
     pub entities_upserted: Vec<Entity>,
     pub entities_removed: Vec<u32>,
     pub party_upserted: Vec<PartyMember>,
+    /// `Some(Some(_))` installs a pending invite (s2c 0x0DC); `Some(None)`
+    /// clears it (answered, withdrawn via 0x0DE, or resolved locally).
+    /// Boxed like `TranslatedFrame::Snapshot` already boxes its payload: the
+    /// nested Option would otherwise push this delta past clippy's
+    /// large_enum_variant budget on every consumer frame.
+    #[serde(default)]
+    pub set_party_invite: Option<Option<Box<PartyInvite>>>,
     pub chat_appended: Vec<ChatLine>,
     pub diagnostics: Option<Diagnostics>,
 
@@ -2184,6 +2211,7 @@ mod tests {
 
     fn sample_snapshot() -> SceneSnapshot {
         SceneSnapshot {
+            party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
             zone_id: Some(230),
@@ -2856,12 +2884,16 @@ mod tests {
             "check_message",
             "widescan",
             "death_menu_offer",
+            "party_invite",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // Re-pinned when SceneSnapshot gained party_invite (bead kuluu-o9qt7.8): the
+    // new trailing Option appends exactly one 0x00 byte per None default; no
+    // earlier field moved.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

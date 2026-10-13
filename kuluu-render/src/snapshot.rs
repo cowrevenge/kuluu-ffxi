@@ -230,6 +230,9 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     }
 
     upsert_party(&mut snap.party, &delta.party_upserted);
+    if let Some(invite) = &delta.set_party_invite {
+        snap.party_invite = invite.as_deref().cloned();
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

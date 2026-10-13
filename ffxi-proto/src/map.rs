@@ -163,6 +163,19 @@ pub mod c2s {
     // GROUP_LIST (0x0DD) for every member. The retail client sends this on zone-in
     // to guarantee the party HUD gets a clean refresh.
     pub const GROUP_LIST_REQ: u16 = 0x076;
+
+    // GP_CLI_COMMAND_GROUP_LEAVE, vendor/server/src/map/packets/c2s/0x06f_group_leave.h.
+    // Leave one's own party/alliance: PartyKind Kind (Party = 0, Alliance = 5).
+    pub const GROUP_LEAVE: u16 = 0x06F;
+
+    // GP_CLI_COMMAND_GROUP_BREAKUP, vendor/server/src/map/packets/c2s/0x070_group_breakup.h.
+    // Leader disbands the group: PartyKind Kind.
+    pub const GROUP_BREAKUP: u16 = 0x070;
+
+    // GP_CLI_COMMAND_GROUP_SOLICIT_RES, vendor/server/src/map/packets/c2s/0x074_group_solicit_res.h.
+    // Answer to a pending invite from the party window (prtyjoin YES/NO): Res u8
+    // (Decline = 0, Accept = 1) + padding[3].
+    pub const GROUP_SOLICIT_RES: u16 = 0x074;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -611,6 +624,15 @@ pub mod s2c {
     pub const GROUP_LIST: u16 = 0x0DD;
 
     pub const GROUP_ATTR: u16 = 0x0DF;
+
+    // GP_SERV_COMMAND_GROUP_SOLICIT_REQ, vendor/server/src/map/packets/s2c/0x0dc_group_solicit_req.h.
+    // Incoming party/alliance invite; answered with c2s GROUP_SOLICIT_RES (0x074).
+    pub const GROUP_SOLICIT_REQ: u16 = 0x0DC;
+
+    // GP_SERV_COMMAND_GROUP_SOLICIT_NO, vendor/server/src/map/packets/s2c/0x0de_group_solicit_no.h.
+    // The server withdrawing/noting a failed solicit; the client drops its pending
+    // invite window state (retail closes `prtyjoin` and flags `alarm`).
+    pub const GROUP_SOLICIT_NO: u16 = 0x0DE;
 
     // GP_SERV_COMMAND_EQUIP_INSPECT, vendor/server/src/map/enums/packet_s2c.h.
     // /check answer for a PC target: EQUIPMENT batches then one GENERAL packet

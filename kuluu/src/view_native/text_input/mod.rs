@@ -1125,6 +1125,8 @@ fn sub_target_action_for(
             item_no,
         }),
         A::MoveItem { .. } => None,
+        // Party window rows answer with a packet or are inert; no sub-target step.
+        A::AcceptPartyInvite | A::DeclinePartyInvite | A::PartyMemberRow { .. } => None,
         A::OpenItemAction { .. } => None,
         A::DropItem { .. } => None,
         A::EquipItem { .. } => None,
@@ -1653,6 +1655,20 @@ fn dispatch_dynamic_menu_action(
                 },
             )
         }
+        A::AcceptPartyInvite | A::DeclinePartyInvite => {
+            // c2s GROUP_SOLICIT_RES through the session; retail clears its
+            // pending-solicit static the moment prtyjoin answers, so drop the
+            // invite locally too (vault main_menu.md §24).
+            let accept = matches!(action, A::AcceptPartyInvite);
+            scene_state.snapshot.party_invite = None;
+            if let Err(e) = cmd_tx.try_send(AgentCommand::PartyInviteRespond { accept }) {
+                push_system_chat_line(scene_state, format!("[menu] party answer dropped: {e}"));
+            }
+            return;
+        }
+        // Roster slots stay inert until the prtyN member sub-action mapping is
+        // dug out (vault main_menu.md §24 [I]).
+        A::PartyMemberRow { .. } => return,
         A::OpenItemAction { .. } | A::DropItem { .. } => return,
         // Handled in confirm_menu_at_cursor (chat echo, menu stays open).
         A::KeyItem { .. } => return,

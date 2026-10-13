@@ -1620,12 +1620,13 @@ mod menu_dispatch_tests {
 
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
+        // Party is built (opens the prtyN window per vault main_menu.md §24);
+        // everything else here still answers "Not supported yet".
         for label in [
             "Synthesis",
             "Trade",
             "Linkshell",
             "Region Info",
-            "Party",
             "Search",
             "Missions",
             "View House",

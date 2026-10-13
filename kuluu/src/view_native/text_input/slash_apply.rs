@@ -24,6 +24,19 @@ fn minimap_retail_desc(state: &kuluu_render::minimap::MinimapState, zone: Option
     )
 }
 
+/// The one applied Current Time outcome (retail runner law, vault main_menu.md §12): toggles the
+/// widget and prints both time lines. Shared by the menu row's TextCommand seam and typed `/clock`.
+pub(super) fn activate_current_time(
+    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
+    scene_state: &mut SceneState,
+) {
+    vana_clock_visible.0 = !vana_clock_visible.0;
+    for line in kuluu_render::hud::vana_clock::current_time_chat_lines(vana_clock) {
+        push_system_chat_line(scene_state, line);
+    }
+}
+
 /// Apply a parsed slash-command outcome. Disengage (/disengage, /cancel)
 /// releases the camera lock like the H toggle; the lock is a client-side
 /// latch the wire cancel does not touch. Quit sends ReqLogout and Disconnect
@@ -357,12 +370,22 @@ pub(super) fn apply_slash_outcome(
             );
         }
         SlashOutcome::SetVanaClock(setting) => {
-            let next = setting.unwrap_or(!slash_writers.vana_clock_visible.0);
-            slash_writers.vana_clock_visible.0 = next;
-            push_system_chat_line(
-                scene_state,
-                format!("/clock: {}", if next { "shown" } else { "hidden" }),
-            );
+            // The single applied clock outcome (bead kuluu-o9qt7.28): the widget flips and both
+            // retail time lines print, whether typed or driven by the Current Time menu row.
+            if let Some(next) = setting {
+                slash_writers.vana_clock_visible.0 = next;
+                for line in kuluu_render::hud::vana_clock::current_time_chat_lines(
+                    &slash_writers.vana_clock,
+                ) {
+                    push_system_chat_line(scene_state, line);
+                }
+            } else {
+                activate_current_time(
+                    &slash_writers.vana_clock,
+                    &mut slash_writers.vana_clock_visible,
+                    scene_state,
+                );
+            }
         }
         SlashOutcome::SetRenderScale(setting) => {
             let g = &mut *slash_writers.graphics;

@@ -430,7 +430,9 @@ pub(super) fn confirm_menu_at_cursor(
 
 /// The client-side half of the text-command runner (FFXiMain.dll
 /// retail-2026-09 RVA 0x80DC0, vault main_menu.md §12): commands with no server
-/// counterpart execute here; unknown ones answer in system chat for now.
+/// counterpart execute here; unknown ones answer in system chat for now. The clock's applied
+/// outcome lives in slash_apply::activate_current_time so the typed layer and this seam stay
+/// identical (bead kuluu-o9qt7.28 - full parse_slash routing is that bead's remaining half).
 pub(super) fn run_client_text_command(
     cmd: &str,
     vana_clock: &kuluu_render::vana_time::VanaClock,
@@ -438,19 +440,10 @@ pub(super) fn run_client_text_command(
     scene_state: &mut SceneState,
 ) {
     match cmd {
-        "/clock" => activate_current_time(vana_clock, vana_clock_visible, scene_state),
+        "/clock" => {
+            super::slash_apply::activate_current_time(vana_clock, vana_clock_visible, scene_state)
+        }
         other => push_system_chat_line(scene_state, format!("[menu] {other} — not implemented")),
-    }
-}
-
-fn activate_current_time(
-    vana_clock: &kuluu_render::vana_time::VanaClock,
-    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
-    scene_state: &mut SceneState,
-) {
-    vana_clock_visible.0 = !vana_clock_visible.0;
-    for line in kuluu_render::hud::vana_clock::current_time_chat_lines(vana_clock) {
-        push_system_chat_line(scene_state, line);
     }
 }
 
@@ -1634,6 +1627,7 @@ mod menu_dispatch_tests {
 
     #[test]
     fn current_time_toggles_widget_and_prints_both_time_lines() {
+        use super::super::slash_apply::activate_current_time;
         use kuluu_render::hud::vana_clock::{
             VanaClockVisible, EARTH_TIME_LINE_PREFIX, VANA_TIME_LINE_PREFIX,
         };

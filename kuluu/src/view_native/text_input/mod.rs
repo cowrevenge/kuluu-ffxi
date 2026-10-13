@@ -486,6 +486,7 @@ pub(crate) fn text_input_system(
                     &slash_writers.map_view,
                     &slash_writers.minimap_state,
                     &slash_writers.change_map_catalog,
+                    &slash_writers.command_surface,
                 ) {
                     *mode = next;
                 }
@@ -1950,6 +1951,7 @@ pub fn mouse_nav_dispatch_system(
     mut scene_state: ResMut<SceneState>,
     mut menu_writers: MenuConfirmWriters,
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
+    command_surface: Res<crate::view_native::command_surface::CommandSurface>,
     mut check_target: ResMut<kuluu_render::hud::check_view::CheckTarget>,
     mut trade_state: ResMut<kuluu_render::hud::trade::TradeState>,
     mut lock_on: ResMut<kuluu_render::LockOn>,
@@ -1981,6 +1983,7 @@ pub fn mouse_nav_dispatch_system(
                 &dynamic_menu,
                 current_target,
                 self_pos,
+                &command_surface,
             ) {
                 *mode = next;
             }

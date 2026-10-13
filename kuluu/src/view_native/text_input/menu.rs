@@ -1,5 +1,5 @@
 use super::map_screen::handle_map_key;
-use super::slash_apply::apply_keybind_update;
+use super::slash_apply::{apply_keybind_update, apply_menu_text_command};
 use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -228,6 +228,7 @@ pub(super) fn confirm_menu_at_cursor(
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
     self_pos: kuluu_snapshot::Vec3,
+    command_surface: &crate::view_native::command_surface::CommandSurface,
 ) -> Option<InputMode> {
     let (kind, cursor) = {
         let level = stack.current()?;
@@ -632,7 +633,17 @@ pub(super) fn confirm_menu_at_cursor(
             None
         }
         MenuDispatch::TextCommand(cmd) => {
-            run_client_text_command(cmd, stack, vana_clock, vana_clock_visible, scene_state);
+            apply_menu_text_command(
+                cmd,
+                command_surface,
+                stack,
+                vana_clock,
+                vana_clock_visible,
+                scene_state,
+                cmd_tx,
+                self_pos,
+                target_id,
+            );
             // Mirrors the Debug toggles: the menu stays open (provisional
             // pending retail capture, bead kuluu-y5hq retail_unknowns).
             None
@@ -731,36 +742,6 @@ pub(super) fn confirm_menu_at_cursor(
             push_system_chat_line(scene_state, format!("[menu] {label} — not implemented"));
             None
         }
-    }
-}
-
-/// The client-side half of the text-command runner (FFXiMain.dll
-/// retail-2026-09 RVA 0x80DC0, vault main_menu.md §12): commands with no server
-/// counterpart execute here; unknown ones answer in system chat for now. The clock's applied
-/// outcome lives in slash_apply::activate_current_time so the typed layer and this seam stay
-/// identical (bead kuluu-o9qt7.28 - full parse_slash routing is that bead's remaining half).
-pub(super) fn run_client_text_command(
-    cmd: &str,
-    stack: &mut MenuStack,
-    vana_clock: &kuluu_render::vana_time::VanaClock,
-    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
-    scene_state: &mut SceneState,
-) {
-    match cmd {
-        "/clock" => {
-            super::slash_apply::activate_current_time(vana_clock, vana_clock_visible, scene_state)
-        }
-        // Retail's client-side /keyitem opens the key-item list window (vault
-        // main_menu.md §12 registry id 0x4C); typed input reaches the same kind
-        // through parse_slash → SlashOutcome::OpenMenu(MenuKind::KeyItems).
-        "/keyitem" => stack.push(MenuKind::KeyItems),
-        // Retail's client-side /quest opens the quest00 list window (FFXiMain.dll
-        // retail-2026-09 RVA 0x7D240 — the id-0x4D handler that clears the
-        // filter word then name-opens `menu    quest00`; vault main_menu.md §31);
-        // typed input reaches the same kind through parse_slash →
-        // SlashOutcome::OpenMenu(MenuKind::QuestList).
-        "/quest" => stack.push(MenuKind::QuestList),
-        other => push_system_chat_line(scene_state, format!("[menu] {other} — not implemented")),
     }
 }
 
@@ -1103,6 +1084,7 @@ pub(super) fn handle_menu_key(
     map_view: &kuluu_render::hud::map_screen::MapView,
     minimap_state: &kuluu_render::minimap::MinimapState,
     change_map_catalog: &kuluu_render::hud::map_screen::ChangeMapCatalog,
+    command_surface: &crate::view_native::command_surface::CommandSurface,
 ) -> Option<InputMode> {
     let top_kind = stack.current()?.kind;
 
@@ -1404,6 +1386,7 @@ pub(super) fn handle_menu_key(
             dynamic,
             target_id,
             self_pos,
+            command_surface,
         );
         if kind == MenuKind::Root && stack.current().is_some_and(|l| l.kind == MenuKind::Items) {
             item_bag.0 = ffxi_proto::map::container::LOC_INVENTORY;
@@ -1455,6 +1438,7 @@ mod menu_key_tests {
         map_view: MapView,
         minimap_state: MinimapState,
         change_map_catalog: ChangeMapCatalog,
+        command_surface: crate::view_native::command_surface::CommandSurface,
         cmd_tx: Sender<AgentCommand>,
         _cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
     }
@@ -1487,6 +1471,7 @@ mod menu_key_tests {
                 map_view: MapView::default(),
                 minimap_state: MinimapState::default(),
                 change_map_catalog: ChangeMapCatalog::default(),
+                command_surface: crate::view_native::command_surface::CommandSurface::default(),
                 cmd_tx,
                 _cmd_rx,
             }
@@ -1526,6 +1511,7 @@ mod menu_key_tests {
                 &self.map_view,
                 &self.minimap_state,
                 &self.change_map_catalog,
+                &self.command_surface,
             )
         }
     }
@@ -1913,6 +1899,7 @@ mod menu_key_tests {
             &harness.map_view,
             &harness.minimap_state,
             &harness.change_map_catalog,
+            &harness.command_surface,
         );
     }
 
@@ -2431,8 +2418,10 @@ mod menu_dispatch_tests {
         );
     }
 
-    /// The runner seam (vault main_menu.md §12): "/clock" reaches the widget
-    /// toggle + time lines; anything else says so in system chat.
+    /// The runner seam (vault main_menu.md §12, bead kuluu-o9qt7.28): row literals go through
+    /// the same `parse_slash` typed input uses - "/clock" reaches the widget toggle + time lines;
+    /// an unknown word answers with the parser's own unknown-command line (the shim-specific
+    /// refusal wording retired with the unification).
     #[test]
     fn text_command_runner_routes_clock_and_refuses_unknown() {
         use kuluu_render::hud::vana_clock::VANA_TIME_LINE_PREFIX;
@@ -2442,7 +2431,19 @@ mod menu_dispatch_tests {
         let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
         let mut scene_state = SceneState::default();
         let mut stack = MenuStack::root();
-        run_client_text_command("/clock", &mut stack, &clock, &mut visible, &mut scene_state);
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let surface = crate::view_native::command_surface::CommandSurface::default();
+        seam_call(
+            "/clock",
+            &surface,
+            &mut stack,
+            &clock,
+            &mut visible,
+            &mut scene_state,
+            &cmd_tx,
+        );
+        // The widget's default is shown, so the retail toggle hides it.
+        assert!(!visible.0, "the widget flipped off from its shown default");
         assert!(
             scene_state
                 .local_toasts
@@ -2451,11 +2452,44 @@ mod menu_dispatch_tests {
             "{}",
             scene_state.local_toasts.len()
         );
-        run_client_text_command("/nope", &mut stack, &clock, &mut visible, &mut scene_state);
+        seam_call(
+            "/nope",
+            &surface,
+            &mut stack,
+            &clock,
+            &mut visible,
+            &mut scene_state,
+            &cmd_tx,
+        );
         assert!(scene_state
             .local_toasts
             .iter()
-            .any(|l| { l.text.starts_with("[menu] /nope") && l.text.contains("not implemented") }));
+            .any(|l| { l.text.contains("unknown command") && l.text.contains("/nope") }));
+    }
+
+    /// The seam's arguments ride the snapshot and shared primitives (bead kuluu-o9qt7.28), so a
+    /// test can drive it without any Bevy scaffolding.
+    #[allow(clippy::too_many_arguments)]
+    fn seam_call(
+        cmd: &str,
+        surface: &crate::view_native::command_surface::CommandSurface,
+        stack: &mut MenuStack,
+        clock: &kuluu_render::vana_time::VanaClock,
+        visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
+        scene_state: &mut SceneState,
+        cmd_tx: &Sender<AgentCommand>,
+    ) {
+        apply_menu_text_command(
+            cmd,
+            surface,
+            stack,
+            clock,
+            visible,
+            scene_state,
+            cmd_tx,
+            kuluu_snapshot::Vec3::default(),
+            None,
+        );
     }
 
     /// Retail's Key Items row runs "/keyitem" (FFXiMain.dll retail-2026-09 RVA
@@ -2472,12 +2506,16 @@ mod menu_dispatch_tests {
         let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
         let mut scene_state = SceneState::default();
         let mut stack = MenuStack::root();
-        run_client_text_command(
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let surface = crate::view_native::command_surface::CommandSurface::default();
+        seam_call(
             "/keyitem",
+            &surface,
             &mut stack,
             &clock,
             &mut visible,
             &mut scene_state,
+            &cmd_tx,
         );
         assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::KeyItems));
     }
@@ -2497,8 +2535,152 @@ mod menu_dispatch_tests {
         let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
         let mut scene_state = SceneState::default();
         let mut stack = MenuStack::root();
-        run_client_text_command("/quest", &mut stack, &clock, &mut visible, &mut scene_state);
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let surface = crate::view_native::command_surface::CommandSurface::default();
+        seam_call(
+            "/quest",
+            &surface,
+            &mut stack,
+            &clock,
+            &mut visible,
+            &mut scene_state,
+            &cmd_tx,
+        );
         assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::QuestList));
+    }
+
+    /// The unification (bead kuluu-o9qt7.28): the seam runs `parse_slash`, so a retail alias from
+    /// the install's command table reaches its handler too, and both spellings of the clock parse
+    /// to one outcome - state the same primitive applies (`set_current_time`).
+    #[test]
+    fn menu_text_command_shares_the_typed_parser_and_aliases() {
+        use ffxi_dat::main_dll::{ClientCommand, CommandTable};
+
+        let surface = crate::view_native::command_surface::CommandSurface::new(
+            CommandTable::from_entries(vec![
+                ClientCommand {
+                    name: "clock".to_owned(),
+                    id: 0x3f,
+                    flags: 0,
+                },
+                ClientCommand {
+                    name: "cl".to_owned(),
+                    id: 0x3f,
+                    flags: 0,
+                },
+            ]),
+        );
+
+        let clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
+        let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
+        let mut scene_state = SceneState::default();
+        let mut stack = MenuStack::root();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        seam_call(
+            "/cl",
+            &surface,
+            &mut stack,
+            &clock,
+            &mut visible,
+            &mut scene_state,
+            &cmd_tx,
+        );
+        // Shown by default: flipping off proves the alias landed on the clock handler.
+        assert!(
+            !visible.0,
+            "the alias reached the clock handler through parse_slash"
+        );
+
+        // Both spellings produce exactly one typed outcome off the same snapshot args.
+        let gate = kuluu_render::fishing_spot::gate_from_snapshot(&scene_state.snapshot);
+        for spelling in ["/clock", "/cl"] {
+            let out = parse_slash(
+                spelling,
+                &surface,
+                &scene_state.snapshot.entities,
+                kuluu_snapshot::Vec3::default(),
+                None,
+                scene_state.snapshot.zone_id,
+                scene_state.snapshot.self_char_id,
+                &scene_state.snapshot.party,
+                gate,
+                None,
+                scene_state.snapshot.self_pet_targid,
+            );
+            assert!(
+                matches!(out, SlashOutcome::SetVanaClock(None)),
+                "{spelling}: the seam's source of truth is one outcome, got {out:?}"
+            );
+        }
+    }
+
+    /// End to end (bead kuluu-o9qt7.28): confirming the Root Current Time row - the seam both
+    /// the keyboard and mouse paths share - lands the typed `/clock` state: widget flips, both
+    /// time lines print, menu stays open on the same level.
+    #[test]
+    fn current_time_row_confirm_matches_typed_clock() {
+        use crate::keybinds_store::KeybindsStore;
+        use kuluu_render::hud::menu::ROOT_CURRENT_TIME;
+
+        let mut bindings = Bindings::default();
+        // Root at cursor 0, like InputMode::Menu(MenuStack::root()).
+        let mut stack = MenuStack::root();
+        let row = kuluu_render::hud::menu::root_entries()
+            .iter()
+            .position(|e| *e == ROOT_CURRENT_TIME)
+            .expect("Current Time is a root row");
+        stack.current_mut().unwrap().cursor = row;
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut keybinds_state = KeybindsStateRes {
+            store: KeybindsStore::new(std::env::temp_dir().join("kuluu-clock-seam-tests.json")),
+            persisted: Default::default(),
+        };
+        let mut graphics = kuluu_render::GraphicsSettings::default();
+        let mut status_profile_open = Default::default();
+        let mut hud_panels = Default::default();
+        let mut net_status = Default::default();
+        let mut audio_mute = Default::default();
+        let mut vana_clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
+        let mut vana_clock_visible = Default::default();
+        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        let surface = crate::view_native::command_surface::CommandSurface::default();
+
+        let next = confirm_menu_at_cursor(
+            &mut bindings,
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut keybinds_state,
+            &mut graphics,
+            &mut status_profile_open,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut vana_clock,
+            &mut vana_clock_visible,
+            &dynamic,
+            None,
+            kuluu_snapshot::Vec3::default(),
+            &surface,
+        );
+
+        assert!(next.is_none(), "the menu stays open");
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::Root));
+        // Shown by default: flipping off is the toggle landing (bead kuluu-o9qt7.28).
+        assert!(!vana_clock_visible.0, "widget flipped like typed /clock");
+        use kuluu_render::hud::vana_clock::{EARTH_TIME_LINE_PREFIX, VANA_TIME_LINE_PREFIX};
+        let lines: Vec<&str> = scene_state
+            .local_toasts
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(lines.len(), 2, "both retail time lines print: {lines:?}");
+        assert!(
+            lines[0].starts_with(VANA_TIME_LINE_PREFIX)
+                && lines[1].starts_with(EARTH_TIME_LINE_PREFIX),
+            "{lines:?}"
+        );
     }
 
     /// Retail persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60), so the

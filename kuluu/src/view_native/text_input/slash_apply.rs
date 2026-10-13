@@ -37,6 +37,194 @@ pub(super) fn activate_current_time(
     }
 }
 
+/// The applied `SetVanaClock` outcome (bead kuluu-o9qt7.28): the shared primitive behind both
+/// `apply_slash_outcome`'s arm and the menu rows' seam, so typed `/clock [show|hide|toggle]`
+/// and the Current Time row land identical state and chat lines.
+pub(super) fn set_current_time(
+    setting: Option<bool>,
+    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
+    scene_state: &mut SceneState,
+) {
+    if let Some(next) = setting {
+        vana_clock_visible.0 = next;
+        for line in kuluu_render::hud::vana_clock::current_time_chat_lines(vana_clock) {
+            push_system_chat_line(scene_state, line);
+        }
+    } else {
+        activate_current_time(vana_clock, vana_clock_visible, scene_state);
+    }
+}
+
+/// The chat echo `apply_slash_outcome`'s OpenMenu arm prints for a menu kind; the menu rows'
+/// seam (bead kuluu-o9qt7.28) echoes through this same table so both surfaces read alike.
+pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> {
+    match kind {
+        kuluu_render::MenuKind::Magic => "Magic".into(),
+        // The picker keeps the Magic caption; a filtered list echoes its school
+        // (vault main_menu.md §21 numbers).
+        kuluu_render::MenuKind::MagicGroups => "Magic".into(),
+        kuluu_render::MenuKind::MagicGroup(school) => format!("MagicList({school})").into(),
+        kuluu_render::MenuKind::Abilities => "Abilities".into(),
+        // Same pair law for the abimenu picker and its filtered list
+        // (vault main_menu.md §23).
+        kuluu_render::MenuKind::AbilitiesGroups => "Abilities".into(),
+        kuluu_render::MenuKind::AbilitiesGroup(group) => format!("AbilityList({group})").into(),
+        kuluu_render::MenuKind::Items => "Items".into(),
+        kuluu_render::MenuKind::KeyItems => "Key Items".into(),
+        kuluu_render::MenuKind::UsableItems => "Items (usable)".into(),
+        kuluu_render::MenuKind::Equipment => "Equipment".into(),
+        kuluu_render::MenuKind::Root => "Root".into(),
+        kuluu_render::MenuKind::Config => "Config".into(),
+        kuluu_render::MenuKind::Controls => "Controls".into(),
+        kuluu_render::MenuKind::Debug => "Debug".into(),
+        kuluu_render::MenuKind::Graphics => "Graphics".into(),
+        kuluu_render::MenuKind::GraphicsDlss => "DLSS Config".into(),
+        kuluu_render::MenuKind::Status => "Status".into(),
+
+        kuluu_render::MenuKind::Communication => "Communication".into(),
+        kuluu_render::MenuKind::EmoteList => "Emote List".into(),
+        // Page-1 row 10's window (vault main_menu.md §27): retail opens `menu    link5`,
+        // which is the same surface a `/menu linkshell` style entry reaches here.
+        kuluu_render::MenuKind::Linkshell => "Link Shell".into(),
+        kuluu_render::MenuKind::SynthLauncher => "Synthesis".into(),
+        kuluu_render::MenuKind::CraftList => "Craft List".into(),
+        kuluu_render::MenuKind::RegionInfo { .. } => "Region Info".into(),
+        kuluu_render::MenuKind::MissionList => "Missions".into(),
+        kuluu_render::MenuKind::MissionDetail { port } => format!("MissionLog({port})").into(),
+        // Bazaar row's stall picker (vault main_menu.md §33).
+        kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
+        kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
+        kuluu_render::MenuKind::RetailConfig => "Config".into(),
+        kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
+        // commenu Friend List widget (vault main_menu.md §37).
+        kuluu_render::MenuKind::FriendList => "Friend List".into(),
+        // Equipment-row variants (vault main_menu.md §39): pupequip
+        // keeps the parent caption; mp_mncst is catalog-titled.
+        kuluu_render::MenuKind::AutomatonEquip => "Equipment".into(),
+        kuluu_render::MenuKind::MpCustomize => "Customization".into(),
+        // The Map-row myroom variant inherits its parent caption (the
+        // `myro` DAT record has no title token; vault main_menu.md §40).
+        kuluu_render::MenuKind::HomeView => "Map".into(),
+        // mcrselec/mcres20 likewise inherit `Macros` (§41 title law).
+        kuluu_render::MenuKind::MacroSelect | kuluu_render::MenuKind::MacroResult => {
+            "Macros".into()
+        }
+        // The /quest seam (vault main_menu.md §31).
+        kuluu_render::MenuKind::QuestList => "Quests".into(),
+        kuluu_render::MenuKind::QuestDetail { log, id } => format!("QuestLog({log},{id})").into(),
+
+        kuluu_render::MenuKind::ItemAction { item_no, .. } => {
+            format!("ItemAction({item_no})").into()
+        }
+        kuluu_render::MenuKind::ItemDropConfirm { item_no, .. } => {
+            format!("ItemDropConfirm({item_no})").into()
+        }
+        kuluu_render::MenuKind::EquipSlot(slot) => format!("EquipSlot({slot})").into(),
+        kuluu_render::MenuKind::Map => "Map".into(),
+        // One surface for the prtyN family (vault main_menu.md section 24).
+        kuluu_render::MenuKind::Party => "Party".into(),
+        // One surface for the trade/gift pair and its bag picker
+        // (vault main_menu.md section 25).
+        kuluu_render::MenuKind::Trade => "Trade".into(),
+        kuluu_render::MenuKind::TradePick { trade_index } => {
+            format!("TradePick({trade_index})").into()
+        }
+        // One surface for the searchma/scresult family
+        // (vault main_menu.md section 26).
+        kuluu_render::MenuKind::Search => "Search".into(),
+        kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
+            "ShutDownPrompt"
+        } else {
+            "LogOutPrompt"
+        }
+        .into(),
+    }
+}
+
+/// The single text-command runner for the Commands-menu rows (bead kuluu-o9qt7.28): a row's
+/// literal goes through `parse_slash` — the one classifier/alias layer typed input uses
+/// (FFXiMain.dll retail-2026-09 RVA 0x80DC0, vault main_menu.md §12) — and the outcome is
+/// applied through this function's subset of `apply_slash_outcome`'s arms. The parse arguments
+/// all ride the snapshot; the fishing gate comes from `gate_from_snapshot`, so keyboard rows,
+/// mouse clicks and typed input resolve identically without caller-side plumbing.
+///
+/// The subset covers every outcome the three row literals can produce (Current Time →
+/// `SetVanaClock`, Key Items/Quests → `OpenMenu`), plus `Command(s)` pass-through and
+/// `SystemMessage`. Two typed-only apply effects are intentionally absent here: the heal/rest
+/// stance mirror and the enhanced shutdown-counter writer, both driven by `/logout`-family rows
+/// that answer through PowerPrompt instead of this seam.
+pub(super) fn apply_menu_text_command(
+    cmd: &str,
+    command_surface: &crate::view_native::command_surface::CommandSurface,
+    stack: &mut MenuStack,
+    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+    self_pos: kuluu_snapshot::Vec3,
+    target_id: Option<u32>,
+) {
+    let battle_target = match scene_state.snapshot.current_goal {
+        Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => Some(target_id),
+        _ => None,
+    };
+    let outcome = parse_slash(
+        cmd,
+        command_surface,
+        &scene_state.snapshot.entities,
+        self_pos,
+        target_id,
+        scene_state.snapshot.zone_id,
+        scene_state.snapshot.self_char_id,
+        &scene_state.snapshot.party,
+        kuluu_render::fishing_spot::gate_from_snapshot(&scene_state.snapshot),
+        battle_target,
+        scene_state.snapshot.self_pet_targid,
+    );
+    match outcome {
+        SlashOutcome::SetVanaClock(setting) => {
+            set_current_time(setting, vana_clock, vana_clock_visible, scene_state);
+        }
+        SlashOutcome::OpenMenu(kind) => {
+            let label = menu_open_label(kind);
+            push_system_chat_line(scene_state, format!("[menu] opened {label}"));
+            stack.push(kind);
+        }
+        SlashOutcome::SystemMessage(text) => {
+            for line in text.split('\n') {
+                push_system_chat_line(scene_state, line.to_string());
+            }
+        }
+        SlashOutcome::Command(command) => {
+            if let Some(toast) = reqlogout_ack_text(&command) {
+                push_system_chat_line(scene_state, toast.into());
+            }
+            if let Err(e) = cmd_tx.try_send(command) {
+                push_system_chat_line(scene_state, format!("command dropped (channel issue): {e}"));
+            }
+        }
+        SlashOutcome::Commands(commands) => {
+            for command in commands {
+                if let Some(toast) = reqlogout_ack_text(&command) {
+                    push_system_chat_line(scene_state, toast.into());
+                }
+                if let Err(e) = cmd_tx.try_send(command) {
+                    push_system_chat_line(
+                        scene_state,
+                        format!("command dropped (channel issue): {e}"),
+                    );
+                }
+            }
+        }
+        _ => {
+            // No row literal reaches these today; keep the old shim's refusal line for any
+            // future row whose command needs an apply effect this seam does not own.
+            push_system_chat_line(scene_state, format!("[menu] {cmd} — not implemented"));
+        }
+    }
+}
+
 /// Apply a parsed slash-command outcome. Disengage (/disengage, /cancel)
 /// releases the camera lock like the H toggle; the lock is a client-side
 /// latch the wire cancel does not touch. Quit sends ReqLogout and Disconnect
@@ -372,20 +560,12 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::SetVanaClock(setting) => {
             // The single applied clock outcome (bead kuluu-o9qt7.28): the widget flips and both
             // retail time lines print, whether typed or driven by the Current Time menu row.
-            if let Some(next) = setting {
-                slash_writers.vana_clock_visible.0 = next;
-                for line in kuluu_render::hud::vana_clock::current_time_chat_lines(
-                    &slash_writers.vana_clock,
-                ) {
-                    push_system_chat_line(scene_state, line);
-                }
-            } else {
-                activate_current_time(
-                    &slash_writers.vana_clock,
-                    &mut slash_writers.vana_clock_visible,
-                    scene_state,
-                );
-            }
+            set_current_time(
+                setting,
+                &slash_writers.vana_clock,
+                &mut slash_writers.vana_clock_visible,
+                scene_state,
+            );
         }
         SlashOutcome::SetRenderScale(setting) => {
             let g = &mut *slash_writers.graphics;
@@ -802,93 +982,7 @@ pub(super) fn apply_slash_outcome(
             }
         }
         SlashOutcome::OpenMenu(kind) => {
-            let label: std::borrow::Cow<'static, str> = match kind {
-                kuluu_render::MenuKind::Magic => "Magic".into(),
-                // The picker keeps the Magic caption; a filtered list echoes its school
-                // (vault main_menu.md §21 numbers).
-                kuluu_render::MenuKind::MagicGroups => "Magic".into(),
-                kuluu_render::MenuKind::MagicGroup(school) => format!("MagicList({school})").into(),
-                kuluu_render::MenuKind::Abilities => "Abilities".into(),
-                // Same pair law for the abimenu picker and its filtered list
-                // (vault main_menu.md §23).
-                kuluu_render::MenuKind::AbilitiesGroups => "Abilities".into(),
-                kuluu_render::MenuKind::AbilitiesGroup(group) => {
-                    format!("AbilityList({group})").into()
-                }
-                kuluu_render::MenuKind::Items => "Items".into(),
-                kuluu_render::MenuKind::KeyItems => "Key Items".into(),
-                kuluu_render::MenuKind::UsableItems => "Items (usable)".into(),
-                kuluu_render::MenuKind::Equipment => "Equipment".into(),
-                kuluu_render::MenuKind::Root => "Root".into(),
-                kuluu_render::MenuKind::Config => "Config".into(),
-                kuluu_render::MenuKind::Controls => "Controls".into(),
-                kuluu_render::MenuKind::Debug => "Debug".into(),
-                kuluu_render::MenuKind::Graphics => "Graphics".into(),
-                kuluu_render::MenuKind::GraphicsDlss => "DLSS Config".into(),
-                kuluu_render::MenuKind::Status => "Status".into(),
-
-                kuluu_render::MenuKind::Communication => "Communication".into(),
-                kuluu_render::MenuKind::EmoteList => "Emote List".into(),
-                // Page-1 row 10's window (vault main_menu.md §27): retail opens `menu    link5`,
-                // which is the same surface a `/menu linkshell` style entry reaches here.
-                kuluu_render::MenuKind::Linkshell => "Link Shell".into(),
-                kuluu_render::MenuKind::SynthLauncher => "Synthesis".into(),
-                kuluu_render::MenuKind::CraftList => "Craft List".into(),
-                kuluu_render::MenuKind::RegionInfo { .. } => "Region Info".into(),
-                kuluu_render::MenuKind::MissionList => "Missions".into(),
-                kuluu_render::MenuKind::MissionDetail { port } => {
-                    format!("MissionLog({port})").into()
-                }
-                // Bazaar row's stall picker (vault main_menu.md §33).
-                kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
-                kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
-                kuluu_render::MenuKind::RetailConfig => "Config".into(),
-                kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
-                // commenu Friend List widget (vault main_menu.md §37).
-                kuluu_render::MenuKind::FriendList => "Friend List".into(),
-                // Equipment-row variants (vault main_menu.md §39): pupequip
-                // keeps the parent caption; mp_mncst is catalog-titled.
-                kuluu_render::MenuKind::AutomatonEquip => "Equipment".into(),
-                kuluu_render::MenuKind::MpCustomize => "Customization".into(),
-                // The Map-row myroom variant inherits its parent caption (the
-                // `myro` DAT record has no title token; vault main_menu.md §40).
-                kuluu_render::MenuKind::HomeView => "Map".into(),
-                // mcrselec/mcres20 likewise inherit `Macros` (§41 title law).
-                kuluu_render::MenuKind::MacroSelect | kuluu_render::MenuKind::MacroResult => {
-                    "Macros".into()
-                }
-                // The /quest seam (vault main_menu.md §31).
-                kuluu_render::MenuKind::QuestList => "Quests".into(),
-                kuluu_render::MenuKind::QuestDetail { log, id } => {
-                    format!("QuestLog({log},{id})").into()
-                }
-
-                kuluu_render::MenuKind::ItemAction { item_no, .. } => {
-                    format!("ItemAction({item_no})").into()
-                }
-                kuluu_render::MenuKind::ItemDropConfirm { item_no, .. } => {
-                    format!("ItemDropConfirm({item_no})").into()
-                }
-                kuluu_render::MenuKind::EquipSlot(slot) => format!("EquipSlot({slot})").into(),
-                kuluu_render::MenuKind::Map => "Map".into(),
-                // One surface for the prtyN family (vault main_menu.md section 24).
-                kuluu_render::MenuKind::Party => "Party".into(),
-                // One surface for the trade/gift pair and its bag picker
-                // (vault main_menu.md section 25).
-                kuluu_render::MenuKind::Trade => "Trade".into(),
-                kuluu_render::MenuKind::TradePick { trade_index } => {
-                    format!("TradePick({trade_index})").into()
-                }
-                // One surface for the searchma/scresult family
-                // (vault main_menu.md section 26).
-                kuluu_render::MenuKind::Search => "Search".into(),
-                kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
-                    "ShutDownPrompt"
-                } else {
-                    "LogOutPrompt"
-                }
-                .into(),
-            };
+            let label = menu_open_label(kind);
             push_system_chat_line(scene_state, format!("[menu] opened {label}"));
         }
         SlashOutcome::OpenSubTarget { .. } => {

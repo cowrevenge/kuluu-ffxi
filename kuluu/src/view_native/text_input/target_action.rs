@@ -18,6 +18,7 @@ pub(super) fn handle_world_key(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
         return Some(InputMode::Chat(ChatBuffer::empty()));
@@ -59,6 +60,7 @@ pub(super) fn handle_world_key(
                         check_target,
                         trade_state,
                         lock_on,
+                        magic_flat_list,
                     )
                 }
             }
@@ -80,6 +82,7 @@ pub(super) fn handle_world_key(
                 check_target,
                 trade_state,
                 lock_on,
+                magic_flat_list,
             ),
         };
     }
@@ -104,6 +107,7 @@ fn open_target_action_menu(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -132,6 +136,7 @@ fn open_target_action_menu(
             check_target,
             trade_state,
             lock_on,
+            magic_flat_list,
         );
     }
     Some(InputMode::TargetAction(state))
@@ -151,6 +156,7 @@ pub(super) fn handle_target_action_key(
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
     lock_on: &mut kuluu_render::LockOn,
     reselect_unequip_enabled: bool,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
     use kuluu_render::input_mode::SubAction;
@@ -250,6 +256,7 @@ pub(super) fn handle_target_action_key(
             check_target,
             trade_state,
             lock_on,
+            magic_flat_list,
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
@@ -271,6 +278,7 @@ pub(super) fn confirm_target_action_at_cursor(
     check_target: &mut kuluu_render::hud::check_view::CheckTarget,
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::TargetActionId;
 
@@ -336,7 +344,10 @@ pub(super) fn confirm_target_action_at_cursor(
             state.chat_mode_idx,
             target_ent,
         ))),
-        TargetActionId::Magic => Some(open_submenu(MenuKind::Magic)),
+        // Retail's Magic entry goes through the mgcmenu picker; the flat list is the
+        // off-by-default kuluu convenience (vault main_menu.md §21).
+        TargetActionId::Magic if magic_flat_list => Some(open_submenu(MenuKind::Magic)),
+        TargetActionId::Magic => Some(open_submenu(MenuKind::MagicGroups)),
         TargetActionId::Abilities => {
             use kuluu_render::hud::action_model::AbilityGroup;
             use kuluu_render::input_mode::{SubAction, SubActionStack};
@@ -607,6 +618,7 @@ mod mounted_tests {
             &mut Default::default(),
             &mut Default::default(),
             &mut Default::default(),
+            false,
         )
         .is_none());
         assert!(state.dismount_confirm);

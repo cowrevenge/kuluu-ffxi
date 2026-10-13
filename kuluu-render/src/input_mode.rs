@@ -238,7 +238,19 @@ pub enum MenuKind {
     /// (graphics_settings::DLSS_CONFIG_SECTIONS).
     GraphicsDlss,
 
+    /// Kuluu's flat spell list (all known spells, one page) - kept behind the
+    /// Retail+ "Flat Magic List" toggle; retail has no such window.
     Magic,
+
+    /// mgcmenu: retail's Magic category picker, eight fixed school rows in the
+    /// jump-table display order (FFXiMain.dll retail-2026-09 RVA 0x13F750;
+    /// vault main_menu.md §21). Picking a row pushes [`MenuKind::MagicGroup`].
+    MagicGroups,
+
+    /// The `magic` spell-list window for one school (payload = the client
+    /// magicType number FFXiMain.dll's handler pushes after a category pick,
+    /// vault main_menu.md §21); rows cast through the shared sub-target cursor.
+    MagicGroup(u8),
 
     Abilities,
 

@@ -402,6 +402,69 @@ pub const RETAIL_KNOCKBACK: &str = "Knockback";
 /// CAMERA_LEASH_STEP_YALMS; 0 turns the leash off. Persists in
 /// GraphicsSettings.
 pub const RETAIL_CAMERA_LEASH: &str = "Camera_leash";
+/// Retail+ magic row: open the kuluu flat spell list instead of retail's
+/// mgcmenu category picker. Kuluu's single-step list has no retail counterpart -
+/// the real Magic flow is two windows (FFXiMain.dll retail-2026-09 RVA 0x13F750
+/// opens the `magic` spell list through the category rows; vault main_menu.md §21)
+/// - so the flat list survives as an off-by-default option.
+pub const RETAIL_MAGIC_FLAT_LIST: &str = "Flat Magic List";
+
+/// The client-side school numbers mgcmenu filters on: the internal ids its
+/// handler pushes into the `magic` window (FFXiMain.dll retail-2026-09 RVA
+/// 0x13F750 jump table 0x13F7CC maps item ids {4..B} to esi ∈ {1,2,5,4,3,6,7,8};
+/// vault main_menu.md §21), which are the spell DAT's magicType numbers
+/// (ffxi-dat spell_info::MagicType).
+const MAGIC_CAT_WHITE: u8 = 1;
+const MAGIC_CAT_BLACK: u8 = 2;
+const MAGIC_CAT_SUMMONING: u8 = 3;
+const MAGIC_CAT_NINJUTSU: u8 = 4;
+const MAGIC_CAT_SONGS: u8 = 5;
+const MAGIC_CAT_BLUE: u8 = 6;
+const MAGIC_CAT_GEOMANCY: u8 = 7;
+const MAGIC_CAT_TRUST: u8 = 8;
+
+/// mgcmenu's rows as (client school id, caption) in retail display order - the
+/// jump-table shuffle above says row 3 is Songs (5) and row 5 Summoning (3),
+/// not numeric order (§21). Captions are d_msg catalog strings: ROM/165/77.DAT
+/// indices 246-250 and 252, Blue Magic from ROM/165/76.DAT index 141 (the §10
+/// caption catalogs). No short Trust caption exists in any ROM/165 d_msg table,
+/// so "Trust Magic" follows the LSB wording [I].
+pub const MAGIC_CATEGORY_ROWS: &[(u8, &str)] = &[
+    (MAGIC_CAT_WHITE, "White Magic"),
+    (MAGIC_CAT_BLACK, "Black Magic"),
+    (MAGIC_CAT_SONGS, "Songs"),
+    (MAGIC_CAT_NINJUTSU, "Ninjutsu"),
+    (MAGIC_CAT_SUMMONING, "Summoning"),
+    (MAGIC_CAT_BLUE, "Blue Magic"),
+    (MAGIC_CAT_GEOMANCY, "Geomancy"),
+    (MAGIC_CAT_TRUST, "Trust Magic"),
+];
+
+/// The same labels for the generic static-list path; pairing with
+/// [`MAGIC_CATEGORY_ROWS`] is pinned by a test.
+const MAGIC_CATEGORY_LABELS: &[&str] = &[
+    "White Magic",
+    "Black Magic",
+    "Songs",
+    "Ninjutsu",
+    "Summoning",
+    "Blue Magic",
+    "Geomancy",
+    "Trust Magic",
+];
+
+/// The client school of the mgcmenu row at display index `row`.
+pub fn magic_category_at(row: usize) -> Option<u8> {
+    MAGIC_CATEGORY_ROWS.get(row).map(|(cat, _)| *cat)
+}
+
+/// The client school a picked mgcmenu caption drills into.
+pub fn magic_category_for_label(label: &str) -> Option<u8> {
+    MAGIC_CATEGORY_ROWS
+        .iter()
+        .find(|(_, cap)| *cap == label)
+        .map(|(cat, _)| *cat)
+}
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -434,6 +497,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_JOB_DISPLAY,
     RETAIL_STATUS_ROWS,
     RETAIL_RESELECT_UNEQUIP,
+    RETAIL_MAGIC_FLAT_LIST,
     #[cfg(feature = "enhanced-ignore-knockback-self")]
     RETAIL_KNOCKBACK,
     RETAIL_CAMERA_LEASH,
@@ -524,6 +588,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
     matches!(
         kind,
         MenuKind::Magic
+            | MenuKind::MagicGroup(_)
             | MenuKind::Abilities
             | MenuKind::Items
             | MenuKind::KeyItems
@@ -624,6 +689,7 @@ pub fn action_recast_remaining(
 fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
     match kind {
         MenuKind::Magic => "(no spells learned yet)",
+        MenuKind::MagicGroup(_) => "(no spells learned in this school)",
         MenuKind::Abilities => "(no abilities available — wrong job?)",
         MenuKind::Items => "(bag empty)",
         MenuKind::KeyItems => "(no key items)",
@@ -652,6 +718,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Graphics => &[],
 
         MenuKind::Magic => &["(Magic — data pending)"],
+        MenuKind::MagicGroups => MAGIC_CATEGORY_LABELS,
+        MenuKind::MagicGroup(_) => &["(Magic — data pending)"],
         MenuKind::Abilities => &["(Abilities — data pending)"],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
         MenuKind::KeyItems => &[],
@@ -683,6 +751,11 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::Graphics => "Graphics",
         MenuKind::Equipment => "Equipment",
         MenuKind::Magic => "Magic",
+        // The picker keeps the Magic row's own caption; the spell list it opens is
+        // titled `Magic List` (ROM/165/76.DAT catalog index 76, §10 - which one the
+        // root row uses stays [I], the list title is the grounded side).
+        MenuKind::MagicGroups => "Magic",
+        MenuKind::MagicGroup(_) => "Magic List",
         MenuKind::Abilities => "Abilities",
         MenuKind::Items => "Items",
         MenuKind::KeyItems => "Key Items",
@@ -712,9 +785,13 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
 /// the client). `None` = a Root entry with no browsable submenu (Party/Search/
 /// Macros fire commands or aren't built; Current Time/Log Out/Shut Down act
 /// directly), so the right pane shows no preview.
-pub fn root_child_kind(label: &str) -> Option<MenuKind> {
+/// `flat_magic` is the Retail+ "Flat Magic List" gate
+/// ([`RETAIL_MAGIC_FLAT_LIST`] in GraphicsSettings): on, kuluu's one-step spell
+/// list replaces retail's two-window flow (vault main_menu.md §21).
+pub fn root_child_kind(label: &str, flat_magic: bool) -> Option<MenuKind> {
     Some(match label {
-        "Magic" => MenuKind::Magic,
+        "Magic" if flat_magic => MenuKind::Magic,
+        "Magic" => MenuKind::MagicGroups,
         "Abilities" => MenuKind::Abilities,
         "Items" => MenuKind::Items,
         "Key Items" => MenuKind::KeyItems,
@@ -837,11 +914,83 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
         });
 }
 
+/// Spell-school lookup for the Magic category filter. Retail buckets spells by
+/// the spell DAT's magicType - the same numbers mgcmenu filters on (vault
+/// main_menu.md §21); with no install loaded the scraped LSB `group` column
+/// stands in, mapped onto those numbers.
+#[derive(Resource, Default)]
+pub struct MagicSchoolTable {
+    loaded: bool,
+    table: ffxi_dat::spell_info::SpellTable,
+}
+
+impl MagicSchoolTable {
+    fn ensure_loaded(&mut self, root: Option<&ffxi_dat::DatRoot>) {
+        if !self.loaded {
+            if let Some(root) = root {
+                self.table = ffxi_dat::spell_info::SpellTable::open_from_root(root);
+                self.loaded = true;
+            }
+        }
+    }
+
+    fn school_of(&self, spell_id: u16) -> Option<u8> {
+        if self.loaded {
+            if let Some(school) = self
+                .table
+                .lookup(spell_id)
+                .and_then(|s| s.magic_type.bucket_id())
+            {
+                return Some(school);
+            }
+        }
+        ffxi_vocab::magic::group(u32::from(spell_id)).and_then(lsb_group_to_school)
+    }
+}
+
+/// LSB xi.magic.spellGroup numbers onto the client school numbers of §21: the
+/// two enums are bijective but shuffled (SONG 1→5, SUMMONING 5→3, WHITE 6→1,
+/// BLUE 3→6; BLACK/NINJUTSU/GEOMANCY/TRUST keep their number).
+fn lsb_group_to_school(group: u8) -> Option<u8> {
+    use ffxi_vocab::magic as g;
+    match group {
+        g::GROUP_WHITE => Some(MAGIC_CAT_WHITE),
+        g::GROUP_BLACK => Some(MAGIC_CAT_BLACK),
+        g::GROUP_SUMMONING => Some(MAGIC_CAT_SUMMONING),
+        g::GROUP_NINJUTSU => Some(MAGIC_CAT_NINJUTSU),
+        g::GROUP_SONG => Some(MAGIC_CAT_SONGS),
+        g::GROUP_BLUE => Some(MAGIC_CAT_BLUE),
+        g::GROUP_GEOMANCY => Some(MAGIC_CAT_GEOMANCY),
+        g::GROUP_TRUST => Some(MAGIC_CAT_TRUST),
+        _ => None,
+    }
+}
+
+/// The `magic` spell list for one school: known spells whose bucket matches.
+pub fn magic_school_rows(
+    spells_known: &[u16],
+    school: u8,
+    school_of: impl Fn(u16) -> Option<u8>,
+) -> Vec<DynamicMenuRow> {
+    spells_known
+        .iter()
+        .filter(|&&id| school_of(id) == Some(school))
+        .filter_map(|&id| {
+            ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
+                label: name.to_string(),
+                action: DynamicMenuAction::CastSpell { spell_id: id },
+            })
+        })
+        .collect()
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
     sort: Res<crate::hud::item_detail::SortOptions>,
     active_bag: Res<crate::hud::item_screen::ItemScreenContainer>,
+    dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
+    mut school_table: ResMut<MagicSchoolTable>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
     let active_kind = match &*mode {
@@ -867,6 +1016,10 @@ pub fn refresh_dynamic_menu_rows(
                 })
             })
             .collect(),
+        MenuKind::MagicGroup(school) => {
+            school_table.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+            magic_school_rows(&snap.spells_known, school, |id| school_table.school_of(id))
+        }
         MenuKind::Abilities => {
             let mut out: Vec<DynamicMenuRow> = Vec::with_capacity(
                 snap.job_abilities_known.len()
@@ -1629,6 +1782,16 @@ fn format_row_body(
                     return format!(
                         "{label:<14}[{}]",
                         if settings.reselect_unequip {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                }
+                if label == RETAIL_MAGIC_FLAT_LIST {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.magic_flat_list {
                             "on"
                         } else {
                             "off"
@@ -2544,10 +2707,58 @@ mod tests {
         assert!(matches!(rows.first(), Some(MenuRow::Header(_))));
         // The kuluu settings page hangs off the page-3 "Interface" row; the
         // page-2 "Config" row is retail's configwi and stays unbuilt.
-        assert_eq!(root_child_kind("Interface"), Some(MenuKind::Config));
-        assert_eq!(root_child_kind("Config"), None);
+        assert_eq!(root_child_kind("Interface", false), Some(MenuKind::Config));
+        assert_eq!(root_child_kind("Config", false), None);
         assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
+    }
+
+    // FFXiMain.dll retail-2026-09 RVA 0x13F750 answers mgcmenu selects and maps
+    // the eight item ids {4..B} to internal school ids esi ∈ {1,2,5,4,3,6,7,8}
+    // through jump table 0x13F7CC - display order is NOT numeric (vault main_menu.md §21).
+    #[test]
+    fn mgcmenu_picker_rows_follow_the_jump_table_order() {
+        let cats: Vec<u8> = (0..MAGIC_CATEGORY_ROWS.len())
+            .map(|i| magic_category_at(i).unwrap())
+            .collect();
+        assert_eq!(cats, [1, 2, 5, 4, 3, 6, 7, 8]);
+        assert_eq!(static_entries(MenuKind::MagicGroups), MAGIC_CATEGORY_LABELS);
+        let labels: Vec<&str> = MAGIC_CATEGORY_ROWS.iter().map(|(_, l)| *l).collect();
+        assert_eq!(labels.to_vec(), MAGIC_CATEGORY_LABELS.to_vec());
+        assert_eq!(magic_category_for_label("Songs"), Some(5));
+        assert_eq!(magic_category_at(MAGIC_CATEGORY_ROWS.len()), None);
+    }
+
+    #[test]
+    fn magic_windows_keep_retail_titles() {
+        // The picker carries the Magic row's own caption; the spell list it opens is
+        // titled from the ROM/165/76.DAT catalog index 76 (§10).
+        assert_eq!(menu_title(MenuKind::MagicGroups), "Magic");
+        assert_eq!(menu_title(MenuKind::MagicGroup(1)), "Magic List");
+    }
+
+    #[test]
+    fn magic_group_lists_only_its_school_and_casts_like_magic() {
+        // No install loaded, so this exercises the LSB `group`-column fallback.
+        let table = MagicSchoolTable::default();
+        assert_eq!(table.school_of(1), Some(1)); // cure -> white
+        assert_eq!(table.school_of(144), Some(2)); // fire -> black
+        assert_eq!(table.school_of(603), Some(6)); // wild oats -> blue
+        let rows = magic_school_rows(&[1, 144, 603], 2, |id| table.school_of(id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::CastSpell { spell_id: 144 }
+        );
+        let unknown_school = magic_school_rows(&[], 8, |id| table.school_of(id));
+        assert!(unknown_school.is_empty());
+        assert!(is_dynamic(MenuKind::MagicGroup(2)));
+    }
+
+    #[test]
+    fn root_magic_row_drills_into_the_picker_unless_flat_is_on() {
+        assert_eq!(root_child_kind("Magic", false), Some(MenuKind::MagicGroups));
+        assert_eq!(root_child_kind("Magic", true), Some(MenuKind::Magic));
     }
 
     #[test]

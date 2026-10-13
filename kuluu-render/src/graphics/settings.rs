@@ -699,6 +699,15 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub reselect_unequip: bool,
 
+    /// Retail+ gate for opening kuluu's flat spell list instead of retail's two-window Magic flow.
+    /// The real Magic row opens `mgcmenu`, whose handler maps eight category rows (item ids {4..B})
+    /// to internal school ids via jump table 0x13F7CC before pushing the filter into the `magic`
+    /// spell-list window (FFXiMain.dll retail-2026-09 RVA 0x13F750; vault main_menu.md §21). Kuluu's
+    /// single flat list has no retail counterpart, so it survives as an OFF-by-default option: when
+    /// this is off the Magic row drills picker → school-filtered list.
+    #[serde(default)]
+    pub magic_flat_list: bool,
+
     /// Retail+ gate: the player character ignores knockback displacement (the push and the
     /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
     /// The `enhanced-ignore-knockback-self` feature is its compile-time half: without it this
@@ -1022,6 +1031,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1072,6 +1082,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1122,6 +1133,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso2x,
                 bloom_intensity: 0.04,
@@ -1172,6 +1184,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
@@ -1226,6 +1239,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
@@ -1277,6 +1291,7 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 interactive_status_rows: false,
                 reselect_unequip: false,
+                magic_flat_list: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso16x,
                 bloom_intensity: 0.16,

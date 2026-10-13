@@ -781,6 +781,10 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::OpenMenu(kind) => {
             let label: std::borrow::Cow<'static, str> = match kind {
                 kuluu_render::MenuKind::Magic => "Magic".into(),
+                // The picker keeps the Magic caption; a filtered list echoes its school
+                // (vault main_menu.md §21 numbers).
+                kuluu_render::MenuKind::MagicGroups => "Magic".into(),
+                kuluu_render::MenuKind::MagicGroup(school) => format!("MagicList({school})").into(),
                 kuluu_render::MenuKind::Abilities => "Abilities".into(),
                 kuluu_render::MenuKind::Items => "Items".into(),
                 kuluu_render::MenuKind::KeyItems => "Key Items".into(),

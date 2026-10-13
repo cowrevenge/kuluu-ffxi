@@ -423,6 +423,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.check_target,
                     &mut slash_writers.trade_state,
                     &mut slash_writers.lock_on,
+                    slash_writers.graphics.magic_flat_list,
                 ) {
                     *mode = next;
                 }
@@ -498,6 +499,7 @@ pub(crate) fn text_input_system(
                     current_target,
                     &entities,
                     &cmd_tx.0,
+                    slash_writers.graphics.magic_flat_list,
                 ) {
                     *mode = next;
                 }
@@ -549,6 +551,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.trade_intent,
                     &mut slash_writers.lock_on,
                     slash_writers.graphics.reselect_unequip,
+                    slash_writers.graphics.magic_flat_list,
                 ) {
                     *mode = next;
                 }
@@ -1765,10 +1768,11 @@ fn confirm_quick_action_at_cursor(
     target_id: Option<u32>,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     let label = kuluu_render::hud::quick_action::entry_label(state.has_target, state.cursor);
     let target_ent = target_id.and_then(|id| entities.iter().find(|e| e.id == id));
-    match resolve_quick_action(label, target_ent) {
+    match resolve_quick_action(label, target_ent, magic_flat_list) {
         QuickActionDispatch::Command(cmd) => {
             if let Err(e) = cmd_tx.try_send(cmd) {
                 push_system_chat_line(scene_state, format!("[quick] dispatch dropped: {e}"));
@@ -1885,6 +1889,7 @@ pub fn mouse_nav_dispatch_system(
                 current_target,
                 &entities,
                 &cmd_tx.0,
+                menu_writers.graphics.magic_flat_list,
             ) {
                 *mode = next;
             }
@@ -1920,6 +1925,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut check_target,
                 &mut trade_state,
                 &mut lock_on,
+                menu_writers.graphics.magic_flat_list,
             ) {
                 *mode = next;
             }
@@ -2189,9 +2195,12 @@ enum QuickActionDispatch {
     OpenMenu(MenuKind),
 }
 
+/// `magic_flat_list` is the Retail+ gate on kuluu's one-step spell list; retail's
+/// Magic entry opens the mgcmenu picker first (vault main_menu.md §21).
 fn resolve_quick_action(
     label: &str,
     target: Option<&kuluu_snapshot::Entity>,
+    magic_flat_list: bool,
 ) -> QuickActionDispatch {
     match label {
         "Check" => match target {
@@ -2221,7 +2230,8 @@ fn resolve_quick_action(
             None => QuickActionDispatch::SystemMessage("[quick] Talk: no target".into()),
         },
 
-        "Magic" => QuickActionDispatch::OpenMenu(MenuKind::Magic),
+        "Magic" if magic_flat_list => QuickActionDispatch::OpenMenu(MenuKind::Magic),
+        "Magic" => QuickActionDispatch::OpenMenu(MenuKind::MagicGroups),
         "Abilities" => QuickActionDispatch::OpenMenu(MenuKind::Abilities),
         "Items" => QuickActionDispatch::OpenMenu(MenuKind::Items),
 
@@ -2237,6 +2247,7 @@ fn handle_quick_action_key(
     target_id: Option<u32>,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    magic_flat_list: bool,
 ) -> Option<InputMode> {
     let entry_count = kuluu_render::hud::quick_action::entry_count(state.has_target);
     if bindings.matches_logical(Action::NavUp, key) {
@@ -2253,7 +2264,14 @@ fn handle_quick_action_key(
         return None;
     }
     if bindings.matches_logical(Action::NavConfirm, key) {
-        return confirm_quick_action_at_cursor(state, scene_state, target_id, entities, cmd_tx);
+        return confirm_quick_action_at_cursor(
+            state,
+            scene_state,
+            target_id,
+            entities,
+            cmd_tx,
+            magic_flat_list,
+        );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
         return Some(InputMode::World);
@@ -2642,7 +2660,7 @@ mod quick_action_tests {
     #[test]
     fn check_dispatches_check_target_with_basic_kind() {
         let ent = target_ent(0x1234, 7);
-        let result = resolve_quick_action("Check", Some(&ent));
+        let result = resolve_quick_action("Check", Some(&ent), false);
         match result {
             QuickActionDispatch::Command(AgentCommand::CheckTarget {
                 target_id,
@@ -2659,7 +2677,7 @@ mod quick_action_tests {
 
     #[test]
     fn check_with_no_target_returns_system_message() {
-        let result = resolve_quick_action("Check", None);
+        let result = resolve_quick_action("Check", None, false);
         match result {
             QuickActionDispatch::SystemMessage(msg) => {
                 assert!(msg.to_lowercase().contains("no target"));
@@ -2671,24 +2689,31 @@ mod quick_action_tests {
     #[test]
     fn unwired_entry_stays_not_implemented() {
         let ent = target_ent(1, 1);
-        let result = resolve_quick_action("Macros", Some(&ent));
+        let result = resolve_quick_action("Macros", Some(&ent), false);
         assert_eq!(result, QuickActionDispatch::NotImplemented("Macros".into()),);
     }
 
     #[test]
     fn contextual_action_categories_open_their_menu() {
+        // The Magic entry lands on retail's mgcmenu picker unless the Retail+ flat
+        // list is on (vault main_menu.md §21).
         for (label, expected) in [
-            ("Magic", MenuKind::Magic),
+            ("Magic", MenuKind::MagicGroups),
             ("Abilities", MenuKind::Abilities),
             ("Items", MenuKind::Items),
         ] {
-            let result = resolve_quick_action(label, None);
+            let result = resolve_quick_action(label, None, false);
             assert_eq!(
                 result,
                 QuickActionDispatch::OpenMenu(expected),
                 "{label} should open {expected:?}",
             );
         }
+        assert_eq!(
+            resolve_quick_action("Magic", None, true),
+            QuickActionDispatch::OpenMenu(MenuKind::Magic),
+            "flat toggle moves the Magic entry to kuluu's one-step list",
+        );
     }
 }
 

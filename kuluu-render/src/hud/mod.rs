@@ -249,6 +249,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<vana_clock::VanaClockVisible>();
 
         app.init_resource::<menu::DynamicMenu>();
+        app.init_resource::<menu::MagicSchoolTable>();
 
         app.init_resource::<overlay::ActiveOverlay>();
         app.init_resource::<chat_panel::ActiveChatTab>();

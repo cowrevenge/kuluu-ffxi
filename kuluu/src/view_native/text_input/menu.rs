@@ -31,10 +31,12 @@ fn apply_settings_cycle(
     }
 }
 
-fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
+/// `flat_magic` is GraphicsSettings.magic_flat_list (Retail+ "Flat Magic List"); it
+/// feeds the Root → submenu mapping so the drill and preview stay identical.
+fn resolve_menu_entry(kind: MenuKind, label: &str, flat_magic: bool) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
+        magic_category_for_label, COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
     };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
@@ -65,8 +67,17 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
 
         // Root categories that drill into a browsable submenu share their
         // mapping with the right-pane preview (single source of truth).
-        (MenuKind::Root, label) => match kuluu_render::hud::menu::root_child_kind(label) {
-            Some(submenu) => MenuDispatch::OpenSubmenu(submenu),
+        (MenuKind::Root, label) => {
+            match kuluu_render::hud::menu::root_child_kind(label, flat_magic) {
+                Some(submenu) => MenuDispatch::OpenSubmenu(submenu),
+                None => MenuDispatch::NotImplemented(label.to_string()),
+            }
+        }
+
+        // mgcmenu select: the category's school id (jump table 0x13F7CC; vault
+        // main_menu.md §21) becomes the filter of the `magic` spell list.
+        (MenuKind::MagicGroups, label) => match magic_category_for_label(label) {
+            Some(school) => MenuDispatch::OpenSubmenu(MenuKind::MagicGroup(school)),
             None => MenuDispatch::NotImplemented(label.to_string()),
         },
 
@@ -373,7 +384,7 @@ pub(super) fn confirm_menu_at_cursor(
         stack.pop();
         return None;
     }
-    match resolve_menu_entry(kind, label) {
+    match resolve_menu_entry(kind, label, graphics.magic_flat_list) {
         MenuDispatch::TextCommand(cmd) => {
             run_client_text_command(cmd, vana_clock, vana_clock_visible, scene_state);
             // Mirrors the Debug toggles: the menu stays open (provisional
@@ -466,7 +477,7 @@ fn handle_retail_plus_row(
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{
         DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_CAMERA_LEASH, RETAIL_DLSS_MENU,
-        RETAIL_RESELECT_UNEQUIP, RETAIL_STATUS_ROWS,
+        RETAIL_MAGIC_FLAT_LIST, RETAIL_RESELECT_UNEQUIP, RETAIL_STATUS_ROWS,
     };
     match label {
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
@@ -494,6 +505,25 @@ fn handle_retail_plus_row(
                 format!(
                     "[menu] {label}: {}",
                     if graphics.reselect_unequip {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            );
+            true
+        }
+        // Retail's Magic row opens mgcmenu, whose handler turns a category pick into the
+        // `magic` window's school filter (FFXiMain.dll retail-2026-09 RVA 0x13F750,
+        // jump table 0x13F7CC; vault main_menu.md §21); kuluu's flat one-step spell list is
+        // the opt-in enhancement.
+        RETAIL_MAGIC_FLAT_LIST => {
+            graphics.magic_flat_list = !graphics.magic_flat_list;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.magic_flat_list {
                         "on"
                     } else {
                         "off"
@@ -1214,7 +1244,7 @@ mod menu_key_tests {
         );
         assert_eq!(stack.current().unwrap().kind, MenuKind::Controls);
         assert_eq!(
-            resolve_menu_entry(MenuKind::Controls, "Compact 1"),
+            resolve_menu_entry(MenuKind::Controls, "Compact 1", false),
             MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
         );
     }
@@ -1529,7 +1559,7 @@ mod menu_dispatch_tests {
     fn log_out_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_LOG_OUT;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT),
+            resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT, false),
             MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: false })
         );
     }
@@ -1538,7 +1568,7 @@ mod menu_dispatch_tests {
     fn shut_down_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_SHUT_DOWN;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN),
+            resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN, false),
             MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: true })
         );
     }
@@ -1560,7 +1590,7 @@ mod menu_dispatch_tests {
             "Help Desk",
         ] {
             assert_eq!(
-                resolve_menu_entry(MenuKind::Root, label),
+                resolve_menu_entry(MenuKind::Root, label, false),
                 MenuDispatch::NotImplemented(label.into()),
                 "{label} should still be a stub"
             );
@@ -1579,8 +1609,8 @@ mod menu_dispatch_tests {
                 continue;
             }
             match (
-                resolve_menu_entry(MenuKind::Root, label),
-                menu::root_child_kind(label),
+                resolve_menu_entry(MenuKind::Root, label, false),
+                menu::root_child_kind(label, false),
             ) {
                 (MenuDispatch::OpenSubmenu(dispatched), Some(preview)) => {
                     assert_eq!(dispatched, preview, "{label} drill vs preview drift");
@@ -1636,7 +1666,7 @@ mod menu_dispatch_tests {
     fn current_time_row_runs_the_retail_clock_literal() {
         use kuluu_render::hud::menu::ROOT_CURRENT_TIME;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_CURRENT_TIME),
+            resolve_menu_entry(MenuKind::Root, ROOT_CURRENT_TIME, false),
             MenuDispatch::TextCommand("/clock"),
         );
     }
@@ -1720,6 +1750,62 @@ mod menu_dispatch_tests {
             &mut scene_state,
         );
         assert!(!graphics.reselect_unequip, "flips back off");
+    }
+
+    /// Retail's Magic row is the two-window flow (vault main_menu.md §21): Root → mgcmenu picker →
+    /// school-filtered `magic` list. The flat one-step list only exists with the Debug/Retail+
+    /// "Flat Magic List" toggle, which is off by default and flips through that row.
+    #[test]
+    fn magic_drills_the_retail_picker_and_the_flat_toggle_moves_it() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Magic", false),
+            MenuDispatch::OpenSubmenu(MenuKind::MagicGroups)
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Magic", true),
+            MenuDispatch::OpenSubmenu(MenuKind::Magic)
+        );
+
+        let mut graphics = kuluu_render::GraphicsSettings::default();
+        assert!(
+            !graphics.magic_flat_list,
+            "retail default: Magic goes through mgcmenu"
+        );
+        let mut scene_state = SceneState::default();
+        assert!(handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_MAGIC_FLAT_LIST,
+            &mut graphics,
+            &mut scene_state,
+        ));
+        assert!(graphics.magic_flat_list, "toggle flips on");
+        handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_MAGIC_FLAT_LIST,
+            &mut graphics,
+            &mut scene_state,
+        );
+        assert!(!graphics.magic_flat_list, "flips back off");
+    }
+
+    /// Picking a mgcmenu category drills to that school's spell list on the §21 numbers
+    /// (display row 3 is Songs = 5, row 5 Summoning = 3).
+    #[test]
+    fn mgcmenu_category_select_opens_the_matching_spell_list() {
+        for (label, school) in [
+            ("White Magic", 1u8),
+            ("Black Magic", 2),
+            ("Songs", 5),
+            ("Ninjutsu", 4),
+            ("Summoning", 3),
+            ("Blue Magic", 6),
+            ("Geomancy", 7),
+            ("Trust Magic", 8),
+        ] {
+            assert_eq!(
+                resolve_menu_entry(MenuKind::MagicGroups, label, false),
+                MenuDispatch::OpenSubmenu(MenuKind::MagicGroup(school)),
+                "{label} should open school {school}",
+            );
+        }
     }
 
     /// Send-panel shape: choice 0 = recipient row (above the grid), choices

@@ -46,6 +46,7 @@ mod floor {
     pub const JOB_NAME: usize = scrape_floor(23);
     pub const SPELL: usize = scrape_floor(890);
     pub const SPELL_SKILL: usize = scrape_floor(771);
+    pub const SPELL_GROUP: usize = scrape_floor(891);
     pub const SPELL_VALID_TARGET: usize = scrape_floor(891);
     pub const SPELL_ANIMATION: usize = scrape_floor(891);
     pub const SPELL_CAST_TIME: usize = scrape_floor(891);
@@ -244,6 +245,27 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         spell_skill_entries.len(),
         floor::SPELL_SKILL,
+    )?;
+
+    // vendor/server/sql/spell_list.sql field 3 `group`, the xi.magic.spellGroup number
+    // (vendor/server/scripts/enum/magic.lua), which drives retail's Magic category picker.
+    let spell_group_entries: Vec<(u16, u8)> = parse_u16_pair_rows(&spell_src, "spell_list", 3)?
+        .into_iter()
+        // Every group fits in the xi.magic.spellGroup enum (0..=8); a wider value means the
+        // SQL grew past that law, so saturate and let the count floor catch mass drift.
+        .map(|(id, group)| (id, u8::try_from(group).unwrap_or(u8::MAX)))
+        .collect();
+    write_u16_u8_table(
+        &out_dir.join("spell_group_table.rs"),
+        "SPELL_GROUP",
+        LSB_SPELL_LIST_SQL,
+        &spell_group_entries,
+    )?;
+    check_scrape_count(
+        "spell-group entries",
+        LSB_SPELL_LIST_SQL,
+        spell_group_entries.len(),
+        floor::SPELL_GROUP,
     )?;
 
     let spell_target_entries = parse_u16_pair_rows(&spell_src, "spell_list", 7)?;

@@ -133,6 +133,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         search: s.search.clone(),
         linkshells: s.linkshells,
         synth_result: s.synth_result.clone(),
+        missions: s.missions.clone(),
     }
 }
 

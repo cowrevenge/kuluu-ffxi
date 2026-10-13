@@ -314,6 +314,17 @@ pub enum MenuKind {
         mode: u8,
     },
 
+    /// The `missionm` list behind page-2 row 1 (FFXiMain.dll retail-2026-09 RVA
+    /// 0x22DB40; vault main_menu.md §30): rows follow the s2c 0x056 log state.
+    MissionList,
+
+    /// The `miss00` detail window for one port of that battery — missionm's
+    /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
+    /// 0x22DB40; vault main_menu.md §30), so selects push this payload.
+    MissionDetail {
+        port: u16,
+    },
+
     Items,
 
     KeyItems,

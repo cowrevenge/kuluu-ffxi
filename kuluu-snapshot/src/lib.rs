@@ -1082,6 +1082,9 @@ pub struct SceneSnapshot {
     /// a closed craft window still shows what happened. Trailing on purpose.
     #[serde(default)]
     pub synth_result: Option<SynthOutcome>,
+    /// The s2c 0x056 mission/quest log battery (vault main_menu.md §30).
+    #[serde(default)]
+    pub missions: Missions,
 }
 
 /// One synthesis answer (subset of the s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS
@@ -1099,6 +1102,44 @@ pub struct SynthOutcome {
     /// `ItemNo` — the item produced; 0 while nothing came of the ask.
     pub item_no: u16,
     pub broken_items: Vec<u16>,
+}
+
+/// One OTHER-port frame of the s2c 0x056 battery: `uint32 Data[8]` verbatim under
+/// its Port (port enums in vendor/server/src/map/enums/mission_log.h +
+/// quest_log.h; vault main_menu.md §30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionLogEntry {
+    pub port: u16,
+    pub data: [u32; 8],
+}
+
+/// The s2c 0x056 main-port (0xFFFF) fields verbatim — same law as
+/// `ffxi_proto::mission::MissionMain` (vendor/server/src/map/packets/s2c/
+/// 0x056_mission.{h,cpp}; vault main_menu.md §30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionInfo {
+    pub nation: u32,
+    pub nation_mission: u32,
+    pub rotz: u32,
+    pub cop: u32,
+    /// `statusUpper << 16 | statusLower` as LSB builds it.
+    pub cop2: u32,
+    pub addon_acp: u8,
+    pub addon_amk: u8,
+    pub addon_asa: u8,
+    pub tales_beginning: u16,
+    pub soa: u32,
+    pub rov: u32,
+}
+
+/// The whole s2c 0x056 battery as folded from login + later updates (vault
+/// main_menu.md §30); logs carry every OTHER port last reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Missions {
+    pub info: Option<MissionInfo>,
+    /// Raw `Expansion_TVR` from the 0xFFFE-port frame; 0 while unreported.
+    pub tvr: u32,
+    pub logs: Vec<MissionLogEntry>,
 }
 
 /// One staged slot of a player-trade offer. A gil row keeps `item_no` at the
@@ -1871,6 +1912,9 @@ pub struct SceneDelta {
     /// main_menu.md §28).
     #[serde(default)]
     pub set_synth_result: Option<SynthOutcome>,
+    /// Last-writer-wins the whole battery fold (vault main_menu.md §30).
+    #[serde(default)]
+    pub set_missions: Option<Missions>,
 }
 
 /// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
@@ -2540,6 +2584,7 @@ mod tests {
             search: None,
             linkshells: LinkShells::default(),
             synth_result: None,
+            missions: Missions::default(),
         }
     }
 
@@ -3103,15 +3148,16 @@ mod tests {
             "search",
             "linkshells",
             "synth_result",
+            "missions",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
-    // (then search, then linkshells, now synth_result): every append is exactly
+    // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

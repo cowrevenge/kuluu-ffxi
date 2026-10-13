@@ -82,6 +82,10 @@ fn resolve_menu_entry(
             MenuDispatch::OpenSubmenu(MenuKind::RegionInfo { mode: 0 })
         }
 
+        // Page-2 row 1 name-opens `menu    missionm` under the game-object select
+        // gate (FFXiMain.dll retail-2026-09 RVA 0x14E86D; vault main_menu.md §30).
+        (MenuKind::Root, "Missions") => MenuDispatch::OpenSubmenu(MenuKind::MissionList),
+
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
         (MenuKind::Root, "Map") => MenuDispatch::OpenSubmenu(MenuKind::Map),
@@ -348,6 +352,14 @@ pub(super) fn confirm_menu_at_cursor(
                 if let Some(level) = stack.current_mut() {
                     level.kind = MenuKind::RegionInfo { mode };
                 }
+                return None;
+            }
+
+            // The missionm select tail name-opens miss00 over the list (FFXiMain.dll
+            // retail-2026-09 RVA 0x22DB40; vault main_menu.md §30) — kuluu pushes the
+            // per-port detail window the same way.
+            if let A::MissionOpenLog { port } = action {
+                stack.push(MenuKind::MissionDetail { port });
                 return None;
             }
 
@@ -1661,6 +1673,38 @@ mod menu_key_tests {
         }
     }
 
+    #[test]
+    fn mission_row_select_pushes_the_detail_window() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MissionList);
+        stack.take_absorb_open_minus();
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [1, 0, 0, 0, 0, 0, 0, 0],
+        });
+        harness.scene_state.snapshot = snap;
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::mission_list_rows(&harness.scene_state.snapshot);
+
+        // The sole row is the Nations complete-log entry (vault main_menu.md section 30).
+        stack.current_mut().unwrap().cursor = 0;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        match stack.current().unwrap().kind {
+            MenuKind::MissionDetail { port } => assert_eq!(port, 0x00D0),
+            other => panic!("expected the miss00-stand-in detail on top, got {other:?}"),
+        }
+        assert_eq!(
+            stack.levels.len(),
+            3,
+            "detail pushes over the list, like retail"
+        );
+    }
+
     fn menu_root_trade_index() -> usize {
         kuluu_render::hud::menu::root_entries()
             .iter()
@@ -1986,6 +2030,14 @@ mod menu_dispatch_tests {
     }
 
     #[test]
+    fn missions_row_opens_the_battery_list() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Missions", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::MissionList)
+        );
+    }
+
+    #[test]
     fn region_info_row_drills_the_four_mode_window() {
         assert_eq!(
             resolve_menu_entry(MenuKind::Root, "Region Info", false, false),
@@ -1996,16 +2048,9 @@ mod menu_dispatch_tests {
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24), so
-        // is Search (vault main_menu.md §26) and Region Info (§29); everything
-        // else here still answers "Not supported yet".
-        for label in [
-            "Missions",
-            "View House",
-            "Bazaar",
-            "Edit Macros",
-            "Config",
-            "Help Desk",
-        ] {
+        // are Search (§26), Region Info (§29) and Missions (§30); everything else
+        // here still answers "Not supported yet".
+        for label in ["View House", "Bazaar", "Edit Macros", "Config", "Help Desk"] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::Root, label, false, false),
                 MenuDispatch::NotImplemented(label.into()),

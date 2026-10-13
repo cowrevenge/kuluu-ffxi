@@ -12,6 +12,7 @@ pub mod login;
 pub mod map;
 pub mod md5;
 pub mod melee;
+pub mod mission;
 pub mod packet_names;
 pub mod s2c_layout;
 pub mod search;

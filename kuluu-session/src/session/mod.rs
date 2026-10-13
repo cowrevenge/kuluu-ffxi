@@ -1941,6 +1941,38 @@ fn handle_sub_packet(
             }
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
+        // The mission/quest log battery (vault main_menu.md section 30): every frame folds whole per port.
+        s2c::MISSION => match ffxi_proto::mission::parse_mission_frame(sub.data) {
+            Ok(ffxi_proto::mission::MissionFrame::Main(m)) => {
+                let _ = event_tx.send(AgentEvent::MissionInfoUpdated {
+                    info: kuluu_snapshot::MissionInfo {
+                        nation: m.nation,
+                        nation_mission: m.nation_mission,
+                        rotz: m.rotz,
+                        cop: m.cop,
+                        cop2: m.cop2,
+                        addon_acp: m.addon_acp,
+                        addon_amk: m.addon_amk,
+                        addon_asa: m.addon_asa,
+                        tales_beginning: m.tales_beginning,
+                        soa: m.soa,
+                        rov: m.rov,
+                    },
+                });
+            }
+            Ok(ffxi_proto::mission::MissionFrame::Tvr(tvr)) => {
+                let _ = event_tx.send(AgentEvent::MissionTvrUpdated { tvr });
+            }
+            Ok(ffxi_proto::mission::MissionFrame::Other(o)) => {
+                let _ = event_tx.send(AgentEvent::MissionLogUpdated {
+                    entry: kuluu_snapshot::MissionLogEntry {
+                        port: o.port,
+                        data: o.data,
+                    },
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
         s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {

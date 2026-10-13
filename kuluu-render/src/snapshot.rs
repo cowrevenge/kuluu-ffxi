@@ -254,6 +254,9 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if let Some(synth_result) = &delta.set_synth_result {
         snap.synth_result = Some(synth_result.clone());
     }
+    if let Some(missions) = &delta.set_missions {
+        snap.missions = missions.clone();
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

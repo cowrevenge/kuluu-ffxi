@@ -312,6 +312,19 @@ pub enum DynamicMenuAction {
         mode: u8,
     },
 
+    /// One row of the `missionm` list opening its `miss00` detail (the handler's
+    /// select tail name-opens miss00; FFXiMain.dll retail-2026-09 RVA 0x22DB40;
+    /// vault main_menu.md §30).
+    MissionOpenLog {
+        port: u16,
+    },
+
+    /// A legible-only mission-log line (`miss00`'s paging semantics are
+    /// [I-pending], vault main_menu.md section 30).
+    MissionLogRow {
+        port: u16,
+    },
+
     /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
     /// window pair; FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28). The plan is resolved
     /// against the bag at render time: selecting sends exactly this c2s 0x096 ask, ingredients in
@@ -731,6 +744,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::Linkshell
             | MenuKind::CraftList
             | MenuKind::RegionInfo { .. }
+            | MenuKind::MissionList
+            | MenuKind::MissionDetail { .. }
     )
 }
 
@@ -901,6 +916,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
         MenuKind::CraftList => &[],
         MenuKind::RegionInfo { .. } => &[],
+        MenuKind::MissionList => &[],
+        MenuKind::MissionDetail { .. } => &[],
     }
 }
 
@@ -936,6 +953,8 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::SynthLauncher => "Synthesis",
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
+        MenuKind::MissionList => "Missions",
+        MenuKind::MissionDetail { .. } => "Mission Log",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1267,6 +1286,10 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // Page-1 row 11 name-opens `menu    region` ungated (FFXiMain.dll
         // retail-2026-09 RVA 0x140691; vault main_menu.md §29).
         "Region Info" => MenuKind::RegionInfo { mode: 0 },
+
+        // Page-2 row 1 name-opens `menu    missionm` (FFXiMain.dll retail-2026-09
+        // RVA 0x14E86D; vault main_menu.md §30).
+        "Missions" => MenuKind::MissionList,
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -1526,6 +1549,121 @@ pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
         .collect()
 }
 
+/// Nation names in LSB's MissionLog enum order (`Sandoria`/`Bastok`/`Windurst`,
+/// vendor/server/src/map/enums/mission_log.h).
+pub const MISSION_NATION_NAMES_PINNED: [&str; 3] = ["Sandoria", "Bastok", "Windurst"];
+
+/// The complete-mission ports named by `MissionComplete` (vendor/server/src/map/
+/// enums/mission_log.h) — the only OTHER ports the Missions surface lists; quest
+/// ports belong to the "/quest" seam (vault main_menu.md §30).
+pub const MISSION_COMPLETE_PORTS_PINNED: [(u16, &str); 4] = [
+    (0x00D0, "Nations"),
+    (0x00D8, "ToAU/WoTG"),
+    (0x0030, "Campaign I"),
+    (0x0038, "Campaign II"),
+];
+
+pub fn mission_nation_name(nation: u32) -> String {
+    match MISSION_NATION_NAMES_PINNED.get(nation as usize) {
+        Some(name) => (*name).to_string(),
+        None => format!("Nation #{nation}"),
+    }
+}
+
+/// The `missionm` rows (vault main_menu.md §30): the chrome carries no captions,
+/// and kuluu lists exactly the logs its s2c 0x056 state holds — the nation log
+/// line plus each complete-mission port with data. Select mirrors the handler's
+/// tail name-open of miss00 by pushing that port's detail.
+pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut rows = Vec::new();
+    if let Some(info) = &snap.missions.info {
+        rows.push(DynamicMenuRow {
+            label: format!(
+                "{}: mission #{}",
+                mission_nation_name(info.nation),
+                info.nation_mission
+            ),
+            action: DynamicMenuAction::MissionOpenLog {
+                port: ffxi_proto::mission::PORT_MISSION_MAIN,
+            },
+        });
+    }
+    for entry in snap
+        .missions
+        .logs
+        .iter()
+        .filter(|e| e.data.iter().any(|&w| w != 0))
+    {
+        if let Some((port, name)) = MISSION_COMPLETE_PORTS_PINNED
+            .iter()
+            .find(|(p, _)| *p == entry.port)
+        {
+            rows.push(DynamicMenuRow {
+                label: format!("Completed missions — {name}"),
+                action: DynamicMenuAction::MissionOpenLog { port: *port },
+            });
+        }
+    }
+    if rows.is_empty() {
+        rows.push(DynamicMenuRow {
+            label: "(no mission logs reported)".to_string(),
+            action: DynamicMenuAction::MissionLogRow { port: 0 },
+        });
+    }
+    rows
+}
+
+/// The `miss00` detail lines for one port (vault main_menu.md §30): the field
+/// dump legible, every row inert while that window's paging semantics stay
+/// [I-pending]. Labels are kuluu pins (§22/§30 chrome-only law).
+pub fn mission_detail_rows(snap: &kuluu_snapshot::SceneSnapshot, port: u16) -> Vec<DynamicMenuRow> {
+    let mut rows = Vec::new();
+    if port == ffxi_proto::mission::PORT_MISSION_MAIN {
+        if let Some(i) = &snap.missions.info {
+            rows.push(format!(
+                "{}: mission #{}",
+                mission_nation_name(i.nation),
+                i.nation_mission
+            ));
+            // Field-named lines: the LSB field names are [V] (the packet header); retail
+            // expansion captions would be invented chrome ([I]) so kuluu keeps them out.
+            for (name, value) in [
+                ("RoZ", i.rotz),
+                ("CoP", i.cop),
+                ("ACP", u32::from(i.addon_acp)),
+                ("AMK", u32::from(i.addon_amk)),
+                ("ASA", u32::from(i.addon_asa)),
+                ("SoA", i.soa),
+                ("RoV", i.rov),
+            ] {
+                if value != 0 {
+                    rows.push(format!("{name} progress #{value}"));
+                }
+            }
+        }
+    } else if let Some(entry) = snap.missions.logs.iter().find(|e| e.port == port) {
+        for (i, w) in entry.data.iter().enumerate() {
+            if *w != 0 {
+                rows.push(format!("word[{i}] = {w:#010X}"));
+            }
+        }
+    }
+    let mut rows: Vec<DynamicMenuRow> = rows
+        .into_iter()
+        .map(|label| DynamicMenuRow {
+            label,
+            action: DynamicMenuAction::MissionLogRow { port },
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(DynamicMenuRow {
+            label: "(nothing recorded)".to_string(),
+            action: DynamicMenuAction::MissionLogRow { port },
+        });
+    }
+    rows
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
@@ -1580,6 +1718,9 @@ pub fn refresh_dynamic_menu_rows(
         // Region Info modes (vault main_menu.md §29): the rows also carry the
         // predicate gate notice for an unresolvable zone.
         MenuKind::RegionInfo { mode } => region_info_rows(mode, snap.zone_id),
+        // The missionm list follows the folded s2c 0x056 battery (vault main_menu.md §30).
+        MenuKind::MissionList => mission_list_rows(snap),
+        MenuKind::MissionDetail { port } => mission_detail_rows(snap, port),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -4101,6 +4242,73 @@ mod tests {
         assert_eq!(
             root_child_kind("Region Info", false, false),
             Some(MenuKind::RegionInfo { mode: 0 })
+        );
+    }
+
+    /// Mission law (vault main_menu.md §30): missionm lists exactly the logs the
+    /// s2c 0x056 state holds and every row drills that port's miss00 detail.
+    #[test]
+    fn mission_list_rows_follow_the_folded_battery() {
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        let rows = mission_list_rows(&empty);
+        assert_eq!(rows.len(), 1, "logged-out state keeps one hint row");
+        assert!(rows[0].label.contains("no mission logs"));
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.missions.info = Some(kuluu_snapshot::MissionInfo {
+            nation: 2,
+            nation_mission: 3,
+            rotz: 0,
+            cop: 0,
+            cop2: 0,
+            addon_acp: 0,
+            addon_amk: 0,
+            addon_asa: 0,
+            tales_beginning: 0,
+            soa: 0,
+            rov: 0,
+        });
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [1, 0, 0, 0, 0, 0, 0, 0],
+        });
+        let rows = mission_list_rows(&snap);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "Windurst: mission #3");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::MissionOpenLog {
+                port: ffxi_proto::mission::PORT_MISSION_MAIN
+            }
+        );
+        assert_eq!(rows[1].label, "Completed missions — Nations");
+
+        // A quest port carries data but belongs to the /quest seam, not here.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x0058,
+            data: [7; 8],
+        });
+        assert_eq!(mission_list_rows(&snap).len(), 2);
+
+        // Detail rows are legible-only field dumps per the [I-pending] paging law.
+        let detail = mission_detail_rows(&snap, ffxi_proto::mission::PORT_MISSION_MAIN);
+        assert_eq!(detail[0].label, "Windurst: mission #3");
+        for row in &detail {
+            assert!(matches!(
+                row.action,
+                DynamicMenuAction::MissionLogRow { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn mission_windows_are_dynamic_titled_and_rooted() {
+        assert!(is_dynamic(MenuKind::MissionList));
+        assert!(is_dynamic(MenuKind::MissionDetail { port: 0xD0 }));
+        assert_eq!(menu_title(MenuKind::MissionList), "Missions");
+        assert_eq!(
+            root_child_kind("Missions", false, false),
+            Some(MenuKind::MissionList)
         );
     }
 }

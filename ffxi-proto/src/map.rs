@@ -560,6 +560,9 @@ pub mod s2c {
     // The answer to a synthesis ask (result code, gained item, broken
     // ingredients; [`crate::synth::parse_combine_ans`]).
     pub const COMBINE_ANS: u16 = 0x06F;
+    // GP_SERV_COMMAND_MISSION, vendor/server/src/map/packets/s2c/0x056_mission.h;
+    // vault main_menu.md section 30.
+    pub const MISSION: u16 = 0x056;
 
     pub const BATTLE2: u16 = 0x028;
 

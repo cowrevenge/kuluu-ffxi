@@ -567,6 +567,8 @@ pub struct SessionState {
     /// The last s2c 0x06F answer to our synthesis ask (vault main_menu.md §28).
     #[serde(default)]
     pub synth_result: Option<kuluu_snapshot::SynthOutcome>,
+    /// The last s2c 0x056 battery fold (vault main_menu.md §30).
+    pub missions: kuluu_snapshot::Missions,
 
     #[serde(default)]
     pub current_weather: Option<u16>,
@@ -2929,6 +2931,35 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::MissionInfoUpdated { info } => {
+                // Each main-port frame replaces the mission log whole (vault main_menu.md §30).
+                let changed = self.missions.info.as_ref() != Some(info);
+                if changed {
+                    self.missions.info = Some(*info);
+                }
+                changed
+            }
+            AgentEvent::MissionTvrUpdated { tvr } => {
+                let changed = self.missions.tvr != *tvr;
+                if changed {
+                    self.missions.tvr = *tvr;
+                }
+                changed
+            }
+            AgentEvent::MissionLogUpdated { entry } => {
+                // One entry per Port, last frame wins (vault main_menu.md §30).
+                match self.missions.logs.iter_mut().find(|e| e.port == entry.port) {
+                    Some(existing) if *existing == *entry => false,
+                    Some(existing) => {
+                        *existing = *entry;
+                        true
+                    }
+                    None => {
+                        self.missions.logs.push(*entry);
+                        true
+                    }
+                }
+            }
             AgentEvent::AuctionSellQuote { quote, .. } => {
                 let changed = self.auction.fee_quote != *quote;
                 self.auction.fee_quote = *quote;
@@ -3704,6 +3735,23 @@ pub enum AgentEvent {
     /// ask replaces whatever we held (vault main_menu.md §28).
     SynthCompleted {
         outcome: kuluu_snapshot::SynthOutcome,
+    },
+
+    /// s2c 0x056 port 0xFFFF main frame replaces the mission log whole (vault
+    /// main_menu.md §30).
+    MissionInfoUpdated {
+        info: kuluu_snapshot::MissionInfo,
+    },
+
+    /// s2c 0x056 port 0xFFFE `Expansion_TVR` (vault main_menu.md section 30).
+    MissionTvrUpdated {
+        tvr: u32,
+    },
+
+    /// One OTHER-port frame replaces that port's log whole (vault main_menu.md
+    /// section 30); unseen ports append in arrival order.
+    MissionLogUpdated {
+        entry: kuluu_snapshot::MissionLogEntry,
     },
 
     /// s2c AskCommit: the listing-fee quote (`quote: None` on rejection, with

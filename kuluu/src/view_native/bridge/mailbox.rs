@@ -60,6 +60,7 @@ fn merge(mut previous: wire::SceneDelta, mut next: wire::SceneDelta) -> wire::Sc
         set_linkshells: next.set_linkshells.or(previous.set_linkshells),
         // Same replacement law for the last synthesis answer (vault main_menu.md section 28).
         set_synth_result: next.set_synth_result.or(previous.set_synth_result),
+        set_missions: next.set_missions.or(previous.set_missions),
     }
 }
 

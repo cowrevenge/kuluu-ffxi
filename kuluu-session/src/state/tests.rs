@@ -2760,6 +2760,47 @@ fn synth_answers_replace_the_last_outcome_whole() {
     assert!(!state.apply_event(&AgentEvent::SynthCompleted { outcome: failed }));
 }
 
+#[test]
+fn mission_battery_folds_whole_per_port() {
+    // s2c 0x056 (vault main_menu.md §30): login pushes the battery; every frame
+    // replaces its own port whole and changes nothing else.
+    let mut state = SessionState::default();
+    assert!(state.missions.info.is_none());
+
+    let info = kuluu_snapshot::MissionInfo {
+        nation: 1,
+        nation_mission: 5,
+        rotz: 0,
+        cop: 0,
+        cop2: 0,
+        addon_acp: 0,
+        addon_amk: 0,
+        addon_asa: 0,
+        tales_beginning: 0x3F,
+        soa: 0,
+        rov: 0,
+    };
+    assert!(state.apply_event(&AgentEvent::MissionInfoUpdated { info }));
+    assert_eq!(state.missions.info, Some(info));
+    assert!(!state.apply_event(&AgentEvent::MissionInfoUpdated { info }));
+
+    let entry = kuluu_snapshot::MissionLogEntry {
+        port: 0xD0,
+        data: [1, 2, 3, 4, 5, 6, 7, 8],
+    };
+    assert!(state.apply_event(&AgentEvent::MissionLogUpdated { entry }));
+    let updated = kuluu_snapshot::MissionLogEntry {
+        port: 0xD0,
+        data: [9; 8],
+    };
+    assert!(state.apply_event(&AgentEvent::MissionLogUpdated { entry: updated }));
+    assert_eq!(state.missions.logs.len(), 1);
+    assert_eq!(state.missions.logs[0], updated);
+
+    assert!(state.apply_event(&AgentEvent::MissionTvrUpdated { tvr: 7 }));
+    assert_eq!(state.missions.tvr, 7);
+}
+
 /// AgentEvent is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2772,6 +2813,9 @@ fn synth_answers_replace_the_last_outcome_whole() {
 #[allow(clippy::unneeded_struct_pattern)]
 fn _agentevent_is_additive_only(x: &AgentEvent) {
     match x {
+        AgentEvent::MissionInfoUpdated { .. } => (),
+        AgentEvent::MissionTvrUpdated { .. } => (),
+        AgentEvent::MissionLogUpdated { .. } => (),
         AgentEvent::SynthCompleted { .. } => (),
         AgentEvent::PlayerSearchCompleted { .. } => (),
         AgentEvent::LinkShellSlotChanged { .. } => (),

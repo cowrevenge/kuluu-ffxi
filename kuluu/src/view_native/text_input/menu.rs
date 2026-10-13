@@ -75,6 +75,13 @@ fn resolve_menu_entry(
         // no handler and never sees it on the wire.
         (MenuKind::Root, "Key Items") => MenuDispatch::TextCommand("/keyitem"),
 
+        // Page-1 row 11 name-opens `menu    region` with no gate (FFXiMain.dll
+        // retail-2026-09 RVA 0x140691; vault main_menu.md §29): kuluu drills its
+        // four-mode panel, opened at display mode 0.
+        (MenuKind::Root, "Region Info") => {
+            MenuDispatch::OpenSubmenu(MenuKind::RegionInfo { mode: 0 })
+        }
+
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
         (MenuKind::Root, "Map") => MenuDispatch::OpenSubmenu(MenuKind::Map),
@@ -334,6 +341,16 @@ pub(super) fn confirm_menu_at_cursor(
                 }
                 return None;
             }
+            // The region-info window answers a select by installing the display table on
+            // itself — FFXiMain.dll retail-2026-09 RVA 0x140780 tail-jumps 0x1E7980 rather than
+            // opening anything (vault main_menu.md §29) — so kuluu swaps the payload in place.
+            if let A::RegionInfoMode { mode } = action {
+                if let Some(level) = stack.current_mut() {
+                    level.kind = MenuKind::RegionInfo { mode };
+                }
+                return None;
+            }
+
             // Craft-list select: the plan was resolved against the bag when the rows
             // were built, so this is that c2s 0x096 ask verbatim (vault main_menu.md
             // §28); the s2c 0x06F answer lands in snapshot.synth_result.
@@ -1619,6 +1636,31 @@ mod menu_key_tests {
             .unwrap()
     }
 
+    #[test]
+    fn region_info_select_installs_the_mode_in_place() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RegionInfo { mode: 0 });
+        stack.take_absorb_open_minus();
+        harness.dynamic.rows = kuluu_render::hud::menu::region_info_rows(0, None);
+
+        // Handler item id 3 installs display mode 2 (vault main_menu.md §29).
+        stack.current_mut().unwrap().cursor = 2;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        assert_eq!(
+            stack.levels.len(),
+            2,
+            "install must not push another window"
+        );
+        match stack.current().unwrap().kind {
+            MenuKind::RegionInfo { mode } => assert_eq!(mode, 2),
+            other => panic!("expected the Region Info window on top, got {other:?}"),
+        }
+    }
+
     fn menu_root_trade_index() -> usize {
         kuluu_render::hud::menu::root_entries()
             .iter()
@@ -1944,12 +1986,19 @@ mod menu_dispatch_tests {
     }
 
     #[test]
+    fn region_info_row_drills_the_four_mode_window() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Region Info", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::RegionInfo { mode: 0 })
+        );
+    }
+
+    #[test]
     fn unwired_root_entries_stay_not_implemented() {
-        // Party is built (opens the prtyN window per vault main_menu.md §24) and
-        // so is Search (vault main_menu.md §26); everything else here still
-        // answers "Not supported yet".
+        // Party is built (opens the prtyN window per vault main_menu.md §24), so
+        // is Search (vault main_menu.md §26) and Region Info (§29); everything
+        // else here still answers "Not supported yet".
         for label in [
-            "Region Info",
             "Missions",
             "View House",
             "Bazaar",

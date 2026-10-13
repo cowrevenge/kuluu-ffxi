@@ -305,6 +305,13 @@ pub enum DynamicMenuAction {
         linkshell_slot: u8,
     },
 
+    /// One mode row of the Region Info window: items 1..4 install display modes
+    /// 0..3 on that window itself (FFXiMain.dll retail-2026-09 RVA 0x140818;
+    /// vault main_menu.md §29).
+    RegionInfoMode {
+        mode: u8,
+    },
+
     /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
     /// window pair; FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28). The plan is resolved
     /// against the bag at render time: selecting sends exactly this c2s 0x096 ask, ingredients in
@@ -723,6 +730,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::Search
             | MenuKind::Linkshell
             | MenuKind::CraftList
+            | MenuKind::RegionInfo { .. }
     )
 }
 
@@ -892,6 +900,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::SynthLauncher => SYNTH_LAUNCHER_ENTRIES,
         // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
         MenuKind::CraftList => &[],
+        MenuKind::RegionInfo { .. } => &[],
     }
 }
 
@@ -926,6 +935,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::Linkshell => "Link Shell",
         MenuKind::SynthLauncher => "Synthesis",
         MenuKind::CraftList => "Craft List",
+        MenuKind::RegionInfo { .. } => "Region Info",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1254,6 +1264,9 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // (FFXiMain.dll retail-2026-09; vault main_menu.md §26).
         "Search" => MenuKind::Search,
         "Linkshell" => MenuKind::Linkshell,
+        // Page-1 row 11 name-opens `menu    region` ungated (FFXiMain.dll
+        // retail-2026-09 RVA 0x140691; vault main_menu.md §29).
+        "Region Info" => MenuKind::RegionInfo { mode: 0 },
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -1450,6 +1463,69 @@ pub fn magic_school_rows(
         .collect()
 }
 
+/// Region Info row captions. The `region` window is chrome-only — no string
+/// hits for its buttons in DLL or DAT (vault main_menu.md §29) — so kuluu pins
+/// these English mode names by test; naming informed by retail zoom semantics,
+/// caption itself [I].
+pub const REGION_MODE_LABELS_PINNED: [&str; 4] = ["World", "Nation", "Region", "Zone"];
+
+/// Notice worn by the World row when the installed mode is 0 but the current
+/// zone fails FFXiMain's predicate — kuluu's stand-in for that path's message
+/// id 0x7B post (vault main_menu.md §29); retail caption text [I].
+pub const REGION_UNAVAILABLE_NOTICE_PINNED: &str = "(unavailable)";
+
+/// Zones accepted by the mode-install predicate: verbatim first-word copy of
+/// the stride-8 table FFXiMain.dll retail-2026-09 RVA 0x1E6CA0 scans at RVA
+/// 0x37F632 (vault main_menu.md §29), both trailing zero words kept as found.
+pub const REGION_PRED_ZONES_PINNED: [u16; 146] = [
+    0x00E6, 0x00E7, 0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF, 0x00F0, 0x00F1,
+    0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x0064, 0x0065, 0x008C, 0x008D, 0x008E, 0x008B, 0x00BE,
+    0x00A7, 0x0067, 0x006C, 0x00C4, 0x0066, 0x00C1, 0x00F8, 0x0068, 0x0069, 0x00C3, 0x0095, 0x0096,
+    0x0001, 0x0002, 0x006A, 0x006B, 0x008F, 0x0090, 0x00BF, 0x00AC, 0x00AD, 0x006D, 0x006E, 0x00C5,
+    0x0093, 0x0094, 0x0073, 0x0074, 0x0091, 0x0092, 0x00A9, 0x00C0, 0x00C2, 0x00AA, 0x0076, 0x0075,
+    0x00C6, 0x00F9, 0x00D5, 0x0003, 0x0004, 0x0077, 0x0078, 0x00C8, 0x0097, 0x0098, 0x0007, 0x0008,
+    0x006F, 0x00A6, 0x00CC, 0x00CE, 0x00CB, 0x0009, 0x000A, 0x0070, 0x00A1, 0x00A2, 0x00A5, 0x0005,
+    0x0006, 0x007E, 0x007F, 0x009D, 0x009E, 0x00B8, 0x00B3, 0x0079, 0x007A, 0x00FB, 0x0099, 0x009A,
+    0x00CA, 0x0072, 0x007D, 0x00F7, 0x00D0, 0x00A8, 0x00D1, 0x0071, 0x00AE, 0x0080, 0x00D4, 0x00C9,
+    0x007B, 0x00B0, 0x00FA, 0x00FC, 0x007C, 0x009F, 0x00A0, 0x00A3, 0x00CD, 0x00CF, 0x00D3, 0x0082,
+    0x00B1, 0x00B2, 0x00B4, 0x00B5, 0x000B, 0x000C, 0x000D, 0x0018, 0x0019, 0x0020, 0x001B, 0x001C,
+    0x001D, 0x001E, 0x001F, 0x00DF, 0x00E0, 0x00E1, 0x00DC, 0x00DD, 0x00E3, 0x00E4, 0x00E2, 0x001A,
+    0x0000, 0x0000,
+];
+
+/// The mode-install predicate's first-word test (vault main_menu.md §29).
+fn region_zone_known(zone: u16) -> bool {
+    REGION_PRED_ZONES_PINNED.contains(&zone)
+}
+
+/// The four Region Info rows in handler item order (FFXiMain.dll retail-2026-09
+/// RVA 0x140818; vault main_menu.md §29): the marker rides the installed mode,
+/// and while mode 0 is installed over a zone outside FFXiMain's predicate table
+/// the World row wears the unavailable notice. Four rows regardless of state —
+/// the window answers only items 1..4.
+pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
+    REGION_MODE_LABELS_PINNED
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let mut label = (*label).to_string();
+            if i == 0 && mode == 0 && !zone.is_some_and(region_zone_known) {
+                label.push(' ');
+                label.push_str(REGION_UNAVAILABLE_NOTICE_PINNED);
+            }
+            let marker = if u8::try_from(i).is_ok_and(|m| m == mode) {
+                "\u{bb} "
+            } else {
+                ""
+            };
+            DynamicMenuRow {
+                label: format!("{marker}{label}"),
+                action: DynamicMenuAction::RegionInfoMode { mode: i as u8 },
+            }
+        })
+        .collect()
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
@@ -1501,6 +1577,9 @@ pub fn refresh_dynamic_menu_rows(
         // The craft list (kuluu surface for the cmbHwin/cmbhlst pair behind cmbmenu row 2;
         // FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28).
         MenuKind::CraftList => craft_list_rows(snap),
+        // Region Info modes (vault main_menu.md §29): the rows also carry the
+        // predicate gate notice for an unresolvable zone.
+        MenuKind::RegionInfo { mode } => region_info_rows(mode, snap.zone_id),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -3977,5 +4056,51 @@ mod tests {
         // The hidden shape carries no job/level entries — the row says so.
         assert_eq!(&rows[2].label, "ALongNameX  ???  Z0");
         assert_eq!(rows[2].action, DynamicMenuAction::SearchHitRow { index: 1 });
+    }
+
+    /// Region Info law (vault main_menu.md §29): the window answers items 1..4 as display modes
+    /// 0..3; kuluu renders exactly four rows in that order with the marker on the installed mode.
+    #[test]
+    fn region_info_rows_are_the_four_modes_with_the_active_marker() {
+        let known = Some(REGION_PRED_ZONES_PINNED[0]);
+        let rows = region_info_rows(2, known);
+        assert_eq!(rows.len(), 4, "items 1..4 only — always four rows");
+        assert_eq!(
+            rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+            vec!["World", "Nation", "\u{bb} Region", "Zone"],
+            "handler item order 1..4, marker on the installed mode"
+        );
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.action,
+                DynamicMenuAction::RegionInfoMode { mode: i as u8 }
+            );
+        }
+
+        // The message-0x7B seam: with mode 0 installed over a zone outside FFXiMain's predicate
+        // table (and with no zone resolved yet) the World row wears the notice; other rows never.
+        let unknown = region_info_rows(0, Some(u16::MAX));
+        assert_eq!(
+            unknown[0].label,
+            format!("\u{bb} World {}", REGION_UNAVAILABLE_NOTICE_PINNED),
+            "the notice rides the active marker on the same row"
+        );
+        assert!(!unknown[1].label.contains("unavailable"));
+        let no_zone = region_info_rows(0, None);
+        assert!(no_zone[0].label.contains(REGION_UNAVAILABLE_NOTICE_PINNED));
+
+        // Known zone or non-zero mode: the notice is gone.
+        assert_eq!(region_info_rows(0, known)[0].label, "\u{bb} World");
+        assert_eq!(region_info_rows(3, Some(u16::MAX))[0].label, "World");
+    }
+
+    #[test]
+    fn region_info_window_is_registered_dynamic_and_titled() {
+        assert!(is_dynamic(MenuKind::RegionInfo { mode: 0 }));
+        assert_eq!(menu_title(MenuKind::RegionInfo { mode: 0 }), "Region Info");
+        assert_eq!(
+            root_child_kind("Region Info", false, false),
+            Some(MenuKind::RegionInfo { mode: 0 })
+        );
     }
 }

@@ -834,6 +834,7 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::Linkshell => "Link Shell".into(),
                 kuluu_render::MenuKind::SynthLauncher => "Synthesis".into(),
                 kuluu_render::MenuKind::CraftList => "Craft List".into(),
+                kuluu_render::MenuKind::RegionInfo { .. } => "Region Info".into(),
 
                 kuluu_render::MenuKind::ItemAction { item_no, .. } => {
                     format!("ItemAction({item_no})").into()

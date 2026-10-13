@@ -305,6 +305,15 @@ pub enum MenuKind {
     /// rows, one per shell slot the server tracks (vault main_menu.md section 27).
     Linkshell,
 
+    /// The `region` window behind page-1 row 11: its handler answers only select
+    /// events, items 1..4 installing display modes 0..3 on the open window
+    /// (FFXiMain.dll retail-2026-09 RVA 0x140780; vault main_menu.md §29). The
+    /// payload is the installed mode — selects replace it in place, mirroring that
+    /// install-in-place law rather than pushing another window.
+    RegionInfo {
+        mode: u8,
+    },
+
     Items,
 
     KeyItems,

@@ -1148,6 +1148,8 @@ fn sub_target_action_for(
         // Link Shell slot rows carry no target action (vault main_menu.md section 27.6 keeps their
         // select semantics [I-pending]).
         A::LinkShellSlot { .. } => None,
+        // Region Info rows change the window's installed mode, never a target.
+        A::RegionInfoMode { .. } => None,
     }
 }
 
@@ -1695,6 +1697,9 @@ fn dispatch_dynamic_menu_action(
         // Legible-only rows until the window's select table is lawed (vault main_menu.md section
         // 27.6): kuluu will not guess what equip/unequip request retail sends from this window.
         A::LinkShellSlot { .. } => return,
+        // Region Info installs are answered at the confirm seam above (vault
+        // main_menu.md §29).
+        A::RegionInfoMode { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

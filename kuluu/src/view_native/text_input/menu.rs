@@ -2245,8 +2245,14 @@ mod menu_dispatch_tests {
             resolve_menu_entry(MenuKind::Root, "Config", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::RetailConfig)
         );
+        // Hub captions are the DAT windowpsNNN strings (vault main_menu.md §43).
         assert!(matches!(
-            resolve_menu_entry(MenuKind::RetailConfig, "Config Page 1", false, false),
+            resolve_menu_entry(
+                MenuKind::RetailConfig,
+                "Adjust the keyboard settings.",
+                false,
+                false
+            ),
             MenuDispatch::NotImplemented(_)
         ));
     }

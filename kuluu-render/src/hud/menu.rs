@@ -1342,24 +1342,25 @@ pub const MACRO_ROW_SELECT_MACRO: &str = "Select Macro";
 pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
 const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
 
-/// The configwi hub's twelve rows. Retail renders no caption strings for them
-/// — the `conf` DAT chunk is chrome-only and no d_msg catalog holds usable
-/// candidates (vault main_menu.md §35, both scans [V-negative]) — so kuluu
-/// numbers them; row order follows item ids 1..12 of handler FFXiMain.dll
-/// retail-2026-09 RVA 0x196770, labels pinned by tests.
+/// The configwi hub's twelve rows, captioned from the DAT: each `conf` chunk widget
+/// `windowpsNNN` indexes catalog table 11 = ROM/165/75.DAT at its own suffix id — the
+/// windowpsNNN caption law (vault main_menu.md §43; supersedes §35's chrome-only reading).
+/// Row order is the chunk's widget file order [V]; the handler arms of FFXiMain.dll
+/// retail-2026-09 RVA 0x196792.. name each row's page window (§35/§42 literal run
+/// .data 0x37A618..), and that arm↔widget pairing stays [I] until the arms are walked.
 const RETAIL_CONFIG_ENTRIES: &[&str] = &[
-    "Config Page 1",
-    "Config Page 2",
-    "Config Page 3",
-    "Config Page 4",
-    "Config Page 5",
-    "Config Page 6",
-    "Config Page 7",
-    "Config Page 8",
-    "Config Page 9",
-    "Config Page 10",
-    "Config Page 11",
-    "Config Page 12",
+    "Adjust the keyboard settings.",
+    "Adjust in-game settings exclusive to FINAL FANTASY XI.",
+    "Adjust the filter settings for text in the log window.",
+    "Adjust the color of different types of text in the log window.",
+    "Adjust log window settings.",
+    "Adjust miscellaneous settings for FINAL FANTASY XI.",
+    "Remove onscreen battle effects to improve frame rate.",
+    "Adjust the mouse and camera settings.",
+    "Adjust global options that affect all of PlayOnline.",
+    "Adjust other miscellaneous settings for FINAL FANTASY XI.",
+    "Designate which messages appear in which window. Only active when multiple log windows are displayed.",
+    "Adjust further miscellaneous settings for FINAL FANTASY XI.",
 ];
 
 /// The faqsub Help Desk panel's destinations. The DAT `faqs` chunk is
@@ -4601,16 +4602,28 @@ mod tests {
         );
     }
 
-    /// The configwi hub law (vault main_menu.md §35): twelve page rows in
-    /// handler item-id order, DAT-grounded title Config (comwin token 54 =
-    /// catalog string `Config`), Root `Config` row drills it, and kuluu numbers
-    /// the chrome-only captions itself.
+    /// The configwi hub law (vault main_menu.md §35/§43): twelve page rows in chunk
+    /// widget file order, each captioned by its `windowpsNNN` suffix id indexing catalog
+    /// table 11 = ROM/165/75.DAT (§43; supersedes §35's chrome-only numbering), the
+    /// DAT-grounded title Config (comwin token 54 = catalog string `Config`), and Root
+    /// `Config` drilling it.
     #[test]
     fn retail_config_hub_rows_and_title_track_the_configwi_law() {
         let entries = entries_for(MenuKind::RetailConfig, false);
         assert_eq!(entries.len(), 12);
-        assert_eq!(entries[0], "Config Page 1");
-        assert_eq!(entries[11], "Config Page 12");
+        assert_eq!(entries[0], "Adjust the keyboard settings.");
+        assert_eq!(
+            entries[6],
+            "Remove onscreen battle effects to improve frame rate."
+        );
+        assert_eq!(
+            entries[10],
+            "Designate which messages appear in which window. Only active when multiple log windows are displayed."
+        );
+        assert_eq!(
+            entries[11],
+            "Adjust further miscellaneous settings for FINAL FANTASY XI."
+        );
         assert_eq!(menu_title(MenuKind::RetailConfig), "Config");
         assert_eq!(
             root_child_kind("Config", false, false),

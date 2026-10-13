@@ -44,6 +44,7 @@ fn resolve_menu_entry(
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
         magic_category_for_label, COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
+        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
@@ -85,6 +86,16 @@ fn resolve_menu_entry(
                 Some(submenu) => MenuDispatch::OpenSubmenu(submenu),
                 None => MenuDispatch::NotImplemented(label.to_string()),
             }
+        }
+
+        // The cmbmenu launcher's rows (handler FFXiMain.dll retail-2026-09 RVA 0x1E29A0; vault
+        // main_menu.md §22/§28): select id 1 opens the bag, select id 2 drills kuluu's craft list
+        // in place of the cmbHwin/cmbhlst window pair.
+        (MenuKind::SynthLauncher, l) if l == SYNTH_ROW_PICK_MATERIAL => {
+            MenuDispatch::OpenSubmenu(MenuKind::Items)
+        }
+        (MenuKind::SynthLauncher, l) if l == SYNTH_ROW_OPEN_LIST => {
+            MenuDispatch::OpenSubmenu(MenuKind::CraftList)
         }
 
         // mgcmenu select: the category's school id (jump table 0x13F7CC; vault
@@ -320,6 +331,25 @@ pub(super) fn confirm_menu_at_cursor(
                     bag_slot,
                 }) {
                     push_system_chat_line(scene_state, format!("[menu] trade stage dropped: {e}"));
+                }
+                return None;
+            }
+            // Craft-list select: the plan was resolved against the bag when the rows
+            // were built, so this is that c2s 0x096 ask verbatim (vault main_menu.md
+            // §28); the s2c 0x06F answer lands in snapshot.synth_result.
+            if let A::SynthesizeRecipe {
+                crystal_id,
+                crystal_slot,
+                ingredients,
+            } = action
+            {
+                let ingredients = ingredients.into_iter().flatten().collect::<Vec<_>>();
+                if let Err(e) = cmd_tx.try_send(AgentCommand::Synthesize {
+                    crystal_id,
+                    crystal_slot,
+                    ingredients,
+                }) {
+                    push_system_chat_line(scene_state, format!("[menu] synth ask dropped: {e}"));
                 }
                 return None;
             }
@@ -1887,13 +1917,38 @@ mod menu_dispatch_tests {
         );
     }
 
+    /// The Synthesis row drills the cmbmenu launcher ungated, exactly like the
+    /// menuwind arm FFXiMain.dll retail-2026-09 RVA 0x1405D2 name-opens `menu
+    /// cmbmenu` with no gate (vault main_menu.md §28), and the launcher's two rows
+    /// go where select ids 1/2 of handler 0x1E29A0 take them (§22).
+    #[test]
+    fn synthesis_row_opens_the_cmbmenu_launcher() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Synthesis", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::SynthLauncher)
+        );
+        use kuluu_render::hud::menu::{SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL};
+        assert_eq!(
+            resolve_menu_entry(
+                MenuKind::SynthLauncher,
+                SYNTH_ROW_PICK_MATERIAL,
+                false,
+                false
+            ),
+            MenuDispatch::OpenSubmenu(MenuKind::Items)
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::SynthLauncher, SYNTH_ROW_OPEN_LIST, false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::CraftList)
+        );
+    }
+
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24) and
         // so is Search (vault main_menu.md §26); everything else here still
         // answers "Not supported yet".
         for label in [
-            "Synthesis",
             "Region Info",
             "Missions",
             "View House",

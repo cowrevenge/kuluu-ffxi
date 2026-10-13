@@ -832,6 +832,8 @@ pub(super) fn apply_slash_outcome(
                 // Page-1 row 10's window (vault main_menu.md §27): retail opens `menu    link5`,
                 // which is the same surface a `/menu linkshell` style entry reaches here.
                 kuluu_render::MenuKind::Linkshell => "Link Shell".into(),
+                kuluu_render::MenuKind::SynthLauncher => "Synthesis".into(),
+                kuluu_render::MenuKind::CraftList => "Craft List".into(),
 
                 kuluu_render::MenuKind::ItemAction { item_no, .. } => {
                     format!("ItemAction({item_no})").into()

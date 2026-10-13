@@ -1076,6 +1076,29 @@ pub struct SceneSnapshot {
     /// purpose, so the postcard pin stays an append.
     #[serde(default)]
     pub linkshells: LinkShells,
+
+    /// The last s2c 0x06F answer to our synthesis ask (vault main_menu.md §28;
+    /// the `cmbhlst` list's feedback row). Kept until the next ask answers, so
+    /// a closed craft window still shows what happened. Trailing on purpose.
+    #[serde(default)]
+    pub synth_result: Option<SynthOutcome>,
+}
+
+/// One synthesis answer (subset of the s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS
+/// body). `result` is a SynthesisResult code
+/// (vendor/server/src/map/enums/synthesis_result.h); LSB never fills the
+/// packet's `grade`, so kuluu carries it through untouched. `broken_items`
+/// lists each ingredient id that broke, at its recipe position (the BreakNo
+/// law in vendor/server/src/map/packets/s2c/0x06f_combine_ans.cpp).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SynthOutcome {
+    pub result: u8,
+    pub grade: i8,
+    /// `Count` — quantity gained (0 unless the synthesis produced an item).
+    pub count: u8,
+    /// `ItemNo` — the item produced; 0 while nothing came of the ask.
+    pub item_no: u16,
+    pub broken_items: Vec<u16>,
 }
 
 /// One staged slot of a player-trade offer. A gil row keeps `item_no` at the
@@ -1843,6 +1866,11 @@ pub struct SceneDelta {
     /// merge rebuilds the pair (vault main_menu.md §27).
     #[serde(default)]
     pub set_linkshells: Option<LinkShells>,
+
+    /// One synthesis answer replaces the previous one whole (s2c 0x06F; vault
+    /// main_menu.md §28).
+    #[serde(default)]
+    pub set_synth_result: Option<SynthOutcome>,
 }
 
 /// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
@@ -2511,6 +2539,7 @@ mod tests {
             trade: None,
             search: None,
             linkshells: LinkShells::default(),
+            synth_result: None,
         }
     }
 
@@ -3073,16 +3102,16 @@ mod tests {
             "trade",
             "search",
             "linkshells",
+            "synth_result",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    // Re-pinned for each trailing additive field since (§25-era: party_invite
-    // then trade, beads kuluu-o9qt7.8/.9; now search, bead kuluu-o9qt7.10): every
-    // append is exactly one 0x00 byte while the default stays None; no earlier
-    // field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // Re-pinned for each trailing additive field since §25-era party_invite/trade
+    // (then search, then linkshells, now synth_result): every append is exactly
+    // the bytes its default encodes to; no earlier field moved.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

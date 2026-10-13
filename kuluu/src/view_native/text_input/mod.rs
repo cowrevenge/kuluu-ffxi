@@ -1144,7 +1144,7 @@ fn sub_target_action_for(
         A::Emote { .. } => None,
         // Search rows go straight to the search server (Run) or stay inert
         // (hits); no sub-target cursor (vault main_menu.md section 26).
-        A::SearchRun | A::SearchHitRow { .. } => None,
+        A::SearchRun | A::SearchHitRow { .. } | A::SynthesizeRecipe { .. } => None,
         // Link Shell slot rows carry no target action (vault main_menu.md section 27.6 keeps their
         // select semantics [I-pending]).
         A::LinkShellSlot { .. } => None,
@@ -1689,6 +1689,8 @@ fn dispatch_dynamic_menu_action(
         // retail's own hit-row select semantics remain [I] (vault main_menu.md
         // section 26).
         A::SearchHitRow { .. } => return,
+        // Craft-list rows are answered at the confirm seam above (vault main_menu.md §28).
+        A::SynthesizeRecipe { .. } => return,
 
         // Legible-only rows until the window's select table is lawed (vault main_menu.md section
         // 27.6): kuluu will not guess what equip/unequip request retail sends from this window.

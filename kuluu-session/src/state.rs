@@ -564,6 +564,10 @@ pub struct SessionState {
     #[serde(default)]
     pub linkshells: kuluu_snapshot::LinkShells,
 
+    /// The last s2c 0x06F answer to our synthesis ask (vault main_menu.md §28).
+    #[serde(default)]
+    pub synth_result: Option<kuluu_snapshot::SynthOutcome>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2917,6 +2921,14 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::SynthCompleted { outcome } => {
+                // Each answer replaces the last whole (s2c 0x06F is one-shot feedback).
+                let changed = self.synth_result.as_ref() != Some(outcome);
+                if changed {
+                    self.synth_result = Some(outcome.clone());
+                }
+                changed
+            }
             AgentEvent::AuctionSellQuote { quote, .. } => {
                 let changed = self.auction.fee_quote != *quote;
                 self.auction.fee_quote = *quote;
@@ -3688,6 +3700,12 @@ pub enum AgentEvent {
         item_index: u8,
     },
 
+    /// s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS: the answer to our last synthesis
+    /// ask replaces whatever we held (vault main_menu.md §28).
+    SynthCompleted {
+        outcome: kuluu_snapshot::SynthOutcome,
+    },
+
     /// s2c AskCommit: the listing-fee quote (`quote: None` on rejection, with
     /// the LSB message code in `result` — 197 from auctionutils SellingItems).
     AuctionSellQuote {
@@ -3823,6 +3841,15 @@ pub enum AgentCommand {
         filters: Vec<ffxi_proto::search::SearchFilter>,
         #[serde(default)]
         all_pages: bool,
+    },
+
+    /// Ask one synthesis (c2s 0x096 COMBINE_ASK): the crystal's item id plus its bag slot, and
+    /// the ingredient (item id, bag slot) pairs already in the recipe row's own order — that
+    /// positional order is what the server keys on (`resolveRecipe`, vault main_menu.md §28).
+    Synthesize {
+        crystal_id: u16,
+        crystal_slot: u8,
+        ingredients: Vec<ffxi_proto::synth::SynthIngredient>,
     },
 
     Move {

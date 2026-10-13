@@ -273,6 +273,15 @@ pub enum MenuKind {
     /// vault main_menu.md §24).
     Party,
 
+    /// cmbmenu: the Synthesis row's launcher, two fixed rows - pick a bag material, or open the
+    /// craft list (handler FFXiMain.dll retail-2026-09 RVA 0x1E29A0; vault main_menu.md §22/§28).
+    SynthLauncher,
+
+    /// The kuluu craft list behind launcher row 2 (the cmbHwin/cmbhlst pair, FFXiMain.dll
+    /// retail-2026-09 RVA 0x1E29C1; vault main_menu.md §28): rows are recipes the bag can currently
+    /// satisfy, selecting sends the resolved c2s 0x096 ask.
+    CraftList,
+
     /// The trade window pair — retail opens `trade` (own side) and `gift`
     /// (partner view) together on either side of the transaction; kuluu mirrors
     /// both windows as one menu whose rows follow s2c 0x021/0x022/0x023/0x025

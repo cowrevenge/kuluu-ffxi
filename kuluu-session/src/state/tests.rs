@@ -2527,6 +2527,7 @@ fn trade_phases_fold_into_the_state_field() {
 #[allow(clippy::unneeded_struct_pattern)]
 fn _agentcommand_is_additive_only(x: &AgentCommand) {
     match x {
+        AgentCommand::Synthesize { .. } => (),
         AgentCommand::PlayerSearch { .. } => (),
         AgentCommand::Move { .. } => (),
         AgentCommand::StopMove { .. } => (),
@@ -2724,6 +2725,41 @@ fn linkshell_slot_events_fold_the_pair_and_ignore_unknown_slots() {
     }));
 }
 
+#[test]
+fn synth_answers_replace_the_last_outcome_whole() {
+    // s2c 0x06F is one-shot feedback (vault main_menu.md §28): every answer
+    // replaces whatever we held, and a duplicate answer changes nothing.
+    let mut state = SessionState::default();
+    assert!(state.synth_result.is_none());
+
+    let success = kuluu_snapshot::SynthOutcome {
+        result: ffxi_proto::synth::result::SUCCESS,
+        grade: 0,
+        count: 33,
+        item_no: 17319,
+        broken_items: vec![705],
+    };
+    assert!(state.apply_event(&AgentEvent::SynthCompleted {
+        outcome: success.clone()
+    }));
+    assert_eq!(state.synth_result.as_ref(), Some(&success));
+
+    // A later failure replaces the success whole — no merge, no queue.
+    let failed = kuluu_snapshot::SynthOutcome {
+        result: ffxi_proto::synth::result::FAILED,
+        grade: 0,
+        count: 0,
+        item_no: 0,
+        broken_items: vec![],
+    };
+    assert!(state.apply_event(&AgentEvent::SynthCompleted {
+        outcome: failed.clone()
+    }));
+    assert_eq!(state.synth_result.as_ref(), Some(&failed));
+
+    assert!(!state.apply_event(&AgentEvent::SynthCompleted { outcome: failed }));
+}
+
 /// AgentEvent is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2736,6 +2772,7 @@ fn linkshell_slot_events_fold_the_pair_and_ignore_unknown_slots() {
 #[allow(clippy::unneeded_struct_pattern)]
 fn _agentevent_is_additive_only(x: &AgentEvent) {
     match x {
+        AgentEvent::SynthCompleted { .. } => (),
         AgentEvent::PlayerSearchCompleted { .. } => (),
         AgentEvent::LinkShellSlotChanged { .. } => (),
         AgentEvent::Connected { .. } => (),

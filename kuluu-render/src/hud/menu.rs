@@ -304,6 +304,18 @@ pub enum DynamicMenuAction {
     LinkShellSlot {
         linkshell_slot: u8,
     },
+
+    /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
+    /// window pair; FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28). The plan is resolved
+    /// against the bag at render time: selecting sends exactly this c2s 0x096 ask, ingredients in
+    /// the recipe row's own positional order.
+    SynthesizeRecipe {
+        crystal_id: u16,
+        crystal_slot: u8,
+        /// Entries in recipe column order; `None` fills the empty trailing columns
+        /// (the ask's Items byte is the number of Somes).
+        ingredients: [Option<ffxi_proto::synth::SynthIngredient>; 8],
+    },
 }
 
 impl DynamicMenuAction {
@@ -708,6 +720,9 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::ItemAction { .. }
             | MenuKind::EquipSlot(_)
             | MenuKind::EmoteList
+            | MenuKind::Search
+            | MenuKind::Linkshell
+            | MenuKind::CraftList
     )
 }
 
@@ -871,6 +886,12 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Map => &[],
         // Slot rows come from the server state, never a static table (vault main_menu.md section 27).
         MenuKind::Linkshell => &[],
+        // The cmbmenu launcher's two fixed rows: select ids 1-2 of handler FFXiMain.dll
+        // retail-2026-09 RVA 0x1E29A0 (bag-pick, then craft list; vault main_menu.md §22/§28). No DAT
+        // caption was recovered for either row (§22 caption law), so kuluu's labels are pinned by tests.
+        MenuKind::SynthLauncher => SYNTH_LAUNCHER_ENTRIES,
+        // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
+        MenuKind::CraftList => &[],
     }
 }
 
@@ -903,6 +924,8 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // Neither `lscswin` nor the `linkN` records carry inline captions (vault main_menu.md
         // section 27.5), so kuluu titles its slot window after the Root row, like Party/Trade/Search.
         MenuKind::Linkshell => "Link Shell",
+        MenuKind::SynthLauncher => "Synthesis",
+        MenuKind::CraftList => "Craft List",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1155,6 +1178,63 @@ pub fn linkshell_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<Dynami
         .collect()
 }
 
+/// The cmbmenu launcher's two rows. Neither window carries DAT captions (§22 caption law: the
+/// `cmbmenu`/`cmbhlst` mini-chunks are chrome-only and no short craft strings exist in the ROM/165
+/// message catalog), so these kuluu-picked labels stand pinned by tests; their order follows
+/// select ids 1-2 of handler FFXiMain.dll retail-2026-09 RVA 0x1E29A0 (vault main_menu.md §22/§28).
+pub const SYNTH_ROW_PICK_MATERIAL: &str = "Synthesize from a bag item";
+pub const SYNTH_ROW_OPEN_LIST: &str = "Open the craft list";
+const SYNTH_LAUNCHER_ENTRIES: &[&str] = &[SYNTH_ROW_PICK_MATERIAL, SYNTH_ROW_OPEN_LIST];
+
+/// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
+/// tier substitutable by element and all positional ingredients assignable to bag slots under
+/// LSB's per-stack use law (vault main_menu.md §28; `resolveRecipe`,
+/// `GP_CLI_COMMAND_COMBINE_ASK::process`). The row carries its full ask plan so the select is a
+/// straight send. Rows keep recipe-id order for stable paging.
+pub fn craft_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let bag: Vec<(u8, u16, u32)> = snap
+        .inventory_main()
+        .iter()
+        .filter(|slot| slot.item_no != 0 && slot.quantity > 0)
+        .map(|slot| (slot.index, slot.item_no, slot.quantity))
+        .collect();
+    let mut rows = Vec::new();
+    for recipe in ffxi_vocab::craft::SYNTH_RECIPES {
+        // A key-item gate means the server cancels without it (`resolveRecipe`).
+        if recipe.key_item != 0 && !snap.key_items.contains(&(recipe.key_item as u16)) {
+            continue;
+        }
+        let Some((crystal_slot, held_crystal_id)) = bag.iter().find_map(|(slot, id, _)| {
+            ffxi_vocab::craft::crystal_accepts(recipe.crystal, *id).then_some((*slot, *id))
+        }) else {
+            continue;
+        };
+        let needed: Vec<u16> = recipe
+            .ingredients
+            .iter()
+            .copied()
+            .filter(|&i| i != 0)
+            .collect();
+        let Some(entries) = ffxi_proto::synth::assign_ingredient_slots(&needed, &bag, crystal_slot)
+        else {
+            continue;
+        };
+        let mut plan: [Option<ffxi_proto::synth::SynthIngredient>; 8] = [None; 8];
+        for (cell, entry) in plan.iter_mut().zip(entries) {
+            *cell = Some(entry);
+        }
+        rows.push(DynamicMenuRow {
+            label: recipe.name.to_string(),
+            action: DynamicMenuAction::SynthesizeRecipe {
+                crystal_id: held_crystal_id,
+                crystal_slot,
+                ingredients: plan,
+            },
+        });
+    }
+    rows
+}
+
 pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> Option<MenuKind> {
     Some(match label {
         "Magic" if flat_magic => MenuKind::Magic,
@@ -1174,6 +1254,9 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // (FFXiMain.dll retail-2026-09; vault main_menu.md §26).
         "Search" => MenuKind::Search,
         "Linkshell" => MenuKind::Linkshell,
+        // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
+        // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
+        "Synthesis" => MenuKind::SynthLauncher,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1415,6 +1498,9 @@ pub fn refresh_dynamic_menu_rows(
         // Link Shell slots (helper FFXiMain.dll retail-2026-09 RVA 0x1E4470 always opens
         // `menu    link5`; vault main_menu.md section 27).
         MenuKind::Linkshell => linkshell_window_rows(snap),
+        // The craft list (kuluu surface for the cmbHwin/cmbhlst pair behind cmbmenu row 2;
+        // FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28).
+        MenuKind::CraftList => craft_list_rows(snap),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -3623,6 +3709,171 @@ mod tests {
                 qty: 1,
                 bag_slot: 4,
             }
+        );
+    }
+
+    fn craft_bag(items: &[(u8, u16, u32)], key_items: &[u16]) -> kuluu_snapshot::SceneSnapshot {
+        kuluu_snapshot::SceneSnapshot {
+            containers: vec![kuluu_snapshot::ContainerView {
+                id: 0,
+                capacity: 30,
+                items: items
+                    .iter()
+                    .map(|(index, item_no, quantity)| kuluu_snapshot::InventoryItem {
+                        container: 0,
+                        index: *index,
+                        item_no: *item_no,
+                        quantity: *quantity,
+                        locked: false,
+                        unselectable: false,
+                        charges_remaining: None,
+                        next_use_vana_ts: None,
+                        use_delay_end_vana_ts: None,
+                        ready: None,
+                    })
+                    .collect(),
+            }],
+            key_items: key_items.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn plan_of(row: &DynamicMenuRow) -> Vec<ffxi_proto::synth::SynthIngredient> {
+        match row.action {
+            DynamicMenuAction::SynthesizeRecipe { ingredients, .. } => {
+                ingredients.into_iter().flatten().collect()
+            }
+            other => panic!("expected a synth plan, got {other:?}"),
+        }
+    }
+
+    fn crystal_of(row: &DynamicMenuRow) -> (u16, u8) {
+        match row.action {
+            DynamicMenuAction::SynthesizeRecipe {
+                crystal_id,
+                crystal_slot,
+                ..
+            } => (crystal_id, crystal_slot),
+            other => panic!("expected a synth plan, got {other:?}"),
+        }
+    }
+
+    /// Craft-list law (vault main_menu.md §28): a recipe earns a row when its crystal passes the
+    /// element-tier gate (`crystalProps` folds tiers; `resolveRecipe` keys on the folded name) and
+    /// every positional ingredient assigns to bag slots under LSB's per-stack use law. Rows carry
+    /// the wire plan verbatim, in recipe-id order; key-item gates mirror `resolveRecipe`.
+    #[test]
+    fn craft_list_rows_are_the_recipes_the_bag_can_currently_satisfy() {
+        assert!(craft_list_rows(&kuluu_snapshot::SceneSnapshot::default()).is_empty());
+
+        // synth_recipes rows 1-3: Banquet Table (earth crystal + 3553/3554/3555), Arrowwood
+        // Lumber (wind crystal + one 688), and the key-item-1986 synth (688 x3 + 1657). The seeded
+        // crystals are each ONE TIER UP (CYCLONE for wind, TERRA for earth) to also prove the §28
+        // element-tier substitution law on every row.
+        let bag = craft_bag(
+            &[
+                (2, 4240, 1),
+                (3, 4241, 1),
+                (5, 3553, 1),
+                (6, 3554, 1),
+                (7, 3555, 1),
+                (8, 688, 3),
+                (9, 1657, 1),
+            ],
+            &[1986],
+        );
+        let rows = craft_list_rows(&bag);
+
+        let table = rows
+            .iter()
+            .find(|r| r.label == "Banquet Table")
+            .expect("row 1");
+        assert_eq!(crystal_of(table), (4241, 3));
+        assert_eq!(
+            plan_of(table).iter().map(|e| e.item_id).collect::<Vec<_>>(),
+            vec![3553, 3554, 3555],
+            "entries keep the recipe row's own column order"
+        );
+
+        // Stack law on the KI synth: three copies of item 688 share ONE slot-8 stack (LSB counts
+        // uses per slot against the quantity - slotQty in GP_CLI_COMMAND_COMBINE_ASK::process).
+        let triple = rows
+            .iter()
+            .find(|r| plan_of(r).iter().any(|e| e.item_id == 1657))
+            .expect("the KI synth");
+        assert_eq!(triple.label, "Arrowwood Lumber");
+        assert_eq!(
+            plan_of(triple)
+                .iter()
+                .map(|e| (e.item_id, e.inv_slot))
+                .collect::<Vec<_>>(),
+            vec![(688, 8), (688, 8), (688, 8), (1657, 9)]
+        );
+
+        // Id order: Banquet Table (id 1) precedes both Arrowwood rows (ids 2 and 3), and the KI gate
+        // drops id 3 when the key item is unknown (`resolveRecipe`).
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        let first_table = labels.iter().position(|l| *l == "Banquet Table").unwrap();
+        let last_row = labels.len() - 1;
+        assert!(labels[..last_row].contains(&"Arrowwood Lumber"));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.label == "Arrowwood Lumber")
+                .count(),
+            2,
+            "id order keeps both Arrowwood rows after Banquet Table (pos {first_table})"
+        );
+
+        let no_ki = craft_bag(
+            &[
+                (2, 4240, 1),
+                (3, 4241, 1),
+                (5, 3553, 1),
+                (6, 3554, 1),
+                (7, 3555, 1),
+                (8, 688, 3),
+            ],
+            &[],
+        );
+        assert_eq!(
+            craft_list_rows(&no_ki)
+                .iter()
+                .filter(|r| r.label == "Arrowwood Lumber")
+                .count(),
+            1,
+            "without KI 1986 the server cancels that recipe"
+        );
+
+        // A bag without any matching crystal earns nothing even when materials sit there.
+        let no_crystal = craft_bag(&[(5, 3553, 1), (6, 3554, 1), (7, 3555, 1)], &[]);
+        assert!(craft_list_rows(&no_crystal)
+            .iter()
+            .all(|r| r.label != "Banquet Table"));
+    }
+
+    /// The `is_dynamic` registry must list every kind whose rows come from the refresh arms;
+    /// Search and Linkshell were missing it until the craft-list round (§26/§27 surfaces).
+    #[test]
+    fn server_state_windows_are_registered_as_dynamic() {
+        assert!(is_dynamic(MenuKind::Search));
+        assert!(is_dynamic(MenuKind::Linkshell));
+        assert!(is_dynamic(MenuKind::CraftList));
+    }
+
+    /// The cmbmenu launcher law (vault main_menu.md §22/§28): two fixed rows in select-id order;
+    /// the window keeps the Synthesis title, and the Root row drills it directly. Captions stay
+    /// [I] from DATs (§22 caption law), so kuluu's labels are pinned here instead.
+    #[test]
+    fn synth_launcher_rows_and_title_track_the_cmbmenu_law() {
+        assert_eq!(
+            entries_for(MenuKind::SynthLauncher, false),
+            &[SYNTH_ROW_PICK_MATERIAL, SYNTH_ROW_OPEN_LIST]
+        );
+        assert_eq!(menu_title(MenuKind::SynthLauncher), "Synthesis");
+        assert_eq!(menu_title(MenuKind::CraftList), "Craft List");
+        assert_eq!(
+            root_child_kind("Synthesis", false, false),
+            Some(MenuKind::SynthLauncher)
         );
     }
 

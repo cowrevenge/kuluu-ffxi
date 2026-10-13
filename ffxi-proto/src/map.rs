@@ -191,6 +191,11 @@ pub mod c2s {
     // Stage one slot of our offer: ItemNum u32 (qty; gil amount when ItemNo is GIL)
     // + ItemNo u16 + ItemIndex u8 (bag slot) + TradeIndex u8 (slot 0 = gil).
     pub const TRADE_LIST: u16 = 0x034;
+
+    // GP_CLI_COMMAND_COMBINE_ASK, vendor/server/src/map/packets/c2s/0x096_combine_ask.h.
+    // One synthesis attempt: crystal item id + its bag slot, then up to 8
+    // ingredient (id, bag-slot) pairs in the recipe row's own order ([`crate::synth`]).
+    pub const COMBINE_ASK: u16 = 0x096;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -550,6 +555,11 @@ pub mod s2c {
     // GP_SERV_COMMAND_ITEM_TRADE_MYLIST, vendor/server/src/map/packets/s2c/0x025_item_trade_mylist.h.
     // One slot of MY trade offer refreshed (server echo after c2s TRADE_LIST).
     pub const ITEM_TRADE_MYLIST: u16 = 0x025;
+
+    // GP_SERV_COMMAND_COMBINE_ANS, vendor/server/src/map/packets/s2c/0x06f_combine_ans.h.
+    // The answer to a synthesis ask (result code, gained item, broken
+    // ingredients; [`crate::synth::parse_combine_ans`]).
+    pub const COMBINE_ANS: u16 = 0x06F;
 
     pub const BATTLE2: u16 = 0x028;
 

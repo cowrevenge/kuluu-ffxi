@@ -1926,6 +1926,21 @@ fn handle_sub_packet(
             }
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
+        // The synthesis answer (vault main_menu.md §28): one-shot feedback for our own ask.
+        s2c::COMBINE_ANS => match ffxi_proto::synth::parse_combine_ans(sub.data) {
+            Ok(a) => {
+                let _ = event_tx.send(AgentEvent::SynthCompleted {
+                    outcome: kuluu_snapshot::SynthOutcome {
+                        result: a.result,
+                        grade: a.grade,
+                        count: a.count,
+                        item_no: a.item_no,
+                        broken_items: a.break_nos.into_iter().filter(|&id| id != 0).collect(),
+                    },
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
         s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {
@@ -3991,6 +4006,30 @@ async fn keepalive_loop(
                             filters,
                             all_pages,
                         );
+                    }
+                    // One synthesis attempt (c2s 0x096, vault main_menu.md §28). The
+                    // HashNo byte stays 0: LSB's validate()/process never read it.
+                    Some(AgentCommand::Synthesize {
+                        crystal_id,
+                        crystal_slot,
+                        ingredients,
+                    }) => {
+                        if ingredients.is_empty() || ingredients.len() > 8 {
+                            continue; // the server's Items 1..=8 validate law
+                        }
+                        let payload = build_subpacket_combine_ask(
+                            sub_seq,
+                            crystal_id,
+                            crystal_slot,
+                            &ingredients,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "synth ask send failed");
+                        }
                     }
                     Some(AgentCommand::AhBid {
                         item_id,

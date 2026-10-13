@@ -730,6 +730,28 @@ pub(crate) fn build_subpacket_trade_list(
     buf
 }
 
+/// GP_CLI_COMMAND_COMBINE_ASK (vendor/server/src/map/packets/c2s/
+/// 0x096_combine_ask.h; vault main_menu.md §28): header + the 32-byte body,
+/// built by [`ffxi_proto::synth::encode_combine_ask`] with a zero HashNo
+/// (LSB never reads that byte).
+pub(crate) fn build_subpacket_combine_ask(
+    sync: u16,
+    crystal_id: u16,
+    crystal_slot: u8,
+    ingredients: &[ffxi_proto::synth::SynthIngredient],
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 4 + ffxi_proto::synth::ASK_BODY_LEN];
+    // One header word plus an eight-word body.
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::COMBINE_ASK,
+        9,
+        sync,
+    ));
+    let body = ffxi_proto::synth::encode_combine_ask(0, crystal_id, crystal_slot, ingredients);
+    buf[4..].copy_from_slice(&body);
+    buf
+}
+
 pub(crate) fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(

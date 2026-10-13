@@ -21,6 +21,9 @@ const LSB_ITEM_BASIC_SQL: &str = "../vendor/server/sql/item_basic.sql";
 const LSB_ITEM_EQUIPMENT_SQL: &str = "../vendor/server/sql/item_equipment.sql";
 const LSB_ITEM_USABLE_SQL: &str = "../vendor/server/sql/item_usable.sql";
 const LSB_ITEM_WEAPON_SQL: &str = "../vendor/server/sql/item_weapon.sql";
+const LSB_SYNTH_RECIPES_SQL: &str = "../vendor/server/sql/synth_recipes.sql";
+const LSB_SYNTHUTILS_CPP: &str = "../vendor/server/src/map/utils/synthutils.cpp";
+const LSB_ITEMS_H: &str = "../vendor/server/src/map/items.h";
 const LSB_STATUS_EFFECTS_YAML: &str = "../vendor/server/data/status_effects.yaml";
 const LSB_STATUS_EFFECT_FLAG_YAML: &str = "../vendor/server/data/enums/status_effect_flag.yaml";
 const LSB_ZONE_ENUM_YAML: &str = "../vendor/server/data/enums/zone.yaml";
@@ -68,10 +71,13 @@ mod floor {
     pub const MOB_SKILL_ANIMATION: usize = scrape_floor(4344);
     pub const EMOTE: usize = scrape_floor(51);
     pub const TRANSPORT: usize = scrape_floor(24);
+    pub const SYNTH_RECIPE: usize = scrape_floor(4390);
+    pub const SYNTH_CRYSTAL_GROUP: usize = scrape_floor(8);
 }
 
 fn main() -> Result<()> {
     scrape_transport()?;
+    scrape_synth()?;
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={LSB_MSG_BASIC_H}");
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
@@ -85,6 +91,9 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_ITEM_EQUIPMENT_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_USABLE_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_WEAPON_SQL}");
+    println!("cargo:rerun-if-changed={LSB_SYNTH_RECIPES_SQL}");
+    println!("cargo:rerun-if-changed={LSB_SYNTHUTILS_CPP}");
+    println!("cargo:rerun-if-changed={LSB_ITEMS_H}");
     println!("cargo:rerun-if-changed={LSB_STATUS_EFFECTS_YAML}");
     println!("cargo:rerun-if-changed={LSB_STATUS_EFFECT_FLAG_YAML}");
     println!("cargo:rerun-if-changed={LSB_EMOTE_H}");
@@ -1322,4 +1331,298 @@ fn scrape_transport() -> Result<()> {
         output,
     )?;
     Ok(())
+}
+
+/// Mirror of the recipe table LSB loads at boot (`LoadSynthRecipes` reads
+/// vendor/server/sql/synth_recipes.sql) plus the crystal element groups from its
+/// `crystalProps`. The server resolves a synth ask by keying against these exact
+/// rows (`resolveRecipe`, `SynthRecipe::ingredientKey` in
+/// vendor/server/src/map/utils/synthutils.cpp), so kuluu can only offer what the
+/// table carries, and an ask must name ingredients in the row's own order.
+fn scrape_synth() -> Result<()> {
+    println!("cargo:rerun-if-changed={LSB_SYNTH_RECIPES_SQL}");
+    println!("cargo:rerun-if-changed={LSB_SYNTHUTILS_CPP}");
+    let items_src =
+        fs::read_to_string(LSB_ITEMS_H).with_context(|| format!("reading {LSB_ITEMS_H}"))?;
+    let synthutils_src = fs::read_to_string(LSB_SYNTHUTILS_CPP)
+        .with_context(|| format!("reading {LSB_SYNTHUTILS_CPP}"))?;
+
+    let mut output = String::from("pub const SYNTH_CRYSTAL_GROUPS: &[CrystalGroup] = &[\n");
+    let groups = scrape_crystal_groups(&synthutils_src, &items_src)?;
+    for (element, crystals) in &groups {
+        let ids = crystals
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!(
+            "    CrystalGroup {{ element: {}, crystals: [{ids}] }},\n",
+            rust_string_literal(element)
+        ));
+    }
+    output.push_str("];\n");
+    check_scrape_count(
+        "crystal element groups",
+        LSB_SYNTHUTILS_CPP,
+        groups.len(),
+        floor::SYNTH_CRYSTAL_GROUP,
+    )?;
+
+    let recipe_src = fs::read_to_string(LSB_SYNTH_RECIPES_SQL)
+        .with_context(|| format!("reading {LSB_SYNTH_RECIPES_SQL}"))?;
+    output.push_str("\npub const SYNTH_RECIPES: &[SynthRecipe] = &[\n");
+    let mut count = 0usize;
+    for (id, f) in sql_rows(&recipe_src, "synth_recipes")? {
+        if f.len() != RECIPE_COLUMNS {
+            bail!(
+                "synth_recipes row {id} has {} columns, expected {RECIPE_COLUMNS}",
+                f.len()
+            );
+        }
+        let num = |name: &str, i: usize| -> Result<u64> {
+            f[i].trim()
+                .parse::<u64>()
+                .with_context(|| format!("synth_recipes row {id} column `{name}` is {:?}", f[i]))
+        };
+        let num8 = |name: &str, i: usize| -> Result<u8> {
+            u8::try_from(num(name, i)?).with_context(|| format!("column `{name}` of row {id}"))
+        };
+        let num16 = |name: &str, i: usize| -> Result<u16> {
+            u16::try_from(num(name, i)?).with_context(|| format!("column `{name}` of row {id}"))
+        };
+
+        // CRAFT_DESYNTHESIS (vendor/server/src/map/items/craft_state.h) is the
+        // only mode LSB branches on for this column.
+        let desynth = match num("Desynth", 1)? {
+            0 => false,
+            1 => true,
+            value => bail!("synth_recipes row {id} has Desynth {value}, expected 0/1"),
+        };
+        let key_item = u32::try_from(num("KeyItem", 2)?)
+            .with_context(|| format!("column `KeyItem` of row {id}"))?;
+
+        // The eight skill columns (Wood..Cook) and Ingredient1..8 keep their SQL
+        // column order — that order is what `ingredientKey` joins and what the
+        // per-skill difficulty check reads.
+        let skills = (0..8usize)
+            .map(|k| num8(&format!("skill {}", k + 1), 3 + k))
+            .collect::<Result<Vec<u8>>>()?;
+        let crystal = num16("Crystal", 11)?;
+        let hq_crystal = num16("HQCrystal", 12)?;
+        let ingredients = (0..8usize)
+            .map(|k| num16(&format!("Ingredient{}", k + 1), 13 + k))
+            .collect::<Result<Vec<u16>>>()?;
+        let result = num16("Result", 21)?;
+        let results_hq = (0..3usize)
+            .map(|k| num16(&format!("ResultHQ{}", k + 1), 22 + k))
+            .collect::<Result<Vec<u16>>>()?;
+        // ResultQty, then the three HQ quantities.
+        let qty = (0..4usize)
+            .map(|k| num8(&format!("ResultQty{k}"), 25 + k))
+            .collect::<Result<Vec<u8>>>()?;
+
+        let name = unquote_dump_string(f[29])
+            .with_context(|| format!("synth_recipes row {id} has a non-string ResultName"))?;
+        let content_tag = if f[30].trim() == "NULL" {
+            None
+        } else {
+            Some(unquote_dump_string(f[30]).with_context(|| {
+                format!("synth_recipes row {id} has a bad content_tag {:?}", f[30])
+            })?)
+        };
+
+        let list = |v: &[u16]| v.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+        output.push_str(&format!(
+            "    SynthRecipe {{ id: {id}, desynth: {desynth}, key_item: {key_item}, skill_required: [{}], crystal: {crystal}, hq_crystal: {hq_crystal}, ingredients: [{}], result: {result}, result_hq: [{}], qty: [{}], name: {}, content_tag: {} }},\n",
+            skills.iter().map(u8::to_string).collect::<Vec<_>>().join(", "),
+            list(&ingredients),
+            list(&results_hq),
+            qty.iter().map(u8::to_string).collect::<Vec<_>>().join(", "),
+            rust_string_literal(&name),
+            match &content_tag {
+                None => "None".to_string(),
+                Some(tag) => format!("Some({})", rust_string_literal(tag)),
+            },
+        ));
+        count += 1;
+    }
+    output.push_str("];\n");
+    check_scrape_count(
+        "synth recipes",
+        LSB_SYNTH_RECIPES_SQL,
+        count,
+        floor::SYNTH_RECIPE,
+    )?;
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
+    fs::write(out_dir.join("craft_table.rs"), output)?;
+    Ok(())
+}
+
+/// Column count of the `synth_recipes` CREATE TABLE in synth_recipes.sql.
+const RECIPE_COLUMNS: usize = 31;
+
+/// Every active `INSERT INTO `<table>` VALUES (...)` row in order: column-0 id +
+/// raw fields (commented-out recipes start with a `-- ` prefix and never match).
+/// mysqldump escapes quotes inside strings as `\'`, which the shared
+/// lsb_scrape splitters do not skip, so this family walks its own scanner.
+fn sql_rows<'a>(src: &'a str, table: &str) -> Result<Vec<(u32, Vec<&'a str>)>> {
+    let needle = format!("INSERT INTO `{table}` VALUES ");
+    let mut rows = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim().strip_prefix(needle.as_str()) else {
+            continue;
+        };
+        let mut cursor = rest;
+        while let Some(open) = cursor.find('(') {
+            cursor = &cursor[open + 1..];
+            let Some((tuple, after)) = split_backslash_tuple(cursor) else {
+                break;
+            };
+            // A trailing `;` ends the statement; anything past it is a line
+            // comment (many recipes carry `(typo?)`-style notes that would
+            // otherwise read as another tuple).
+            if after.starts_with(';') {
+                let fields = split_backslash_fields(tuple);
+                let id = fields
+                    .first()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .with_context(|| {
+                        format!("{table} row without a numeric ID: {}", tuple.len())
+                    })?;
+                rows.push((id, fields));
+                break;
+            }
+            cursor = after;
+            let fields = split_backslash_fields(tuple);
+            let id = fields
+                .first()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .with_context(|| format!("{table} row without a numeric ID: {}", tuple.len()))?;
+            rows.push((id, fields));
+        }
+    }
+    if rows.is_empty() {
+        bail!("parsed zero rows from `INSERT INTO {table}` — SQL format may have changed");
+    }
+    Ok(rows)
+}
+
+/// `(...)` body up to the closing paren, treating `\x` as one escaped unit even
+/// inside strings (the mysqldump escape law).
+fn split_backslash_tuple(s: &str) -> Option<(&str, &str)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        if in_string && bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => in_string = !in_string,
+            b')' if !in_string => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_backslash_fields(tuple: &str) -> Vec<&str> {
+    let bytes = tuple.as_bytes();
+    let mut fields = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_string = false;
+    while i < bytes.len() {
+        if in_string && bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => in_string = !in_string,
+            b',' if !in_string => {
+                fields.push(&tuple[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    fields.push(&tuple[start..]);
+    fields
+}
+
+/// Unquote one mysqldump string field: strip the surrounding quotes and collapse
+/// every `\x` escape to its bare character.
+fn unquote_dump_string(field: &str) -> Option<String> {
+    let inner = field.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push(chars.next()?);
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// The `case NAME:` chains before each `return { ELEMENT_X, .. };` of
+/// `crystalProps` (vendor/server/src/map/utils/synthutils.cpp) are one element's
+/// crystal tiers; names resolve through the constants in items.h.
+fn scrape_crystal_groups(synthutils_src: &str, items_src: &str) -> Result<Vec<(String, Vec<u16>)>> {
+    let mut ids = std::collections::HashMap::new();
+    for line in items_src.lines() {
+        let Some((name, value)) = line
+            .trim()
+            .strip_suffix(',')
+            .and_then(|t| t.split_once('='))
+        else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<u64>() else {
+            continue;
+        };
+        ids.entry(name.trim().to_string()).or_insert(value);
+    }
+
+    let start = synthutils_src
+        .find("auto crystalProps(uint16 itemId)")
+        .context("`crystalProps` not found in synthutils.cpp — did LSB rename it?")?;
+    let mut groups = Vec::new();
+    let mut pending: Vec<u16> = Vec::new();
+    for line in synthutils_src[start..].lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed
+            .strip_prefix("case ")
+            .and_then(|s| s.strip_suffix(':'))
+        {
+            let raw = *ids
+                .get(name)
+                .with_context(|| format!("crystal `{name}` is not an items.h constant"))?;
+            pending.push(
+                u16::try_from(raw).with_context(|| format!("crystal `{name}` overflows u16"))?,
+            );
+        } else if trimmed.starts_with("return { ELEMENT_") {
+            let element = trimmed
+                .split("ELEMENT_")
+                .nth(1)
+                .and_then(|s| s.split(',').next())
+                .with_context(|| format!("malformed crystalProps return: {trimmed}"))?
+                .to_string();
+            anyhow::ensure!(
+                pending.len() == 3,
+                "crystal element {element} carries {} tiers, expected 3",
+                pending.len()
+            );
+            groups.push((element, std::mem::take(&mut pending)));
+        } else if trimmed.starts_with("return {") {
+            // The final `return { 0, SynthesisEffect::None };` ends crystalProps.
+            break;
+        }
+    }
+    Ok(groups)
 }

@@ -244,6 +244,16 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if let Some(search) = &delta.set_search {
         snap.search = search.clone();
     }
+    // Both shell slots ride one field: each s2c 0x0E0 rebuilds the pair whole
+    // before it reaches the delta (vault main_menu.md §27).
+    if let Some(linkshells) = &delta.set_linkshells {
+        snap.linkshells = *linkshells;
+    }
+    // The last synthesis answer is replaced whole by the next one (s2c 0x06F;
+    // vault main_menu.md §28).
+    if let Some(synth_result) = &delta.set_synth_result {
+        snap.synth_result = Some(synth_result.clone());
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

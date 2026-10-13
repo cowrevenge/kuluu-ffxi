@@ -690,6 +690,15 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub interactive_status_rows: bool,
 
+    /// Retail+ gate for re-selecting the item already in an equip slot to unequip it. The retail
+    /// equipment window's command-event handler has no toggle-off branch - every select case equips
+    /// (FFXiMain.dll retail-2026-09 RVA 0x1322B0, jump table 0x132608; vault main_menu.md
+    /// §20). The unequip-on-reselect behavior rides on LSB
+    /// leniency (vendor/server/src/map/utils/charutils.cpp EquipItem: slotID of zero = unequip) and
+    /// is OFF by default, i.e. retail's idempotent re-equip.
+    #[serde(default)]
+    pub reselect_unequip: bool,
+
     /// Retail+ gate: the player character ignores knockback displacement (the push and the
     /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
     /// The `enhanced-ignore-knockback-self` feature is its compile-time half: without it this
@@ -1012,6 +1021,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1061,6 +1071,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1110,6 +1121,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso2x,
                 bloom_intensity: 0.04,
@@ -1159,6 +1171,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
@@ -1212,6 +1225,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
@@ -1262,6 +1276,7 @@ impl GraphicsSettings {
                 job_display: false,
                 mob_hp_under: false,
                 interactive_status_rows: false,
+                reselect_unequip: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso16x,
                 bloom_intensity: 0.16,

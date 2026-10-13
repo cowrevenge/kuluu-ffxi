@@ -150,6 +150,7 @@ pub(super) fn handle_target_action_key(
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     trade_intent: &mut MessageWriter<kuluu_render::hud::trade::TradeIntent>,
     lock_on: &mut kuluu_render::LockOn,
+    reselect_unequip_enabled: bool,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
     use kuluu_render::input_mode::SubAction;
@@ -168,6 +169,7 @@ pub(super) fn handle_target_action_key(
             current_target,
             entities,
             cmd_tx,
+            reselect_unequip_enabled,
         );
     }
 
@@ -505,6 +507,7 @@ fn handle_abilities_group_key(
     current_target: Option<u32>,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    reselect_unequip_enabled: bool,
 ) -> Option<InputMode> {
     let rows = kuluu_render::hud::menu::ability_group_rows(&scene_state.snapshot, group);
     let count = rows.len();
@@ -552,6 +555,7 @@ fn handle_abilities_group_key(
                 entities,
                 cmd_tx,
                 scene_state,
+                reselect_unequip_enabled,
             );
             return Some(InputMode::World);
         }

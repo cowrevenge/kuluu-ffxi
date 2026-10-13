@@ -548,6 +548,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.trade_state,
                     &mut slash_writers.trade_intent,
                     &mut slash_writers.lock_on,
+                    slash_writers.graphics.reselect_unequip,
                 ) {
                     *mode = next;
                 }
@@ -560,6 +561,7 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &entities,
                     &cmd_tx.0,
+                    slash_writers.graphics.reselect_unequip,
                 ) {
                     *mode = next;
                 }
@@ -1330,6 +1332,7 @@ fn handle_sub_target_key(
     scene_state: &mut SceneState,
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
+    reselect_unequip_enabled: bool,
 ) -> Option<InputMode> {
     use ffxi_vocab::valid_target::TargetFlags;
     use kuluu_render::input_mode::SubTargetAction;
@@ -1412,6 +1415,7 @@ fn handle_sub_target_key(
             entities,
             cmd_tx,
             scene_state,
+            reselect_unequip_enabled,
         );
         return Some(InputMode::World);
     }
@@ -1431,6 +1435,7 @@ fn dispatch_dynamic_menu_action(
     entities: &[kuluu_snapshot::Entity],
     cmd_tx: &Sender<AgentCommand>,
     scene_state: &mut SceneState,
+    reselect_unequip_enabled: bool,
 ) {
     use kuluu_render::hud::menu::DynamicMenuAction as A;
     // Refuse an ability still on recast client-side (retail blocks it locally rather
@@ -1660,12 +1665,15 @@ fn dispatch_dynamic_menu_action(
                 .copied()
                 .flatten()
                 == Some(item_no);
-            if already_equipped {
-                // Re-selecting the item already in this slot toggles it off.
-                // LSB unequips when slotID (container_index) is 0, regardless of
-                // container: vendor/server/src/map/utils/charutils.cpp EquipItem
-                // ("slotID of zero = unequip"). LOC_INVENTORY (0) always passes
-                // the equip_set container validation.
+            // Retail's equipment handler equips on every select case - its command-event jump
+            // table has no toggle-off branch (FFXiMain.dll retail-2026-09 RVA 0x1322B0,
+            // table 0x132608; vault main_menu.md §20), so re-selecting the equipped item is an
+            // idempotent equip there. The unequip-on-reselect path below rides on LSB leniency
+            // (vendor/server/src/map/utils/charutils.cpp EquipItem: slotID of zero = unequip)
+            // and is the kuluu enhancement, off by default behind GraphicsSettings.reselect_unequip.
+            if reselect_unequip_enabled && already_equipped {
+                // LSB unequips when slotID (container_index) is 0, regardless of container;
+                // LOC_INVENTORY (0) always passes the equip_set container validation.
                 (
                     "unequip",
                     AgentCommand::Equip {
@@ -3321,6 +3329,7 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
+            false,
         );
         assert!(
             next.is_none(),
@@ -3345,6 +3354,47 @@ mod sub_target_pick_tests {
             "the sent candidate must arm the answer wait"
         );
         assert!(st.pending_since.is_some());
+    }
+
+    /// Retail's equipment handler equips on every select case - no toggle-off branch in its
+    /// command-event jump table (FFXiMain.dll retail-2026-09 RVA 0x1322B0 / 0x132608, vault
+    /// main_menu.md §20) - so re-selecting the item already worn must dispatch a plain equip,
+    /// not LSB's slotID-0 unequip sentinel (vendor/server/src/map/utils/charutils.cpp EquipItem).
+    /// The sentinel goes out only with the Retail+ "Reselect Unequip" toggle on.
+    #[test]
+    fn equip_reselect_sends_plain_equip_unless_the_toggle_is_on() {
+        use kuluu_render::hud::menu::DynamicMenuAction;
+
+        const SLOT: usize = 2;
+        const WORN_ITEM: u16 = 7;
+        for (toggle, want_slot_id) in [(false, 9u8), (true, 0u8)] {
+            let mut scene = SceneState::default();
+            scene.snapshot.equipped[SLOT] = Some(WORN_ITEM);
+            let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+            dispatch_dynamic_menu_action(
+                DynamicMenuAction::EquipItem {
+                    container: 0,
+                    container_index: 9,
+                    equip_slot: SLOT as u8,
+                    item_no: WORN_ITEM,
+                },
+                None,
+                Default::default(),
+                &[],
+                &cmd_tx,
+                &mut scene,
+                toggle,
+            );
+            let sent = cmd_rx
+                .try_recv()
+                .expect("an equip select must always send an update");
+            assert!(
+                matches!(sent, AgentCommand::Equip { container: 0, container_index, .. }
+                    if container_index == want_slot_id),
+                "toggle={toggle}: {} expected slot id {want_slot_id}: {sent:?}",
+                if toggle { "on" } else { "off (retail default)" }
+            );
+        }
     }
 
     /// The candidate sits inside the sub-target range, beyond the engage
@@ -3377,6 +3427,7 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
+            false,
         );
         assert!(
             next.is_none(),
@@ -3499,6 +3550,7 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
+            false,
         );
         assert!(
             st.pending_switch.is_some(),
@@ -3511,6 +3563,7 @@ mod sub_target_pick_tests {
             &mut scene,
             &entities,
             &cmd_tx,
+            false,
         );
         assert_eq!(
             st.pending_switch, None,

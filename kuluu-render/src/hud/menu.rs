@@ -387,6 +387,10 @@ pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
 /// Makes the Status panel's rows actionable. Retail opens persona, which answers no menu command
 /// events (FFXiMain.dll retail-2026-09 RVA 0x12AC60 is a ret-8 stub) — display-only. Default off.
 pub const RETAIL_STATUS_ROWS: &str = "Status Rows";
+/// Makes re-selecting the already-equipped item in an equip slot unequip it. Retail's equipment
+/// handler equips on every select case - no toggle-off branch (FFXiMain.dll retail-2026-09 RVA
+/// 0x1322B0, jump table 0x132608; vault main_menu.md §20). Default off = retail re-equip.
+pub const RETAIL_RESELECT_UNEQUIP: &str = "Reselect Unequip";
 /// Debug dev row: [on] = the player character takes knockback displacement
 /// (the retail behavior, the default); off drops the travel only — flinch,
 /// facing and the movement lock still play. The row exists only with
@@ -429,6 +433,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
     RETAIL_STATUS_ROWS,
+    RETAIL_RESELECT_UNEQUIP,
     #[cfg(feature = "enhanced-ignore-knockback-self")]
     RETAIL_KNOCKBACK,
     RETAIL_CAMERA_LEASH,
@@ -1614,6 +1619,16 @@ fn format_row_body(
                     return format!(
                         "{label:<14}[{}]",
                         if settings.interactive_status_rows {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                }
+                if label == RETAIL_RESELECT_UNEQUIP {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.reselect_unequip {
                             "on"
                         } else {
                             "off"

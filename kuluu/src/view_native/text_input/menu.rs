@@ -303,10 +303,11 @@ pub(super) fn confirm_menu_at_cursor(
                 &entities,
                 cmd_tx,
                 scene_state,
+                graphics.reselect_unequip,
             );
-            // Retail keeps the equip list up after a gear change so the player
-            // can keep swapping (or re-select to unequip), and keeps the bag
-            // open after moving an item so a sort/move session flows; the
+            // Retail's equip select case refreshes its windows in place instead of closing them
+            // (FFXiMain.dll retail-2026-09 RVA 0x1322CE), so kuluu keeps the equip list up for
+            // further swaps and keeps the bag open through a sort/move session; the
             // one-shot action menus (Magic/Abilities/item Use) close back to
             // the world.
             return if matches!(kind, MenuKind::EquipSlot(_)) {
@@ -465,7 +466,7 @@ fn handle_retail_plus_row(
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{
         DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_CAMERA_LEASH, RETAIL_DLSS_MENU,
-        RETAIL_STATUS_ROWS,
+        RETAIL_RESELECT_UNEQUIP, RETAIL_STATUS_ROWS,
     };
     match label {
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
@@ -476,6 +477,23 @@ fn handle_retail_plus_row(
                 format!(
                     "[menu] {label}: {}",
                     if graphics.interactive_status_rows {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            );
+            true
+        }
+        // Retail's equip handler equips on every select case (FFXiMain.dll retail-2026-09 RVA
+        // 0x1322B0, vault main_menu.md §20); the unequip-on-reselect shortcut is opt-in here.
+        RETAIL_RESELECT_UNEQUIP => {
+            graphics.reselect_unequip = !graphics.reselect_unequip;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.reselect_unequip {
                         "on"
                     } else {
                         "off"
@@ -1674,6 +1692,34 @@ mod menu_dispatch_tests {
             &mut scene_state,
         );
         assert!(!graphics.interactive_status_rows, "flips back off");
+    }
+
+    /// Retail's equipment window equips on every select case - no toggle-off branch in the
+    /// command-event jump table (FFXiMain.dll retail-2026-09 RVA 0x1322B0 / 0x132608, vault
+    /// main_menu.md §20) - so reselect-unequip is off by default and flips only through the
+    /// Debug/Retail+ "Reselect Unequip" row.
+    #[test]
+    fn reselect_unequip_off_by_default_with_retail_plus_toggle() {
+        use kuluu_render::GraphicsSettings;
+
+        let mut graphics = GraphicsSettings::default();
+        assert!(
+            !graphics.reselect_unequip,
+            "retail default: re-selecting the equipped item just re-equips"
+        );
+        let mut scene_state = SceneState::default();
+        assert!(handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_RESELECT_UNEQUIP,
+            &mut graphics,
+            &mut scene_state,
+        ));
+        assert!(graphics.reselect_unequip, "toggle flips on");
+        handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_RESELECT_UNEQUIP,
+            &mut graphics,
+            &mut scene_state,
+        );
+        assert!(!graphics.reselect_unequip, "flips back off");
     }
 
     /// Send-panel shape: choice 0 = recipient row (above the grid), choices

@@ -141,15 +141,15 @@ fn resolve_menu_entry(
             MenuDispatch::OpenSubmenu(MenuKind::CraftList)
         }
 
-        // The mcrmenu rows drill to windows not built yet (`mcrselec` and
-        // `mcres20`, handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0 items
-        // {1,2}; vault main_menu.md §34): they answer "Not supported yet" until
-        // the .19.1 round builds them (MACRO_ROW_* imported above).
+        // The mcrmenu launcher rows drill the §41 windows built by bead .19.1
+        // (handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0 items {1,2}; vault
+        // main_menu.md §34/§41): Select Macro opens the store-backed mcrselec,
+        // Macro Result the grounded-empty mcres20 surface.
         (MenuKind::MacrosPalette, l) if l == MACRO_ROW_SELECT_MACRO => {
-            MenuDispatch::NotImplemented(l.into())
+            MenuDispatch::OpenSubmenu(MenuKind::MacroSelect)
         }
         (MenuKind::MacrosPalette, l) if l == MACRO_ROW_MACRO_RESULT => {
-            MenuDispatch::NotImplemented(l.into())
+            MenuDispatch::OpenSubmenu(MenuKind::MacroResult)
         }
 
         // The myroom panel's rows stay inert: the §40 select family covers ids
@@ -2204,31 +2204,31 @@ mod menu_dispatch_tests {
     #[test]
     fn edit_macros_row_drills_the_mcrmenu_launcher() {
         // Ungated page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E8BD name-opens
-        // `menu    mcrmenu` (vault main_menu.md §34); its two rows answer until
-        // the .19.1 windows land.
+        // `menu    mcrmenu` (vault main_menu.md §34); its two rows drill the
+        // §41 windows bead .19.1 built.
         use kuluu_render::hud::menu::{MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO};
         assert_eq!(
             resolve_menu_entry(MenuKind::Root, "Edit Macros", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::MacrosPalette)
         );
-        assert!(matches!(
+        assert_eq!(
             resolve_menu_entry(
                 MenuKind::MacrosPalette,
                 MACRO_ROW_SELECT_MACRO,
                 false,
                 false
             ),
-            MenuDispatch::NotImplemented(_)
-        ));
-        assert!(matches!(
+            MenuDispatch::OpenSubmenu(MenuKind::MacroSelect)
+        );
+        assert_eq!(
             resolve_menu_entry(
                 MenuKind::MacrosPalette,
                 MACRO_ROW_MACRO_RESULT,
                 false,
                 false
             ),
-            MenuDispatch::NotImplemented(_)
-        ));
+            MenuDispatch::OpenSubmenu(MenuKind::MacroResult)
+        );
     }
 
     /// The Map row drills `myroom` lawfully (§40) and its eight pinned rows

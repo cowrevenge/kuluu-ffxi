@@ -1128,8 +1128,9 @@ fn sub_target_action_for(
         // Party window rows answer with a packet or are inert; no sub-target step.
         A::AcceptPartyInvite | A::DeclinePartyInvite | A::PartyMemberRow { .. } => None,
         // Automaton slot rows are inert display until §39's equip flow lands;
-        // no sub-target step (vault main_menu.md §39).
-        A::AutomatonSlotRow { .. } => None,
+        // no sub-target step (vault main_menu.md §39). Macro slot rows likewise
+        // — the macro-use seam is open-map on bead .19.1 (vault §41).
+        A::AutomatonSlotRow { .. } | A::MacroSlotRow { .. } => None,
         // Trade window rows likewise act on the wire directly, drill through
         // confirm_menu_at_cursor, or stay display-only (vault main_menu.md §25).
         A::TradeAcceptInvite
@@ -1698,8 +1699,10 @@ fn dispatch_dynamic_menu_action(
         A::PartyMemberRow { .. } => return,
         // Automaton slot rows are legible-only display: kuluu will not guess
         // which c2s 0x102 pup_data_t equip request the pupequip select table
-        // sends until that family is lawed (vault main_menu.md §39 [I]).
-        A::AutomatonSlotRow { .. } => return,
+        // sends until that family is lawed (vault main_menu.md §39 [I]). Macro
+        // slot rows stay inert for the same reason — no widget-press-to-use
+        // law yet (vault main_menu.md §41).
+        A::AutomatonSlotRow { .. } | A::MacroSlotRow { .. } => return,
         // Search hit rows stay inert until a search-to-target mapping exists;
         // retail's own hit-row select semantics remain [I] (vault main_menu.md
         // section 26).

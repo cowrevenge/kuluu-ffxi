@@ -582,6 +582,13 @@ pub struct SessionState {
     #[serde(default)]
     pub monstrosity: Option<kuluu_snapshot::MonstrosityInfo>,
 
+    /// The client-local macro store behind the mcrmenu family — retail keeps no
+    /// server copy (vault main_menu.md §34 wire law) and kuluu's capacity comes
+    /// from the DAT grids: 2 blocks x 20 slots (vault main_menu.md §41). Filled
+    /// slots only; the editor that mutates this is still open-map on bead .19.1.
+    #[serde(default)]
+    pub macros: Vec<kuluu_snapshot::MacroSlot>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 

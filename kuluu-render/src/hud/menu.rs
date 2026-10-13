@@ -199,6 +199,16 @@ pub enum DynamicMenuAction {
         slot: u8,
     },
 
+    /// One filled macro slot row of the mcrselec select window (vault
+    /// main_menu.md §41). Selecting stays inert until the macro-use seam is
+    /// lawed end to end — the DAT grids prove capacity (2 blocks x 20 keytops),
+    /// the store proves content, but which widget press runs a macro is an
+    /// open-map item on bead .19.1.
+    MacroSlotRow {
+        block: u8,
+        index: u8,
+    },
+
     /// Answer an incoming trade request YES — c2s TRADE_RES Kind Start. Retail
     /// answers through the gift window's rows once s2c 0x021 lands (FFXiMain.dll
     /// retail-2026-09 RVA 0x1515E0; vault main_menu.md §25).
@@ -791,6 +801,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::QuestList
             | MenuKind::QuestDetail { .. }
             | MenuKind::AutomatonEquip
+            | MenuKind::MacroSelect
     )
 }
 
@@ -976,6 +987,11 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The mcrmenu launcher's two fixed rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x1A64B0; vault main_menu.md §34).
         MenuKind::MacrosPalette => MACRO_LAUNCHER_ENTRIES,
+        // mcrselec rows arrive from the store (dynamic; macro_select_rows and
+        // vault main_menu.md §41). mcres20 shows run results, of which kuluu
+        // has none until macros execute — the grounded empty display.
+        MenuKind::MacroSelect => &[],
+        MenuKind::MacroResult => &[],
         // The configwi hub's twelve page rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x196770; vault main_menu.md §35).
         MenuKind::RetailConfig => RETAIL_CONFIG_ENTRIES,
@@ -1027,6 +1043,11 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // DAT `mcrm` carries comwin title token 80 = catalog id 80
         // `MacroPalette` (vault main_menu.md §34) — the grounded title.
         MenuKind::MacrosPalette => "MacroPalette",
+        // Neither `mcrselec` nor `mcres20` carries a DAT title token (both
+        // comwin records read -1; vault main_menu.md §41), so both inherit the
+        // parent row's caption like the other token-less windows here.
+        MenuKind::MacroSelect => "Macros",
+        MenuKind::MacroResult => "Macros",
         // DAT `conf` carries comwin title token 54 = catalog id 54 `Config`
         // (vault main_menu.md §35) — the grounded title.
         MenuKind::RetailConfig => "Config",
@@ -1890,6 +1911,34 @@ pub fn automaton_equip_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<Dynamic
     rows
 }
 
+/// The DAT-grounded macro capacity: two palette windows (`mcr1pall`/`mcr2pall`,
+/// toggled by the helper family FFXiMain.dll retail-2026-09 RVA 0x1A44DE..) and
+/// twenty keytop widgets per grid chunk — 'mcrs' (ROM/0/1.DAT file-off 0x2A3CC0,
+/// root mcrselec) and 'mcr7' (@0x2A8560, root mcres20) each hold exactly twenty
+/// `menu    keytops3-1` children (vault main_menu.md §41).
+pub const MACRO_BLOCKS: usize = 2;
+pub const MACRO_SLOTS_PER_BLOCK: usize = 20;
+
+/// The mcrselec variant's rows: every filled slot of the client-local store in
+/// (block, index) order. Retail renders empty keytops as blank cells; kuluu
+/// lists only filled slots, so a fresh character sees the same nothing the
+/// retail grid shows (vault main_menu.md §41). Selecting is inert [I] until
+/// the macro-use seam lands.
+pub fn macro_select_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut slots = snap.macros.clone();
+    slots.sort_by_key(|m| (m.block, m.index));
+    slots
+        .into_iter()
+        .map(|m| DynamicMenuRow {
+            label: format!("B{}/{}: {}", m.block + 1, m.index + 1, m.text),
+            action: DynamicMenuAction::MacroSlotRow {
+                block: m.block,
+                index: m.index,
+            },
+        })
+        .collect()
+}
+
 /// Rows of kuluu's Bazaar stall picker: every PC in the zone whose
 /// `Flags1.BazaarFlag` is set — LSB pushes it on the entity stream as
 /// `hasBazaar()` (`char_update.cpp`; vault main_menu.md §33). Self never
@@ -2129,6 +2178,7 @@ pub fn refresh_dynamic_menu_rows(
         // The pupequip variant's fourteen automaton slot rows (vault
         // main_menu.md §39).
         MenuKind::AutomatonEquip => automaton_equip_rows(snap),
+        MenuKind::MacroSelect => macro_select_rows(snap),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -4700,6 +4750,46 @@ mod tests {
         assert_eq!(menu_title(MenuKind::MpCustomize), "Customization");
         assert!(entries_for(MenuKind::MpCustomize, false).is_empty());
         assert_eq!(menu_title(MenuKind::AutomatonEquip), "Equipment");
+    }
+
+    /// The §41 macro law: DAT grids 'mcrs'/'mcr7' hold 20 keytops each under
+    /// two palette windows, so capacity is 2 x 20; mcrselec lists filled store
+    /// slots in (block, index) order with pinned labels, and both sub-windows
+    /// inherit `Macros` because their comwin tokens read -1.
+    #[test]
+    fn macro_windows_track_the_dat_grid_capacity_law() {
+        assert_eq!(MACRO_BLOCKS * MACRO_SLOTS_PER_BLOCK, 40);
+        assert!(is_dynamic(MenuKind::MacroSelect));
+        assert_eq!(menu_title(MenuKind::MacroSelect), "Macros");
+        assert_eq!(menu_title(MenuKind::MacroResult), "Macros");
+        // A fresh character: retail's keytop cells are blank, kuluu lists
+        // nothing.
+        let fresh = kuluu_snapshot::SceneSnapshot::default();
+        assert!(macro_select_rows(&fresh).is_empty());
+
+        let seeded = kuluu_snapshot::SceneSnapshot {
+            macros: vec![
+                kuluu_snapshot::MacroSlot {
+                    block: 1,
+                    index: 0,
+                    text: "/lastshout".to_string(),
+                },
+                kuluu_snapshot::MacroSlot {
+                    block: 0,
+                    index: 4,
+                    text: "/ra".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let rows = macro_select_rows(&seeded);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "B1/5: /ra");
+        assert_eq!(rows[1].label, "B2/1: /lastshout");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::MacroSlotRow { block: 0, index: 4 }
+        );
     }
 
     /// The commenu law (vault main_menu.md §37): two list widgets in DAT order —

@@ -138,6 +138,9 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // snapshot type — clone straight through.
         automaton: s.automaton.clone(),
         monstrosity: s.monstrosity,
+        // The client-local macro store (vault main_menu.md §41) has no wire of
+        // its own; it rides the shared snapshot like the extended-job records.
+        macros: s.macros.clone(),
     }
 }
 
@@ -1591,6 +1594,21 @@ mod tests {
                 sub_map: 2
             })
         );
+    }
+
+    #[test]
+    fn macro_store_crosses_the_wire_boundary() {
+        use kuluu_snapshot::MacroSlot;
+        let mut s = SessionState::default();
+        assert!(state_to_snapshot(&s).macros.is_empty());
+        s.macros.push(MacroSlot {
+            block: 0,
+            index: 3,
+            text: "/ra".to_string(),
+        });
+        let snap = state_to_snapshot(&s);
+        assert_eq!(snap.macros.len(), 1);
+        assert_eq!((snap.macros[0].block, snap.macros[0].index), (0, 3));
     }
 
     #[test]

@@ -853,6 +853,10 @@ pub(super) fn apply_slash_outcome(
                 // The Map-row myroom variant inherits its parent caption (the
                 // `myro` DAT record has no title token; vault main_menu.md §40).
                 kuluu_render::MenuKind::HomeView => "Map".into(),
+                // mcrselec/mcres20 likewise inherit `Macros` (§41 title law).
+                kuluu_render::MenuKind::MacroSelect | kuluu_render::MenuKind::MacroResult => {
+                    "Macros".into()
+                }
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

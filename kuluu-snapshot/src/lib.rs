@@ -1100,6 +1100,15 @@ pub struct SceneSnapshot {
     /// row (vault main_menu.md §39). Trailing on purpose.
     #[serde(default)]
     pub monstrosity: Option<MonstrosityInfo>,
+
+    /// The character's locally-held macros — the mcrmenu family's data model.
+    /// Retail keeps them purely client-side (vault main_menu.md §34 wire law:
+    /// LSB ships no macro packets [V-negative]); capacity is grounded by the DAT
+    /// grids: two palette windows `mcr1pall`/`mcr2pall` whose chunks hold 20
+    /// keytop widgets each (vault main_menu.md §41). Only filled slots appear.
+    /// Trailing on purpose.
+    #[serde(default)]
+    pub macros: Vec<MacroSlot>,
 }
 
 /// The automaton record folded from one s2c 0x044 EXTENDED_JOB PUP frame
@@ -1127,6 +1136,18 @@ pub struct AutomatonInfo {
 pub struct MonstrosityInfo {
     pub species: u16,
     pub equipped_instincts: [u16; 12],
+}
+
+/// One filled macro slot of the client-local store (vault main_menu.md §41):
+/// `block` 0..=1 picks `mcr1pall`/`mcr2pall`, `index` 0..=19 the keytop column
+/// in that window's grid, and `text` the stored chat line — a macro is sent as
+/// if typed when used (the pager/candidate law of handler FFXiMain.dll
+/// retail-2026-09 RVA 0x1A6EB0 pages result candidates through the same bodies).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroSlot {
+    pub block: u8,
+    pub index: u8,
+    pub text: String,
 }
 
 /// One synthesis answer (subset of the s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS
@@ -2639,6 +2660,7 @@ mod tests {
             missions: Missions::default(),
             automaton: None,
             monstrosity: None,
+            macros: Vec::new(),
         }
     }
 
@@ -3205,6 +3227,7 @@ mod tests {
             "missions",
             "automaton",
             "monstrosity",
+            "macros",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3213,7 +3236,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

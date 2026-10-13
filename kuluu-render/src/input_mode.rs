@@ -354,6 +354,17 @@ pub enum MenuKind {
     /// container widgets (vault main_menu.md §40).
     HomeView,
 
+    /// The `mcrselec` select window drilled from the launcher's Select Macro
+    /// row: filled slots of the client-local store, 2 blocks x 20 keytops per
+    /// the DAT grids 'mcrs'/'mcr7' (vault main_menu.md §41).
+    MacroSelect,
+
+    /// The `mcres20`/`mcresmn` result surface drilled from the launcher's
+    /// Macro Result row — a ten-page candidate pager per handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x1A6EB0 (vault main_menu.md §41); grounded-empty
+    /// until kuluu executes macros.
+    MacroResult,
+
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
     /// 0x22DB40; vault main_menu.md §30), so selects push this payload.

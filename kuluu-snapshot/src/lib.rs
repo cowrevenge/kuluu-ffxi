@@ -1058,6 +1058,69 @@ pub struct SceneSnapshot {
     /// `None` is the ordinary home-point-only menu.
     #[serde(default)]
     pub death_menu_offer: Option<DeathMenuOffer>,
+
+    /// The player-trade session from the s2c 0x021/0x022/0x023/0x025 family
+    /// (vendor/server/src/map/items/transactions/player_trade.cpp; vault
+    /// main_menu.md §25). Trailing on purpose: the postcard pin stays an append.
+    #[serde(default)]
+    pub trade: Option<Box<TradeWindow>>,
+}
+
+/// One staged slot of a player-trade offer. A gil row keeps `item_no` at the
+/// 0xFFFF sentinel (`ffxi_proto::decode::TRADE_GIL_ITEM_NO`) with `qty` as the
+/// amount — LSB's own reading (player_trade.cpp canReceive sums sentinel slots
+/// as offered gil; an empty view carries the same sentinel with qty 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeOffer {
+    pub item_no: u16,
+    pub qty: u32,
+}
+
+/// The live player-to-player trade. One window per side in retail (`trade` +
+/// `gift`, vault main_menu.md §25); kuluu mirrors the pair as one state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeWindow {
+    /// The partner's char id (UniqueNo on the wire).
+    pub partner_id: u32,
+    /// True while we are the invited side and have not answered s2c 0x021 yet;
+    /// the window then shows its answer rows instead of slots.
+    #[serde(default)]
+    pub incoming_pending: bool,
+    /// True once the server confirmed Start to both sides — slot staging is
+    /// legal only in this phase (retail gates its select rows on it likewise).
+    #[serde(default)]
+    pub active: bool,
+    /// Our offer slots, list position = TradeIndex (slot 0 is gil, per LSB's
+    /// `GilSlot = 0`); at most ffxi_proto::decode::TRADE_SLOT_COUNT entries.
+    #[serde(default)]
+    pub my_slots: Vec<Option<TradeOffer>>,
+    /// Partner's offer slots as pushed by s2c 0x023, same index law.
+    #[serde(default)]
+    pub partner_slots: Vec<Option<TradeOffer>>,
+    /// Our Make is sent-and-waiting (retail sets its state to confirmed at send
+    /// time, select id 9 → state 4; vault main_menu.md §25).
+    #[serde(default)]
+    pub my_confirmed: bool,
+    /// Partner pressed confirm (s2c RES Make addressed to us names it; any slot
+    /// change from either side un-confirms both per player_trade.cpp setSlot).
+    #[serde(default)]
+    pub partner_confirmed: bool,
+}
+
+impl TradeWindow {
+    /// Fresh outgoing window after our TRADE_REQ went out — retail opens its
+    /// windows on send (helper 0x13FE70's success path, vault main_menu.md §25).
+    pub fn outgoing(partner_id: u32) -> Self {
+        Self {
+            partner_id,
+            incoming_pending: false,
+            active: false,
+            my_slots: Vec::new(),
+            partner_slots: Vec::new(),
+            my_confirmed: false,
+            partner_confirmed: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1653,6 +1716,12 @@ pub struct SceneDelta {
     /// large_enum_variant budget on every consumer frame.
     #[serde(default)]
     pub set_party_invite: Option<Option<Box<PartyInvite>>>,
+
+    /// Replace-or-clear the whole trade window state (last-writer-wins like
+    /// `set_party_invite`): every s2c trade event lands as a rebuilt snapshot of
+    /// it, mirroring how LSB's own views re-push each changed slot.
+    #[serde(default)]
+    pub set_trade: Option<Option<Box<TradeWindow>>>,
     pub chat_appended: Vec<ChatLine>,
     pub diagnostics: Option<Diagnostics>,
 
@@ -2326,6 +2395,7 @@ mod tests {
             check_message: None,
             widescan: WidescanList::default(),
             death_menu_offer: None,
+            trade: None,
         }
     }
 
@@ -2885,15 +2955,16 @@ mod tests {
             "widescan",
             "death_menu_offer",
             "party_invite",
+            "trade",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    // Re-pinned when SceneSnapshot gained party_invite (bead kuluu-o9qt7.8): the
-    // new trailing Option appends exactly one 0x00 byte per None default; no
-    // earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // Re-pinned for each trailing additive field since (§25-era: party_invite
+    // then trade, beads kuluu-o9qt7.8/.9): every append is exactly one 0x00 byte
+    // while the default stays None; no earlier field moved.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

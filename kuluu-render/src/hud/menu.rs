@@ -181,6 +181,47 @@ pub enum DynamicMenuAction {
         char_id: u32,
     },
 
+    /// Answer an incoming trade request YES — c2s TRADE_RES Kind Start. Retail
+    /// answers through the gift window's rows once s2c 0x021 lands (FFXiMain.dll
+    /// retail-2026-09 RVA 0x1515E0; vault main_menu.md §25).
+    TradeAcceptInvite,
+    /// Answer NO — c2s TRADE_RES Kind Cancell. The server confirms nothing back
+    /// to the decliner, so kuluu clears its pending window locally too (the same
+    /// law accepted for party answers in §24).
+    TradeDeclineInvite,
+    /// The trade window's button row id 9 = Confirm: sends c2s TRADE_RES Kind
+    /// Make while unconfirmed; retail sets its state to confirmed at send time
+    /// (vault main_menu.md §25 select law).
+    TradeConfirmRow,
+    /// Button row id 10 = Exit: retail closes BOTH window names when nothing is
+    /// pending (predicate 0x151340); kuluu sends TRADE_RES Kind Cancell and
+    /// clears its own state.
+    TradeCancelRow,
+    /// One of our own offer slots — select ids 1..8 through the byte table at
+    /// .rdata 0x371D60: an empty row opens the Add Item picker, a filled row
+    /// releases via the qty-0 TRADE_LIST path (player_trade.cpp setSlot).
+    TradeOwnSlot {
+        trade_index: u8,
+    },
+    /// Button row id 11 = Add Gil. Retail posts an async keypad dialog
+    /// (`call 0x140D90`, callback 0x1515C0) before staging slot 0 with the
+    /// 0xFFFF sentinel; the keypad itself is [I-pending], so this row stays
+    /// display-only for now (vault main_menu.md §25).
+    TradeGilRow,
+    /// Partner-side offer slot rows (`gift` window): display only — retail gives
+    /// them no select arm at all.
+    TradePartnerOfferRow {
+        trade_index: u8,
+    },
+    /// Pick from the Add Item bag picker: c2s TRADE_LIST stages `bag_slot`'s
+    /// contents into our offer at `trade_index` (player_trade.cpp setSlot).
+    TradeStageFromBag {
+        trade_index: u8,
+        item_no: u16,
+        qty: u32,
+        bag_slot: u8,
+    },
+
     /// Get off the mount (c2s action 0x12).
     /// GP_CLI_COMMAND_ACTION_ACTIONID,
     /// vendor/server/src/map/packets/c2s/0x01a_action.h.
@@ -637,6 +678,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::Abilities
             | MenuKind::AbilitiesGroup(_)
             | MenuKind::Party
+            | MenuKind::Trade
+            | MenuKind::TradePick { .. }
             | MenuKind::Items
             | MenuKind::KeyItems
             | MenuKind::UsableItems
@@ -743,6 +786,10 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
             .map(|g| ability_group_empty_hint(*g))
             .unwrap_or("(empty)"),
         MenuKind::Party => "(not in a party)",
+        // A trade window with no transaction behind it (the invite timed out on
+        // the server and already sent RES{Cancell}) keeps the §25 hint state.
+        MenuKind::Trade => "(not trading)",
+        MenuKind::TradePick { .. } => "(nothing to offer)",
         MenuKind::Items => "(bag empty)",
         MenuKind::KeyItems => "(no key items)",
         MenuKind::UsableItems => "(no usable items)",
@@ -776,6 +823,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::AbilitiesGroups => ABILITIES_CATEGORY_LABELS,
         MenuKind::AbilitiesGroup(_) => &["(Abilities — data pending)"],
         MenuKind::Party => &[],
+        MenuKind::Trade => &[],
+        MenuKind::TradePick { .. } => &[],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
         MenuKind::KeyItems => &[],
         MenuKind::UsableItems => &[],
@@ -817,8 +866,14 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::AbilitiesGroups => "Abilities",
         MenuKind::AbilitiesGroup(_) => "Ability List",
         // The prtyN family's DAT records carry no inline captions (§24); the
-        // Root-row caption is the grounded title choice.
+        // Root-row caption is the grounded title choice. Neither does `trade`
+        // or `gift` (vault main_menu.md §25), so kuluu titles its mirrored
+        // pair-window the same way.
         MenuKind::Party => "Party",
+        MenuKind::Trade => "Trade",
+        // The bag picker hung off the trade window's Add-Item button row; its
+        // own caption is [I] like the rest of the family (§25).
+        MenuKind::TradePick { .. } => "Add Item",
         MenuKind::Items => "Items",
         MenuKind::KeyItems => "Key Items",
         MenuKind::UsableItems => "Items",
@@ -868,6 +923,125 @@ pub fn party_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
         .collect()
 }
 
+/// Label for one cell of the trade slot grid from its s2c view row. Neither
+/// `trade` nor `gift` carries inline DAT captions (vault main_menu.md §25), so
+/// these labels are kuluu's choice, pinned by tests; the 0xFFFF sentinel IS the
+/// gil cell per player_trade.cpp.
+fn trade_cell_label(view: Option<kuluu_snapshot::TradeOffer>, is_gil_slot: bool) -> String {
+    match view {
+        Some(offer) if is_gil_slot => format!("Gil x{}", offer.qty),
+        Some(offer) => {
+            let name = ffxi_vocab::item_names::lookup(offer.item_no)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{:#06X}", offer.item_no));
+            if offer.qty > 1 {
+                format!("{name} x{}", offer.qty)
+            } else {
+                name
+            }
+        }
+        None if is_gil_slot => "Gil".to_string(),
+        None => "(empty)".to_string(),
+    }
+}
+
+/// Rows for the trade window pair — retail opens `trade` (own side, selectable)
+/// and `gift` (partner view, display-only) together as one state machine
+/// (FFXiMain.dll retail-2026-09 vtable 0x335060 handler RVA 0x1515E0; vault
+/// main_menu.md §25). kuluu mirrors the pair as one menu: while s2c 0x021 is
+/// unanswered it shows the answer rows, else gil (trade slot 0 per LSB's
+/// `GilSlot = 0`), own item slots 1..8 (select byte table .rdata 0x371D60),
+/// then the button law {9=Confirm, 10=Exit}, and finally the partner-side
+/// views appended as display rows.
+pub fn trade_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let Some(trade) = snap.trade.as_deref() else {
+        return Vec::new();
+    };
+    if trade.incoming_pending {
+        let name = snap
+            .entities
+            .iter()
+            .find(|e| e.id == trade.partner_id)
+            .and_then(|e| e.name.clone())
+            .unwrap_or_else(|| format!("{:08X}", trade.partner_id));
+        return vec![
+            DynamicMenuRow {
+                label: format!("Yes (accept {})", name),
+                action: DynamicMenuAction::TradeAcceptInvite,
+            },
+            DynamicMenuRow {
+                label: "No".to_string(),
+                action: DynamicMenuAction::TradeDeclineInvite,
+            },
+        ];
+    }
+    let mut rows = Vec::new();
+    rows.push(DynamicMenuRow {
+        label: trade_cell_label(trade.my_slots.first().copied().flatten(), true),
+        action: DynamicMenuAction::TradeGilRow,
+    });
+    for idx in 1..ffxi_proto::decode::TRADE_SLOT_COUNT {
+        rows.push(DynamicMenuRow {
+            label: trade_cell_label(trade.my_slots.get(idx).copied().flatten(), false),
+            action: DynamicMenuAction::TradeOwnSlot {
+                trade_index: idx as u8,
+            },
+        });
+    }
+    rows.push(DynamicMenuRow {
+        label: if trade.my_confirmed {
+            "Confirm (waiting for partner)".to_string()
+        } else {
+            "Confirm".to_string()
+        },
+        action: DynamicMenuAction::TradeConfirmRow,
+    });
+    rows.push(DynamicMenuRow {
+        label: "Exit".to_string(),
+        action: DynamicMenuAction::TradeCancelRow,
+    });
+    for idx in 0..ffxi_proto::decode::TRADE_SLOT_COUNT {
+        rows.push(DynamicMenuRow {
+            label: trade_cell_label(trade.partner_slots.get(idx).copied().flatten(), idx == 0),
+            action: DynamicMenuAction::TradePartnerOfferRow {
+                trade_index: idx as u8,
+            },
+        });
+    }
+    rows
+}
+
+/// Add-Item bag picker rows for one own-side slot (retail opens this from an
+/// empty slot row; vault main_menu.md §25 [I-pending] keeps the qty keypad
+/// undecoded, so kuluu stages ONE per pick — the minimum legal ItemNum under
+/// player_trade.cpp setSlot). Locked and server-unselectable slots are skipped:
+/// LSB's own validation refuses them (Exclusive flag / ItemLockFlg::NoSelect).
+pub fn trade_pick_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    trade_index: u8,
+) -> Vec<DynamicMenuRow> {
+    snap.inventory_main()
+        .iter()
+        .filter(|slot| !slot.locked && !slot.unselectable)
+        .filter_map(|slot| {
+            let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
+            Some(DynamicMenuRow {
+                label: if slot.quantity > 1 {
+                    format!("{name} x{}", slot.quantity)
+                } else {
+                    name.to_string()
+                },
+                action: DynamicMenuAction::TradeStageFromBag {
+                    trade_index,
+                    item_no: slot.item_no,
+                    qty: 1,
+                    bag_slot: slot.index,
+                },
+            })
+        })
+        .collect()
+}
+
 /// The submenu a Root category drills into, and thus the level the right pane
 /// previews while that category is highlighted at Root. Single source for the
 /// Root → submenu mapping: `text_input::resolve_menu_entry` drills through this
@@ -891,6 +1065,10 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // (FFXiMain.dll retail-2026-09 RVA 0x2016E0; vault main_menu.md §24) —
         // one kuluu window whose rows follow that same state.
         "Party" => MenuKind::Party,
+        // Retail's Trade row hands off to helper 0x13FE70, which refuses (error
+        // sound) without an eligible target — kuluu keeps the window drill and
+        // enforces that gate at confirm time (vault main_menu.md §25).
+        "Trade" => MenuKind::Trade,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1124,6 +1302,11 @@ pub fn refresh_dynamic_menu_rows(
         // main_menu.md §24): invite pending → prtyjoin's YES/NO; else the party
         // roster as display rows; not in a party → empty-hint state.
         MenuKind::Party => party_window_rows(snap),
+        // Trade window pair (FFXiMain.dll retail-2026-09 RVA 0x1515E0; vault
+        // main_menu.md §25): answer rows → gil/own slots/buttons → partner
+        // views, and the Add-Item bag picker under each own slot row.
+        MenuKind::Trade => trade_window_rows(snap),
+        MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
         MenuKind::AbilitiesGroup(group) => crate::hud::action_model::AbilityGroup::ALL
@@ -3189,5 +3372,148 @@ mod tests {
         let safe = slot_snapshot(c::LOC_MOGSAFE, 4112, false);
         assert!(usable_item_rows(&safe).is_empty());
         assert!(!any_usable_item(&safe));
+    }
+
+    fn trade_offer(item_no: u16, qty: u32) -> kuluu_snapshot::TradeOffer {
+        kuluu_snapshot::TradeOffer { item_no, qty }
+    }
+
+    /// The trade window's row law (FFXiMain.dll retail-2026-09 vtable 0x335060
+    /// handler RVA 0x1515E0; vault main_menu.md §25): an unanswered s2c 0x021
+    /// yields the answer rows; a live trade shows gil (trade slot 0 per LSB's
+    /// `GilSlot = 0`), own item slots {1..8} (select byte table .rdata 0x371D60),
+    /// then the button law {9=Confirm, 10=Exit}; finally the partner-side views.
+    #[test]
+    fn trade_window_rows_follow_the_helper_law() {
+        use kuluu_snapshot::{TradeOffer, TradeWindow};
+
+        // No transaction behind the window: the empty-hint display state.
+        let solo = kuluu_snapshot::SceneSnapshot::default();
+        assert!(trade_window_rows(&solo).is_empty());
+
+        // Unanswered invite (no entity fixture, so the hex fallback names the
+        // partner): YES/NO rows answer c2s TRADE_RES Start/Cancell.
+        let invited = kuluu_snapshot::SceneSnapshot {
+            trade: Some(Box::new(TradeWindow {
+                partner_id: 42,
+                incoming_pending: true,
+                active: false,
+                my_slots: Vec::new(),
+                partner_slots: Vec::new(),
+                my_confirmed: false,
+                partner_confirmed: false,
+            })),
+            ..Default::default()
+        };
+        let rows = trade_window_rows(&invited);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].label, "Yes (accept 0000002A)");
+        assert_eq!(rows[1].label, "No");
+        assert_eq!(rows[0].action, DynamicMenuAction::TradeAcceptInvite);
+        assert_eq!(rows[1].action, DynamicMenuAction::TradeDeclineInvite);
+
+        // Live trade: gil staged in slot 0 plus an item stack in slot 3, the
+        // partner offering a single unit in their slot 7.
+        let mut my_slots: Vec<Option<TradeOffer>> = vec![None; 9];
+        my_slots[0] = Some(trade_offer(ffxi_proto::decode::TRADE_GIL_ITEM_NO, 150));
+        my_slots[3] = Some(trade_offer(4112, 2));
+        let mut partner_slots: Vec<Option<TradeOffer>> = vec![None; 9];
+        partner_slots[7] = Some(trade_offer(4112, 1));
+        let live = kuluu_snapshot::SceneSnapshot {
+            trade: Some(Box::new(TradeWindow {
+                partner_id: 42,
+                incoming_pending: false,
+                active: true,
+                my_slots,
+                partner_slots,
+                my_confirmed: false,
+                partner_confirmed: true,
+            })),
+            ..Default::default()
+        };
+        let rows = trade_window_rows(&live);
+        let potion = ffxi_vocab::item_names::lookup(4112).expect("4112 has a retail name");
+        assert_eq!(
+            rows.len(),
+            1 + 8 + 2 + 9,
+            "gil cell + own slots 1..=8 + Confirm/Exit + partner views: {rows:?}"
+        );
+        assert_eq!(&rows[0].label, &format!("Gil x{GIL}", GIL = 150));
+        assert!(matches!(rows[0].action, DynamicMenuAction::TradeGilRow));
+        // Row index == own trade-slot index (slot 0 sits above slots 1..8 in the
+        // same column), so slot 3 is row 3.
+        assert_eq!(&rows[3].label, &format!("{potion} x2"));
+        assert_eq!(
+            rows[3].action,
+            DynamicMenuAction::TradeOwnSlot { trade_index: 3 }
+        );
+        assert_eq!(rows[1].label, "(empty)");
+        assert_eq!(&rows[9].label, "Confirm");
+        assert!(matches!(rows[9].action, DynamicMenuAction::TradeConfirmRow));
+        assert_eq!(&rows[10].label, "Exit");
+        assert!(matches!(rows[10].action, DynamicMenuAction::TradeCancelRow));
+        // Partner views append after the buttons, their slot 7 at row 18.
+        assert_eq!(&rows[18].label, potion);
+        assert_eq!(
+            rows[18].action,
+            DynamicMenuAction::TradePartnerOfferRow { trade_index: 7 }
+        );
+    }
+
+    /// The Add-Item picker skips locked and server-unselectable slots (LSB's
+    /// setSlot refuses them) and stages ONE unit per pick while the qty keypad
+    /// stays [I-pending] (vault main_menu.md §25).
+    #[test]
+    fn trade_pick_rows_skip_locked_slots() {
+        let snap = kuluu_snapshot::SceneSnapshot {
+            containers: vec![kuluu_snapshot::ContainerView {
+                id: 0,
+                capacity: 30,
+                items: vec![
+                    kuluu_snapshot::InventoryItem {
+                        container: 0,
+                        index: 4,
+                        item_no: 4112,
+                        quantity: 3,
+                        locked: false,
+                        unselectable: false,
+                        charges_remaining: None,
+                        next_use_vana_ts: None,
+                        use_delay_end_vana_ts: None,
+                        ready: None,
+                    },
+                    kuluu_snapshot::InventoryItem {
+                        container: 0,
+                        index: 5,
+                        item_no: 4112,
+                        quantity: 1,
+                        locked: true,
+                        unselectable: false,
+                        charges_remaining: None,
+                        next_use_vana_ts: None,
+                        use_delay_end_vana_ts: None,
+                        ready: None,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        let rows = trade_pick_rows(&snap, 5);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the locked slot must not be offered: {rows:?}"
+        );
+        let potion = ffxi_vocab::item_names::lookup(4112).expect("4112 has a retail name");
+        assert_eq!(&rows[0].label, &format!("{potion} x3"));
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::TradeStageFromBag {
+                trade_index: 5,
+                item_no: 4112,
+                qty: 1,
+                bag_slot: 4,
+            }
+        );
     }
 }

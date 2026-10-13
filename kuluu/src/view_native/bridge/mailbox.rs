@@ -12,7 +12,7 @@ pub(super) fn publish(mailbox: &SnapshotMailbox, mut next: ReadyFrame) {
                 TranslatedFrame::Snapshot(snapshot)
             }
             (TranslatedFrame::Delta(previous), TranslatedFrame::Delta(next)) => {
-                TranslatedFrame::Delta(merge(previous, next))
+                TranslatedFrame::Delta(Box::new(merge(*previous, *next)))
             }
         };
     }
@@ -46,6 +46,8 @@ fn merge(mut previous: wire::SceneDelta, mut next: wire::SceneDelta) -> wire::Sc
         // Last writer wins for the pending invite (a chain must not resurrect a
         // cleared one).
         set_party_invite: next.set_party_invite.or(previous.set_party_invite),
+        // Same law for the trade window replacement.
+        set_trade: next.set_trade.or(previous.set_trade),
         chat_appended: previous
             .chat_appended
             .into_iter()
@@ -87,7 +89,7 @@ mod tests {
                 ..Default::default()
             };
             apply_delta(&mut expected, &delta);
-            publish_frame(&mailbox, TranslatedFrame::Delta(delta));
+            publish_frame(&mailbox, TranslatedFrame::Delta(Box::new(delta)));
         }
         let TranslatedFrame::Snapshot(actual) = mailbox.lock().unwrap().take().unwrap().frame
         else {
@@ -102,28 +104,28 @@ mod tests {
         for _ in 0..100 {
             publish_frame(
                 &mailbox,
-                TranslatedFrame::Delta(wire::SceneDelta {
+                TranslatedFrame::Delta(Box::new(wire::SceneDelta {
                     entities_removed: vec![11],
                     ..Default::default()
-                }),
+                })),
             );
             publish_frame(
                 &mailbox,
-                TranslatedFrame::Delta(wire::SceneDelta {
+                TranslatedFrame::Delta(Box::new(wire::SceneDelta {
                     entities_upserted: vec![
                         entity_to_wire(&mob_entity(11)),
                         entity_to_wire(&mob_entity(22)),
                     ],
                     ..Default::default()
-                }),
+                })),
             );
         }
         publish_frame(
             &mailbox,
-            TranslatedFrame::Delta(wire::SceneDelta {
+            TranslatedFrame::Delta(Box::new(wire::SceneDelta {
                 entities_removed: vec![22],
                 ..Default::default()
-            }),
+            })),
         );
         let TranslatedFrame::Delta(actual) = mailbox.lock().unwrap().take().unwrap().frame else {
             panic!("expected delta");
@@ -144,10 +146,10 @@ mod tests {
         let mailbox = SnapshotMailbox::default();
         publish_frame(
             &mailbox,
-            TranslatedFrame::Delta(wire::SceneDelta {
+            TranslatedFrame::Delta(Box::new(wire::SceneDelta {
                 entities_removed: vec![11],
                 ..Default::default()
-            }),
+            })),
         );
         let expected = state_to_snapshot(&populated_state());
         publish_frame(

@@ -840,6 +840,12 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::Map => "Map".into(),
                 // One surface for the prtyN family (vault main_menu.md section 24).
                 kuluu_render::MenuKind::Party => "Party".into(),
+                // One surface for the trade/gift pair and its bag picker
+                // (vault main_menu.md section 25).
+                kuluu_render::MenuKind::Trade => "Trade".into(),
+                kuluu_render::MenuKind::TradePick { trade_index } => {
+                    format!("TradePick({trade_index})").into()
+                }
                 kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
                     "ShutDownPrompt"
                 } else {

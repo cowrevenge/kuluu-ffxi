@@ -1127,6 +1127,16 @@ fn sub_target_action_for(
         A::MoveItem { .. } => None,
         // Party window rows answer with a packet or are inert; no sub-target step.
         A::AcceptPartyInvite | A::DeclinePartyInvite | A::PartyMemberRow { .. } => None,
+        // Trade window rows likewise act on the wire directly, drill through
+        // confirm_menu_at_cursor, or stay display-only (vault main_menu.md §25).
+        A::TradeAcceptInvite
+        | A::TradeDeclineInvite
+        | A::TradeConfirmRow
+        | A::TradeCancelRow
+        | A::TradeOwnSlot { .. }
+        | A::TradeGilRow
+        | A::TradePartnerOfferRow { .. }
+        | A::TradeStageFromBag { .. } => None,
         A::OpenItemAction { .. } => None,
         A::DropItem { .. } => None,
         A::EquipItem { .. } => None,
@@ -1669,6 +1679,47 @@ fn dispatch_dynamic_menu_action(
         // Roster slots stay inert until the prtyN member sub-action mapping is
         // dug out (vault main_menu.md §24 [I]).
         A::PartyMemberRow { .. } => return,
+        // Trade answer YES sends c2s TRADE_RES Kind Start; LSB then pushes
+        // RES{Start} to BOTH sides, which replaces our pending window with the
+        // live one (player_trade.cpp; vault main_menu.md §25) — nothing to clear
+        // locally yet. The slot/button/picker rows are fired by
+        // confirm_menu_at_cursor where the menu stack is in reach.
+        A::TradeAcceptInvite => {
+            if let Err(e) = cmd_tx.try_send(AgentCommand::TradeRespond { accept: true }) {
+                push_system_chat_line(scene_state, format!("[menu] trade answer dropped: {e}"));
+            }
+            return;
+        }
+        // Answer NO sends Cancell; the server confirms nothing back to the
+        // decliner (player_trade.cpp), so — like the party answer law of §24 —
+        // kuluu clears its own pending window right there.
+        A::TradeDeclineInvite => {
+            scene_state.snapshot.trade = None;
+            if let Err(e) = cmd_tx.try_send(AgentCommand::TradeRespond { accept: false }) {
+                push_system_chat_line(scene_state, format!("[menu] trade answer dropped: {e}"));
+            }
+            return;
+        }
+        // Button row id 9 = Confirm while unconfirmed → TRADE_RES Kind Make; the
+        // session marks us confirmed locally once it is on the wire (retail sets
+        // its state at send time, vault main_menu.md §25).
+        A::TradeConfirmRow => {
+            if let Err(e) = cmd_tx.try_send(AgentCommand::TradeConfirm) {
+                push_system_chat_line(scene_state, format!("[menu] trade confirm dropped: {e}"));
+            }
+            return;
+        }
+        // The gil cell mirrors retail's Add-Gil button (id 11), which posts an
+        // async keypad before staging slot 0 — the keypad dialog is [I-pending]
+        // (call 0x140D90 / callback 0x1515C0, vault main_menu.md §25), so this
+        // row stays display-only until it decodes.
+        A::TradeGilRow => return,
+        // Partner-side rows have no select arm at all in retail (`gift` is a
+        // pure view, vault main_menu.md §25).
+        A::TradePartnerOfferRow { .. } => return,
+        // Own-slot drill, the picker's stage and Exit (which pops its window
+        // with it) all live in confirm_menu_at_cursor.
+        A::TradeOwnSlot { .. } | A::TradeStageFromBag { .. } | A::TradeCancelRow => return,
         A::OpenItemAction { .. } | A::DropItem { .. } => return,
         // Handled in confirm_menu_at_cursor (chat echo, menu stays open).
         A::KeyItem { .. } => return,

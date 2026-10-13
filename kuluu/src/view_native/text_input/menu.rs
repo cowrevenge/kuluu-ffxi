@@ -271,6 +271,69 @@ pub(super) fn confirm_menu_at_cursor(
                 });
                 return None;
             }
+            // The trade window's own-slot rows (FFXiMain.dll retail-2026-09
+            // handler 0x1515E0 gates every select on state==3; vault
+            // main_menu.md §25): a filled slot releases via the qty-0 TRADE_LIST
+            // path, an empty one opens that slot's Add-Item picker.
+            if let A::TradeOwnSlot { trade_index } = action {
+                let started = scene_state
+                    .snapshot
+                    .trade
+                    .as_deref()
+                    .is_some_and(|t| !t.incoming_pending && t.active);
+                if !started {
+                    return None;
+                }
+                let filled = scene_state
+                    .snapshot
+                    .trade
+                    .as_deref()
+                    .and_then(|t| t.my_slots.get(trade_index as usize).copied().flatten())
+                    .is_some();
+                if filled {
+                    if let Err(e) = cmd_tx.try_send(AgentCommand::TradeClearSlot { trade_index }) {
+                        push_system_chat_line(
+                            scene_state,
+                            format!("[menu] trade release dropped: {e}"),
+                        );
+                    }
+                } else {
+                    stack.push(MenuKind::TradePick { trade_index });
+                }
+                return None;
+            }
+            // An Add-Item pick stages ONE unit into the slot — retail's qty
+            // keypad is [I-pending] (vault main_menu.md §25) and 1 is the
+            // minimum legal ItemNum under player_trade.cpp setSlot. Like
+            // retail's re-pushing views, the picker stays open for more picks.
+            if let A::TradeStageFromBag {
+                trade_index,
+                item_no,
+                qty,
+                bag_slot,
+            } = action
+            {
+                if let Err(e) = cmd_tx.try_send(AgentCommand::TradeStage {
+                    trade_index,
+                    item_no,
+                    qty,
+                    bag_slot,
+                }) {
+                    push_system_chat_line(scene_state, format!("[menu] trade stage dropped: {e}"));
+                }
+                return None;
+            }
+            // Button row id 10 = Exit (vault main_menu.md §25): send Cancell and
+            // close the window pair — kuluu pops back to Root, retail closes
+            // both names through 0x15E910.
+            if matches!(action, A::TradeCancelRow) {
+                scene_state.snapshot.trade = None;
+                if let Err(e) = cmd_tx.try_send(AgentCommand::TradeCancel) {
+                    push_system_chat_line(scene_state, format!("[menu] trade cancel dropped: {e}"));
+                }
+                stack.pop();
+                return None;
+            }
             if let A::DropItem {
                 container,
                 index,
@@ -419,6 +482,48 @@ pub(super) fn confirm_menu_at_cursor(
             None
         }
         MenuDispatch::OpenSubmenu(submenu) => {
+            // The Root Trade row obeys helper 0x13FE70's gate law (vault
+            // main_menu.md §25): it opens only against an eligible PC target and
+            // refuses — with the error-sound arm at menuwind 0x1406AD, whose
+            // kuluu analog is this hint line — when a trade already exists or no
+            // valid target stands selected. Success puts c2s TRADE_REQ
+            // {UniqueNo, ActIndex} on the wire; our windows open right away and
+            // advance only once the partner answers (player_trade.cpp).
+            if matches!(submenu, MenuKind::Trade) && matches!(kind, MenuKind::Root) {
+                if scene_state.snapshot.trade.is_some() {
+                    push_system_chat_line(
+                        scene_state,
+                        "[menu] Trade — already in a trade".to_string(),
+                    );
+                    return None;
+                }
+                let partner = scene_state.snapshot.entities.iter().find(|e| {
+                    Some(e.id) == target_id
+                        && e.kind == kuluu_snapshot::EntityKind::Pc
+                        && Some(e.id) != scene_state.snapshot.self_char_id
+                });
+                match partner {
+                    Some(entity) => {
+                        if let Err(e) = cmd_tx.try_send(AgentCommand::TradeRequest {
+                            char_id: entity.id,
+                            act_index: entity.act_index,
+                        }) {
+                            push_system_chat_line(
+                                scene_state,
+                                format!("[menu] trade request dropped: {e}"),
+                            );
+                        }
+                        stack.push(submenu);
+                    }
+                    None => {
+                        push_system_chat_line(
+                            scene_state,
+                            "[menu] Trade — no valid target".to_string(),
+                        );
+                    }
+                }
+                return None;
+            }
             // Refresh the job-emote/chair unlock bits whenever the Emote List
             // opens (c2s 0x119 → s2c 0x11A gates the Job row).
             if submenu == MenuKind::EmoteList {
@@ -1484,6 +1589,153 @@ mod menu_key_tests {
             .unwrap()
     }
 
+    fn menu_root_trade_index() -> usize {
+        kuluu_render::hud::menu::root_entries()
+            .iter()
+            .position(|e| *e == "Trade")
+            .unwrap()
+    }
+
+    /// Page-1 row 8 drills the trade window pair now — no longer a stub (vault
+    /// main_menu.md §25).
+    #[test]
+    fn root_trade_row_resolves_to_the_window() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Trade", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::Trade)
+        );
+    }
+
+    /// One Enter through the full key handler with an explicit target.
+    fn drive_enter(
+        harness: &mut Harness,
+        stack: &mut MenuStack,
+        world: &mut World,
+        target_id: Option<u32>,
+    ) {
+        let markers = world.resource_mut::<MapMarkers>();
+        handle_menu_key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut harness.bindings,
+            stack,
+            &mut harness.scene_state,
+            &harness.cmd_tx,
+            &mut harness.keybinds_state,
+            &mut harness.graphics,
+            &mut harness.status_profile_open,
+            &mut harness.hud_panels,
+            &mut harness.net_status,
+            &mut harness.audio_mute,
+            &mut harness.vana_clock,
+            &mut harness.vana_clock_visible,
+            &mut harness.sort_options,
+            &mut harness.item_menu_focus,
+            &mut harness.item_bag,
+            &mut harness.item_viewport,
+            &harness.dynamic,
+            target_id,
+            kuluu_snapshot::Vec3::default(),
+            &mut harness.map_state,
+            markers,
+            &harness.map_view,
+            &harness.minimap_state,
+            &harness.change_map_catalog,
+        );
+    }
+
+    fn trade_pc_entity(id: u32, name: &str) -> kuluu_snapshot::Entity {
+        use kuluu_snapshot::{EntityKind, Vec3};
+        kuluu_snapshot::Entity {
+            id,
+            act_index: id as u16,
+            kind: EntityKind::Pc,
+            name: Some(name.to_string()),
+            pos: Vec3::default(),
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: kuluu_snapshot::status_type::NORMAL,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        }
+    }
+
+    /// Helper 0x13FE70's gate law (vault main_menu.md §25): without an eligible
+    /// target the row opens nothing and sends nothing — the hint line stands in
+    /// for retail's error-sound arm at menuwind 0x1406AD. A valid PC target
+    /// puts c2s TRADE_REQ {UniqueNo, ActIndex} on the wire and opens our own
+    /// windows right away; self-targets and a second concurrent trade are both
+    /// refused exactly like the helper's null-field gates refuse them.
+    #[test]
+    fn root_trade_row_gates_on_eligible_target() {
+        // No target at all: Root stays, nothing on the wire.
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = menu_root_trade_index();
+        drive_enter(&mut harness, &mut stack, &mut world, None);
+        assert_eq!(stack.levels.len(), 1, "no target: the window stays shut");
+        assert!(harness._cmd_rx.try_recv().is_err());
+
+        // A valid PC target opens the window and sends TRADE_REQ with both the
+        // char id and the wire act index read off the entity.
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.entities = vec![trade_pc_entity(42, "Gessandral")];
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = menu_root_trade_index();
+        drive_enter(&mut harness, &mut stack, &mut world, Some(42));
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Trade);
+        assert_eq!(
+            harness._cmd_rx.try_recv().expect("TRADE_REQ must go out"),
+            AgentCommand::TradeRequest {
+                char_id: 42,
+                act_index: 42,
+            }
+        );
+
+        // Self-target: the helper's self-entity comparison (call 0x81550) makes
+        // this ineligible — no packet, no window.
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.self_char_id = Some(42);
+        harness.scene_state.snapshot.entities = vec![trade_pc_entity(42, "Self")];
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = menu_root_trade_index();
+        drive_enter(&mut harness, &mut stack, &mut world, Some(42));
+        assert_eq!(stack.levels.len(), 1, "self is not a trade partner");
+        assert!(harness._cmd_rx.try_recv().is_err());
+
+        // Already trading: helper fields +0x74/+0x6C refuse the second open.
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.entities = vec![trade_pc_entity(42, "Gessandral")];
+        harness.scene_state.snapshot.trade = Some(Box::new(kuluu_snapshot::TradeWindow {
+            partner_id: 9,
+            incoming_pending: false,
+            active: true,
+            my_slots: Vec::new(),
+            partner_slots: Vec::new(),
+            my_confirmed: false,
+            partner_confirmed: false,
+        }));
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = menu_root_trade_index();
+        drive_enter(&mut harness, &mut stack, &mut world, Some(42));
+        assert_eq!(stack.levels.len(), 1, "one transaction at a time (LSB law)");
+        assert!(harness._cmd_rx.try_recv().is_err());
+    }
+
     /// kuluu-u8p1: the Change Map list the key handler indexes and the one the
     /// panel draws must be the same list, and it must only offer floors the
     /// zone's DLL records describe -- POLUtils lists a third Windurst Waters map
@@ -1624,7 +1876,6 @@ mod menu_dispatch_tests {
         // everything else here still answers "Not supported yet".
         for label in [
             "Synthesis",
-            "Trade",
             "Linkshell",
             "Region Info",
             "Search",

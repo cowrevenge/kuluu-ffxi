@@ -126,6 +126,9 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
             ffxi_proto::decode::DeathMenuOffer::Raise => wire::DeathMenuOffer::Raise,
             ffxi_proto::decode::DeathMenuOffer::Tractor => wire::DeathMenuOffer::Tractor,
         }),
+        // The trade state lives on the shared snapshot type already (no mirror
+        // struct in `state`), so it forwards by clone.
+        trade: s.trade.clone(),
     }
 }
 

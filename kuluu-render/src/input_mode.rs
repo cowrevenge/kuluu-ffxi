@@ -273,6 +273,18 @@ pub enum MenuKind {
     /// vault main_menu.md §24).
     Party,
 
+    /// The trade window pair — retail opens `trade` (own side) and `gift`
+    /// (partner view) together on either side of the transaction; kuluu mirrors
+    /// both windows as one menu whose rows follow s2c 0x021/0x022/0x023/0x025
+    /// (FFXiMain.dll retail-2026-09 vtable 0x335060 handler RVA 0x1515E0; vault
+    /// main_menu.md §25).
+    Trade,
+    /// The Add-Item bag picker opened from one own-side slot row, staged into
+    /// that trade slot by c2s TRADE_LIST (vault main_menu.md §25).
+    TradePick {
+        trade_index: u8,
+    },
+
     Items,
 
     KeyItems,

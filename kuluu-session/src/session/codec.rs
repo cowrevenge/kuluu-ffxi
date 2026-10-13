@@ -674,6 +674,62 @@ pub(crate) fn build_subpacket_group_solicit_res(sync: u16, accept: bool) -> Vec<
     buf
 }
 
+/// c2s 0x032 TRADE_REQ: UniqueNo u32 + ActIndex u16 + padding u16
+/// (vendor/server/src/map/packets/c2s/0x032_trade_req.h).
+pub(crate) fn build_subpacket_trade_req(sync: u16, unique_no: u32, act_index: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 4 + 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::TRADE_REQ,
+        3,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
+    buf[8..10].copy_from_slice(&act_index.to_le_bytes());
+    // body[10..12] = padding00 (dammy2), left zeroed.
+    buf
+}
+
+/// c2s 0x033 TRADE_RES: Kind u32 + TradeCounter u16 (+pad) — kinds are
+/// [`ffxi_proto::decode::TradeResKind`] numbers (Start = 0, Cancell = 1, Make = 2;
+/// vendor/server/src/map/packets/c2s/0x033_trade_res.h). Retail stamps the live
+/// window refresh counter (vault main_menu.md §25); LSB never reads the field
+/// back (validate/process ignore it), so kuluu sends a live counter of 0 until
+/// its own windows adopt one.
+pub(crate) fn build_subpacket_trade_res(sync: u16, kind: u32, counter: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 4 + 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::TRADE_RES,
+        3,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&kind.to_le_bytes());
+    buf[8..10].copy_from_slice(&counter.to_le_bytes());
+    buf
+}
+
+/// c2s 0x034 TRADE_LIST: ItemNum u32 + ItemNo u16 + ItemIndex u8 + TradeIndex u8
+/// (vendor/server/src/map/packets/c2s/0x034_trade_list.h). The gil offer uses the
+/// GIL sentinel `item_no` on slot 0; clearing a slot is qty = 0.
+pub(crate) fn build_subpacket_trade_list(
+    sync: u16,
+    qty: u32,
+    item_no: u16,
+    item_index: u8,
+    trade_index: u8,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 4 + 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::TRADE_LIST,
+        3,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&qty.to_le_bytes());
+    buf[8..10].copy_from_slice(&item_no.to_le_bytes());
+    buf[10] = item_index;
+    buf[11] = trade_index;
+    buf
+}
+
 pub(crate) fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -1138,5 +1194,40 @@ mod tests {
             assert_eq!(buf[4], want, "Res");
             assert_eq!(&buf[5..8], &[0u8; 3], "padding");
         }
+    }
+
+    /// c2s 0x32/0x33/0x34 byte law per vendor/server headers: 12-byte
+    /// subpackets (3 words), bodies UniqueNo|Kind|ItemNum first.
+    #[test]
+    fn trade_builders_pin_lsb_layouts() {
+        let req = build_subpacket_trade_req(0x7F, 0x00A1_0002, 0x1A);
+        assert_eq!(req.len(), 12);
+        let hdr = u16::from_le_bytes([req[0], req[1]]);
+        assert_eq!(hdr & 0x01FF, ffxi_proto::map::c2s::TRADE_REQ);
+        assert_eq!((hdr >> 9) as usize, 3, "size_words");
+        assert_eq!(u16::from_le_bytes([req[2], req[3]]), 0x7F, "sync");
+        assert_eq!(
+            u32::from_le_bytes(req[4..8].try_into().unwrap()),
+            0x00A1_0002
+        );
+        assert_eq!(u16::from_le_bytes(req[8..10].try_into().unwrap()), 0x1A);
+        assert_eq!(&req[10..], &[0u8; 2], "padding00");
+
+        let res = build_subpacket_trade_res(0x7F, 2, 0);
+        let hdr = u16::from_le_bytes([res[0], res[1]]);
+        assert_eq!(hdr & 0x01FF, ffxi_proto::map::c2s::TRADE_RES);
+        assert_eq!(
+            u32::from_le_bytes(res[4..8].try_into().unwrap()),
+            2,
+            "Kind Make"
+        );
+
+        let list = build_subpacket_trade_list(0x7F, 12, 4212, 9, 3);
+        let hdr = u16::from_le_bytes([list[0], list[1]]);
+        assert_eq!(hdr & 0x01FF, ffxi_proto::map::c2s::TRADE_LIST);
+        assert_eq!(u32::from_le_bytes(list[4..8].try_into().unwrap()), 12);
+        assert_eq!(u16::from_le_bytes(list[8..10].try_into().unwrap()), 4212);
+        assert_eq!(list[10], 9, "ItemIndex (bag slot)");
+        assert_eq!(list[11], 3, "TradeIndex");
     }
 }

@@ -896,6 +896,17 @@ fn classify_char_npc(
 /// Dedup'd warning for sub-packet payloads that fail to decode in
 /// [`handle_sub_packet`]: WARN on the first failure per opcode (per process),
 /// DEBUG thereafter, so a malformed stream cannot spam the log (kuluu-zkuf).
+/// Slot-view law for the trade lists (s2c 0x23/0x25 → offer rows): LSB writes
+/// the GIL sentinel `item_no` with quantity 0 to clear a slot, and the same
+/// sentinel with a quantity IS the gil offer (player_trade.cpp; vault
+/// main_menu.md §25).
+fn trade_slot_view(item_no: u16, qty: u32) -> Option<kuluu_snapshot::TradeOffer> {
+    if item_no == decode::TRADE_GIL_ITEM_NO && qty == 0 {
+        return None;
+    }
+    Some(kuluu_snapshot::TradeOffer { item_no, qty })
+}
+
 fn warn_decode_err(opcode: u16, err: impl std::fmt::Display) {
     if first_decode_err(opcode) {
         tracing::warn!(
@@ -2062,6 +2073,51 @@ fn handle_sub_packet(
         s2c::GROUP_SOLICIT_NO => {
             tracing::info!("0x0DE GROUP_SOLICIT_NO (withdraw pending invite)");
             let _ = event_tx.send(AgentEvent::PartySolicitWithdrawn);
+        }
+        s2c::ITEM_TRADE_REQ => {
+            if let Ok(req) = decode::ItemTradeReq::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                tracing::info!(
+                    char_id = req.unique_no,
+                    "0x021 ITEM_TRADE_REQ (trade invite)"
+                );
+                let _ = event_tx.send(AgentEvent::TradeIncoming {
+                    char_id: req.unique_no,
+                });
+            }
+        }
+        s2c::ITEM_TRADE_RES => {
+            if let Ok(res) = decode::ItemTradeRes::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                tracing::info!(?res.kind, "0x022 ITEM_TRADE_RES");
+                let _ = event_tx.send(AgentEvent::TradeRes { kind: res.kind });
+            }
+        }
+        s2c::ITEM_TRADE_LIST => {
+            if let Ok(row) = decode::ItemTradeList::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                // Empty-slot views carry the GIL sentinel with quantity 0
+                // (player_trade.cpp pushSlotView / mylist ctor law).
+                let offer = trade_slot_view(row.item_no, row.item_num);
+                let _ = event_tx.send(AgentEvent::TradePartnerSlotSet {
+                    trade_index: row.trade_index,
+                    offer,
+                });
+            }
+        }
+        s2c::ITEM_TRADE_MYLIST => {
+            if let Ok(row) = decode::ItemTradeMyList::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let offer = trade_slot_view(row.item_no, row.item_num);
+                let _ = event_tx.send(AgentEvent::TradeMySlotSet {
+                    trade_index: row.trade_index,
+                    offer,
+                });
+            }
         }
         s2c::GROUP_LIST => {
             if let Ok((attrs, extra)) = decode::PartyAttrs::decode_group_list(sub.data)
@@ -3290,6 +3346,106 @@ async fn keepalive_loop(
                         }
                         cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                         let _ = event_tx.send(AgentEvent::EventEnded);
+                    }
+                    Some(AgentCommand::TradeRequest { char_id, act_index }) => {
+                        let payload = build_subpacket_trade_req(sub_seq, char_id, act_index);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade request send failed");
+                        } else {
+                            // Retail opens its trade windows on send (vault
+                            // main_menu.md §25).
+                            let _ = event_tx.send(AgentEvent::TradeOutgoingOpened { char_id });
+                        }
+                    }
+                    Some(AgentCommand::TradeRespond { accept }) => {
+                        let kind = if accept { 0 } else { 1 }; // Start / Cancell
+                        let payload = build_subpacket_trade_res(sub_seq, kind, 0);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade answer send failed");
+                        }
+                    }
+                    Some(AgentCommand::TradeStage {
+                        trade_index,
+                        item_no,
+                        qty,
+                        bag_slot,
+                    }) => {
+                        let payload =
+                            build_subpacket_trade_list(sub_seq, qty, item_no, bag_slot, trade_index);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade stage send failed");
+                        }
+                    }
+                    Some(AgentCommand::TradeSetGil { qty }) => {
+                        // GIL sentinel item id on slot 0 — LSB validate() pins
+                        // gil to that exact pairing (0x034_trade_list.cpp).
+                        let payload = build_subpacket_trade_list(
+                            sub_seq,
+                            qty,
+                            decode::TRADE_GIL_ITEM_NO,
+                            0,
+                            0,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade gil send failed");
+                        }
+                    }
+                    Some(AgentCommand::TradeClearSlot { trade_index }) => {
+                        // qty 0 is setSlot's release path.
+                        let payload = build_subpacket_trade_list(
+                            sub_seq,
+                            0,
+                            decode::TRADE_GIL_ITEM_NO,
+                            0,
+                            trade_index,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade clear send failed");
+                        }
+                    }
+                    Some(AgentCommand::TradeConfirm) => {
+                        let payload = build_subpacket_trade_res(sub_seq, 2, 0); // Kind Make
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade confirm send failed");
+                        } else {
+                            // Retail marks its own window confirmed at Make-send,
+                            // before any echo (vault main_menu.md §25).
+                            let _ = event_tx.send(AgentEvent::TradeMadeLocally);
+                        }
+                    }
+                    Some(AgentCommand::TradeCancel) => {
+                        let payload = build_subpacket_trade_res(sub_seq, 1, 0); // Kind Cancell
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "trade cancel send failed");
+                        }
                     }
                     Some(AgentCommand::Action {
                         target_id,

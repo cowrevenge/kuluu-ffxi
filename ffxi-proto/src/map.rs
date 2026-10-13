@@ -176,6 +176,21 @@ pub mod c2s {
     // Answer to a pending invite from the party window (prtyjoin YES/NO): Res u8
     // (Decline = 0, Accept = 1) + padding[3].
     pub const GROUP_SOLICIT_RES: u16 = 0x074;
+
+    // GP_CLI_COMMAND_TRADE_REQ, vendor/server/src/map/packets/c2s/0x032_trade_req.h.
+    // Ask a target to trade: UniqueNo u32 + ActIndex u16 + padding u16. The server
+    // pushes the target s2c ITEM_TRADE_REQ; nothing comes back to us until they answer.
+    pub const TRADE_REQ: u16 = 0x032;
+
+    // GP_CLI_COMMAND_TRADE_RES, vendor/server/src/map/packets/c2s/0x033_trade_res.h.
+    // Kind u32 ([`crate::decode::TradeResReqKind`]: Start=0/Cancell=1/Make=2/MakeCancel=3)
+    // + TradeCounter u16 (the window's refresh counter, s2c 0x23 carries it).
+    pub const TRADE_RES: u16 = 0x033;
+
+    // GP_CLI_COMMAND_TRADE_LIST, vendor/server/src/map/packets/c2s/0x034_trade_list.h.
+    // Stage one slot of our offer: ItemNum u32 (qty; gil amount when ItemNo is GIL)
+    // + ItemNo u16 + ItemIndex u8 (bag slot) + TradeIndex u8 (slot 0 = gil).
+    pub const TRADE_LIST: u16 = 0x034;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -518,6 +533,23 @@ pub mod s2c {
     pub const ITEM_LIST: u16 = 0x01F;
 
     pub const ITEM_ATTR: u16 = 0x020;
+
+    // GP_SERV_COMMAND_ITEM_TRADE_REQ, vendor/server/src/map/packets/s2c/0x021_item_trade_req.h.
+    // Someone asked to trade: UniqueNo + ActIndex. Answer with c2s TRADE_RES (0x033).
+    pub const ITEM_TRADE_REQ: u16 = 0x021;
+
+    // GP_SERV_COMMAND_ITEM_TRADE_RES, vendor/server/src/map/packets/s2c/0x022_item_trade_res.h.
+    // Trade state changes: Kind sees [`crate::decode::TradeResKind`] (Start opens both
+    // windows after the target accepted; End closes them after commit).
+    pub const ITEM_TRADE_RES: u16 = 0x022;
+
+    // GP_SERV_COMMAND_ITEM_TRADE_LIST, vendor/server/src/map/packets/s2c/0x023_item_trade_list.h.
+    // One slot of the PARTNER's trade offer refreshed (TradeIndex 0 is their gil).
+    pub const ITEM_TRADE_LIST: u16 = 0x023;
+
+    // GP_SERV_COMMAND_ITEM_TRADE_MYLIST, vendor/server/src/map/packets/s2c/0x025_item_trade_mylist.h.
+    // One slot of MY trade offer refreshed (server echo after c2s TRADE_LIST).
+    pub const ITEM_TRADE_MYLIST: u16 = 0x025;
 
     pub const BATTLE2: u16 = 0x028;
 

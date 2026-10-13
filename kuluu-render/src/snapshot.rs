@@ -233,6 +233,12 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if let Some(invite) = &delta.set_party_invite {
         snap.party_invite = invite.as_deref().cloned();
     }
+    // The whole trade window is re-pushed on every slot view (the same law as
+    // set_party_invite, mirroring LSB's per-slot view refresh; vault
+    // main_menu.md §25), so replacement — not merge — is correct here.
+    if let Some(trade) = &delta.set_trade {
+        snap.trade = trade.clone();
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

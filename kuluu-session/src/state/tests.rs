@@ -2443,6 +2443,78 @@ fn party_solicit_lands_and_clears_on_the_state_field() {
     assert!(!state.apply_event(&AgentEvent::PartySolicitWithdrawn));
 }
 
+/// The trade fold's phase law (vendor/server/src/map/items/transactions/
+/// player_trade.cpp; vault main_menu.md §25): an invite opens the pending
+/// answer window, RES{Start} makes it live, slot views re-stamp and ANY change
+/// un-confirms both sides, Make marks us confirmed locally, and a terminal RES
+/// clears the transaction — duplicate pushes of either kind change nothing.
+#[test]
+fn trade_phases_fold_into_the_state_field() {
+    use ffxi_proto::decode::{TradeResKind as K, TRADE_GIL_ITEM_NO};
+    use kuluu_snapshot::TradeOffer;
+
+    let mut state = SessionState::default();
+    assert!(state.trade.is_none());
+    // With no transaction open even our own echo pushes change nothing (LSB's
+    // one-transaction rule).
+    assert!(!state.apply_event(&AgentEvent::TradeMySlotSet {
+        trade_index: 0,
+        offer: None,
+    }));
+
+    // s2c 0x021 → the answer window (retail opens its gift pair likewise).
+    assert!(state.apply_event(&AgentEvent::TradeIncoming { char_id: 42 }));
+    let opened = state.trade.clone().unwrap();
+    assert_eq!(
+        (opened.partner_id, opened.incoming_pending, opened.active),
+        (42, true, false)
+    );
+    // Re-stamping the same invite is not a change.
+    assert!(!state.apply_event(&AgentEvent::TradeIncoming { char_id: 42 }));
+
+    // RES{Start} — the answer landed and LSB opened the transaction for both
+    // sides, so our window goes live.
+    assert!(state.apply_event(&AgentEvent::TradeRes { kind: K::Start }));
+    let live = state.trade.clone().unwrap();
+    assert!(!live.incoming_pending && live.active);
+
+    // Gil staged in slot 0 (s2c 0x025 echo) and Make confirmed locally… an
+    // identical re-push neither changes the slot nor clears that stamp.
+    let gil = TradeOffer {
+        item_no: TRADE_GIL_ITEM_NO,
+        qty: 10,
+    };
+    assert!(state.apply_event(&AgentEvent::TradeMySlotSet {
+        trade_index: 0,
+        offer: Some(gil),
+    }));
+    assert!(state.apply_event(&AgentEvent::TradeMadeLocally));
+    assert!(!state.apply_event(&AgentEvent::TradeMySlotSet {
+        trade_index: 0,
+        offer: Some(gil),
+    }));
+    assert!(state.trade.as_deref().is_some_and(|w| w.my_confirmed));
+
+    // A partner-side view (s2c 0x023) mutates the deal and un-confirms us.
+    let theirs = TradeOffer {
+        item_no: 4112,
+        qty: 1,
+    };
+    assert!(state.apply_event(&AgentEvent::TradePartnerSlotSet {
+        trade_index: 7,
+        offer: Some(theirs),
+    }));
+    assert!(state
+        .trade
+        .as_deref()
+        .is_some_and(|w| !w.my_confirmed && w.partner_slots.len() == 8));
+
+    // A terminal RES clears the transaction; further terminals change nothing.
+    assert!(state.apply_event(&AgentEvent::TradeRes { kind: K::End }));
+    assert!(state.trade.is_none());
+    assert!(!state.apply_event(&AgentEvent::TradeRes { kind: K::Cancell }));
+}
+
 /// AgentCommand is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2474,6 +2546,15 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::EndEventChoice { .. } => (),
         AgentCommand::CustomMenuRespond { .. } => (),
         AgentCommand::PartyInviteRespond { .. } => (),
+        // The player-trade command family (bead kuluu-o9qt7.9, vault
+        // main_menu.md §25): names are the agent-socket wire contract.
+        AgentCommand::TradeRequest { .. } => (),
+        AgentCommand::TradeRespond { .. } => (),
+        AgentCommand::TradeStage { .. } => (),
+        AgentCommand::TradeSetGil { .. } => (),
+        AgentCommand::TradeClearSlot { .. } => (),
+        AgentCommand::TradeConfirm { .. } => (),
+        AgentCommand::TradeCancel { .. } => (),
         AgentCommand::Disconnect { .. } => (),
         AgentCommand::ReqLogout { .. } => (),
         AgentCommand::Snapshot { .. } => (),
@@ -2652,6 +2733,14 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::PartyTableReset { .. } => (),
         AgentEvent::PartySolicitReceived { .. } => (),
         AgentEvent::PartySolicitWithdrawn => (),
+        // The player-trade fold family (bead kuluu-o9qt7.9, vault
+        // main_menu.md §25).
+        AgentEvent::TradeIncoming { .. } => (),
+        AgentEvent::TradeOutgoingOpened { .. } => (),
+        AgentEvent::TradeRes { .. } => (),
+        AgentEvent::TradeMySlotSet { .. } => (),
+        AgentEvent::TradePartnerSlotSet { .. } => (),
+        AgentEvent::TradeMadeLocally => (),
         AgentEvent::LowHp { .. } => (),
         AgentEvent::PartyMemberLowHp { .. } => (),
         AgentEvent::EngagedBy { .. } => (),

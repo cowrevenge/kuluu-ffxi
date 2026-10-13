@@ -72,6 +72,26 @@ const S2C_LAYOUTS: &[(&str, &str, &str)] = &[
         "0x119_abil_recast.h",
         "GP_SERV_COMMAND_ABIL_RECAST::PacketData",
     ),
+    (
+        "item_trade_req",
+        "0x021_item_trade_req.h",
+        "GP_SERV_COMMAND_ITEM_TRADE_REQ::PacketData",
+    ),
+    (
+        "item_trade_res",
+        "0x022_item_trade_res.h",
+        "GP_SERV_COMMAND_ITEM_TRADE_RES::PacketData",
+    ),
+    (
+        "item_trade_list",
+        "0x023_item_trade_list.h",
+        "GP_SERV_COMMAND_ITEM_TRADE_LIST::PacketData",
+    ),
+    (
+        "item_trade_mylist",
+        "0x025_item_trade_mylist.h",
+        "GP_SERV_COMMAND_ITEM_TRADE_MYLIST::PacketData",
+    ),
 ];
 const PATCH_STAMP_DATE_LEN: usize = 8;
 const SUBKEY_LEN: usize = 4168;

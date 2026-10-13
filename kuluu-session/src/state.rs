@@ -545,6 +545,13 @@ pub struct SessionState {
     #[serde(default)]
     pub death_menu_offer: Option<ffxi_proto::decode::DeathMenuOffer>,
 
+    /// The live player trade (s2c 0x021/0x022/0x023/0x025 + our own send/open
+    /// transitions; vendor/server/src/map/items/transactions/player_trade.cpp,
+    /// vault main_menu.md §25). One at a time — LSB allows exactly one active
+    /// transaction per player.
+    #[serde(default)]
+    pub trade: Option<Box<kuluu_snapshot::TradeWindow>>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2065,6 +2072,121 @@ impl SessionState {
                 self.party_invite = None;
                 had
             }
+            AgentEvent::TradeIncoming { char_id } => {
+                // s2c 0x021: we are the invited side. Retail answers through its
+                // own trade window's rows (vault main_menu.md section 25); ours
+                // opens with answer rows via incoming_pending.
+                let fresh = kuluu_snapshot::TradeWindow {
+                    partner_id: *char_id,
+                    incoming_pending: true,
+                    active: false,
+                    my_slots: Vec::new(),
+                    partner_slots: Vec::new(),
+                    my_confirmed: false,
+                    partner_confirmed: false,
+                };
+                let next = Some(Box::new(fresh));
+                let changed = self.trade != next;
+                self.trade = next;
+                changed
+            }
+            AgentEvent::TradeOutgoingOpened { char_id } => {
+                // Our own TRADE_REQ went out: retail opens its windows on send
+                // (helper 0x13FE70's success path, vault main_menu.md section 25).
+                if self
+                    .trade
+                    .as_ref()
+                    .is_some_and(|w| w.partner_id == *char_id && !w.incoming_pending)
+                {
+                    return false;
+                }
+                self.trade = Some(Box::new(kuluu_snapshot::TradeWindow::outgoing(*char_id)));
+                true
+            }
+            AgentEvent::TradeRes { kind } => {
+                // s2c 0x022: Start opens both windows once the target accepted;
+                // every terminal kind (Cancell/End/Err*) closes ours — LSB keeps
+                // at most one transaction per player, so no partner-matching is
+                // needed to clear it safely.
+                use ffxi_proto::decode::TradeResKind as K;
+                match kind {
+                    // Start means the transaction exists now, whichever phase our
+                    // window was in (invited-and-accepted, or our own request).
+                    K::Start => match self.trade.as_mut() {
+                        Some(w) => {
+                            let already = w.active && !w.incoming_pending;
+                            w.incoming_pending = false;
+                            w.active = true;
+                            !already
+                        }
+                        None => {
+                            // A Start with no window — the 0x21/0x32 race we never
+                            // saw: open active against the packet's sender.
+                            self.trade = Some(Box::new(kuluu_snapshot::TradeWindow {
+                                partner_id: 0,
+                                incoming_pending: false,
+                                active: true,
+                                my_slots: Vec::new(),
+                                partner_slots: Vec::new(),
+                                my_confirmed: false,
+                                partner_confirmed: false,
+                            }));
+                            true
+                        }
+                    },
+                    _ => {
+                        let had = self.trade.is_some();
+                        self.trade = None;
+                        had
+                    }
+                }
+            }
+            AgentEvent::TradeMySlotSet { trade_index, offer } => {
+                // s2c 0x025 echo of our staging. Any slot mutation also un-confirms
+                // both sides (player_trade.cpp setSlot clears `accepted` for both).
+                let Some(w) = self.trade.as_mut() else {
+                    // With no transaction open the views describe a partner we
+                    // already walked away from — drop them (LSB allows exactly
+                    // one PlayerTradeTransaction per player).
+                    return false;
+                };
+                if apply_trade_slot(&mut w.my_slots, *trade_index, *offer) {
+                    // Any slot mutation un-confirms BOTH sides
+                    // (player_trade.cpp setSlot clears `accepted`).
+                    w.my_confirmed = false;
+                    w.partner_confirmed = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            AgentEvent::TradePartnerSlotSet { trade_index, offer } => {
+                let Some(w) = self.trade.as_mut() else {
+                    return false;
+                };
+                if apply_trade_slot(&mut w.partner_slots, *trade_index, *offer) {
+                    // Partner-side views un-confirm us too — the offer changed
+                    // under our feet (player_trade.cpp pushSlotView → both
+                    // `accepted=false`, vault main_menu.md section 25).
+                    w.my_confirmed = false;
+                    w.partner_confirmed = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            AgentEvent::TradeMadeLocally => {
+                // Retail stamps its confirm state at Make-send time (select id 9
+                // sets the window's state word to 4 before any echo, vault
+                // main_menu.md section 25); the commit comes as RES End/Cancell.
+                if let Some(w) = self.trade.as_mut() {
+                    if !w.my_confirmed {
+                        w.my_confirmed = true;
+                        return true;
+                    }
+                }
+                false
+            }
             AgentEvent::PartyMemberUpdated { member } => {
                 if let Some(existing) = self.party.iter_mut().find(|m| m.id == member.id) {
                     let preserved_name = if member.name.is_some() {
@@ -2814,6 +2936,27 @@ pub struct KnockbackHit {
     pub level: u8,
 }
 
+/// Land one slot view at its TradeIndex position (the positional law of vault
+/// main_menu.md §25: list index = TradeIndex 0..=8, slot 0 is gil).
+fn apply_trade_slot(
+    slots: &mut Vec<Option<kuluu_snapshot::TradeOffer>>,
+    trade_index: u8,
+    offer: Option<kuluu_snapshot::TradeOffer>,
+) -> bool {
+    let idx = trade_index as usize;
+    if idx >= ffxi_proto::decode::TRADE_SLOT_COUNT {
+        return false;
+    }
+    while slots.len() <= idx {
+        slots.push(None);
+    }
+    if slots[idx] == offer {
+        return false;
+    }
+    slots[idx] = offer;
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -3095,6 +3238,41 @@ pub enum AgentEvent {
 
     /// s2c 0x0DE GROUP_SOLICIT_NO: the pending invite is withdrawn/expired.
     PartySolicitWithdrawn,
+
+    /// s2c 0x021 ITEM_TRADE_REQ: `char_id` asked to trade with us; answer rows
+    /// open until c2s 0x033 goes out (vendor/server/src/map/packets/s2c/
+    /// 0x021_item_trade_req.h).
+    TradeIncoming {
+        char_id: u32,
+    },
+
+    /// Our own c2s TRADE_REQ was accepted by the transport: open the window in
+    /// its outgoing state (retail opens on send, vault main_menu.md section 25).
+    TradeOutgoingOpened {
+        char_id: u32,
+    },
+
+    /// s2c 0x022 ITEM_TRADE_RES kind (Start/Cancell/Make/…/End):
+    /// vendor/server/src/map/packets/s2c/0x022_item_trade_res.h.
+    TradeRes {
+        kind: ffxi_proto::decode::TradeResKind,
+    },
+
+    /// s2c 0x025 ITEM_TRADE_MYLIST slot view; `offer` is None for the empty-slot
+    /// push (sentinel ItemNo with quantity 0, per 0x025_item_trade_mylist.cpp).
+    TradeMySlotSet {
+        trade_index: u8,
+        offer: Option<kuluu_snapshot::TradeOffer>,
+    },
+
+    /// s2c 0x023 ITEM_TRADE_LIST slot view of the partner's side.
+    TradePartnerSlotSet {
+        trade_index: u8,
+        offer: Option<kuluu_snapshot::TradeOffer>,
+    },
+
+    /// Our Make went out on the wire — mark us confirmed while the commit lands.
+    TradeMadeLocally,
 
     LowHp {
         pct: u8,
@@ -3522,6 +3700,48 @@ pub enum AgentCommand {
     PartyInviteRespond {
         accept: bool,
     },
+
+    /// Ask `char_id` to trade — c2s 0x032 TRADE_REQ (UniqueNo + the target's
+    /// wire ActIndex, both read off the snapshot entity by the caller). The
+    /// server pushes the target s2c 0x021; nothing changes for us until they
+    /// answer.
+    TradeRequest {
+        char_id: u32,
+        act_index: u16,
+    },
+
+    /// Answer an incoming trade request (c2s 0x033 TRADE_RES Kind Start/Cancell).
+    TradeRespond {
+        accept: bool,
+    },
+
+    /// Stage one bag slot into our offer (c2s 0x034 TRADE_LIST): qty ItemNum,
+    /// `item_no` must match the bag slot's contents (player_trade.cpp setSlot).
+    TradeStage {
+        trade_index: u8,
+        item_no: u16,
+        qty: u32,
+        bag_slot: u8,
+    },
+
+    /// Offer gil — TRADE_LIST on slot 0 with the GIL sentinel item id (LSB's
+    /// `GilSlot = 0`, validate() rejects it elsewhere).
+    TradeSetGil {
+        qty: u32,
+    },
+
+    /// Clear one of our offer slots: TRADE_LIST with ItemNum 0 (setSlot takes
+    /// that as the release path).
+    TradeClearSlot {
+        trade_index: u8,
+    },
+
+    /// Confirm our side (c2s 0x033 Kind Make); the commit resolves when both
+    /// sides made and the server sends RES End to each.
+    TradeConfirm,
+
+    /// Walk away (c2s 0x033 Kind Cancell).
+    TradeCancel,
 
     Move {
         x: f32,

@@ -43,6 +43,8 @@ mod movement;
 pub use movement::*;
 mod party;
 pub use party::*;
+mod trade;
+pub use trade::*;
 mod inventory;
 pub use inventory::*;
 mod delivery;

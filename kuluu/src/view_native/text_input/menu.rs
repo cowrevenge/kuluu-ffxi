@@ -75,6 +75,13 @@ fn resolve_menu_entry(
         // no handler and never sees it on the wire.
         (MenuKind::Root, "Key Items") => MenuDispatch::TextCommand("/keyitem"),
 
+        // Page 2 row 2 runs the text command "/quest" through the same runner
+        // (FFXiMain.dll retail-2026-09 RVA 0x14E889, literal .data 0x371B24;
+        // registry record /quest = id 0x4D, whose table handler 0x7D240 resets
+        // the quest-window filter word and name-opens menu quest00 — vault
+        // main_menu.md §31). Client-side: LSB has no handler and never sees it.
+        (MenuKind::Root, "Quests") => MenuDispatch::TextCommand("/quest"),
+
         // Page-1 row 11 name-opens `menu    region` with no gate (FFXiMain.dll
         // retail-2026-09 RVA 0x140691; vault main_menu.md §29): kuluu drills its
         // four-mode panel, opened at display mode 0.
@@ -363,6 +370,14 @@ pub(super) fn confirm_menu_at_cursor(
                 return None;
             }
 
+            // The quest00 select tail name-opens quest01 over the list with the
+            // row value (FFXiMain.dll retail-2026-09 RVA 0x2300EE; vault
+            // main_menu.md §31) — kuluu pushes that quest's detail the same way.
+            if let A::QuestOpenDetail { log, id } = action {
+                stack.push(MenuKind::QuestDetail { log, id });
+                return None;
+            }
+
             // Craft-list select: the plan was resolved against the bag when the rows
             // were built, so this is that c2s 0x096 ask verbatim (vault main_menu.md
             // §28); the s2c 0x06F answer lands in snapshot.synth_result.
@@ -639,6 +654,12 @@ pub(super) fn run_client_text_command(
         // main_menu.md §12 registry id 0x4C); typed input reaches the same kind
         // through parse_slash → SlashOutcome::OpenMenu(MenuKind::KeyItems).
         "/keyitem" => stack.push(MenuKind::KeyItems),
+        // Retail's client-side /quest opens the quest00 list window (FFXiMain.dll
+        // retail-2026-09 RVA 0x7D240 — the id-0x4D handler that clears the
+        // filter word then name-opens `menu    quest00`; vault main_menu.md §31);
+        // typed input reaches the same kind through parse_slash →
+        // SlashOutcome::OpenMenu(MenuKind::QuestList).
+        "/quest" => stack.push(MenuKind::QuestList),
         other => push_system_chat_line(scene_state, format!("[menu] {other} — not implemented")),
     }
 }
@@ -1705,6 +1726,41 @@ mod menu_key_tests {
         );
     }
 
+    #[test]
+    fn quest_row_select_pushes_the_detail_window() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList);
+        stack.take_absorb_open_minus();
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        // San d'Oria offer bit 0 only — the list's single row is quest (log 0, id 0).
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[0],
+            data: [1, 0, 0, 0, 0, 0, 0, 0],
+        });
+        harness.scene_state.snapshot = snap;
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::quest_list_rows(&harness.scene_state.snapshot);
+
+        stack.current_mut().unwrap().cursor = 0;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        match stack.current().unwrap().kind {
+            MenuKind::QuestDetail { log, id } => {
+                assert_eq!(log, 0);
+                assert_eq!(id, 0);
+            }
+            other => panic!("expected the quest01-stand-in detail on top, got {other:?}"),
+        }
+        assert_eq!(
+            stack.levels.len(),
+            3,
+            "detail pushes over the list, like retail"
+        );
+    }
+
     fn menu_root_trade_index() -> usize {
         kuluu_render::hud::menu::root_entries()
             .iter()
@@ -2065,11 +2121,12 @@ mod menu_dispatch_tests {
     fn root_drill_matches_preview_child_kind() {
         use kuluu_render::hud::menu::{self, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
         for &label in menu::root_entries() {
-            // Log Out / Shut Down open the yes/no prompt and Current Time/Key
-            // Items run text commands - none of them has a right-pane preview.
+            // Log Out / Shut Down open the yes/no prompt and Current Time, Key
+            // Items and Quests run text commands - none of them has a right-pane
+            // preview (vault main_menu.md §31 for the quest arm).
             if matches!(
                 label,
-                ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME | "Key Items"
+                ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME | "Key Items" | "Quests"
             ) {
                 continue;
             }
@@ -2186,6 +2243,25 @@ mod menu_dispatch_tests {
             &mut scene_state,
         );
         assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::KeyItems));
+    }
+
+    /// Retail's Quests row runs "/quest" (FFXiMain.dll retail-2026-09 RVA
+    /// 0x14E889, .data 0x371B24; vault main_menu.md §31 id-table entry 0x4D →
+    /// handler RVA 0x7D240): the dispatch hands over the literal and the runner opens the
+    /// quest00-stand-in list.
+    #[test]
+    fn quests_row_runs_the_retail_quest_literal() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Quests", false, false),
+            MenuDispatch::TextCommand("/quest"),
+        );
+
+        let clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
+        let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
+        let mut scene_state = SceneState::default();
+        let mut stack = MenuStack::root();
+        run_client_text_command("/quest", &mut stack, &clock, &mut visible, &mut scene_state);
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::QuestList));
     }
 
     /// Retail persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60), so the

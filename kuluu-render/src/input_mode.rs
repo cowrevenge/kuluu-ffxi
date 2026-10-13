@@ -325,6 +325,20 @@ pub enum MenuKind {
         port: u16,
     },
 
+    /// Page-2 row 2 fires the "/quest" text command, whose id-table handler resets
+    /// the quest-window filter word and name-opens `menu    quest00` (FFXiMain.dll
+    /// retail-2026-09 RVA 0x14E889 → runner, entry 0x4D → 0x1007D240; vault
+    /// main_menu.md §31). Rows follow the s2c 0x056 quest-log state.
+    QuestList,
+
+    /// The `quest01` detail window — quest00's select tail name-opens it over
+    /// itself with the row value (FFXiMain.dll retail-2026-09 RVA 0x2300EE; vault
+    /// main_menu.md §31), so selects push this `(log, id)` payload.
+    QuestDetail {
+        log: u8,
+        id: u16,
+    },
+
     Items,
 
     KeyItems,

@@ -13,6 +13,46 @@ pub const PORT_MISSION_MAIN: u16 = 0xFFFF;
 /// TVR port (`packet.Port = 0xFFFE` in `vendor/server/src/map/packets/s2c/0x056_mission_tvr.cpp`).
 pub const PORT_TVR: u16 = 0xFFFE;
 
+/// The `QuestOffer` ports in QuestLog order (vendor/server/src/map/enums/quest_log.h;
+/// vault main_menu.md §31): each carries the in-progress quest-id bitmask of one log.
+pub const QUEST_OFFER_PORTS: [u16; 11] = [
+    0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0xE0, 0xF0, 0x100,
+];
+/// The `QuestComplete` ports in QuestLog order (same header): completed quest-id
+/// bitmasks. AhtUrghan's frame ORs assault-complete bits into words 4..7 per
+/// vendor/server/src/map/packets/s2c/0x056_mission_other.cpp.
+pub const QUEST_COMPLETE_PORTS: [u16; 11] = [
+    0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xE8, 0xF8, 0x108,
+];
+
+/// Recognise a quest-log port: `(log index in QuestLog order, completed)`.
+pub fn quest_port(port: u16) -> Option<(u8, bool)> {
+    QUEST_OFFER_PORTS
+        .iter()
+        .position(|&p| p == port)
+        .map(|i| (i as u8, false))
+        .or_else(|| {
+            QUEST_COMPLETE_PORTS
+                .iter()
+                .position(|&p| p == port)
+                .map(|i| (i as u8, true))
+        })
+}
+
+/// Expand one quest-log frame's `Data[8]` — the quest-id bitmask LSB memcpy'd
+/// from `m_questLog[i].progress/.complete` — into ascending quest ids.
+pub fn quest_ids(data: &[u32; 8]) -> Vec<u16> {
+    let mut ids = Vec::new();
+    for (word, &bits) in data.iter().enumerate() {
+        for b in 0..32 {
+            if bits >> b & 1 == 1 {
+                ids.push((word * 32 + b) as u16);
+            }
+        }
+    }
+    ids
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MissionError {
     #[error("MISSION frame too short: {0} bytes (need 34)")]
@@ -130,6 +170,27 @@ mod tests {
                 data: [9; 8]
             })
         );
+    }
+
+    #[test]
+    fn quest_ports_map_to_logs_and_expand_their_bitmasks() {
+        // Port table verbatim from vendor/server/src/map/enums/quest_log.h.
+        assert_eq!(
+            QUEST_OFFER_PORTS,
+            [0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0xE0, 0xF0, 0x100]
+        );
+        assert_eq!(
+            QUEST_COMPLETE_PORTS,
+            [0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0, 0xC8, 0xE8, 0xF8, 0x108]
+        );
+        assert_eq!(quest_port(0x50), Some((0, false)));
+        assert_eq!(quest_port(0x100), Some((10, false)));
+        assert_eq!(quest_port(0xF8), Some((9, true)));
+        // Complete-mission ports are not quest ports (§30 seam stays separate).
+        assert_eq!(quest_port(0xD0), None);
+
+        let data = [0b101u32, 0x8000_0000, 0, 0, 0, 0, 0, 0];
+        assert_eq!(quest_ids(&data), vec![0, 2, 63]);
     }
 
     #[test]

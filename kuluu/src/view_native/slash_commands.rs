@@ -726,6 +726,24 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
+            // Retail's page-2 Quests row runs this literal (FFXiMain.dll
+            // retail-2026-09 RVA 0x14E889, .data 0x371B24); the client registry
+            // knows /quest = id 0x4D and its static handler (RVA 0x7D240) clears
+            // the quest-window filter then name-opens menu quest00 — LSB has no
+            // server handler (vault main_menu.md §31).
+            Command {
+                names: &["quest"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "open the quest list",
+                handler: |c| {
+                    if c.rest.is_empty() {
+                        SlashOutcome::OpenMenu(MenuKind::QuestList)
+                    } else {
+                        unknown_command(c.cmd)
+                    }
+                },
+            },
             #[cfg(debug_assertions)]
             Command {
                 names: &["widescan", "wscan"],
@@ -3368,6 +3386,7 @@ mod tests {
             (&["clock"], 0x003f),
             (&["map"], 0x004f),
             (&["keyitem"], 0x004c),
+            (&["quest"], 0x004d),
             (&["bank"], 0x006c),
             (&["follow"], 0x005b),
             (&["nod", "yes"], 0x00a9),
@@ -3606,6 +3625,18 @@ mod tests {
         ));
         assert!(matches!(
             parse_slash_t("/keyitem foo", &empty_entities(), origin(), None, None),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    #[test]
+    fn quest_opens_the_quest_list() {
+        assert!(matches!(
+            parse_slash_t("/quest", &empty_entities(), origin(), None, None),
+            SlashOutcome::OpenMenu(MenuKind::QuestList)
+        ));
+        assert!(matches!(
+            parse_slash_t("/quest foo", &empty_entities(), origin(), None, None),
             SlashOutcome::SystemMessage(_)
         ));
     }

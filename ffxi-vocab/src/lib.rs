@@ -22,6 +22,7 @@ pub mod msg_area;
 pub mod msg_basic;
 pub mod msg_channel;
 pub mod msg_system;
+pub mod quest_lattice;
 pub mod recast;
 pub mod skill_names;
 pub mod spell_names;

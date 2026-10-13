@@ -839,6 +839,11 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::MissionDetail { port } => {
                     format!("MissionLog({port})").into()
                 }
+                // The /quest seam (vault main_menu.md §31).
+                kuluu_render::MenuKind::QuestList => "Quests".into(),
+                kuluu_render::MenuKind::QuestDetail { log, id } => {
+                    format!("QuestLog({log},{id})").into()
+                }
 
                 kuluu_render::MenuKind::ItemAction { item_no, .. } => {
                     format!("ItemAction({item_no})").into()

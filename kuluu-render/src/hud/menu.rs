@@ -325,6 +325,21 @@ pub enum DynamicMenuAction {
         port: u16,
     },
 
+    /// One row of the `quest00` list opening its `quest01` detail (the handler's
+    /// select tail name-opens quest01 with the row value; FFXiMain.dll retail-2026-09
+    /// RVA 0x2300EE; vault main_menu.md section 31).
+    QuestOpenDetail {
+        log: u8,
+        id: u16,
+    },
+
+    /// A legible-only quest detail line (`quest01`'s paging semantics stay
+    /// [I-pending], vault main_menu.md section 31).
+    QuestDetailRow {
+        log: u8,
+        id: u16,
+    },
+
     /// One craftable recipe row of the kuluu craft list (the `cmbmenu` row-2 branch opens this
     /// window pair; FFXiMain.dll retail-2026-09 RVA 0x1E29C1, vault main_menu.md §22/§28). The plan is resolved
     /// against the bag at render time: selecting sends exactly this c2s 0x096 ask, ingredients in
@@ -746,6 +761,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::RegionInfo { .. }
             | MenuKind::MissionList
             | MenuKind::MissionDetail { .. }
+            | MenuKind::QuestList
+            | MenuKind::QuestDetail { .. }
     )
 }
 
@@ -918,6 +935,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::RegionInfo { .. } => &[],
         MenuKind::MissionList => &[],
         MenuKind::MissionDetail { .. } => &[],
+        MenuKind::QuestList => &[],
+        MenuKind::QuestDetail { .. } => &[],
     }
 }
 
@@ -955,6 +974,8 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
         MenuKind::MissionDetail { .. } => "Mission Log",
+        MenuKind::QuestList => "Quests",
+        MenuKind::QuestDetail { .. } => "Quest Log",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1294,9 +1315,10 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
         "Items" => MenuKind::Items,
-        // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
-        // text command instead of drilling (vault main_menu.md §5 row id 3 /
-        // §12 runner), handled as a TextCommand in `resolve_menu_entry`.
+        // "Key Items" and "Quests" are absent on purpose: retail page 2 fires the
+        // "/keyitem" and "/quest" text commands instead of drilling (vault
+        // main_menu.md §5 row id 3, §12 runner, and §31 for the quest arm),
+        // handled as TextCommands in `resolve_menu_entry`.
         "Equipment" => MenuKind::Equipment,
         "Status" => MenuKind::Status,
         ROOT_COMMUNICATION => MenuKind::Communication,
@@ -1664,6 +1686,95 @@ pub fn mission_detail_rows(snap: &kuluu_snapshot::SceneSnapshot, port: u16) -> V
     rows
 }
 
+/// The `quest00` rows (vault main_menu.md §31): the chrome carries no captions,
+/// and kuluu lists exactly the quest bits its s2c 0x056 quest-port state holds —
+/// one row per `(log, id)` in log-then-id order, labelled from the scraped
+/// `scripts/globals/quests.lua` lattice. A bit present in both a QuestOffer and
+/// its QuestComplete port shows as complete (the window carries one row per
+/// quest; which report wins is state order, filter semantics [I-pending]).
+/// Select mirrors quest00's select tail name-open of quest01 by pushing detail.
+pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut statuses: std::collections::BTreeMap<(u8, u16), bool> = Default::default();
+    for entry in &snap.missions.logs {
+        if let Some((log, complete)) = ffxi_proto::mission::quest_port(entry.port) {
+            for id in ffxi_proto::mission::quest_ids(&entry.data) {
+                *statuses.entry((log, id)).or_default() |= complete;
+            }
+        }
+    }
+    let mut rows: Vec<DynamicMenuRow> = statuses
+        .iter()
+        .map(|(&(log, id), &complete)| DynamicMenuRow {
+            label: match quest_caption(log, id) {
+                Some(name) if complete => format!("{name} (complete)"),
+                Some(name) => name.to_string(),
+                None if complete => format!("Quest #{id} (complete)"),
+                None => format!("Quest #{id}"),
+            },
+            action: DynamicMenuAction::QuestOpenDetail { log, id },
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(DynamicMenuRow {
+            label: "(no quests reported)".to_string(),
+            action: DynamicMenuAction::QuestDetailRow { log: 0, id: 0 },
+        });
+    }
+    rows
+}
+
+fn quest_caption(log: u8, id: u16) -> Option<&'static str> {
+    ffxi_vocab::quest_lattice::quest_name(log, id)
+}
+
+/// The `quest01` detail lines for one quest bit (vault main_menu.md §31): the
+/// field dump legible, every row inert while that window's paging law stays
+/// [I-pending]. Labels are kuluu pins (§22/§31 chrome-only law).
+pub fn quest_detail_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    log: u8,
+    id: u16,
+) -> Vec<DynamicMenuRow> {
+    let mut bits = (false, false);
+    for entry in &snap.missions.logs {
+        if let Some((entry_log, complete)) = ffxi_proto::mission::quest_port(entry.port) {
+            if entry_log == log && ffxi_proto::mission::quest_ids(&entry.data).contains(&id) {
+                bits.0 |= !complete;
+                bits.1 |= complete;
+            }
+        }
+    }
+    let area = ffxi_vocab::quest_lattice::QUEST_AREA_NAMES
+        .get(log as usize)
+        .copied()
+        .unwrap_or("Unknown");
+    let mut lines: Vec<String> = Vec::new();
+    match quest_caption(log, id) {
+        Some(name) => lines.push(name.to_string()),
+        None => lines.push(format!("Quest #{id}")),
+    }
+    lines.push(format!("Area: {area}"));
+    if bits.1 {
+        lines.push("Complete.".to_string());
+    } else if bits.0 {
+        lines.push("In progress.".to_string());
+    }
+    let mut rows: Vec<DynamicMenuRow> = lines
+        .into_iter()
+        .map(|label| DynamicMenuRow {
+            label,
+            action: DynamicMenuAction::QuestDetailRow { log, id },
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(DynamicMenuRow {
+            label: "(nothing recorded)".to_string(),
+            action: DynamicMenuAction::QuestDetailRow { log, id },
+        });
+    }
+    rows
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
@@ -1721,6 +1832,10 @@ pub fn refresh_dynamic_menu_rows(
         // The missionm list follows the folded s2c 0x056 battery (vault main_menu.md §30).
         MenuKind::MissionList => mission_list_rows(snap),
         MenuKind::MissionDetail { port } => mission_detail_rows(snap, port),
+        // The quest00 list follows the folded s2c 0x056 quest ports (vault
+        // main_menu.md §31).
+        MenuKind::QuestList => quest_list_rows(snap),
+        MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, log, id),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -4310,5 +4425,69 @@ mod tests {
             root_child_kind("Missions", false, false),
             Some(MenuKind::MissionList)
         );
+    }
+
+    #[test]
+    fn quest_list_rows_expand_the_quest_ports() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        let empty = quest_list_rows(&snap);
+        assert_eq!(empty.len(), 1, "logged-out state keeps one hint row");
+        assert!(empty[0].label.contains("no quests"));
+
+        // San d'Oria offer bits 0/2 and the id-18 overlap between that same
+        // offer port and Sandoria's complete port: three rows, log-then-id order.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_OFFER_PORTS[0],
+            data: [1 | (1 << 2) | (1 << 18), 0, 0, 0, 0, 0, 0, 0],
+        });
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: ffxi_proto::mission::QUEST_COMPLETE_PORTS[0],
+            data: [1 << 18, 0, 0, 0, 0, 0, 0, 0],
+        });
+        // A complete-mission port must not leak into this seam either direction.
+        snap.missions.logs.push(kuluu_snapshot::MissionLogEntry {
+            port: 0x00D0,
+            data: [7; 8],
+        });
+
+        let rows = quest_list_rows(&snap);
+        assert_eq!(rows.len(), 3, "one row per (log, id) bit held");
+        // scripts/globals/quests.lua San d'Oria block.
+        assert_eq!(rows[0].label, "A Sentrys Peril");
+        assert_eq!(rows[1].label, "Rosel the Armorer");
+        assert_eq!(rows[2].label, "Gates to Paradise (complete)");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::QuestOpenDetail { log: 0, id: 0 }
+        );
+        assert_eq!(
+            rows[2].action,
+            DynamicMenuAction::QuestOpenDetail { log: 0, id: 18 }
+        );
+
+        // The quest01 stand-in is a legible-only dump of the fields kuluu holds.
+        let detail = quest_detail_rows(&snap, 0, 18);
+        assert_eq!(detail[0].label, "Gates to Paradise");
+        assert_eq!(detail[1].label, "Area: Sandoria");
+        assert_eq!(detail[2].label, "Complete.");
+        for row in &detail {
+            assert!(matches!(
+                row.action,
+                DynamicMenuAction::QuestDetailRow { log: 0, id: 18 }
+            ));
+        }
+    }
+
+    #[test]
+    fn quest_windows_are_dynamic_titled_and_never_root_drilled() {
+        assert!(is_dynamic(MenuKind::QuestList));
+        assert!(is_dynamic(MenuKind::QuestDetail { log: 0, id: 4 }));
+        assert_eq!(menu_title(MenuKind::QuestList), "Quests");
+        assert_eq!(
+            menu_title(MenuKind::QuestDetail { log: 2, id: 9 }),
+            "Quest Log"
+        );
+        // Retail opens the list through the "/quest" text command, never a row drill.
+        assert_eq!(root_child_kind("Quests", false, false), None);
     }
 }

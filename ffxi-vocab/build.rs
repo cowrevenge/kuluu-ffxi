@@ -29,6 +29,8 @@ const LSB_STATUS_EFFECT_FLAG_YAML: &str = "../vendor/server/data/enums/status_ef
 const LSB_ZONE_ENUM_YAML: &str = "../vendor/server/data/enums/zone.yaml";
 const LSB_ZONES_DATA_DIR: &str = "../vendor/server/data/zones";
 const LSB_EMOTE_H: &str = "../vendor/server/src/map/enums/emote.h";
+const LSB_QUESTS_LUA: &str = "../vendor/server/scripts/globals/quests.lua";
+const LSB_QUEST_LOG_LUA: &str = "../vendor/server/scripts/enum/quest_log.lua";
 
 /// Smallest row count each scrape can return and still plausibly have parsed
 /// its source; the argument is the count the pinned vendor tree yields today
@@ -73,11 +75,13 @@ mod floor {
     pub const TRANSPORT: usize = scrape_floor(24);
     pub const SYNTH_RECIPE: usize = scrape_floor(4390);
     pub const SYNTH_CRYSTAL_GROUP: usize = scrape_floor(8);
+    pub const QUEST_ENTRY: usize = scrape_floor(1084);
 }
 
 fn main() -> Result<()> {
     scrape_transport()?;
     scrape_synth()?;
+    scrape_quests()?;
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={LSB_MSG_BASIC_H}");
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
@@ -1461,6 +1465,160 @@ fn scrape_synth() -> Result<()> {
 
 /// Column count of the `synth_recipes` CREATE TABLE in synth_recipes.sql.
 const RECIPE_COLUMNS: usize = 31;
+
+/// Scrape the quest id lattice LSB hands the client: `xi.quest.id.<area>` in
+/// scripts/globals/quests.lua, keyed by the `xi.questLog` enum indices
+/// (scripts/enum/quest_log.lua) — the same 0..10 log order the s2c 0x056 quest
+/// ports address (vault main_menu.md §31).
+fn scrape_quests() -> Result<()> {
+    println!("cargo:rerun-if-changed={LSB_QUESTS_LUA}");
+    println!("cargo:rerun-if-changed={LSB_QUEST_LOG_LUA}");
+    let enum_src = fs::read_to_string(LSB_QUEST_LOG_LUA)
+        .with_context(|| format!("reading {LSB_QUEST_LOG_LUA}"))?;
+    let mut areas: Vec<(u8, String)> = Vec::new();
+    for line in lua_table_body(&enum_src, "xi.questLog")?.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let digits = value
+                .trim_end_matches(',')
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+                continue;
+            }
+            // `NONE = -1` names the sentinel, not a log; every other entry is an index.
+            let id: i64 = digits
+                .parse()
+                .with_context(|| format!("xi.questLog entry `{key}` has value {digits:?}"))?;
+            if id < 0 {
+                continue;
+            }
+            let id =
+                u8::try_from(id).with_context(|| format!("xi.questLog entry `{key}` = {id}"))?;
+            if areas.iter().any(|(_, k)| *k == key) {
+                bail!("duplicate xi.questLog entry `{key}");
+            }
+            areas.push((id, key));
+        }
+    }
+    check_scrape_count("quest log areas", LSB_QUEST_LOG_LUA, areas.len(), 11)?;
+
+    let src =
+        fs::read_to_string(LSB_QUESTS_LUA).with_context(|| format!("reading {LSB_QUESTS_LUA}"))?;
+    let mut rows: Vec<(u8, u16, String)> = Vec::new();
+    let mut current: Option<u8> = None;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[xi.quest.area[xi.questLog.") {
+            let name = rest
+                .split("]]")
+                .next()
+                .context("malformed xi.quest.area header")?;
+            let (idx, _) = areas
+                .iter()
+                .find(|(_, k)| *k == name)
+                .with_context(|| format!("quest area `{name}` is not in {LSB_QUEST_LOG_LUA}"))?;
+            current = Some(*idx);
+            continue;
+        }
+        if trimmed.starts_with('}') {
+            // Closing brace of an area block, the xi.quest.id table, or one of
+            // the file's earlier tables; in every case no entry is inside it.
+            current = None;
+            continue;
+        }
+        let Some(log) = current else { continue };
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key
+            .trim()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || key.trim().is_empty()
+        {
+            continue;
+        }
+        let digits = value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(',');
+        let Ok(id) = digits.parse::<u16>() else {
+            continue;
+        };
+        // The wire law is a 256-bit field per log (Data[8]); an id past that
+        // could never be addressed, so the scrape must notice before kuluu does.
+        if id > 255 {
+            bail!(
+                "quest `{}` in area {log} has id {id}, outside the s2c 0x056 bitmask",
+                key.trim()
+            );
+        }
+        rows.push((log, id, prettify_snake_case(key.trim())));
+    }
+    check_scrape_count(
+        "quest lattice entries",
+        LSB_QUESTS_LUA,
+        rows.len(),
+        floor::QUEST_ENTRY,
+    )?;
+
+    rows.sort_by_key(|(log, id, _)| (*log, *id));
+    if rows
+        .windows(2)
+        .any(|w| (w[0].0, w[0].1) == (w[1].0, w[1].1))
+    {
+        bail!("duplicate quest ids inside one log area");
+    }
+
+    let mut out = String::new();
+    out.push_str("// AUTO-GENERATED by ffxi-vocab/build.rs from scripts/globals/quests.lua\n");
+    out.push_str("// and scripts/enum/quest_log.lua. Do not edit by hand.\n");
+    let names = areas
+        .iter()
+        .map(|(_, key)| rust_string_literal(&prettify_snake_case(key)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "/// Quest-log area names in the s2c 0x056 port order (`xi.questLog`).\n\
+         pub const QUEST_AREA_NAMES: [&str; {}] = [{names}];\n",
+        areas.len()
+    ));
+    out.push_str("pub const QUEST_LATTICE: &[(u8, u16, &str)] = &[\n");
+    for (log, id, name) in &rows {
+        out.push_str(&format!(
+            "    ({log}, {id}, {}),\n",
+            rust_string_literal(name)
+        ));
+    }
+    out.push_str("];");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").context("OUT_DIR not set")?);
+    fs::write(out_dir.join("quest_lattice_table.rs"), &out)?;
+    Ok(())
+}
+
+/// The text between `table = {` and its closing brace, for simple enum-style lua tables.
+fn lua_table_body<'a>(src: &'a str, table: &str) -> Result<&'a str> {
+    let start = src
+        .find(table)
+        .with_context(|| format!("{table} table not found"))?;
+    let after_eq = start + src[start..].find('=').context("no `=` after table name")?;
+    let open = after_eq
+        + src[after_eq..]
+            .find('{')
+            .context("no `{` after table name")?;
+    let close = src[open..]
+        .find('}')
+        .map(|i| open + i)
+        .context("no closing brace")?;
+    Ok(&src[open + 1..close])
+}
 
 /// Every active `INSERT INTO `<table>` VALUES (...)` row in order: column-0 id +
 /// raw fields (commented-out recipes start with a `-- ` prefix and never match).

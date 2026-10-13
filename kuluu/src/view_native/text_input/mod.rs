@@ -1152,6 +1152,8 @@ fn sub_target_action_for(
         A::RegionInfoMode { .. } => None,
         // Mission list/detail rows drill or stay legible; no sub-target step.
         A::MissionOpenLog { .. } | A::MissionLogRow { .. } => None,
+        // Same law for the quest00/quest01 pair (vault main_menu.md §31).
+        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => None,
     }
 }
 
@@ -1703,8 +1705,10 @@ fn dispatch_dynamic_menu_action(
         // main_menu.md §29).
         A::RegionInfoMode { .. } => return,
         // Mission drills and legible log rows are answered at the confirm seam
-        // above / stay inert per vault main_menu.md section 30.
+        // above / stay inert per vault main_menu.md section 30; quest00's drill and
+        // quest01's legible rows follow the same law (vault section 31).
         A::MissionOpenLog { .. } | A::MissionLogRow { .. } => return,
+        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

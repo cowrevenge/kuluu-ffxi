@@ -318,6 +318,13 @@ pub enum MenuKind {
     /// 0x22DB40; vault main_menu.md §30): rows follow the s2c 0x056 log state.
     MissionList,
 
+    /// Kuluu's data-driven reading of the `bazaar` browser behind page-2 row 5
+    /// (ungated name-open at FFXiMain.dll retail-2026-09 RVA 0x14E8A1, shared
+    /// results-list class with `scresult`; vault main_menu.md §33): rows are the
+    /// zone's PCs with LSB's entity-stream BazaarFlag; select sends c2s 0x105 for
+    /// that seller and hands off to the bazaar browse screen.
+    BazaarStalls,
+
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
     /// 0x22DB40; vault main_menu.md §30), so selects push this payload.

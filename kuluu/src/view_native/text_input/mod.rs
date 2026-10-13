@@ -1150,8 +1150,10 @@ fn sub_target_action_for(
         A::LinkShellSlot { .. } => None,
         // Region Info rows change the window's installed mode, never a target.
         A::RegionInfoMode { .. } => None,
-        // Mission list/detail rows drill or stay legible; no sub-target step.
-        A::MissionOpenLog { .. } | A::MissionLogRow { .. } => None,
+        // Mission list/detail rows drill or stay legible; no sub-target step. The
+        // Bazaar stall picker picks up its browse on the plain confirm seam only,
+        // like the mission drills (vault main_menu.md §33).
+        A::MissionOpenLog { .. } | A::MissionLogRow { .. } | A::BazaarStall { .. } => None,
         // Same law for the quest00/quest01 pair (vault main_menu.md §31).
         A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => None,
     }
@@ -1708,6 +1710,9 @@ fn dispatch_dynamic_menu_action(
         // above / stay inert per vault main_menu.md section 30; quest00's drill and
         // quest01's legible rows follow the same law (vault section 31).
         A::MissionOpenLog { .. } | A::MissionLogRow { .. } => return,
+        // The stall picker answers on the plain confirm seam (vault
+        // main_menu.md §33), never as a sub-target action.
+        A::BazaarStall { .. } => return,
         A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,

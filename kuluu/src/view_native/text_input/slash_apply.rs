@@ -839,6 +839,8 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::MissionDetail { port } => {
                     format!("MissionLog({port})").into()
                 }
+                // Bazaar row's stall picker (vault main_menu.md §33).
+                kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

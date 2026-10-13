@@ -106,6 +106,11 @@ fn resolve_menu_entry(
         // gate (FFXiMain.dll retail-2026-09 RVA 0x14E86D; vault main_menu.md §30).
         (MenuKind::Root, "Missions") => MenuDispatch::OpenSubmenu(MenuKind::MissionList),
 
+        // Page-2 row 5 name-opens `menu    bazaar` with no gate (FFXiMain.dll
+        // retail-2026-09 RVA 0x14E8A1; vault main_menu.md §33): kuluu drills the
+        // stall picker built from entity BazaarFlag rows.
+        (MenuKind::Root, "Bazaar") => MenuDispatch::OpenSubmenu(MenuKind::BazaarStalls),
+
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
         (MenuKind::Root, "Map") => MenuDispatch::OpenSubmenu(MenuKind::Map),
@@ -389,6 +394,26 @@ pub(super) fn confirm_menu_at_cursor(
             if let A::QuestOpenDetail { log, id } = action {
                 stack.push(MenuKind::QuestDetail { log, id });
                 return None;
+            }
+
+            // Bazaar stall picker select = “request to view a bazaar”: c2s 0x105
+            // for that seller (vault main_menu.md §33), then kuluu's browse screen
+            // takes over — the same seam as the /check wares path in check.rs.
+            // The empty-list hint row never resolves to an entity and stays inert.
+            if let A::BazaarStall { char_id } = action {
+                let target_index = scene_state
+                    .snapshot
+                    .entities
+                    .iter()
+                    .find(|e| e.id == char_id && e.char_flags.bazaar)
+                    .map(|e| e.act_index)?;
+                if let Err(e) = cmd_tx.try_send(AgentCommand::OpenBazaar {
+                    target_id: char_id,
+                    target_index,
+                }) {
+                    push_system_chat_line(scene_state, format!("[menu] bazaar open dropped: {e}"));
+                }
+                return Some(InputMode::Bazaar);
             }
 
             // Craft-list select: the plan was resolved against the bag when the rows
@@ -2140,13 +2165,24 @@ mod menu_dispatch_tests {
         // are Search (§26), Region Info (§29), Missions (§30) and View House —
         // the Mog Menu row (§32); everything else still answers
         // "Not supported yet".
-        for label in ["Bazaar", "Edit Macros", "Config", "Help Desk"] {
+        // Bazaar is built now (drills the stall picker, vault main_menu.md §33).
+        for label in ["Edit Macros", "Config", "Help Desk"] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::Root, label, false, false),
                 MenuDispatch::NotImplemented(label.into()),
                 "{label} should still be a stub"
             );
         }
+    }
+
+    #[test]
+    fn bazaar_row_drills_the_stall_picker() {
+        // Ungated page-2 arm 0x14E8A1 name-open of `menu    bazaar` (vault
+        // main_menu.md §33).
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Bazaar", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::BazaarStalls)
+        );
     }
 
     #[test]

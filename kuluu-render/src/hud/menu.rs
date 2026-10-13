@@ -328,6 +328,14 @@ pub enum DynamicMenuAction {
         port: u16,
     },
 
+    /// One stall-picked row of the Bazaar window (the `bazaar` browser is
+    /// data-driven chrome — FFXiMain.dll retail-2026-09 RVA 0x1F6C70; vault
+    /// main_menu.md §33): select browses that seller's stall via c2s 0x105. The
+    /// empty-list hint row carries `char_id: u32::MAX` and never resolves.
+    BazaarStall {
+        char_id: u32,
+    },
+
     /// One row of the `quest00` list opening its `quest01` detail (the handler's
     /// select tail name-opens quest01 with the row value; FFXiMain.dll retail-2026-09
     /// RVA 0x2300EE; vault main_menu.md section 31).
@@ -764,6 +772,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::RegionInfo { .. }
             | MenuKind::MissionList
             | MenuKind::MissionDetail { .. }
+            | MenuKind::BazaarStalls
             | MenuKind::QuestList
             | MenuKind::QuestDetail { .. }
     )
@@ -938,6 +947,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::RegionInfo { .. } => &[],
         MenuKind::MissionList => &[],
         MenuKind::MissionDetail { .. } => &[],
+        // Stall rows come from the zone entity stream (vault main_menu.md §33).
+        MenuKind::BazaarStalls => &[],
         MenuKind::QuestList => &[],
         MenuKind::QuestDetail { .. } => &[],
     }
@@ -977,6 +988,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
         MenuKind::MissionDetail { .. } => "Mission Log",
+        MenuKind::BazaarStalls => "Bazaar",
         MenuKind::QuestList => "Quests",
         MenuKind::QuestDetail { .. } => "Quest Log",
         // The bag picker hung off the trade window's Add-Item button row; its
@@ -1314,6 +1326,11 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // Page-2 row 1 name-opens `menu    missionm` (FFXiMain.dll retail-2026-09
         // RVA 0x14E86D; vault main_menu.md §30).
         "Missions" => MenuKind::MissionList,
+
+        // Page-2 row 5 name-opens `menu    bazaar` ungated (FFXiMain.dll retail-2026-09
+        // RVA 0x14E8A1; vault main_menu.md §33): kuluu drills the stall picker its
+        // data-driven reading of that browser window builds from entity flags.
+        "Bazaar" => MenuKind::BazaarStalls,
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -1638,6 +1655,39 @@ pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     rows
 }
 
+/// Rows of kuluu's Bazaar stall picker: every PC in the zone whose
+/// `Flags1.BazaarFlag` is set — LSB pushes it on the entity stream as
+/// `hasBazaar()` (`char_update.cpp`; vault main_menu.md §33). Self never
+/// browses its own stall from here. Labels are kuluu pins (the retail window
+/// is chrome-only, §33); selecting sends c2s 0x105 for that seller.
+pub fn bazaar_stall_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut rows: Vec<DynamicMenuRow> = snap
+        .entities
+        .iter()
+        .filter(|e| is_bazaar_stall_entity(e, snap.self_char_id))
+        .map(|e| DynamicMenuRow {
+            label: format!("{}'s Bazaar", e.name.as_deref().unwrap_or_default()),
+            action: DynamicMenuAction::BazaarStall { char_id: e.id },
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(DynamicMenuRow {
+            label: "(no player bazaars open nearby)".to_string(),
+            action: DynamicMenuAction::BazaarStall { char_id: u32::MAX },
+        });
+    }
+    rows
+}
+
+/// The §33 stall predicate on one entity; the hint-row sentinel id never
+/// matches, so those rows stay inert.
+pub fn is_bazaar_stall_entity(e: &kuluu_snapshot::Entity, self_char_id: Option<u32>) -> bool {
+    e.kind == kuluu_snapshot::EntityKind::Pc
+        && e.char_flags.bazaar
+        && Some(e.id) != self_char_id
+        && (e.id as u64) < u32::MAX as u64
+}
+
 /// The `miss00` detail lines for one port (vault main_menu.md §30): the field
 /// dump legible, every row inert while that window's paging semantics stay
 /// [I-pending]. Labels are kuluu pins (§22/§30 chrome-only law).
@@ -1835,6 +1885,8 @@ pub fn refresh_dynamic_menu_rows(
         // The missionm list follows the folded s2c 0x056 battery (vault main_menu.md §30).
         MenuKind::MissionList => mission_list_rows(snap),
         MenuKind::MissionDetail { port } => mission_detail_rows(snap, port),
+        // The bazaar browser lists the zone's open player stalls (§33 wire law).
+        MenuKind::BazaarStalls => bazaar_stall_rows(snap),
         // The quest00 list follows the folded s2c 0x056 quest ports (vault
         // main_menu.md §31).
         MenuKind::QuestList => quest_list_rows(snap),
@@ -4534,5 +4586,67 @@ mod tests {
         assert!(!view_house_blocked(Some(230), true));
         // Unknown zone (not yet reported) never vetoes.
         assert!(!view_house_blocked(None, false));
+    }
+
+    #[test]
+    fn bazaar_stall_picker_is_dynamic_titled_and_root_drilled() {
+        assert!(is_dynamic(MenuKind::BazaarStalls));
+        assert_eq!(menu_title(MenuKind::BazaarStalls), "Bazaar");
+        // The ungated page-2 arm (vault main_menu.md §33) drills it from Root.
+        assert_eq!(
+            root_child_kind("Bazaar", false, false),
+            Some(MenuKind::BazaarStalls)
+        );
+    }
+
+    #[test]
+    fn bazaar_stall_rows_follow_the_entity_bazaar_flag() {
+        use kuluu_snapshot::{Entity, EntityKind};
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(bazaar_stall_rows(&snap).len(), 1);
+        assert!(bazaar_stall_rows(&snap)[0]
+            .label
+            .contains("no player bazaars"));
+
+        snap.entities.push(Entity {
+            id: 7,
+            act_index: 2,
+            kind: EntityKind::Pc,
+            name: Some("Kupipi".into()),
+            pos: kuluu_snapshot::Vec3::default(),
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        });
+        assert!(
+            bazaar_stall_rows(&snap)[0]
+                .label
+                .contains("no player bazaars"),
+            "the flag is required"
+        );
+        snap.entities[0].char_flags.bazaar = true;
+        let rows = bazaar_stall_rows(&snap);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Kupipi's Bazaar");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::BazaarStall { char_id: 7 }
+        );
+        snap.self_char_id = Some(7);
+        assert!(bazaar_stall_rows(&snap)[0]
+            .label
+            .contains("no player bazaars"));
     }
 }

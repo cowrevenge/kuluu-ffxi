@@ -324,6 +324,9 @@ pub enum MenuKind {
     /// zone's PCs with LSB's entity-stream BazaarFlag; select sends c2s 0x105 for
     /// that seller and hands off to the bazaar browse screen.
     BazaarStalls,
+    /// The `mcrmenu` macro-palette launcher: two rows = its handler's select
+    /// items {1,2} (vault main_menu.md §34).
+    MacrosPalette,
 
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA

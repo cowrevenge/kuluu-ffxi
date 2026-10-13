@@ -841,6 +841,7 @@ pub(super) fn apply_slash_outcome(
                 }
                 // Bazaar row's stall picker (vault main_menu.md §33).
                 kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
+                kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

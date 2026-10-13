@@ -942,6 +942,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // retail-2026-09 RVA 0x1E29A0 (bag-pick, then craft list; vault main_menu.md §22/§28). No DAT
         // caption was recovered for either row (§22 caption law), so kuluu's labels are pinned by tests.
         MenuKind::SynthLauncher => SYNTH_LAUNCHER_ENTRIES,
+        // The mcrmenu launcher's two fixed rows (handler FFXiMain.dll
+        // retail-2026-09 RVA 0x1A64B0; vault main_menu.md §34).
+        MenuKind::MacrosPalette => MACRO_LAUNCHER_ENTRIES,
         // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
         MenuKind::CraftList => &[],
         MenuKind::RegionInfo { .. } => &[],
@@ -984,6 +987,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // section 27.5), so kuluu titles its slot window after the Root row, like Party/Trade/Search.
         MenuKind::Linkshell => "Link Shell",
         MenuKind::SynthLauncher => "Synthesis",
+        // DAT `mcrm` carries comwin title token 80 = catalog id 80
+        // `MacroPalette` (vault main_menu.md §34) — the grounded title.
+        MenuKind::MacrosPalette => "MacroPalette",
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
@@ -1251,6 +1257,15 @@ pub const SYNTH_ROW_PICK_MATERIAL: &str = "Synthesize from a bag item";
 pub const SYNTH_ROW_OPEN_LIST: &str = "Open the craft list";
 const SYNTH_LAUNCHER_ENTRIES: &[&str] = &[SYNTH_ROW_PICK_MATERIAL, SYNTH_ROW_OPEN_LIST];
 
+/// The mcrmenu launcher's two rows. DAT `mcrm` carries no captions — the
+/// windowps pair is chrome-only (vault main_menu.md §34) — so these
+/// kuluu-picked labels stand pinned by tests; their order follows select ids
+/// {1,2} of handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0: item 1 opens
+/// `mcrselec`, item 2 opens `mcres20`.
+pub const MACRO_ROW_SELECT_MACRO: &str = "Select Macro";
+pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
+const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
+
 /// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
 /// tier substitutable by element and all positional ingredients assignable to bag slots under
 /// LSB's per-stack use law (vault main_menu.md §28; `resolveRecipe`,
@@ -1331,6 +1346,11 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // RVA 0x14E8A1; vault main_menu.md §33): kuluu drills the stall picker its
         // data-driven reading of that browser window builds from entity flags.
         "Bazaar" => MenuKind::BazaarStalls,
+        // Page-2 row 6 is the ungated name-open of `menu    mcrmenu`
+        // (FFXiMain.dll retail-2026-09 RVA 0x14E8BD; vault main_menu.md
+        // §34): the root row drills that launcher. The `Edit Macros`
+        // caption is the catalog string (§10 idx 75/109).
+        "Edit Macros" => MenuKind::MacrosPalette,
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -4289,6 +4309,23 @@ mod tests {
         assert_eq!(
             root_child_kind("Synthesis", false, false),
             Some(MenuKind::SynthLauncher)
+        );
+    }
+
+    /// The mcrmenu launcher law (vault main_menu.md §34): two rows in
+    /// select-id order, the DAT-derived MacroPalette title (comwin token 80 =
+    /// ROM/165/76.DAT catalog index 80), and the Root `Edit Macros` row
+    /// drilling it directly. Row captions stay [I] (§34 chrome-only law).
+    #[test]
+    fn macros_palette_launcher_rows_and_title_track_the_mcrmenu_law() {
+        assert_eq!(
+            entries_for(MenuKind::MacrosPalette, false),
+            &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT]
+        );
+        assert_eq!(menu_title(MenuKind::MacrosPalette), "MacroPalette");
+        assert_eq!(
+            root_child_kind("Edit Macros", false, false),
+            Some(MenuKind::MacrosPalette)
         );
     }
 

@@ -50,8 +50,9 @@ fn resolve_menu_entry(
 ) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        magic_category_for_label, COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
-        ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        magic_category_for_label, COMM_EMOTE_LIST, MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO,
+        ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST,
+        SYNTH_ROW_PICK_MATERIAL,
     };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
@@ -132,6 +133,17 @@ fn resolve_menu_entry(
         }
         (MenuKind::SynthLauncher, l) if l == SYNTH_ROW_OPEN_LIST => {
             MenuDispatch::OpenSubmenu(MenuKind::CraftList)
+        }
+
+        // The mcrmenu rows drill to windows not built yet (`mcrselec` and
+        // `mcres20`, handler FFXiMain.dll retail-2026-09 RVA 0x1A64B0 items
+        // {1,2}; vault main_menu.md §34): they answer "Not supported yet" until
+        // the .19.1 round builds them (MACRO_ROW_* imported above).
+        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_SELECT_MACRO => {
+            MenuDispatch::NotImplemented(l.into())
+        }
+        (MenuKind::MacrosPalette, l) if l == MACRO_ROW_MACRO_RESULT => {
+            MenuDispatch::NotImplemented(l.into())
         }
 
         // mgcmenu select: the category's school id (jump table 0x13F7CC; vault
@@ -2160,13 +2172,44 @@ mod menu_dispatch_tests {
     }
 
     #[test]
+    fn edit_macros_row_drills_the_mcrmenu_launcher() {
+        // Ungated page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E8BD name-opens
+        // `menu    mcrmenu` (vault main_menu.md §34); its two rows answer until
+        // the .19.1 windows land.
+        use kuluu_render::hud::menu::{MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO};
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Edit Macros", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::MacrosPalette)
+        );
+        assert!(matches!(
+            resolve_menu_entry(
+                MenuKind::MacrosPalette,
+                MACRO_ROW_SELECT_MACRO,
+                false,
+                false
+            ),
+            MenuDispatch::NotImplemented(_)
+        ));
+        assert!(matches!(
+            resolve_menu_entry(
+                MenuKind::MacrosPalette,
+                MACRO_ROW_MACRO_RESULT,
+                false,
+                false
+            ),
+            MenuDispatch::NotImplemented(_)
+        ));
+    }
+
+    #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24), so
         // are Search (§26), Region Info (§29), Missions (§30) and View House —
         // the Mog Menu row (§32); everything else still answers
         // "Not supported yet".
-        // Bazaar is built now (drills the stall picker, vault main_menu.md §33).
-        for label in ["Edit Macros", "Config", "Help Desk"] {
+        // Bazaar is built now (drills the stall picker, vault main_menu.md §33),
+        // and so is Edit Macros (§34 launcher).
+        for label in ["Config", "Help Desk"] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::Root, label, false, false),
                 MenuDispatch::NotImplemented(label.into()),

@@ -333,6 +333,10 @@ pub enum MenuKind {
     /// The `faqsub` Help Desk panel opened by the page-2 row's trampoline
     /// (vault main_menu.md §36); three destinations per the transfer-message law.
     HelpDeskPanel,
+    /// The commenu Friend List widget's window; rows arrive with a local friend
+    /// store in `.23.1` — LSB ships only black-list c2s 0x03c, no friends list
+    /// (vault main_menu.md §37).
+    FriendList,
 
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA

@@ -14,6 +14,10 @@ pub const ROOT_SHUT_DOWN: &str = "Shut Down";
 pub const ROOT_CURRENT_TIME: &str = "Current Time";
 pub const ROOT_COMMUNICATION: &str = "Communication";
 pub const COMM_EMOTE_LIST: &str = "Emote List";
+/// Friend List row — the `com1` DAT carries windowps330 with caption token 61
+/// = catalog string `Friend List`, listed before windowps928's `Emote List`
+/// (token 180) (vault main_menu.md §37).
+pub const COMM_FRIEND_LIST: &str = "Friend List";
 /// Page-2 row 4. The caption is catalog id 107, which the `mogcont` window
 /// record itself carries as its comwin title token (vault main_menu.md §32).
 pub const ROOT_VIEW_HOUSE: &str = "View House";
@@ -127,7 +131,9 @@ pub fn root_entries() -> &'static [&'static str] {
     ROOT_ENTRIES
 }
 
-const COMMUNICATION_ENTRIES: &[&str] = &[COMM_EMOTE_LIST];
+// commenu's two list widgets in DAT order: windowps330 `Friend List` (61),
+// then windowps928 `Emote List` (180) — vault main_menu.md §37.
+const COMMUNICATION_ENTRIES: &[&str] = &[COMM_FRIEND_LIST, COMM_EMOTE_LIST];
 
 const ITEMS_ENTRIES_STUB: &[&str] = &["(Items — Stage 3: pending inventory submenu)"];
 
@@ -932,6 +938,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::EquipSlot(_) => &["(loading equippable items…)"],
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
+        // The friend list has no data source yet (LSB implements only the
+        // black-list c2s 0x03c, not a friends list [V-negative]) — rows arrive
+        // with the local store in `.23.1`.
+        MenuKind::FriendList => &[],
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
@@ -1028,6 +1038,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::Status => "Status",
         MenuKind::EquipSlot(_) => "Equip",
         MenuKind::Communication => "Communication",
+        MenuKind::FriendList => "Friend List",
         MenuKind::EmoteList => "Emote List",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
@@ -4418,6 +4429,20 @@ mod tests {
             root_child_kind("Help Desk", false, false),
             Some(MenuKind::HelpDeskPanel)
         );
+    }
+
+    /// The commenu law (vault main_menu.md §37): two list widgets in DAT order —
+    /// Friend List (catalog 61) then Emote List (catalog 180) — under the grounded
+    /// title Communication (comwin token 179).
+    #[test]
+    fn communication_menu_rows_track_the_commen_law() {
+        assert_eq!(
+            entries_for(MenuKind::Communication, false),
+            &[COMM_FRIEND_LIST, COMM_EMOTE_LIST]
+        );
+        assert_eq!(menu_title(MenuKind::Communication), "Communication");
+        assert_eq!(menu_title(MenuKind::FriendList), "Friend List");
+        assert_eq!(entries_for(MenuKind::FriendList, false).len(), 0);
     }
 
     /// The Link Shell law (vault main_menu.md §27): the window always shows both shell slots the

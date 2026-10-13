@@ -50,9 +50,9 @@ fn resolve_menu_entry(
 ) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        magic_category_for_label, COMM_EMOTE_LIST, MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO,
-        ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST,
-        SYNTH_ROW_PICK_MATERIAL,
+        magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
+        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE,
+        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
@@ -60,6 +60,12 @@ fn resolve_menu_entry(
         }
         (MenuKind::Communication, l) if l == COMM_EMOTE_LIST => {
             MenuDispatch::OpenSubmenu(MenuKind::EmoteList)
+        }
+        // commenu's other list widget (DAT windowps330, caption token 61;
+        // vault main_menu.md §37): drills the friend-list window, whose rows
+        // arrive with the local store in `.23.1`.
+        (MenuKind::Communication, l) if l == COMM_FRIEND_LIST => {
+            MenuDispatch::OpenSubmenu(MenuKind::FriendList)
         }
         // Both power rows open the retail yes/no prompt first (Vault-grounded
         // reading at FFXiMain.dll retail-2026-09 RVA 0x160960 / 0x1609F0); the
@@ -2233,6 +2239,27 @@ mod menu_dispatch_tests {
                 MenuDispatch::NotImplemented(_)
             ));
         }
+    }
+
+    #[test]
+    fn communication_row_drills_both_commen_list_widgets() {
+        // Page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E970 name-opens
+        // `menu    commenu` (vault main_menu.md §37); the DAT order is
+        // windowps330 Friend List then windowps928 Emote List, and each row
+        // drills its own list widget.
+        use kuluu_render::hud::menu::{COMM_EMOTE_LIST, COMM_FRIEND_LIST};
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Communication", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::Communication)
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Communication, COMM_FRIEND_LIST, false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::FriendList)
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Communication, COMM_EMOTE_LIST, false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::EmoteList)
+        );
     }
 
     #[test]

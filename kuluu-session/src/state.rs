@@ -552,6 +552,12 @@ pub struct SessionState {
     #[serde(default)]
     pub trade: Option<Box<kuluu_snapshot::TradeWindow>>,
 
+    /// Last completed player search (the `scresult` model singleton in retail;
+    /// vault main_menu.md §26). Held until the next query replaces it — retail
+    /// keeps the rows visible while you edit the form.
+    #[serde(default)]
+    pub search: Option<Box<kuluu_snapshot::SearchResults>>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2863,6 +2869,17 @@ impl SessionState {
                 self.auction.busy = None;
                 changed
             }
+            AgentEvent::PlayerSearchCompleted { total, players } => {
+                // Whole-set replacement, like the set_search delta law: retail's
+                // scresult model is rebuilt from a new query's frames.
+                let next = Some(Box::new(kuluu_snapshot::SearchResults {
+                    total: *total,
+                    players: players.clone(),
+                }));
+                let changed = self.search != next;
+                self.search = next;
+                changed
+            }
             AgentEvent::AuctionSellQuote { quote, .. } => {
                 let changed = self.auction.fee_quote != *quote;
                 self.auction.fee_quote = *quote;
@@ -3617,6 +3634,14 @@ pub enum AgentEvent {
         message: String,
     },
 
+    /// Player-search answer: every CSearchListPacket of one query merged in
+    /// arrival order; `total` is the server-declared overall count (the last
+    /// frame's [0x0E], vault main_menu.md §26).
+    PlayerSearchCompleted {
+        total: u16,
+        players: Vec<kuluu_snapshot::SearchPlayer>,
+    },
+
     /// s2c AskCommit: the listing-fee quote (`quote: None` on rejection, with
     /// the LSB message code in `result` — 197 from auctionutils SellingItems).
     AuctionSellQuote {
@@ -3742,6 +3767,17 @@ pub enum AgentCommand {
 
     /// Walk away (c2s 0x033 Kind Cancell).
     TradeCancel,
+
+    /// Run a `searchma` query against the search server: one TCP_SEARCH (or
+    /// TCP_SEARCH_ALL) request whose TLV blob is built from these filters
+    /// (vendor/server/src/search/search_handler.cpp _HandleSearchRequest; vault
+    /// main_menu.md §26). The merged result frames come back as
+    /// [`AgentEvent::PlayerSearchCompleted`].
+    PlayerSearch {
+        filters: Vec<ffxi_proto::search::SearchFilter>,
+        #[serde(default)]
+        all_pages: bool,
+    },
 
     Move {
         x: f32,

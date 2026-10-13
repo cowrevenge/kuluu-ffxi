@@ -1142,6 +1142,9 @@ fn sub_target_action_for(
         A::EquipItem { .. } => None,
         A::KeyItem { .. } => None,
         A::Emote { .. } => None,
+        // Search rows go straight to the search server (Run) or stay inert
+        // (hits); no sub-target cursor (vault main_menu.md section 26).
+        A::SearchRun | A::SearchHitRow { .. } => None,
     }
 }
 
@@ -1679,6 +1682,25 @@ fn dispatch_dynamic_menu_action(
         // Roster slots stay inert until the prtyN member sub-action mapping is
         // dug out (vault main_menu.md §24 [I]).
         A::PartyMemberRow { .. } => return,
+        // Search hit rows stay inert until a search-to-target mapping exists;
+        // retail's own hit-row select semantics remain [I] (vault main_menu.md
+        // section 26).
+        A::SearchHitRow { .. } => return,
+        // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
+        // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
+        // which LSB defaults to "everyone" (_HandleSearchRequest); the merged
+        // result frames land back on SceneSnapshot.search and refresh the rows
+        // (vault main_menu.md section 26). Filter sub-editors are the documented
+        // follow-up on this bead family.
+        A::SearchRun => {
+            if let Err(e) = cmd_tx.try_send(AgentCommand::PlayerSearch {
+                filters: Vec::new(),
+                all_pages: false,
+            }) {
+                push_system_chat_line(scene_state, format!("[menu] search dropped: {e}"));
+            }
+            return;
+        }
         // Trade answer YES sends c2s TRADE_RES Kind Start; LSB then pushes
         // RES{Start} to BOTH sides, which replaces our pending window with the
         // live one (player_trade.cpp; vault main_menu.md §25) — nothing to clear

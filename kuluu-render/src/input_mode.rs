@@ -285,6 +285,12 @@ pub enum MenuKind {
         trade_index: u8,
     },
 
+    /// The Search row family — one kuluu surface for retail's `searchma` form
+    /// and the `scresult` model list; rows follow the select law (FFXiMain.dll
+    /// retail-2026-09 vtable 0x33B900 handler RVA 0x20D340; vault main_menu.md
+    /// §26).
+    Search,
+
     Items,
 
     KeyItems,

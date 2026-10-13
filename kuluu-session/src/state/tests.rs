@@ -2527,6 +2527,7 @@ fn trade_phases_fold_into_the_state_field() {
 #[allow(clippy::unneeded_struct_pattern)]
 fn _agentcommand_is_additive_only(x: &AgentCommand) {
     match x {
+        AgentCommand::PlayerSearch { .. } => (),
         AgentCommand::Move { .. } => (),
         AgentCommand::StopMove { .. } => (),
         AgentCommand::GroundCorrection { .. } => (),
@@ -2685,6 +2686,7 @@ fn ground_height_correction_is_same_column_and_height_only() {
 #[allow(clippy::unneeded_struct_pattern)]
 fn _agentevent_is_additive_only(x: &AgentEvent) {
     match x {
+        AgentEvent::PlayerSearchCompleted { .. } => (),
         AgentEvent::Connected { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),

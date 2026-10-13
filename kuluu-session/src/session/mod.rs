@@ -2848,6 +2848,9 @@ async fn keepalive_loop(
 
     let mut auction = crate::auction::AuctionFlow::default();
     let ah_search_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Player searches ride the same search-server socket family but may run
+    // alongside an AH browse (retail has no cross-lock between them).
+    let player_search_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Delivery-box recipient entry: `awaiting_recipient` is set while the
     // name-entry frame is up (the next TextInput answers it);
@@ -3968,6 +3971,15 @@ async fn keepalive_loop(
                             &event_tx,
                             server_host.clone(),
                             AhSearchQuery::History { item_id, stack },
+                        );
+                    }
+                    Some(AgentCommand::PlayerSearch { filters, all_pages }) => {
+                        spawn_player_search(
+                            &player_search_inflight,
+                            &event_tx,
+                            server_host.clone(),
+                            filters,
+                            all_pages,
                         );
                     }
                     Some(AgentCommand::AhBid {
@@ -7545,6 +7557,44 @@ fn spawn_ah_search(
                     },
                 }
             }
+        };
+        inflight.store(false, Ordering::Release);
+        let _ = event_tx.send(event);
+    });
+}
+
+/// Runs one player-search round-trip off the session loop (vault
+/// main_menu.md section 26). Serialized like [`spawn_ah_search`]; TCP_SEARCH
+/// needs no paging request — LSB queues every result frame with the reply.
+fn spawn_player_search(
+    inflight: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    host: String,
+    filters: Vec<ffxi_proto::search::SearchFilter>,
+    all_pages: bool,
+) {
+    use std::sync::atomic::Ordering;
+    if inflight.swap(true, Ordering::AcqRel) {
+        let _ = event_tx.send(AgentEvent::Error {
+            message: "player search already in flight".into(),
+        });
+        return;
+    }
+    let inflight = inflight.clone();
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let event = match crate::search_client::player_search(&host, &filters, all_pages).await {
+            Ok(pages) => AgentEvent::PlayerSearchCompleted {
+                total: pages.total,
+                players: pages
+                    .hits
+                    .iter()
+                    .map(crate::search_client::search_hit_to_view)
+                    .collect(),
+            },
+            Err(e) => AgentEvent::Error {
+                message: format!("player search: {e:#}"),
+            },
         };
         inflight.store(false, Ordering::Release);
         let _ = event_tx.send(event);

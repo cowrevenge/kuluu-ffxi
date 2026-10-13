@@ -239,6 +239,11 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if let Some(trade) = &delta.set_trade {
         snap.trade = trade.clone();
     }
+    // One finished query replaces the whole result set (scresult law, vault
+    // main_menu.md §26); a full snapshot carries it through directly.
+    if let Some(search) = &delta.set_search {
+        snap.search = search.clone();
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

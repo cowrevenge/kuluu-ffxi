@@ -55,6 +55,8 @@ fn merge(mut previous: wire::SceneDelta, mut next: wire::SceneDelta) -> wire::Sc
             .collect(),
         diagnostics: next.diagnostics.or(previous.diagnostics),
         myroom: next.myroom.or(previous.myroom),
+        // Same replacement law for finished search results (vault main_menu.md section 26).
+        set_search: next.set_search.or(previous.set_search),
     }
 }
 

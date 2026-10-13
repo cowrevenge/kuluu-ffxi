@@ -282,6 +282,18 @@ pub enum DynamicMenuAction {
     Emote {
         emote_id: u8,
     },
+
+    /// The `searchma` run row — select id 1 hands to the query object's method
+    /// 0x20EE70 (FFXiMain.dll retail-2026-09 law at handler RVA 0x20D340; vault
+    /// main_menu.md section 26). Fires AgentCommand::PlayerSearch; merged
+    /// CSearchListPacket frames land the results in SceneSnapshot.search.
+    SearchRun,
+    /// One hit row of the results list (retail's `scresult` model window).
+    /// Selecting is inert until a search-to-target mapping exists — retail's own
+    /// hit-row semantics stay [I] (vault main_menu.md section 26).
+    SearchHitRow {
+        index: usize,
+    },
 }
 
 impl DynamicMenuAction {
@@ -796,6 +808,9 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
         MenuKind::ItemAction { .. } => "(item no longer in this bag)",
         MenuKind::EquipSlot(_) => "(no equippable items for this slot)",
         MenuKind::EmoteList => "(emote table unavailable)",
+        // The Run row is always present; this hint covers the no-results state
+        // (scresult empty before a query has run, vault main_menu.md section 26).
+        MenuKind::Search => "(no search results yet)",
         _ => "(empty)",
     }
 }
@@ -825,6 +840,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Party => &[],
         MenuKind::Trade => &[],
         MenuKind::TradePick { .. } => &[],
+        MenuKind::Search => &[],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
         MenuKind::KeyItems => &[],
         MenuKind::UsableItems => &[],
@@ -871,6 +887,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // pair-window the same way.
         MenuKind::Party => "Party",
         MenuKind::Trade => "Trade",
+        MenuKind::Search => "Search",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1042,14 +1059,53 @@ pub fn trade_pick_rows(
         .collect()
 }
 
+/// Rows of the Search surface — one menu for retail's `searchma` form and its
+/// `scresult` model list (vault main_menu.md §26). The Run row leads (select id
+/// 1 → query-object method 0x20EE70), then one row per hit in server order.
+/// Label law follows the AddPlayer fields: name, job abbrev + levels (`???` for
+/// the hidden shape behind flags1 & 0x4000 — those entries vanish from the
+/// frame), and zone id. kuluu has no filter editor yet, so Run sends an empty
+/// entry list, which LSB's _HandleSearchRequest defaults read as "everyone".
+/// The form sub-windows (scname/searchjo/searchna/… select ids 2-7,17) are the
+/// documented follow-ups for this bead family.
+pub fn search_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut rows = vec![DynamicMenuRow {
+        label: "Run Search".to_string(),
+        action: DynamicMenuAction::SearchRun,
+    }];
+    let Some(results) = snap.search.as_deref() else {
+        return rows;
+    };
+    for (index, hit) in results.players.iter().enumerate() {
+        let shape = match (hit.main_job, hit.main_level) {
+            (Some(job), Some(level)) => {
+                let job = ffxi_vocab::job_names::abbrev(u16::from(job)).unwrap_or("??");
+                let sub = match (hit.sub_job, hit.sub_level) {
+                    (Some(sjob), Some(slvl)) if slvl > 0 => format!(
+                        "/{}{slvl}",
+                        ffxi_vocab::job_names::abbrev(u16::from(sjob)).unwrap_or("??")
+                    ),
+                    _ => String::new(),
+                };
+                format!("{job}{level}{sub}")
+            }
+            _ => "???".to_string(),
+        };
+        rows.push(DynamicMenuRow {
+            label: format!("{}  {shape}  Z{}", hit.name, hit.zone),
+            action: DynamicMenuAction::SearchHitRow { index },
+        });
+    }
+    rows
+}
+
 /// The submenu a Root category drills into, and thus the level the right pane
 /// previews while that category is highlighted at Root. Single source for the
 /// Root → submenu mapping: `text_input::resolve_menu_entry` drills through this
 /// so the client dispatch and the preview can't disagree (guarded by a test in
-/// the client). `None` = a Root entry with no browsable submenu (Search/
-/// Macros fire commands or aren't built; Current Time/Key Items run their retail
-/// text commands, Log Out/Shut Down act directly), so the right pane shows no
-/// preview.
+/// the client). `None` = a Root entry with no browsable submenu (Macros isn't
+/// built; Current Time/Key Items run their retail text commands, Log Out/Shut
+/// Down act directly), so the right pane shows no preview.
 /// `flat_magic` is the Retail+ "Flat Magic List" gate
 /// ([`RETAIL_MAGIC_FLAT_LIST`] in GraphicsSettings): on, kuluu's one-step spell
 /// list replaces retail's two-window flow (vault main_menu.md §21).
@@ -1069,6 +1125,10 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // sound) without an eligible target — kuluu keeps the window drill and
         // enforces that gate at confirm time (vault main_menu.md §25).
         "Trade" => MenuKind::Trade,
+        // Retail's Search row opens `searchma` unconditionally from its menuwind
+        // arm 0x140626 — no gate, just the scresult null-check on entry select
+        // (FFXiMain.dll retail-2026-09; vault main_menu.md §26).
+        "Search" => MenuKind::Search,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1306,6 +1366,7 @@ pub fn refresh_dynamic_menu_rows(
         // main_menu.md §25): answer rows → gil/own slots/buttons → partner
         // views, and the Add-Item bag picker under each own slot row.
         MenuKind::Trade => trade_window_rows(snap),
+        MenuKind::Search => search_window_rows(snap),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -3515,5 +3576,71 @@ mod tests {
                 bag_slot: 4,
             }
         );
+    }
+
+    /// The search surface law (vault main_menu.md §26): the Run row leads, then
+    /// one hit row per server frame entry in order. Label = name, job abbrevs +
+    /// levels from the AddPlayer entries — or `???` for a hidden player whose
+    /// job/level/race/rank entries were dropped (flags1 & 0x4000), then zone.
+    #[test]
+    fn search_window_rows_lead_with_run_then_hits_in_server_order() {
+        use kuluu_snapshot::{SearchPlayer, SearchResults};
+
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(search_window_rows(&empty).len(), 1);
+
+        let snap = kuluu_snapshot::SceneSnapshot {
+            search: Some(Box::new(SearchResults {
+                total: 2,
+                players: vec![
+                    SearchPlayer {
+                        name: "bob".into(),
+                        zone: 103,
+                        nation: Some(1),
+                        main_job: Some(3),
+                        sub_job: Some(1),
+                        main_level: Some(75),
+                        sub_level: Some(37),
+                        race: Some(2),
+                        rank: Some(3),
+                        flags1: 0x42,
+                        id: 0x1_2345,
+                        comment_type: None,
+                        flags2: 0,
+                        languages: 3,
+                    },
+                    SearchPlayer {
+                        name: "ALongNameX".into(),
+                        zone: 0,
+                        nation: None,
+                        main_job: None,
+                        sub_job: None,
+                        main_level: None,
+                        sub_level: None,
+                        race: None,
+                        rank: None,
+                        flags1: 0x4000,
+                        id: 99,
+                        comment_type: Some(7),
+                        flags2: 0xDEAD,
+                        languages: 1,
+                    },
+                ],
+            })),
+            ..Default::default()
+        };
+        let rows = search_window_rows(&snap);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].label, "Run Search");
+        // Job ids 3/1 are WHM/WAR in the LSB job table scraped by ffxi-vocab.
+        assert_eq!(&rows[1].label, &{
+            let whm = ffxi_vocab::job_names::abbrev(3).expect("WHM has a name");
+            let war = ffxi_vocab::job_names::abbrev(1).expect("WAR has a name");
+            format!("bob  {whm}75/{war}37  Z103")
+        });
+        assert_eq!(rows[1].action, DynamicMenuAction::SearchHitRow { index: 0 });
+        // The hidden shape carries no job/level entries — the row says so.
+        assert_eq!(&rows[2].label, "ALongNameX  ???  Z0");
+        assert_eq!(rows[2].action, DynamicMenuAction::SearchHitRow { index: 1 });
     }
 }

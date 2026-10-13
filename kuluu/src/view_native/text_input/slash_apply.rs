@@ -846,6 +846,9 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::TradePick { trade_index } => {
                     format!("TradePick({trade_index})").into()
                 }
+                // One surface for the searchma/scresult family
+                // (vault main_menu.md section 26).
+                kuluu_render::MenuKind::Search => "Search".into(),
                 kuluu_render::MenuKind::PowerPrompt { shut_down } => if shut_down {
                     "ShutDownPrompt"
                 } else {

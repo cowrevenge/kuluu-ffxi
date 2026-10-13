@@ -1870,15 +1870,26 @@ mod menu_dispatch_tests {
         );
     }
 
+    /// The Search row drills into the searchma/scresult surface unconditionally,
+    /// like retail's menuwind arm 0x140626 opens `searchma` with no gate (vault
+    /// main_menu.md §26).
+    #[test]
+    fn search_row_opens_the_search_window() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Search", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::Search)
+        );
+    }
+
     #[test]
     fn unwired_root_entries_stay_not_implemented() {
-        // Party is built (opens the prtyN window per vault main_menu.md §24);
-        // everything else here still answers "Not supported yet".
+        // Party is built (opens the prtyN window per vault main_menu.md §24) and
+        // so is Search (vault main_menu.md §26); everything else here still
+        // answers "Not supported yet".
         for label in [
             "Synthesis",
             "Linkshell",
             "Region Info",
-            "Search",
             "Missions",
             "View House",
             "Bazaar",

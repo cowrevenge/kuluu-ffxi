@@ -1064,6 +1064,12 @@ pub struct SceneSnapshot {
     /// main_menu.md §25). Trailing on purpose: the postcard pin stays an append.
     #[serde(default)]
     pub trade: Option<Box<TradeWindow>>,
+
+    /// The last completed player-search result set (the `scresult` singleton's
+    /// data in retail; vault main_menu.md §26). Kept across frames until a new
+    /// query replaces it, exactly like the retail model window holds its rows.
+    #[serde(default)]
+    pub search: Option<Box<SearchResults>>,
 }
 
 /// One staged slot of a player-trade offer. A gil row keeps `item_no` at the
@@ -1105,6 +1111,48 @@ pub struct TradeWindow {
     /// change from either side un-confirms both per player_trade.cpp setSlot).
     #[serde(default)]
     pub partner_confirmed: bool,
+}
+
+/// One player row from a `CSearchListPacket` (vendor/server/src/search/packets/
+/// search_list.cpp AddPlayer; vault main_menu.md §26). The optionality follows
+/// the wire law: fields vanish while flags1 & 0x4000 hides a player's shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPlayer {
+    pub name: String,
+    /// Zone id where the server last saw them (`Area` entry).
+    pub zone: u16,
+    #[serde(default)]
+    pub nation: Option<u8>,
+    #[serde(default)]
+    pub main_job: Option<u8>,
+    #[serde(default)]
+    pub sub_job: Option<u8>,
+    #[serde(default)]
+    pub main_level: Option<u8>,
+    #[serde(default)]
+    pub sub_level: Option<u8>,
+    #[serde(default)]
+    pub race: Option<u8>,
+    #[serde(default)]
+    pub rank: Option<u8>,
+    pub flags1: u16,
+    /// 20-bit `Id` entry (the chars.id on the server side).
+    pub id: u32,
+    /// seacom comment type, present only when non-zero.
+    #[serde(default)]
+    pub comment_type: Option<u32>,
+    pub flags2: u32,
+    /// Language bits (`Language` entry).
+    pub languages: u16,
+}
+
+/// Everything one player search returned across its result frames, plus the
+/// server-declared total (which may exceed what was sent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub total: u16,
+    /// Concatenation of every non-final frame in arrival order, then the final.
+    pub players: Vec<SearchPlayer>,
 }
 
 impl TradeWindow {
@@ -1730,6 +1778,11 @@ pub struct SceneDelta {
     /// arrive as a full snapshot, which every producer today sends anyway).
     #[serde(default)]
     pub myroom: Option<MyRoom>,
+
+    /// Replace-or-clear the whole search result set (`set_trade` law): one
+    /// completed query lands as one rebuilt frame (vault main_menu.md §26).
+    #[serde(default)]
+    pub set_search: Option<Option<Box<SearchResults>>>,
 }
 
 /// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
@@ -2396,6 +2449,7 @@ mod tests {
             widescan: WidescanList::default(),
             death_menu_offer: None,
             trade: None,
+            search: None,
         }
     }
 
@@ -2956,15 +3010,17 @@ mod tests {
             "death_menu_offer",
             "party_invite",
             "trade",
+            "search",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
     // Re-pinned for each trailing additive field since (§25-era: party_invite
-    // then trade, beads kuluu-o9qt7.8/.9): every append is exactly one 0x00 byte
-    // while the default stays None; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // then trade, beads kuluu-o9qt7.8/.9; now search, bead kuluu-o9qt7.10): every
+    // append is exactly one 0x00 byte while the default stays None; no earlier
+    // field moved.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

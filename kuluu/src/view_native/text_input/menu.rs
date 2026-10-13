@@ -154,6 +154,12 @@ pub(super) fn confirm_menu_at_cursor(
     }
 
     if matches!(kind, MenuKind::Status) {
+        // Retail's persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60
+        // is a ret-8 stub; vault main_menu.md §11.1): default is the passive panel, and kuluu's
+        // actionable rows live behind the Retail+ "Status Rows" toggle.
+        if !graphics.interactive_status_rows {
+            return None;
+        }
         use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
         let entry = STATUS_ENTRIES.get(cursor)?;
         match entry.kind {
@@ -459,9 +465,25 @@ fn handle_retail_plus_row(
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{
         DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_CAMERA_LEASH, RETAIL_DLSS_MENU,
+        RETAIL_STATUS_ROWS,
     };
     match label {
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
+        RETAIL_STATUS_ROWS => {
+            graphics.interactive_status_rows = !graphics.interactive_status_rows;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.interactive_status_rows {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            );
+            true
+        }
         // Number row: the value moves with Left/Right, so confirm does
         // nothing rather than fall through to toggle_debug_panel.
         RETAIL_CAMERA_LEASH => true,
@@ -1625,6 +1647,33 @@ mod menu_dispatch_tests {
             .local_toasts
             .iter()
             .any(|l| { l.text.starts_with("[menu] /nope") && l.text.contains("not implemented") }));
+    }
+
+    /// Retail persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60), so the
+    /// Status panel is passive by default; kuluu's actionable rows sit behind the "Status Rows"
+    /// Retail+ toggle, flipped via the shared Debug-row handler.
+    #[test]
+    fn status_rows_passive_by_default_with_retail_plus_toggle() {
+        use kuluu_render::GraphicsSettings;
+
+        let mut graphics = GraphicsSettings::default();
+        assert!(
+            !graphics.interactive_status_rows,
+            "retail default: persona rows are display-only"
+        );
+        let mut scene_state = SceneState::default();
+        assert!(handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_STATUS_ROWS,
+            &mut graphics,
+            &mut scene_state,
+        ));
+        assert!(graphics.interactive_status_rows, "toggle flips on");
+        handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_STATUS_ROWS,
+            &mut graphics,
+            &mut scene_state,
+        );
+        assert!(!graphics.interactive_status_rows, "flips back off");
     }
 
     /// Send-panel shape: choice 0 = recipient row (above the grid), choices

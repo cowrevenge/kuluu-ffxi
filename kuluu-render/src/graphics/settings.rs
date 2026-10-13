@@ -683,6 +683,13 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub mob_hp_under: bool,
 
+    /// Retail+ gate for the actionable Status panel rows. Retail opens persona, whose menu-window
+    /// handler is a ret-8 stub (FFXiMain.dll retail-2026-09 RVA 0x12AC60 answers no command events):
+    /// its rows are pure display. Kuluu's interactive rows (Profile, Play Time echo, ...) sit behind
+    /// this toggle; OFF by default = the retail passive panel. Persisted here so the choice sticks.
+    #[serde(default)]
+    pub interactive_status_rows: bool,
+
     /// Retail+ gate: the player character ignores knockback displacement (the push and the
     /// flinch ride on, only the travel is dropped). OFF by default — retail knocks players back.
     /// The `enhanced-ignore-knockback-self` feature is its compile-time half: without it this
@@ -1004,6 +1011,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1052,6 +1060,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -1100,6 +1109,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso2x,
                 bloom_intensity: 0.04,
@@ -1148,6 +1158,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
@@ -1200,6 +1211,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
@@ -1249,6 +1261,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
+                interactive_status_rows: false,
                 ignore_knockback_self: false,
                 texture_filtering: TextureFiltering::Aniso16x,
                 bloom_intensity: 0.16,

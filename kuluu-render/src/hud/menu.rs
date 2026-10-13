@@ -384,6 +384,9 @@ pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
 /// Gates the party-frame Job column (retail shows none; default off). The row
 /// exists only with `enhanced-job-display`.
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
+/// Makes the Status panel's rows actionable. Retail opens persona, which answers no menu command
+/// events (FFXiMain.dll retail-2026-09 RVA 0x12AC60 is a ret-8 stub) — display-only. Default off.
+pub const RETAIL_STATUS_ROWS: &str = "Status Rows";
 /// Debug dev row: [on] = the player character takes knockback displacement
 /// (the retail behavior, the default); off drops the travel only — flinch,
 /// facing and the movement lock still play. The row exists only with
@@ -425,6 +428,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_MOB_HP_UNDER,
     #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
+    RETAIL_STATUS_ROWS,
     #[cfg(feature = "enhanced-ignore-knockback-self")]
     RETAIL_KNOCKBACK,
     RETAIL_CAMERA_LEASH,
@@ -1603,6 +1607,16 @@ fn format_row_body(
                             "off"
                         } else {
                             "on"
+                        }
+                    );
+                }
+                if label == RETAIL_STATUS_ROWS {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.interactive_status_rows {
+                            "on"
+                        } else {
+                            "off"
                         }
                     );
                 }

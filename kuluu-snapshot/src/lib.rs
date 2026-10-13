@@ -1070,6 +1070,12 @@ pub struct SceneSnapshot {
     /// query replaces it, exactly like the retail model window holds its rows.
     #[serde(default)]
     pub search: Option<Box<SearchResults>>,
+
+    /// The two link-shell slots as s2c 0x0E0 last reported them (vault main_menu.md §27; the
+    /// server pushes both at login and again after every equip/unequip/create). Trailing on
+    /// purpose, so the postcard pin stays an append.
+    #[serde(default)]
+    pub linkshells: LinkShells,
 }
 
 /// One staged slot of a player-trade offer. A gil row keeps `item_no` at the
@@ -1144,6 +1150,55 @@ pub struct SearchPlayer {
     pub flags2: u32,
     /// Language bits (`Language` entry).
     pub languages: u16,
+}
+
+/// One link-shell slot's equipped pearl (the s2c 0x0E0 model in vault main_menu.md §27).
+/// `category`/`item_index` stay 0 while nothing is equipped: LSB leaves both zeroed when
+/// `equipLocation(SLOT_LINK1/SLOT_LINK2)` has no entry, and reads them back the same way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkShellSlot {
+    /// Container holding the pearl (`Category`).
+    pub category: u8,
+    /// Slot inside that container (`ItemIndex`); 0 means the shell slot is empty.
+    pub item_index: u8,
+}
+
+impl LinkShellSlot {
+    pub const EMPTY: Self = Self {
+        category: 0,
+        item_index: 0,
+    };
+
+    /// A pearl sits in this slot (the s2c 0x0E0 law above).
+    pub fn is_occupied(&self) -> bool {
+        self.item_index != 0
+    }
+}
+
+/// Both link-shell slots — `LinkshellNum` 1 and 2, the only two the server tracks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkShells {
+    pub one: LinkShellSlot,
+    pub two: LinkShellSlot,
+}
+
+impl LinkShells {
+    /// Slot by `LinkshellId` (1/2); anything else is out of range and ignored.
+    pub fn slot_mut(&mut self, linkshell_id: u8) -> Option<&mut LinkShellSlot> {
+        match linkshell_id {
+            1 => Some(&mut self.one),
+            2 => Some(&mut self.two),
+            _ => None,
+        }
+    }
+
+    pub fn slot(&self, linkshell_id: u8) -> Option<&LinkShellSlot> {
+        match linkshell_id {
+            1 => Some(&self.one),
+            2 => Some(&self.two),
+            _ => None,
+        }
+    }
 }
 
 /// Everything one player search returned across its result frames, plus the
@@ -1783,6 +1838,11 @@ pub struct SceneDelta {
     /// completed query lands as one rebuilt frame (vault main_menu.md §26).
     #[serde(default)]
     pub set_search: Option<Option<Box<SearchResults>>>,
+
+    /// Replace both link-shell slots (`set_search` law): each s2c 0x0E0 describes one slot, and the
+    /// merge rebuilds the pair (vault main_menu.md §27).
+    #[serde(default)]
+    pub set_linkshells: Option<LinkShells>,
 }
 
 /// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
@@ -2450,6 +2510,7 @@ mod tests {
             death_menu_offer: None,
             trade: None,
             search: None,
+            linkshells: LinkShells::default(),
         }
     }
 
@@ -3011,6 +3072,7 @@ mod tests {
             "party_invite",
             "trade",
             "search",
+            "linkshells",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3020,7 +3082,7 @@ mod tests {
     // then trade, beads kuluu-o9qt7.8/.9; now search, bead kuluu-o9qt7.10): every
     // append is exactly one 0x00 byte while the default stays None; no earlier
     // field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

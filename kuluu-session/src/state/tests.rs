@@ -2674,6 +2674,56 @@ fn ground_height_correction_is_same_column_and_height_only() {
     assert_eq!(position.speed_base, 5);
 }
 
+#[test]
+fn linkshell_slot_events_fold_the_pair_and_ignore_unknown_slots() {
+    // s2c 0x0E0 law (vault main_menu.md §27): one packet describes one slot, LSB pushes both at
+    // login, and a zeroed pair means "nothing equipped in that slot".
+    let mut state = SessionState::default();
+    assert!(!state.linkshells.one.is_occupied());
+
+    assert!(state.apply_event(&AgentEvent::LinkShellSlotChanged {
+        linkshell_slot: 1,
+        category: 0,
+        item_index: 12,
+    }));
+    assert_eq!(state.linkshells.one.item_index, 12);
+
+    // The second login push reports slot 2; the first slot must survive it.
+    assert!(state.apply_event(&AgentEvent::LinkShellSlotChanged {
+        linkshell_slot: 2,
+        category: 1,
+        item_index: 3,
+    }));
+    assert_eq!(state.linkshells.one.item_index, 12);
+    assert_eq!(
+        state.linkshells.two,
+        kuluu_snapshot::LinkShellSlot {
+            category: 1,
+            item_index: 3
+        }
+    );
+
+    // Repeating the same report changes nothing.
+    assert!(!state.apply_event(&AgentEvent::LinkShellSlotChanged {
+        linkshell_slot: 2,
+        category: 1,
+        item_index: 3,
+    }));
+
+    // Unequip arrives as zeros; slot ids outside LSB's LinkshellId 1/2 are ignored.
+    assert!(state.apply_event(&AgentEvent::LinkShellSlotChanged {
+        linkshell_slot: 2,
+        category: 0,
+        item_index: 0,
+    }));
+    assert!(!state.linkshells.two.is_occupied());
+    assert!(!state.apply_event(&AgentEvent::LinkShellSlotChanged {
+        linkshell_slot: 3,
+        category: 0,
+        item_index: 9,
+    }));
+}
+
 /// AgentEvent is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2687,6 +2737,7 @@ fn ground_height_correction_is_same_column_and_height_only() {
 fn _agentevent_is_additive_only(x: &AgentEvent) {
     match x {
         AgentEvent::PlayerSearchCompleted { .. } => (),
+        AgentEvent::LinkShellSlotChanged { .. } => (),
         AgentEvent::Connected { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),

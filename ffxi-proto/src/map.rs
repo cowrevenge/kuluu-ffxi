@@ -693,6 +693,11 @@ pub mod s2c {
     // Another customer bought a row of the bazaar we are browsing.
     pub const BAZAAR_SELL: u16 = 0x109;
 
+    // GP_SERV_COMMAND_GROUP_COMLINK, vendor/server/src/map/packets/s2c/0x0e0_group_comlink.h.
+    // Which inventory item is now the pearl equipped in linkshell slot 1 or 2; pushed for both
+    // slots at login and after every equip/unequip/create (vault main_menu.md §27).
+    pub const GROUP_COMLINK: u16 = 0x0E0;
+
     // vendor/server/src/map/packets/s2c/0x10e_reqsubmapnum.h GP_SERV_COMMAND_REQSUBMAPNUM.
     pub const REQSUBMAPNUM: u16 = super::event_query_wire::S2C_REQSUBMAPNUM;
 

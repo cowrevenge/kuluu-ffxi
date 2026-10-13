@@ -1,10 +1,12 @@
 pub mod autotranslate;
+pub mod bitstream;
 pub mod blowfish;
 pub mod checksum;
 pub mod decode;
 pub mod entity_stream;
 pub mod fishing_messages;
 pub mod framing;
+pub mod linkshell;
 pub mod linkshell_name;
 pub mod login;
 pub mod map;

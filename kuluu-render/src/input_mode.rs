@@ -291,6 +291,11 @@ pub enum MenuKind {
     /// §26).
     Search,
 
+    /// The Link Shell row's window. Retail answers page-1 row 10 by handing the `link5` singleton
+    /// to helper FFXiMain.dll retail-2026-09 RVA 0x1E4470 and always opening `menu    link5`; two
+    /// rows, one per shell slot the server tracks (vault main_menu.md section 27).
+    Linkshell,
+
     Items,
 
     KeyItems,

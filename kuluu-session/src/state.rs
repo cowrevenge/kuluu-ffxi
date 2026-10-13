@@ -558,6 +558,12 @@ pub struct SessionState {
     #[serde(default)]
     pub search: Option<Box<kuluu_snapshot::SearchResults>>,
 
+    /// Both link-shell slots as s2c 0x0E0 last reported them (the `link5`/`lscswin` family's data;
+    /// vault main_menu.md §27). LSB pushes both slots at login and again after every
+    /// equip/unequip/create, so they are never unknown for long once we are in world.
+    #[serde(default)]
+    pub linkshells: kuluu_snapshot::LinkShells,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2880,6 +2886,37 @@ impl SessionState {
                 self.search = next;
                 changed
             }
+
+            AgentEvent::LinkShellSlotChanged {
+                linkshell_slot,
+                category,
+                item_index,
+            } => {
+                // One s2c 0x0E0 describes one slot; the pair is rebuilt whole so the delta stays a
+                // last-writer-wins `set_linkshells` (vault main_menu.md §27).
+                let Some(slot) = linkshell_slot_for(*linkshell_slot) else {
+                    return false;
+                };
+                let mut next = self.linkshells;
+                let empty = *category == 0 && *item_index == 0;
+                let value = if empty {
+                    kuluu_snapshot::LinkShellSlot::EMPTY
+                } else {
+                    kuluu_snapshot::LinkShellSlot {
+                        category: *category,
+                        item_index: *item_index,
+                    }
+                };
+                match slot {
+                    1 => next.one = value,
+                    _ => next.two = value,
+                }
+                let changed = next != self.linkshells;
+                if changed {
+                    self.linkshells = next;
+                }
+                changed
+            }
             AgentEvent::AuctionSellQuote { quote, .. } => {
                 let changed = self.auction.fee_quote != *quote;
                 self.auction.fee_quote = *quote;
@@ -3640,6 +3677,15 @@ pub enum AgentEvent {
     PlayerSearchCompleted {
         total: u16,
         players: Vec<kuluu_snapshot::SearchPlayer>,
+    },
+
+    /// s2c 0x0E0 GP_SERV_COMMAND_GROUP_COMLINK: the pearl equipped in `linkshell_slot` (1 or 2) now
+    /// lives at `category`/`item_index`; zeros mean the slot is empty — LSB leaves both fields zero
+    /// when `equipLocation(SLOT_LINK1/SLOT_LINK2)` has no entry. Vault main_menu.md §27.
+    LinkShellSlotChanged {
+        linkshell_slot: u8,
+        category: u8,
+        item_index: u8,
     },
 
     /// s2c AskCommit: the listing-fee quote (`quote: None` on rejection, with
@@ -4688,3 +4734,12 @@ pub const INSTANT_ACTION_LOCK_MS: u32 = 1000;
 
 #[cfg(test)]
 mod tests;
+
+/// `LinkshellNum`/`LinkshellId` values LSB accepts in this family (`GP_CLI_COMMAND_GROUP_COMLINK_*_LINKSHELLID`).
+fn linkshell_slot_for(id: u8) -> Option<u8> {
+    match id {
+        ffxi_proto::linkshell::LINKSHELL_1 => Some(1),
+        ffxi_proto::linkshell::LINKSHELL_2 => Some(2),
+        _ => None,
+    }
+}

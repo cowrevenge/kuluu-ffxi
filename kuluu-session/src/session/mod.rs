@@ -1916,6 +1916,16 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
+        s2c::GROUP_COMLINK => match ffxi_proto::linkshell::parse_group_comlink(sub.data) {
+            Ok(c) => {
+                let _ = event_tx.send(AgentEvent::LinkShellSlotChanged {
+                    linkshell_slot: c.linkshell_slot,
+                    category: c.category,
+                    item_index: c.item_index,
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
         s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {

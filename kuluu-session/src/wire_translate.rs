@@ -131,6 +131,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // (the scresult model, vault main_menu.md §26).
         trade: s.trade.clone(),
         search: s.search.clone(),
+        linkshells: s.linkshells,
     }
 }
 

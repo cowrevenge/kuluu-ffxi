@@ -288,11 +288,21 @@ pub enum DynamicMenuAction {
     /// main_menu.md section 26). Fires AgentCommand::PlayerSearch; merged
     /// CSearchListPacket frames land the results in SceneSnapshot.search.
     SearchRun,
-    /// One hit row of the results list (retail's `scresult` model window).
-    /// Selecting is inert until a search-to-target mapping exists — retail's own
-    /// hit-row semantics stay [I] (vault main_menu.md section 26).
+    /// One hit row of the results list (retail's `scresult` model window). Selecting is inert
+    /// until a search-to-target mapping exists - retail's own hit-row semantics stay [I] (vault
+    /// main_menu.md section 26).
     SearchHitRow {
         index: usize,
+    },
+
+    /// One shell-slot row of the Link Shell window (retail `menu    link5`, opened by the page-1
+    /// arm FFXiMain.dll retail-2026-09 RVA 0x1405EE through helper
+    /// FFXiMain.dll retail-2026-09 RVA 0x1E4470; vault main_menu.md section 27).
+    /// `linkshell_slot` is LSB's `LinkshellId` (1/2). Selecting stays inert while that window's own
+    /// select table is [I-pending] (section 27.6): the row makes the s2c 0x0E0 state legible, it
+    /// does not guess at equip/unequip UI.
+    LinkShellSlot {
+        linkshell_slot: u8,
     },
 }
 
@@ -859,6 +869,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
         MenuKind::Map => &[],
+        // Slot rows come from the server state, never a static table (vault main_menu.md section 27).
+        MenuKind::Linkshell => &[],
     }
 }
 
@@ -888,6 +900,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::Party => "Party",
         MenuKind::Trade => "Trade",
         MenuKind::Search => "Search",
+        // Neither `lscswin` nor the `linkN` records carry inline captions (vault main_menu.md
+        // section 27.5), so kuluu titles its slot window after the Root row, like Party/Trade/Search.
+        MenuKind::Linkshell => "Link Shell",
         // The bag picker hung off the trade window's Add-Item button row; its
         // own caption is [I] like the rest of the family (§25).
         MenuKind::TradePick { .. } => "Add Item",
@@ -1111,6 +1126,35 @@ pub fn search_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMe
 /// list replaces retail's two-window flow (vault main_menu.md §21).
 /// `flat_abilities` is the same pattern for Abilities
 /// ([`RETAIL_ABILITIES_FLAT_LIST`]; vault main_menu.md §23).
+/// Row law for the Link Shell window (vault main_menu.md section 27): retail's `menu    link5`
+/// mirrors the two shell slots LSB tracks (`LinkshellNum` 1/2), and all the server ever says about a
+/// slot is which inventory item is its pearl - s2c 0x0E0 `{ LinkshellNum, ItemIndex, Category }`,
+/// zeros meaning "nothing equipped". The shell *name* lives in the pearl's exdata (which kuluu does
+/// not ingest yet) and retail's own row captions are string-table ids (section 27.5), so rows stay
+/// slot-labelled rather than invented.
+pub fn linkshell_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    [1u8, 2]
+        .into_iter()
+        .map(|slot| {
+            let state = snap.linkshells.slot(slot).copied().unwrap_or_default();
+            let label = if state.is_occupied() {
+                format!(
+                    "Link Shell {}   pearl at container {}, index {}",
+                    slot, state.category, state.item_index
+                )
+            } else {
+                format!("Link Shell {}   (no pearl equipped)", slot)
+            };
+            DynamicMenuRow {
+                label,
+                action: DynamicMenuAction::LinkShellSlot {
+                    linkshell_slot: slot,
+                },
+            }
+        })
+        .collect()
+}
+
 pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> Option<MenuKind> {
     Some(match label {
         "Magic" if flat_magic => MenuKind::Magic,
@@ -1129,6 +1173,7 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // arm 0x140626 — no gate, just the scresult null-check on entry select
         // (FFXiMain.dll retail-2026-09; vault main_menu.md §26).
         "Search" => MenuKind::Search,
+        "Linkshell" => MenuKind::Linkshell,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1367,6 +1412,9 @@ pub fn refresh_dynamic_menu_rows(
         // views, and the Add-Item bag picker under each own slot row.
         MenuKind::Trade => trade_window_rows(snap),
         MenuKind::Search => search_window_rows(snap),
+        // Link Shell slots (helper FFXiMain.dll retail-2026-09 RVA 0x1E4470 always opens
+        // `menu    link5`; vault main_menu.md section 27).
+        MenuKind::Linkshell => linkshell_window_rows(snap),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -3576,6 +3624,42 @@ mod tests {
                 bag_slot: 4,
             }
         );
+    }
+
+    /// The Link Shell law (vault main_menu.md §27): the window always shows both shell slots the
+    /// server tracks, labelled by whether s2c 0x0E0 reports a pearl and where it lives.
+    #[test]
+    fn linkshell_window_rows_track_the_two_shell_slots_the_server_reports() {
+        // Both slots always exist (vault main_menu.md section 27.7: LSB pushes LinkshellNum 1 and 2
+        // at login); only the s2c 0x0E0 payload changes whether a slot holds a pearl, and where.
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        let rows = linkshell_window_rows(&empty);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "Link Shell 1   (no pearl equipped)");
+        assert_eq!(rows[1].label, "Link Shell 2   (no pearl equipped)");
+        assert_eq!(
+            rows[1].action,
+            DynamicMenuAction::LinkShellSlot { linkshell_slot: 2 }
+        );
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        snap.linkshells.two = kuluu_snapshot::LinkShellSlot {
+            category: 0,
+            item_index: 12,
+        };
+        let rows = linkshell_window_rows(&snap);
+        assert_eq!(rows[0].label, "Link Shell 1   (no pearl equipped)");
+        assert_eq!(
+            rows[1].label,
+            "Link Shell 2   pearl at container 0, index 12"
+        );
+
+        // Root row 10 and the right-pane preview share one mapping.
+        assert_eq!(
+            root_child_kind("Linkshell", false, false),
+            Some(MenuKind::Linkshell)
+        );
+        assert_eq!(menu_title(MenuKind::Linkshell), "Link Shell");
     }
 
     /// The search surface law (vault main_menu.md §26): the Run row leads, then

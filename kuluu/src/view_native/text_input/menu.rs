@@ -1879,6 +1879,12 @@ mod menu_dispatch_tests {
             resolve_menu_entry(MenuKind::Root, "Search", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::Search)
         );
+
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Linkshell", false, false),
+            MenuDispatch::OpenSubmenu(kuluu_render::MenuKind::Linkshell),
+            "page-1 row 10 drills to the slot window (retail always opens menu    link5)"
+        );
     }
 
     #[test]
@@ -1888,7 +1894,6 @@ mod menu_dispatch_tests {
         // answers "Not supported yet".
         for label in [
             "Synthesis",
-            "Linkshell",
             "Region Info",
             "Missions",
             "View House",

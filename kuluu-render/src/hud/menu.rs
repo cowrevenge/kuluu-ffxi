@@ -945,6 +945,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The mcrmenu launcher's two fixed rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x1A64B0; vault main_menu.md §34).
         MenuKind::MacrosPalette => MACRO_LAUNCHER_ENTRIES,
+        // The configwi hub's twelve page rows (handler FFXiMain.dll
+        // retail-2026-09 RVA 0x196770; vault main_menu.md §35).
+        MenuKind::RetailConfig => RETAIL_CONFIG_ENTRIES,
         // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
         MenuKind::CraftList => &[],
         MenuKind::RegionInfo { .. } => &[],
@@ -990,6 +993,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // DAT `mcrm` carries comwin title token 80 = catalog id 80
         // `MacroPalette` (vault main_menu.md §34) — the grounded title.
         MenuKind::MacrosPalette => "MacroPalette",
+        // DAT `conf` carries comwin title token 54 = catalog id 54 `Config`
+        // (vault main_menu.md §35) — the grounded title.
+        MenuKind::RetailConfig => "Config",
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
@@ -1266,6 +1272,26 @@ pub const MACRO_ROW_SELECT_MACRO: &str = "Select Macro";
 pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
 const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
 
+/// The configwi hub's twelve rows. Retail renders no caption strings for them
+/// — the `conf` DAT chunk is chrome-only and no d_msg catalog holds usable
+/// candidates (vault main_menu.md §35, both scans [V-negative]) — so kuluu
+/// numbers them; row order follows item ids 1..12 of handler FFXiMain.dll
+/// retail-2026-09 RVA 0x196770, labels pinned by tests.
+const RETAIL_CONFIG_ENTRIES: &[&str] = &[
+    "Config Page 1",
+    "Config Page 2",
+    "Config Page 3",
+    "Config Page 4",
+    "Config Page 5",
+    "Config Page 6",
+    "Config Page 7",
+    "Config Page 8",
+    "Config Page 9",
+    "Config Page 10",
+    "Config Page 11",
+    "Config Page 12",
+];
+
 /// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
 /// tier substitutable by element and all positional ingredients assignable to bag slots under
 /// LSB's per-stack use law (vault main_menu.md §28; `resolveRecipe`,
@@ -1351,6 +1377,11 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // §34): the root row drills that launcher. The `Edit Macros`
         // caption is the catalog string (§10 idx 75/109).
         "Edit Macros" => MenuKind::MacrosPalette,
+        // Page-2 row 7 is the ungated name-open of `menu    configwi`
+        // (FFXiMain.dll retail-2026-09 RVA 0x14E8D9; vault main_menu.md
+        // §35): the retail Config row drills that twelve-page hub. kuluu's
+        // own settings pages stay separate as Interface/Controls (page 3).
+        "Config" => MenuKind::RetailConfig,
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -3639,12 +3670,16 @@ mod tests {
         );
         assert!(matches!(rows.first(), Some(MenuRow::Header(_))));
         // The kuluu settings page hangs off the page-3 "Interface" row; the
-        // page-2 "Config" row is retail's configwi and stays unbuilt.
+        // page-2 "Config" row is retail's configwi hub (vault main_menu.md §35),
+        // built now as MenuKind::RetailConfig.
         assert_eq!(
             root_child_kind("Interface", false, false),
             Some(MenuKind::Config)
         );
-        assert_eq!(root_child_kind("Config", false, false), None);
+        assert_eq!(
+            root_child_kind("Config", false, false),
+            Some(MenuKind::RetailConfig)
+        );
         assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
     }
@@ -4326,6 +4361,23 @@ mod tests {
         assert_eq!(
             root_child_kind("Edit Macros", false, false),
             Some(MenuKind::MacrosPalette)
+        );
+    }
+
+    /// The configwi hub law (vault main_menu.md §35): twelve page rows in
+    /// handler item-id order, DAT-grounded title Config (comwin token 54 =
+    /// catalog string `Config`), Root `Config` row drills it, and kuluu numbers
+    /// the chrome-only captions itself.
+    #[test]
+    fn retail_config_hub_rows_and_title_track_the_configwi_law() {
+        let entries = entries_for(MenuKind::RetailConfig, false);
+        assert_eq!(entries.len(), 12);
+        assert_eq!(entries[0], "Config Page 1");
+        assert_eq!(entries[11], "Config Page 12");
+        assert_eq!(menu_title(MenuKind::RetailConfig), "Config");
+        assert_eq!(
+            root_child_kind("Config", false, false),
+            Some(MenuKind::RetailConfig)
         );
     }
 

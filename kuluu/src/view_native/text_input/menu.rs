@@ -2202,20 +2202,36 @@ mod menu_dispatch_tests {
     }
 
     #[test]
+    fn config_row_drills_the_retail_hub() {
+        // Ungated page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E8D9
+        // name-opens `menu    configwi` (vault main_menu.md §35); the hub's
+        // twelve rows answer through the generic stub until `.20.1` builds each
+        // page window.
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Config", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::RetailConfig)
+        );
+        assert!(matches!(
+            resolve_menu_entry(MenuKind::RetailConfig, "Config Page 1", false, false),
+            MenuDispatch::NotImplemented(_)
+        ));
+    }
+
+    #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24), so
         // are Search (§26), Region Info (§29), Missions (§30) and View House —
         // the Mog Menu row (§32); everything else still answers
         // "Not supported yet".
         // Bazaar is built now (drills the stall picker, vault main_menu.md §33),
-        // and so is Edit Macros (§34 launcher).
-        for label in ["Config", "Help Desk"] {
-            assert_eq!(
-                resolve_menu_entry(MenuKind::Root, label, false, false),
-                MenuDispatch::NotImplemented(label.into()),
-                "{label} should still be a stub"
-            );
-        }
+        // and so are Edit Macros (§34 launcher) and Config (§35 hub); only
+        // Help Desk remains.
+        let label = "Help Desk";
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, label, false, false),
+            MenuDispatch::NotImplemented(label.into()),
+            "{label} should still be a stub"
+        );
     }
 
     #[test]

@@ -327,6 +327,9 @@ pub enum MenuKind {
     /// The `mcrmenu` macro-palette launcher: two rows = its handler's select
     /// items {1,2} (vault main_menu.md §34).
     MacrosPalette,
+    /// The retail `configwi` page hub: twelve rows = handler item ids 1..12
+    /// (vault main_menu.md §35).
+    RetailConfig,
 
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA

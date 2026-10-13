@@ -28,6 +28,7 @@ pub mod key_item;
 pub mod kind;
 pub mod main_dll;
 pub mod map_image;
+pub mod menu_windows;
 pub mod mmb;
 pub mod mzb;
 pub mod npc_names;

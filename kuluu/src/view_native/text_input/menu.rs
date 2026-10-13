@@ -6,6 +6,12 @@ use super::*;
 enum MenuDispatch {
     OpenSubmenu(MenuKind),
 
+    /// Retail rows that "run" a command hand the runner their literal text -
+    /// FFXiMain.dll retail-2026-09 RVA 0x80DC0 is the runner, and page 2's
+    /// Current Time case at RVA 0x14E98C pushes its own string (.data 0x371AB8
+    /// "/clock"). The same seam serves typed input later (vault §12).
+    TextCommand(&'static str),
+
     KeybindUpdate(KeybindUpdate),
 
     NotImplemented(String),
@@ -27,7 +33,9 @@ fn apply_settings_cycle(
 
 fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
-    use kuluu_render::hud::menu::{COMM_EMOTE_LIST, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
+    use kuluu_render::hud::menu::{
+        COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
+    };
     match (kind, label) {
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
             MenuDispatch::OpenSubmenu(MenuKind::Controls)
@@ -44,6 +52,12 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
         (MenuKind::Root, ROOT_SHUT_DOWN) => {
             MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: true })
         }
+
+        // Page 2 row 10 runs the text command "/clock" through the runner
+        // (FFXiMain.dll retail-2026-09 RVA 0x14E98C, literal .data 0x371AB8;
+        // registry record /clock = id 0x3F in vault §12). Client-side: LSB
+        // has no handler and never sees it on the wire.
+        (MenuKind::Root, l) if l == ROOT_CURRENT_TIME => MenuDispatch::TextCommand("/clock"),
 
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
@@ -136,16 +150,6 @@ pub(super) fn confirm_menu_at_cursor(
             self_pos,
             scene_state,
         );
-        return None;
-    }
-
-    if matches!(kind, MenuKind::Root)
-        && kuluu_render::hud::menu::entry_label(kind, cursor, dynamic)
-            == kuluu_render::hud::menu::ROOT_CURRENT_TIME
-    {
-        activate_current_time(vana_clock, vana_clock_visible, scene_state);
-        // Mirrors the Debug toggles: the menu stays open (provisional pending
-        // retail capture, bead kuluu-y5hq retail_unknowns).
         return None;
     }
 
@@ -363,6 +367,12 @@ pub(super) fn confirm_menu_at_cursor(
         return None;
     }
     match resolve_menu_entry(kind, label) {
+        MenuDispatch::TextCommand(cmd) => {
+            run_client_text_command(cmd, vana_clock, vana_clock_visible, scene_state);
+            // Mirrors the Debug toggles: the menu stays open (provisional
+            // pending retail capture, bead kuluu-y5hq retail_unknowns).
+            None
+        }
         MenuDispatch::OpenSubmenu(submenu) => {
             // Refresh the job-emote/chair unlock bits whenever the Emote List
             // opens (c2s 0x119 → s2c 0x11A gates the Job row).
@@ -397,6 +407,21 @@ pub(super) fn confirm_menu_at_cursor(
             push_system_chat_line(scene_state, format!("[menu] {label} — not implemented"));
             None
         }
+    }
+}
+
+/// The client-side half of the text-command runner (FFXiMain.dll
+/// retail-2026-09 RVA 0x80DC0, vault main_menu.md §12): commands with no server
+/// counterpart execute here; unknown ones answer in system chat for now.
+pub(super) fn run_client_text_command(
+    cmd: &str,
+    vana_clock: &kuluu_render::vana_time::VanaClock,
+    vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
+    scene_state: &mut SceneState,
+) {
+    match cmd {
+        "/clock" => activate_current_time(vana_clock, vana_clock_visible, scene_state),
+        other => push_system_chat_line(scene_state, format!("[menu] {other} — not implemented")),
     }
 }
 
@@ -1506,10 +1531,11 @@ mod menu_dispatch_tests {
     /// share one Root → submenu mapping; pin that they can't drift apart.
     #[test]
     fn root_drill_matches_preview_child_kind() {
-        use kuluu_render::hud::menu::{self, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
+        use kuluu_render::hud::menu::{self, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
         for &label in menu::root_entries() {
-            // Log Out / Shut Down open the yes/no prompt (no right-pane preview).
-            if label == ROOT_LOG_OUT || label == ROOT_SHUT_DOWN {
+            // Log Out / Shut Down open the yes/no prompt and Current Time runs
+            // a text command - none of them has a right-pane preview.
+            if matches!(label, ROOT_LOG_OUT | ROOT_SHUT_DOWN | ROOT_CURRENT_TIME) {
                 continue;
             }
             match (
@@ -1563,17 +1589,42 @@ mod menu_dispatch_tests {
         assert!(visible.0, "second activation shows the widget again");
     }
 
+    /// Retail's Current Time row hands the runner its literal string
+    /// (FFXiMain.dll retail-2026-09 RVA 0x14E98C, .data 0x371AB8); kuluu must
+    /// route through the same text-command seam, not a bespoke intercept.
     #[test]
-    fn current_time_never_reaches_resolve_wired() {
-        // confirm_menu_at_cursor intercepts ROOT_CURRENT_TIME (a
-        // resource-touching entry) before resolve_menu_entry; this pins the
-        // fallback so a lost wiring degrades to a visible "not implemented"
-        // chat line rather than silently dispatching something else.
+    fn current_time_row_runs_the_retail_clock_literal() {
         use kuluu_render::hud::menu::ROOT_CURRENT_TIME;
         assert_eq!(
             resolve_menu_entry(MenuKind::Root, ROOT_CURRENT_TIME),
-            MenuDispatch::NotImplemented(ROOT_CURRENT_TIME.into()),
+            MenuDispatch::TextCommand("/clock"),
         );
+    }
+
+    /// The runner seam (vault main_menu.md §12): "/clock" reaches the widget
+    /// toggle + time lines; anything else says so in system chat.
+    #[test]
+    fn text_command_runner_routes_clock_and_refuses_unknown() {
+        use kuluu_render::hud::vana_clock::VANA_TIME_LINE_PREFIX;
+        use kuluu_render::vana_time::VanaClock;
+
+        let clock = VanaClock::anchored_at_hour(12.0);
+        let mut visible = kuluu_render::hud::vana_clock::VanaClockVisible::default();
+        let mut scene_state = SceneState::default();
+        run_client_text_command("/clock", &clock, &mut visible, &mut scene_state);
+        assert!(
+            scene_state
+                .local_toasts
+                .iter()
+                .any(|l| l.text.starts_with(VANA_TIME_LINE_PREFIX)),
+            "{}",
+            scene_state.local_toasts.len()
+        );
+        run_client_text_command("/nope", &clock, &mut visible, &mut scene_state);
+        assert!(scene_state
+            .local_toasts
+            .iter()
+            .any(|l| { l.text.starts_with("[menu] /nope") && l.text.contains("not implemented") }));
     }
 
     /// Send-panel shape: choice 0 = recipient row (above the grid), choices

@@ -1131,7 +1131,12 @@ fn sub_target_action_for(
         // Automaton slot rows are inert display until §39's equip flow lands;
         // no sub-target step (vault main_menu.md §39). Macro slot rows likewise
         // — the macro-use seam is open-map on bead .19.1 (vault §41).
-        A::AutomatonSlotRow { .. } | A::MacroSlotRow { .. } => None,
+        A::AutomatonSlotRow { .. }
+        | A::MacroSlotRow { .. }
+        // Macro edit rows are client-local and handled in confirm before
+        // dispatch (bead kuluu-o9qt7.19.3); they never target anything.
+        | A::MacroEditLine { .. }
+        | A::MacroClearSlot => None,
         // Trade window rows likewise act on the wire directly, drill through
         // confirm_menu_at_cursor, or stay display-only (vault main_menu.md §25).
         A::TradeAcceptInvite
@@ -1706,7 +1711,13 @@ fn dispatch_dynamic_menu_action(
         // sends until that family is lawed (vault main_menu.md §39 [I]). Macro
         // slot rows stay inert for the same reason — no widget-press-to-use
         // law yet (vault main_menu.md §41).
-        A::AutomatonSlotRow { .. } | A::MacroSlotRow { .. } => return,
+        // Macro rows are client-local: the confirm seam drills the editor and
+        // commits through CommitMacros before this wire dispatcher runs (bead
+        // kuluu-o9qt7.19.3) — nothing to send here.
+        A::AutomatonSlotRow { .. }
+        | A::MacroSlotRow { .. }
+        | A::MacroEditLine { .. }
+        | A::MacroClearSlot => return,
         // Search hit rows stay inert until a search-to-target mapping exists;
         // retail's own hit-row select semantics remain [I] (vault main_menu.md
         // section 26).

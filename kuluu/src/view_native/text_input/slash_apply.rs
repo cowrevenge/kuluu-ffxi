@@ -115,10 +115,11 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         kuluu_render::MenuKind::JobChange | kuluu_render::MenuKind::JobPick { .. } => {
             "Change Jobs".into()
         }
-        // mcrselec/mcres20 likewise inherit `Macros` (§41 title law).
-        kuluu_render::MenuKind::MacroSelect | kuluu_render::MenuKind::MacroResult => {
-            "Macros".into()
-        }
+        // mcrselec/mcres20 and the line editor likewise inherit `Macros`
+        // (§41 title law).
+        kuluu_render::MenuKind::MacroSelect
+        | kuluu_render::MenuKind::MacroEditor { .. }
+        | kuluu_render::MenuKind::MacroResult => "Macros".into(),
         // The /quest seam (vault main_menu.md §31).
         kuluu_render::MenuKind::QuestList => "Quests".into(),
         kuluu_render::MenuKind::QuestDetail { log, id } => format!("QuestLog({log},{id})").into(),

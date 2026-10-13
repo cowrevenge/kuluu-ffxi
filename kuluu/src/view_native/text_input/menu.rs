@@ -552,6 +552,59 @@ pub(super) fn confirm_menu_at_cursor(
                 }
                 return None;
             }
+            // The macro family (bead kuluu-o9qt7.19.3): a store row drills its
+            // line editor — retail's long-form chain from the palette/mcrselop
+            // windows (FFXiMain.dll retail-2026-09 RVA 0x1A68C0/0x1A5690; vault
+            // main_menu.md §34) — line rows seed the level's mcrledit buffer,
+            // and the clear row commits without it. Nothing here touches the
+            // wire except through CommitMacros (§41 [V-negative]).
+            if let A::MacroSlotRow { block, index } = action {
+                stack.push(MenuKind::MacroEditor { block, index });
+                return None;
+            }
+            if let A::MacroEditLine { line_index } = action {
+                let (block, index) = match kind {
+                    MenuKind::MacroEditor { block, index } => (block, index),
+                    _ => return None,
+                };
+                let seed = scene_state
+                    .snapshot
+                    .macros
+                    .iter()
+                    .find(|s| s.block == block && s.index == index)
+                    .map(|s| kuluu_render::hud::menu::macro_slot_lines(&s.text))
+                    .and_then(|ls| match line_index {
+                        Some(i) => ls.get(i).map(|s| (*s).to_string()),
+                        None => Some(String::new()),
+                    })
+                    .unwrap_or_default();
+                if let Some(level) = stack.current_mut() {
+                    level.macro_line_edit = Some(kuluu_render::input_mode::MacroLineBuffer {
+                        block,
+                        index,
+                        line_no: line_index,
+                        text: seed,
+                    });
+                }
+                return None;
+            }
+            if let A::MacroClearSlot = action {
+                let (block, index) = match kind {
+                    MenuKind::MacroEditor { block, index } => (block, index),
+                    _ => return None,
+                };
+                let slots: Vec<kuluu_snapshot::MacroSlot> = scene_state
+                    .snapshot
+                    .macros
+                    .iter()
+                    .filter(|s| !(s.block == block && s.index == index))
+                    .cloned()
+                    .collect();
+                if let Err(e) = cmd_tx.try_send(AgentCommand::CommitMacros { slots }) {
+                    push_system_chat_line(scene_state, format!("[menu] macro clear dropped: {e}"));
+                }
+                return None;
+            }
             if let A::UseItem {
                 container, index, ..
             } = action
@@ -1135,6 +1188,66 @@ fn toggle_debug_panel(
     );
 }
 
+/// Consume one keystroke while a macro line editor buffer is open (bead
+/// kuluu-o9qt7.19.3): printable characters append, Backspace pops, Enter
+/// commits the merged set through CommitMacros (retail's mcrledit commit —
+/// FFXiMain.dll retail-2026-09 RVA 0x1A6180 runs its blip then stores;
+/// vault main_menu.md §34/§41), Esc discards. The menu never closes here.
+fn macro_line_edit_key(
+    key: &Key,
+    bindings: &Bindings,
+    stack: &mut MenuStack,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+) {
+    if bindings.matches_logical(Action::NavCancel, key) {
+        if let Some(level) = stack.current_mut() {
+            level.macro_line_edit = None;
+        }
+        return;
+    }
+    if bindings.matches_logical(Action::NavConfirm, key) {
+        let edit = stack
+            .current()
+            .and_then(|l| l.macro_line_edit.as_ref())
+            .map(|b| (b.block, b.index, b.line_no, b.text.clone()));
+        if let Some((block, index, line_no, text)) = edit {
+            let slots = kuluu_render::hud::menu::merge_macro_line(
+                &scene_state.snapshot.macros,
+                block,
+                index,
+                line_no,
+                &text,
+            );
+            if let Err(e) = cmd_tx.try_send(AgentCommand::CommitMacros { slots }) {
+                push_system_chat_line(scene_state, format!("[menu] macro commit dropped: {e}"));
+            }
+        }
+        if let Some(level) = stack.current_mut() {
+            level.macro_line_edit = None;
+        }
+        return;
+    }
+    let Some(buf) = stack.current_mut().and_then(|l| l.macro_line_edit.as_mut()) else {
+        return;
+    };
+    if bindings.matches_logical(Action::ChatBackspace, key) {
+        buf.text.pop();
+        return;
+    }
+    match key {
+        Key::Space => buf.text.push(' '),
+        Key::Character(s) => {
+            for c in s.chars() {
+                if !c.is_control() {
+                    buf.text.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Route one keypress in the open menu. In the sort pane, any key the pane
 /// does not own maps to SortPaneKey::Other so it can't leak into list
 /// navigation. Commands > Items opens on the inventory; only the Mog Menu
@@ -1216,6 +1329,16 @@ pub(super) fn handle_menu_key(
                 level.cursor = kuluu_render::hud::menu::root_next_page_cursor(level.cursor);
             }
         }
+        return None;
+    }
+
+    // mcrledit line editor (bead kuluu-o9qt7.19.3): while the window holds an
+    // edit buffer every keystroke belongs to it — retail's macro line editor
+    // owns input until Enter commits or Esc discards (FFXiMain.dll
+    // retail-2026-09 RVA 0x1A6180; vault main_menu.md §34/§41). Nav keys stay
+    // dead while typing, which is also the `.29` rule.
+    if stack.current().is_some_and(|l| l.macro_line_edit.is_some()) {
+        macro_line_edit_key(key, bindings, stack, scene_state, cmd_tx);
         return None;
     }
 
@@ -2190,6 +2313,286 @@ mod menu_key_tests {
         assert_eq!(
             harness.map_state.zoom_radius, None,
             "zoom binds must not fire while a marker label is being typed"
+        );
+    }
+
+    /// Drill law (bead kuluu-o9qt7.19.3): selecting a stored keytop row opens that
+    /// slot's editor as its own level — retail chained the long-form mcr*edit
+    /// windows off the palette/op-select handler (`FFXiMain.dll` retail-2026-09 RVA
+    /// 0x1A68C0; vault main_menu.md §34/§41).
+    #[test]
+    fn macro_select_row_drills_the_line_editor() {
+        use kuluu_render::hud::menu::{DynamicMenuAction, DynamicMenuRow};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroSelect);
+        harness.dynamic.rows = vec![DynamicMenuRow {
+            label: "B1/5: /ra".to_string(),
+            action: DynamicMenuAction::MacroSlotRow { block: 0, index: 4 },
+        }];
+        stack.current_mut().unwrap().cursor = 0;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::MacroEditor { block: 0, index: 4 })
+        );
+    }
+
+    /// Selecting a command-line row seeds the level's mcrledit buffer with that
+    /// line (edit-and-commit law of FFXiMain.dll retail-2026-09 RVA 0x1A6180;
+    /// vault main_menu.md §34/§41); selecting the add row seeds an empty append.
+    #[test]
+    fn editor_line_rows_seed_the_edit_buffer() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.macros = vec![kuluu_snapshot::MacroSlot {
+            block: 0,
+            index: 3,
+            text: "/ra".to_string(),
+        }];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroEditor { block: 0, index: 3 });
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
+
+        stack.current_mut().unwrap().cursor = 0; // the "/ra" line row
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::MacroEditor { block: 0, index: 3 }),
+            "seeding must not leave the editor window"
+        );
+        let seeded = stack.current().unwrap().macro_line_edit.clone();
+        assert_eq!(
+            seeded,
+            Some(kuluu_render::input_mode::MacroLineBuffer {
+                block: 0,
+                index: 3,
+                line_no: Some(0),
+                text: "/ra".to_string(),
+            })
+        );
+
+        stack.current_mut().unwrap().macro_line_edit = None;
+        stack.current_mut().unwrap().cursor = 1; // the add row
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().macro_line_edit.clone(),
+            Some(kuluu_render::input_mode::MacroLineBuffer {
+                block: 0,
+                index: 3,
+                line_no: None,
+                text: String::new(),
+            })
+        );
+    }
+
+    /// The clear row commits the store without the keytop — a blank keytop
+    /// leaves no entry (vault main_menu.md §41 capacity law; bead .19.3).
+    #[test]
+    fn editor_clear_row_commits_the_store_without_the_slot() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.macros = vec![
+            kuluu_snapshot::MacroSlot {
+                block: 0,
+                index: 3,
+                text: "/ra".to_string(),
+            },
+            kuluu_snapshot::MacroSlot {
+                block: 1,
+                index: 7,
+                text: "/wait 1".to_string(),
+            },
+        ];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroEditor { block: 0, index: 3 });
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
+
+        // Rows are ["/ra", add, clear] — the cursor goes to the clear row.
+        stack.current_mut().unwrap().cursor = 2;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        let committed = match harness._cmd_rx.try_recv() {
+            Ok(AgentCommand::CommitMacros { slots }) => slots,
+            other => panic!("clear row must commit CommitMacros, got {other:?}"),
+        };
+        assert_eq!(
+            committed,
+            vec![kuluu_snapshot::MacroSlot {
+                block: 1,
+                index: 7,
+                text: "/wait 1".to_string(),
+            }],
+            "the cleared keytop must be gone, the other untouched"
+        );
+    }
+
+    /// Typing law (bead .19.3): printable keys append to the buffer, Backspace
+    /// pops, Enter commits the merged set through CommitMacros and clears the
+    /// buffer while the editor window stays open — retail's mcrledit blip-then-
+    /// store tail (`FFXiMain.dll` retail-2026-09 handler 0x1A6180; vault
+    /// main_menu.md §34/§41).
+    #[test]
+    fn editor_typing_commits_the_merged_slot() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.macros = vec![kuluu_snapshot::MacroSlot {
+            block: 0,
+            index: 3,
+            text: "/ra".to_string(),
+        }];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroEditor { block: 0, index: 3 });
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
+
+        // Seed through the add row so the commit is an append.
+        stack.current_mut().unwrap().cursor = 1;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(stack.current().unwrap().macro_line_edit.is_some());
+
+        for (key, code) in [
+            (&Key::Character("/".into()), KeyCode::Slash),
+            (&Key::Character("p".into()), KeyCode::KeyP),
+            (&Key::Character("o".into()), KeyCode::KeyO),
+            (&Key::Character("k".into()), KeyCode::KeyK),
+            (&Key::Character("e".into()), KeyCode::KeyE),
+        ] {
+            harness.key(key, code, &mut stack, world.resource_mut::<MapMarkers>());
+        }
+        assert_eq!(
+            stack
+                .current()
+                .unwrap()
+                .macro_line_edit
+                .as_ref()
+                .unwrap()
+                .text,
+            "/poke"
+        );
+
+        // A typed space appends, Backspace pops it again (trailing-space edit).
+        harness.key(
+            &Key::Space,
+            KeyCode::Space,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        harness.key(
+            &Key::Backspace,
+            KeyCode::Backspace,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+
+        // Enter commits and clears.
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().macro_line_edit, None);
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::MacroEditor { block: 0, index: 3 }),
+            "retail's commit keeps the editor open"
+        );
+        let committed = match harness._cmd_rx.try_recv() {
+            Ok(AgentCommand::CommitMacros { slots }) => slots,
+            other => panic!("Enter must commit CommitMacros, got {other:?}"),
+        };
+        assert_eq!(
+            committed,
+            vec![kuluu_snapshot::MacroSlot {
+                block: 0,
+                index: 3,
+                text: "/ra\n/poke".to_string(),
+            }]
+        );
+    }
+
+    /// While typing, navigation is dead (also the `.29` rule): arrows neither
+    /// move the row cursor nor touch the buffer, and Esc discards the edit but
+    /// keeps the editor window open (bead .19.3).
+    #[test]
+    fn editor_typing_owns_navigation_until_commit_or_escape() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroEditor { block: 0, index: 3 });
+        let depth = stack.levels.len();
+        stack.current_mut().unwrap().cursor = 1;
+        stack.current_mut().unwrap().macro_line_edit =
+            Some(kuluu_render::input_mode::MacroLineBuffer {
+                block: 0,
+                index: 3,
+                line_no: Some(0),
+                text: "/ra".to_string(),
+            });
+
+        for (key, code) in [
+            (&Key::ArrowDown, KeyCode::ArrowDown),
+            (&Key::ArrowUp, KeyCode::ArrowUp),
+            (&Key::ArrowRight, KeyCode::ArrowRight),
+        ] {
+            harness.key(key, code, &mut stack, world.resource_mut::<MapMarkers>());
+            assert_eq!(
+                stack.current().unwrap().cursor,
+                1,
+                "arrows must not move rows while typing"
+            );
+            assert_eq!(
+                stack
+                    .current()
+                    .unwrap()
+                    .macro_line_edit
+                    .as_ref()
+                    .unwrap()
+                    .text,
+                "/ra",
+                "arrows must not touch the buffer"
+            );
+        }
+
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().macro_line_edit, None);
+        assert_eq!(stack.levels.len(), depth, "Esc discards the edit only");
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::MacroEditor { block: 0, index: 3 })
         );
     }
 }

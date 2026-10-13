@@ -380,6 +380,17 @@ pub enum MenuKind {
         main_pick: bool,
     },
 
+    /// One keytop of the client-local macro store, edited through the long-
+    /// form/mcrledit family (FFXiMain.dll retail-2026-09 RVA 0x1A5690 grid-chrome
+    /// handler and 0x1A6180 line editor; vault main_menu.md §34/§41). The window
+    /// lists the slot's command lines plus add/clear rows; typing while a line is
+    /// being edited edits `MenuLevel::macro_line_edit` (kuluu collapses retail's
+    /// mcrbedit/mcr1edit/mcr2edit/mcrledit family into this one drill [I-shape]).
+    MacroEditor {
+        block: u8,
+        index: u8,
+    },
+
     /// The `mcrselec` select window drilled from the launcher's Select Macro
     /// row: filled slots of the client-local store, 2 blocks x 20 keytops per
     /// the DAT grids 'mcrs'/'mcr7' (vault main_menu.md §41).
@@ -471,6 +482,24 @@ pub enum MenuKind {
 pub struct MenuLevel {
     pub kind: MenuKind,
     pub cursor: usize,
+    /// While a macro command line is being typed (bead kuluu-o9qt7.19.2/§34's
+    /// mcrledit law), the working buffer lives on this level — scoping cancel
+    /// and commit to the window that opened it.
+    pub macro_line_edit: Option<MacroLineBuffer>,
+}
+
+/// One in-progress edit of a macro slot's command line (`line_no` `None` = an
+/// appended new line). Enter commits the whole set through
+/// `AgentCommand::CommitMacros`; Esc discards (retail's mcrledit commits with
+/// its UI blip — FFXiMain.dll retail-2026-09 handler 0x1A6180 event arm calls
+/// the 0x37E90 blip then the store commit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroLineBuffer {
+    pub block: u8,
+    pub index: u8,
+    /// `None` while composing a brand-new line.
+    pub line_no: Option<usize>,
+    pub text: String,
 }
 
 /// Retail's Command Menu draws two columns: the left holds the parent level
@@ -501,6 +530,7 @@ impl MenuStack {
             levels: vec![MenuLevel {
                 kind: MenuKind::Root,
                 cursor: 0,
+                macro_line_edit: None,
             }],
             active_pane: Pane::Right,
             absorb_open_minus: true,
@@ -522,7 +552,11 @@ impl MenuStack {
     }
 
     pub fn push(&mut self, kind: MenuKind) {
-        self.levels.push(MenuLevel { kind, cursor: 0 });
+        self.levels.push(MenuLevel {
+            kind,
+            cursor: 0,
+            macro_line_edit: None,
+        });
         self.active_pane = Pane::Right;
     }
 

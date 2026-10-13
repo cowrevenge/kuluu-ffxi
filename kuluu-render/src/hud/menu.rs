@@ -397,6 +397,18 @@ pub enum DynamicMenuAction {
         job_id: u8,
         as_main: bool,
     },
+
+    /// Edit one command line of a macro keytop (`None` = compose a new line);
+    /// selects seed the level's `macro_line_edit` buffer — retail's mcrledit
+    /// edit-and-blip-commit law (FFXiMain.dll retail-2026-09 RVA 0x1A6180;
+    /// vault main_menu.md §34/§41, bead kuluu-o9qt7.19.3).
+    MacroEditLine {
+        line_index: Option<usize>,
+    },
+
+    /// Wipe the keytop wholesale (retail's blank-keytop state; vault
+    /// main_menu.md §41 capacity law — a cleared slot leaves no file entry).
+    MacroClearSlot,
 }
 
 impl DynamicMenuAction {
@@ -812,6 +824,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::QuestDetail { .. }
             | MenuKind::AutomatonEquip
             | MenuKind::MacroSelect
+            | MenuKind::MacroEditor { .. }
             | MenuKind::JobPick { .. }
     )
 }
@@ -996,6 +1009,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // (vault main_menu.md §53); the pick lists are roster-built.
         MenuKind::JobChange => JOB_CHANGE_ROWS,
         MenuKind::JobPick { .. } => &[],
+        // Macro editor rows come from the store (one command line per row plus
+        // the add/clear actions below).
+        MenuKind::MacroEditor { .. } => &[],
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
@@ -1132,6 +1148,9 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // and the pick lists drilled from its rows.
         MenuKind::JobChange => "Change Jobs",
         MenuKind::JobPick { .. } => "Change Jobs",
+        // mcrledit's DAT chrome has no title token — it inherits Macros (§41
+        // title law).
+        MenuKind::MacroEditor { .. } => "Macros",
         MenuKind::EmoteList => "Emote List",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
@@ -2424,6 +2443,97 @@ pub fn job_pick_rows(snap: &kuluu_snapshot::SceneSnapshot, main_pick: bool) -> V
         .collect()
 }
 
+/// The add/clear action rows of the macro line editor. kuluu-worded chrome —
+/// mcrledit's DAT record names no captions (vault main_menu.md §34/§41).
+pub const MACRO_ROW_ADD_LINE: &str = "+ Add command line";
+pub const MACRO_ROW_CLEAR_SLOT: &str = "Clear this macro";
+
+/// The slot's stored text as displayable command lines. A retail macro holds a
+/// sequence of commands run in order (the chat-bar use path, vault main_menu.md
+/// §41/§53); kuluu stores them newline-joined and lists one per row.
+pub fn macro_slot_lines(text: &str) -> Vec<&str> {
+    text.split('\n').filter(|l| !l.trim().is_empty()).collect()
+}
+
+/// Rows of the long-form/line editor for keytop (block, index): each command
+/// line, then add/clear actions (bead kuluu-o9qt7.19.3; retail's mcrledit law
+/// FFXiMain.dll retail-2026-09 RVA 0x1A6180).
+pub fn macro_editor_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    block: u8,
+    index: u8,
+) -> Vec<DynamicMenuRow> {
+    let mut rows = snap
+        .macros
+        .iter()
+        .find(|s| s.block == block && s.index == index)
+        .map(|s| {
+            macro_slot_lines(&s.text)
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| DynamicMenuRow {
+                    label: line.to_string(),
+                    action: DynamicMenuAction::MacroEditLine {
+                        line_index: Some(i),
+                    },
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    rows.push(DynamicMenuRow {
+        label: MACRO_ROW_ADD_LINE.to_string(),
+        action: DynamicMenuAction::MacroEditLine { line_index: None },
+    });
+    rows.push(DynamicMenuRow {
+        label: MACRO_ROW_CLEAR_SLOT.to_string(),
+        action: DynamicMenuAction::MacroClearSlot,
+    });
+    rows
+}
+
+/// Applies one committed line edit to the whole set (the shape sent as
+/// `AgentCommand::CommitMacros`): replace at `line_no`, append when `None`, an
+/// empty result drops that line and a fully emptied slot disappears — retail's
+/// blank keytops leave no store entry (vault main_menu.md §41).
+pub fn merge_macro_line(
+    slots: &[kuluu_snapshot::MacroSlot],
+    block: u8,
+    index: u8,
+    line_no: Option<usize>,
+    new_text: &str,
+) -> Vec<kuluu_snapshot::MacroSlot> {
+    let mut out = slots.to_vec();
+    let slot_pos = out
+        .iter()
+        .position(|s| s.block == block && s.index == index);
+    let mut lines: Vec<String> = match slot_pos {
+        Some(p) => macro_slot_lines(&out[p].text)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+    match line_no {
+        Some(i) if i < lines.len() => lines[i] = new_text.to_string(),
+        _ => lines.push(new_text.to_string()),
+    }
+    lines.retain(|l| !l.trim().is_empty());
+    let joined = lines.join("\n");
+    match (slot_pos, joined.trim().is_empty()) {
+        (Some(p), true) => {
+            out.remove(p);
+        }
+        (Some(p), false) => out[p].text = joined,
+        (None, true) => {}
+        (None, false) => out.push(kuluu_snapshot::MacroSlot {
+            block,
+            index,
+            text: joined,
+        }),
+    }
+    out
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
@@ -2486,6 +2596,9 @@ pub fn refresh_dynamic_menu_rows(
         // (vault main_menu.md §53); the sub side renders empty until the
         // packet's sub-job grant arrived, like LSB refusing the row.
         MenuKind::JobPick { main_pick } => job_pick_rows(snap, main_pick),
+        // The long-form/line-editor family for one keytop (§34: mcrbedit/
+        // mcr1edit/mcr2edit/mcrledit collapse to this drill [I-shape]).
+        MenuKind::MacroEditor { block, index } => macro_editor_rows(snap, block, index),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -2508,6 +2621,23 @@ pub fn refresh_dynamic_menu_rows(
     };
 
     let mut rows = rows;
+    // While a command line is being typed in the macro editor, echo its live
+    // buffer as a trailing row (§34's mcrledit edit-then-commit law; kuluu
+    // draws it inside the list). Edit-mode keys route to the buffer before the
+    // cursor ever moves, so the echoed row never needs own semantics.
+    if let MenuKind::MacroEditor { .. } = kind {
+        if let Some(buf) = match &*mode {
+            InputMode::Menu(stack) => stack.current().and_then(|l| l.macro_line_edit.as_ref()),
+            _ => None,
+        } {
+            rows.push(DynamicMenuRow {
+                label: format!("{} > {}_", MACRO_ROW_ADD_LINE, buf.text),
+                action: DynamicMenuAction::MacroEditLine {
+                    line_index: buf.line_no,
+                },
+            });
+        }
+    }
     order_dynamic_rows(kind, sort.auto, &mut rows);
     if rows != dynamic.rows {
         dynamic.rows = rows;
@@ -5413,6 +5543,88 @@ mod tests {
                 as_main: false
             }
         ));
+    }
+
+    /// The line editor lists the slot's command lines first (newline-joined in
+    /// the store, one per row on screen) and always ends with add/clear rows
+    /// (bead kuluu-o9qt7.19.3; mcrledit law vault main_menu.md §34/§41).
+    #[test]
+    fn macro_editor_rows_list_lines_then_actions() {
+        let snap = kuluu_snapshot::SceneSnapshot {
+            macros: vec![kuluu_snapshot::MacroSlot {
+                block: 0,
+                index: 3,
+                text: "/ra\n/heal".to_string(),
+            }],
+            ..Default::default()
+        };
+        let rows = macro_editor_rows(&snap, 0, 3);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].label, "/ra");
+        assert_eq!(
+            rows[0].action,
+            DynamicMenuAction::MacroEditLine {
+                line_index: Some(0)
+            }
+        );
+        assert_eq!(rows[1].label, "/heal");
+        assert_eq!(
+            rows[1].action,
+            DynamicMenuAction::MacroEditLine {
+                line_index: Some(1)
+            }
+        );
+        assert_eq!(
+            rows[2].label, MACRO_ROW_ADD_LINE,
+            "row after the lines is the add-action"
+        );
+        assert!(matches!(
+            rows[2].action,
+            DynamicMenuAction::MacroEditLine { line_index: None }
+        ));
+        assert_eq!(rows[3].label, MACRO_ROW_CLEAR_SLOT);
+        assert_eq!(rows[3].action, DynamicMenuAction::MacroClearSlot);
+
+        // A keytop nobody assigned yet still edits (the two action rows).
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        let rows = macro_editor_rows(&empty, 1, 7);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            rows[0].action,
+            DynamicMenuAction::MacroEditLine { line_index: None }
+        ));
+    }
+
+    /// Commit-time merge law (bead kuluu-o9qt7.19.3): replace in place, append
+    /// for new lines, and emptying lines prunes them — a keytop with nothing
+    /// left leaves no store entry at all.
+    #[test]
+    fn merge_macro_line_replaces_appends_and_prunes() {
+        use kuluu_snapshot::MacroSlot;
+        let base = vec![MacroSlot {
+            block: 1,
+            index: 2,
+            text: "/a\n/b".to_string(),
+        }];
+
+        let replaced = merge_macro_line(&base, 1, 2, Some(0), "/poke");
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].text, "/poke\n/b");
+
+        let appended = merge_macro_line(&base, 1, 2, None, "/c");
+        assert_eq!(appended[0].text, "/a\n/b\n/c");
+
+        // Blanking a line removes just that line…
+        let blanked = merge_macro_line(&base, 1, 2, Some(1), "   ");
+        assert_eq!(blanked[0].text, "/a");
+        // …and blanking the last one removes the keytop.
+        let wiped = merge_macro_line(&blanked, 1, 2, Some(0), "");
+        assert!(wiped.is_empty(), "cleared slot leaves no store entry");
+
+        // Appending onto a fresh keytop creates it.
+        let created = merge_macro_line(&[], 0, 9, None, "/oom");
+        assert_eq!(created.len(), 1);
+        assert_eq!((created[0].block, created[0].index), (0, 9));
     }
 
     /// The pupequip rows (vault main_menu.md §39): fourteen in AutomatonSlot

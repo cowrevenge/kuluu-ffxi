@@ -843,6 +843,7 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::BazaarStalls => "Bazaar".into(),
                 kuluu_render::MenuKind::MacrosPalette => "MacroPalette".into(),
                 kuluu_render::MenuKind::RetailConfig => "Config".into(),
+                kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

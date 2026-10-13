@@ -2218,20 +2218,42 @@ mod menu_dispatch_tests {
     }
 
     #[test]
+    fn help_desk_row_drills_the_faqsub_panel() {
+        // Page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E9C0 -> trampoline
+        // 0x2174C0 name-opens `menu    faqsub` (vault main_menu.md §36); the
+        // three destination rows answer until `.21.1` builds them.
+        use kuluu_render::hud::menu::{FAQ_ROW_CONFIG, FAQ_ROW_MENTOR, FAQ_ROW_QA};
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Help Desk", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::HelpDeskPanel)
+        );
+        for label in [FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CONFIG] {
+            assert!(matches!(
+                resolve_menu_entry(MenuKind::HelpDeskPanel, label, false, false),
+                MenuDispatch::NotImplemented(_)
+            ));
+        }
+    }
+
+    #[test]
     fn unwired_root_entries_stay_not_implemented() {
         // Party is built (opens the prtyN window per vault main_menu.md §24), so
         // are Search (§26), Region Info (§29), Missions (§30) and View House —
         // the Mog Menu row (§32); everything else still answers
         // "Not supported yet".
         // Bazaar is built now (drills the stall picker, vault main_menu.md §33),
-        // and so are Edit Macros (§34 launcher) and Config (§35 hub); only
-        // Help Desk remains.
-        let label = "Help Desk";
-        assert_eq!(
-            resolve_menu_entry(MenuKind::Root, label, false, false),
-            MenuDispatch::NotImplemented(label.into()),
-            "{label} should still be a stub"
-        );
+        // and so are Edit Macros (§34 launcher), Config (§35 hub) and Help Desk
+        // (§36 panel): every Root entry resolves to a drill or a command —
+        // nothing unwired. Assert it by scanning the whole root list.
+        for label in kuluu_render::hud::menu::entries_for(MenuKind::Root, false) {
+            assert!(
+                !matches!(
+                    resolve_menu_entry(MenuKind::Root, label, false, false),
+                    MenuDispatch::NotImplemented(_)
+                ),
+                "{label} must resolve"
+            );
+        }
     }
 
     #[test]

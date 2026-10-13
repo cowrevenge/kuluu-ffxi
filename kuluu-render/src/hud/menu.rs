@@ -948,6 +948,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // The configwi hub's twelve page rows (handler FFXiMain.dll
         // retail-2026-09 RVA 0x196770; vault main_menu.md §35).
         MenuKind::RetailConfig => RETAIL_CONFIG_ENTRIES,
+        // The faqsub Help Desk panel rows (vault main_menu.md §36: the
+        // big-widget caption builder loads exactly these destination strings).
+        MenuKind::HelpDeskPanel => HELPDESK_PANEL_ENTRIES,
         // cmbhlst-style rows come from the recipe table filtered against the bag (vault main_menu.md §28).
         MenuKind::CraftList => &[],
         MenuKind::RegionInfo { .. } => &[],
@@ -996,6 +999,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // DAT `conf` carries comwin title token 54 = catalog id 54 `Config`
         // (vault main_menu.md §35) — the grounded title.
         MenuKind::RetailConfig => "Config",
+        // The `faqs` DAT record carries no title (token -1); the grounded
+        // caption is catalog string 60 `Help Desk` in ROM/165/76.DAT — same as
+        // the Root row's own label (§36).
+        MenuKind::HelpDeskPanel => "Help Desk",
         MenuKind::CraftList => "Craft List",
         MenuKind::RegionInfo { .. } => "Region Info",
         MenuKind::MissionList => "Missions",
@@ -1292,6 +1299,16 @@ const RETAIL_CONFIG_ENTRIES: &[&str] = &[
     "Config Page 12",
 ];
 
+/// The faqsub Help Desk panel's destinations. The DAT `faqs` chunk is
+/// chrome-only with an empty title token (-1), so labels come from the
+/// window's own caption builder strings (vault main_menu.md §36): table 9 =
+/// ROM/165/72.DAT idx 0xC3 `Q&A`, 0xCF `Mentor Search`, 0xDD `Config` — the
+/// three targets named by the transfer messages at 0xD7/0xD8/0xD9.
+pub const FAQ_ROW_QA: &str = "Q&A";
+pub const FAQ_ROW_MENTOR: &str = "Mentor Search";
+pub const FAQ_ROW_CONFIG: &str = "Config";
+const HELPDESK_PANEL_ENTRIES: &[&str] = &[FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CONFIG];
+
 /// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
 /// tier substitutable by element and all positional ingredients assignable to bag slots under
 /// LSB's per-stack use law (vault main_menu.md §28; `resolveRecipe`,
@@ -1382,6 +1399,11 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // §35): the retail Config row drills that twelve-page hub. kuluu's
         // own settings pages stay separate as Interface/Controls (page 3).
         "Config" => MenuKind::RetailConfig,
+        // Page-2 row 8 goes through the Help Desk trampoline: socialme item
+        // id 8 (FFXiMain.dll retail-2026-09 RVA 0x14E9C0) calls 0x2174C0, which
+        // name-opens `menu    faqsub` once its boot singleton exists; kuluu
+        // drills the panel directly (vault main_menu.md §36).
+        "Help Desk" => MenuKind::HelpDeskPanel,
         // Page-1 row 5 is the ungated name-open of `menu    cmbmenu` (FFXiMain.dll retail-2026-09
         // RVA 0x1405D2; vault main_menu.md §28): the root row drills into that launcher.
         "Synthesis" => MenuKind::SynthLauncher,
@@ -4378,6 +4400,23 @@ mod tests {
         assert_eq!(
             root_child_kind("Config", false, false),
             Some(MenuKind::RetailConfig)
+        );
+    }
+
+    /// The faqsub panel law (vault main_menu.md §36): three destinations
+    /// labelled from the window's own caption-builder strings (table 9 ids
+    /// 0xC3/0xCF/0xDD), title `Help Desk` (ROM/165/76.DAT idx 60), and the
+    /// Root Help Desk row drills it.
+    #[test]
+    fn helpdesk_panel_rows_and_title_track_the_faqsub_law() {
+        assert_eq!(
+            entries_for(MenuKind::HelpDeskPanel, false),
+            &["Q&A", "Mentor Search", "Config"]
+        );
+        assert_eq!(menu_title(MenuKind::HelpDeskPanel), "Help Desk");
+        assert_eq!(
+            root_child_kind("Help Desk", false, false),
+            Some(MenuKind::HelpDeskPanel)
         );
     }
 

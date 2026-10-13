@@ -61,6 +61,9 @@ fn merge(mut previous: wire::SceneDelta, mut next: wire::SceneDelta) -> wire::Sc
         // Same replacement law for the last synthesis answer (vault main_menu.md section 28).
         set_synth_result: next.set_synth_result.or(previous.set_synth_result),
         set_missions: next.set_missions.or(previous.set_missions),
+        // Same replacement law for the extended-job records (vault main_menu.md §39).
+        set_automaton: next.set_automaton.or(previous.set_automaton),
+        set_monstrosity: next.set_monstrosity.or(previous.set_monstrosity),
     }
 }
 

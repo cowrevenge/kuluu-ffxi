@@ -1085,6 +1085,48 @@ pub struct SceneSnapshot {
     /// The s2c 0x056 mission/quest log battery (vault main_menu.md §30).
     #[serde(default)]
     pub missions: Missions,
+
+    /// The automaton as s2c 0x044 EXTENDED_JOB PUP last reported it — the
+    /// pupequip variant's data source for a Puppetmaster (vault main_menu.md
+    /// §39; layout vendor/server/src/map/packets/s2c/0x044_extended_job_pup.h).
+    /// LSB sends it at login while PUP is main or sub, so its presence mirrors
+    /// the DLL's Equipment-row job gate exactly. Trailing on purpose.
+    #[serde(default)]
+    pub automaton: Option<Box<AutomatonInfo>>,
+
+    /// The monstrosity session as s2c 0x044 EXTENDED_JOB MON last reported it
+    /// — the `mp_mncst` ("Customization") variant's data source; `Some` is also
+    /// kuluu's stand for the DLL's Monstrosity predicate 0x97D50 on the Equipment
+    /// row (vault main_menu.md §39). Trailing on purpose.
+    #[serde(default)]
+    pub monstrosity: Option<MonstrosityInfo>,
+}
+
+/// The automaton record folded from one s2c 0x044 EXTENDED_JOB PUP frame
+/// (vendor/server/src/map/packets/s2c/0x044_extended_job_pup.h; vault
+/// main_menu.md §39). `head` is the LSB `AutomatonHead` enum value (0 = none;
+/// 1..6 per vendor/server/src/map/enums/automaton.h), `frame` the
+/// `AutomatonFrame` value (0x20..0x23), and each `attachments` byte carries one
+/// slot's low-byte item id in DAT row order (`AutomatonSlot`: Head=0, Frame=1,
+/// Attachment1..12 = 2..13 per vendor/server/src/map/packets/c2s/
+/// 0x102_extended_job.h). Unlocked masks follow the packet's uint32 fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomatonInfo {
+    pub is_sub_job: bool,
+    pub head: u8,
+    pub frame: u8,
+    pub attachments: [u8; 12],
+    pub unlocked_heads: u32,
+    pub unlocked_frames: u32,
+}
+
+/// The monstrosity record folded from one s2c 0x044 EXTENDED_JOB MON frame
+/// (vendor/server/src/map/packets/s2c/0x044_extended_job_mon.h; vault
+/// main_menu.md §39): current species id plus the 12 equipped-instinct words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonstrosityInfo {
+    pub species: u16,
+    pub equipped_instincts: [u16; 12],
 }
 
 /// One synthesis answer (subset of the s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS
@@ -1915,6 +1957,16 @@ pub struct SceneDelta {
     /// Last-writer-wins the whole battery fold (vault main_menu.md §30).
     #[serde(default)]
     pub set_missions: Option<Missions>,
+
+    /// One s2c 0x044 PUP frame replaces the automaton record whole (vault
+    /// main_menu.md §39).
+    #[serde(default)]
+    pub set_automaton: Option<Option<Box<AutomatonInfo>>>,
+
+    /// One s2c 0x044 MON frame replaces the monstrosity record whole (vault
+    /// main_menu.md §39).
+    #[serde(default)]
+    pub set_monstrosity: Option<Option<MonstrosityInfo>>,
 }
 
 /// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
@@ -2585,6 +2637,8 @@ mod tests {
             linkshells: LinkShells::default(),
             synth_result: None,
             missions: Missions::default(),
+            automaton: None,
+            monstrosity: None,
         }
     }
 
@@ -3149,6 +3203,8 @@ mod tests {
             "linkshells",
             "synth_result",
             "missions",
+            "automaton",
+            "monstrosity",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3157,7 +3213,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

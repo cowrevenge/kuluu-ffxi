@@ -570,6 +570,18 @@ pub struct SessionState {
     /// The last s2c 0x056 battery fold (vault main_menu.md §30).
     pub missions: kuluu_snapshot::Missions,
 
+    /// Automaton record from the newest s2c 0x044 EXTENDED_JOB PUP frame — the
+    /// pupequip Equipment-row variant's whole data source (vault main_menu.md
+    /// §39; vendor/server/src/map/utils/charutils.cpp SendExtendedJobPackets).
+    #[serde(default)]
+    pub automaton: Option<Box<kuluu_snapshot::AutomatonInfo>>,
+
+    /// Monstrosity record from the newest s2c 0x044 EXTENDED_JOB MON frame —
+    /// present exactly while in a monstrosity session, kuluu's stand for the
+    /// DLL Monstrosity predicate on the Equipment row (vault main_menu.md §39).
+    #[serde(default)]
+    pub monstrosity: Option<kuluu_snapshot::MonstrosityInfo>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -2939,6 +2951,25 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::AutomatonUpdated { automaton } => {
+                // One s2c 0x044 PUP frame replaces the automaton record whole
+                // (vault main_menu.md §39).
+                let next = Some(Box::new(automaton.clone()));
+                let changed = self.automaton != next;
+                if changed {
+                    self.automaton = next;
+                }
+                changed
+            }
+            AgentEvent::MonstrosityUpdated { monstrosity } => {
+                // One s2c 0x044 MON frame replaces the record whole (vault
+                // main_menu.md §39).
+                let changed = self.monstrosity.as_ref() != Some(monstrosity);
+                if changed {
+                    self.monstrosity = Some(*monstrosity);
+                }
+                changed
+            }
             AgentEvent::MissionTvrUpdated { tvr } => {
                 let changed = self.missions.tvr != *tvr;
                 if changed {
@@ -3741,6 +3772,19 @@ pub enum AgentEvent {
     /// main_menu.md §30).
     MissionInfoUpdated {
         info: kuluu_snapshot::MissionInfo,
+    },
+
+    /// One s2c 0x044 EXTENDED_JOB PUP frame replaces the automaton record whole
+    /// (vendor/server/src/map/packets/s2c/0x044_extended_job_pup.h; vault
+    /// main_menu.md §39).
+    AutomatonUpdated {
+        automaton: kuluu_snapshot::AutomatonInfo,
+    },
+
+    /// One s2c 0x044 EXTENDED_JOB MON frame replaces the monstrosity record
+    /// whole (vault main_menu.md §39).
+    MonstrosityUpdated {
+        monstrosity: kuluu_snapshot::MonstrosityInfo,
     },
 
     /// s2c 0x056 port 0xFFFE `Expansion_TVR` (vault main_menu.md section 30).

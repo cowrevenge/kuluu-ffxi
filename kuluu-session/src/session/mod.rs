@@ -1973,6 +1973,35 @@ fn handle_sub_packet(
             }
             Err(e) => warn_decode_err(sub.opcode, &e),
         },
+        // The extended-job family (vault main_menu.md §39): LSB sends these at
+        // login per SendExtendedJobPackets in vendor/server/src/map/utils/
+        // charutils.cpp — MON while a monstrosity session is active, else one
+        // PUP frame per main/sub Puppetmaster slot.
+        s2c::EXTENDED_JOB => match ffxi_proto::puppet::parse_extended_job(sub.data) {
+            Some(ffxi_proto::puppet::ExtendedJobFrame::Pup(pup)) => {
+                let _ = event_tx.send(AgentEvent::AutomatonUpdated {
+                    automaton: kuluu_snapshot::AutomatonInfo {
+                        is_sub_job: pup.is_sub_job,
+                        head: pup.head,
+                        frame: pup.frame,
+                        attachments: pup.attachments,
+                        unlocked_heads: pup.unlocked_heads,
+                        unlocked_frames: pup.unlocked_frames,
+                    },
+                });
+            }
+            Some(ffxi_proto::puppet::ExtendedJobFrame::Mon(mon)) => {
+                let _ = event_tx.send(AgentEvent::MonstrosityUpdated {
+                    monstrosity: kuluu_snapshot::MonstrosityInfo {
+                        species: mon.species,
+                        equipped_instincts: mon.equipped_instincts,
+                    },
+                });
+            }
+            // BLU spell sets and any other extended job are recognized but not
+            // modeled yet (vault main_menu.md §39 covers PUP/MON only).
+            Some(ffxi_proto::puppet::ExtendedJobFrame::Other { .. }) | None => {}
+        },
         s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {

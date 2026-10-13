@@ -1127,6 +1127,9 @@ fn sub_target_action_for(
         A::MoveItem { .. } => None,
         // Party window rows answer with a packet or are inert; no sub-target step.
         A::AcceptPartyInvite | A::DeclinePartyInvite | A::PartyMemberRow { .. } => None,
+        // Automaton slot rows are inert display until §39's equip flow lands;
+        // no sub-target step (vault main_menu.md §39).
+        A::AutomatonSlotRow { .. } => None,
         // Trade window rows likewise act on the wire directly, drill through
         // confirm_menu_at_cursor, or stay display-only (vault main_menu.md §25).
         A::TradeAcceptInvite
@@ -1693,6 +1696,10 @@ fn dispatch_dynamic_menu_action(
         // Roster slots stay inert until the prtyN member sub-action mapping is
         // dug out (vault main_menu.md §24 [I]).
         A::PartyMemberRow { .. } => return,
+        // Automaton slot rows are legible-only display: kuluu will not guess
+        // which c2s 0x102 pup_data_t equip request the pupequip select table
+        // sends until that family is lawed (vault main_menu.md §39 [I]).
+        A::AutomatonSlotRow { .. } => return,
         // Search hit rows stay inert until a search-to-target mapping exists;
         // retail's own hit-row select semantics remain [I] (vault main_menu.md
         // section 26).

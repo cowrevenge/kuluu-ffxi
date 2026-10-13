@@ -134,6 +134,10 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         linkshells: s.linkshells,
         synth_result: s.synth_result.clone(),
         missions: s.missions.clone(),
+        // The extended-job records (vault main_menu.md §39) ride the shared
+        // snapshot type — clone straight through.
+        automaton: s.automaton.clone(),
+        monstrosity: s.monstrosity,
     }
 }
 

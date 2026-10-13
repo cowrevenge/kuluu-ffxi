@@ -190,6 +190,15 @@ pub enum DynamicMenuAction {
         char_id: u32,
     },
 
+    /// One automaton slot row of the pupequip variant. `slot` is the LSB
+    /// AutomatonSlot id (Head=0, Frame=1, Attachment1..12 = 2..13 — vendor/
+    /// server/src/map/packets/c2s/0x102_extended_job.h). Selecting stays inert
+    /// until the pupequip select family's equip flow is dug out and wired to
+    /// c2s 0x102 pup_data_t (vault main_menu.md §39 [I]).
+    AutomatonSlotRow {
+        slot: u8,
+    },
+
     /// Answer an incoming trade request YES — c2s TRADE_RES Kind Start. Retail
     /// answers through the gift window's rows once s2c 0x021 lands (FFXiMain.dll
     /// retail-2026-09 RVA 0x1515E0; vault main_menu.md §25).
@@ -781,6 +790,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::BazaarStalls
             | MenuKind::QuestList
             | MenuKind::QuestDetail { .. }
+            | MenuKind::AutomatonEquip
     )
 }
 
@@ -944,6 +954,12 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // empty (vault main_menu.md §38.5; the live system of that family is the
         // black list, which kuluu may surface separately — not via this row).
         MenuKind::FriendList => &[],
+        // The pupequip variant's fourteen rows come from s2c 0x044 (dynamic;
+        // automaton_equip_rows, vault main_menu.md §39).
+        MenuKind::AutomatonEquip => &[],
+        // `mp_mncst` chrome carries only three unnamed buttons and no captions
+        // (DAT mp_1, vault main_menu.md §39) — the grounded empty display.
+        MenuKind::MpCustomize => &[],
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
@@ -1041,6 +1057,12 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::EquipSlot(_) => "Equip",
         MenuKind::Communication => "Communication",
         MenuKind::FriendList => "Friend List",
+        // The pupequip DAT comwin record carries no title token (vault
+        // main_menu.md §39), so the variant keeps the parent row's caption.
+        MenuKind::AutomatonEquip => "Equipment",
+        // DAT mp_1's comwin record carries title token 165, and the caption
+        // catalog resolves it to `Customization` (vault main_menu.md §39).
+        MenuKind::MpCustomize => "Customization",
         MenuKind::EmoteList => "Emote List",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
@@ -1741,6 +1763,88 @@ pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     rows
 }
 
+/// The Equipment row's variant law (FFXiMain.dll retail-2026-09 RVA 0x1404D5;
+/// vault main_menu.md §39): the Monstrosity predicate comes first (call 0x97D50
+/// → helper 0x141BA0 opens `mp_mncst`), then — when the puppet flag byte has
+/// bit 0 set and either job slot is PUP (`mov al, 0x12`, RVA 0x1404FB) — a
+/// name-open of `pupequip`; otherwise the ordinary `equip` window.
+///
+/// kuluu's stand for both client flags is data presence: LSB only ever sends
+/// s2c 0x044 MON while a monstrosity session is active and s2c 0x044 PUP only
+/// for characters whose main or sub job is PUP (SendExtendedJobPackets,
+/// vendor/server/src/map/utils/charutils.cpp), so `monstrosity.is_some()` /
+/// `automaton.is_some()` mirror the gates exactly without a job byte of their
+/// own on the snapshot.
+pub fn equipment_drill_kind(snap: &kuluu_snapshot::SceneSnapshot) -> MenuKind {
+    if snap.monstrosity.is_some() {
+        return MenuKind::MpCustomize;
+    }
+    if snap.automaton.is_some() {
+        return MenuKind::AutomatonEquip;
+    }
+    MenuKind::Equipment
+}
+
+/// Name vocabulary for the packet's AutomatonHead byte (0 = nothing equipped);
+/// verbatim from vendor/server/src/map/enums/automaton.h.
+pub fn automaton_head_name(code: u8) -> Option<&'static str> {
+    match code {
+        1 => Some("Harlequin"),
+        2 => Some("Valoredge"),
+        3 => Some("Sharpshot"),
+        4 => Some("Stormwaker"),
+        5 => Some("Soulsoother"),
+        6 => Some("Spiritreaver"),
+        _ => None,
+    }
+}
+
+/// Name vocabulary for the packet's AutomatonFrame byte; verbatim from the same
+/// header (values 0x20..=0x23).
+pub fn automaton_frame_name(code: u8) -> Option<&'static str> {
+    match code {
+        0x20 => Some("Harlequin"),
+        0x21 => Some("Valoredge"),
+        0x22 => Some("Sharpshot"),
+        0x23 => Some("Stormwaker"),
+        _ => None,
+    }
+}
+
+/// The pupequip variant's fourteen rows: Head, Frame, then Attachment 1..12 in
+/// AutomatonSlot order (Head=0, Frame=1, Attachment1..12 = 2..13 — vendor/
+/// server/src/map/packets/c2s/0x102_extended_job.h; vault main_menu.md §39).
+/// The DAT `pupe` record is chrome-only, so the slot words are kuluu pins held
+/// by tests; equipped names come from the s2c 0x044 PUP frame (enum vocabulary
+/// for head/frame, item names for attachments — empty slots read "(empty)" like
+/// the trade grid's cells). Selecting is inert until §39's equip flow lands.
+pub fn automaton_equip_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let Some(automaton) = snap.automaton.as_deref() else {
+        return Vec::new();
+    };
+    let named = |word: &str, name: Option<&'static str>, slot: u8| DynamicMenuRow {
+        label: format!("{word}: {}", name.unwrap_or("(empty)")),
+        action: DynamicMenuAction::AutomatonSlotRow { slot },
+    };
+    let mut rows = vec![
+        named("Head", automaton_head_name(automaton.head), 0),
+        named("Frame", automaton_frame_name(automaton.frame), 1),
+    ];
+    for (i, &item) in automaton.attachments.iter().enumerate() {
+        let name = if item == 0 {
+            None
+        } else {
+            ffxi_vocab::item_names::lookup(u16::from(item))
+        };
+        rows.push(named(
+            &format!("Attachment {}", i + 1),
+            name,
+            u8::try_from(i + 2).unwrap_or(13),
+        ));
+    }
+    rows
+}
+
 /// Rows of kuluu's Bazaar stall picker: every PC in the zone whose
 /// `Flags1.BazaarFlag` is set — LSB pushes it on the entity stream as
 /// `hasBazaar()` (`char_update.cpp`; vault main_menu.md §33). Self never
@@ -1977,6 +2081,9 @@ pub fn refresh_dynamic_menu_rows(
         // main_menu.md §31).
         MenuKind::QuestList => quest_list_rows(snap),
         MenuKind::QuestDetail { log, id } => quest_detail_rows(snap, log, id),
+        // The pupequip variant's fourteen automaton slot rows (vault
+        // main_menu.md §39).
+        MenuKind::AutomatonEquip => automaton_equip_rows(snap),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -4431,6 +4538,85 @@ mod tests {
             root_child_kind("Help Desk", false, false),
             Some(MenuKind::HelpDeskPanel)
         );
+    }
+
+    /// The Equipment-row variant gate order, fresh from FFXiMain.dll
+    /// retail-2026-09 RVA 0x1404D5 (vault main_menu.md §39): Monstrosity beats
+    /// puppetry, puppetry beats the ordinary equip window; data presence on the
+    /// folded snapshot stands in for both client flags.
+    #[test]
+    fn equipment_row_variant_gate_order_follows_the_dll_branch_law() {
+        let plain = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(equipment_drill_kind(&plain), MenuKind::Equipment);
+
+        let automaton = kuluu_snapshot::AutomatonInfo {
+            is_sub_job: false,
+            head: 0,
+            frame: 0,
+            attachments: [0; 12],
+            unlocked_heads: 0x3F,
+            unlocked_frames: 0x0F,
+        };
+        let pup = kuluu_snapshot::SceneSnapshot {
+            automaton: Some(Box::new(automaton.clone())),
+            ..Default::default()
+        };
+        assert_eq!(equipment_drill_kind(&pup), MenuKind::AutomatonEquip);
+
+        // Both records present — the DLL tests the Monstrosity predicate first
+        // (call 0x97D50 before the flag/job compares), so mp wins.
+        let both = kuluu_snapshot::SceneSnapshot {
+            automaton: Some(Box::new(automaton)),
+            monstrosity: Some(kuluu_snapshot::MonstrosityInfo {
+                species: 1,
+                equipped_instincts: [0; 12],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(equipment_drill_kind(&both), MenuKind::MpCustomize);
+    }
+
+    /// The pupequip rows (vault main_menu.md §39): fourteen in AutomatonSlot
+    /// order — Head, Frame, Attachment 1..12 — with the LSB enum vocabulary for
+    /// head/frame and "(empty)" cells; slot ids match c2s 0x102's AutomatonSlot.
+    #[test]
+    fn pupequip_rows_are_fourteen_slots_in_automatonslot_order() {
+        let snap = kuluu_snapshot::SceneSnapshot {
+            automaton: Some(Box::new(kuluu_snapshot::AutomatonInfo {
+                is_sub_job: false,
+                head: 2, // Valoredge (vendor/server/src/map/enums/automaton.h)
+                frame: 0x21,
+                attachments: [0; 12],
+                unlocked_heads: 0x3F,
+                unlocked_frames: 0x0F,
+            })),
+            ..Default::default()
+        };
+        let rows = automaton_equip_rows(&snap);
+        assert_eq!(rows.len(), 14);
+        assert_eq!(rows[0].label, "Head: Valoredge");
+        assert_eq!(rows[1].label, "Frame: Valoredge");
+        assert_eq!(rows[2].label, "Attachment 1: (empty)");
+        assert_eq!(rows[13].label, "Attachment 12: (empty)");
+        let slots: Vec<u8> = rows
+            .iter()
+            .map(|r| match r.action {
+                DynamicMenuAction::AutomatonSlotRow { slot } => slot,
+                ref a => panic!("unexpected action {a:?}"),
+            })
+            .collect();
+        assert_eq!(slots, (0u8..14).collect::<Vec<u8>>());
+        // The window with no automaton record (frame not arrived) shows nothing.
+        assert!(automaton_equip_rows(&kuluu_snapshot::SceneSnapshot::default()).is_empty());
+    }
+
+    /// `mp_mncst` is the grounded-title empty display: catalog 76.DAT idx 165
+    /// = Customization; its DAT record names no rows (vault main_menu.md §39).
+    #[test]
+    fn mp_customize_window_is_the_grounded_title_empty_display() {
+        assert_eq!(menu_title(MenuKind::MpCustomize), "Customization");
+        assert!(entries_for(MenuKind::MpCustomize, false).is_empty());
+        assert_eq!(menu_title(MenuKind::AutomatonEquip), "Equipment");
     }
 
     /// The commenu law (vault main_menu.md §37): two list widgets in DAT order —

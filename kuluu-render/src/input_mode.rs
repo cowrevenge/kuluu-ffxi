@@ -338,6 +338,17 @@ pub enum MenuKind {
     /// (vault main_menu.md §37).
     FriendList,
 
+    /// The `pupequip` variant of the Equipment row for a Puppetmaster: fourteen
+    /// automaton slot rows fed by s2c 0x044 EXTENDED_JOB PUP
+    /// (FFXiMain.dll retail-2026-09 RVA 0x1404D5/0x14051D; vault main_menu.md §39).
+    AutomatonEquip,
+
+    /// The `mp_mncst` variant of the Equipment row during a monstrosity session:
+    /// the window catalog titles it Customization (76.DAT idx 165) and its DAT
+    /// record carries only three unnamed chrome buttons, so kuluu renders the
+    /// grounded title with no rows yet (vault main_menu.md §39).
+    MpCustomize,
+
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
     /// 0x22DB40; vault main_menu.md §30), so selects push this payload.

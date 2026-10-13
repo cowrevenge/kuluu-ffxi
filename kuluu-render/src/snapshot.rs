@@ -257,6 +257,14 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if let Some(missions) = &delta.set_missions {
         snap.missions = missions.clone();
     }
+    // One s2c 0x044 frame replaces each extended-job record whole; the inner
+    // Option can clear it (vault main_menu.md §39).
+    if let Some(automaton) = &delta.set_automaton {
+        snap.automaton = automaton.clone();
+    }
+    if let Some(monstrosity) = &delta.set_monstrosity {
+        snap.monstrosity = *monstrosity;
+    }
 
     for line in &delta.chat_appended {
         snap.chat.push(line.clone());

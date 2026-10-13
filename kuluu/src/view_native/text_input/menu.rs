@@ -632,6 +632,18 @@ pub(super) fn confirm_menu_at_cursor(
             None
         }
         MenuDispatch::OpenSubmenu(submenu) => {
+            // The Root Equipment row obeys the variant law (FFXiMain.dll
+            // retail-2026-09 RVA 0x1404D5: Monstrosity first via helper 0x141BA0
+            // into `mp_mncst`, then the puppet flag + job byte 0x12 branch into
+            // `pupequip`; vault main_menu.md §39). Data presence on the folded
+            // snapshot stands in for both client flags (same law as
+            // equipment_drill_kind's doc).
+            let submenu =
+                if matches!(submenu, MenuKind::Equipment) && matches!(kind, MenuKind::Root) {
+                    kuluu_render::hud::menu::equipment_drill_kind(&scene_state.snapshot)
+                } else {
+                    submenu
+                };
             // The Root Trade row obeys helper 0x13FE70's gate law (vault
             // main_menu.md §25): it opens only against an eligible PC target and
             // refuses — with the error-sound arm at menuwind 0x1406AD, whose

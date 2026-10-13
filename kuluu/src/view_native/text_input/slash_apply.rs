@@ -846,6 +846,10 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
                 // commenu Friend List widget (vault main_menu.md §37).
                 kuluu_render::MenuKind::FriendList => "Friend List".into(),
+                // Equipment-row variants (vault main_menu.md §39): pupequip
+                // keeps the parent caption; mp_mncst is catalog-titled.
+                kuluu_render::MenuKind::AutomatonEquip => "Equipment".into(),
+                kuluu_render::MenuKind::MpCustomize => "Customization".into(),
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

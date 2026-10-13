@@ -564,6 +564,11 @@ pub mod s2c {
     // vault main_menu.md section 30.
     pub const MISSION: u16 = 0x056;
 
+    // GP_SERV_COMMAND_EXTENDED_JOB — BLU/PUP/MON extended info
+    // (vendor/server/src/map/packets/s2c/0x044_extended_job_pup.h and friends;
+    // vault main_menu.md §39). Parse with [`crate::puppet::parse_extended_job`].
+    pub const EXTENDED_JOB: u16 = 0x044;
+
     pub const BATTLE2: u16 = 0x028;
 
     pub const BATTLE_MESSAGE: u16 = 0x029;

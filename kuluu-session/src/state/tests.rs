@@ -2801,6 +2801,34 @@ fn mission_battery_folds_whole_per_port() {
     assert_eq!(state.missions.tvr, 7);
 }
 
+/// The s2c 0x044 folds (vault main_menu.md §39): one PUP frame lands the whole
+/// automaton record and repeats are no-ops; same law for MON.
+#[test]
+fn extended_job_frames_fold_whole() {
+    let mut state = crate::state::SessionState::default();
+    let automaton = kuluu_snapshot::AutomatonInfo {
+        is_sub_job: false,
+        head: 2, // AutomatonHead::Valoredge (vendor/server/src/map/enums/automaton.h)
+        frame: 0x21,
+        attachments: [0; 12],
+        unlocked_heads: 0x3F,
+        unlocked_frames: 0x0F,
+    };
+    assert!(state.apply_event(&AgentEvent::AutomatonUpdated {
+        automaton: automaton.clone()
+    }));
+    assert_eq!(state.automaton, Some(Box::new(automaton.clone())));
+    assert!(!state.apply_event(&AgentEvent::AutomatonUpdated { automaton }));
+
+    let monstrosity = kuluu_snapshot::MonstrosityInfo {
+        species: 71,
+        equipped_instincts: [0; 12],
+    };
+    assert!(state.apply_event(&AgentEvent::MonstrosityUpdated { monstrosity }));
+    assert_eq!(state.monstrosity, Some(monstrosity));
+    assert!(!state.apply_event(&AgentEvent::MonstrosityUpdated { monstrosity }));
+}
+
 /// AgentEvent is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2819,6 +2847,8 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::SynthCompleted { .. } => (),
         AgentEvent::PlayerSearchCompleted { .. } => (),
         AgentEvent::LinkShellSlotChanged { .. } => (),
+        AgentEvent::AutomatonUpdated { .. } => (),
+        AgentEvent::MonstrosityUpdated { .. } => (),
         AgentEvent::Connected { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),

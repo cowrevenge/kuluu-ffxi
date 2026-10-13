@@ -142,6 +142,14 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // its own; it rides the shared snapshot like the extended-job records.
         macros: s.macros.clone(),
         config_confdata: s.config_confdata,
+        // The job roster (s2c 0x01B) rides the shared snapshot so myroom's
+        // Change Jobs row can offer every unlocked job — LSB validates its
+        // commit against this very bitmask (vault main_menu.md §53).
+        jobs: s.job_info.map(|info| kuluu_snapshot::JobList {
+            unlocked: info.unlocked,
+            sub_job_unlocked: info.sub_job_unlocked,
+            job_levels: info.job_levels.to_vec(),
+        }),
     }
 }
 
@@ -1610,6 +1618,34 @@ mod tests {
         let snap = state_to_snapshot(&s);
         assert_eq!(snap.macros.len(), 1);
         assert_eq!((snap.macros[0].block, snap.macros[0].index), (0, 3));
+    }
+
+    #[test]
+    fn job_roster_crosses_the_wire_boundary() {
+        // The home-view Change Jobs row offers its pick list from this roster,
+        // and LSB's MYROOM_JOB validator re-tests every non-zero index against
+        // the same unlocked bits (vendor/server/src/map/packets/c2s/
+        // 0x100_myroom_job.cpp; vault main_menu.md §53) — so the fold must be
+        // lossless, not a summary.
+        let mut s = SessionState::default();
+        assert!(state_to_snapshot(&s).jobs.is_none());
+        s.job_info = Some(crate::state::JobInfoState {
+            mjob_no: 1,
+            sjob_no: 4,
+            unlocked: 0b1_0010,
+            sub_job_unlocked: true,
+            job_levels: {
+                let mut l = [0u8; ffxi_proto::decode::JobInfo::MAX_JOBTYPE];
+                l[1] = 99;
+                l[4] = 24;
+                l
+            },
+        });
+        let snap = state_to_snapshot(&s);
+        let jobs = snap.jobs.expect("roster folds through");
+        assert_eq!((jobs.unlocked, jobs.sub_job_unlocked), (0b1_0010, true));
+        assert_eq!(jobs.job_levels[1], 99);
+        assert_eq!(jobs.job_levels[4], 24);
     }
 
     #[test]

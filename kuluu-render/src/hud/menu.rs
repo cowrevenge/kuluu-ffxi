@@ -387,6 +387,16 @@ pub enum DynamicMenuAction {
         /// (the ask's Items byte is the number of Somes).
         ingredients: [Option<ffxi_proto::synth::SynthIngredient>; 8],
     },
+
+    /// One job row of the home-view pick list (`jobchang` → `jobcsel` family,
+    /// vault main_menu.md §53): selecting sends c2s 0x100 MYROOM_JOB carrying
+    /// this id on its own side and zero ("no change") on the other — exactly
+    /// what LSB's validator walks before applying it (vendor/server/src/map/
+    /// packets/c2s/0x100_myroom_job.cpp).
+    HomeJobRow {
+        job_id: u8,
+        as_main: bool,
+    },
 }
 
 impl DynamicMenuAction {
@@ -802,6 +812,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::QuestDetail { .. }
             | MenuKind::AutomatonEquip
             | MenuKind::MacroSelect
+            | MenuKind::JobPick { .. }
     )
 }
 
@@ -978,9 +989,13 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // `mp_mncst` chrome carries only three unnamed buttons and no captions
         // (DAT mp_1, vault main_menu.md §39) — the grounded empty display.
         MenuKind::MpCustomize => &[],
-        // The myroom home-view ops panel: eight captioned widgets read from the
-        // DAT chunk (vault main_menu.md §40).
+        // The myroom home-view ops panel: fourteen captioned widgets read from
+        // the DAT chunk (vault main_menu.md §40 as corrected by §53).
         MenuKind::HomeView => HOME_VIEW_ROWS,
+        // jobchang's two widgets — catalog tokens 65/66 in DAT record 'jobc'
+        // (vault main_menu.md §53); the pick lists are roster-built.
+        MenuKind::JobChange => JOB_CHANGE_ROWS,
+        MenuKind::JobPick { .. } => &[],
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
@@ -1112,6 +1127,11 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // vault main_menu.md §40), so — as with the pupequip variant — kuluu
         // inherits the parent row's caption.
         MenuKind::HomeView => "Map",
+        // jobchang's frame carries no title token of its own in DAT record
+        // 'jobc' (vault main_menu.md §53); catalog caption 67 grounds both it
+        // and the pick lists drilled from its rows.
+        MenuKind::JobChange => "Change Jobs",
+        MenuKind::JobPick { .. } => "Change Jobs",
         MenuKind::EmoteList => "Emote List",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
@@ -1566,24 +1586,76 @@ const HELPDESK_PANEL_ENTRIES: &[&str] = &[FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CO
 
 /// The myroom home-view panel's captioned widgets, verbatim from the DAT
 /// chunk `myro` (ROM/0/1.DAT file-off 0x282D80 size 0x4D0) windowps tokens,
-/// each decoded against ROM/165/76.DAT (vault main_menu.md §40): idx 138 Mog
-/// Locker, 151 Satchel, 158 Mog Sack, 147 Open Mog House, 166 Mog Case, 168
-/// M.Ward., 181 Safe 2, 182 Remodel. The handler answers select ids 1..7
-/// (FFXiMain.dll retail-2026-09 RVA 0x145460 jump table .rdata 0x1455BC) so at
-/// least one widget is mode-conditional — the §40 law shows id 6 rewriting
-/// widget visibility via the pair of calls to 0x118B60(5, _) before entering
-/// furniture mode. kuluu renders all eight pinned rows; selects stay inert
-/// until the id-to-caption mapping lands (OPEN MAP on bead .13.2).
+/// each decoded against ROM/165/76.DAT. The full fourteen named widgets —
+/// the §40 reading of six of them as "chrome" was wrong: their caption tokens
+/// label real buttons (vault main_menu.md §53 re-read): 168 M.Ward., 3 Mog
+/// Safe, 37 Storage, 138 Mog Locker, 151 Satchel, 147 Open Mog House, 166
+/// Mog Case, 158 Mog Sack, 87 Delivery Box, 67 Change Jobs, 89 Gardening, 4
+/// Layout, 181 Safe 2, 182 Remodel. Display order is fixed twice over by the
+/// geometry y column (0x15..0xE5 stride 0x10) and the per-record prev/next
+/// chain ring. The handler answers select ids 1..7
+/// (FFXiMain.dll retail-2026-09 RVA 0x145460 jump table .rdata 0x1455BC):
+/// id1 storage, id2 mogpost, id3 jobchang, id4 "/garden", id5 "/layout" (the
+/// §40 literal pairing was swapped), id6 furniture-edit mode, id7 roomlist.
 pub const HOME_VIEW_ROWS: &[&str] = &[
+    "M.Ward.",
+    "Mog Safe",
+    "Storage",
     "Mog Locker",
     "Satchel",
-    "Mog Sack",
     "Open Mog House",
     "Mog Case",
-    "M.Ward.",
+    "Mog Sack",
+    "Delivery Box",
+    "Change Jobs",
+    "Gardening",
+    "Layout",
     "Safe 2",
     "Remodel",
 ];
+
+/// `jobchang`'s two rows, verbatim from the DAT record 'jobc' (ROM/0/1.DAT):
+/// windowps273/274 with catalog tokens 65 "Main Job" and 66 "Support Job"
+/// (vault main_menu.md §53).
+pub const JOB_CHANGE_ROWS: &[&str] = &["Main Job", "Support Job"];
+
+/// The container an openable home-view row browses, keyed by the DAT caption.
+/// The bag identities follow the LSB CONTAINER_ID enum (vendor/server/src/map/
+/// item_container.h: MOGSAFE=1, STORAGE=2, MOGLOCKER=4, MOGSATCHEL=5, MOGSACK=
+/// 6, MOGCASE=7, WARDROBE=8, MOGSAFE2=9 — vault main_menu.md §53); the 'M.Ward.'
+/// caption is the wardrobe bag. Which of the two window classes `storage`/
+/// `storage2` (name-opened by select id 1's holder method 0x145C70) binds to
+/// which bag stays unmapped — those windows have no DAT record to read it from
+/// [V-negative], so kuluu maps the "Storage" caption to its same-named LSB bag.
+pub fn home_view_row_container(label: &str) -> Option<u8> {
+    use ffxi_proto::map::container as c;
+    match label {
+        "Mog Safe" => Some(c::LOC_MOGSAFE),
+        "Storage" => Some(c::LOC_STORAGE),
+        "Mog Locker" => Some(c::LOC_MOGLOCKER),
+        "Satchel" => Some(c::LOC_MOGSATCHEL),
+        "Mog Case" => Some(c::LOC_MOGCASE),
+        "Mog Sack" => Some(c::LOC_MOGSACK),
+        "M.Ward." => Some(c::LOC_WARDROBE),
+        "Safe 2" => Some(c::LOC_MOGSAFE2),
+        _ => None,
+    }
+}
+
+/// The two home-view rows that are text commands (select ids 4 and 5 of handler
+/// FFXiMain.dll retail-2026-09 RVA 0x145460, arms @0x145541/@0x14554A): each
+/// runs its literal through the runner (0x80DC0) and closes myroom by name via
+/// 0x15E910. The §40 pairing of literals to ids was swapped — fresh read: id 4
+/// pushes .data 0x3715F0 "/garden", id 5 pushes .data 0x3715E8 "/layout".
+/// LSB ships neither command (C++ nor scripts/commands), so like /clock the
+/// literal never reaches an LSB server as anything meaningful [V-negative].
+pub fn home_view_text_command(label: &str) -> Option<&'static str> {
+    match label {
+        "Gardening" => Some("/garden"),
+        "Layout" => Some("/layout"),
+        _ => None,
+    }
+}
 
 /// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
 /// tier substitutable by element and all positional ingredients assignable to bag slots under
@@ -2319,6 +2391,39 @@ pub fn quest_detail_rows(
     rows
 }
 
+/// Rows for one side of a home-view job change: every JOBTYPE id whose bit is
+/// set in the s2c 0x01B roster (bit 0 and never-unlocked jobs stay out — LSB's
+/// MYROOM_JOB validator ranges MainJobIndex to 0x01..=MAX-1 and tests each
+/// non-zero index against `jobs.unlocked`, vendor/server/src/map/packets/c2s/
+/// 0x100_myroom_job.cpp; vault main_menu.md §53). A side picks nothing while
+/// the roster is unknown (`snap.jobs` None) or the sub-job grant never arrived.
+pub fn job_pick_rows(snap: &kuluu_snapshot::SceneSnapshot, main_pick: bool) -> Vec<DynamicMenuRow> {
+    let Some(jobs) = snap.jobs.as_ref() else {
+        return Vec::new();
+    };
+    if !main_pick && !jobs.sub_job_unlocked {
+        return Vec::new();
+    }
+    let max_jobs = jobs.job_levels.len().min(32);
+    (1u8..max_jobs as u8)
+        .filter(|id| jobs.unlocked & (1 << *id) != 0)
+        .map(|job_id| {
+            let level = jobs.job_levels[usize::from(job_id)];
+            DynamicMenuRow {
+                label: format!(
+                    "{} LV{}",
+                    ffxi_vocab::job_names::lookup(u16::from(job_id)).unwrap_or("???"),
+                    level
+                ),
+                action: DynamicMenuAction::HomeJobRow {
+                    job_id,
+                    as_main: main_pick,
+                },
+            }
+        })
+        .collect()
+}
+
 pub fn refresh_dynamic_menu_rows(
     mode: Res<InputMode>,
     scene: Res<crate::snapshot::SceneState>,
@@ -2377,6 +2482,10 @@ pub fn refresh_dynamic_menu_rows(
         // main_menu.md §39).
         MenuKind::AutomatonEquip => automaton_equip_rows(snap),
         MenuKind::MacroSelect => macro_select_rows(snap),
+        // Home-view job pick lists — both sides come from the same roster
+        // (vault main_menu.md §53); the sub side renders empty until the
+        // packet's sub-job grant arrived, like LSB refusing the row.
+        MenuKind::JobPick { main_pick } => job_pick_rows(snap, main_pick),
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -5207,23 +5316,103 @@ mod tests {
     }
 
     /// The myroom panel rows and inherited title (DAT 'myro' caption tokens
-    /// against ROM/165/76.DAT; vault main_menu.md §40).
+    /// against ROM/165/76.DAT; vault main_menu.md §40 as corrected by §53 —
+    /// fourteen named widgets, display order pinned twice over by the geometry
+    /// y column 0x15..0xE5 and the records' prev/next chain ring).
     #[test]
     fn home_view_rows_and_title_track_the_myro_dat_law() {
         assert_eq!(
             entries_for(MenuKind::HomeView, false),
             &[
+                "M.Ward.",
+                "Mog Safe",
+                "Storage",
                 "Mog Locker",
                 "Satchel",
-                "Mog Sack",
                 "Open Mog House",
                 "Mog Case",
-                "M.Ward.",
+                "Mog Sack",
+                "Delivery Box",
+                "Change Jobs",
+                "Gardening",
+                "Layout",
                 "Safe 2",
                 "Remodel",
             ]
         );
         assert_eq!(menu_title(MenuKind::HomeView), "Map");
+    }
+
+    /// Container rows name their LSB bags (vendor/server/src/map/item_container.h)
+    /// and the Gardening/Layout rows their literals — id 4 = "/garden", id 5 =
+    /// "/layout" per the corrected arms of handler FFXiMain.dll retail-2026-09
+    /// RVA 0x145460 (vault main_menu.md §53).
+    #[test]
+    fn home_view_rows_map_to_lsb_bags_and_text_command_literals() {
+        use ffxi_proto::map::container as c;
+        assert_eq!(home_view_row_container("Mog Safe"), Some(c::LOC_MOGSAFE));
+        assert_eq!(home_view_row_container("Storage"), Some(c::LOC_STORAGE));
+        assert_eq!(
+            home_view_row_container("Mog Locker"),
+            Some(c::LOC_MOGLOCKER)
+        );
+        assert_eq!(home_view_row_container("Satchel"), Some(c::LOC_MOGSATCHEL));
+        assert_eq!(home_view_row_container("Mog Case"), Some(c::LOC_MOGCASE));
+        assert_eq!(home_view_row_container("Mog Sack"), Some(c::LOC_MOGSACK));
+        assert_eq!(home_view_row_container("M.Ward."), Some(c::LOC_WARDROBE));
+        assert_eq!(home_view_row_container("Safe 2"), Some(c::LOC_MOGSAFE2));
+        assert_eq!(home_view_text_command("Gardening"), Some("/garden"));
+        assert_eq!(home_view_text_command("Layout"), Some("/layout"));
+        // The rows whose retail arms are unbuilt stay un-mapped here and reach
+        // the dispatcher's NotImplemented path.
+        for label in ["Open Mog House", "Delivery Box", "Remodel", "Change Jobs"] {
+            assert!(home_view_row_container(label).is_none());
+            assert!(home_view_text_command(label).is_none());
+        }
+    }
+
+    /// `jobchang` shows its two DAT rows; the pick lists build from the folded
+    /// s2c 0x01B roster — locked jobs are not offered, and a sub-side list
+    /// waits for the packet's grant (vault main_menu.md §53).
+    #[test]
+    fn job_change_drill_rows_and_roster_built_picks() {
+        assert_eq!(
+            entries_for(MenuKind::JobChange, false),
+            &["Main Job", "Support Job"]
+        );
+
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert!(job_pick_rows(&snap, true).is_empty(), "roster unknown");
+        snap.jobs = Some(kuluu_snapshot::JobList {
+            unlocked: (1 << 1) | (1 << 3),
+            sub_job_unlocked: false,
+            job_levels: vec![0, 99, 0, 24],
+        });
+        let mains = job_pick_rows(&snap, true);
+        assert_eq!(mains.len(), 2, "only unlocked jobs are offered");
+        let warrior = ffxi_vocab::job_names::lookup(1).unwrap_or("???");
+        assert_eq!(format!("{warrior} LV99"), mains[0].label);
+        assert!(matches!(
+            mains[0].action,
+            DynamicMenuAction::HomeJobRow {
+                job_id: 1,
+                as_main: true
+            }
+        ));
+        assert!(
+            job_pick_rows(&snap, false).is_empty(),
+            "sub side waits for the grant"
+        );
+        snap.jobs.as_mut().unwrap().sub_job_unlocked = true;
+        let subs = job_pick_rows(&snap, false);
+        assert_eq!(subs.len(), 2);
+        assert!(matches!(
+            subs[1].action,
+            DynamicMenuAction::HomeJobRow {
+                job_id: 3,
+                as_main: false
+            }
+        ));
     }
 
     /// The pupequip rows (vault main_menu.md §39): fourteen in AutomatonSlot

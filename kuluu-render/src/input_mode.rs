@@ -364,6 +364,22 @@ pub enum MenuKind {
     /// container widgets (vault main_menu.md §40).
     HomeView,
 
+    /// The `jobchang` window drilled from myroom's Change Jobs row (name-open
+    /// arm FFXiMain.dll retail-2026-09 RVA 0x145517; both paths through its
+    /// predicate open the window — vault main_menu.md §53). The DAT record
+    /// 'jobc' gives it exactly two widgets, captioned tokens 65 "Main Job" and
+    /// 66 "Support Job"; each drills [`MenuKind::JobPick`].
+    JobChange,
+
+    /// One side of a home-view job change: every unlocked job from the folded
+    /// s2c 0x01B JOB_INFO roster (`snap.jobs`, vault main_menu.md §53). Selecting
+    /// sends c2s 0x100 MYROOM_JOB, whose LSB validator tests the pick against
+    /// that same `jobs.unlocked` bitmask (vendor/server/src/map/packets/c2s/
+    /// 0x100_myroom_job.cpp); the untouched side rides the packet's zero index.
+    JobPick {
+        main_pick: bool,
+    },
+
     /// The `mcrselec` select window drilled from the launcher's Select Macro
     /// row: filled slots of the client-local store, 2 blocks x 20 keytops per
     /// the DAT grids 'mcrs'/'mcr7' (vault main_menu.md §41).

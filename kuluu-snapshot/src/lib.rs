@@ -1118,6 +1118,14 @@ pub struct SceneSnapshot {
     /// on purpose.
     #[serde(default)]
     pub config_confdata: Option<[u8; 4]>,
+
+    /// The whole job roster as s2c 0x01B JOB_INFO last reported it — the data
+    /// source for myroom's `jobchang` (Change Jobs) home-view row, whose pick
+    /// list offers every unlocked job and whose commit c2s 0x100 MYROOM_JOB is
+    /// validated against exactly this bitmask (vendor/server/src/map/packets/
+    /// c2s/0x100_myroom_job.cpp; vault main_menu.md §53). Trailing on purpose.
+    #[serde(default)]
+    pub jobs: Option<JobList>,
 }
 
 /// The automaton record folded from one s2c 0x044 EXTENDED_JOB PUP frame
@@ -1157,6 +1165,20 @@ pub struct MacroSlot {
     pub block: u8,
     pub index: u8,
     pub text: String,
+}
+
+/// The job roster record folded from one s2c 0x01B JOB_INFO frame (vendor/
+/// server/src/map/packets/s2c/0x01b_job_info.h): `unlocked` is the LSB
+/// `jobs.unlocked` bitmask (bit position = JOBTYPE id, bit 0 unused), and
+/// `job_levels` is indexed the same way. LSB's MYROOM_JOB validator tests each
+/// non-zero index against this mask before changing jobs (vendor/server/src/
+/// map/packets/c2s/0x100_myroom_job.cpp — vault main_menu.md §53).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobList {
+    pub unlocked: u32,
+    pub sub_job_unlocked: bool,
+    /// Indexed by JOBTYPE id; entries past the packet's job count stay 0.
+    pub job_levels: Vec<u8>,
 }
 
 /// One synthesis answer (subset of the s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS
@@ -2671,6 +2693,7 @@ mod tests {
             monstrosity: None,
             macros: Vec::new(),
             config_confdata: None,
+            jobs: None,
         }
     }
 
@@ -3239,6 +3262,7 @@ mod tests {
             "monstrosity",
             "macros",
             "config_confdata",
+            "jobs",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3247,7 +3271,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

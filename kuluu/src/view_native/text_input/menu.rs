@@ -12,6 +12,20 @@ enum MenuDispatch {
     /// "/clock"). The same seam serves typed input later (vault §12).
     TextCommand(&'static str),
 
+    /// myroom's Gardening/Layout rows (select ids 4 and 5 of handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x145460 — arms @0x145541/@0x14554A): each runs its
+    /// literal through the runner (0x80DC0) and then closes myroom by name via
+    /// 0x15E910, so kuluu pops the home-view level after running it (vault
+    /// main_menu.md §53; the pair's literal↔id mapping was swapped in §40).
+    HomeTextCommand(&'static str),
+
+    /// A container row of the myroom panel: opens kuluu's Items window on the
+    /// LSB bag named by `container` (vault main_menu.md §53 container law) —
+    /// the same seam a Mog Menu storage row uses (`open_items_on_bag`).
+    BrowseBag {
+        container: u8,
+    },
+
     KeybindUpdate(KeybindUpdate),
 
     /// View House (page-2 row 4): the retail arm opens the Mog Menu locally —
@@ -176,11 +190,35 @@ fn resolve_menu_entry(
             MenuDispatch::OpenSubmenu(MenuKind::MacroResult)
         }
 
-        // The myroom panel's rows stay inert: the §40 select family covers ids
-        // 1..7 of FFXiMain.dll retail-2026-09 RVA 0x145460 while eight captioned
-        // widgets render, so the id-to-caption mapping (and the storage /
-        // jobchange / layout-mode tails behind it) is not yet grounded.
-        (MenuKind::HomeView, _) => MenuDispatch::NotImplemented(label.to_string()),
+        // myroom's select family (handler FFXiMain.dll retail-2026-09 RVA
+        // 0x145460, ids 1..7): the six container rows open their LSB bags, the
+        // two text-command rows run their literals and close the panel, Change
+        // Jobs name-opens `jobchang` (id3 arm @0x145517 — its predicate only
+        // selects an extra helper call 0xA1860(50); BOTH paths open the window,
+        // so kuluu opens it ungated). The rows whose retail arms are not yet
+        // built (Delivery Box→`mogpost`, Remodel→`roomlist`, Open Mog House)
+        // answer NotImplemented until their beads land (vault §53).
+        (MenuKind::HomeView, _) => {
+            if let Some(container) = kuluu_render::hud::menu::home_view_row_container(label) {
+                MenuDispatch::BrowseBag { container }
+            } else if let Some(cmd) = kuluu_render::hud::menu::home_view_text_command(label) {
+                MenuDispatch::HomeTextCommand(cmd)
+            } else if label == "Change Jobs" {
+                MenuDispatch::OpenSubmenu(MenuKind::JobChange)
+            } else {
+                MenuDispatch::NotImplemented(label.to_string())
+            }
+        }
+
+        // `jobchang`'s two rows (DAT 'jobc' widgets windowps273/274, catalog
+        // tokens 65/66) drill their pick lists — Main Job and Support Job each
+        // send one c2s 0x100 MYROOM_JOB on select (vault main_menu.md §53).
+        (MenuKind::JobChange, l) if l == kuluu_render::hud::menu::JOB_CHANGE_ROWS[0] => {
+            MenuDispatch::OpenSubmenu(MenuKind::JobPick { main_pick: true })
+        }
+        (MenuKind::JobChange, l) if l == kuluu_render::hud::menu::JOB_CHANGE_ROWS[1] => {
+            MenuDispatch::OpenSubmenu(MenuKind::JobPick { main_pick: false })
+        }
 
         // mgcmenu select: the category's school id (jump table 0x13F7CC; vault
         // main_menu.md §21) becomes the filter of the `magic` spell list.
@@ -253,6 +291,7 @@ pub(super) fn confirm_menu_at_cursor(
     target_id: Option<u32>,
     self_pos: kuluu_snapshot::Vec3,
     command_surface: &crate::view_native::command_surface::CommandSurface,
+    item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
 ) -> Option<InputMode> {
     let (kind, cursor) = {
         let level = stack.current()?;
@@ -670,6 +709,29 @@ pub(super) fn confirm_menu_at_cursor(
             );
             // Mirrors the Debug toggles: the menu stays open (provisional
             // pending retail capture, bead kuluu-y5hq retail_unknowns).
+            None
+        }
+        MenuDispatch::HomeTextCommand(cmd) => {
+            apply_menu_text_command(
+                cmd,
+                command_surface,
+                stack,
+                vana_clock,
+                vana_clock_visible,
+                scene_state,
+                cmd_tx,
+                self_pos,
+                target_id,
+            );
+            // The retail arms (FFXiMain.dll retail-2026-09 RVA 0x145541 and
+            // 0x14554A) close myroom by name after the runner returns; kuluu
+            // pops this window's level to do the same (vault §53).
+            stack.pop();
+            None
+        }
+        MenuDispatch::BrowseBag { container } => {
+            item_bag.0 = container;
+            stack.push(MenuKind::Items);
             None
         }
         MenuDispatch::OpenSubmenu(submenu) => {
@@ -1411,6 +1473,7 @@ pub(super) fn handle_menu_key(
             target_id,
             self_pos,
             command_surface,
+            item_bag,
         );
         if kind == MenuKind::Root && stack.current().is_some_and(|l| l.kind == MenuKind::Items) {
             item_bag.0 = ffxi_proto::map::container::LOC_INVENTORY;
@@ -2242,21 +2305,250 @@ mod menu_dispatch_tests {
         );
     }
 
-    /// The Map row drills `myroom` lawfully (§40) and its eight pinned rows
-    /// answer NotImplemented until the select family maps ids to captions.
+    /// The Map row drills `myroom` lawfully (§40) and the fourteen home-view
+    /// rows answer through §53's corrected select family (handler
+    /// FFXiMain.dll retail-2026-09 RVA 0x145460 jump table .rdata 0x1455BC):
+    /// container rows
+    /// open their LSB bags (id1's `menu    storage`/`storage2` arms and the
+    /// locker-family widgets), Gardening/Layout hand their literals to the
+    /// runner, Change Jobs drills `jobchang`; only the still-unbuilt retail
+    /// arms (Delivery Box→`mogpost`, Remodel→`roomlist`, the Mog House door)
+    /// stay on NotImplemented until their beads.
     #[test]
-    fn home_view_rows_resolve_inertly() {
-        use kuluu_render::hud::menu::HOME_VIEW_ROWS;
+    fn home_view_rows_resolve_through_the_select_family() {
+        use ffxi_proto::map::container as c;
         assert_eq!(
             resolve_menu_entry(MenuKind::Root, "Map", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::Map)
         );
-        for row in HOME_VIEW_ROWS {
-            assert!(matches!(
-                resolve_menu_entry(MenuKind::HomeView, row, false, false),
-                MenuDispatch::NotImplemented(_)
-            ));
+        for (label, want) in [
+            (
+                "M.Ward.",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_WARDROBE,
+                },
+            ),
+            (
+                "Mog Safe",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGSAFE,
+                },
+            ),
+            (
+                "Storage",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_STORAGE,
+                },
+            ),
+            (
+                "Mog Locker",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGLOCKER,
+                },
+            ),
+            (
+                "Satchel",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGSATCHEL,
+                },
+            ),
+            (
+                "Mog Case",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGCASE,
+                },
+            ),
+            (
+                "Mog Sack",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGSACK,
+                },
+            ),
+            (
+                "Safe 2",
+                MenuDispatch::BrowseBag {
+                    container: c::LOC_MOGSAFE2,
+                },
+            ),
+            ("Gardening", MenuDispatch::HomeTextCommand("/garden")),
+            ("Layout", MenuDispatch::HomeTextCommand("/layout")),
+            (
+                "Change Jobs",
+                MenuDispatch::OpenSubmenu(MenuKind::JobChange),
+            ),
+            (
+                "Open Mog House",
+                MenuDispatch::NotImplemented("Open Mog House".to_string()),
+            ),
+            (
+                "Delivery Box",
+                MenuDispatch::NotImplemented("Delivery Box".to_string()),
+            ),
+            (
+                "Remodel",
+                MenuDispatch::NotImplemented("Remodel".to_string()),
+            ),
+        ] {
+            assert_eq!(
+                resolve_menu_entry(MenuKind::HomeView, label, false, false),
+                want,
+                "{label}"
+            );
         }
+    }
+
+    /// `jobchang`'s two DAT widgets (catalog tokens 65 "Main Job" / 66
+    /// "Support Job", vault main_menu.md §53) drill their roster-built pick
+    /// lists; each side commits its own c2s 0x100 index.
+    #[test]
+    fn job_change_rows_drill_their_pick_sides() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::JobChange, "Main Job", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::JobPick { main_pick: true })
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::JobChange, "Support Job", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::JobPick { main_pick: false })
+        );
+    }
+
+    /// Boilerplate-free confirm rig for child-window rows: runs the shared
+    /// keyboard/mouse seam on `stack` with its own scratch writers.
+    fn confirm_row(
+        stack: &mut MenuStack,
+        scene_state: &mut SceneState,
+        cmd_tx: &Sender<AgentCommand>,
+        item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
+    ) -> Option<InputMode> {
+        use crate::keybinds_store::KeybindsStore;
+        let mut bindings = Bindings::default();
+        let mut keybinds_state = KeybindsStateRes {
+            store: KeybindsStore::new(std::env::temp_dir().join("kuluu-myroom-seam-tests.json")),
+            persisted: Default::default(),
+        };
+        let mut graphics = kuluu_render::GraphicsSettings::default();
+        let mut status_profile_open = Default::default();
+        let mut hud_panels = Default::default();
+        let mut net_status = Default::default();
+        let mut audio_mute = Default::default();
+        let mut vana_clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
+        let mut vana_clock_visible = Default::default();
+        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        let surface = crate::view_native::command_surface::CommandSurface::default();
+        confirm_menu_at_cursor(
+            &mut bindings,
+            stack,
+            scene_state,
+            cmd_tx,
+            &mut keybinds_state,
+            &mut graphics,
+            &mut status_profile_open,
+            &mut hud_panels,
+            &mut net_status,
+            &mut audio_mute,
+            &mut vana_clock,
+            &mut vana_clock_visible,
+            &dynamic,
+            None,
+            kuluu_snapshot::Vec3::default(),
+            &surface,
+            item_bag,
+        )
+    }
+
+    fn stack_home_view_with_cursor(stack: &mut MenuStack, label: &str) {
+        use kuluu_render::hud::menu::HOME_VIEW_ROWS;
+        stack.push(MenuKind::HomeView);
+        let row = HOME_VIEW_ROWS
+            .iter()
+            .position(|e| *e == label)
+            .expect("home-view row");
+        stack.current_mut().unwrap().cursor = row;
+    }
+
+    /// Confirm-time law: the Storage row (id1's `menu    storage` arm, holder
+    /// method FFXiMain.dll retail-2026-09 RVA 0x145C70(0)) opens kuluu's Items
+    /// window on the LSB storage bag — the same seam a Mog Menu storage row uses.
+    #[test]
+    fn storage_row_confirm_opens_items_window_on_the_storage_bag() {
+        use ffxi_proto::map::container as c;
+        let mut stack = MenuStack::root();
+        stack_home_view_with_cursor(&mut stack, "Storage");
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row(&mut stack, &mut scene_state, &cmd_tx, &mut item_bag);
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::Items));
+        assert_eq!(item_bag.0, c::LOC_STORAGE);
+        // The home view stays open below, like the retail window pair.
+        let kinds: Vec<MenuKind> = stack.levels.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![MenuKind::Root, MenuKind::HomeView, MenuKind::Items]
+        );
+    }
+
+    /// Confirm-time law: the Gardening row runs its literal through the runner
+    /// and then closes myroom by name (arms 0x145541/0x15E910 tail; §53) — kuluu
+    /// pops the home-view level, landing back on Root.
+    #[test]
+    fn gardening_row_runs_its_literal_and_closes_the_panel() {
+        let mut stack = MenuStack::root();
+        stack_home_view_with_cursor(&mut stack, "Gardening");
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row(&mut stack, &mut scene_state, &cmd_tx, &mut item_bag);
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::Root));
+    }
+
+    /// A job pick commits exactly one c2s 0x100 MYROOM_JOB side: the picked id
+    /// rides its own index, the other side stays zero ("no change" — LSB skips
+    /// validating zero indices per vendor/server/src/map/packets/c2s/
+    /// 0x100_myroom_job.cpp; vault main_menu.md §53).
+    #[test]
+    fn home_job_picks_send_their_side_of_change_job() {
+        use kuluu_render::hud::menu::DynamicMenuAction;
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut scene_state = SceneState::default();
+        dispatch_dynamic_menu_action(
+            DynamicMenuAction::HomeJobRow {
+                job_id: 6,
+                as_main: true,
+            },
+            None,
+            kuluu_snapshot::Vec3::default(),
+            &[],
+            &cmd_tx,
+            &mut scene_state,
+            false,
+        );
+        assert_eq!(
+            cmd_rx.try_recv().expect("main pick must send"),
+            AgentCommand::ChangeJob {
+                main_job: Some(6),
+                sub_job: None
+            }
+        );
+        dispatch_dynamic_menu_action(
+            DynamicMenuAction::HomeJobRow {
+                job_id: 3,
+                as_main: false,
+            },
+            None,
+            kuluu_snapshot::Vec3::default(),
+            &[],
+            &cmd_tx,
+            &mut scene_state,
+            false,
+        );
+        assert_eq!(
+            cmd_rx.try_recv().expect("sub pick must send"),
+            AgentCommand::ChangeJob {
+                main_job: None,
+                sub_job: Some(3)
+            }
+        );
     }
 
     #[test]
@@ -2754,6 +3046,7 @@ mod menu_dispatch_tests {
         let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
         let surface = crate::view_native::command_surface::CommandSurface::default();
 
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
         let next = confirm_menu_at_cursor(
             &mut bindings,
             &mut stack,
@@ -2771,6 +3064,7 @@ mod menu_dispatch_tests {
             None,
             kuluu_snapshot::Vec3::default(),
             &surface,
+            &mut item_bag,
         );
 
         assert!(next.is_none(), "the menu stays open");

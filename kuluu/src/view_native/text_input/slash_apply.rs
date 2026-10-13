@@ -110,6 +110,11 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         // The Map-row myroom variant inherits its parent caption (the
         // `myro` DAT record has no title token; vault main_menu.md §40).
         kuluu_render::MenuKind::HomeView => "Map".into(),
+        // The Change Jobs drill family echoes its DAT caption (window 'jobchang',
+        // widgets catalog-titled 65/66; vault main_menu.md §53).
+        kuluu_render::MenuKind::JobChange | kuluu_render::MenuKind::JobPick { .. } => {
+            "Change Jobs".into()
+        }
         // mcrselec/mcres20 likewise inherit `Macros` (§41 title law).
         kuluu_render::MenuKind::MacroSelect | kuluu_render::MenuKind::MacroResult => {
             "Macros".into()

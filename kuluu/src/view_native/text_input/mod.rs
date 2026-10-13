@@ -1159,8 +1159,11 @@ fn sub_target_action_for(
         // Bazaar stall picker picks up its browse on the plain confirm seam only,
         // like the mission drills (vault main_menu.md §33).
         A::MissionOpenLog { .. } | A::MissionLogRow { .. } | A::BazaarStall { .. } => None,
-        // Same law for the quest00/quest01 pair (vault main_menu.md §31).
-        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => None,
+        // Same law for the quest00/quest01 pair (vault main_menu.md §31), and
+        // for the home-view job picks — they commit one c2s 0x100 MYROOM_JOB on
+        // the wire, never to a target (handler FFXiMain.dll retail-2026-09
+        // RVA 0x145460 arm 0x145517; vault main_menu.md §53).
+        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } | A::HomeJobRow { .. } => None,
     }
 }
 
@@ -1825,6 +1828,26 @@ fn dispatch_dynamic_menu_action(
                 )
             }
         }
+        // A home-view job pick (c2s 0x100 MYROOM_JOB; vault main_menu.md §53):
+        // the picked id rides its own side, the untouched side rides `None`
+        // (= index 0, "no change" — LSB skips validating a zero index per
+        // vendor/server/src/map/packets/c2s/0x100_myroom_job.cpp). Like every
+        // other job-change path here the state is never updated optimistically;
+        // the server's follow-up burst confirms.
+        A::HomeJobRow { job_id, as_main } => (
+            "jobchange",
+            if as_main {
+                AgentCommand::ChangeJob {
+                    main_job: Some(job_id),
+                    sub_job: None,
+                }
+            } else {
+                AgentCommand::ChangeJob {
+                    main_job: None,
+                    sub_job: Some(job_id),
+                }
+            },
+        ),
     };
     if let Err(e) = cmd_tx.try_send(cmd) {
         push_system_chat_line(scene_state, format!("[menu] {kind_name} dropped: {e}"));
@@ -1984,6 +2007,7 @@ pub fn mouse_nav_dispatch_system(
                 current_target,
                 self_pos,
                 &command_surface,
+                &mut menu_writers.item_screen_container,
             ) {
                 *mode = next;
             }

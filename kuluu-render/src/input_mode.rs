@@ -349,6 +349,11 @@ pub enum MenuKind {
     /// grounded title with no rows yet (vault main_menu.md §39).
     MpCustomize,
 
+    /// The `myroom` variant of the Map row while the server holds the player in
+    /// a Mog House: home-view ops panel whose DAT chunk carries captioned
+    /// container widgets (vault main_menu.md §40).
+    HomeView,
+
     /// The `miss00` detail window for one port of that battery — missionm's
     /// select tail name-opens it over itself (FFXiMain.dll retail-2026-09 RVA
     /// 0x22DB40; vault main_menu.md §30), so selects push this payload.

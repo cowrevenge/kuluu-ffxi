@@ -152,6 +152,12 @@ fn resolve_menu_entry(
             MenuDispatch::NotImplemented(l.into())
         }
 
+        // The myroom panel's rows stay inert: the §40 select family covers ids
+        // 1..7 of FFXiMain.dll retail-2026-09 RVA 0x145460 while eight captioned
+        // widgets render, so the id-to-caption mapping (and the storage /
+        // jobchange / layout-mode tails behind it) is not yet grounded.
+        (MenuKind::HomeView, _) => MenuDispatch::NotImplemented(label.to_string()),
+
         // mgcmenu select: the category's school id (jump table 0x13F7CC; vault
         // main_menu.md §21) becomes the filter of the `magic` spell list.
         (MenuKind::MagicGroups, label) => match magic_category_for_label(label) {
@@ -641,6 +647,12 @@ pub(super) fn confirm_menu_at_cursor(
             let submenu =
                 if matches!(submenu, MenuKind::Equipment) && matches!(kind, MenuKind::Root) {
                     kuluu_render::hud::menu::equipment_drill_kind(&scene_state.snapshot)
+                } else if matches!(submenu, MenuKind::Map) && matches!(kind, MenuKind::Root) {
+                    // The Root Map row obeys the myroom variant law (FFXiMain.dll
+                    // retail-2026-09 RVA 0x140653: name-open `myroom` when in a
+                    // Mog House, else drive the mapframe family via 0x1F7810(0);
+                    // vault main_menu.md §40).
+                    kuluu_render::hud::menu::map_drill_kind(&scene_state.snapshot)
                 } else {
                     submenu
                 };
@@ -2217,6 +2229,23 @@ mod menu_dispatch_tests {
             ),
             MenuDispatch::NotImplemented(_)
         ));
+    }
+
+    /// The Map row drills `myroom` lawfully (§40) and its eight pinned rows
+    /// answer NotImplemented until the select family maps ids to captions.
+    #[test]
+    fn home_view_rows_resolve_inertly() {
+        use kuluu_render::hud::menu::HOME_VIEW_ROWS;
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Map", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::Map)
+        );
+        for row in HOME_VIEW_ROWS {
+            assert!(matches!(
+                resolve_menu_entry(MenuKind::HomeView, row, false, false),
+                MenuDispatch::NotImplemented(_)
+            ));
+        }
     }
 
     #[test]

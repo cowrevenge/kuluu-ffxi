@@ -960,6 +960,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // `mp_mncst` chrome carries only three unnamed buttons and no captions
         // (DAT mp_1, vault main_menu.md §39) — the grounded empty display.
         MenuKind::MpCustomize => &[],
+        // The myroom home-view ops panel: eight captioned widgets read from the
+        // DAT chunk (vault main_menu.md §40).
+        MenuKind::HomeView => HOME_VIEW_ROWS,
         MenuKind::EmoteList => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
@@ -1063,6 +1066,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // DAT mp_1's comwin record carries title token 165, and the caption
         // catalog resolves it to `Customization` (vault main_menu.md §39).
         MenuKind::MpCustomize => "Customization",
+        // The `myro` DAT record carries no title token (comwin `anc anc_s -1`,
+        // vault main_menu.md §40), so — as with the pupequip variant — kuluu
+        // inherits the parent row's caption.
+        MenuKind::HomeView => "Map",
         MenuKind::EmoteList => "Emote List",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
@@ -1343,6 +1350,27 @@ pub const FAQ_ROW_QA: &str = "Q&A";
 pub const FAQ_ROW_MENTOR: &str = "Mentor Search";
 pub const FAQ_ROW_CONFIG: &str = "Config";
 const HELPDESK_PANEL_ENTRIES: &[&str] = &[FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CONFIG];
+
+/// The myroom home-view panel's captioned widgets, verbatim from the DAT
+/// chunk `myro` (ROM/0/1.DAT file-off 0x282D80 size 0x4D0) windowps tokens,
+/// each decoded against ROM/165/76.DAT (vault main_menu.md §40): idx 138 Mog
+/// Locker, 151 Satchel, 158 Mog Sack, 147 Open Mog House, 166 Mog Case, 168
+/// M.Ward., 181 Safe 2, 182 Remodel. The handler answers select ids 1..7
+/// (FFXiMain.dll retail-2026-09 RVA 0x145460 jump table .rdata 0x1455BC) so at
+/// least one widget is mode-conditional — the §40 law shows id 6 rewriting
+/// widget visibility via the pair of calls to 0x118B60(5, _) before entering
+/// furniture mode. kuluu renders all eight pinned rows; selects stay inert
+/// until the id-to-caption mapping lands (OPEN MAP on bead .13.2).
+pub const HOME_VIEW_ROWS: &[&str] = &[
+    "Mog Locker",
+    "Satchel",
+    "Mog Sack",
+    "Open Mog House",
+    "Mog Case",
+    "M.Ward.",
+    "Safe 2",
+    "Remodel",
+];
 
 /// cmbhlst-shaped rows: every recipe the server could currently resolve into a synth — crystal
 /// tier substitutable by element and all positional ingredients assignable to bag slots under
@@ -1783,6 +1811,23 @@ pub fn equipment_drill_kind(snap: &kuluu_snapshot::SceneSnapshot) -> MenuKind {
         return MenuKind::AutomatonEquip;
     }
     MenuKind::Equipment
+}
+
+/// The Map row's variant law (FFXiMain.dll retail-2026-09 RVA 0x140653; vault
+/// main_menu.md §40): when the page-1 window object field +0x14 reads 1 and
+/// predicate FFXiMain.dll retail-2026-09 RVA 0xF0C50 is true — bit 8 of the
+/// game-state dword at [gameStateObj+0x3c35c] — the row name-opens `myroom`
+/// instead of driving the mapframe family (call to 0x1F7810(0)).
+///
+/// kuluu's stand for both conditions is data presence: LSB marks the login
+/// packet MYROOM whenever `PChar->inMogHouse()` holds and every zone change
+/// re-authenticates through 0x00A (vendor/server/src/map/packets/s2c/
+/// 0x00a_login.cpp), so `snap.myroom.is_some()` mirrors the gate exactly.
+pub fn map_drill_kind(snap: &kuluu_snapshot::SceneSnapshot) -> MenuKind {
+    if snap.myroom.is_some() {
+        return MenuKind::HomeView;
+    }
+    MenuKind::Map
 }
 
 /// Name vocabulary for the packet's AutomatonHead byte (0 = nothing equipped);
@@ -4574,6 +4619,44 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(equipment_drill_kind(&both), MenuKind::MpCustomize);
+    }
+
+    /// The Map-row variant gate, fresh from FFXiMain.dll retail-2026-09 RVA
+    /// 0x140653 (vault main_menu.md §40): the myroom name-open only when the
+    /// server holds the player in a Mog House; data presence stands in.
+    #[test]
+    fn map_row_variant_gate_follows_mog_house_presence() {
+        let plain = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(map_drill_kind(&plain), MenuKind::Map);
+
+        let home = kuluu_snapshot::SceneSnapshot {
+            myroom: Some(kuluu_snapshot::MyRoom {
+                model: 615,
+                sub_map: 1,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(map_drill_kind(&home), MenuKind::HomeView);
+    }
+
+    /// The myroom panel rows and inherited title (DAT 'myro' caption tokens
+    /// against ROM/165/76.DAT; vault main_menu.md §40).
+    #[test]
+    fn home_view_rows_and_title_track_the_myro_dat_law() {
+        assert_eq!(
+            entries_for(MenuKind::HomeView, false),
+            &[
+                "Mog Locker",
+                "Satchel",
+                "Mog Sack",
+                "Open Mog House",
+                "Mog Case",
+                "M.Ward.",
+                "Safe 2",
+                "Remodel",
+            ]
+        );
+        assert_eq!(menu_title(MenuKind::HomeView), "Map");
     }
 
     /// The pupequip rows (vault main_menu.md §39): fourteen in AutomatonSlot

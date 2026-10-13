@@ -850,6 +850,9 @@ pub(super) fn apply_slash_outcome(
                 // keeps the parent caption; mp_mncst is catalog-titled.
                 kuluu_render::MenuKind::AutomatonEquip => "Equipment".into(),
                 kuluu_render::MenuKind::MpCustomize => "Customization".into(),
+                // The Map-row myroom variant inherits its parent caption (the
+                // `myro` DAT record has no title token; vault main_menu.md §40).
+                kuluu_render::MenuKind::HomeView => "Map".into(),
                 // The /quest seam (vault main_menu.md §31).
                 kuluu_render::MenuKind::QuestList => "Quests".into(),
                 kuluu_render::MenuKind::QuestDetail { log, id } => {

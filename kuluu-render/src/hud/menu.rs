@@ -409,6 +409,15 @@ pub enum DynamicMenuAction {
     /// Wipe the keytop wholesale (retail's blank-keytop state; vault
     /// main_menu.md §41 capacity law — a cleared slot leaves no file entry).
     MacroClearSlot,
+
+    /// Run the keytop now: its command lines queue as pending chat-pipeline
+    /// steps, one submitted per frame exactly as if typed (retail feeds a used
+    /// macro's text into the chat pipeline — vault main_menu.md §41/§56; bead
+    /// kuluu-o9qt7.19.4).
+    MacroUse {
+        block: u8,
+        index: u8,
+    },
 }
 
 impl DynamicMenuAction {
@@ -2445,6 +2454,7 @@ pub fn job_pick_rows(snap: &kuluu_snapshot::SceneSnapshot, main_pick: bool) -> V
 
 /// The add/clear action rows of the macro line editor. kuluu-worded chrome —
 /// mcrledit's DAT record names no captions (vault main_menu.md §34/§41).
+pub const MACRO_ROW_USE: &str = "Use this macro";
 pub const MACRO_ROW_ADD_LINE: &str = "+ Add command line";
 pub const MACRO_ROW_CLEAR_SLOT: &str = "Clear this macro";
 
@@ -2480,6 +2490,18 @@ pub fn macro_editor_rows(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // The use row first among the actions: running a keytop is what retail's
+    // palette/grid interaction is for (vault main_menu.md §41/§56).
+    let slot_present = snap
+        .macros
+        .iter()
+        .any(|s| s.block == block && s.index == index);
+    if slot_present {
+        rows.push(DynamicMenuRow {
+            label: MACRO_ROW_USE.to_string(),
+            action: DynamicMenuAction::MacroUse { block, index },
+        });
+    }
     rows.push(DynamicMenuRow {
         label: MACRO_ROW_ADD_LINE.to_string(),
         action: DynamicMenuAction::MacroEditLine { line_index: None },
@@ -5559,7 +5581,12 @@ mod tests {
             ..Default::default()
         };
         let rows = macro_editor_rows(&snap, 0, 3);
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[2].label, MACRO_ROW_USE);
+        assert_eq!(
+            rows[2].action,
+            DynamicMenuAction::MacroUse { block: 0, index: 3 }
+        );
         assert_eq!(rows[0].label, "/ra");
         assert_eq!(
             rows[0].action,
@@ -5574,16 +5601,17 @@ mod tests {
                 line_index: Some(1)
             }
         );
+        // With the use row in, add/clear shifted one down.
         assert_eq!(
-            rows[2].label, MACRO_ROW_ADD_LINE,
-            "row after the lines is the add-action"
+            rows[3].label, MACRO_ROW_ADD_LINE,
+            "row after the actions is the add-action"
         );
         assert!(matches!(
-            rows[2].action,
+            rows[3].action,
             DynamicMenuAction::MacroEditLine { line_index: None }
         ));
-        assert_eq!(rows[3].label, MACRO_ROW_CLEAR_SLOT);
-        assert_eq!(rows[3].action, DynamicMenuAction::MacroClearSlot);
+        assert_eq!(rows[4].label, MACRO_ROW_CLEAR_SLOT);
+        assert_eq!(rows[4].action, DynamicMenuAction::MacroClearSlot);
 
         // A keytop nobody assigned yet still edits (the two action rows).
         let empty = kuluu_snapshot::SceneSnapshot::default();

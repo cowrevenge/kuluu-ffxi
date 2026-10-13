@@ -45,6 +45,35 @@ pub struct SceneState {
     /// advance, and an auto-enter fire in that window would make the session
     /// dismiss the frame the manual advance just opened.
     pub last_manual_dialog_advance: Option<Instant>,
+
+    /// Steps of a macro started from the mcrmenu family (bead kuluu-o9qt7.19.4).
+    /// Retail feeds a used keytop's lines one at a time into the chat pipeline
+    /// (vault main_menu.md §41/§56); the text_input walker submits the next step
+    /// per frame through exactly the typed-line seam, so nothing here bypasses
+    /// what a player typing the same line would hit. Kept in order; pop from
+    /// the front (`pop_next_macro_step` is the consumer's door).
+    pub pending_macro_steps: Vec<String>,
+}
+
+impl SceneState {
+    /// Starts a macro run: the queued remainder is replaced wholesale (one run
+    /// at a time — like retail's single in-flight use path, not two half-runs).
+    pub fn queue_macro_steps(&mut self, steps: Vec<String>) {
+        self.pending_macro_steps = steps;
+    }
+
+    /// Pops the next queued step (`None` when idle). Public read is only via
+    /// this and `pending_macro_len`, keeping the drain site the sole consumer.
+    pub fn pop_next_macro_step(&mut self) -> Option<String> {
+        if self.pending_macro_steps.is_empty() {
+            return None;
+        }
+        Some(self.pending_macro_steps.remove(0))
+    }
+
+    pub fn pending_macro_len(&self) -> usize {
+        self.pending_macro_steps.len()
+    }
 }
 
 pub const LOCAL_TOAST_CAP: usize = 256;
@@ -865,5 +894,22 @@ mod tests {
     fn resolve_self_returns_none_for_empty_party() {
         let party: Vec<PartyMember> = vec![];
         assert!(resolve_self(&party, Some(42)).is_none());
+    }
+
+    /// One run at a time (bead kuluu-o9qt7.19.4): queueing replaces any
+    /// remainder, and pops come front-first so steps keep their order.
+    #[test]
+    fn macro_run_queue_replaces_and_pops_in_order() {
+        let mut state = SceneState::default();
+        assert_eq!(state.pop_next_macro_step(), None);
+
+        state.queue_macro_steps(vec!["a".into(), "b".into(), "c".into()]);
+        state.queue_macro_steps(vec!["x".into()]);
+        assert_eq!(state.pending_macro_len(), 1, "the new run replaces the old");
+
+        state.queue_macro_steps(vec!["a".into(), "b".into()]);
+        assert_eq!(state.pop_next_macro_step().as_deref(), Some("a"));
+        assert_eq!(state.pop_next_macro_step().as_deref(), Some("b"));
+        assert_eq!(state.pop_next_macro_step(), None);
     }
 }

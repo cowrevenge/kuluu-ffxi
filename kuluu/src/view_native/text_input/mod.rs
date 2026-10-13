@@ -629,6 +629,42 @@ pub(crate) fn text_input_system(
             }
         }
     }
+
+    // The macro-run drain (bead kuluu-o9qt7.19.4): while the mcrmenu family has a run
+    // going, one queued step is submitted per frame — through apply_chat_action's
+    // own Submit arm on a synthetic buffer, so a run takes exactly the typed-line
+    // seam: same parse, same echoes, same channel to the session. Retail feeds a
+    // used keytop's lines into the chat pipeline one at a time (vault
+    // main_menu.md §41/§56); steps kuluu cannot do answer like typed ones do —
+    // visibly, never as silent no-ops.
+    if let Some(step) = scene_state.pop_next_macro_step() {
+        let mut synth_mode = InputMode::Chat(kuluu_render::input_mode::ChatBuffer {
+            text: step,
+            ..Default::default()
+        });
+        let fishing_gate = slash_writers.fishing_spot.0;
+        apply_chat_action(
+            ChatAction::Submit,
+            &mut synth_mode,
+            &entities,
+            self_pos,
+            current_target,
+            &mut target,
+            &cmd_tx.0,
+            &mut scene_state,
+            &mut exit,
+            &mut navmesh.visible,
+            &navmesh.state,
+            &mut bindings,
+            &mut keybinds_state,
+            #[cfg(unix)]
+            session_gates.agent_paused.as_deref(),
+            session_gates.session_event_tx.as_deref(),
+            fishing_gate,
+            &mut slash_writers,
+            &mut draw_distance,
+        );
+    }
 }
 
 fn death_menu_response_command(
@@ -1134,9 +1170,12 @@ fn sub_target_action_for(
         A::AutomatonSlotRow { .. }
         | A::MacroSlotRow { .. }
         // Macro edit rows are client-local and handled in confirm before
-        // dispatch (bead kuluu-o9qt7.19.3); they never target anything.
+        // dispatch (bead kuluu-o9qt7.19.3); they never target anything — nor
+        // does the run row, whose steps ride the chat pipeline instead
+        // (bead .19.4).
         | A::MacroEditLine { .. }
-        | A::MacroClearSlot => None,
+        | A::MacroClearSlot
+        | A::MacroUse { .. } => None,
         // Trade window rows likewise act on the wire directly, drill through
         // confirm_menu_at_cursor, or stay display-only (vault main_menu.md §25).
         A::TradeAcceptInvite
@@ -1717,7 +1756,8 @@ fn dispatch_dynamic_menu_action(
         A::AutomatonSlotRow { .. }
         | A::MacroSlotRow { .. }
         | A::MacroEditLine { .. }
-        | A::MacroClearSlot => return,
+        | A::MacroClearSlot
+        | A::MacroUse { .. } => return,
         // Search hit rows stay inert until a search-to-target mapping exists;
         // retail's own hit-row select semantics remain [I] (vault main_menu.md
         // section 26).
@@ -3866,6 +3906,74 @@ mod sub_target_pick_tests {
         assert!(
             matches!(*app.world().resource::<InputMode>(), InputMode::World),
             "a dead main target must close the switch-target picker"
+        );
+    }
+}
+
+/// The run side of the mcrmenu family (bead kuluu-o9qt7.19.4): queued steps go
+/// out one per frame through the typed-line seam — retail feeds a used keytop's
+/// lines into the chat pipeline sequentially (vault main_menu.md §41/§56).
+#[cfg(test)]
+mod macro_run_drain_tests {
+    use super::*;
+
+    #[test]
+    fn queued_steps_submit_one_per_frame_in_order() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(8);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        app.insert_resource(InputMode::World);
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .queue_macro_steps(vec!["one".to_string(), "two".to_string()]);
+
+        app.update();
+        assert_eq!(
+            cmd_rx.try_recv().expect("first step must submit"),
+            AgentCommand::Chat {
+                kind: 0,
+                text: "one".to_string()
+            },
+            "the first queued step is a say, as if typed"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "only one step may submit per frame (sequential law)"
+        );
+
+        app.update();
+        assert_eq!(
+            cmd_rx.try_recv().expect("second step must submit"),
+            AgentCommand::Chat {
+                kind: 0,
+                text: "two".to_string()
+            }
+        );
+        app.update();
+        assert!(cmd_rx.try_recv().is_err(), "a finished run stays quiet");
+    }
+
+    #[test]
+    fn a_running_macro_leaves_the_open_window_undisturbed() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(8);
+        let mut app = cs_input_lock_tests::gate_app(cmd_tx);
+        // gate_app opens Menu(Map): the drain must not touch it while steps fly.
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .queue_macro_steps(vec!["help me".to_string()]);
+
+        app.update();
+        assert!(matches!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Menu(_)
+        ));
+        assert_eq!(
+            cmd_rx
+                .try_recv()
+                .expect("step must submit while a menu is up"),
+            AgentCommand::Chat {
+                kind: 0,
+                text: "help me".to_string()
+            }
         );
     }
 }

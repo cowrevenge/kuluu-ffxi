@@ -605,6 +605,27 @@ pub(super) fn confirm_menu_at_cursor(
                 }
                 return None;
             }
+            // Running a keytop (bead kuluu-o9qt7.19.4): the slot's command lines
+            // become pending chat-pipeline steps — retail feeds a used macro one
+            // line at a time into the same pipeline typed text takes (vault
+            // main_menu.md §41/§56); no store write, no wire beyond what the
+            // submitted lines themselves carry.
+            if let A::MacroUse { block, index } = action {
+                let steps = scene_state
+                    .snapshot
+                    .macros
+                    .iter()
+                    .find(|s| s.block == block && s.index == index)
+                    .map(|s| {
+                        kuluu_render::hud::menu::macro_slot_lines(&s.text)
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                scene_state.queue_macro_steps(steps);
+                return None;
+            }
             if let A::UseItem {
                 container, index, ..
             } = action
@@ -2385,7 +2406,7 @@ mod menu_key_tests {
         );
 
         stack.current_mut().unwrap().macro_line_edit = None;
-        stack.current_mut().unwrap().cursor = 1; // the add row
+        stack.current_mut().unwrap().cursor = 2; // the add row (past line + use)
         harness.key(
             &Key::Enter,
             KeyCode::Enter,
@@ -2426,8 +2447,8 @@ mod menu_key_tests {
         harness.dynamic.rows =
             kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
 
-        // Rows are ["/ra", add, clear] — the cursor goes to the clear row.
-        stack.current_mut().unwrap().cursor = 2;
+        // Rows are ["/ra", use, add, clear] — the cursor goes to the clear row.
+        stack.current_mut().unwrap().cursor = 3;
         harness.key(
             &Key::Enter,
             KeyCode::Enter,
@@ -2469,7 +2490,7 @@ mod menu_key_tests {
             kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
 
         // Seed through the add row so the commit is an append.
-        stack.current_mut().unwrap().cursor = 1;
+        stack.current_mut().unwrap().cursor = 2;
         harness.key(
             &Key::Enter,
             KeyCode::Enter,
@@ -2593,6 +2614,52 @@ mod menu_key_tests {
         assert_eq!(
             stack.current().map(|l| l.kind),
             Some(MenuKind::MacroEditor { block: 0, index: 3 })
+        );
+    }
+
+    /// The use row starts a run (bead kuluu-o9qt7.19.4): confirming it queues
+    /// exactly the slot's command lines, in order — and nothing else: no store
+    /// commit, no window change (retail runs one line at a time through the
+    /// chat pipeline; vault main_menu.md §41/§56).
+    #[test]
+    fn editor_use_row_queues_the_slot_lines_in_order() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.macros = vec![kuluu_snapshot::MacroSlot {
+            block: 0,
+            index: 3,
+            text: "/ra\n/attend".to_string(),
+        }];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MacroEditor { block: 0, index: 3 });
+        harness.dynamic.rows =
+            kuluu_render::hud::menu::macro_editor_rows(&harness.scene_state.snapshot, 0, 3);
+
+        // Rows are ["/ra", "/attend", use, add, clear] — cursor on the use row.
+        stack.current_mut().unwrap().cursor = 2;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(harness.scene_state.pending_macro_len(), 2);
+        assert_eq!(
+            (
+                harness.scene_state.pop_next_macro_step(),
+                harness.scene_state.pop_next_macro_step(),
+                harness.scene_state.pop_next_macro_step()
+            ),
+            (Some("/ra".to_string()), Some("/attend".to_string()), None)
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::MacroEditor { block: 0, index: 3 }),
+            "running must not move the editor"
+        );
+        assert!(
+            harness._cmd_rx.try_recv().is_err(),
+            "a run is not a store write"
         );
     }
 }

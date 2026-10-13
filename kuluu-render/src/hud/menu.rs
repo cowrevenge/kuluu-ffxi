@@ -940,9 +940,12 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::Magic => &[],
         MenuKind::MagicGroups => MAGIC_CATEGORY_LABELS,
         MenuKind::MagicGroup(_) => &[],
-        MenuKind::Abilities => &["(Abilities — data pending)"],
+        // Both ability lists are snapshot-built (`ability_flat_rows` /
+        // `ability_group_rows`, fed by the s2c COMMAND_DATA bitmaps), so an empty one
+        // renders its `empty_dynamic_hint`, never a stub.
+        MenuKind::Abilities => &[],
         MenuKind::AbilitiesGroups => ABILITIES_CATEGORY_LABELS,
-        MenuKind::AbilitiesGroup(_) => &["(Abilities — data pending)"],
+        MenuKind::AbilitiesGroup(_) => &[],
         MenuKind::Party => &[],
         MenuKind::Trade => &[],
         MenuKind::TradePick { .. } => &[],
@@ -2381,32 +2384,7 @@ pub fn refresh_dynamic_menu_rows(
             .get(group as usize)
             .map(|g| ability_group_rows(snap, *g))
             .unwrap_or_default(),
-        MenuKind::Abilities => {
-            let mut out: Vec<DynamicMenuRow> = Vec::with_capacity(
-                snap.job_abilities_known.len()
-                    + snap.weaponskills_known.len()
-                    + snap.pet_abilities_known.len(),
-            );
-            out.extend(snap.job_abilities_known.iter().filter_map(|&id| {
-                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
-                    label: name.to_string(),
-                    action: DynamicMenuAction::JobAbility { ability_id: id },
-                })
-            }));
-            out.extend(snap.weaponskills_known.iter().filter_map(|&id| {
-                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
-                    label: format!("{name} (WS)"),
-                    action: DynamicMenuAction::Weaponskill { skill_id: id },
-                })
-            }));
-            out.extend(snap.pet_abilities_known.iter().filter_map(|&id| {
-                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
-                    label: format!("{name} (Pet)"),
-                    action: DynamicMenuAction::PetAbility { ability_id: id },
-                })
-            }));
-            out
-        }
+        MenuKind::Abilities => ability_flat_rows(snap),
         MenuKind::Items => inventory_rows(snap, active_bag.0, sort.auto),
         MenuKind::KeyItems => key_item_rows(snap),
         MenuKind::EmoteList => emote_rows(snap),
@@ -2754,6 +2732,53 @@ pub fn item_action_rows(
     rows
 }
 
+/// One row name from the weapon-skill id space. `COMMAND_DATA`'s three bitmaps are
+/// three different id spaces: vendor/server/src/map/packets/s2c/0x0ac_command_data.cpp
+/// copies WeaponSkills from `m_WeaponSkills`, whose accessors key on a WeaponSkillID
+/// (`charutils::hasWeaponSkill`), while JobAbilities/PetAbilities come from
+/// `m_Abilities`/`m_PetCommands`, whose accessors key on an AbilityID
+/// (`charutils::hasPetAbility`). So weapon skills must be named from the scraped
+/// `weapon_skills` table (`ffxi_vocab::weapon_skill_names`) and never from the abilities
+/// table, where id 32 is a goblin's Warcry rather than Fast Blade.
+fn weapon_skill_row_name(id: u16) -> Option<&'static str> {
+    ffxi_vocab::weapon_skill_names::lookup(id)
+}
+
+/// The flat list behind kuluu's Retail+ "Flat Abilities List" option: the three
+/// known-id arrays at once (job abilities, weapon skills, pet commands).
+/// Retail has no such window — its abimenu always drills one category first (vault
+/// main_menu.md §23) — so the suffixed labels exist here only to keep the three id
+/// spaces apart in a single column.
+pub fn ability_flat_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
+    let mut out: Vec<DynamicMenuRow> = Vec::with_capacity(
+        snap.job_abilities_known.len()
+            + snap.weaponskills_known.len()
+            + snap.pet_abilities_known.len(),
+    );
+    out.extend(snap.job_abilities_known.iter().filter_map(|&id| {
+        ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+            label: name.to_string(),
+            action: DynamicMenuAction::JobAbility { ability_id: id },
+        })
+    }));
+    out.extend(snap.weaponskills_known.iter().filter_map(|&id| {
+        weapon_skill_row_name(id).map(|name| DynamicMenuRow {
+            label: format!("{name} (WS)"),
+            action: DynamicMenuAction::Weaponskill { skill_id: id },
+        })
+    }));
+    out.extend(snap.pet_abilities_known.iter().filter_map(|&id| {
+        ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+            label: format!("{name} (Pet)"),
+            action: DynamicMenuAction::PetAbility { ability_id: id },
+        })
+    }));
+    out
+}
+
+/// One category list of the `ability` window (vault main_menu.md §23): the known ids
+/// of one group, named from the server-side ability id space so a row's label and
+/// its c2s 0x01A payload can never disagree.
 pub fn ability_group_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     group: crate::hud::action_model::AbilityGroup,
@@ -2774,7 +2799,7 @@ pub fn ability_group_rows(
             .weaponskills_known
             .iter()
             .filter_map(|&id| {
-                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                weapon_skill_row_name(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::Weaponskill { skill_id: id },
                 })
@@ -4260,6 +4285,79 @@ mod tests {
             Some(MenuKind::Abilities)
         );
         assert_eq!(root_child_kind("Magic", true, false), Some(MenuKind::Magic));
+    }
+
+    /// s2c COMMAND_DATA ships three bitmaps in three id spaces, so a
+    /// weapon-skill row must be named from `weapon_skills` and a job/pet row from
+    /// `abilities`. Ability id 32 is Warcry while weapon skill 32 is Fast Blade —
+    /// naming one through the other table is the bug this pins (vault §52).
+    #[test]
+    fn ability_rows_name_each_id_space_from_its_own_table() {
+        use crate::hud::action_model::AbilityGroup;
+        let snap = kuluu_snapshot::SceneSnapshot {
+            weaponskills_known: vec![1, 32],
+            job_abilities_known: vec![16, 32],
+            pet_abilities_known: vec![80],
+            ..Default::default()
+        };
+        let ws: Vec<String> = ability_group_rows(&snap, AbilityGroup::WeaponSkill)
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(ws, ["Combo", "Fast Blade"], "weapon skills sort by name");
+
+        let job: Vec<String> = ability_group_rows(&snap, AbilityGroup::JobAbilities)
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(job, ["Mighty Strikes", "Warcry"]);
+
+        let pet: Vec<String> = ability_group_rows(&snap, AbilityGroup::PetCommand)
+            .iter()
+            .map(|r| r.label.clone())
+            .collect();
+        assert_eq!(pet, ["Spirit Link"]);
+    }
+
+    /// The flat list keeps the three spaces apart by suffix and drops nothing that
+    /// a bitmap reports; neither ability kind carries a static placeholder, so an
+    /// empty one falls back to its grounded hint.
+    #[test]
+    fn flat_ability_list_separates_the_spaces_and_keeps_no_placeholder() {
+        let snap = kuluu_snapshot::SceneSnapshot {
+            weaponskills_known: vec![32],
+            job_abilities_known: vec![16],
+            pet_abilities_known: vec![80],
+            ..Default::default()
+        };
+        assert_eq!(
+            ability_flat_rows(&snap)
+                .iter()
+                .map(|r| (r.label.as_str(), r.action))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Mighty Strikes",
+                    DynamicMenuAction::JobAbility { ability_id: 16 }
+                ),
+                (
+                    "Fast Blade (WS)",
+                    DynamicMenuAction::Weaponskill { skill_id: 32 }
+                ),
+                (
+                    "Spirit Link (Pet)",
+                    DynamicMenuAction::PetAbility { ability_id: 80 }
+                ),
+            ]
+        );
+
+        let none = DynamicMenu::default();
+        assert!(static_entries(MenuKind::Abilities).is_empty());
+        assert!(static_entries(MenuKind::AbilitiesGroup(1)).is_empty());
+        assert_eq!(
+            entry_label(MenuKind::Abilities, 0, &none),
+            "(no abilities available — wrong job?)"
+        );
     }
 
     /// The abimenu picker rows pair positionally with the target-action groups

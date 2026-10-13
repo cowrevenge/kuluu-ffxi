@@ -466,6 +466,36 @@ pub fn magic_category_for_label(label: &str) -> Option<u8> {
         .map(|(cat, _)| *cat)
 }
 
+/// Retail+ abilities row: open the kuluu flat ability list instead of retail's
+/// abimenu category picker. Kuluu's single-step list has no retail counterpart -
+/// the real Abilities flow is two windows (FFXiMain.dll retail-2026-09 RVA
+/// 0x13FA70 opens the `ability` list through its rows, row 6 opening `mount`;
+/// vault main_menu.md §23) - so the flat list survives as an off-by-default
+/// option.
+pub const RETAIL_ABILITIES_FLAT_LIST: &str = "Flat Abilities List";
+
+/// abimenu's five category rows in item-id order (vault main_menu.md §23:
+/// items {1,2,3,5} open the `ability` list with filter triples and item 6 opens
+/// `menu    mount`). The category semantics per row are [I-pending] on the DLL
+/// side; this set is grounded by kuluu's existing target-action groups
+/// (AbilityGroup::ALL in hud/action_model.rs, indices referenced positionally)
+/// - noted on bead kuluu-o9qt7.7 per the ambiguity rule.
+pub const ABILITIES_CATEGORY_LABELS: &[&str] = &[
+    "Job Abilities",
+    "Weapon Skills",
+    "Ranged Attack",
+    "Mount",
+    "Pet Commands",
+];
+
+/// The picker row at display index `idx` as a positional index into
+/// `AbilityGroup::ALL` (pairing pinned by a test).
+pub fn abilities_category_index(label: &str) -> Option<usize> {
+    ABILITIES_CATEGORY_LABELS
+        .iter()
+        .position(|cap| *cap == label)
+}
+
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
     DEBUG_TARGET_CYCLE,
@@ -498,6 +528,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_STATUS_ROWS,
     RETAIL_RESELECT_UNEQUIP,
     RETAIL_MAGIC_FLAT_LIST,
+    RETAIL_ABILITIES_FLAT_LIST,
     #[cfg(feature = "enhanced-ignore-knockback-self")]
     RETAIL_KNOCKBACK,
     RETAIL_CAMERA_LEASH,
@@ -590,6 +621,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
         MenuKind::Magic
             | MenuKind::MagicGroup(_)
             | MenuKind::Abilities
+            | MenuKind::AbilitiesGroup(_)
             | MenuKind::Items
             | MenuKind::KeyItems
             | MenuKind::UsableItems
@@ -691,6 +723,10 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
         MenuKind::Magic => "(no spells learned yet)",
         MenuKind::MagicGroup(_) => "(no spells learned in this school)",
         MenuKind::Abilities => "(no abilities available — wrong job?)",
+        MenuKind::AbilitiesGroup(group) => crate::hud::action_model::AbilityGroup::ALL
+            .get(group as usize)
+            .map(|g| ability_group_empty_hint(*g))
+            .unwrap_or("(empty)"),
         MenuKind::Items => "(bag empty)",
         MenuKind::KeyItems => "(no key items)",
         MenuKind::UsableItems => "(no usable items)",
@@ -721,6 +757,8 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::MagicGroups => MAGIC_CATEGORY_LABELS,
         MenuKind::MagicGroup(_) => &["(Magic — data pending)"],
         MenuKind::Abilities => &["(Abilities — data pending)"],
+        MenuKind::AbilitiesGroups => ABILITIES_CATEGORY_LABELS,
+        MenuKind::AbilitiesGroup(_) => &["(Abilities — data pending)"],
         MenuKind::Items => ITEMS_ENTRIES_STUB,
         MenuKind::KeyItems => &[],
         MenuKind::UsableItems => &[],
@@ -757,6 +795,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::MagicGroups => "Magic",
         MenuKind::MagicGroup(_) => "Magic List",
         MenuKind::Abilities => "Abilities",
+        // Like Magic's pair: the picker carries the row caption, the filtered
+        // list window is titled by the row it answers (vault §23).
+        MenuKind::AbilitiesGroups => "Abilities",
+        MenuKind::AbilitiesGroup(_) => "Ability List",
         MenuKind::Items => "Items",
         MenuKind::KeyItems => "Key Items",
         MenuKind::UsableItems => "Items",
@@ -789,11 +831,14 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
 /// `flat_magic` is the Retail+ "Flat Magic List" gate
 /// ([`RETAIL_MAGIC_FLAT_LIST`] in GraphicsSettings): on, kuluu's one-step spell
 /// list replaces retail's two-window flow (vault main_menu.md §21).
-pub fn root_child_kind(label: &str, flat_magic: bool) -> Option<MenuKind> {
+/// `flat_abilities` is the same pattern for Abilities
+/// ([`RETAIL_ABILITIES_FLAT_LIST`]; vault main_menu.md §23).
+pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> Option<MenuKind> {
     Some(match label {
         "Magic" if flat_magic => MenuKind::Magic,
         "Magic" => MenuKind::MagicGroups,
-        "Abilities" => MenuKind::Abilities,
+        "Abilities" if flat_abilities => MenuKind::Abilities,
+        "Abilities" => MenuKind::AbilitiesGroups,
         "Items" => MenuKind::Items,
         // "Key Items" is absent on purpose: retail page 2 fires the "/keyitem"
         // text command instead of drilling (vault main_menu.md §5 row id 3 /
@@ -1023,6 +1068,12 @@ pub fn refresh_dynamic_menu_rows(
             school_table.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
             magic_school_rows(&snap.spells_known, school, |id| school_table.school_of(id))
         }
+        // abimenu category list (vault main_menu.md §23): the same group rows
+        // kuluu's target-action groups already build.
+        MenuKind::AbilitiesGroup(group) => crate::hud::action_model::AbilityGroup::ALL
+            .get(group as usize)
+            .map(|g| ability_group_rows(snap, *g))
+            .unwrap_or_default(),
         MenuKind::Abilities => {
             let mut out: Vec<DynamicMenuRow> = Vec::with_capacity(
                 snap.job_abilities_known.len()
@@ -1795,6 +1846,16 @@ fn format_row_body(
                     return format!(
                         "{label:<14}[{}]",
                         if settings.magic_flat_list {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                }
+                if label == RETAIL_ABILITIES_FLAT_LIST {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.abilities_flat_list {
                             "on"
                         } else {
                             "off"
@@ -2710,8 +2771,11 @@ mod tests {
         assert!(matches!(rows.first(), Some(MenuRow::Header(_))));
         // The kuluu settings page hangs off the page-3 "Interface" row; the
         // page-2 "Config" row is retail's configwi and stays unbuilt.
-        assert_eq!(root_child_kind("Interface", false), Some(MenuKind::Config));
-        assert_eq!(root_child_kind("Config", false), None);
+        assert_eq!(
+            root_child_kind("Interface", false, false),
+            Some(MenuKind::Config)
+        );
+        assert_eq!(root_child_kind("Config", false, false), None);
         assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
     }
@@ -2760,8 +2824,46 @@ mod tests {
 
     #[test]
     fn root_magic_row_drills_into_the_picker_unless_flat_is_on() {
-        assert_eq!(root_child_kind("Magic", false), Some(MenuKind::MagicGroups));
-        assert_eq!(root_child_kind("Magic", true), Some(MenuKind::Magic));
+        assert_eq!(
+            root_child_kind("Magic", false, false),
+            Some(MenuKind::MagicGroups)
+        );
+        // The Abilities row mirrors Magic: picker by default, flat list behind
+        // the Retail+ toggle (vault main_menu.md §23).
+        assert_eq!(
+            root_child_kind("Abilities", false, false),
+            Some(MenuKind::AbilitiesGroups)
+        );
+        assert_eq!(
+            root_child_kind("Abilities", true, false),
+            Some(MenuKind::AbilitiesGroups)
+        );
+        assert_eq!(
+            root_child_kind("Abilities", false, true),
+            Some(MenuKind::Abilities)
+        );
+        assert_eq!(root_child_kind("Magic", true, false), Some(MenuKind::Magic));
+    }
+
+    /// The abimenu picker rows pair positionally with the target-action groups
+    /// (AbilityGroup::ALL) that back their lists, and keep the retail two-window
+    /// titles like Magic's pair (vault main_menu.md §23).
+    #[test]
+    fn abilities_picker_rows_pair_with_the_groups_and_keep_titles() {
+        use crate::hud::action_model::AbilityGroup;
+        assert_eq!(ABILITIES_CATEGORY_LABELS.len(), AbilityGroup::ALL.len());
+        for (idx, _group) in AbilityGroup::ALL.iter().enumerate() {
+            let row = ABILITIES_CATEGORY_LABELS[idx];
+            assert!(!row.is_empty(), "picker row {idx} needs a label");
+            assert_eq!(abilities_category_index(row), Some(idx));
+        }
+        assert_eq!(
+            static_entries(MenuKind::AbilitiesGroups),
+            ABILITIES_CATEGORY_LABELS
+        );
+        assert!(is_dynamic(MenuKind::AbilitiesGroup(2)));
+        assert_eq!(menu_title(MenuKind::AbilitiesGroups), "Abilities");
+        assert_eq!(menu_title(MenuKind::AbilitiesGroup(1)), "Ability List");
     }
 
     #[test]

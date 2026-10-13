@@ -33,7 +33,14 @@ fn apply_settings_cycle(
 
 /// `flat_magic` is GraphicsSettings.magic_flat_list (Retail+ "Flat Magic List"); it
 /// feeds the Root → submenu mapping so the drill and preview stay identical.
-fn resolve_menu_entry(kind: MenuKind, label: &str, flat_magic: bool) -> MenuDispatch {
+/// `flat_abilities` is the same pattern for GraphicsSettings.abilities_flat_list
+/// and the Abilities row (vault main_menu.md §23).
+fn resolve_menu_entry(
+    kind: MenuKind,
+    label: &str,
+    flat_magic: bool,
+    flat_abilities: bool,
+) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
         magic_category_for_label, COMM_EMOTE_LIST, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN,
@@ -74,7 +81,7 @@ fn resolve_menu_entry(kind: MenuKind, label: &str, flat_magic: bool) -> MenuDisp
         // Root categories that drill into a browsable submenu share their
         // mapping with the right-pane preview (single source of truth).
         (MenuKind::Root, label) => {
-            match kuluu_render::hud::menu::root_child_kind(label, flat_magic) {
+            match kuluu_render::hud::menu::root_child_kind(label, flat_magic, flat_abilities) {
                 Some(submenu) => MenuDispatch::OpenSubmenu(submenu),
                 None => MenuDispatch::NotImplemented(label.to_string()),
             }
@@ -86,6 +93,15 @@ fn resolve_menu_entry(kind: MenuKind, label: &str, flat_magic: bool) -> MenuDisp
             Some(school) => MenuDispatch::OpenSubmenu(MenuKind::MagicGroup(school)),
             None => MenuDispatch::NotImplemented(label.to_string()),
         },
+
+        // abimenu select: the category row becomes the `ability` window's group
+        // filter (FFXiMain.dll retail-2026-09 RVA 0x13FA70; vault main_menu.md §23).
+        (MenuKind::AbilitiesGroups, label) => {
+            match kuluu_render::hud::menu::abilities_category_index(label) {
+                Some(idx) => MenuDispatch::OpenSubmenu(MenuKind::AbilitiesGroup(idx as u8)),
+                None => MenuDispatch::NotImplemented(label.to_string()),
+            }
+        }
 
         (MenuKind::Magic, _) => {
             MenuDispatch::NotImplemented("Magic — pending Stage 2 (learned-spell decoder)".into())
@@ -390,7 +406,12 @@ pub(super) fn confirm_menu_at_cursor(
         stack.pop();
         return None;
     }
-    match resolve_menu_entry(kind, label, graphics.magic_flat_list) {
+    match resolve_menu_entry(
+        kind,
+        label,
+        graphics.magic_flat_list,
+        graphics.abilities_flat_list,
+    ) {
         MenuDispatch::TextCommand(cmd) => {
             run_client_text_command(cmd, stack, vana_clock, vana_clock_visible, scene_state);
             // Mirrors the Debug toggles: the menu stays open (provisional
@@ -480,8 +501,9 @@ fn handle_retail_plus_row(
     #[cfg(feature = "enhanced-mob-hp-under")]
     use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
     use kuluu_render::hud::menu::{
-        DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_CAMERA_LEASH, RETAIL_DLSS_MENU,
-        RETAIL_MAGIC_FLAT_LIST, RETAIL_RESELECT_UNEQUIP, RETAIL_STATUS_ROWS,
+        DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_ABILITIES_FLAT_LIST,
+        RETAIL_CAMERA_LEASH, RETAIL_DLSS_MENU, RETAIL_MAGIC_FLAT_LIST, RETAIL_RESELECT_UNEQUIP,
+        RETAIL_STATUS_ROWS,
     };
     match label {
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
@@ -528,6 +550,25 @@ fn handle_retail_plus_row(
                 format!(
                     "[menu] {label}: {}",
                     if graphics.magic_flat_list {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            );
+            true
+        }
+        // Retail's Abilities row opens abimenu, whose rows filter the `ability`
+        // list (row 6 opening `menu    mount`); kuluu's flat one-step ability list
+        // is the opt-in enhancement (FFXiMain.dll retail-2026-09 RVA 0x13FA70,
+        // vault main_menu.md §23).
+        RETAIL_ABILITIES_FLAT_LIST => {
+            graphics.abilities_flat_list = !graphics.abilities_flat_list;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.abilities_flat_list {
                         "on"
                     } else {
                         "off"
@@ -1248,7 +1289,7 @@ mod menu_key_tests {
         );
         assert_eq!(stack.current().unwrap().kind, MenuKind::Controls);
         assert_eq!(
-            resolve_menu_entry(MenuKind::Controls, "Compact 1", false),
+            resolve_menu_entry(MenuKind::Controls, "Compact 1", false, false),
             MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
         );
     }
@@ -1563,7 +1604,7 @@ mod menu_dispatch_tests {
     fn log_out_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_LOG_OUT;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT, false),
+            resolve_menu_entry(MenuKind::Root, ROOT_LOG_OUT, false, false),
             MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: false })
         );
     }
@@ -1572,7 +1613,7 @@ mod menu_dispatch_tests {
     fn shut_down_row_opens_the_yes_no_prompt() {
         use kuluu_render::hud::menu::ROOT_SHUT_DOWN;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN, false),
+            resolve_menu_entry(MenuKind::Root, ROOT_SHUT_DOWN, false, false),
             MenuDispatch::OpenSubmenu(MenuKind::PowerPrompt { shut_down: true })
         );
     }
@@ -1594,7 +1635,7 @@ mod menu_dispatch_tests {
             "Help Desk",
         ] {
             assert_eq!(
-                resolve_menu_entry(MenuKind::Root, label, false),
+                resolve_menu_entry(MenuKind::Root, label, false, false),
                 MenuDispatch::NotImplemented(label.into()),
                 "{label} should still be a stub"
             );
@@ -1616,8 +1657,8 @@ mod menu_dispatch_tests {
                 continue;
             }
             match (
-                resolve_menu_entry(MenuKind::Root, label, false),
-                menu::root_child_kind(label, false),
+                resolve_menu_entry(MenuKind::Root, label, false, false),
+                menu::root_child_kind(label, false, false),
             ) {
                 (MenuDispatch::OpenSubmenu(dispatched), Some(preview)) => {
                     assert_eq!(dispatched, preview, "{label} drill vs preview drift");
@@ -1674,7 +1715,7 @@ mod menu_dispatch_tests {
     fn current_time_row_runs_the_retail_clock_literal() {
         use kuluu_render::hud::menu::ROOT_CURRENT_TIME;
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, ROOT_CURRENT_TIME, false),
+            resolve_menu_entry(MenuKind::Root, ROOT_CURRENT_TIME, false, false),
             MenuDispatch::TextCommand("/clock"),
         );
     }
@@ -1712,7 +1753,7 @@ mod menu_dispatch_tests {
     #[test]
     fn key_items_row_runs_the_retail_keyitem_literal() {
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Key Items", false),
+            resolve_menu_entry(MenuKind::Root, "Key Items", false, false),
             MenuDispatch::TextCommand("/keyitem"),
         );
 
@@ -1791,11 +1832,11 @@ mod menu_dispatch_tests {
     #[test]
     fn magic_drills_the_retail_picker_and_the_flat_toggle_moves_it() {
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Magic", false),
+            resolve_menu_entry(MenuKind::Root, "Magic", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::MagicGroups)
         );
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Magic", true),
+            resolve_menu_entry(MenuKind::Root, "Magic", true, false),
             MenuDispatch::OpenSubmenu(MenuKind::Magic)
         );
 
@@ -1834,9 +1875,66 @@ mod menu_dispatch_tests {
             ("Trust Magic", 8),
         ] {
             assert_eq!(
-                resolve_menu_entry(MenuKind::MagicGroups, label, false),
+                resolve_menu_entry(MenuKind::MagicGroups, label, false, false),
                 MenuDispatch::OpenSubmenu(MenuKind::MagicGroup(school)),
                 "{label} should open school {school}",
+            );
+        }
+    }
+
+    /// The Abilities row follows the same two-window law (vault main_menu.md §23):
+    /// Root → abimenu picker → group-filtered list. Kuluu's flat one-step ability
+    /// list survives behind the Debug/Retail+ "Flat Abilities List" toggle, off by
+    /// default like its magic twin.
+    #[test]
+    fn abilities_drill_the_retail_picker_and_the_flat_toggle_moves_it() {
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Abilities", false, false),
+            MenuDispatch::OpenSubmenu(MenuKind::AbilitiesGroups)
+        );
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Root, "Abilities", false, true),
+            MenuDispatch::OpenSubmenu(MenuKind::Abilities)
+        );
+
+        let mut graphics = kuluu_render::GraphicsSettings::default();
+        assert!(
+            !graphics.abilities_flat_list,
+            "retail default: Abilities goes through abimenu"
+        );
+        let mut scene_state = SceneState::default();
+        assert!(handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_ABILITIES_FLAT_LIST,
+            &mut graphics,
+            &mut scene_state,
+        ));
+        assert!(graphics.abilities_flat_list, "toggle flips on");
+        handle_retail_plus_row(
+            kuluu_render::hud::menu::RETAIL_ABILITIES_FLAT_LIST,
+            &mut graphics,
+            &mut scene_state,
+        );
+        assert!(!graphics.abilities_flat_list, "flips back off");
+    }
+
+    /// Picking an abimenu category drills to that group's ability list; the picker
+    /// rows pair positionally with `AbilityGroup::ALL` (the [I-pending] grounding
+    /// recorded on bead kuluu-o9qt7.7 and vault main_menu.md §23).
+    #[test]
+    fn abimenu_category_select_opens_the_matching_ability_list() {
+        use kuluu_render::hud::action_model::AbilityGroup;
+        assert_eq!(
+            kuluu_render::hud::menu::ABILITIES_CATEGORY_LABELS.len(),
+            AbilityGroup::ALL.len()
+        );
+        for (idx, label) in kuluu_render::hud::menu::ABILITIES_CATEGORY_LABELS
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                resolve_menu_entry(MenuKind::AbilitiesGroups, label, false, false),
+                MenuDispatch::OpenSubmenu(MenuKind::AbilitiesGroup(idx as u8)),
+                "{label} should open group {idx}",
             );
         }
     }

@@ -809,6 +809,12 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::MagicGroups => "Magic".into(),
                 kuluu_render::MenuKind::MagicGroup(school) => format!("MagicList({school})").into(),
                 kuluu_render::MenuKind::Abilities => "Abilities".into(),
+                // Same pair law for the abimenu picker and its filtered list
+                // (vault main_menu.md §23).
+                kuluu_render::MenuKind::AbilitiesGroups => "Abilities".into(),
+                kuluu_render::MenuKind::AbilitiesGroup(group) => {
+                    format!("AbilityList({group})").into()
+                }
                 kuluu_render::MenuKind::Items => "Items".into(),
                 kuluu_render::MenuKind::KeyItems => "Key Items".into(),
                 kuluu_render::MenuKind::UsableItems => "Items (usable)".into(),

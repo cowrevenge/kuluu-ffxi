@@ -252,7 +252,20 @@ pub enum MenuKind {
     /// vault main_menu.md §21); rows cast through the shared sub-target cursor.
     MagicGroup(u8),
 
+    /// Kuluu's flat ability list (all known JA/WS/pet, one page) - kept behind
+    /// the Retail+ "Flat Abilities List" toggle; retail has no such window.
     Abilities,
+
+    /// abimenu: retail's Abilities category picker, five fixed rows in the
+    /// handler's item order (FFXiMain.dll retail-2026-09 RVA 0x13FA70; vault
+    /// main_menu.md §23). Picking a row pushes [`MenuKind::AbilitiesGroup`].
+    AbilitiesGroups,
+
+    /// The `ability` list window for one category (payload = positional index
+    /// into `AbilityGroup::ALL`, the grounding kuluu already uses for its
+    /// target-action groups; vault main_menu.md §23 notes per-row codes remain
+    /// [I-pending]).
+    AbilitiesGroup(u8),
 
     Items,
 

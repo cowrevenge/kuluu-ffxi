@@ -325,6 +325,8 @@ fn char_stats_to_wire(c: crate::state::CharStatsRaw) -> wire::CharStats {
         int_: c.bp_base[4],
         mnd: c.bp_base[5],
         chr: c.bp_base[6],
+        exp_now: c.exp_now,
+        exp_next: c.exp_next,
         hp_max: c.hp_max,
         mp_max: c.mp_max,
         attack: c.attack,

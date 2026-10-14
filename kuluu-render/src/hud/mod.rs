@@ -293,7 +293,6 @@ impl Plugin for HudPlugin {
 
         app.init_resource::<check_view::CheckTarget>();
         app.init_resource::<bazaar_view::BazaarScreenState>();
-        app.init_resource::<status_panel::StatusProfileOpen>();
         app.init_resource::<party_frame::PartyFrameSettings>();
 
         app.init_resource::<trade::TradeState>();
@@ -417,6 +416,9 @@ impl Plugin for HudPlugin {
                 target_action_menu::target_action_mouse_hover_system,
                 target_action_menu::target_action_mouse_click_system,
                 item_screen::update_item_screen_layout,
+                menu::update_status_detail_window
+                    .after(menu::refresh_dynamic_menu_rows)
+                    .before(menu::update_main_menu),
                 item_screen::update_item_screen.after(menu::refresh_dynamic_menu_rows),
                 item_screen::update_item_scrollbar.after(item_screen::update_item_screen),
                 item_screen::update_bag_tabs.after(item_screen::update_item_screen),
@@ -582,6 +584,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             check_view::spawn_check_view,
             bazaar_view::spawn_bazaar_view,
             status_panel::spawn_status_panel,
+            menu::spawn_status_detail_window,
             equipment_screen::spawn_equipment_screen,
             delivery::spawn_delivery_screen,
             auction::spawn_auction_screen,

@@ -136,8 +136,41 @@ pub fn status_entry_count() -> usize {
 
 const PANEL_WIDTH_PX: f32 = 280.0;
 
+/// Left-column host for the persona panel and its `level` box, at the spot the
+/// menu flow opens them (vault main_menu.md §59 addendum 10): opening Status
+/// code-moves persona to design **(16,16)** (mode-1 move; record frame
+/// `(16,48)`) and draws `level` right under it — both display-only while
+/// statcom2 holds the keys.
+#[derive(Component)]
+pub struct StatusLeftStack;
+
 #[derive(Component)]
 pub struct StatusPanel;
+
+/// The framed `level` box (retail window `menu    level  `): Level / EXP /
+/// NEXTLevel, from the s2c 0x061 pair kuluu folds into
+/// [`kuluu_snapshot::CharStats::exp_now`] (vendor/server/src/map/packets/s2c/
+/// 0x061_clistatus.h CLISTATUS exp_now/exp_next).
+#[derive(Component)]
+pub struct StatusLevelBox;
+
+#[derive(Component)]
+pub struct StatusLevelText;
+
+/// True while the stack holds statcom2 or one of its detail windows — retail
+/// opens persona + level WITH the list and cascades them closed together, so
+/// kuluu shows both panels for exactly as long as a `Status`/detail frame is open.
+pub fn status_flow_open(mode: &crate::input_mode::InputMode) -> bool {
+    let crate::input_mode::InputMode::Menu(stack) = mode else {
+        return false;
+    };
+    stack.levels.iter().any(|l| {
+        matches!(
+            l.kind,
+            crate::input_mode::MenuKind::Status | crate::input_mode::MenuKind::StatusDetail { .. }
+        )
+    })
+}
 
 #[derive(Component)]
 pub struct StatusHeaderRow;
@@ -156,62 +189,109 @@ pub struct StatusAttrRow {
 pub const PRIMARY_ATTRS: &[&str] = &["STR", "DEX", "VIT", "AGI", "INT", "MND", "CHR"];
 
 pub fn spawn_status_panel(mut commands: Commands) {
-    commands
+    let stack = commands
         .spawn((
             crate::components::InGameEntity,
-            StatusPanel,
+            StatusLeftStack,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(48.0),
-                left: Val::Px(8.0),
+                top: Val::Px(16.0),
+                left: Val::Px(16.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let panel = commands
+        .spawn((
+            StatusPanel,
+            Node {
                 width: Val::Px(PANEL_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(2.0),
-                display: Display::None,
                 ..default()
             },
             BackgroundColor(theme::FRAME_BG),
             BorderColor::all(theme::FRAME_EDGE),
         ))
-        .with_children(|p| {
-            p.spawn((
-                StatusHeaderRow,
-                Text::new(""),
-                style::text_font(14.0),
-                TextColor(theme::TITLE),
-            ));
-            p.spawn((
-                StatusVitalsRow,
+        .id();
+    commands.entity(stack).add_child(panel);
+    commands.entity(stack).with_children(|s| {
+        s.spawn((
+            StatusLevelBox,
+            Node {
+                width: Val::Px(150.0),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(theme::FRAME_BG),
+            BorderColor::all(theme::FRAME_EDGE),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                StatusLevelText,
                 Text::new(""),
                 style::text_font(13.0),
                 TextColor(theme::TEXT),
             ));
+        });
+    });
+    commands.entity(panel).with_children(|p| {
+        p.spawn((
+            StatusHeaderRow,
+            Text::new(""),
+            style::text_font(14.0),
+            TextColor(theme::TITLE),
+        ));
+        p.spawn((
+            StatusVitalsRow,
+            Text::new(""),
+            style::text_font(13.0),
+            TextColor(theme::TEXT),
+        ));
+        p.spawn((
+            StatusItemLevelRow,
+            Text::new(""),
+            style::text_font(13.0),
+            TextColor(theme::MUTED),
+        ));
+        for attr_index in 0..PRIMARY_ATTRS.len() {
             p.spawn((
-                StatusItemLevelRow,
+                StatusAttrRow { attr_index },
                 Text::new(""),
                 style::text_font(13.0),
-                TextColor(theme::MUTED),
+                TextColor(theme::TEXT),
             ));
-            for attr_index in 0..PRIMARY_ATTRS.len() {
-                p.spawn((
-                    StatusAttrRow { attr_index },
-                    Text::new(""),
-                    style::text_font(13.0),
-                    TextColor(theme::TEXT),
-                ));
-            }
-        });
+        }
+    });
 }
 
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct StatusProfileOpen(pub bool);
+/// The `level` box body: Level / EXP / NEXTLevel (labels follow the retail
+/// window's on-screen words captured in the owner's screenshot; values from
+/// s2c 0x061 — no wire value, no invented number).
+pub fn level_box_lines(snap: &kuluu_snapshot::SceneSnapshot) -> String {
+    let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
+    let Some(lv) = me.map(|m| m.main_job_lv) else {
+        return "Level —".to_string();
+    };
+    match snap.stats.as_ref() {
+        Some(s) if s.exp_next != 0 => {
+            format!("Level {lv}\nEXP {}\nNEXTLevel {}", s.exp_now, s.exp_next)
+        }
+        _ => format!("Level {lv}"),
+    }
+}
 
 pub fn update_status_panel(
-    open: Res<StatusProfileOpen>,
+    mode: Res<crate::input_mode::InputMode>,
     state: Res<SceneState>,
-    mut panel_q: Query<&mut Node, With<StatusPanel>>,
+    mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
+    mut level_text_q: Query<&mut Text, With<StatusLevelText>>,
     mut header_q: Query<
         &mut Text,
         (
@@ -248,17 +328,16 @@ pub fn update_status_panel(
         ),
     >,
 ) {
-    let Ok(mut panel_node) = panel_q.single_mut() else {
+    let Ok(mut stack_node) = stack_q.single_mut() else {
         return;
     };
-    if !open.0 {
-        if panel_node.display != Display::None {
-            panel_node.display = Display::None;
-        }
+    let open = status_flow_open(&mode);
+    if !open && stack_node.display != Display::None {
+        stack_node.display = Display::None;
         return;
     }
-    if panel_node.display == Display::None {
-        panel_node.display = Display::Flex;
+    if open && stack_node.display == Display::None {
+        stack_node.display = Display::Flex;
     }
 
     let snap = &state.snapshot;
@@ -286,6 +365,13 @@ pub fn update_status_panel(
             Some(s) => format!("Item Level: {}", s.item_level),
             None => "Item Level: —".to_string(),
         };
+        if **text != want {
+            **text = want;
+        }
+    }
+
+    if let Ok(mut text) = level_text_q.single_mut() {
+        let want = level_box_lines(snap);
         if **text != want {
             **text = want;
         }
@@ -479,6 +565,44 @@ pub fn job_level_rows(overlay: &ActiveOverlay, levels: &[(u8, u8)]) -> Vec<JobLe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `level` box under the persona panel answers from s2c 0x061 EXP
+    /// (vault main_menu.md §59 addendum 10 screenshot law): Level / EXP /
+    /// NEXTLevel, no invented values when the stats block is absent.
+    #[test]
+    fn level_box_answers_from_the_wire_exp_pair() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert_eq!(level_box_lines(&snap), "Level —", "no self yet");
+
+        snap.self_char_id = Some(7);
+        snap.party.push(kuluu_snapshot::PartyMember {
+            id: 7,
+            act_index: 0x100,
+            name: Some("Cowrevenge".into()),
+            hp: 98,
+            mp: 55,
+            tp: 572,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 104,
+            main_job: 22,
+            main_job_lv: 6,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: true,
+            is_alliance_leader: false,
+            in_mog_house: false,
+            party_no: 0,
+        });
+        assert_eq!(level_box_lines(&snap), "Level 6", "no stats block yet");
+
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            exp_now: 806,
+            exp_next: 1750,
+            ..Default::default()
+        });
+        assert_eq!(level_box_lines(&snap), "Level 6\nEXP 806\nNEXTLevel 1750");
+    }
 
     #[test]
     fn status_entries_have_disabled_post_classic_screens() {

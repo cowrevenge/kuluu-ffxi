@@ -1627,6 +1627,18 @@ pub const CONFIG_SUB_CONF11S: u8 = 10;
 pub struct ConfigDatRows {
     pub loaded: bool,
     pub by_root: std::collections::BTreeMap<String, Vec<(u32, String)>>,
+    /// Every menu record's own frame (x, y, width in the 512×448 design space;
+    /// anchor law vault main_menu.md §7/§16) — window placement IS DAT data
+    /// (companion_windows law: each window sits at its record's rect).
+    pub frames: std::collections::BTreeMap<String, (i16, i16, i16)>,
+}
+
+impl ConfigDatRows {
+    pub fn window_frame(&self, name: &str) -> Option<(f32, f32, f32)> {
+        self.frames
+            .get(name)
+            .map(|&(x, y, w)| (f32::from(x), f32::from(y), f32::from(w.max(1))))
+    }
 }
 
 impl ConfigDatRows {
@@ -1671,6 +1683,13 @@ impl ConfigDatRows {
             }
         }
         self.by_root = by_root;
+        let mut frames = std::collections::BTreeMap::new();
+        for (name, window) in &windows {
+            if let Some(frame) = &window.frame {
+                frames.insert(name.clone(), (frame.x, frame.y, frame.width));
+            }
+        }
+        self.frames = frames;
         self.loaded = true;
     }
 
@@ -4228,14 +4247,6 @@ struct PaneView {
     cursor: usize,
 }
 
-fn current_view(stack: &MenuStack) -> Option<PaneView> {
-    let level = stack.current()?;
-    Some(PaneView {
-        kind: level.kind,
-        cursor: level.cursor,
-    })
-}
-
 #[allow(clippy::type_complexity)]
 pub fn update_main_menu(
     mode: Res<InputMode>,
@@ -4327,18 +4338,37 @@ pub fn update_main_menu(
         }
     }
 
-    let view = current_view(stack);
+    // A Status detail window is display-only and opens BESIDE the persona
+    // panel, not in this column (vault main_menu.md §59 addendum 10: every
+    // statcom2 detail record sits at x=130,y=48): the right column keeps
+    // showing the list under it. `update_status_detail_window` draws the readout.
+    let view_index = stack
+        .levels
+        .iter()
+        .rposition(|l| !matches!(l.kind, MenuKind::StatusDetail { .. }))
+        .unwrap_or(stack.levels.len().saturating_sub(1));
+    let view = stack.levels.get(view_index).map(|l| PaneView {
+        kind: l.kind,
+        cursor: l.cursor,
+    });
 
-    // The selector stays on screen under its companion (vault main_menu.md §59    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
+    // The selector stays on screen under its companion (vault main_menu.md §59
+    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
     // OpenMenu RVA 0x15E350 keeps the selector open). v1 mirrors only the
     // level directly under focus; deeper retail stacks keep more windows open
-    // and land as follow-on beads.
-    let parent_view = stack.levels.len().checked_sub(2).and_then(|i| {
-        stack.levels.get(i).map(|l| PaneView {
-            kind: l.kind,
-            cursor: l.cursor,
+    // and land as follow-on beads. statcom2 is the exception: its record frame
+    // `(384,48,w112,h218)` covers menuwind's `(384,48,w112,h202)` exactly (§59
+    // addendum 10), so retail shows only the list — mirror hidden.
+    let parent_view = if matches!(view.as_ref().map(|v| v.kind), Some(MenuKind::Status)) {
+        None
+    } else {
+        view_index.checked_sub(1).and_then(move |i| {
+            stack.levels.get(i).map(|l| PaneView {
+                kind: l.kind,
+                cursor: l.cursor,
+            })
         })
-    });
+    };
     let parent_view = parent_view.filter(|p| !renders_bespoke_screen(p.kind));
 
     for (_, comp, mut text) in title_q.iter_mut() {
@@ -4478,6 +4508,193 @@ pub fn update_main_menu(
         }
         if frame.display != Display::Flex {
             frame.display = Display::Flex;
+        }
+    }
+}
+
+/// statcom2's detail windows, drawn beside the persona panel at their own record
+/// frames — all `(x=130,y=48,w≈252)` in the 512×448 design space (vault
+/// main_menu.md §59 addendum 10) — never inside the Commands column. Retail's
+/// detail rows carry no cursor and take no keys: the list under them keeps both
+/// (FFXiMain.dll retail-2026-09 focus law + detail table RVA 0x3716B8 behind handler
+/// 0x148D00; the close-details helper at 0x148AC0 only ever closes these).
+#[derive(Component)]
+pub struct StatusDetailWindow;
+
+#[derive(Component)]
+pub struct StatusDetailTitle;
+
+#[derive(Component)]
+pub struct StatusDetailLine {
+    pub slot: usize,
+}
+
+/// The DAT record each STATUS_ENTRIES row opens, by detail-table order — the
+/// table FFXiMain.dll retail-2026-09 RVA 0x148D00 dispatches statcom2 selects
+/// through (vault main_menu.md §59). Row ≠ item id: Master Levels is row 3 but
+/// id 12, hence the explicit per-row list. Play Time runs `/playtime` and opens
+/// no window (§2 id 9).
+pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
+    Some("profile"),
+    Some("joblevel"),
+    Some("masterle"),
+    Some("btlskill"),
+    Some("mgcskill"),
+    Some("trdskill"),
+    Some("evitem"),
+    Some("evitem"),
+    Some("ut_menu"),
+    None,
+    Some("merit1"),
+    Some("merit2ca"),
+    Some("fp_cat"),
+];
+
+pub fn spawn_status_detail_window(mut commands: Commands) {
+    let (mut node, bg, border) = style::window_frame();
+    node.position_type = PositionType::Absolute;
+    node.left = Val::Px(130.0);
+    node.top = Val::Px(48.0);
+    node.width = Val::Px(252.0);
+    node.display = Display::None;
+    commands
+        .spawn((
+            crate::components::InGameEntity,
+            StatusDetailWindow,
+            node,
+            bg,
+            border,
+        ))
+        .with_children(|w| {
+            w.spawn((
+                StatusDetailTitle,
+                Text::new(""),
+                text_nowrap(),
+                style::text_font(14.0),
+                TextColor(theme::TITLE),
+            ));
+            for slot in 0..MAX_ENTRY_COUNT {
+                let line_node = Node {
+                    display: Display::None,
+                    ..default()
+                };
+                w.spawn((
+                    StatusDetailLine { slot },
+                    line_node,
+                    Text::new(""),
+                    text_nowrap(),
+                    style::text_font(13.0),
+                    TextColor(theme::TEXT),
+                    BackgroundColor(Color::NONE),
+                ));
+            }
+        });
+}
+
+/// Places and fills the left-side windows of the Status flow from DAT frames:
+/// the persona panel takes `persona`'s record width (fallback keeps kuluu's own
+/// width when no install is present), and the detail window sits at its record
+/// rect beside it. Also hides everything once the flow closes.
+#[allow(clippy::type_complexity)]
+pub fn update_status_detail_window(
+    mode: Res<InputMode>,
+    dynamic: Res<DynamicMenu>,
+    dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
+    mut config_rows: ResMut<ConfigDatRows>,
+    mut frame_q: Query<&mut Node, With<StatusDetailWindow>>,
+    mut title_q: Query<&mut Text, (With<StatusDetailTitle>, Without<MainMenuTitle>)>,
+    mut line_q: Query<
+        (&StatusDetailLine, &mut Text, &mut Node),
+        (
+            Without<StatusDetailTitle>,
+            Without<StatusDetailWindow>,
+            Without<crate::hud::status_panel::StatusPanel>,
+        ),
+    >,
+    mut persona_width_q: Query<
+        &mut Node,
+        (
+            With<crate::hud::status_panel::StatusPanel>,
+            (
+                Without<StatusDetailWindow>,
+                Without<StatusDetailTitle>,
+                Without<StatusDetailLine>,
+            ),
+        ),
+    >,
+) {
+    config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+    let top = match &*mode {
+        InputMode::Menu(stack) => stack.current().map(|l| l.kind),
+        _ => None,
+    };
+    // The persona panel answers with its record width the moment an install is
+    // readable; retail's box is that narrow next to the statcom2 list.
+    let persona_w = config_rows
+        .window_frame("persona")
+        .map(|(_, _, w)| w.max(90.0));
+    if let Some(w) = persona_w {
+        for mut node in persona_width_q.iter_mut() {
+            if node.width != Val::Px(w) {
+                node.width = Val::Px(w);
+            }
+        }
+    }
+
+    let idx = match top {
+        Some(MenuKind::StatusDetail { entry }) => usize::from(entry),
+        _ => {
+            for mut node in frame_q.iter_mut() {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
+            }
+            for (_, _, mut line_node) in line_q.iter_mut() {
+                if line_node.display != Display::None {
+                    line_node.display = Display::None;
+                }
+            }
+            return;
+        }
+    };
+    let mut node = match frame_q.single_mut() {
+        Ok(node) => node,
+        Err(_) => return,
+    };
+    let name = STATUS_DETAIL_WINDOW_NAMES
+        .get(idx)
+        .copied()
+        .flatten()
+        .unwrap_or("profile");
+    if let Some((x, y, w)) = config_rows.window_frame(name) {
+        node.left = Val::Px(x);
+        node.top = Val::Px(y);
+        node.width = Val::Px(w);
+    }
+    if node.display != Display::Flex {
+        node.display = Display::Flex;
+    }
+    let want_title = menu_title(MenuKind::StatusDetail {
+        entry: u8::try_from(idx).unwrap_or(u8::MAX),
+    })
+    .to_string();
+    if let Ok(mut title_text) = title_q.single_mut() {
+        if **title_text != want_title {
+            **title_text = want_title;
+        }
+    }
+    for (line, mut text, mut line_node) in line_q.iter_mut() {
+        let Some(row) = dynamic.rows.get(line.slot) else {
+            if line_node.display != Display::None {
+                line_node.display = Display::None;
+            }
+            continue;
+        };
+        if **text != row.label {
+            **text = row.label.clone();
+        }
+        if line_node.display != Display::Flex {
+            line_node.display = Display::Flex;
         }
     }
 }
@@ -5108,6 +5325,125 @@ mod tests {
         let mut app = root_menu_app(0);
         let (visible, _, _) = companion_frame_visible(&mut app);
         assert!(!visible, "no selector to mirror under a depth-1 stack");
+    }
+
+    /// The cover law (vault main_menu.md §59 addendum 10): statcom2's record
+    /// frame `(384,48,w112,h218)` sits exactly over menuwind's — retail draws
+    /// the list ON the Command spot and nothing else beside it. kuluu shows the
+    /// thirteen rows in place, with no mirrored Commands frame next to them.
+    #[test]
+    fn status_list_covers_the_command_spot_without_a_mirror() {
+        let mut app = root_menu_app(0);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        let (visible, _, _) = companion_frame_visible(&mut app);
+        assert!(
+            !visible,
+            "statcom2 covers menuwind's rect; retail shows only the list"
+        );
+        let rows = visible_rows(&mut app);
+        assert_eq!(
+            rows.len(),
+            crate::hud::status_panel::STATUS_ENTRIES.len(),
+            "the live statcom2 list draws in place"
+        );
+    }
+
+    /// The detail law (vault main_menu.md §59 addendum 10): a statcom2 detail
+    /// opens as its OWN framed window beside the persona panel (record rect,
+    /// fallback `(130,48,w252)` with no install readable) while the right column
+    /// keeps drawing the list under it. Detail rows answer plain — retail's
+    /// display-only windows carry no cursor and never take keys.
+    #[test]
+    fn status_detail_opens_beside_the_list_not_inside_it() {
+        use crate::hud::network_status::NetStatusVisible;
+        use crate::snapshot::SceneState;
+
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<NetStatusVisible>()
+            .init_resource::<SceneState>()
+            .init_resource::<DynamicMenu>()
+            .init_resource::<ConfigDatRows>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::StatusDetail { entry: 0 });
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, (spawn_main_menu, spawn_status_detail_window));
+        app.add_systems(
+            Update,
+            (
+                update_status_detail_window,
+                update_main_menu.after(update_status_detail_window),
+            ),
+        );
+        {
+            let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+            d.rows = vec![
+                DynamicMenuRow {
+                    label: "Cowrevenge".into(),
+                    action: DynamicMenuAction::DisplayInfo,
+                },
+                DynamicMenuRow {
+                    label: "Blue Mage - Level 75".into(),
+                    action: DynamicMenuAction::DisplayInfo,
+                },
+            ];
+        }
+        app.update();
+        app.update();
+
+        let (mut visible, mut left, mut width) = (false, Val::Auto, Val::Auto);
+        {
+            let mut q = app.world_mut().query::<(&StatusDetailWindow, &Node)>();
+            for (_, node) in q.iter(app.world()) {
+                if node.display != Display::None {
+                    visible = true;
+                    left = node.left;
+                    width = node.width;
+                }
+            }
+        }
+        assert!(visible, "the detail draws as its own framed window");
+        assert_eq!(left, Val::Px(130.0), "beside the persona column");
+        assert_eq!(width, Val::Px(252.0), "profile's record width (fallback)");
+
+        let title = app
+            .world_mut()
+            .query::<(&StatusDetailTitle, &Text)>()
+            .iter(app.world())
+            .map(|(_, text)| text.0.clone())
+            .next()
+            .expect("detail window has a title node");
+        assert_eq!(title, menu_title(MenuKind::StatusDetail { entry: 0 }));
+
+        let mut line_q = app.world_mut().query::<(&StatusDetailLine, &Text, &Node)>();
+        let mut lines: Vec<(usize, String)> = line_q
+            .iter(app.world())
+            .filter(|(_, _, node)| node.display != Display::None)
+            .map(|(line, text, _)| (line.slot, text.0.clone()))
+            .collect();
+        lines.sort_by_key(|(slot, _)| *slot);
+        assert_eq!(
+            lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+            vec!["Cowrevenge", "Blue Mage - Level 75"],
+            "live readout, no cursor decoration"
+        );
+
+        // The right column keeps drawing the statcom2 list, not the detail.
+        let rows = visible_rows(&mut app);
+        assert_eq!(rows.len(), crate::hud::status_panel::STATUS_ENTRIES.len());
+        assert!(
+            !rows.iter().any(|(_, t)| t.contains("Cowrevenge")),
+            "the list column never shows detail text: {rows:?}"
+        );
+        let (mirror, _, _) = companion_frame_visible(&mut app);
+        assert!(!mirror, "and no Commands mirror beside it either");
     }
 
     /// The selector-window law: opening the retail Config hub over the Command

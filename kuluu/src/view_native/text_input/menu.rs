@@ -257,13 +257,10 @@ const EQUIP_SLOT_INDEX_MAX: u8 = (kuluu_render::equip_slot::EquipmentIndex::ALL.
 /// detail already shows changes nothing; any other select closes the previous
 /// display-only detail (helper RVA 0x148AC0) by REPLACING it, then opens the
 /// new one beside the selector. The Profile window's former overlay lives on
-/// as this detail level's own rows, so the legacy `StatusProfileOpen` flag
-/// stays false — one surface per companion, never two.
-fn open_statcom_detail(
-    stack: &mut MenuStack,
-    cursor: usize,
-    status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
-) {
+/// as this detail level's own rows; retail keeps persona + level + detail on
+/// screen together, and kuluu derives those panels' visibility from the stack
+/// (status_flow_open), so no separate overlay flag exists anymore.
+fn open_statcom_detail(stack: &mut MenuStack, cursor: usize) {
     use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
     let Some(entry_idx) = STATUS_ENTRIES.get(cursor).map(|_| cursor as u8) else {
         return;
@@ -276,7 +273,6 @@ fn open_statcom_detail(
         return;
     }
     let detail = MenuKind::StatusDetail { entry: entry_idx };
-    status_profile_open.0 = false;
     if let Some(top) = stack.levels.last_mut() {
         if let MenuKind::StatusDetail { entry: prev } = top.kind {
             if usize::from(prev) == usize::from(entry_idx) {
@@ -324,7 +320,6 @@ pub(super) fn confirm_menu_at_cursor(
     cmd_tx: &Sender<AgentCommand>,
     keybinds_state: &mut KeybindsStateRes,
     graphics: &mut kuluu_render::GraphicsSettings,
-    status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
@@ -381,7 +376,7 @@ pub(super) fn confirm_menu_at_cursor(
                     kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
                 push_system_chat_line(scene_state, line);
             }
-            Some(_) => open_statcom_detail(stack, cursor, status_profile_open),
+            Some(_) => open_statcom_detail(stack, cursor),
             None => {}
         }
         return None;
@@ -1446,7 +1441,6 @@ pub(super) fn handle_menu_key(
     cmd_tx: &Sender<AgentCommand>,
     keybinds_state: &mut KeybindsStateRes,
     graphics: &mut kuluu_render::GraphicsSettings,
-    status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
@@ -1563,7 +1557,7 @@ pub(super) fn handle_menu_key(
                         kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
                     push_system_chat_line(scene_state, line);
                 }
-                Some(_) => open_statcom_detail(stack, sel_cursor, status_profile_open),
+                Some(_) => open_statcom_detail(stack, sel_cursor),
                 None => {}
             }
             return None;
@@ -1877,7 +1871,6 @@ pub(super) fn handle_menu_key(
             cmd_tx,
             keybinds_state,
             graphics,
-            status_profile_open,
             hud_panels,
             net_status,
             audio_mute,
@@ -1901,9 +1894,6 @@ pub(super) fn handle_menu_key(
         // code — FFXiMain.dll retail-2026-09 RVA 0x148BB0 — closes persona,
         // whose close closes level; vault main_menu.md §59). Kuluu mirrors the
         // cascade by popping one stack level per Esc.
-        if matches!(kind, MenuKind::Status) {
-            status_profile_open.0 = false;
-        }
         // Cancel pops one level; from Root it closes back to the world.
         return if !stack.pop() {
             Some(InputMode::World)
@@ -1930,7 +1920,6 @@ mod menu_key_tests {
         scene_state: SceneState,
         keybinds_state: KeybindsStateRes,
         graphics: kuluu_render::GraphicsSettings,
-        status_profile_open: kuluu_render::hud::status_panel::StatusProfileOpen,
         hud_panels: kuluu_render::hud::HudPanels,
         net_status: kuluu_render::hud::network_status::NetStatusVisible,
         audio_mute: kuluu_render::audio::AudioMuteState,
@@ -1963,7 +1952,6 @@ mod menu_key_tests {
                     persisted: Default::default(),
                 },
                 graphics: Default::default(),
-                status_profile_open: Default::default(),
                 hud_panels: Default::default(),
                 net_status: Default::default(),
                 audio_mute: Default::default(),
@@ -2000,7 +1988,6 @@ mod menu_key_tests {
                 &self.cmd_tx,
                 &mut self.keybinds_state,
                 &mut self.graphics,
-                &mut self.status_profile_open,
                 &mut self.hud_panels,
                 &mut self.net_status,
                 &mut self.audio_mute,
@@ -2420,7 +2407,6 @@ mod menu_key_tests {
             &harness.cmd_tx,
             &mut harness.keybinds_state,
             &mut harness.graphics,
-            &mut harness.status_profile_open,
             &mut harness.hud_panels,
             &mut harness.net_status,
             &mut harness.audio_mute,
@@ -3791,7 +3777,6 @@ mod menu_dispatch_tests {
             persisted: Default::default(),
         };
         let mut graphics = kuluu_render::GraphicsSettings::default();
-        let mut status_profile_open = Default::default();
         let mut hud_panels = Default::default();
         let mut net_status = Default::default();
         let mut audio_mute = Default::default();
@@ -3805,7 +3790,6 @@ mod menu_dispatch_tests {
             cmd_tx,
             &mut keybinds_state,
             &mut graphics,
-            &mut status_profile_open,
             &mut hud_panels,
             &mut net_status,
             &mut audio_mute,
@@ -4623,7 +4607,6 @@ mod menu_dispatch_tests {
             persisted: Default::default(),
         };
         let mut graphics = kuluu_render::GraphicsSettings::default();
-        let mut status_profile_open = Default::default();
         let mut hud_panels = Default::default();
         let mut net_status = Default::default();
         let mut audio_mute = Default::default();
@@ -4640,7 +4623,6 @@ mod menu_dispatch_tests {
             &cmd_tx,
             &mut keybinds_state,
             &mut graphics,
-            &mut status_profile_open,
             &mut hud_panels,
             &mut net_status,
             &mut audio_mute,

@@ -142,6 +142,11 @@ pub struct CliStatus {
     pub mjob_lv: u8,
     pub sjob_no: u8,
     pub sjob_lv: u8,
+    /// Current- and next-level EXP thresholds carried straight from the wire so
+    /// the `level` box under the persona panel answers (LSB
+    /// vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS exp_now/exp_next).
+    pub exp_now: i16,
+    pub exp_next: i16,
     pub bp_base: [u16; Self::BP_COUNT],
     pub bp_adj: [i16; Self::BP_COUNT],
     pub attack: u16,
@@ -158,6 +163,10 @@ impl CliStatus {
     const MJOB_LV_OFFSET: usize = 9;
     const SJOB_NO_OFFSET: usize = 10;
     const SJOB_LV_OFFSET: usize = 11;
+    // CLISTATUS keeps `int16_t exp_now/exp_next` between the sub-job bytes and
+    // `bp_base[7]` (vendor/server/src/map/packets/s2c/0x061_clistatus.h).
+    const EXP_NOW_OFFSET: usize = 12;
+    const EXP_NEXT_OFFSET: usize = 14;
     const BP_BASE_OFFSET: usize = 16;
     const BP_ADJ_OFFSET: usize = 30;
     const ATTACK_OFFSET: usize = 44;
@@ -195,6 +204,8 @@ impl CliStatus {
             mjob_lv: body[Self::MJOB_LV_OFFSET],
             sjob_no: body[Self::SJOB_NO_OFFSET],
             sjob_lv: body[Self::SJOB_LV_OFFSET],
+            exp_now: rdi16(Self::EXP_NOW_OFFSET),
+            exp_next: rdi16(Self::EXP_NEXT_OFFSET),
             bp_base,
             bp_adj,
             attack: rd16(Self::ATTACK_OFFSET),
@@ -353,6 +364,8 @@ mod cli_status_tests {
         buf[9] = 75; // mjob_lv
         buf[10] = 4; // sjob_no (BLM)
         buf[11] = 37; // sjob_lv
+        buf[12..14].copy_from_slice(&806i16.to_le_bytes()); // exp_now
+        buf[14..16].copy_from_slice(&1750i16.to_le_bytes()); // exp_next
         for i in 0..7 {
             buf[16 + i * 2..18 + i * 2].copy_from_slice(&((10 + i as u16) * 5).to_le_bytes());
             buf[30 + i * 2..32 + i * 2].copy_from_slice(&((i as i16 + 1) * 7).to_le_bytes());
@@ -369,6 +382,8 @@ mod cli_status_tests {
         assert_eq!(cs.mjob_lv, 75);
         assert_eq!(cs.sjob_no, 4);
         assert_eq!(cs.sjob_lv, 37);
+        assert_eq!(cs.exp_now, 806, "EXP between levels (level box)");
+        assert_eq!(cs.exp_next, 1750);
         assert_eq!(cs.bp_base[0], 50, "STR base");
         assert_eq!(cs.bp_base[6], 80, "CHR base");
         assert_eq!(cs.bp_adj[0], 7, "STR gear delta");

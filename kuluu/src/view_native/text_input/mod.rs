@@ -137,8 +137,6 @@ pub struct SlashWriters<'w, 's> {
 
     pub auto_attack: ResMut<'w, crate::view_native::auto_target::AutoAttack>,
 
-    pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
-
     pub sort_options: ResMut<'w, kuluu_render::hud::item_detail::SortOptions>,
 
     pub item_menu_focus: ResMut<'w, kuluu_render::hud::item_detail::ItemMenuFocus>,
@@ -221,7 +219,6 @@ pub(crate) struct SessionGates<'w> {
 #[derive(SystemParam)]
 pub struct MenuConfirmWriters<'w> {
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,
-    pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
     pub hud_panels: ResMut<'w, kuluu_render::hud::HudPanels>,
     pub net_status: ResMut<'w, kuluu_render::hud::network_status::NetStatusVisible>,
     pub audio_mute: ResMut<'w, kuluu_render::audio::AudioMuteState>,
@@ -468,7 +465,6 @@ pub(crate) fn text_input_system(
                     &cmd_tx.0,
                     &mut keybinds_state,
                     &mut slash_writers.graphics,
-                    &mut slash_writers.status_profile_open,
                     &mut slash_writers.hud_panels,
                     &mut slash_writers.net_status_visible,
                     &mut slash_writers.audio_mute,
@@ -2083,7 +2079,6 @@ pub fn mouse_nav_dispatch_system(
                 &cmd_tx.0,
                 &mut keybinds_state,
                 &mut menu_writers.graphics,
-                &mut menu_writers.status_profile_open,
                 &mut menu_writers.hud_panels,
                 &mut menu_writers.net_status,
                 &mut menu_writers.audio_mute,
@@ -3181,7 +3176,6 @@ mod cs_input_lock_tests {
         app.insert_resource(kuluu_render::minimap::MinimapView::default());
         app.insert_resource(kuluu_render::minimap::MinimapState::default());
         app.insert_resource(kuluu_render::combat_stance::RestStance::default());
-        app.insert_resource(kuluu_render::hud::status_panel::StatusProfileOpen::default());
         app.insert_resource(kuluu_render::hud::item_detail::SortOptions::default());
         app.insert_resource(kuluu_render::hud::item_detail::ItemMenuFocus::default());
         app.insert_resource(kuluu_render::hud::item_screen::ItemScreenContainer::default());

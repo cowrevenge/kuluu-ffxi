@@ -1799,6 +1799,8 @@ fn handle_sub_packet(
                         attack: cs.attack,
                         defense: cs.defense,
                         resist: cs.def_elem,
+                        exp_now: cs.exp_now,
+                        exp_next: cs.exp_next,
                         ilvl: cs.ilvl,
                     },
                 });

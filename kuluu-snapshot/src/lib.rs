@@ -1558,6 +1558,13 @@ pub struct CharStats {
     // Self-stat block from s2c 0x061 (CLISTATUS). `bonus` is the signed gear/buff
     // delta retail renders as "+N"; `resist` is the 8 elemental defenses. New fields
     // default so older postcard frames still deserialize.
+    /// EXP between the current and next level, straight from s2c 0x061's
+    /// exp_now/exp_next pair (vendor/server/src/map/packets/s2c/0x061_clistatus.h
+    /// CLISTATUS); retail draws both in the `level` box under the persona panel.
+    #[serde(default)]
+    pub exp_now: i16,
+    #[serde(default)]
+    pub exp_next: i16,
     #[serde(default)]
     pub hp_max: u32,
     #[serde(default)]

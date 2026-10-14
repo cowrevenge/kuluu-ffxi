@@ -389,6 +389,12 @@ pub struct NetStats {
 /// See ffxi_proto::decode::CliStatus.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharStatsRaw {
+    /// CLISTATUS exp_now/exp_next (s2c 0x061), fed to the `level` box under
+    /// the persona panel.
+    #[serde(default)]
+    pub exp_now: i16,
+    #[serde(default)]
+    pub exp_next: i16,
     pub hp_max: u32,
     pub mp_max: u32,
     pub bp_base: [u16; 7],

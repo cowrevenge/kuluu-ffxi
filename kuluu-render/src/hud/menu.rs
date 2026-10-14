@@ -277,6 +277,17 @@ pub enum DynamicMenuAction {
         store_id: u32,
     },
 
+    /// A `WindowLocal` pair row's write: the choice lives only on the window
+    /// object (retail `[obj+0x38]` + dirty byte `[obj+0x3c]`, arms .text FFXiMain.dll
+    /// retail-2026-09 RVA 0x19aa85/0x19aa92) — never the option store, never the
+    /// wire. `obj_off` is that object field offset and `window_key` comes from
+    /// [`config_window_state_key`] (vault main_menu.md §59 addendum 9; bead
+    /// kuluu-o9qt7.20.1.2).
+    ConfigWindowChoiceSet {
+        window_key: u8,
+        obj_off: u16,
+        value: i32,
+    },
     /// The dialog row of `conf6win` (select id 10, arm .text FFXiMain.dll
     /// retail-2026-09 RVA 0x19B309): nothing is written at select — the handler only launches
     /// a yes/no prompt through the generic dialog service object ([0x10664520],
@@ -610,6 +621,12 @@ pub struct DynamicMenu {
     /// companion's own rows can read which option opened it (vault main_menu.md
     /// §59 addendum 5; bead kuluu-o9qt7.20.1). Absent = never drilled.
     pub config_companion_modes: std::collections::BTreeMap<u8, i32>,
+    /// The `WindowLocal` pair rows' state (`conf3win` rows 3/4): (window state key,
+    /// retail object field offset) → choice, living only as long as this client
+    /// session — mirroring the window objects the menu manager boots once ([obj+0x38]
+    /// at −1 in the ctor .text FFXiMain.dll retail-2026-09 RVA 0x19a8b8; vault
+    /// main_menu.md §59 addendum 9; bead kuluu-o9qt7.20.1.2).
+    pub config_window_choices: std::collections::BTreeMap<(u8, u16), i32>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -1799,11 +1816,17 @@ pub enum ConfigRowArm {
     /// A confirm-dialog row: select launches a Yes/No prompt (retail through
     /// the generic dialog service object [0x10664520], FFXiMain.dll retail-2026-09 RVA 0x210E30) and answers later — on Yes the callback factory-resets both key-assignment option ranges (see [`key_assign_reset_defaults`]); No is inert (`conf6win` select id 10, arm .text FFXiMain.dll retail-2026-09 RVA 0x19B309; vault main_menu.md §59 addenda 7–8).
     ConfirmResetKeyAssignments,
-    /// Position in a law'd page whose select arm is not dug yet (the window-local
-    /// flag rows at conf3win ids 3/4 — handler FFXiMain.dll retail-2026-09 RVA
-    /// 0x19AA10): keeps the option-record fallback while its dig completes on
-    /// bead kuluu-o9qt7.20.1.
-    Plain,
+    /// A pair row whose choice never leaves the window object: the arm writes
+    /// `value` into the window's field at `obj_off` (and its dirty byte, which only
+    /// drives retail's label refresh) — no option store, no wire. The pair marks
+    /// from [`DynamicMenu::config_window_choices`]; a freshly booted window holds −1
+    /// so neither row starts marked (`conf3win` ids 3/4 → `[obj+0x38]`, arms .text
+    /// FFXiMain.dll retail-2026-09 RVA 0x19aa85/0x19aa92; boot −1 at .text
+    /// 0x19a8b8; vault main_menu.md §59 addendum 9).
+    WindowLocal {
+        obj_off: u16,
+        value: i32,
+    },
 }
 
 /// `conf13wi`'s six select arms — jump table .text 0x19be98 (guard `dec;
@@ -1900,7 +1923,8 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
 /// `conf3win`'s fifteen arms - jump table .text 0x19ac30 (guard `dec; cmp
 /// eax,0xe`) of handler FFXiMain.dll retail-2026-09 RVA 0x19AA10: rows 1/2/5 the
 /// triple on store 0x13 (values ebx=0 from the prologue's `xor ebx,ebx`, 1, 2);
-/// rows 3/4 set window-local bytes [esi+0x38]/[esi+0x3c] only (semantics open);
+/// rows 3/4 are the window-local pair on `[obj+0x38]` (+ dirty byte `[obj+0x3c]`,
+/// which only drives retail's label refresh — vault main_menu.md §59 addendum 9);
 /// rows 6/7/8 store 0x3A {2, ebx=0, 1}; rows 9/10 store 0x3B {1, ebx=0}; row 11
 /// pins a slider (widget [esi+0x48], edit byte [esi+0x20]) whose store lives in
 /// the pin region from .text 0x19AB94 - open; rows 12/13 are the bit pair on
@@ -1915,8 +1939,17 @@ const CONF3WIN_ROW_ARMS: [ConfigRowArm; 15] = [
         store_id: 0x13,
         value: 1,
     },
-    ConfigRowArm::Plain,
-    ConfigRowArm::Plain,
+    // Ids 3/4 (index 2/3): the arms at .text FFXiMain.dll retail-2026-09 RVA
+    // 0x19aa85/0x19aa92 write `[esi+0x38]`=choice and set the dirty byte — no store
+    // wrapper call, no wire (vault main_menu.md §59 addendum 9).
+    ConfigRowArm::WindowLocal {
+        obj_off: 0x38,
+        value: 0,
+    },
+    ConfigRowArm::WindowLocal {
+        obj_off: 0x38,
+        value: 1,
+    },
     ConfigRowArm::Radio {
         store_id: 0x13,
         value: 2,
@@ -2346,6 +2379,24 @@ pub fn config_page_supports_slider_pin(window: &str) -> bool {
     })
 }
 
+/// State key for a Config-family window: pages keep their index in
+/// RETAIL_CONFIG_PAGE_WINDOWS and sub-windows start at 32 (index in
+/// RETAIL_CONFIG_SUB_WINDOWS + 32) — a kuluu-internal coordinate, not an option id;
+/// used with the retail object field offset by
+/// [`DynamicMenu::config_window_choices`] (vault main_menu.md §59 addendum 9).
+pub fn config_window_state_key(window: &str) -> Option<u8> {
+    RETAIL_CONFIG_PAGE_WINDOWS
+        .iter()
+        .position(|w| *w == window)
+        .map(|i| i as u8)
+        .or_else(|| {
+            RETAIL_CONFIG_SUB_WINDOWS
+                .iter()
+                .position(|w| *w == window)
+                .map(|i| 32 + i as u8)
+        })
+}
+
 /// The option the bit helper FFXiMain.dll retail-2026-09 RVA 0x1938F0 pins as its
 /// read-modify-write target - a flag dword whose individual bits are the on/off
 /// state of several Config pairs (`conf12wi` bits 7 and 6, `conf3win` bit 2;
@@ -2396,6 +2447,13 @@ pub fn config_window_rows(
     table: &ConfigDatRows,
     option_values: &std::collections::BTreeMap<u32, i32>,
     option_edit: Option<(u32, u8)>,
+    // Per-window local choices for the `WindowLocal` pair rows, keyed by
+    // config_window_state_key + the retail window object's field offset (`conf3win`'s
+    // `[obj+0x38]`, arms .text FFXiMain.dll retail-2026-09 RVA 0x19aa85/0x19aa92).
+    // Absent means never chosen — retail boots those fields to −1 (.text 0x19a8b8),
+    // so neither row of a fresh pair carries the mark (vault main_menu.md §59
+    // addendum 9; bead kuluu-o9qt7.20.1.2).
+    window_choices: &std::collections::BTreeMap<(u8, u16), i32>,
 ) -> Vec<DynamicMenuRow> {
     let radio_arm = |position: usize| match window {
         "conf5win" => CONF5WIN_RADIO_ARMS.get(position).copied(),
@@ -2460,6 +2518,24 @@ pub fn config_window_rows(
                         },
                         action: DynamicMenuAction::ConfigOptionBitSet {
                             bit: *bit,
+                            value: *value,
+                        },
+                    };
+                }
+                // The window-local pair rows mark from the per-window choice map
+                // (arms .text FFXiMain.dll retail-2026-09 RVA 0x19aa85/0x19aa92 write
+                // only `[obj+0x38]`); an unset window has no mark on either row.
+                Some(ConfigRowArm::WindowLocal { obj_off, value }) => {
+                    let key = config_window_state_key(window).unwrap_or_default();
+                    return DynamicMenuRow {
+                        label: if window_choices.get(&(key, *obj_off)) == Some(value) {
+                            format!("\u{bb} {label}")
+                        } else {
+                            label.clone()
+                        },
+                        action: DynamicMenuAction::ConfigWindowChoiceSet {
+                            window_key: key,
+                            obj_off: *obj_off,
                             value: *value,
                         },
                     };
@@ -3640,6 +3716,7 @@ pub fn refresh_dynamic_menu_rows(
                 &config_rows,
                 &dynamic.config_option_values,
                 dynamic.option_edit,
+                &dynamic.config_window_choices,
             )
         }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
@@ -6711,6 +6788,7 @@ mod tests {
             &table,
             &std::collections::BTreeMap::new(),
             None,
+            &std::collections::BTreeMap::new(),
         );
         assert_eq!(hub.len(), 13);
         for (position, row) in hub.iter().enumerate() {
@@ -6730,8 +6808,13 @@ mod tests {
             }
         }
 
-        let launcher =
-            config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None);
+        let launcher = config_window_rows(
+            "conf5m",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         let subs: Vec<u8> = launcher
             .iter()
             .map(|row| match row.action {
@@ -6741,7 +6824,13 @@ mod tests {
             .collect();
         assert_eq!(subs, vec![2u8, 1, 0]);
 
-        let page = config_window_rows("conf7", &table, &std::collections::BTreeMap::new(), None);
+        let page = config_window_rows(
+            "conf7",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(page.is_empty(), "unloaded window lists nothing");
     }
 
@@ -6760,7 +6849,13 @@ mod tests {
         );
         let mut values = std::collections::BTreeMap::new();
         values.insert(0xB4u32, 2i32);
-        let rows = config_window_rows("conf5win", &table, &values, None);
+        let rows = config_window_rows(
+            "conf5win",
+            &table,
+            &values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
         for (position, row) in rows.iter().enumerate() {
             match row.action {
@@ -6785,7 +6880,13 @@ mod tests {
         };
         let mut table = ConfigDatRows::default();
         table.ensure_loaded(Some(&root));
-        let rows = config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None);
+        let rows = config_window_rows(
+            "conf5win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
     }
 
@@ -6803,7 +6904,13 @@ mod tests {
             "conf2win".to_string(),
             (0..11u32).map(|i| (700 + i, format!("row{i}"))).collect(),
         );
-        let rows = config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
+        let rows = config_window_rows(
+            "conf2win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows.len(), CONF2WIN_ROW_ARMS.len());
         // Rows 1-2: radio pair store 7 (0/1). Slider stores keep their §58 boot
         // defaults; the pin marks its row and shows the live value.
@@ -6849,7 +6956,13 @@ mod tests {
         ));
         let mut values = std::collections::BTreeMap::new();
         values.insert(9u32, 42i32);
-        let rows = config_window_rows("conf2win", &table, &values, Some((0x37u32, 51u8)));
+        let rows = config_window_rows(
+            "conf2win",
+            &table,
+            &values,
+            Some((0x37u32, 51u8)),
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(
             rows[2].label, "row2: 42",
             "a written value replaces the boot default"
@@ -6860,7 +6973,13 @@ mod tests {
         );
         // A radio group member matching the store's current value wears the marker.
         values.insert(0xCAu32, 1i32);
-        let rows = config_window_rows("conf2win", &table, &values, None);
+        let rows = config_window_rows(
+            "conf2win",
+            &table,
+            &values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows[10].label, "\u{bb} row10");
         assert!(!rows[9].label.starts_with('\u{bb}'));
     }
@@ -6878,7 +6997,13 @@ mod tests {
             "conf13wi".to_string(),
             (0..6u32).map(|i| (600 + i, format!("t{i}"))).collect(),
         );
-        let rows = config_window_rows("conf13wi", &table, &std::collections::BTreeMap::new(), None);
+        let rows = config_window_rows(
+            "conf13wi",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows.len(), 6);
         let want = [
             (0usize, 0xC9u32, 0i32),
@@ -6907,7 +7032,13 @@ mod tests {
                                       // mask with bit 6 set marks row 14 and leaves row 13 unmarked (vault
                                       // main_menu.md §59 addendum 5).
         values.insert(CONFIG_OPTION_MISC_FLAGS, 1 << 6);
-        let rows = config_window_rows("conf12wi", &table, &values, None);
+        let rows = config_window_rows(
+            "conf12wi",
+            &table,
+            &values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(rows.len(), CONF12WI_RADIO_ARMS.len());
         assert_eq!(
             rows[4].label, "\u{bb} p4",
@@ -6949,8 +7080,39 @@ mod tests {
                 (0..15u32).map(|i| (400 + i, format!("{w}{i}"))).collect(),
             );
         }
-        let r3 = config_window_rows("conf3win", &table, &std::collections::BTreeMap::new(), None);
+        let r3 = config_window_rows(
+            "conf3win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(r3.len(), 15);
+        // Ids 3/4 are the window-local pair (arms .text FFXiMain.dll retail-2026-09
+        // RVA 0x19aa85/0x19aa92): unmarked while no choice is stored — retail boots
+        // `[obj+0x38]` to −1 (.text 0x19a8b8) so neither row starts marked (vault
+        // main_menu.md §59 addendum 9).
+        assert!(!r3[2].label.starts_with('\u{bb}'));
+        assert!(!r3[3].label.starts_with('\u{bb}'));
+        assert!(matches!(
+            r3[2].action,
+            DynamicMenuAction::ConfigWindowChoiceSet {
+                window_key: 4,
+                obj_off: 0x38,
+                value: 0
+            }
+        ));
+        let mut choices = std::collections::BTreeMap::new();
+        choices.insert((4u8, 0x38u16), 1i32);
+        let r3 = config_window_rows(
+            "conf3win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &choices,
+        );
+        assert_eq!(r3[2].label, "conf3win2");
+        assert_eq!(r3[3].label, "\u{bb} conf3win3");
         for (position, store_id) in [(0usize, 0x13u32), (4, 0x13)] {
             let want = if position == 4 { 2 } else { 0 };
             assert!(
@@ -6984,13 +7146,15 @@ mod tests {
                 value: 1
             }
         ));
-        for position in [2usize, 3] {
+        // Ids 3/4 answer their arms (.text FFXiMain.dll retail-2026-09 RVA
+        // 0x19aa85/0x19aa92) as the window-local pair, not a fallback row.
+        for (position, value) in [(2usize, 0i32), (3, 1)] {
             assert!(
                 matches!(
                     r3[position].action,
-                    DynamicMenuAction::ConfigOptionRow { .. }
+                    DynamicMenuAction::ConfigWindowChoiceSet { window_key: 4, obj_off: 0x38, value: v } if v == value
                 ),
-                "undug conf3win row {position}"
+                "conf3win window-local row {position}"
             );
         }
         // Row 11 is the slider entry arm on store 0x3C (boot/ceiling 50).
@@ -7000,7 +7164,13 @@ mod tests {
         ));
         assert_eq!(r3[10].label, "conf3win10: 50");
 
-        let r6 = config_window_rows("conf6win", &table, &std::collections::BTreeMap::new(), None);
+        let r6 = config_window_rows(
+            "conf6win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(r6.len(), 15);
         for (position, store_id) in [(0usize, 0x3Eu32), (3, 0x40), (6, 0x43)] {
             assert!(
@@ -7037,12 +7207,24 @@ mod tests {
         // RVA 0x19B358) rather than a bit of the flag mask.
         let mut primary = std::collections::BTreeMap::new();
         primary.insert(0x9Du32, 1i32);
-        let r6 = config_window_rows("conf6win", &table, &primary, None);
+        let r6 = config_window_rows(
+            "conf6win",
+            &table,
+            &primary,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(
             r6[12].label.starts_with(mark),
             "primary mark on store 0x9D row: {}",
             r6[12].label
         );
+        // The window state keys are kuluu coordinates: pages by their index in
+        // RETAIL_CONFIG_PAGE_WINDOWS, subs at 32+index — and the hub itself has no
+        // key because it carries no WindowLocal rows.
+        assert_eq!(config_window_state_key("conf3win"), Some(4));
+        assert_eq!(config_window_state_key("k1assign"), Some(35));
+        assert_eq!(config_window_state_key(RETAIL_CONFIG_HUB_WINDOW), None);
     }
 
     /// `conf4`/`conf7` rows answer their arm tables (bead kuluu-o9qt7.20.1):
@@ -7065,7 +7247,13 @@ mod tests {
             );
         }
         let empty = std::collections::BTreeMap::new();
-        let r4 = config_window_rows("conf4", &table, &empty, None);
+        let r4 = config_window_rows(
+            "conf4",
+            &table,
+            &empty,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(r4.len(), 9);
         for (position, value) in [(0usize, 0i32), (1, 1)] {
             assert!(
@@ -7091,7 +7279,13 @@ mod tests {
         }
         let mut values = std::collections::BTreeMap::new();
         values.insert(0x41u32, -1i32);
-        let r4 = config_window_rows("conf4", &table, &values, None);
+        let r4 = config_window_rows(
+            "conf4",
+            &table,
+            &values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(
             r4[8].label.starts_with(mark),
             "off row must mark at store 0x41 = −1: {}",
@@ -7107,7 +7301,13 @@ mod tests {
             marked_levels.is_empty(),
             "level rows must not mark at store 0x41 = −1: {marked_levels:?}"
         );
-        let r7 = config_window_rows("conf7", &table, &empty, None);
+        let r7 = config_window_rows(
+            "conf7",
+            &table,
+            &empty,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(r7.len(), 14);
         for (position, (store_id, value)) in [
             (0usize, (0x90u32, 0i32)),
@@ -7206,7 +7406,13 @@ mod tests {
             );
         }
         let empty = std::collections::BTreeMap::new();
-        let rows = config_window_rows("conftxtc", &table, &empty, None);
+        let rows = config_window_rows(
+            "conftxtc",
+            &table,
+            &empty,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         for mode in 0..4i32 {
             assert!(
                 matches!(
@@ -7226,7 +7432,13 @@ mod tests {
             "conftxtc row 5 opens the Yes/No panel"
         );
 
-        let rows = config_window_rows("conf11m", &table, &empty, None);
+        let rows = config_window_rows(
+            "conf11m",
+            &table,
+            &empty,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         for (position, mode) in [(0usize, 0i32), (1, 1)] {
             assert!(
                 matches!(
@@ -7238,7 +7450,13 @@ mod tests {
             );
         }
 
-        let rows = config_window_rows("conf11l", &table, &empty, None);
+        let rows = config_window_rows(
+            "conf11l",
+            &table,
+            &empty,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(rows.iter().enumerate().all(|(position, row)| matches!(
             &row.action,
             DynamicMenuAction::OpenRetailConfigCompanion { mode, opens }

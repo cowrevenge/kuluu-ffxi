@@ -585,6 +585,22 @@ pub(super) fn confirm_menu_at_cursor(
                 );
                 return None;
             }
+            // The window-local pair rows (`conf3win` ids 3/4, arms .text FFXiMain.dll
+            // retail-2026-09 RVA 0x19aa85/0x19aa92) write only their own object field
+            // — kuluu keeps the choice in `config_window_choices`: never the option
+            // store, never the wire; the window stays open like retail's (vault
+            // main_menu.md §59 addendum 9).
+            if let A::ConfigWindowChoiceSet {
+                window_key,
+                obj_off,
+                value,
+            } = action
+            {
+                dynamic
+                    .config_window_choices
+                    .insert((window_key, obj_off), value);
+                return None;
+            }
             // A slider row's select arm does NOT write — it pins the window into
             // edit mode on that store (conf2win entry arms 3–7 only set the edit
             // bytes/mode and stash the widget; handler FFXiMain.dll retail-2026-09
@@ -3199,8 +3215,13 @@ mod menu_key_tests {
             "conf2win".to_string(),
             (0..11u32).map(|i| (700 + i, format!("srow{i}"))).collect(),
         );
-        harness.dynamic.rows =
-            config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
+        harness.dynamic.rows = config_window_rows(
+            "conf2win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RetailConfigPage(0));
         // Row 4 selects store 0xA — boots at its max, so Right must die first.
@@ -3285,8 +3306,13 @@ mod menu_key_tests {
             "conf3win".to_string(),
             (0..15u32).map(|i| (600 + i, format!("c3row{i}"))).collect(),
         );
-        harness.dynamic.rows =
-            config_window_rows("conf3win", &table, &std::collections::BTreeMap::new(), None);
+        harness.dynamic.rows = config_window_rows(
+            "conf3win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RetailConfigPage(4));
         stack.current_mut().unwrap().cursor = 10;
@@ -3566,6 +3592,87 @@ mod menu_dispatch_tests {
         confirm_row_dynamic(stack, scene_state, cmd_tx, &mut dynamic, item_bag)
     }
 
+    /// `conf3win` ids 3/4 (index 2/3) are the window-local pair: select writes only
+    /// `(state_key, obj_off)` into `config_window_choices`, marks that row on the next
+    /// build, flips when the partner row is taken, and never touches the option store
+    /// or the wire (arms .text FFXiMain.dll retail-2026-09 RVA 0x19aa85/0x19aa92;
+    /// vault main_menu.md §59 addendum 9; bead kuluu-o9qt7.20.1.2).
+    #[test]
+    fn conf3win_window_local_pair_flips_on_the_object_not_the_store() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf3win".to_string(),
+            (0..15u32).map(|i| (800 + i, format!("c3_{i}"))).collect(),
+        );
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        dynamic.rows = config_window_rows(
+            "conf3win",
+            &table,
+            &dynamic.config_option_values,
+            None,
+            &dynamic.config_window_choices,
+        );
+        assert!(!dynamic.rows[2].label.starts_with('\u{bb}'));
+        let mut stack = MenuStack::root();
+        // Page index 4 of RETAIL_CONFIG_PAGE_WINDOWS is `conf3win`.
+        stack.push(MenuKind::RetailConfigPage(4));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        stack.current_mut().unwrap().cursor = 2; // select id 3
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            stack.levels.len(),
+            2,
+            "the window keeps retail's open window"
+        );
+        assert_eq!(
+            dynamic.config_window_choices.get(&(4u8, 0x38u16)).copied(),
+            Some(0)
+        );
+
+        // The partner row flips the same object field.
+        stack.current_mut().unwrap().cursor = 3; // select id 4
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic.config_window_choices.get(&(4u8, 0x38u16)).copied(),
+            Some(1)
+        );
+
+        // Marks follow the stored choice; nothing landed in the option store or wire.
+        let rows = config_window_rows(
+            "conf3win",
+            &table,
+            &dynamic.config_option_values,
+            None,
+            &dynamic.config_window_choices,
+        );
+        assert_eq!(rows[2].label, "c3_2");
+        assert_eq!(rows[3].label, "\u{bb} c3_3");
+        assert!(dynamic.config_option_values.is_empty());
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "window-local writes never ride the wire"
+        );
+    }
+
     /// `conf6win` row 10 (index 9) is the dialog arm (.text FFXiMain.dll
     /// retail-2026-09 RVA 0x19B309): select pushes the Yes/No prompt (opens on No),
     /// No leaves the option store untouched, and Yes runs both panels' factory reset —
@@ -3587,7 +3694,13 @@ mod menu_dispatch_tests {
         for id in 0x4Au32..=0x89 {
             dynamic.config_option_values.insert(id, -7);
         }
-        dynamic.rows = config_window_rows("conf6win", &table, &dynamic.config_option_values, None);
+        dynamic.rows = config_window_rows(
+            "conf6win",
+            &table,
+            &dynamic.config_option_values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         let mut stack = MenuStack::root();
         // Page index 5 of RETAIL_CONFIG_PAGE_WINDOWS is `conf6win`.
         stack.push(MenuKind::RetailConfigPage(5));
@@ -3832,7 +3945,13 @@ mod menu_dispatch_tests {
             (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("configwi", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "configwi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
@@ -3903,7 +4022,13 @@ mod menu_dispatch_tests {
             ],
         );
         let mut launcher = DynamicMenu {
-            rows: config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf5m",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
@@ -3937,7 +4062,13 @@ mod menu_dispatch_tests {
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
         let mut page = DynamicMenu {
-            rows: config_window_rows("textcol2", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "textcol2",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
@@ -3997,7 +4128,13 @@ mod menu_dispatch_tests {
             ConfigRowArm::Companion { mode: 2, opens } if *opens == CONFTXT_TEXT_OPENS
         ));
         let mut dynamic = kuluu_render::hud::menu::DynamicMenu {
-            rows: config_window_rows("conftxtc", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conftxtc",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..Default::default()
         };
         let mut stack = MenuStack::root();
@@ -4041,7 +4178,13 @@ mod menu_dispatch_tests {
             (0..16u32).map(|i| (900 + i, format!("opt{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf5win",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         assert!(
@@ -4083,6 +4226,7 @@ mod menu_dispatch_tests {
             &table,
             &dynamic.config_option_values,
             dynamic.option_edit,
+            &std::collections::BTreeMap::new(),
         );
         assert_eq!(rows[9].label, "\u{bb} opt9");
         assert!(!rows[8].label.starts_with('\u{bb}'));
@@ -4806,7 +4950,13 @@ mod menu_dispatch_tests {
             (0..6u32).map(|i| (600 + i, format!("c13_{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("conf13wi", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf13wi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
@@ -4832,7 +4982,13 @@ mod menu_dispatch_tests {
             );
             assert_eq!(dynamic.config_option_values.get(&store_id), Some(&value));
         }
-        let rows = config_window_rows("conf13wi", &table, &dynamic.config_option_values, None);
+        let rows = config_window_rows(
+            "conf13wi",
+            &table,
+            &dynamic.config_option_values,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         // store 0xCE currently holds 0 (row 6) - only that row wears the mark.
         assert_eq!(rows[5].label, "\u{bb} c13_5");
         assert!(!rows[4].label.starts_with('\u{bb}'));
@@ -4855,7 +5011,13 @@ mod menu_dispatch_tests {
             (0..14u32).map(|i| (800 + i, format!("c12_{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("conf12wi", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf12wi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();

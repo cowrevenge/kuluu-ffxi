@@ -625,6 +625,10 @@ pub fn key_item_row_label(id: u16, seen: bool) -> String {
 #[derive(bevy::prelude::Resource, Debug, Clone, Default)]
 pub struct DynamicMenu {
     pub rows: Vec<DynamicMenuRow>,
+    /// The remodel confirm question, copied from the DAT table-12 catalog by
+    /// [`refresh_dynamic_menu_rows`] (GetText id [`ROOMLIST_CONFIRM_PROMPT_ID`]; bead
+    /// kuluu-o9qt7.13.5.2). `None` while that catalog has not loaded or holds no such string.
+    pub roomlist_prompt: Option<String>,
     /// Page-1/2 Command-menu selector captions read live from the DAT window
     /// records and short-caption catalog (`menuwind` then `socialme`, display
     /// order). While non-empty, [`entry_label`] prefers it over the static
@@ -639,8 +643,10 @@ pub struct DynamicMenu {
     pub config_option_values: std::collections::BTreeMap<u32, i32>,
     /// A slider row pinned in edit mode: (store id, live value). While set on
     /// the top window, Left/Right step the value ±1 with retail's clamps and
-    /// write through immediately; Up/Down are swallowed so the cursor cannot
-    /// move; Enter/Esc save and unpin (conf2win key tables .text 0x197874/
+    /// write through immediately. Up/Down are NOT part of that control: they drop the pin
+    /// and move rows like any other row (bead kuluu-8l5h4 — every direction reads its own
+    /// neighbour byte in the input switch FFXiMain.dll retail-2026-09 RVA 0x118260); Enter/Esc
+    /// save and unpin (conf2win key tables .text 0x197874/
     /// 0x19788C/0x1978A4 of handler FFXiMain.dll retail-2026-09 RVA 0x197470;
     /// bead kuluu-o9qt7.20.1 part B). Only config pages whose arms are lawed
     /// support pinning; any other top window drops the pin.
@@ -1690,6 +1696,11 @@ pub struct ConfigDatRows {
     /// anchor law vault main_menu.md §7/§16) — window placement IS DAT data
     /// (companion_windows law: each window sits at its record's rect).
     pub frames: std::collections::BTreeMap<String, (i16, i16, i16)>,
+    /// The roomlist remodel confirm question, read from GetText **table 12 id
+    /// [`ROOMLIST_CONFIRM_PROMPT_ID`]** at load — retail's row callback hands exactly that string
+    /// to the dialog service (.text FFXiMain.dll retail-2026-09 0x1D6B85 fetches it just before
+    /// calling helper 0x210E30; vault main_menu.md §59 addendum 21). `None` until the DAT loads.
+    pub roomlist_prompt: Option<String>,
 }
 
 impl ConfigDatRows {
@@ -1813,6 +1824,13 @@ impl ConfigDatRows {
             }
         }
         self.frames = frames;
+        self.roomlist_prompt = usize::try_from(ROOMLIST_CONFIRM_PROMPT_ID)
+            .ok()
+            .and_then(|i| {
+                style_catalog
+                    .as_ref()
+                    .and_then(|c| c.text(i).map(str::to_string))
+            });
         self.loaded = true;
     }
 
@@ -3771,6 +3789,12 @@ pub const ROOMLIST_DAT_WINDOW: &str = "roomlist";
 /// 450 = "No changes" — then 0x1be..0x1c1.)
 const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [450, 446, 447, 448, 449];
 
+/// The confirm question the remodel prompt shows, from the same GetText table 12 that supplies the
+/// row captions. The row callback fetches it right before opening the dialog (.text FFXiMain.dll
+/// retail-2026-09 0x1D6B85 → dialog service RVA 0x210E30; vault main_menu.md §59 addendum 21); the
+/// catalog string itself is pinned against a real install by ffxi-dat's table-12 test.
+pub const ROOMLIST_CONFIRM_PROMPT_ID: u32 = 451;
+
 /// Row i of the pool sends `MYROOM_IS{Kind=Remodel, Param2 = ROW_STYLES[i]}` (sender
 /// .text FFXiMain.dll retail-2026-09 0x1D6AD0 reads Param2 = u16@[record+2], written by
 /// the fill loop from the style words {0, 615, 616, 617, 618} pushed at .text
@@ -4856,6 +4880,12 @@ pub fn refresh_dynamic_menu_rows(
     mut selector_captions: ResMut<CommandSelectorCaptions>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
+    // The remodel prompt's question is DAT text, so it rides in with every refresh (bead
+    // kuluu-o9qt7.13.5.2) rather than being typed into the client.
+    if dynamic.roomlist_prompt != config_rows.roomlist_prompt {
+        let prompt = config_rows.roomlist_prompt.clone();
+        dynamic.roomlist_prompt = prompt;
+    }
     let active_kind = match &*mode {
         InputMode::Menu(stack) => stack.current().map(|l| l.kind),
         _ => None,
@@ -6951,6 +6981,21 @@ mod tests {
             ],
             "roomlist captions must stay the table-12 catalog strings"
         );
+        assert_eq!(
+            table.roomlist_prompt.as_deref(),
+            Some("Make changes?"),
+            "the remodel confirm question must be GetText table-12 id {ROOMLIST_CONFIRM_PROMPT_ID} text (bead kuluu-o9qt7.13.5.2)"
+        );
+    }
+
+    /// The prompt id is what the row callback fetches just before opening the dialog (.text
+    /// FFXiMain.dll retail-2026-09 0x1D6B85 → dialog service RVA 0x210E30), and until that catalog
+    /// loads nothing renders in its place — there is no typed fallback (bead kuluu-o9qt7.13.5.2).
+    #[test]
+    fn remodel_prompt_id_matches_the_fetch_and_absent_dat_shows_nothing() {
+        assert_eq!(ROOMLIST_CONFIRM_PROMPT_ID, 451);
+        assert_eq!(DynamicMenu::default().roomlist_prompt, None);
+        assert_eq!(ConfigDatRows::default().roomlist_prompt, None);
     }
 
     /// Placement law: every Config page draws at its own menu record's rect; when a

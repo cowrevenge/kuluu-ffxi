@@ -210,6 +210,10 @@ fn entry_help(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> String {
             _ => "Select an action.".to_string(),
         },
         MenuKind::ItemDropConfirm { .. } => ITEM_DROP_CONFIRM_HELP.to_string(),
+        // The remodel prompt's question is GetText table-12 text, read from the DAT at load — so it
+        // renders nothing until that catalog loads instead of being typed into the client (.text
+        // FFXiMain.dll retail-2026-09 0x1D6B85; bead kuluu-o9qt7.13.5.2).
+        MenuKind::RoomListConfirm { .. } => dynamic.roomlist_prompt.clone().unwrap_or_default(),
         MenuKind::EmoteList => "Select an emote.".to_string(),
         MenuKind::Status => "Select a category.".to_string(),
         _ => "Select an option.".to_string(),

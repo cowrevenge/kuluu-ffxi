@@ -256,11 +256,14 @@ pub enum DynamicMenuAction {
         store_id: u32,
         value: i32,
     },
-    /// The same radio write through the second store wrapper FFXiMain.dll
-    /// retail-2026-09 RVA 0x1938F0 — its own option bank, marked from
-    /// [`DynamicMenu::config_option_values_bank2`] (bead kuluu-o9qt7.20.1).
-    ConfigOptionSet2 {
-        store_id: u32,
+    /// A binary row of the shared flag mask: select sets or clears `bit` in
+    /// option [`CONFIG_OPTION_MISC_FLAGS`] through the read-modify-write helper
+    /// FFXiMain.dll retail-2026-09 RVA 0x1938F0 (callee .text 0x193910 reads the
+    /// option via wrapper 0x193850, ORs/ANDs one bit, writes back through 0x193830
+    /// — there is no second store bank; vault main_menu.md §59 addendum 5). The
+    /// row marks when the stored dword already holds that bit value.
+    ConfigOptionBitSet {
+        bit: u8,
         value: i32,
     },
     /// A slider row of a law'd config page (`conf2win` today): select pins the
@@ -583,10 +586,6 @@ pub struct DynamicMenu {
     /// this machine: LSB's c2s 0x0DC accepts only the named SAVE_CONF bits
     /// (vendor/server/src/map/packets/c2s/0x0dc_config.cpp), not store options.
     pub config_option_values: std::collections::BTreeMap<u32, i32>,
-    /// Options written through the second store wrapper FFXiMain.dll
-    /// retail-2026-09 RVA 0x1938F0 (bank key = its own record bank; same absent
-    /// = unmarked law as [`Self::config_option_values`]; bead kuluu-o9qt7.20.1).
-    pub config_option_values_bank2: std::collections::BTreeMap<u32, i32>,
     /// A slider row pinned in edit mode: (store id, live value). While set on
     /// the top window, Left/Right step the value ±1 with retail's clamps and
     /// write through immediately; Up/Down are swallowed so the cursor cannot
@@ -1735,8 +1734,9 @@ const CONF5WIN_RADIO_ARMS: [(u32, i32); 16] = [
 ];
 
 /// A law'd select arm of a Config-family row: an immediate radio write through
-/// the primary store wrapper FFXiMain.dll retail-2026-09 RVA 0x193830 or its
-/// bank-2 sibling 0x1938F0, or a slider row that pins into edit mode instead.
+/// the primary store wrapper FFXiMain.dll retail-2026-09 RVA 0x193830, the same
+/// store reached one bit at a time through helper 0x1938F0, a companion drill, or
+/// a slider row that pins into edit mode instead.
 ///
 /// Values are signed dwords: `conf4`'s off arm stores −1 (helper FFXiMain.dll
 /// retail-2026-09 RVA 0x19C510 zero branch, push at 0x19C557).
@@ -1745,11 +1745,15 @@ pub enum ConfigRowArm {
         store_id: u32,
         value: i32,
     },
-    /// Radio pair/triple written through the second store wrapper
-    /// FFXiMain.dll retail-2026-09 RVA 0x1938F0 (its own option bank; used by
-    /// `conf12wi` rows 7/8 and 13/14, vault main_menu.md §59 addendum 2).
-    Radio2 {
-        store_id: u32,
+    /// A binary pair whose arm calls the bit helper FFXiMain.dll retail-2026-09
+    /// RVA 0x1938F0 rather than a plain store write: the immediate the handler
+    /// pushes is a **bit index** into option [`CONFIG_OPTION_MISC_FLAGS`]'s flag
+    /// dword (`conf12wi` rows 7/8 → bit 7 at .text 0x19BA8E, rows 13/14 → bit 6 at
+    /// 0x19BADA; `conf3win` rows 12/13 → bit 2), and each row asks for one bit
+    /// state. vault main_menu.md §59 addendum 5 corrects the earlier "bank-2 store
+    /// id" reading from addendum 2.
+    RadioBit {
+        bit: u8,
         value: i32,
     },
     Slider {
@@ -1823,7 +1827,9 @@ pub const CONF13WI_RADIO_ARMS: &[ConfigRowArm] = &[
 /// 0x19B9C0; each shared arm computes its value from the row's own select id
 /// (xor+cmp+sete/setne), so every pair is a binary option whose on/off order
 /// varies per row — captured here as the resolved per-row values. Rows 7/8 and
-/// 13/14 write through bank-2 wrapper 0x1938F0 (stores 7 and 6). Row 3/4's arm
+/// 13/14 drive the bit helper 0x1938F0 on option 0x99 - **bit 7** (.text
+/// 0x19BA8E) and **bit 6** (0x19BADA); addendum 5 corrected these from "stores".
+/// Row 3/4's arm
 /// also reads its old value (wrapper 0x193850) and fires helper 0x1A8030(4)
 /// when leaving the on state — kuluu records the write; the helper side effect
 /// is noted open in vault main_menu.md §59 addendum 2.
@@ -1852,14 +1858,8 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
         store_id: 0xC0,
         value: 0,
     },
-    ConfigRowArm::Radio2 {
-        store_id: 7,
-        value: 0,
-    },
-    ConfigRowArm::Radio2 {
-        store_id: 7,
-        value: 1,
-    },
+    ConfigRowArm::RadioBit { bit: 7, value: 0 },
+    ConfigRowArm::RadioBit { bit: 7, value: 1 },
     ConfigRowArm::Radio {
         store_id: 0xC2,
         value: 1,
@@ -1876,14 +1876,8 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
         store_id: 0xC3,
         value: 0,
     },
-    ConfigRowArm::Radio2 {
-        store_id: 6,
-        value: 0,
-    },
-    ConfigRowArm::Radio2 {
-        store_id: 6,
-        value: 1,
-    },
+    ConfigRowArm::RadioBit { bit: 6, value: 0 },
+    ConfigRowArm::RadioBit { bit: 6, value: 1 },
 ];
 
 /// `conf3win`'s fifteen arms - jump table .text 0x19ac30 (guard `dec; cmp
@@ -1892,8 +1886,8 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
 /// rows 3/4 set window-local bytes [esi+0x38]/[esi+0x3c] only (semantics open);
 /// rows 6/7/8 store 0x3A {2, ebx=0, 1}; rows 9/10 store 0x3B {1, ebx=0}; row 11
 /// pins a slider (widget [esi+0x48], edit byte [esi+0x20]) whose store lives in
-/// the pin region from .text 0x19AB94 - open; rows 12/13 write bank-2 wrapper
-/// 0x1938F0 (store 2, values 1/ebx=0); rows 14/15 store 0xA5 {ebx=0, 1} (vault
+/// the pin region from .text 0x19AB94 - open; rows 12/13 are the bit pair on
+/// option 0x99 (**bit 2**, values 1/ebx=0); rows 14/15 store 0xA5 {ebx=0, 1} (vault
 /// main_menu.md §59 addendum 3; bead kuluu-o9qt7.20.1).
 const CONF3WIN_ROW_ARMS: [ConfigRowArm; 15] = [
     ConfigRowArm::Radio {
@@ -1931,14 +1925,8 @@ const CONF3WIN_ROW_ARMS: [ConfigRowArm; 15] = [
         value: 0,
     },
     ConfigRowArm::Plain,
-    ConfigRowArm::Radio2 {
-        store_id: 2,
-        value: 1,
-    },
-    ConfigRowArm::Radio2 {
-        store_id: 2,
-        value: 0,
-    },
+    ConfigRowArm::RadioBit { bit: 2, value: 1 },
+    ConfigRowArm::RadioBit { bit: 2, value: 0 },
     ConfigRowArm::Radio {
         store_id: 0xA5,
         value: 0,
@@ -2317,6 +2305,12 @@ pub fn config_page_supports_slider_pin(window: &str) -> bool {
     })
 }
 
+/// The option the bit helper FFXiMain.dll retail-2026-09 RVA 0x1938F0 pins as its
+/// read-modify-write target - a flag dword whose individual bits are the on/off
+/// state of several Config pairs (`conf12wi` bits 7 and 6, `conf3win` bit 2;
+/// vault main_menu.md §59 addendum 5).
+pub const CONFIG_OPTION_MISC_FLAGS: u32 = 0x99;
+
 /// One Config-family window's rows: DAT captions in file order, each carrying
 /// its handler-grounded select action — hub row i name-opens page i (twelve
 /// jump-table branches; the thirteenth widget falls to the default tail),
@@ -2329,7 +2323,6 @@ pub fn config_window_rows(
     table: &ConfigDatRows,
     option_values: &std::collections::BTreeMap<u32, i32>,
     option_edit: Option<(u32, u8)>,
-    option_values_bank2: &std::collections::BTreeMap<u32, i32>,
 ) -> Vec<DynamicMenuRow> {
     let radio_arm = |position: usize| match window {
         "conf5win" => CONF5WIN_RADIO_ARMS.get(position).copied(),
@@ -2380,15 +2373,20 @@ pub fn config_window_rows(
                         },
                     };
                 }
-                Some(ConfigRowArm::Radio2 { store_id, value }) => {
+                Some(ConfigRowArm::RadioBit { bit, value }) => {
+                    // The pair marks from one dword: the row is active when the
+                    // stored flag mask already carries its own bit value.
+                    let marked = option_values
+                        .get(&CONFIG_OPTION_MISC_FLAGS)
+                        .is_some_and(|mask| (((*mask as u32) >> *bit) & 1) as i32 == *value);
                     return DynamicMenuRow {
-                        label: if option_values_bank2.get(store_id) == Some(value) {
+                        label: if marked {
                             format!("\u{bb} {label}")
                         } else {
                             label.clone()
                         },
-                        action: DynamicMenuAction::ConfigOptionSet2 {
-                            store_id: *store_id,
+                        action: DynamicMenuAction::ConfigOptionBitSet {
+                            bit: *bit,
                             value: *value,
                         },
                     };
@@ -3560,7 +3558,6 @@ pub fn refresh_dynamic_menu_rows(
                 &config_rows,
                 &dynamic.config_option_values,
                 dynamic.option_edit,
-                &dynamic.config_option_values_bank2,
             )
         }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
@@ -6607,7 +6604,6 @@ mod tests {
             &table,
             &std::collections::BTreeMap::new(),
             None,
-            &std::collections::BTreeMap::new(),
         );
         assert_eq!(hub.len(), 13);
         for (position, row) in hub.iter().enumerate() {
@@ -6627,13 +6623,8 @@ mod tests {
             }
         }
 
-        let launcher = config_window_rows(
-            "conf5m",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let launcher =
+            config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None);
         let subs: Vec<u8> = launcher
             .iter()
             .map(|row| match row.action {
@@ -6643,13 +6634,7 @@ mod tests {
             .collect();
         assert_eq!(subs, vec![2u8, 1, 0]);
 
-        let page = config_window_rows(
-            "conf7",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let page = config_window_rows("conf7", &table, &std::collections::BTreeMap::new(), None);
         assert!(page.is_empty(), "unloaded window lists nothing");
     }
 
@@ -6668,13 +6653,7 @@ mod tests {
         );
         let mut values = std::collections::BTreeMap::new();
         values.insert(0xB4u32, 2i32);
-        let rows = config_window_rows(
-            "conf5win",
-            &table,
-            &values,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf5win", &table, &values, None);
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
         for (position, row) in rows.iter().enumerate() {
             match row.action {
@@ -6699,13 +6678,7 @@ mod tests {
         };
         let mut table = ConfigDatRows::default();
         table.ensure_loaded(Some(&root));
-        let rows = config_window_rows(
-            "conf5win",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
     }
 
@@ -6723,13 +6696,7 @@ mod tests {
             "conf2win".to_string(),
             (0..11u32).map(|i| (700 + i, format!("row{i}"))).collect(),
         );
-        let rows = config_window_rows(
-            "conf2win",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(rows.len(), CONF2WIN_ROW_ARMS.len());
         // Rows 1-2: radio pair store 7 (0/1). Slider stores keep their §58 boot
         // defaults; the pin marks its row and shows the live value.
@@ -6775,13 +6742,7 @@ mod tests {
         ));
         let mut values = std::collections::BTreeMap::new();
         values.insert(9u32, 42i32);
-        let rows = config_window_rows(
-            "conf2win",
-            &table,
-            &values,
-            Some((0x37u32, 51u8)),
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf2win", &table, &values, Some((0x37u32, 51u8)));
         assert_eq!(
             rows[2].label, "row2: 42",
             "a written value replaces the boot default"
@@ -6792,13 +6753,7 @@ mod tests {
         );
         // A radio group member matching the store's current value wears the marker.
         values.insert(0xCAu32, 1i32);
-        let rows = config_window_rows(
-            "conf2win",
-            &table,
-            &values,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf2win", &table, &values, None);
         assert_eq!(rows[10].label, "\u{bb} row10");
         assert!(!rows[9].label.starts_with('\u{bb}'));
     }
@@ -6816,13 +6771,7 @@ mod tests {
             "conf13wi".to_string(),
             (0..6u32).map(|i| (600 + i, format!("t{i}"))).collect(),
         );
-        let rows = config_window_rows(
-            "conf13wi",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let rows = config_window_rows("conf13wi", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(rows.len(), 6);
         let want = [
             (0usize, 0xC9u32, 0i32),
@@ -6847,24 +6796,30 @@ mod tests {
         );
         let mut values = std::collections::BTreeMap::new();
         values.insert(0xC0u32, 1i32); // the "on" member of the C0 pair is select id 5
-        let mut bank2 = std::collections::BTreeMap::new();
-        bank2.insert(6u32, 1i32); // last row
-        let rows = config_window_rows("conf12wi", &table, &values, None, &bank2);
+                                      // The two bit pairs share one dword (option CONFIG_OPTION_MISC_FLAGS), so a
+                                      // mask with bit 6 set marks row 14 and leaves row 13 unmarked (vault
+                                      // main_menu.md §59 addendum 5).
+        values.insert(CONFIG_OPTION_MISC_FLAGS, 1 << 6);
+        let rows = config_window_rows("conf12wi", &table, &values, None);
         assert_eq!(rows.len(), CONF12WI_RADIO_ARMS.len());
         assert_eq!(
             rows[4].label, "\u{bb} p4",
-            "primary-bank mark: C0 on-member is index 4"
+            "primary store mark: C0 on-member is index 4"
         );
         assert_eq!(
             rows[13].label, "\u{bb} p13",
-            "bank-2 mark comes from the second map"
+            "the bit-6 on-member marks from the shared flag mask"
+        );
+        assert!(
+            !rows[12].label.starts_with('\u{bb}'),
+            "the matching off-member stays unmarked"
         );
         for position in [6usize, 7, 12, 13] {
-            let store_id = if position < 8 { 7u32 } else { 6 };
+            let bit = if position < 8 { 7u8 } else { 6 };
             assert!(
                 matches!(rows[position].action,
-                    DynamicMenuAction::ConfigOptionSet2 { store_id: s, .. } if s == store_id),
-                "conf12wi row {position} lost its bank-2 pair arm: {:?}",
+                    DynamicMenuAction::ConfigOptionBitSet { bit: b, .. } if b == bit),
+                "conf12wi row {position} lost its bit pair arm: {:?}",
                 rows[position].action
             );
         }
@@ -6887,13 +6842,7 @@ mod tests {
                 (0..15u32).map(|i| (400 + i, format!("{w}{i}"))).collect(),
             );
         }
-        let r3 = config_window_rows(
-            "conf3win",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let r3 = config_window_rows("conf3win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(r3.len(), 15);
         for (position, store_id) in [(0usize, 0x13u32), (4, 0x13)] {
             let want = if position == 4 { 2 } else { 0 };
@@ -6915,14 +6864,11 @@ mod tests {
         }
         assert!(matches!(
             r3[11].action,
-            DynamicMenuAction::ConfigOptionSet2 { store_id: 2, .. }
+            DynamicMenuAction::ConfigOptionBitSet { bit: 2, value: 1 }
         ));
         assert!(matches!(
             r3[12].action,
-            DynamicMenuAction::ConfigOptionSet2 {
-                store_id: 2,
-                value: 0
-            }
+            DynamicMenuAction::ConfigOptionBitSet { bit: 2, value: 0 }
         ));
         assert!(matches!(
             r3[14].action,
@@ -6941,13 +6887,7 @@ mod tests {
             );
         }
 
-        let r6 = config_window_rows(
-            "conf6win",
-            &table,
-            &std::collections::BTreeMap::new(),
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let r6 = config_window_rows("conf6win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(r6.len(), 15);
         for (position, store_id) in [(0usize, 0x3Eu32), (3, 0x40), (6, 0x43)] {
             assert!(
@@ -6977,18 +6917,12 @@ mod tests {
             r6[9].action,
             DynamicMenuAction::ConfigOptionRow { .. }
         ));
-        // Store 0x9D writes through the primary wrapper, so its active-row
-        // mark comes from `option_values` (handler FFXiMain.dll retail-2026-09
-        // RVA 0x19B358), not bank 2.
+        // Store 0x9D writes through the primary wrapper, so its active-row mark
+        // comes straight from `option_values` (handler FFXiMain.dll retail-2026-09
+        // RVA 0x19B358) rather than a bit of the flag mask.
         let mut primary = std::collections::BTreeMap::new();
         primary.insert(0x9Du32, 1i32);
-        let r6 = config_window_rows(
-            "conf6win",
-            &table,
-            &primary,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let r6 = config_window_rows("conf6win", &table, &primary, None);
         assert!(
             r6[12].label.starts_with(mark),
             "primary mark on store 0x9D row: {}",
@@ -7016,7 +6950,7 @@ mod tests {
             );
         }
         let empty = std::collections::BTreeMap::new();
-        let r4 = config_window_rows("conf4", &table, &empty, None, &empty);
+        let r4 = config_window_rows("conf4", &table, &empty, None);
         assert_eq!(r4.len(), 9);
         for (position, value) in [(0usize, 0i32), (1, 1)] {
             assert!(
@@ -7042,7 +6976,7 @@ mod tests {
         }
         let mut values = std::collections::BTreeMap::new();
         values.insert(0x41u32, -1i32);
-        let r4 = config_window_rows("conf4", &table, &values, None, &empty);
+        let r4 = config_window_rows("conf4", &table, &values, None);
         assert!(
             r4[8].label.starts_with(mark),
             "off row must mark at store 0x41 = −1: {}",
@@ -7058,7 +6992,7 @@ mod tests {
             marked_levels.is_empty(),
             "level rows must not mark at store 0x41 = −1: {marked_levels:?}"
         );
-        let r7 = config_window_rows("conf7", &table, &empty, None, &empty);
+        let r7 = config_window_rows("conf7", &table, &empty, None);
         assert_eq!(r7.len(), 14);
         for (position, (store_id, value)) in [
             (0usize, (0x90u32, 0i32)),
@@ -7157,7 +7091,7 @@ mod tests {
             );
         }
         let empty = std::collections::BTreeMap::new();
-        let rows = config_window_rows("conftxtc", &table, &empty, None, &empty);
+        let rows = config_window_rows("conftxtc", &table, &empty, None);
         for mode in 0..4i32 {
             assert!(
                 matches!(
@@ -7177,7 +7111,7 @@ mod tests {
             "conftxtc row 5 opens the Yes/No panel"
         );
 
-        let rows = config_window_rows("conf11m", &table, &empty, None, &empty);
+        let rows = config_window_rows("conf11m", &table, &empty, None);
         for (position, mode) in [(0usize, 0i32), (1, 1)] {
             assert!(
                 matches!(
@@ -7189,7 +7123,7 @@ mod tests {
             );
         }
 
-        let rows = config_window_rows("conf11l", &table, &empty, None, &empty);
+        let rows = config_window_rows("conf11l", &table, &empty, None);
         assert!(rows.iter().enumerate().all(|(position, row)| matches!(
             &row.action,
             DynamicMenuAction::OpenRetailConfigCompanion { mode, opens }

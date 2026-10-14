@@ -5,7 +5,9 @@ use crate::graphics_settings::{
     MenuRow, CONFIG_SECTIONS, DLSS_CONFIG_SECTIONS, GRAPHICS_SECTIONS,
 };
 use crate::hud::style::{self, theme};
-use crate::input_mode::{InputMode, MenuKind, MenuStack};
+#[cfg(test)]
+use crate::input_mode::MenuStack;
+use crate::input_mode::{InputMode, MenuKind};
 
 pub const ROOT_LOG_OUT: &str = "Log Out";
 pub const ROOT_SHUT_DOWN: &str = "Shut Down";

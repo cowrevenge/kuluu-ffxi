@@ -1811,6 +1811,23 @@ fn handle_sub_packet(
                         exp_now: cs.exp_now,
                         exp_next: cs.exp_next,
                         ilvl: cs.ilvl,
+                        su_lv: cs.su_lv,
+                        master_level_unlocked: cs.master_level_unlocked,
+                    },
+                });
+            }
+        }
+        // The Status window's Combat/Magic/Craft rows read nothing else, and open
+        // greyed until a block arrives with something in them (FFXiMain.dll
+        // retail-2026-09 `.text 0x148B50` disables ids 3/4/5 on open).
+        s2c::CLISTATUS2 => {
+            if let Ok(skills) = decode::CharSkillLevels::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let _ = event_tx.send(AgentEvent::CharSkillsUpdated {
+                    skills: kuluu_snapshot::CharSkills {
+                        command_recast: skills.command_recast,
+                        skills: skills.skills,
                     },
                 });
             }

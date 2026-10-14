@@ -524,6 +524,11 @@ pub mod s2c {
     // Self-character stat block: HP/MP max, base+gear stats, attack/defense, resists, iLv.
     pub const CLISTATUS: u16 = 0x061;
 
+    // GP_SERV_COMMAND_CLISTATUS2, vendor/server/src/map/packets/s2c/0x062_clistatus2.h.
+    // The skill block behind the Status window's Combat/Magic/Craft rows:
+    // CommandRecast[31] then skill_base[64], indexed by skill id.
+    pub const CLISTATUS2: u16 = 0x062;
+
     // GP_SERV_COMMAND_FISH, vendor/server/src/map/enums/packet_s2c.h. Sent to start
     // the fishing mini-game with the hooked fish's stats.
     pub const FISH: u16 = 0x115;

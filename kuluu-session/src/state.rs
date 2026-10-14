@@ -403,6 +403,14 @@ pub struct CharStatsRaw {
     pub defense: u16,
     pub resist: [i16; 8],
     pub ilvl: u8,
+    /// `su_lv` (s2c 0x061 CLISTATUS su_lv) — superior level.
+    #[serde(default)]
+    pub su_lv: u8,
+    /// bit 0 of s2c 0x061 `mastery_info.flags` — master-level play unlocked
+    /// (gates the Status window's Master Levels row together with a level-99 main
+    /// job; FFXiMain.dll retail-2026-09 `.text 0x148B20`).
+    #[serde(default)]
+    pub master_level_unlocked: bool,
 }
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
@@ -550,6 +558,11 @@ pub struct SessionState {
     /// value it was given, and every zone-in replaces it anyway.
     #[serde(default)]
     pub play_time_base: Option<PlayTimeBase>,
+
+    /// The newest s2c 0x062 CLISTATUS2 skill block — the only source for the Status
+    /// window's Combat/Magic/Craft rows and for enabling those rows at all.
+    #[serde(default)]
+    pub char_skills: Option<kuluu_snapshot::CharSkills>,
 
     /// Server-offered alternative to returning home while dead (s2c 0x0F9,
     /// vendor/server/src/map/packets/s2c/0x0f9_res.cpp).
@@ -2822,6 +2835,11 @@ impl SessionState {
                 });
                 changed
             }
+            AgentEvent::CharSkillsUpdated { skills } => {
+                let changed = self.char_skills != Some(*skills);
+                self.char_skills = Some(*skills);
+                changed
+            }
             AgentEvent::DeathMenuUpdated { offer } => {
                 let changed = self.death_menu_offer != *offer;
                 self.death_menu_offer = *offer;
@@ -3605,6 +3623,13 @@ pub enum AgentEvent {
     /// (FFXiMain.dll retail-2026-09 handler RVA 0x7CAB0).
     PlayTimeSynced {
         seconds: u32,
+    },
+
+    /// s2c 0x062 GP_SERV_COMMAND_CLISTATUS2 — the whole skill block (combat/magic/
+    /// craft rows of the Status window, and the only source that can enable those
+    /// three rows: FFXiMain.dll retail-2026-09 `.text 0x148B50` opens them disabled).
+    CharSkillsUpdated {
+        skills: kuluu_snapshot::CharSkills,
     },
 
     /// s2c 0x0F9 `GP_SERV_COMMAND_RES`

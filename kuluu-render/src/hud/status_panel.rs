@@ -134,6 +134,84 @@ pub fn status_entry_count() -> usize {
     STATUS_ENTRIES.len()
 }
 
+/// Main-job level 99 — the second half of retail's gate on Master Levels, Job
+/// Points and Alter Ego Points (`FFXiMain.dll retail-2026-09 `.text 0x148B20` /
+/// `.text 0x148EB1`, both `cmp al,0x63`).
+pub const MASTER_LEVEL_JOB_CAP: u8 = 99;
+
+/// Key item that unlocks the Alter Ego Points row (id 13): retail tests it in the
+/// same branch as the level-99 check (`FFXiMain.dll retail-2026-09 RVA 0x148CD2`,
+/// `push 0xD21` feeding the key-item test helper `.text 0x97E80`).
+pub const ALTER_EGO_POINTS_KEY_ITEM: u16 = 3361;
+
+/// The live enable law of one Status row. Retail opens ids 3/4/5/12/13 disabled
+/// (`FFXiMain.dll retail-2026-09 `.text 0x148B50`, five `call 0x118B60(win,id,5)`
+/// disables) and re-enables them only when their content exists: each skill family
+/// needs a visible word in s2c 0x062 (which is also why those three stay grey before
+/// the packet — Shane's A1/A2 reading, corroborated by this cycle's re-read of the
+/// disable/enable sites), and Master Levels needs the mastery flag plus a level-99
+/// main job. A gated row draws grey, its select plays the error blip, and the detail
+/// handler is never called.
+pub fn status_row_enabled(kind: StatusEntryKind, snap: &kuluu_snapshot::SceneSnapshot) -> bool {
+    use ffxi_proto::decode::CharSkillLevels;
+    match kind {
+        StatusEntryKind::CombatSkill => visible_in_range(
+            snap,
+            CharSkillLevels::COMBAT_SKILL_RANGE,
+            CharSkillLevels::SKILL_HIDDEN,
+        ),
+        StatusEntryKind::MagicSkill => visible_in_range(
+            snap,
+            CharSkillLevels::MAGIC_SKILL_RANGE,
+            CharSkillLevels::SKILL_HIDDEN,
+        ),
+        StatusEntryKind::CraftSkill => visible_in_range(
+            snap,
+            CharSkillLevels::CRAFT_SKILL_RANGE,
+            CharSkillLevels::CRAFT_HIDDEN,
+        ),
+        StatusEntryKind::MasterLevels => {
+            main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
+                && snap.stats.is_some_and(|s| s.master_level_unlocked)
+        }
+        // Merit Points (id 7): retail tests a client-side merit flag whose packet
+        // source is still unmapped, so there is nothing here that can lift it — grey,
+        // exactly as the row sits for any character without that flag.
+        StatusEntryKind::MeritPoints => false,
+        // Job Points (id 8): retail requires its category flag *and* a level-99 main
+        // job (`.text 0x148EB1`); kuluu can decide the half it has data for, so the row
+        // stays grey below 99 instead of offering an empty screen.
+        StatusEntryKind::JobPoints => main_job_level(snap) >= MASTER_LEVEL_JOB_CAP,
+        // Alter Ego Points (id 13): level 99 *and* key item [`ALTER_EGO_POINTS_KEY_ITEM`].
+        StatusEntryKind::FacetCategories => {
+            main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
+                && snap.key_items.contains(&ALTER_EGO_POINTS_KEY_ITEM)
+        }
+        _ => true,
+    }
+}
+
+/// Any word in `range` that is not the family's hidden sentinel.
+fn visible_in_range(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    range: std::ops::RangeInclusive<usize>,
+    hidden_word: u16,
+) -> bool {
+    let Some(block) = snap.char_skills.as_ref() else {
+        return false;
+    };
+    range
+        .into_iter()
+        .any(|id| block.skills.get(id).copied() != Some(hidden_word))
+}
+
+/// The character's main-job level as the server last reported it, 0 when unknown.
+fn main_job_level(snap: &kuluu_snapshot::SceneSnapshot) -> u8 {
+    crate::snapshot::resolve_self(&snap.party, snap.self_char_id)
+        .map(|m| m.main_job_lv)
+        .unwrap_or(0)
+}
+
 const PANEL_WIDTH_PX: f32 = 280.0;
 
 /// Left-column host for the persona panel and its `level` box, at the spot the
@@ -514,9 +592,24 @@ pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapsho
         StatusEntryKind::MasterLevels => vec![
             "(master-level roster has no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string(),
         ],
-        StatusEntryKind::CombatSkill | StatusEntryKind::MagicSkill | StatusEntryKind::CraftSkill => {
-            vec!["(skill lists arrive with the login skill packet — not captured yet)".to_string()]
-        }
+        StatusEntryKind::CombatSkill => skill_detail_rows(
+                snap,
+                SkillFamily::Noncraft(ffxi_proto::decode::CharSkillLevels::COMBAT_SKILL_RANGE),
+            )
+            .into_iter()
+            .map(|row| row.text)
+            .collect(),
+        StatusEntryKind::MagicSkill => skill_detail_rows(
+                snap,
+                SkillFamily::Noncraft(ffxi_proto::decode::CharSkillLevels::MAGIC_SKILL_RANGE),
+            )
+            .into_iter()
+            .map(|row| row.text)
+            .collect(),
+        StatusEntryKind::CraftSkill => skill_detail_rows(snap, SkillFamily::Craft)
+            .into_iter()
+            .map(|row| row.text)
+            .collect(),
         StatusEntryKind::Currencies | StatusEntryKind::Currencies2 => {
             vec!["(event-item currency list not received yet)".to_string()]
         }
@@ -528,6 +621,125 @@ pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapsho
             vec!["(facet-point categories have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()]
         }
     }
+}
+
+/// Which family of the 0x062 table a Status skill window shows. Combat and magic
+/// share one encoding (level in the low 15 bits, hidden only at exactly 0x8000)
+/// and the two-column layout; craft hides on 0xFFFF instead and packs level+rank,
+/// drawn in one column.
+#[derive(Debug, Clone)]
+pub enum SkillFamily {
+    Noncraft(std::ops::RangeInclusive<usize>),
+    Craft,
+}
+
+impl SkillFamily {
+    /// One column for craft, two for combat/magic — the row pitch the retail
+    /// height law divides by (FFXiMain.dll retail-2026-09 `.text 0x1483B0`:
+    /// `height = 22 + 14 * ceil(n/2)`; craft uses `22 + 14*n` at RVA 0x148840).
+    pub fn columns(&self) -> usize {
+        match self {
+            Self::Noncraft(_) => 2,
+            Self::Craft => 1,
+        }
+    }
+
+    pub fn ids(&self) -> Box<dyn Iterator<Item = usize> + '_> {
+        match self {
+            Self::Noncraft(range) => Box::new(range.clone()),
+            Self::Craft => Box::new(ffxi_proto::decode::CharSkillLevels::CRAFT_SKILL_RANGE),
+        }
+    }
+}
+
+/// One row of a skill window: the line as retail formats it, plus whether the raw
+/// word says the skill is capped (retail paints those in ARGB 0x802060A0 rather than
+/// the ordinary grey — FFXiMain.dll retail-2026-09 `.text 0x14857A..0x14858C`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDetailRow {
+    pub text: String,
+    pub capped: bool,
+}
+
+/// The rows of one skill window straight out of the folded s2c 0x062 block.
+/// `None` from the server (no 0x062 yet) is the empty readout — retail has no other
+/// source for these three windows, and opens them greyed until a block lands
+/// (`.text 0x148B50`).
+pub fn skill_detail_rows(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    family: SkillFamily,
+) -> Vec<SkillDetailRow> {
+    let Some(block) = snap.char_skills.as_ref() else {
+        return Vec::new();
+    };
+    let mut visible: Vec<(String, bool)> = Vec::new();
+    for id in family.ids() {
+        let word = block.skills.get(id).copied().unwrap_or(0);
+        let label = skill_label(id);
+        match family {
+            SkillFamily::Noncraft(_) => {
+                if let Some(row) = ffxi_proto::decode::CharSkillLevels::noncraft_row(word) {
+                    visible.push((format!("{label} {}", row.level), row.capped));
+                }
+            }
+            SkillFamily::Craft => {
+                // Craft shows the level only: the rank half of the word indexes the
+                // client's rank glyphs, which are DAT art rather than text.
+                if let Some(row) = ffxi_proto::decode::CharSkillLevels::craft_row(word) {
+                    visible.push((format!("{label} {}", row.level), row.capped));
+                }
+            }
+        }
+    }
+
+    // Two columns means the entries pair up, left column first (retail walks its
+    // array by column: `.text 0x1485FA` adds the 14px pitch only on every other
+    // entry, and the height law counts ceil(n/2) rows).
+    let columns = family.columns();
+    if columns == 1 {
+        return visible
+            .into_iter()
+            .map(|(text, capped)| SkillDetailRow { text, capped })
+            .collect();
+    }
+    let rows = visible.len().div_ceil(columns);
+    let left_width = visible
+        .iter()
+        .take(rows)
+        .map(|(t, _)| t.chars().count())
+        .max()
+        .unwrap_or(0);
+    (0..rows)
+        .map(|row| {
+            let left = &visible[row];
+            let right = visible.get(row + rows);
+            match right {
+                Some((right_text, _)) => SkillDetailRow {
+                    text: format!(
+                        "{:<left_width$}  {}",
+                        left.0,
+                        right_text,
+                        left_width = left_width + 2
+                    ),
+                    capped: left.1,
+                },
+                None => SkillDetailRow {
+                    text: left.0.clone(),
+                    capped: left.1,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The id→name table is compile-time vocab (ids are stable); an unknown id still
+/// gets a row rather than silently vanishing, because the wire word said it exists.
+fn skill_label(id: usize) -> String {
+    u8::try_from(id)
+        .ok()
+        .and_then(ffxi_vocab::skill_names::lookup)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Skill {id}"))
 }
 
 pub fn play_time_chat_line(snap: &kuluu_snapshot::SceneSnapshot) -> String {
@@ -695,5 +907,208 @@ mod tests {
         assert_eq!(PRIMARY_ATTRS.len(), 7);
         assert_eq!(PRIMARY_ATTRS[0], "STR");
         assert_eq!(PRIMARY_ATTRS[6], "CHR");
+    }
+
+    /// A snapshot holding one folded s2c 0x062 block. Words left at zero are real
+    /// level-0 rows — only the family sentinels hide anything.
+    fn snap_with_skills(
+        ids: &[(usize, u16)],
+        craft_all_hidden: bool,
+    ) -> kuluu_snapshot::SceneSnapshot {
+        use ffxi_proto::decode::CharSkillLevels;
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        let mut block = kuluu_snapshot::CharSkills::zeroed();
+        for (id, word) in ids {
+            block.skills[*id] = *word;
+        }
+        block.skills[*CharSkillLevels::MAGIC_SKILL_RANGE.start()] = 240;
+        if craft_all_hidden {
+            for id in CharSkillLevels::CRAFT_SKILL_RANGE {
+                block.skills[id] = CharSkillLevels::CRAFT_HIDDEN;
+            }
+        } else {
+            // One packed word at id 50: level 122, rank 6.
+            const LEVEL_122: u16 = 122 << 5;
+            block.skills[50] = LEVEL_122 | 6;
+        }
+        snap.char_skills = Some(block);
+        snap
+    }
+
+    /// Combat and magic share one encoding: a word equal to the hidden sentinel is
+    /// not drawn at all, a bit-15 word keeps its level (only its colour changes), and
+    /// two columns means `ceil(n/2)` lines.
+    #[test]
+    fn noncraft_skill_window_applies_the_word_law_and_pairs_columns() {
+        use ffxi_proto::decode::CharSkillLevels;
+        let snap = snap_with_skills(
+            &[
+                (1, 301),
+                (2, CharSkillLevels::SKILL_HIDDEN),
+                (3, CharSkillLevels::SKILL_CAP_BIT | 125),
+                (4, 88),
+            ],
+            false,
+        );
+
+        let rows = skill_detail_rows(&snap, SkillFamily::Noncraft(1..=4));
+        // Id 2 is the sentinel and drops out first, so three visible ids pair into
+        // two lines with ids 3 and 4 landing as the right column.
+        assert_eq!(rows.len(), 2);
+        let left_of_line1 = rows[0]
+            .text
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(left_of_line1, "Hand-to-Hand 301", "{}", rows[0].text);
+        assert!(rows[0].text.contains(' '), "two columns on one line");
+
+        // The capped word is drawn with its level and flagged for the blue paint.
+        let capped = skill_detail_rows(&snap, SkillFamily::Noncraft(3..=4));
+        assert_eq!(capped.len(), 1);
+        assert!(capped[0].capped, "bit-15 marks a capped row");
+        assert!(
+            capped[0].text.contains("125") && capped[0].text.contains("88"),
+            "both levels survive on one line: {}",
+            capped[0].text
+        );
+    }
+
+    /// Craft hides on its own sentinel, unpacks level+rank from the word, and never
+    /// pairs (one column).
+    #[test]
+    fn craft_skill_window_uses_its_own_sentinel_and_one_column() {
+        let hidden = snap_with_skills(&[(1, 0)], true);
+        assert!(
+            skill_detail_rows(&hidden, SkillFamily::Craft).is_empty(),
+            "every word at the sentinel means no rows"
+        );
+
+        let shown = snap_with_skills(&[(1, 0)], false);
+        let rows = skill_detail_rows(&shown, SkillFamily::Craft);
+        // Craft hides only on its sentinel: an untrained craft is a real row at
+        // level 0, which is why every id in 48..=62 shows.
+        const CRAFT_IDS: usize = *ffxi_proto::decode::CharSkillLevels::CRAFT_SKILL_RANGE.end()
+            - *ffxi_proto::decode::CharSkillLevels::CRAFT_SKILL_RANGE.start()
+            + 1;
+        assert_eq!(rows.len(), CRAFT_IDS);
+
+        // The one packed word unpacks to its level; the others read as level 0.
+        let packed = rows.iter().filter(|r| r.text.contains("122")).count();
+        assert_eq!(packed, 1, "exactly one row carries the packed word");
+        let fished = rows
+            .iter()
+            .find(|r| r.text.starts_with("Fishing"))
+            .expect("id 48 is Fishing");
+        assert!(
+            fished.text.ends_with('0'),
+            "an untrained craft shows its zero level: {}",
+            fished.text
+        );
+        // One column: no line ever holds two entries, so nothing gets the pairing
+        // padding of two spaces. (An unknown id falls back to `Skill 60`, so the token
+        // count is not what distinguishes one column from two.)
+        for row in &rows {
+            assert!(
+                !row.text.contains("  "),
+                "no pairing padding in a one-column window: {}",
+                row.text
+            );
+        }
+    }
+
+    /// With no 0x062 yet the three skill windows are empty and grey: retail's
+    /// `statcom2` opens them disabled and only content in that table lifts them.
+    #[test]
+    fn status_skill_rows_stay_disabled_until_the_block_arrives() {
+        use ffxi_proto::decode::CharSkillLevels;
+        let empty = kuluu_snapshot::SceneSnapshot::default();
+        for kind in [
+            StatusEntryKind::CombatSkill,
+            StatusEntryKind::MagicSkill,
+            StatusEntryKind::CraftSkill,
+        ] {
+            assert!(
+                !status_row_enabled(kind, &empty),
+                "{kind:?} must be grey with no 0x062"
+            );
+            assert!(skill_detail_rows(&empty, SkillFamily::Craft).is_empty());
+        }
+
+        // A block whose combat words are all the sentinel still leaves Combat grey,
+        // while magic (which has content) lights up.
+        let mut snap = empty;
+        let mut block = kuluu_snapshot::CharSkills::zeroed();
+        for id in CharSkillLevels::COMBAT_SKILL_RANGE {
+            block.skills[id] = CharSkillLevels::SKILL_HIDDEN;
+        }
+        for id in CharSkillLevels::CRAFT_SKILL_RANGE {
+            block.skills[id] = CharSkillLevels::CRAFT_HIDDEN;
+        }
+        block.skills[*CharSkillLevels::MAGIC_SKILL_RANGE.start()] = 12;
+        snap.char_skills = Some(block);
+
+        assert!(!status_row_enabled(StatusEntryKind::CombatSkill, &snap));
+        assert!(!status_row_enabled(StatusEntryKind::CraftSkill, &snap));
+        assert!(status_row_enabled(StatusEntryKind::MagicSkill, &snap));
+    }
+
+    /// The three level-99 rows follow their own gates: mastery flag for Master
+    /// Levels, the Alter Ego key item for Facet Categories, and Job Points needs the
+    /// level half kuluu can actually see.
+    #[test]
+    fn status_level_99_rows_gate_on_their_own_conditions() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert!(!status_row_enabled(StatusEntryKind::MasterLevels, &snap));
+        assert!(!status_row_enabled(StatusEntryKind::JobPoints, &snap));
+        assert!(!status_row_enabled(StatusEntryKind::FacetCategories, &snap));
+
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            master_level_unlocked: true,
+            ..Default::default()
+        });
+        // Still gated: the mastery flag is only half of Master Levels' condition.
+        assert!(!status_row_enabled(StatusEntryKind::MasterLevels, &snap));
+
+        let mut party = snap.party.clone();
+        party.push(kuluu_snapshot::PartyMember {
+            id: 7,
+            act_index: 1,
+            name: Some("Sylvie".into()),
+            hp: 1,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 0,
+            zone_no: 1,
+            main_job: 0,
+            main_job_lv: MASTER_LEVEL_JOB_CAP,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        });
+        let mut gated = snap.clone();
+        gated.party = party;
+        // `resolve_self` needs the id to match, or the level reads as 0.
+        gated.self_char_id = Some(7);
+        assert_eq!(main_job_level(&gated), MASTER_LEVEL_JOB_CAP);
+
+        // Mastery flag + level 99 lifts Master Levels; the key item is still missing
+        // for Alter Ego Points, so that one stays grey.
+        assert!(status_row_enabled(StatusEntryKind::MasterLevels, &{
+            gated.clone()
+        }));
+        assert!(status_row_enabled(StatusEntryKind::JobPoints, &gated));
+        assert!(!status_row_enabled(
+            StatusEntryKind::FacetCategories,
+            &gated
+        ));
+
+        gated.key_items.push(ALTER_EGO_POINTS_KEY_ITEM);
+        assert!(status_row_enabled(StatusEntryKind::FacetCategories, &gated));
     }
 }

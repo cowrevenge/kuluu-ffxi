@@ -153,6 +153,10 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
             sub_job_unlocked: info.sub_job_unlocked,
             job_levels: info.job_levels.to_vec(),
         }),
+        // The raw 0x062 words ride through unchanged: each Status window applies its
+        // own family's encoding (FFXiMain.dll retail-2026-09 RVA 0x148564 for
+        // combat/magic, RVA 0x1488A0 for craft).
+        char_skills: s.char_skills,
     }
 }
 
@@ -336,6 +340,8 @@ fn char_stats_to_wire(c: crate::state::CharStatsRaw) -> wire::CharStats {
         defense: c.defense,
         bonus: c.bonus,
         resist: c.resist,
+        su_lv: c.su_lv,
+        master_level_unlocked: c.master_level_unlocked,
     }
 }
 

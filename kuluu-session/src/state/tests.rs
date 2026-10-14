@@ -2684,6 +2684,34 @@ fn play_time_sync_stores_the_base_pair_and_adds_elapsed_since_arrival() {
     );
 }
 
+/// The 0x062 block is what un-greys the Status window's Combat/Magic/Craft rows,
+/// so it must survive both folds: onto the state and into the snapshot the renderer
+/// reads (FFXiMain.dll retail-2026-09 `.text 0x148B50` opens those three disabled;
+/// only content in this table enables them).
+#[test]
+fn char_skills_update_folds_onto_state_and_snapshot() {
+    let mut skills = [0u16; kuluu_snapshot::CharSkills::SKILL_COUNT];
+    const HAND_TO_HAND: u16 = 301;
+    skills[1] = HAND_TO_HAND;
+    let block = kuluu_snapshot::CharSkills {
+        command_recast: [7; kuluu_snapshot::CharSkills::COMMAND_RECAST_COUNT],
+        skills,
+    };
+
+    let mut state = SessionState::default();
+    assert!(state.apply_event(&AgentEvent::CharSkillsUpdated { skills: block }));
+    assert_eq!(state.char_skills, Some(block));
+    assert!(
+        !state.apply_event(&AgentEvent::CharSkillsUpdated { skills: block }),
+        "an identical block is not a snapshot change"
+    );
+
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    let projected = snap.char_skills.expect("snapshot carries the block");
+    assert_eq!(projected.skills[1], HAND_TO_HAND);
+    assert_eq!(projected.command_recast, block.command_recast);
+}
+
 #[test]
 fn death_menu_offer_is_durable_and_clears_on_revive_or_zone_change() {
     use ffxi_proto::decode::DeathMenuOffer;
@@ -3024,6 +3052,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MusicChanged { .. } => (),
         AgentEvent::DeathTimerUpdated { .. } => (),
         AgentEvent::PlayTimeSynced { .. } => (),
+        AgentEvent::CharSkillsUpdated { .. } => (),
         AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),

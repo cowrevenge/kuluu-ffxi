@@ -63,6 +63,11 @@ const S2C_LAYOUTS: &[(&str, &str, &str)] = &[
         "GP_SERV_COMMAND_CLISTATUS::PacketData",
     ),
     (
+        "clistatus2",
+        "0x062_clistatus2.h",
+        "GP_SERV_COMMAND_CLISTATUS2::PacketData",
+    ),
+    (
         "group_list",
         "0x0dd_group_list.h",
         "GP_SERV_COMMAND_GROUP_LIST::PacketData",

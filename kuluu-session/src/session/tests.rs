@@ -449,6 +449,57 @@ fn login_publishes_the_play_time_base() {
     );
 }
 
+/// s2c 0x062 is the only writer of the client's skill table (FFXiMain.dll
+/// retail-2026-09 RVA 0x4856A4), so the Status window's Combat/Magic/Craft rows —
+/// and the enabling of those three rows, which open greyed — depend on the fold
+/// keeping every word. Ids index `skill_base` directly; nothing is filtered here,
+/// because each family hides different sentinels at draw time.
+#[test]
+fn clistatus2_folds_the_whole_skill_block() {
+    use ffxi_proto::decode::CharSkillLevels;
+
+    const HAND_TO_HAND: u16 = 301;
+    const CRAFT_HIDDEN_WORD: u16 = CharSkillLevels::CRAFT_HIDDEN;
+    let mut body = vec![
+        0u8;
+        CharSkillLevels::SKILL_BASE_OFFSET
+            + CharSkillLevels::SKILL_COUNT * std::mem::size_of::<u16>()
+    ];
+    for (id, word) in [
+        (1usize, HAND_TO_HAND),
+        (48, CRAFT_HIDDEN_WORD),
+        (
+            *CharSkillLevels::MAGIC_SKILL_RANGE.start(),
+            CharSkillLevels::SKILL_HIDDEN,
+        ),
+    ] {
+        body[CharSkillLevels::SKILL_BASE_OFFSET + id * 2
+            ..CharSkillLevels::SKILL_BASE_OFFSET + id * 2 + 2]
+            .copy_from_slice(&word.to_le_bytes());
+    }
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::CLISTATUS2, &body);
+    let folded = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::CharSkillsUpdated { skills } => Some(*skills),
+            _ => None,
+        })
+        .expect("0x062 publishes the skill block");
+    assert_eq!(folded.skills[1], HAND_TO_HAND);
+    assert_eq!(folded.skills[48], CRAFT_HIDDEN_WORD);
+
+    // A short body is dropped with the shared decode-warning gate, never folded as
+    // a partial table that would grey the rows for the rest of the session.
+    let short = vec![0u8; body.len() - 2];
+    assert!(
+        !sub_packet_events(ffxi_proto::map::s2c::CLISTATUS2, &short)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::CharSkillsUpdated { .. })),
+        "a truncated 0x062 must not fold"
+    );
+}
+
 /// A 0x051 body whose GrapIDTbl does not decode must go through
 /// [`warn_decode_err`] like every sibling arm — dropped silently, a wrong
 /// body-offset assumption looks exactly like "self kept the launcher seed"

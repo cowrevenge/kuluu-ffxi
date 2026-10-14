@@ -45,6 +45,11 @@ pub mod theme {
     pub const WARN: Color = Color::srgb(1.0, 0.82, 0.30);
     pub const GOOD: Color = Color::srgb(0.45, 0.90, 0.55);
     pub const FAINT: Color = Color::srgb(0.44, 0.48, 0.58);
+    /// A row the client will not answer. Retail keeps the same glyph colour and halves
+    /// its intensity — ARGB 0x80808080 becomes 0x80404040 on a gated roomlist row
+    /// (FFXiMain.dll retail-2026-09 `.text 0x1D6A1A`), and the same halving covers the
+    /// `statcom2` rows disabled at open (`.text 0x148B50`). Half of TEXT.
+    pub const TEXT_DISABLED: Color = Color::srgb(0.455, 0.46, 0.475);
 }
 
 /// The row prefix marking the cursor in every list menu — "> " on the selected

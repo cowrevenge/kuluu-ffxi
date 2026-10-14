@@ -324,10 +324,7 @@ fn statcom_selector_below(stack: &MenuStack) -> Option<usize> {
     let MenuKind::StatusDetail { entry } = top else {
         return None;
     };
-    let Some(entry_def) = kuluu_render::hud::status_panel::STATUS_ENTRIES.get(usize::from(entry))
-    else {
-        return None;
-    };
+    let entry_def = kuluu_render::hud::status_panel::STATUS_ENTRIES.get(usize::from(entry))?;
     if !kuluu_render::hud::status_panel::status_detail_display_only(entry_def.kind) {
         return None;
     }
@@ -401,8 +398,20 @@ pub(super) fn confirm_menu_at_cursor(
                     kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
                 push_system_chat_line(scene_state, line);
             }
-            Some(_) => open_statcom_detail(stack, cursor),
-            None => {}
+            // A gated row answers nothing at all: retail disables it (grey + the
+            // select never reaches the detail table), so kuluu neither opens a window
+            // nor runs a command for it (`statcom2` open code FFXiMain.dll retail-2026-09
+            // `.text 0x148B50`; re-read this cycle).
+            Some(entry_kind)
+                if kuluu_render::hud::status_panel::status_row_enabled(
+                    entry_kind,
+                    &scene_state.snapshot,
+                ) =>
+            {
+                open_statcom_detail(stack, cursor);
+            }
+            // Guard failed: the row is grey, so the select is inert.
+            _ => {}
         }
         return None;
     }
@@ -1718,8 +1727,18 @@ pub(super) fn handle_menu_key(
                         kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
                     push_system_chat_line(scene_state, line);
                 }
-                Some(_) => open_statcom_detail(stack, sel_cursor),
-                None => {}
+                // Same enable law as the top-of-stack path: a greyed row never
+                // reaches the detail table (FFXiMain.dll retail-2026-09 `.text 0x148B50`).
+                Some(entry_kind)
+                    if kuluu_render::hud::status_panel::status_row_enabled(
+                        entry_kind,
+                        &scene_state.snapshot,
+                    ) =>
+                {
+                    open_statcom_detail(stack, sel_cursor);
+                }
+                // Guard failed: the row is grey, so the select is inert.
+                _ => {}
             }
             return None;
         }
@@ -3167,7 +3186,10 @@ mod menu_key_tests {
         let mut world = marker_world();
         let mut stack = MenuStack::root();
         stack.push(MenuKind::Status);
-        stack.levels[1].cursor = 1;
+        // Rows 0 Profile and 1 Job Levels are the two adjacent rows retail never
+        // gates; Master Levels (row 2) sits grey below level 99 (`statcom2` open code
+        // FFXiMain.dll retail-2026-09 `.text 0x148B50`) and would answer nothing here.
+        stack.levels[1].cursor = 0;
 
         harness.key(
             &Key::Enter,
@@ -3191,7 +3213,7 @@ mod menu_key_tests {
         assert_eq!(stack.levels.len(), 3, "one detail window only");
         assert!(matches!(
             stack.levels.last().unwrap().kind,
-            MenuKind::StatusDetail { entry: 2 }
+            MenuKind::StatusDetail { entry: 1 }
         ));
     }
 
@@ -3220,6 +3242,53 @@ mod menu_key_tests {
             .last()
             .expect("playtime line");
         assert!(toast.text.contains("Play time:"), "{:?}", toast.text);
+    }
+
+    /// Retail opens Combat/Magic/Craft disabled and only content in s2c 0x062 lifts
+    /// them (`.text FFXiMain.dll retail-2026-09 0x148B50`), so selecting the row before
+    /// that block arrives must answer nothing at all — no empty window, since the
+    /// detail handler is never reached.
+    #[test]
+    fn statcom_skill_rows_answer_only_once_the_block_arrives() {
+        use kuluu_render::hud::status_panel::StatusEntryKind;
+        const COMBAT_ROW: usize = 3;
+
+        // No block yet: the row stays grey and its select is inert.
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = COMBAT_ROW;
+        assert_eq!(
+            kuluu_render::hud::status_panel::STATUS_ENTRIES[COMBAT_ROW].kind,
+            StatusEntryKind::CombatSkill
+        );
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 2, "a gated row opens no detail window");
+
+        // With one combat word in the block, the same key press opens `btlskill`.
+        let mut block = kuluu_snapshot::CharSkills::zeroed();
+        const HAND_TO_HAND_LEVEL: u16 = 301;
+        block.skills[1] = HAND_TO_HAND_LEVEL;
+        harness.scene_state.snapshot.char_skills = Some(block);
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 3, "the row answers once content exists");
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry } if entry as usize == COMBAT_ROW
+        ));
     }
 
     /// The focus law (vault main_menu.md §59, statcom2 registry flag 0x1 companions):
@@ -4080,8 +4149,10 @@ mod menu_dispatch_tests {
                 (449, "Mog Patio".to_string()),
             ],
         );
-        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
-        dynamic.rows = roomlist_rows(&table);
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu {
+            rows: roomlist_rows(&table),
+            ..Default::default()
+        };
         assert_eq!(dynamic.rows.len(), 5);
 
         let mut stack = MenuStack::root();

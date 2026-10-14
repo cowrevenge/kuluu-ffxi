@@ -5694,10 +5694,28 @@ pub fn update_main_menu(
         );
 
         let is_cursor = view.cursor == list_idx;
-        let (want, want_color, want_bg) = if is_cursor {
-            (format!("> {body}"), theme::CURSOR, Color::NONE)
+        // A `statcom2` row the client will not answer draws grey with the cursor
+        // still on it: retail disables ids 3/4/5/12/13 when the list opens
+        // (FFXiMain.dll retail-2026-09 `.text 0x148B50`), and its dim is exactly half
+        // of ordinary grey — the same pair read for roomlist's gated row, where a
+        // disabled line paints 0x80404040 instead of 0x80808080 (`.text 0x1D6A1A`).
+        let gated = matches!(view.kind, MenuKind::Status)
+            && crate::hud::status_panel::STATUS_ENTRIES
+                .get(list_idx)
+                .is_some_and(|entry| {
+                    !crate::hud::status_panel::status_row_enabled(entry.kind, &scene.snapshot)
+                });
+        let base_color = if gated {
+            theme::TEXT_DISABLED
+        } else if is_cursor {
+            theme::CURSOR
         } else {
-            (format!("  {body}"), theme::TEXT, Color::NONE)
+            theme::TEXT
+        };
+        let (want, want_color, want_bg) = if is_cursor {
+            (format!("> {body}"), base_color, Color::NONE)
+        } else {
+            (format!("  {body}"), base_color, Color::NONE)
         };
         if **text != want {
             **text = want;
@@ -7000,9 +7018,10 @@ mod tests {
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RegionInfo { mode: 0 });
         app.insert_resource(InputMode::Menu(stack));
-        let mut dynamic = app.world_mut().resource_mut::<DynamicMenu>();
-        dynamic.rows = region_info_rows(0, Some(0x00E6));
-        drop(dynamic);
+        {
+            let mut dynamic = app.world_mut().resource_mut::<DynamicMenu>();
+            dynamic.rows = region_info_rows(0, Some(0x00E6));
+        }
         app.update();
 
         let (visible, title, _) = companion_frame_visible(&mut app);

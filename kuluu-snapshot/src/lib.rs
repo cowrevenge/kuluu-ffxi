@@ -1126,6 +1126,83 @@ pub struct SceneSnapshot {
     /// c2s/0x100_myroom_job.cpp; vault main_menu.md §53). Trailing on purpose.
     #[serde(default)]
     pub jobs: Option<JobList>,
+
+    /// The s2c 0x062 CLISTATUS2 skill block, kept as the raw words so each Status
+    /// window can apply its own family's encoding (combat/magic vs craft — see
+    /// `ffxi_proto::decode::CharSkillLevels`). `None` until a zone-in carries one.
+    #[serde(default)]
+    pub char_skills: Option<CharSkills>,
+}
+
+/// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
+/// (vendor/server/src/map/packets/s2c/0x062_clistatus2.h). Retail keeps exactly these
+/// words in its character blob and reads them per window
+/// (FFXiMain.dll retail-2026-09 skill table RVA 0x4856A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharSkills {
+    pub command_recast: [u32; CharSkills::COMMAND_RECAST_COUNT],
+    /// Indexed by skill id: combat 1..=31, magic 32..=47, craft 48..=62. Serde only
+    /// codes arrays up to 32 long, so the 64 words travel through [`skill_words`]
+    /// as a fixed-length sequence.
+    #[serde(with = "skill_words")]
+    pub skills: [u16; CharSkills::SKILL_COUNT],
+}
+
+/// Fixed-length (de)serialisation for the 64-word `skill_base`: serde's built-in
+/// array impls stop at 32, and postcard encodes a fixed tuple with no length byte,
+/// so this costs nothing on the wire.
+mod skill_words {
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    const LEN: usize = crate::CharSkills::SKILL_COUNT;
+
+    pub fn serialize<S: Serializer>(words: &[u16; LEN], s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mut tup = s.serialize_tuple(LEN)?;
+        for w in words {
+            tup.serialize_element(w)?;
+        }
+        tup.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u16; LEN], D::Error> {
+        struct SkillWordsVisitor;
+
+        impl<'de> Visitor<'de> for SkillWordsVisitor {
+            type Value = [u16; LEN];
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{LEN} skill words")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = [0u16; LEN];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element::<u16>()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &"64 skill words"))?;
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_tuple(LEN, SkillWordsVisitor)
+    }
+}
+
+impl CharSkills {
+    pub const COMMAND_RECAST_COUNT: usize = 31;
+    pub const SKILL_COUNT: usize = 64;
+
+    /// An all-zero block, i.e. every combat/magic skill at level 0 and no craft
+    /// row hidden — only used as a default before a real packet arrives.
+    pub fn zeroed() -> Self {
+        Self {
+            command_recast: [0; Self::COMMAND_RECAST_COUNT],
+            skills: [0; Self::SKILL_COUNT],
+        }
+    }
 }
 
 /// The automaton record folded from one s2c 0x044 EXTENDED_JOB PUP frame
@@ -1577,6 +1654,16 @@ pub struct CharStats {
     pub bonus: [i16; 7],
     #[serde(default)]
     pub resist: [i16; 8],
+    /// `su_lv` from s2c 0x061 — the superior level, shown as `Su` on the persona
+    /// panel (FFXiMain.dll retail-2026-09 RVA 0x147287) and used to refuse gear whose
+    /// `su` exceeds it.
+    #[serde(default)]
+    pub su_lv: u8,
+    /// bit 0 of s2c 0x061 `mastery_info.flags`: master-level play unlocked. Retail
+    /// greys the Status window's Master Levels row without it (and without a level-99
+    /// main job) — FFXiMain.dll retail-2026-09 `.text 0x148B20`.
+    #[serde(default)]
+    pub master_level_unlocked: bool,
 }
 
 /// Mirror of `kuluu`'s browsed-bazaar model (s2c 0x105 rows keyed by the
@@ -2576,6 +2663,9 @@ mod tests {
 
     fn sample_snapshot() -> SceneSnapshot {
         SceneSnapshot {
+            // No 0x062 block in the sample: the Status skill rows read as
+            // "nothing received yet", exactly like a fresh zone-in.
+            char_skills: None,
             party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
@@ -3270,6 +3360,7 @@ mod tests {
             "macros",
             "config_confdata",
             "jobs",
+            "char_skills",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3278,7 +3369,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

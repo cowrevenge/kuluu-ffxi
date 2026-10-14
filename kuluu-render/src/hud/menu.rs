@@ -278,6 +278,15 @@ pub enum DynamicMenuAction {
         store_id: u32,
         bit: u8,
     },
+    /// A `cfilter` message-filter row: select dispatches through class B's shared select method
+    /// (vtable slot +0x4c = .text FFXiMain.dll retail-2026-09 RVA 0x198080), which branches on the
+    /// descriptor at [`CFILTER_ROWS`]`[`table_idx`]` — four transition classes over five persisted
+    /// dwords (group level / console-bit toggle with master flip / pair-lane toggle / interlock
+    /// machine; vault main_menu.md §59 addendum 15). The seam runs the exact transitions through
+    /// [`cfilter_apply_select`]; silent, window stays open, nothing on the wire.
+    ConfigCfilterSelect {
+        table_idx: u8,
+    },
     /// A slider row of a law'd config page (`conf2win` today): select pins the
     /// row into edit mode instead of writing — from then on Left/Right step the
     /// store value ±1 (immediate wrapper FFXiMain.dll retail-2026-09 RVA 0x193830
@@ -1719,6 +1728,20 @@ impl ConfigDatRows {
                                     .unwrap_or_else(|| format!("filter option {}", row.caption_id)),
                             ));
                         }
+                    } else if let Some(spec) = cfilter_descriptor_rows(&window.root) {
+                        // …and `cfilter`’s fifty-five descriptor rows the same way, captions still
+                        // read from catalog table 11 per row (.text FFXiMain.dll retail-2026-09
+                        // RVA 0x152EF0 wrapper the drawer calls; bead kuluu-o9qt7.20.1.3).
+                        for row in spec {
+                            let label = usize::try_from(row.caption_id).ok().and_then(|i| {
+                                catalog.as_ref().and_then(|c| c.text(i).map(str::to_string))
+                            });
+                            rows.push((
+                                row.caption_id,
+                                label
+                                    .unwrap_or_else(|| format!("filter option {}", row.caption_id)),
+                            ));
+                        }
                     }
                 }
                 by_root.insert(window.root.clone(), rows);
@@ -1895,6 +1918,15 @@ pub enum ConfigRowArm {
     WindowLocal {
         obj_off: u16,
         value: i32,
+    },
+    /// A row of the `cfilter` message-filter window, keyed by its raw index into class B's
+    /// code-side descriptor table [`CFILTER_ROWS`] — the same index retail's shared select method
+    /// (.text FFXiMain.dll retail-2026-09 RVA 0x198080) receives from the event dispatcher and
+    /// indexes the table with. Marks ride the drawer state method .text 0x198240
+    /// ([`cfilter_row_state`]); select runs [`DynamicMenuAction::ConfigCfilterSelect`] (vault
+    /// main_menu.md §59 addendum 15; bead kuluu-o9qt7.20.1.3).
+    CfilterSelect {
+        table_idx: u8,
     },
 }
 
@@ -2341,6 +2373,7 @@ pub fn config_page_arms(window: &str) -> Option<&'static [ConfigRowArm]> {
         "conf13wi" => Some(CONF13WI_RADIO_ARMS),
         "conf12wi" => Some(CONF12WI_RADIO_ARMS),
         "fxfilter" => Some(&FILTER_LIST_FXFILTER_ARMS),
+        "cfilter" => Some(&FILTER_LIST_CFILTER_ARMS),
         _ => None,
     }
 }
@@ -2653,15 +2686,589 @@ pub const FXFILTER_ROWS: [FilterListRow; 18] = [
     },
 ];
 
-/// The code-side row tables of the filter-list windows. `cfilter`'s table (.rdata **0x379A2C**,
-/// 54 rows `{kind, param, id}`) still lacks its per-row option-lane law — helper
-/// FFXiMain.dll retail-2026-09 RVA 0x1939A0's callee chain maps `kind` onto one of five persisted
-/// dwords (options 0x32/0x33/0x34/0x35/0x47, load .text 0x197F50) — so only `fxfilter` answers
-/// rows yet (bead kuluu-o9qt7.20.1.3).
+/// The code-side row tables of the single-bit filter-list windows.
 pub fn filter_list_rows(window: &str) -> Option<&'static [FilterListRow]> {
     match window {
         "fxfilter" => Some(&FXFILTER_ROWS),
         _ => None,
+    }
+}
+
+/// The five option dwords the `cfilter` window persists: its load method (.text FFXiMain.dll
+/// retail-2026-09 RVA 0x197F50) pulls each through wrapper 0x193850 into `[obj+0x30]`..`[obj+0x40]`
+/// and its store method (.text 0x197F90) writes all five straight back through 0x193830 — the row
+/// count lives in the same load (.text FFXiMain.dll retail-2026-09 RVA 0x197F88 `mov eax, 0x37` =
+/// **55** rows). Client-local like every other config store: LSB carries only
+/// MessageFilter/MessageFilter2 on c2s 0x0DB
+/// (`vendor/server/src/map/packets/c2s/0x0db_config_language.cpp`).
+pub const CONFIG_OPTION_CFILTER_LANE_A: u32 = 0x32; // pair bits for descriptor kinds < 0x1e
+pub const CONFIG_OPTION_CFILTER_LANE_B: u32 = 0x33; // pair bit (kind − 0x1e) for kinds ≥ 0x1e
+/// The console dword `[obj+0x38]`: one bit per descriptor `param`, flipped by kind-0x33 rows and
+/// driven by the interlock machine's C side.
+pub const CONFIG_OPTION_CFILTER_CONSOLE: u32 = 0x34;
+/// The group-level dword `[obj+0x3c]`: the three negative-param group rows store their level here.
+pub const CONFIG_OPTION_CFILTER_GROUP_LEVEL: u32 = 0x35;
+/// The master dword `[obj+0x40]` paired with console bit 2 — the param-2 row flips it (.text
+/// FFXiMain.dll retail-2026-09 RVA 0x198124) when its toggle lands that bit clear, and a set
+/// master switches that row's glyph to the {3,4} variants (.text 0x19827C).
+pub const CONFIG_OPTION_CFILTER_MASTER: u32 = 0x47;
+
+/// One row of class B's code-side descriptor table — `.rdata` **FFXiMain.dll retail-2026-09 RVA
+/// 0x379A28**, stride 4 bytes `{u8 kind, i8 param, u16 caption id}`. The DAT record behind the
+/// window carries no strings at all (§59 addendum 12), so this table is the row list while every
+/// label stays catalog-11 text read through `caption_id` at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct CfilterDescriptorRow {
+    /// Row class: its own pair-lane bit index for most rows; [`CFILTER_KIND_CONSOLE_OR_GROUP`]
+    /// marks the console/group family.
+    pub kind: u8,
+    /// Group rows carry −1/−2/−3 (level − table offset); console and interlock rows name their
+    /// console-dword bit; plain toggle rows all carry [`CFILTER_PARAM_TOGGLE_MARKER`].
+    pub param: i8,
+    /// Row caption: catalog table 11 string id, read live like [`FilterListRow`]`'s`.
+    pub caption_id: u32,
+}
+
+/// `cfilter`’s complete row list = descriptor table `.rdata FFXiMain.dll retail-2026-09 RVA
+/// 0x379A28`, all **55** entries the load method counts (.text FFXiMain.dll retail-2026-09 RVA
+/// 0x197F88). Entry idx 0 is the all-zero row retail draws first and still dispatches (interlock
+/// class on lane bit 0 / console bit 0 — no special case in the shared select method .text
+/// FFXiMain.dll retail-2026-09 RVA 0x198080). The three trailing negative-param rows are the group
+/// levels; kind 0x33 with param ≥ 0 are console-bit rows.
+pub const CFILTER_ROWS: [CfilterDescriptorRow; 55] = [
+    CfilterDescriptorRow {
+        kind: 0x00,
+        param: 0,
+        caption_id: 0,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: 2,
+        caption_id: 2,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: 3,
+        caption_id: 3,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: 4,
+        caption_id: 4,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: 8,
+        caption_id: 5,
+    },
+    CfilterDescriptorRow {
+        kind: 0x31,
+        param: 9,
+        caption_id: 6,
+    },
+    CfilterDescriptorRow {
+        kind: 0x32,
+        param: 10,
+        caption_id: 7,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: 7,
+        caption_id: 8,
+    },
+    CfilterDescriptorRow {
+        kind: 0x03,
+        param: 5,
+        caption_id: 9,
+    },
+    CfilterDescriptorRow {
+        kind: 0x01,
+        param: 1,
+        caption_id: 1,
+    },
+    CfilterDescriptorRow {
+        kind: 0x2e,
+        param: 11,
+        caption_id: 195,
+    },
+    CfilterDescriptorRow {
+        kind: 0x04,
+        param: 11,
+        caption_id: 11,
+    },
+    CfilterDescriptorRow {
+        kind: 0x05,
+        param: 11,
+        caption_id: 12,
+    },
+    CfilterDescriptorRow {
+        kind: 0x06,
+        param: 11,
+        caption_id: 13,
+    },
+    CfilterDescriptorRow {
+        kind: 0x07,
+        param: 11,
+        caption_id: 14,
+    },
+    CfilterDescriptorRow {
+        kind: 0x08,
+        param: 11,
+        caption_id: 15,
+    },
+    CfilterDescriptorRow {
+        kind: 0x09,
+        param: 11,
+        caption_id: 16,
+    },
+    CfilterDescriptorRow {
+        kind: 0x17,
+        param: 11,
+        caption_id: 30,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0d,
+        param: 11,
+        caption_id: 20,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0e,
+        param: 11,
+        caption_id: 21,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0f,
+        param: 11,
+        caption_id: 22,
+    },
+    CfilterDescriptorRow {
+        kind: 0x10,
+        param: 11,
+        caption_id: 23,
+    },
+    CfilterDescriptorRow {
+        kind: 0x11,
+        param: 11,
+        caption_id: 24,
+    },
+    CfilterDescriptorRow {
+        kind: 0x18,
+        param: 11,
+        caption_id: 31,
+    },
+    CfilterDescriptorRow {
+        kind: 0x12,
+        param: 11,
+        caption_id: 25,
+    },
+    CfilterDescriptorRow {
+        kind: 0x13,
+        param: 11,
+        caption_id: 26,
+    },
+    CfilterDescriptorRow {
+        kind: 0x14,
+        param: 11,
+        caption_id: 27,
+    },
+    CfilterDescriptorRow {
+        kind: 0x15,
+        param: 11,
+        caption_id: 28,
+    },
+    CfilterDescriptorRow {
+        kind: 0x16,
+        param: 11,
+        caption_id: 29,
+    },
+    CfilterDescriptorRow {
+        kind: 0x27,
+        param: 11,
+        caption_id: 177,
+    },
+    CfilterDescriptorRow {
+        kind: 0x26,
+        param: 11,
+        caption_id: 178,
+    },
+    CfilterDescriptorRow {
+        kind: 0x22,
+        param: 11,
+        caption_id: 179,
+    },
+    CfilterDescriptorRow {
+        kind: 0x23,
+        param: 11,
+        caption_id: 180,
+    },
+    CfilterDescriptorRow {
+        kind: 0x24,
+        param: 11,
+        caption_id: 181,
+    },
+    CfilterDescriptorRow {
+        kind: 0x25,
+        param: 11,
+        caption_id: 182,
+    },
+    CfilterDescriptorRow {
+        kind: 0x21,
+        param: 11,
+        caption_id: 171,
+    },
+    CfilterDescriptorRow {
+        kind: 0x20,
+        param: 11,
+        caption_id: 172,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1c,
+        param: 11,
+        caption_id: 173,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1d,
+        param: 11,
+        caption_id: 174,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1e,
+        param: 11,
+        caption_id: 175,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1f,
+        param: 11,
+        caption_id: 176,
+    },
+    CfilterDescriptorRow {
+        kind: 0x19,
+        param: 11,
+        caption_id: 32,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0a,
+        param: 11,
+        caption_id: 17,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0b,
+        param: 11,
+        caption_id: 18,
+    },
+    CfilterDescriptorRow {
+        kind: 0x0c,
+        param: 11,
+        caption_id: 19,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1a,
+        param: 11,
+        caption_id: 88,
+    },
+    CfilterDescriptorRow {
+        kind: 0x1b,
+        param: 11,
+        caption_id: 144,
+    },
+    CfilterDescriptorRow {
+        kind: 0x28,
+        param: 11,
+        caption_id: 191,
+    },
+    CfilterDescriptorRow {
+        kind: 0x29,
+        param: 11,
+        caption_id: 192,
+    },
+    CfilterDescriptorRow {
+        kind: 0x2a,
+        param: 11,
+        caption_id: 193,
+    },
+    CfilterDescriptorRow {
+        kind: 0x2d,
+        param: 11,
+        caption_id: 194,
+    },
+    CfilterDescriptorRow {
+        kind: 0x2f,
+        param: 6,
+        caption_id: 10,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: -1,
+        caption_id: 33,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: -2,
+        caption_id: 34,
+    },
+    CfilterDescriptorRow {
+        kind: 0x33,
+        param: -3,
+        caption_id: 35,
+    },
+];
+
+/// The `cfilter` DAT record's synthesis source (the record has fourteen string-less slots, §59
+/// addendum 12); mirrors [`filter_list_rows`] for class B (bead kuluu-o9qt7.20.1.3).
+pub fn cfilter_descriptor_rows(window: &str) -> Option<&'static [CfilterDescriptorRow]> {
+    match window {
+        "cfilter" => Some(&CFILTER_ROWS),
+        _ => None,
+    }
+}
+
+/// `cfilter`'s select arms — position-identical to [`CFILTER_ROWS`] (the raw table index retail's
+/// event dispatcher computes as `scroll_base + row − 1`, .text FFXiMain.dll retail-2026-09 RVA
+/// 0x197D00, and hands to the shared select method .text 0x198080) — a written-out identity so
+/// position == table_idx cannot drift from [`CFILTER_ROWS`].
+pub const FILTER_LIST_CFILTER_ARMS: [ConfigRowArm; 55] = [
+    ConfigRowArm::CfilterSelect { table_idx: 0 },
+    ConfigRowArm::CfilterSelect { table_idx: 1 },
+    ConfigRowArm::CfilterSelect { table_idx: 2 },
+    ConfigRowArm::CfilterSelect { table_idx: 3 },
+    ConfigRowArm::CfilterSelect { table_idx: 4 },
+    ConfigRowArm::CfilterSelect { table_idx: 5 },
+    ConfigRowArm::CfilterSelect { table_idx: 6 },
+    ConfigRowArm::CfilterSelect { table_idx: 7 },
+    ConfigRowArm::CfilterSelect { table_idx: 8 },
+    ConfigRowArm::CfilterSelect { table_idx: 9 },
+    ConfigRowArm::CfilterSelect { table_idx: 10 },
+    ConfigRowArm::CfilterSelect { table_idx: 11 },
+    ConfigRowArm::CfilterSelect { table_idx: 12 },
+    ConfigRowArm::CfilterSelect { table_idx: 13 },
+    ConfigRowArm::CfilterSelect { table_idx: 14 },
+    ConfigRowArm::CfilterSelect { table_idx: 15 },
+    ConfigRowArm::CfilterSelect { table_idx: 16 },
+    ConfigRowArm::CfilterSelect { table_idx: 17 },
+    ConfigRowArm::CfilterSelect { table_idx: 18 },
+    ConfigRowArm::CfilterSelect { table_idx: 19 },
+    ConfigRowArm::CfilterSelect { table_idx: 20 },
+    ConfigRowArm::CfilterSelect { table_idx: 21 },
+    ConfigRowArm::CfilterSelect { table_idx: 22 },
+    ConfigRowArm::CfilterSelect { table_idx: 23 },
+    ConfigRowArm::CfilterSelect { table_idx: 24 },
+    ConfigRowArm::CfilterSelect { table_idx: 25 },
+    ConfigRowArm::CfilterSelect { table_idx: 26 },
+    ConfigRowArm::CfilterSelect { table_idx: 27 },
+    ConfigRowArm::CfilterSelect { table_idx: 28 },
+    ConfigRowArm::CfilterSelect { table_idx: 29 },
+    ConfigRowArm::CfilterSelect { table_idx: 30 },
+    ConfigRowArm::CfilterSelect { table_idx: 31 },
+    ConfigRowArm::CfilterSelect { table_idx: 32 },
+    ConfigRowArm::CfilterSelect { table_idx: 33 },
+    ConfigRowArm::CfilterSelect { table_idx: 34 },
+    ConfigRowArm::CfilterSelect { table_idx: 35 },
+    ConfigRowArm::CfilterSelect { table_idx: 36 },
+    ConfigRowArm::CfilterSelect { table_idx: 37 },
+    ConfigRowArm::CfilterSelect { table_idx: 38 },
+    ConfigRowArm::CfilterSelect { table_idx: 39 },
+    ConfigRowArm::CfilterSelect { table_idx: 40 },
+    ConfigRowArm::CfilterSelect { table_idx: 41 },
+    ConfigRowArm::CfilterSelect { table_idx: 42 },
+    ConfigRowArm::CfilterSelect { table_idx: 43 },
+    ConfigRowArm::CfilterSelect { table_idx: 44 },
+    ConfigRowArm::CfilterSelect { table_idx: 45 },
+    ConfigRowArm::CfilterSelect { table_idx: 46 },
+    ConfigRowArm::CfilterSelect { table_idx: 47 },
+    ConfigRowArm::CfilterSelect { table_idx: 48 },
+    ConfigRowArm::CfilterSelect { table_idx: 49 },
+    ConfigRowArm::CfilterSelect { table_idx: 50 },
+    ConfigRowArm::CfilterSelect { table_idx: 51 },
+    ConfigRowArm::CfilterSelect { table_idx: 52 },
+    ConfigRowArm::CfilterSelect { table_idx: 53 },
+    ConfigRowArm::CfilterSelect { table_idx: 54 },
+];
+
+/// The class-B kind that routes to the console/group row family — the shared select method's
+/// `cmp al, 0x33` (.text FFXiMain.dll retail-2026-09 RVA 0x198090) and the state method's same
+/// test (.text 0x198251).
+const CFILTER_KIND_CONSOLE_OR_GROUP: u8 = 0x33;
+
+/// The param every plain toggle row carries — select dispatches on `cmp dl, 0xb` (.text
+/// FFXiMain.dll retail-2026-09 RVA 0x19814A; the state method branches on it at .text 0x1982B4).
+const CFILTER_PARAM_TOGGLE_MARKER: i8 = 0xb;
+
+/// Class B's pair-lane split, shared by the bit test (.text FFXiMain.dll retail-2026-09 RVA
+/// 0x1939A0) and the lane write (.text 0x1939D0): below the helpers' `cmp ecx, 0x1e` index maps
+/// to bit `index` of [`CONFIG_OPTION_CFILTER_LANE_A`] (`[obj+0x30]`), at/above it to bit
+/// (index − 0x1e) of [`CONFIG_OPTION_CFILTER_LANE_B`] (`[obj+0x34]`).
+const CFILTER_LANE_SPLIT: u8 = 0x1e; // .text FFXiMain.dll retail-2026-09 RVA 0x1939A4
+fn cfilter_pair_lane(index: u8) -> (u32, u32) {
+    if index < CFILTER_LANE_SPLIT {
+        (CONFIG_OPTION_CFILTER_LANE_A, index as u32)
+    } else {
+        (
+            CONFIG_OPTION_CFILTER_LANE_B,
+            (index - CFILTER_LANE_SPLIT) as u32,
+        )
+    }
+}
+
+/// The drawer's row-state method (.text FFXiMain.dll retail-2026-09 RVA 0x198240): glyph codes —
+/// **1** pair-lane bit set, **2** console/interlock C bit set, and for the param-2 row while the
+/// master dword holds, the {3,4} variants keyed on console bit 2 (.text FFXiMain.dll retail-2026-09
+/// RVA 0x198291 `neg al; sbb eax,eax; neg eax; add eax,3` — both non-zero, so the row marks even
+/// with its console bit clear). kuluu marks whenever the code is non-zero. Plain rows never consult
+/// the console dword: .text FFXiMain.dll retail-2026-09 RVA 0x1982B7 branches straight to the
+/// pair-lane-only tail (.text 0x1982F7).
+pub fn cfilter_row_state(
+    table_idx: usize,
+    option_values: &std::collections::BTreeMap<u32, i32>,
+) -> u8 {
+    let Some(row) = CFILTER_ROWS.get(table_idx) else {
+        return 0;
+    };
+    let console_bit = |bit: i8| {
+        // Bit test .text FFXiMain.dll retail-2026-09 RVA 0x193960 over the `[obj+0x38]` dword;
+        // x86 masks dword shift counts, and every param in the table is well below that.
+        let mask = option_values
+            .get(&CONFIG_OPTION_CFILTER_CONSOLE)
+            .copied()
+            .unwrap_or(0) as u32;
+        mask & (1u32 << ((bit as u32) % 32)) != 0
+    };
+    if row.kind == CFILTER_KIND_CONSOLE_OR_GROUP {
+        if row.param < 0 {
+            // Group rows (.text FFXiMain.dll retail-2026-09 RVA 0x19825E): marked while the stored
+            // level has reached this row's own −param.
+            let cur = option_values
+                .get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL)
+                .copied()
+                .unwrap_or(0);
+            return u8::from(cur >= -(row.param as i32));
+        }
+        if row.param == 2 {
+            // The master dword picks the glyph family (.text FFXiMain.dll retail-2026-09 RVA
+            // 0x19827C); both variants mark.
+            let master = option_values
+                .get(&CONFIG_OPTION_CFILTER_MASTER)
+                .copied()
+                .unwrap_or(0);
+            if master != 0 {
+                return if console_bit(row.param) { 4 } else { 3 };
+            }
+        }
+        if row.param == CFILTER_PARAM_TOGGLE_MARKER {
+            // A kind-0x33 param-marker row never marks (.text FFXiMain.dll retail-2026-09 RVA
+            // 0x1982A1, jump to the zero tail).
+            return 0;
+        }
+        return u8::from(console_bit(row.param)) * 2;
+    }
+    let (lane_opt, lane_bit) = cfilter_pair_lane(row.kind);
+    let pair_set =
+        option_values.get(&lane_opt).copied().unwrap_or(0) as u32 & (1u32 << lane_bit) != 0;
+    if row.param == CFILTER_PARAM_TOGGLE_MARKER {
+        return u8::from(pair_set);
+    }
+    // Interlock rows: the L glyph wins while the pair bit holds (.text FFXiMain.dll retail-2026-09
+    // RVA 0x1982B9–0x1982D1), else the shared console tail (.text 0x1982D4 movsx → 0x1982DC).
+    if pair_set {
+        return 1;
+    }
+    u8::from(console_bit(row.param)) * 2
+}
+
+/// Class B's shared select method — vtable slot +0x4c = .text FFXiMain.dll retail-2026-09 RVA
+/// 0x198080, reached from the event dispatcher's row branch (.text 0x197D00) — as a transition on
+/// the five persisted dwords. Four classes, in the method's own dispatch order:
+/// - kind 0x33 with param < 0 (group rows): level `v = table_idx − 0x33`; store `v−1` when
+///   `v <= cur` (.text FFXiMain.dll retail-2026-09 RVA 0x1980B2 `jle`) else `v`.
+/// - kind 0x33 with param ≥ 0 (console rows): toggle bit `param` of the console dword; when
+///   param == 2 and that toggle landed bit 2 **clear**, flip the master dword to
+///   `(old == 0 ? 1 : 0)` (.text FFXiMain.dll retail-2026-09 RVA 0x19810E–0x19812E `sete`).
+/// - kind ≠ 0x33 with param == 0xb (plain rows): toggle bit `kind` across the pair lanes
+///   (.text FFXiMain.dll retail-2026-09 RVA 0x1981EB).
+/// - kind ≠ 0x33 otherwise (interlock rows): a three-state cycle — with L set, clear L **and**
+///   force C←1; else with C set, clear C; else set L (.text FFXiMain.dll retail-2026-09 RVA
+///   0x198157–0x1981E8).
+pub fn cfilter_apply_select(
+    table_idx: usize,
+    option_values: &mut std::collections::BTreeMap<u32, i32>,
+) {
+    let Some(row) = CFILTER_ROWS.get(table_idx) else {
+        return;
+    };
+    // Sign-extended descriptor param as a dword bit index; x86 masks shift counts to 5 bits and
+    // every table value sits far below that.
+    let cbit = (row.param as u32) % 32;
+    if row.kind == CFILTER_KIND_CONSOLE_OR_GROUP {
+        if row.param < 0 {
+            let v = table_idx as i32 - 0x33; // .text FFXiMain.dll retail-2026-09 RVA 0x1980AD `lea eax,[edi−0x33]`
+            let cur = option_values
+                .get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL)
+                .copied()
+                .unwrap_or(0);
+            let next = if v <= cur { v - 1 } else { v };
+            option_values.insert(CONFIG_OPTION_CFILTER_GROUP_LEVEL, next);
+            return;
+        }
+        if row.param == CFILTER_PARAM_TOGGLE_MARKER {
+            // No-op arm (.text FFXiMain.dll retail-2026-09 RVA 0x1980C7 `cmp al,0xb; je` to ret).
+            return;
+        }
+        let console = option_values
+            .get(&CONFIG_OPTION_CFILTER_CONSOLE)
+            .copied()
+            .unwrap_or(0) as u32;
+        // Toggle via the test/RMW pair (.text FFXiMain.dll retail-2026-09 RVA 0x1980D7/0x1980F9):
+        // bit set → write value 0, clear → write value 1.
+        let toggled = console ^ (1u32 << cbit);
+        option_values.insert(CONFIG_OPTION_CFILTER_CONSOLE, toggled as i32);
+        if row.param != 2 {
+            return;
+        }
+        // The master flip rule (.text FFXiMain.dll retail-2026-09 RVA 0x19810E): re-test bit 2 of
+        // the new console dword and touch `[obj+0x40]` only when it landed clear.
+        if toggled & (1u32 << cbit) != 0 {
+            return;
+        }
+        let master = option_values
+            .get(&CONFIG_OPTION_CFILTER_MASTER)
+            .copied()
+            .unwrap_or(0);
+        option_values.insert(CONFIG_OPTION_CFILTER_MASTER, i32::from(master == 0));
+        return;
+    }
+    let (lane_opt, lane_bit) = cfilter_pair_lane(row.kind);
+    let lane = option_values.get(&lane_opt).copied().unwrap_or(0) as u32;
+    if row.param == CFILTER_PARAM_TOGGLE_MARKER {
+        // Plain pair-lane toggle (.text FFXiMain.dll retail-2026-09 RVA 0x1981EB–0x198224).
+        option_values.insert(lane_opt, (lane ^ (1u32 << lane_bit)) as i32);
+        return;
+    }
+    if lane & (1u32 << lane_bit) != 0 {
+        // L set: clear it (.text FFXiMain.dll retail-2026-09 RVA 0x198175, lane write value 0)…
+        option_values.insert(lane_opt, (lane & !(1u32 << lane_bit)) as i32);
+        // …and force the console bit on (.text FFXiMain.dll retail-2026-09 RVA 0x198188, RMW value 1).
+        let console = option_values
+            .get(&CONFIG_OPTION_CFILTER_CONSOLE)
+            .copied()
+            .unwrap_or(0) as u32;
+        option_values.insert(
+            CONFIG_OPTION_CFILTER_CONSOLE,
+            (console | (1u32 << cbit)) as i32,
+        );
+    } else {
+        let console = option_values
+            .get(&CONFIG_OPTION_CFILTER_CONSOLE)
+            .copied()
+            .unwrap_or(0) as u32;
+        if console & (1u32 << cbit) != 0 {
+            // C set: clear it (.text FFXiMain.dll retail-2026-09 RVA 0x1981BF, RMW value 0).
+            option_values.insert(
+                CONFIG_OPTION_CFILTER_CONSOLE,
+                (console & !(1u32 << cbit)) as i32,
+            );
+        } else {
+            // Both clear: set L (.text FFXiMain.dll retail-2026-09 RVA 0x1981D0–0x1981DD, lane write value 1).
+            option_values.insert(lane_opt, (lane | (1u32 << lane_bit)) as i32);
+        }
     }
 }
 
@@ -2817,6 +3424,21 @@ pub fn config_window_rows(
                         action: DynamicMenuAction::ConfigOptionToggleBit {
                             store_id: *store_id,
                             bit: *bit,
+                        },
+                    };
+                }
+                // A `cfilter` row marks through the drawer's state method (.text FFXiMain.dll
+                // retail-2026-09 RVA 0x198240 — glyph code non-zero means marked), and select rides
+                // the shared select method's transition table (vault main_menu.md §59 addendum 15).
+                Some(ConfigRowArm::CfilterSelect { table_idx }) => {
+                    return DynamicMenuRow {
+                        label: if cfilter_row_state(*table_idx as usize, option_values) != 0 {
+                            format!("\u{bb} {label}")
+                        } else {
+                            label.clone()
+                        },
+                        action: DynamicMenuAction::ConfigCfilterSelect {
+                            table_idx: *table_idx,
                         },
                     };
                 }
@@ -7663,6 +8285,210 @@ mod tests {
         assert_eq!(rows[0].label, "Return key assignments to default settings.");
         // Bit 4 ↔ catalog id 157 (vault §59 addendum 14 row table).
         assert_eq!(rows[4].label, "Play music in stereo.");
+    }
+
+    /// `cfilter`'s full row law (vault main_menu.md §59 addendum 15): the page is exactly the
+    /// descriptor table (.rdata FFXiMain.dll retail-2026-09 RVA 0x379A28, count 55 from the load
+    /// method .text 0x197F88), every row selects through the shared select-method arm keyed on its
+    /// raw table index (.text 0x198080), and marks ride the drawer state method .text 0x198240:
+    /// pair-lane bit → glyph 1, console/interlock C bit → 2, the param-2 row with master dword set
+    /// → {3,4} (.text 0x198291) even while its console bit is clear. A fresh store marks nothing.
+    #[test]
+    fn cfilter_rows_are_the_descriptor_table_and_mark_through_the_state_law() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "cfilter".to_string(),
+            CFILTER_ROWS
+                .iter()
+                .enumerate()
+                .map(|(idx, row)| (row.caption_id, format!("cf{idx}")))
+                .collect(),
+        );
+
+        let rows = config_window_rows(
+            "cfilter",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(rows.len(), CFILTER_ROWS.len());
+        for (position, row) in rows.iter().enumerate() {
+            assert!(
+                !row.label.starts_with('\u{bb}'),
+                "fresh store marked row {position}"
+            );
+            match row.action {
+                DynamicMenuAction::ConfigCfilterSelect { table_idx } => {
+                    // The dispatcher's raw index: scroll_base 0 + row − 1 == position (.text
+                    // FFXiMain.dll retail-2026-09 RVA 0x197D00).
+                    assert_eq!(
+                        table_idx as usize, position,
+                        "row {position} lost its table idx"
+                    );
+                }
+                other => panic!("cfilter row {position}: unexpected {other:?}"),
+            }
+        }
+
+        // Glyph codes straight from the state method (.text FFXiMain.dll retail-2026-09 RVA
+        // 0x198240): group rows idx 52–54 mark at level ≥ 1/2/3; console row idx 7 (kind 0x33,
+        // param 7) marks with console bit 7 as glyph 2; the param-2 row idx 1 picks its {3,4}
+        // family from the master dword (.text 0x19827C) keyed on console bit 2; interlock row
+        // idx 5 (kind 0x31 → LANE_B bit 19, C = console bit 9) shows L first; and plain row
+        // idx 11 (kind 0x04, param 0xb) consults ONLY its lane (.text 0x1982B7 → .text 0x1982F7).
+        let mut options = std::collections::BTreeMap::new();
+        options.insert(CONFIG_OPTION_CFILTER_GROUP_LEVEL, 2);
+        assert_eq!(cfilter_row_state(52, &options), 1);
+        assert_eq!(cfilter_row_state(53, &options), 1);
+        assert_eq!(cfilter_row_state(54, &options), 0);
+
+        let mut options = std::collections::BTreeMap::new();
+        options.insert(CONFIG_OPTION_CFILTER_CONSOLE, 1 << 7);
+        assert_eq!(cfilter_row_state(7, &options), 2);
+        // …and a plain row never marks off that same dword (.text FFXiMain.dll retail-2026-09
+        // RVA 0x1982B7 jumps over the console tail entirely).
+        options.insert(CONFIG_OPTION_CFILTER_CONSOLE, 1 << 4);
+        assert_eq!(cfilter_row_state(11, &options), 0);
+        options.insert(CONFIG_OPTION_CFILTER_LANE_A, 1 << 4);
+        assert_eq!(cfilter_row_state(11, &options), 1);
+
+        let mut options = std::collections::BTreeMap::new();
+        options.insert(CONFIG_OPTION_CFILTER_MASTER, 9);
+        assert_eq!(cfilter_row_state(1, &options), 3);
+        options.insert(CONFIG_OPTION_CFILTER_CONSOLE, 1 << 2);
+        assert_eq!(cfilter_row_state(1, &options), 4);
+
+        let mut options = std::collections::BTreeMap::new();
+        options.insert(CONFIG_OPTION_CFILTER_CONSOLE, 1 << 9);
+        assert_eq!(cfilter_row_state(5, &options), 2);
+        options.insert(CONFIG_OPTION_CFILTER_LANE_B, 1 << (0x31 - 0x1e));
+        // The L glyph wins while the pair bit holds (.text FFXiMain.dll retail-2026-09 RVA
+        // 0x1982C8–0x1982D1).
+        assert_eq!(cfilter_row_state(5, &options), 1);
+    }
+
+    /// The four transition classes of class B's shared select method (.text FFXiMain.dll
+    /// retail-2026-09 RVA 0x198080) as run on the five persisted dwords:
+    /// group store rule `if v <= cur {v−1} else {v}` with `v = idx − 0x33` (.text 0x1980AD/0x1980B2);
+    /// console toggle plus the param-2 master flip that fires only when bit 2 lands clear
+    /// (.text 0x19810E–0x19812E `sete`); plain pair-lane toggle (.text 0x1981EB); and the
+    /// interlock three-state cycle off → L → (L cleared, C set) → off (.text 0x198157–0x1981E8).
+    #[test]
+    fn cfilter_select_runs_the_shared_method_transitions() {
+        let mut o = std::collections::BTreeMap::new();
+        cfilter_apply_select(52, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&1));
+        cfilter_apply_select(52, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&0));
+        cfilter_apply_select(53, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&2));
+        cfilter_apply_select(53, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&1));
+        // Row idx 54's level law needs the table index (54 − 0x33 = 3): from a level-2 store,
+        // select stores 3, and again drops to 2 (.text FFXiMain.dll retail-2026-09 RVA 0x1980B2).
+        cfilter_apply_select(54, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&3));
+        cfilter_apply_select(54, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_GROUP_LEVEL), Some(&2));
+
+        let mut o = std::collections::BTreeMap::new();
+        cfilter_apply_select(7, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&(1 << 7)));
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_MASTER), None);
+        cfilter_apply_select(7, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&0));
+
+        // The param-2 row idx 1: setting bit 2 leaves the master alone; landing it clear flips
+        // `[obj+0x40]` via sete — old non-zero → 0, old zero → 1.
+        let mut o = std::collections::BTreeMap::new();
+        cfilter_apply_select(1, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&(1 << 2)));
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_MASTER), None);
+        cfilter_apply_select(1, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&0));
+        // .text FFXiMain.dll retail-2026-09 RVA 0x198124: sete stores (old == 0) into `[obj+0x40]`.
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_MASTER), Some(&1));
+        let mut o = std::collections::BTreeMap::new();
+        o.insert(CONFIG_OPTION_CFILTER_CONSOLE, 1 << 2);
+        o.insert(CONFIG_OPTION_CFILTER_MASTER, 7);
+        cfilter_apply_select(1, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&0));
+        // …and the same sete path maps a non-zero master to 0.
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_MASTER), Some(&0));
+        // A select that lands bit 2 SET never touches the master (.text FFXiMain.dll retail-2026-09
+        // RVA 0x19811E `jne` straight past the flip).
+        let mut o = std::collections::BTreeMap::new();
+        o.insert(CONFIG_OPTION_CFILTER_MASTER, 7);
+        cfilter_apply_select(1, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&(1 << 2)));
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_MASTER), Some(&7));
+
+        // Plain row idx 11 (kind 0x04): toggles lane A bit 4 only.
+        let mut o = std::collections::BTreeMap::new();
+        cfilter_apply_select(11, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_LANE_A), Some(&(1 << 4)));
+        // Kind 0x2e (idx 10) lives in lane B at bit 0x2e − 0x1e (.text FFXiMain.dll retail-2026-09
+        // RVA 0x193A14 `cmp ecx, 0x1e`).
+        cfilter_apply_select(10, &mut o);
+        assert_eq!(
+            o.get(&CONFIG_OPTION_CFILTER_LANE_B),
+            Some(&(1 << (0x2e - 0x1e)))
+        );
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), None);
+
+        // Interlock row idx 5 (kind 0x31, C = console bit 9): off → L; select again clears L and
+        // forces C; a third select leaves only C cleared.
+        let mut o = std::collections::BTreeMap::new();
+        cfilter_apply_select(5, &mut o);
+        assert_eq!(
+            o.get(&CONFIG_OPTION_CFILTER_LANE_B),
+            Some(&(1 << (0x31 - 0x1e)))
+        );
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), None);
+        // L was set: the machine clears it and forces C (.text FFXiMain.dll retail-2026-09 RVA
+        // 0x198175 lane-write value 0, .text 0x198188 console RMW value 1).
+        cfilter_apply_select(5, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_LANE_B), Some(&0));
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&(1 << 9)));
+        // Only C held: select clears it and leaves the lanes alone (.text FFXiMain.dll
+        // retail-2026-09 RVA 0x1981BF console RMW value 0).
+        cfilter_apply_select(5, &mut o);
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_CONSOLE), Some(&0));
+        assert_eq!(o.get(&CONFIG_OPTION_CFILTER_LANE_B), Some(&0));
+    }
+
+    /// Gated on a retail install: `cfilter`'s row list really is the 55-entry descriptor table —
+    /// the DAT record carries fourteen string-less slots (§59 addendum 12) and every caption
+    /// resolves through catalog table 11, so kuluu transcribes no label itself (bead
+    /// kuluu-o9qt7.20.1.3).
+    #[test]
+    fn real_cfilter_page_rows_are_the_descriptor_table() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        // The load method's own count: `mov eax, 0x37` (.text FFXiMain.dll retail-2026-09 RVA
+        // 0x197F88).
+        assert_eq!(table.rows_for("cfilter").len(), CFILTER_ROWS.len());
+        for (idx, row) in table.rows_for("cfilter").iter().enumerate() {
+            assert_eq!(
+                row.0, CFILTER_ROWS[idx].caption_id,
+                "cfilter row {idx} lost its catalog id"
+            );
+        }
+        let rows = config_window_rows(
+            "cfilter",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(rows.len(), CFILTER_ROWS.len());
     }
 
     #[test]

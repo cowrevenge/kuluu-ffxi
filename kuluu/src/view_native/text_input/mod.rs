@@ -1216,6 +1216,7 @@ fn sub_target_action_for(
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionBitSet { .. }
         | A::ConfigOptionToggleBit { .. }
+        | A::ConfigCfilterSelect { .. }
         | A::ConfigSliderEdit { .. }
         | A::ConfigWindowChoiceSet { .. }
         // The dialog row raises its prompt at the confirm seam; no target step.
@@ -1808,6 +1809,7 @@ fn dispatch_dynamic_menu_action(
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionBitSet { .. }
         | A::ConfigOptionToggleBit { .. }
+        | A::ConfigCfilterSelect { .. }
         | A::ConfigSliderEdit { .. }
         | A::ConfigWindowChoiceSet { .. }
         // The reset prompt writes its answer at the confirm seam — never a wire event.

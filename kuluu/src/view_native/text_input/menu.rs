@@ -598,6 +598,22 @@ pub(super) fn confirm_menu_at_cursor(
                     .insert(store_id, (mask ^ (1u32 << bit)) as i32);
                 return None;
             }
+            // A `cfilter` row select runs class B's shared select method (.text FFXiMain.dll
+            // retail-2026-09 RVA 0x198080, vtable slot +0x4c) verbatim through the exported law
+            // transition — group store rule, console-bit toggle with the param-2 master flip,
+            // plain pair-lane toggle, interlock three-state cycle (vault main_menu.md §59 addendum
+            // 15; bead kuluu-o9qt7.20.1.3). Silent like every other config write: LSB has no
+            // packet for the five cfilter stores (`vendor/server/src/map/packets/c2s/0x0db_config_language.cpp`
+            // carries only MessageFilter/MessageFilter2), and the shared select method itself
+            // never closes the window — it writes the in-object dwords and returns (.text
+            // FFXiMain.dll retail-2026-09 RVA 0x198080–0x19822F rets on every class).
+            if let A::ConfigCfilterSelect { table_idx } = action {
+                kuluu_render::hud::menu::cfilter_apply_select(
+                    table_idx as usize,
+                    &mut dynamic.config_option_values,
+                );
+                return None;
+            }
             // The window-local pair rows (`conf3win` ids 3/4, arms .text FFXiMain.dll
             // retail-2026-09 RVA 0x19aa85/0x19aa92) write only their own object field
             // — kuluu keeps the choice in `config_window_choices`: never the option
@@ -5146,6 +5162,121 @@ mod menu_dispatch_tests {
         assert!(matches!(
             stack.current().unwrap().kind,
             MenuKind::RetailConfigPage(6)
+        ));
+    }
+
+    /// A `cfilter` page select rides class B's shared select method onto the five persisted
+    /// dwords — here through the seam on hub page index 1: a group row stores its level, a plain
+    /// row toggles its pair-lane bit, and an interlock row's second select swaps L for C
+    /// (.text FFXiMain.dll retail-2026-09 RVA 0x198080; vault main_menu.md §59 addendum 15; bead
+    /// kuluu-o9qt7.20.1.3). Silent, and the page stays open like every other config write.
+    #[test]
+    fn cfilter_page_rows_apply_the_shared_method_and_keep_the_page_open() {
+        use kuluu_render::hud::menu::{
+            config_window_rows, ConfigDatRows, DynamicMenu, CFILTER_ROWS,
+        };
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "cfilter".to_string(),
+            CFILTER_ROWS
+                .iter()
+                .enumerate()
+                .map(|(idx, row)| (row.caption_id, format!("cf{idx}")))
+                .collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows(
+                "cfilter",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..DynamicMenu::default()
+        };
+        let mut stack = MenuStack::root();
+        // cfilter is hub page index 1 of RETAIL_CONFIG_PAGE_WINDOWS.
+        stack.push(MenuKind::RetailConfigPage(1));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        // Group row idx 52 stores level 1 (.text FFXiMain.dll retail-2026-09 RVA 0x1980AD).
+        stack.current_mut().unwrap().cursor = 52;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_CFILTER_GROUP_LEVEL),
+            Some(&1)
+        );
+
+        // Plain row idx 11 (kind 0x04) toggles its own lane bit, nothing else (.text
+        // FFXiMain.dll retail-2026-09 RVA 0x1981EB).
+        stack.current_mut().unwrap().cursor = 11;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_CFILTER_LANE_A),
+            Some(&(1 << 4))
+        );
+
+        // Interlock row idx 5: first select sets L; the second clears it and forces C (.text
+        // FFXiMain.dll retail-2026-09 RVA 0x198157–0x1981E8).
+        stack.current_mut().unwrap().cursor = 5;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_CFILTER_LANE_B),
+            Some(&(1 << (0x31 - 0x1e)))
+        );
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_CFILTER_LANE_B),
+            Some(&0)
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_CFILTER_CONSOLE),
+            Some(&(1 << 9))
+        );
+        // The window never closed itself, and nothing reached the wire — LSB carries no packet
+        // for these stores (vendor/server/src/map/packets/c2s/0x0db_config_language.cpp).
+        assert!(matches!(
+            stack.current().unwrap().kind,
+            MenuKind::RetailConfigPage(1)
         ));
     }
 }

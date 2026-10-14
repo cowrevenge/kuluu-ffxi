@@ -1784,7 +1784,7 @@ impl ConfigDatRows {
                     } else if window.root == ROOMLIST_DAT_WINDOW {
                         // `roomlist`’s five slots hold no string at all in the DAT record —
                         // retail fills them from GetText table 12 (.text FFXiMain.dll
-                        // retail-2026-09 0x1D6900 fetches ids 458/446..449 into pool slots in
+                        // retail-2026-09 0x1D6900 fetches ids 450/446..449 into pool slots in
                         // this order; bead kuluu-o9qt7.13.5), so the labels load from that
                         // catalog here and nowhere else.
                         for &caption_id in ROOMLIST_ROW_CAPTION_IDS.iter() {
@@ -3767,7 +3767,9 @@ pub const ROOMLIST_DAT_WINDOW: &str = "roomlist";
 /// The five table-12 catalog ids as fetched by the pool builder (.text FFXiMain.dll
 /// retail-2026-09 0x1D6900 writes them in this order at .text 0x1D695E..; labels are read
 /// from the DAT catalog file `GETTEXT_TABLE_12_CATALOG_FILE_ID` at load, never copied).
-const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [458, 446, 447, 448, 449];
+/// (Fetch ids re-read at .text 0x1D6907..0x1D6950: `push 0x1c2` first — catalog id
+/// 450 = "No changes" — then 0x1be..0x1c1.)
+const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [450, 446, 447, 448, 449];
 
 /// Row i of the pool sends `MYROOM_IS{Kind=Remodel, Param2 = ROW_STYLES[i]}` (sender
 /// .text FFXiMain.dll retail-2026-09 0x1D6AD0 reads Param2 = u16@[record+2], written by
@@ -6818,8 +6820,9 @@ mod tests {
 
     /// Row law for bead kuluu-o9qt7.13.5 (vault main_menu.md §59 addendum 20/21):
     /// `roomlist` row i carries style word ROOMLIST_ROW_STYLES[i]; the zero-style row
-    /// (`Rem's Tale Chapters 2 Stored`) answers as display-only because retail's sender
-    /// bails before the packet (.text FFXiMain.dll retail-2026-09 0x1D6AEC), and every
+    /// ("No changes") answers as display-only — the row callback .text
+    /// FFXiMain.dll retail-2026-09 RVA 0x1D6B52 tests its style word zero and only
+    /// refreshes/blips (.text 0x1D6B10), never arming a send — and every
     /// other row's action carries its Param2 style for the confirm→send chain.
     #[test]
     fn roomlist_rows_carry_their_style_words_and_actions() {
@@ -6866,7 +6869,7 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Rem's Tale Chapters 2 Stored",
+                "No changes",
                 "San d'Orian style",
                 "Bastokan style",
                 "Windurstian style",

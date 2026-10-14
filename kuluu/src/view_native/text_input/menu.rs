@@ -4057,8 +4057,9 @@ mod menu_dispatch_tests {
     /// FFXiMain.dll retail-2026-09 0x210E30, opening on No) and only YES runs the
     /// sender wrapper .text 0x1D6AB0 — exactly one MYROOM_IS Kind=Remodel carrying that
     /// row's Param2 style word. NO dismisses without a packet; both answers land back
-    /// on the roomlist. Row 0 (style word 0, `Rem's Tale Chapters 2 Stored`) never
-    /// reaches this seam: retail's sender bails before the packet (.text 0x1D6AEC).
+    /// on the roomlist. Row 0 — style word 0, caption "No changes" — never reaches
+    /// this seam: its select arm only refreshes/blips (.text FFXiMain.dll retail-2026-09
+    /// RVA 0x1D6B52 → .text 0x1D6B10).
     #[test]
     fn room_list_style_row_confirms_before_its_single_remodel_send() {
         use kuluu_render::hud::menu::{roomlist_rows, ConfigDatRows};
@@ -4072,7 +4073,7 @@ mod menu_dispatch_tests {
         table.by_root.insert(
             "roomlist".to_string(),
             vec![
-                (458, "Rem's Tale Chapters 2 Stored".to_string()),
+                (450, "No changes".to_string()),
                 (446, "San d'Orian style".to_string()),
                 (447, "Bastokan style".to_string()),
                 (448, "Windurstian style".to_string()),

@@ -57,7 +57,7 @@ pub const CAPTION_SHORT_CATALOG_FILE_ID: u32 = 55652;
 
 /// GetText **table 12** (`parse_d_msg` n=526 — the runtime caption source the roomlist
 /// remodel driver fills its five dynamic slots from, .text FFXiMain.dll retail-2026-09
-/// 0x1D6900 pushing (12, 458/446..449), plus the confirm prompt (12, 451); vault
+/// 0x1D6900 pushing (12, 450/446..449), plus the confirm prompt (12, 451); vault
 /// main_menu.md §59 addendum 21). File id resolved through the install's own FTABLE.
 pub const GETTEXT_TABLE_12_CATALOG_FILE_ID: u32 = 55653;
 
@@ -1149,7 +1149,7 @@ mod tests {
 
     /// Gated on a retail install. The roomlist remodel driver (.text FFXiMain.dll
     /// retail-2026-09 0x1D6900) fetches its five row captions and the remodel
-    /// confirm string via GetText(table 12, ids 446..=449 + 458/451); the install
+    /// confirm string via GetText(table 12, ids 450/446..449 + 451); the install
     /// carries them in the catalog at [`GETTEXT_TABLE_12_CATALOG_FILE_ID`] (n=526).
     /// Transcribed once by run — drift fails CI rather than the player (bead
     /// kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 21).
@@ -1165,19 +1165,22 @@ mod tests {
         let table = crate::dmsg::DmsgTable::parse(&bytes).expect("d_msg catalog");
         assert_eq!(table.len(), 526, "measured entry count (JP/EN twins alike)");
         // Row pool order as built at .text 0x1D695E..: style words {0, 615, 616,
-        // 617, 618} paired with caption ids fetched in the same write order.
+        // 617, 618} paired with caption ids fetched in the same write order
+        // (`push 0x1c2` first at .text 0x1D6907 — id 450, NOT the chapter-counter
+        // strings 457.. that live next door in this catalog).
         assert_eq!(
-            table.text(458),
-            Some("Rem's Tale Chapters 2 Stored"),
+            table.text(450),
+            Some("No changes"),
             "row 0 (style word 0 — select refreshes locally, never sends)"
         );
         assert_eq!(table.text(446), Some("San d'Orian style"));
         assert_eq!(table.text(447), Some("Bastokan style"));
         assert_eq!(table.text(448), Some("Windurstian style"));
         assert_eq!(table.text(449), Some("Mog Patio"));
-        println!(
-            "confirm-string id 451 = {:?}",
-            table.text(451).unwrap_or_default()
+        assert_eq!(
+            table.text(451),
+            Some("Make changes?"),
+            "the dialog the row callback raises (.text FFXiMain.dll retail-2026-09 RVA 0x1D6B85)"
         );
     }
 

@@ -1726,8 +1726,15 @@ pub enum ConfigRowArm {
     Slider {
         store_id: u32,
     },
+    /// A law'd name-open row: select drills a Config sub-window through menu
+    /// manager FFXiMain.dll retail-2026-09 RVA 0x15E350 (the arms push the
+    /// padded-name immediates, e.g. conf6win ids 8/9 open `menu    k1assign`/
+    /// `k2assign`, vault main_menu.md §59 addendum 3).
+    Sub {
+        sub: u8,
+    },
     /// Position in a law'd page whose select arm is not dug yet (window-local
-    /// flag rows and name-open rows at conf6win ids 8-10, conf3win ids 3/4 and
+    /// flag rows and the dialog arm at conf6win id 10, conf3win ids 3/4 and
     /// the conf3win slider entry id 11 - handlers FFXiMain.dll retail-2026-09
     /// RVA 0x19B200/0x19AA10): keeps the option-record fallback while its dig
     /// completes on bead kuluu-o9qt7.20.1.
@@ -1928,8 +1935,11 @@ const CONF6WIN_ROW_ARMS: [ConfigRowArm; 15] = [
         value: 1,
     },
     ConfigRowArm::Slider { store_id: 0x43 },
-    ConfigRowArm::Plain,
-    ConfigRowArm::Plain,
+    // Ids 8/9 are the name-opens through menu manager FFXiMain.dll
+    // retail-2026-09 RVA 0x15E350 (padded immediates `menu    k1assign`/
+    // `menu    k2assign`); id10 is the GetText+dialog arm, still a gap.
+    ConfigRowArm::Sub { sub: 3 },
+    ConfigRowArm::Sub { sub: 4 },
     ConfigRowArm::Plain,
     ConfigRowArm::Radio {
         store_id: 0x42,
@@ -2245,6 +2255,12 @@ pub fn config_window_rows(
                             store_id: *store_id,
                             value: *value,
                         },
+                    };
+                }
+                Some(ConfigRowArm::Sub { sub }) => {
+                    return DynamicMenuRow {
+                        label: label.clone(),
+                        action: DynamicMenuAction::OpenRetailConfigSub { sub: *sub },
                     };
                 }
                 _ => {}
@@ -6802,15 +6818,20 @@ mod tests {
                 matches!(r6[position].action, DynamicMenuAction::ConfigOptionSet { store_id: 0x42, value: v } if v == value)
             );
         }
-        for position in [7usize, 8, 9] {
-            assert!(
-                matches!(
-                    r6[position].action,
-                    DynamicMenuAction::ConfigOptionRow { .. }
-                ),
-                "conf6win row {position} placeholder"
-            );
-        }
+        // Ids 8/9 (index 7/8) drill k1assign/k2assign; id10's dialog arm is
+        // still a gap and keeps the option-record fallback.
+        assert!(matches!(
+            r6[7].action,
+            DynamicMenuAction::OpenRetailConfigSub { sub: 3 }
+        ));
+        assert!(matches!(
+            r6[8].action,
+            DynamicMenuAction::OpenRetailConfigSub { sub: 4 }
+        ));
+        assert!(matches!(
+            r6[9].action,
+            DynamicMenuAction::ConfigOptionRow { .. }
+        ));
         // Store 0x9D writes through the primary wrapper, so its active-row
         // mark comes from `option_values` (handler FFXiMain.dll retail-2026-09
         // RVA 0x19B358), not bank 2.

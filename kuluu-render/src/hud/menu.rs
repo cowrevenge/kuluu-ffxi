@@ -1771,6 +1771,21 @@ pub struct MainMenuRow {
     pub slot: usize,
 }
 
+/// Frame of the mirrored selector shown beside a companion window (ground
+/// truth C:\briefs\companion_windows.md §1, from FFXiMain.dll retail-2026-09
+/// OpenMenu RVA 0x15E350 with activate=1/exclusive=0: opening a child leaves
+/// the selector open; only the topmost interactive window holds keys).
+#[derive(Component)]
+pub struct MainMenuCompanionFrame;
+
+#[derive(Component)]
+pub struct CompanionTitle;
+
+#[derive(Component)]
+pub struct CompanionRow {
+    pub slot: usize,
+}
+
 #[derive(Message, Debug, Clone, Copy)]
 pub struct MenuRowActivated {
     pub slot: usize,
@@ -1809,6 +1824,9 @@ fn text_nowrap() -> TextLayout {
 pub struct MainMenuPane;
 
 pub fn spawn_main_menu(mut commands: Commands) {
+    // Row order [companion, selector] mirrors retail placement: selectors sit
+    // at design x=384 anchor-right and companion windows at x<384 (measured
+    // DAT frames; vault main_menu.md §16 mini-chunks, §7 field law).
     commands
         .spawn((
             crate::components::InGameEntity,
@@ -1821,7 +1839,45 @@ pub fn spawn_main_menu(mut commands: Commands) {
                 ..default()
             },
         ))
-        .with_children(spawn_pane_column);
+        .with_children(|root| {
+            spawn_companion_frame(root);
+            spawn_pane_column(root);
+        });
+}
+
+/// The read-only mirror of the level under focus - a second framed window, so
+/// a companion never appears to replace its selector (ground truth §1).
+fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
+    let (mut node, bg, border) = style::window_frame();
+    node.width = Val::Px(MENU_PANE_WIDTH);
+    node.display = Display::None;
+    parent
+        .spawn((MainMenuCompanionFrame, node, bg, border))
+        .with_children(|c| {
+            // Mirror nodes carry the same MainMenu title/row components as the
+            // focused pane (one query fills both; the CompanionTitle marker
+            // says which is which). They deliberately lack Button: only the
+            // topmost interactive window takes mouse or keys (ground truth §5).
+            c.spawn((
+                MainMenuTitle,
+                CompanionTitle,
+                Text::new(""),
+                text_nowrap(),
+                style::text_font(14.0),
+                TextColor(theme::TITLE),
+            ));
+            for slot in 0..MAX_ENTRY_COUNT {
+                c.spawn((
+                    MainMenuRow { slot },
+                    CompanionRow { slot },
+                    Text::new(""),
+                    text_nowrap(),
+                    style::text_font(14.0),
+                    TextColor(theme::TEXT),
+                    BackgroundColor(Color::NONE),
+                ));
+            }
+        });
 }
 
 fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
@@ -3075,8 +3131,9 @@ pub fn ability_group_empty_hint(group: crate::hud::action_model::AbilityGroup) -
     }
 }
 
-/// What the single Command-menu column renders this frame: the current (top)
-/// level of the stack.
+/// One framed menu window's content for a frame: the focused top level, and
+/// the level mirrored into the companion frame under it when one is open.
+#[derive(Clone, Copy)]
 struct PaneView {
     kind: MenuKind,
     cursor: usize,
@@ -3101,11 +3158,31 @@ pub fn update_main_menu(
 
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
-    mut menu_q: Query<&mut Node, (With<MainMenu>, Without<MainMenuRow>, Without<MainMenuPane>)>,
-    mut pane_q: Query<&mut Node, (With<MainMenuPane>, Without<MainMenuRow>)>,
-    mut row_q: Query<
+    mut menu_q: Query<
+        &mut Node,
+        (
+            With<MainMenu>,
+            Without<MainMenuRow>,
+            Without<MainMenuPane>,
+            Without<MainMenuCompanionFrame>,
+        ),
+    >,
+    mut pane_q: Query<
+        &mut Node,
+        (
+            With<MainMenuPane>,
+            Without<MainMenuRow>,
+            Without<MainMenuCompanionFrame>,
+            Without<CompanionRow>,
+        ),
+    >,
+    // One fill for both windows: mirror nodes carry the same title/row
+    // components, and the `Option<&Companion*>` markers pick which view they
+    // show (ground truth §1 - the selector stays framed under its companion).
+    #[allow(clippy::type_complexity)] mut row_q: Query<
         (
             &MainMenuRow,
+            Option<&CompanionRow>,
             &mut Node,
             &mut Text,
             &mut TextColor,
@@ -3113,7 +3190,16 @@ pub fn update_main_menu(
         ),
         Without<MainMenuTitle>,
     >,
-    mut title_q: Query<(&MainMenuTitle, &mut Text), Without<MainMenuRow>>,
+    mut title_q: Query<(&MainMenuTitle, Option<&CompanionTitle>, &mut Text)>,
+    mut comp_frame_q: Query<
+        &mut Node,
+        (
+            With<MainMenuCompanionFrame>,
+            Without<MainMenuRow>,
+            Without<MainMenuPane>,
+            Without<MainMenu>,
+        ),
+    >,
 ) {
     let Ok(mut node) = menu_q.single_mut() else {
         return;
@@ -3154,15 +3240,34 @@ pub fn update_main_menu(
 
     let view = current_view(stack);
 
-    for (_, mut text) in title_q.iter_mut() {
-        let want = view.as_ref().map(root_aware_title).unwrap_or_default();
+    // The selector stays on screen under its companion (ground truth §1:
+    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
+    // OpenMenu RVA 0x15E350 keeps the selector open). v1 mirrors only the
+    // level directly under focus; deeper retail stacks keep more windows open
+    // and land as follow-on beads.
+    let parent_view = stack.levels.len().checked_sub(2).and_then(|i| {
+        stack.levels.get(i).map(|l| PaneView {
+            kind: l.kind,
+            cursor: l.cursor,
+        })
+    });
+    let parent_view = parent_view.filter(|p| !renders_bespoke_screen(p.kind));
+
+    for (_, comp, mut text) in title_q.iter_mut() {
+        let want = if comp.is_some() {
+            parent_view
+                .map(|p| menu_title(p.kind).to_string())
+                .unwrap_or_default()
+        } else {
+            view.as_ref().map(root_aware_title).unwrap_or_default()
+        };
         if **text != want {
             **text = want;
         }
     }
 
     let Some(view) = view else {
-        for (_, mut row_node, _, _, _) in row_q.iter_mut() {
+        for (_, _, mut row_node, _, _, _) in row_q.iter_mut() {
             hide(&mut row_node);
         }
         return;
@@ -3171,11 +3276,55 @@ pub fn update_main_menu(
     let (total, viewport_start) =
         resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported);
     let window = visible_window(view.kind, total);
+    // Mirror-side totals for the selector frame.
+    let parent_total = parent_view
+        .map(|p| entry_count(p.kind, &dynamic, settings.dlss_supported))
+        .unwrap_or(0);
+    let parent_window = parent_view
+        .map(|p| visible_window(p.kind, parent_total))
+        .unwrap_or(0);
     let clock_debug_hold = vana_clock
         .as_ref()
         .is_some_and(|clock| clock.debug_hold_active());
 
-    for (row, mut row_node, mut text, mut color, mut bg) in row_q.iter_mut() {
+    for (row, comp, mut row_node, mut text, mut color, mut bg) in row_q.iter_mut() {
+        if comp.is_some() {
+            // Mirror row: the selector's list, read-only (ground truth §1).
+            let Some(parent) = parent_view else {
+                hide(&mut row_node);
+                continue;
+            };
+            if row.slot >= parent_window || row.slot >= parent_total {
+                hide(&mut row_node);
+                continue;
+            }
+            if row_node.display != Display::Flex {
+                row_node.display = Display::Flex;
+            }
+            let label: &str = if is_dynamic(parent.kind) {
+                entry_label(parent.kind, row.slot, &dynamic)
+            } else {
+                entries_for(parent.kind, settings.dlss_supported)
+                    .get(row.slot)
+                    .copied()
+                    .unwrap_or("<unknown>")
+            };
+            let want = if parent.cursor == row.slot {
+                format!("> {label}")
+            } else {
+                format!("  {label}")
+            };
+            if **text != want {
+                **text = want;
+            }
+            if color.0 != theme::TEXT {
+                color.0 = theme::TEXT;
+            }
+            if bg.0 != Color::NONE {
+                bg.0 = Color::NONE;
+            }
+            continue;
+        }
         let list_idx = viewport_start + row.slot;
         if row.slot >= window || list_idx >= total {
             hide(&mut row_node);
@@ -3225,6 +3374,22 @@ pub fn update_main_menu(
         }
         if bg.0 != want_bg {
             bg.0 = want_bg;
+        }
+    }
+
+    let Some(parent) = parent_view else {
+        for mut frame in comp_frame_q.iter_mut() {
+            hide(&mut frame);
+        }
+        return;
+    };
+    let want_width = Val::Px(pane_width_for(parent.kind));
+    for mut frame in comp_frame_q.iter_mut() {
+        if frame.width != want_width {
+            frame.width = want_width;
+        }
+        if frame.display != Display::Flex {
+            frame.display = Display::Flex;
         }
     }
 }
@@ -3716,9 +3881,12 @@ mod tests {
     }
 
     fn title_text(app: &mut App) -> String {
-        let mut q = app.world_mut().query::<(&MainMenuTitle, &Text)>();
+        let mut q = app
+            .world_mut()
+            .query::<(&MainMenuTitle, Option<&CompanionTitle>, &Text)>();
         q.iter(app.world())
-            .map(|(_, text)| text.0.clone())
+            .filter(|(_, comp, _)| comp.is_none())
+            .map(|(_, _, text)| text.0.clone())
             .next()
             .expect("title exists")
     }
@@ -3765,19 +3933,75 @@ mod tests {
         // DYNAMIC_VISIBLE_ROWS viewport math.
         let mut q = app
             .world_mut()
-            .query_filtered::<&TextLayout, With<MainMenuRow>>();
+            .query::<(&TextLayout, &MainMenuRow, Option<&CompanionRow>)>();
         let mut count = 0;
-        for layout in q.iter(app.world()) {
+        for (layout, _row, comp) in q.iter(app.world()) {
             assert_eq!(layout.linebreak, LineBreak::NoWrap);
-            count += 1;
+            if comp.is_none() {
+                count += 1;
+            }
         }
-        assert_eq!(count, MAX_ENTRY_COUNT, "every row carries NoWrap");
+        assert_eq!(count, MAX_ENTRY_COUNT, "every focused row carries NoWrap");
         let mut q = app
             .world_mut()
             .query_filtered::<&TextLayout, With<MainMenuTitle>>();
         assert!(q
             .iter(app.world())
             .all(|l| l.linebreak == LineBreak::NoWrap));
+    }
+
+    fn companion_frame_visible(app: &mut App) -> (bool, String, Vec<String>) {
+        let mut visible = false;
+        {
+            let mut q = app.world_mut().query::<(&MainMenuCompanionFrame, &Node)>();
+            for (_, node) in q.iter(app.world()) {
+                if node.display != Display::None {
+                    visible = true;
+                }
+            }
+        }
+        let title = app
+            .world_mut()
+            .query::<(&CompanionTitle, &Text)>()
+            .iter(app.world())
+            .map(|(_, t)| t.0.clone())
+            .next()
+            .unwrap_or_default();
+        let mut rows: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&CompanionRow, &Text, &Node)>()
+            .iter(app.world())
+            .filter(|(_, _, node)| node.display != Display::None)
+            .map(|(row, text, _)| (row.slot, text.0.clone()))
+            .collect();
+        rows.sort_by_key(|(slot, _)| *slot);
+        (visible, title, rows.into_iter().map(|(_, t)| t).collect())
+    }
+
+    /// Depth-1: the Command menu owns the screen alone - no mirror frame.
+    #[test]
+    fn root_only_stack_shows_no_companion_frame() {
+        let mut app = root_menu_app(0);
+        let (visible, _, _) = companion_frame_visible(&mut app);
+        assert!(!visible, "no selector to mirror under a depth-1 stack");
+    }
+
+    /// The selector-window law: opening the retail Config hub over the Command
+    /// menu leaves that menu framed on screen beside it.
+    #[test]
+    fn opened_windows_keep_their_selector_framed() {
+        let mut app = root_menu_app(0);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        let (visible, title, rows) = companion_frame_visible(&mut app);
+        assert!(visible, "the Command menu stays framed under its companion");
+        assert_eq!(title, "Commands");
+        assert!(
+            !rows.is_empty(),
+            "the mirrored selector still lists its page"
+        );
     }
 
     #[test]

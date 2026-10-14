@@ -292,10 +292,14 @@ pub fn update_status_panel(
     state: Res<SceneState>,
     mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
     mut level_text_q: Query<&mut Text, With<StatusLevelText>>,
+    // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text query here
+    // must exclude EVERY other marker in the system (StatusLevelText included —
+    // schedule-time conflict detection killed the release client without it).
     mut header_q: Query<
         &mut Text,
         (
             With<StatusHeaderRow>,
+            Without<StatusLevelText>,
             Without<StatusVitalsRow>,
             Without<StatusItemLevelRow>,
             Without<StatusAttrRow>,
@@ -306,6 +310,7 @@ pub fn update_status_panel(
         (
             With<StatusVitalsRow>,
             Without<StatusHeaderRow>,
+            Without<StatusLevelText>,
             Without<StatusItemLevelRow>,
             Without<StatusAttrRow>,
         ),
@@ -316,6 +321,7 @@ pub fn update_status_panel(
             With<StatusItemLevelRow>,
             Without<StatusHeaderRow>,
             Without<StatusVitalsRow>,
+            Without<StatusLevelText>,
             Without<StatusAttrRow>,
         ),
     >,
@@ -325,6 +331,7 @@ pub fn update_status_panel(
             Without<StatusHeaderRow>,
             Without<StatusVitalsRow>,
             Without<StatusItemLevelRow>,
+            Without<StatusLevelText>,
         ),
     >,
 ) {
@@ -565,6 +572,23 @@ pub fn job_level_rows(overlay: &ActiveOverlay, levels: &[(u8, u8)]) -> Vec<JobLe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression pin (release-client panic, 2026-10-14): the real schedule runs
+    /// `update_status_panel`, and Bevy's B0001 conflict check fires at system
+    /// init — every &mut Text parameter pair must be provably disjoint via
+    /// Without<..>. Unit tests never touched the scheduler, so this only ever
+    /// exploded in the built game; ticking it once here pins that class.
+    #[test]
+    fn update_status_panel_runs_in_a_real_schedule_without_query_conflicts() {
+        use bevy::app::App;
+        let mut app = App::new();
+        app.add_systems(bevy::app::Update, update_status_panel);
+        app.insert_resource(crate::input_mode::InputMode::default());
+        app.insert_resource(SceneState::default());
+        // No entities: the system returns early, but the queries are already
+        // registered — a B0001 conflict panics inside this same call.
+        app.update();
+    }
 
     /// The `level` box under the persona panel answers from s2c 0x061 EXP
     /// (vault main_menu.md §59 addendum 10 screenshot law): Level / EXP /

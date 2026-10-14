@@ -65,8 +65,8 @@ fn resolve_menu_entry(
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
         magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
-        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE,
-        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_REGION_INFO, ROOT_SHUT_DOWN,
+        ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     // The Config family resolves through no labels at all: every window's rows are DAT
     // widgets read at runtime (bead kuluu-o9qt7.33; vault main_menu.md §43/§49/§57), and each
@@ -124,7 +124,7 @@ fn resolve_menu_entry(
         // Page-1 row 11 name-opens `menu    region` with no gate (FFXiMain.dll
         // retail-2026-09 RVA 0x140691; vault main_menu.md §29): kuluu drills its
         // four-mode panel, opened at display mode 0.
-        (MenuKind::Root, "Region Info") => {
+        (MenuKind::Root, ROOT_REGION_INFO) => {
             MenuDispatch::OpenSubmenu(MenuKind::RegionInfo { mode: 0 })
         }
 
@@ -2124,6 +2124,38 @@ mod menu_key_tests {
             MenuKind::RegionInfo { mode } => assert_eq!(mode, 2),
             other => panic!("expected the Region Info window on top, got {other:?}"),
         }
+    }
+
+    /// User bug kuluu-tfmgd: one Enter with the page-1 cursor sitting on the
+    /// Region Info row must open that window through the full key handler —
+    /// the runtime path, not just label resolution. The kind is dynamic, so
+    /// the registered refresh (hud/mod.rs) installs its live four-mode rows.
+    #[test]
+    fn region_info_root_row_opens_through_the_key_handler() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = kuluu_render::hud::menu::root_entries()
+            .iter()
+            .position(|e| *e == kuluu_render::hud::menu::ROOT_REGION_INFO)
+            .expect("Region Info is a root row");
+        {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        }
+        assert_eq!(
+            stack.levels.len(),
+            2,
+            "the Region Info window opens as its own level"
+        );
+        match stack.current().unwrap().kind {
+            MenuKind::RegionInfo { mode } => assert_eq!(mode, 0),
+            other => panic!("expected the Region Info window on top, got {other:?}"),
+        }
+        assert!(
+            kuluu_render::hud::menu::is_dynamic(MenuKind::RegionInfo { mode: 0 }),
+            "a dynamic kind gets its rows from the registered refresh system"
+        );
     }
 
     #[test]

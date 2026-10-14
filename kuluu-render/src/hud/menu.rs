@@ -21,6 +21,8 @@ pub const COMM_FRIEND_LIST: &str = "Friend List";
 /// Page-2 row 4. The caption is catalog id 107, which the `mogcont` window
 /// record itself carries as its comwin title token (vault main_menu.md §32).
 pub const ROOT_VIEW_HOUSE: &str = "View House";
+/// Page-1 row 11 — the four-mode Region Info panel's selector label.
+pub const ROOT_REGION_INFO: &str = "Region Info";
 
 /// Retail's Command menu (windows `menuwind`/`socialme`) shows twelve rows per
 /// page across two pages; kuluu appends a third page of its own entries. "-"
@@ -4032,6 +4034,47 @@ mod tests {
         assert!(
             !rows.is_empty(),
             "the mirrored selector still lists its page"
+        );
+    }
+
+    /// User bug kuluu-tfmgd: Region Info rides the companion law - opening it
+    /// keeps the Command menu framed beside it, and its pane answers with the
+    /// live four-mode rows (mode marker on World; handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x140780 installs modes in place - vault
+    /// main_menu.md §29), never an empty window.
+    #[test]
+    fn region_info_opens_beside_the_selector_frame() {
+        let mut app = root_menu_app(0);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RegionInfo { mode: 0 });
+        app.insert_resource(InputMode::Menu(stack));
+        let mut dynamic = app.world_mut().resource_mut::<DynamicMenu>();
+        dynamic.rows = region_info_rows(0, Some(0x00E6));
+        drop(dynamic);
+        app.update();
+
+        let (visible, title, _) = companion_frame_visible(&mut app);
+        assert!(visible, "the Command menu stays framed beside Region Info");
+        assert_eq!(title, "Commands");
+
+        let mut q = app
+            .world_mut()
+            .query::<(&MainMenuRow, Option<&CompanionRow>, &Text, &Node)>();
+        let pane_rows: Vec<String> = q
+            .iter(app.world())
+            .filter(|(_, comp, _, node)| comp.is_none() && node.display != Display::None)
+            .map(|(_, _, text, _)| text.0.clone())
+            .collect();
+        assert_eq!(
+            pane_rows.len(),
+            4,
+            "the four mode rows render: {pane_rows:?}"
+        );
+        assert!(
+            pane_rows
+                .iter()
+                .any(|t| t.contains('\u{bb}') && t.contains("World")),
+            "the installed mode wears the marker: {pane_rows:?}"
         );
     }
 

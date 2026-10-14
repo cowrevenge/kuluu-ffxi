@@ -4048,6 +4048,21 @@ async fn keepalive_loop(
                             tracing::warn!(error = %e, "config send failed");
                         }
                     }
+                    // The `conf12wi` store-0xBF pair announce (c2s 0x088 — no LSB
+                    // handler exists for the id, so there is no echo to wait for;
+                    // retail fires it from helper FFXiMain.dll retail-2026-09 RVA
+                    // 0x1A8030 past its gates, which already ran in the menu seam;
+                    // vault main_menu.md §59 addendum 16).
+                    Some(AgentCommand::AnnounceConfigBfPair { mode }) => {
+                        let payload = build_subpacket_conf_bf_announce(sub_seq, mode);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bf pair announce send failed");
+                        }
+                    }
                     Some(AgentCommand::OpenBazaar {
                         target_id,
                         target_index,

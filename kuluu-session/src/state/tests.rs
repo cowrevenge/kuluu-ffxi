@@ -2626,6 +2626,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::CheckTarget { .. } => (),
         AgentCommand::OpenBazaar { .. } => (),
         AgentCommand::SetConfigFlag { .. } => (),
+        AgentCommand::AnnounceConfigBfPair { .. } => (),
         AgentCommand::BuyBazaarItem { .. } => (),
         AgentCommand::CloseBazaar { .. } => (),
         AgentCommand::Heal { .. } => (),

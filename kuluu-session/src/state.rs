@@ -4344,6 +4344,17 @@ pub enum AgentCommand {
         on: bool,
     },
 
+    /// Announce one flip of the `conf12wi` store-0xBF pair (c2s **0x088**, body
+    /// law FFXiMain.dll retail-2026-09 RVA 0xE5520; vault main_menu.md §59
+    /// addendum 16). The mode byte is already the law-derived transition value —
+    /// the helper's Monstrosity bail (.text 0x1A8036) and its >0x2328 ms guard
+    /// (.text 0x1A7D05) run in the menu seam before this is sent. vendor/server
+    /// carries no handler for c2s 0x088 (packets/c2s/ has no file for the id),
+    /// so LSB drops the frame and nothing folds back from it.
+    AnnounceConfigBfPair {
+        mode: u8,
+    },
+
     /// Buy `quantity` of the browsed bazaar's row `index` (c2s 0x106). The
     /// server caps quantity at 99 (0x106_bazaar_buy.cpp validate).
     BuyBazaarItem {

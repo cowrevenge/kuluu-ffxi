@@ -551,9 +551,49 @@ pub(super) fn confirm_menu_at_cursor(
             // is silent, keeps the window open, and stays on this machine —
             // LSB's c2s 0x0DC grammar accepts only the named SAVE_CONF bits
             // (vendor/server/src/map/packets/c2s/0x0dc_config.cpp), never store
-            // options. The row marker arrives with the next refresh.
+            // options. The row marker arrives with the next refresh. The one
+            // exception is `conf12wi` rows 3/4, whose arm rides out to helper
+            // 0x1A8030 after the write — handled below.
             if let A::ConfigOptionSet { store_id, value } = action {
+                // The BF pair's announce mode reads the value the store held
+                // *before* the primary write (.text FFXiMain.dll retail-2026-09
+                // RVA 0x19BA1D grabs it through wrapper 0x193850 first), so take
+                // it before inserting. A never-read store is `None`, which the law
+                // treats as not-1 exactly like retail's fresh config.dat dword.
+                let bf_pair = (store_id == kuluu_render::hud::menu::CONFIG_OPTION_CONF_BF_PAIR)
+                    .then(|| dynamic.config_option_values.get(&store_id).copied());
                 dynamic.config_option_values.insert(store_id, value);
+                if let Some(old) = bf_pair {
+                    // Helper FFXiMain.dll retail-2026-09 RVA 0x1A8030: the arm hands
+                    // it {mode} only — and a Monstrosity session bails before
+                    // anything reaches the wire (.text 0x1A8031 calls predicate
+                    // 0x97D50, .text 0x1A8036 returns false), leaving the store write
+                    // in place. The >0x2328 ms guard (.text 0x1A7D05) then decides:
+                    // on suppression retail pokes sub-window id 0x22 through drawer
+                    // singleton [0x10578158] (.text 0x1A8058–0x1A8068) — chrome with
+                    // no kuluu counterpart, so the announce is dropped; on pass retail
+                    // stamps its clock global ([0x106627e4] store at .text 0x1A806E)
+                    // and sends through writer 0xE5520. The helper's tail re-persist
+                    // of the same store value (.text 0x1A8094/0x1A80B8) is the write
+                    // already applied above (vault main_menu.md §59 addendum 16).
+                    if scene_state.snapshot.monstrosity.is_none() {
+                        let elapsed = dynamic
+                            .conf_bf_stamp
+                            .map(|stamp| stamp.elapsed().as_millis() as u64);
+                        if kuluu_render::hud::menu::conf_bf_announce_allowed(elapsed) {
+                            dynamic.conf_bf_stamp = Some(std::time::Instant::now());
+                            let mode = kuluu_render::hud::menu::conf_bf_packet_mode(value, old);
+                            if let Err(e) =
+                                cmd_tx.try_send(AgentCommand::AnnounceConfigBfPair { mode })
+                            {
+                                push_system_chat_line(
+                                    scene_state,
+                                    format!("[menu] bf pair announce dropped: {e}"),
+                                );
+                            }
+                        }
+                    }
+                }
                 return None;
             }
             // The bit pairs (`conf12wi` rows 7/8 and 13/14, `conf3win` rows 12/13)
@@ -5277,6 +5317,143 @@ mod menu_dispatch_tests {
         assert!(matches!(
             stack.current().unwrap().kind,
             MenuKind::RetailConfigPage(1)
+        ));
+    }
+
+    /// `conf12wi` rows 3/4 write the store-0xBF pair and, past helper FFXiMain.dll
+    /// retail-2026-09 RVA 0x1A8030's gates, announce it — here through the seam on
+    /// hub page index 10: enabling from no known stored value announces mode 4; a
+    /// reselect inside the guard window (.text 0x1A7D05) stays silent while the
+    /// store write stands; and Monstrosity bails before the wire (.text 0x1A8036)
+    /// without rolling that write back (vault main_menu.md §59 addendum 16; bead
+    /// kuluu-o9qt7.20.1.4).
+    #[test]
+    fn conf12wi_bf_pair_rows_write_the_store_and_announce_modes() {
+        use kuluu_render::hud::menu::{
+            config_window_rows, ConfigDatRows, DynamicMenu, CONFIG_OPTION_CONF_BF_PAIR,
+            CONF_BF_MODE_DISABLE, CONF_BF_MODE_ENABLE,
+        };
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf12wi".to_string(),
+            (0..14u32).map(|i| (900 + i, format!("bf{i}"))).collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows(
+                "conf12wi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..DynamicMenu::default()
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(10));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        // Row 4 (the id-4 member writing 1, .text FFXiMain.dll retail-2026-09 RVA
+        // 0x19BA0E) enables from no known stored value → mode 4 (.text 0x19BA43).
+        stack.current_mut().unwrap().cursor = 3;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&CONFIG_OPTION_CONF_BF_PAIR),
+            Some(&1)
+        );
+        match cmd_rx.try_recv() {
+            Ok(AgentCommand::AnnounceConfigBfPair { mode }) => {
+                assert_eq!(mode, CONF_BF_MODE_ENABLE)
+            }
+            other => panic!("expected the enable announce, got {other:?}"),
+        }
+
+        // The off member (row 3 writes 0) right after: the write lands but the
+        // guard (.text FFXiMain.dll retail-2026-09 RVA 0x1A7D05 `cmp eax, 0x2328;
+        // seta`) suppresses inside its window — nothing new reaches the channel.
+        stack.current_mut().unwrap().cursor = 2;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&CONFIG_OPTION_CONF_BF_PAIR),
+            Some(&0)
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the guard window must swallow the re-send"
+        );
+
+        // Monstrosity: the helper bails before touching the wire (.text FFXiMain.dll
+        // retail-2026-09 RVA 0x1A8036) yet never rolls back the primary write.
+        scene_state.snapshot.monstrosity = Some(kuluu_snapshot::MonstrosityInfo {
+            species: 1,
+            equipped_instincts: [0; 12],
+        });
+        stack.current_mut().unwrap().cursor = 3;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&CONFIG_OPTION_CONF_BF_PAIR),
+            Some(&1)
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Monstrosity must stay off the wire"
+        );
+
+        // A forced-past stamp un-suppresses the next transition, whose off member is
+        // helper(0) at .text FFXiMain.dll retail-2026-09 RVA 0x19BA5D.
+        dynamic.conf_bf_stamp = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(
+                    kuluu_render::hud::menu::CONF_BF_ANNOUNCE_WINDOW_MS + 1,
+                ),
+        );
+        stack.current_mut().unwrap().cursor = 2;
+        scene_state.snapshot.monstrosity = None;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        match cmd_rx.try_recv() {
+            Ok(AgentCommand::AnnounceConfigBfPair { mode }) => {
+                assert_eq!(mode, CONF_BF_MODE_DISABLE)
+            }
+            other => panic!("expected the disable announce, got {other:?}"),
+        }
+
+        assert!(matches!(
+            stack.current().unwrap().kind,
+            MenuKind::RetailConfigPage(10)
         ));
     }
 }

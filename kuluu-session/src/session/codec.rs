@@ -279,6 +279,23 @@ pub fn build_subpacket_config(sync: u16, flag: ffxi_proto::config::ConfigBit, on
     buf
 }
 
+// c2s **0x088** — the `conf12wi` store-0xBF pair announce. No LSB file exists
+// for the id (vendor/server/src/map/packets/c2s/ carries no 0x088), so nothing
+// folds back from it; kuluu emits the frame because retail does, body law in
+// ffxi_proto::config::build_conf_pair_announce (writer FFXiMain.dll retail-2026-09
+// RVA 0xE5520; vault main_menu.md §59 addendum 16).
+pub fn build_subpacket_conf_bf_announce(sync: u16, mode: u8) -> Vec<u8> {
+    let body = ffxi_proto::config::build_conf_pair_announce(mode);
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::config::C2S_CONF_PAIR_ANNOUNCE_ID,
+        2,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&body);
+    buf
+}
+
 // GP_CLI_COMMAND_REQSUBMAPNUM, vendor/server/src/map/packets/c2s/
 // 0x0eb_reqsubmapnum.h: header only. The event VM's 0xA6 case 0 sends it to
 // fetch the event's sub-map number; the server answers with s2c 0x10E when

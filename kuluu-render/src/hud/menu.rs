@@ -648,6 +648,12 @@ pub struct DynamicMenu {
     /// at −1 in the ctor .text FFXiMain.dll retail-2026-09 RVA 0x19a8b8; vault
     /// main_menu.md §59 addendum 9; bead kuluu-o9qt7.20.1.2).
     pub config_window_choices: std::collections::BTreeMap<(u8, u16), i32>,
+    /// The announce throttle stamp of the `conf12wi` store-0xBF pair — retail keeps
+    /// this clock global at [0x106627e4], written on every sent announce (.text
+    /// FFXiMain.dll retail-2026-09 RVA 0x1A806E) and read back by the guard
+    /// subtraction at RVA 0x1A7D05 (vault main_menu.md §59 addendum 16; bead
+    /// kuluu-o9qt7.20.1.4). `None` = never announced, like retail's zeroed BSS.
+    pub conf_bf_stamp: Option<std::time::Instant>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -1970,10 +1976,13 @@ pub const CONF13WI_RADIO_ARMS: &[ConfigRowArm] = &[
 /// varies per row — captured here as the resolved per-row values. Rows 7/8 and
 /// 13/14 drive the bit helper 0x1938F0 on option 0x99 - **bit 7** (.text
 /// 0x19BA8E) and **bit 6** (0x19BADA); addendum 5 corrected these from "stores".
-/// Row 3/4's arm
-/// also reads its old value (wrapper 0x193850) and fires helper 0x1A8030(4)
-/// when leaving the on state — kuluu records the write; the helper side effect
-/// is noted open in vault main_menu.md §59 addendum 2.
+/// Rows 3/4's arm additionally reads its old value (wrapper 0x193850 at .text
+/// 0x19BA1D) and hands the transition to helper 0x1A8030 with one of three
+/// modes — off is `helper(0)` (.text 0x19BA5D), writing 1 over stored-1 is
+/// `helper(1)` (.text 0x19BA4F), and writing 1 over anything else is
+/// `helper(4)` (.text 0x19BA43); the helper's own law lives in
+/// [`conf_bf_packet_mode`]/[`conf_bf_announce_allowed`] (vault main_menu.md
+/// §59 addendum 16, closing addendum 2's open note).
 pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
     ConfigRowArm::Radio {
         store_id: 0xBE,
@@ -2020,6 +2029,66 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
     ConfigRowArm::RadioBit { bit: 6, value: 0 },
     ConfigRowArm::RadioBit { bit: 6, value: 1 },
 ];
+
+/// The store dword driven by `conf12wi` rows 3/4. Their shared arm reads the
+/// old value through FFXiMain.dll retail-2026-09 RVA 0x193850 (.text 0x19BA1D),
+/// writes `(select id == 4)` as the new value through wrapper 0x193830 (.text
+/// 0x19BA2A, polarity `cmp ax,4; sete dl` at .text 0x19BA0E/0x19BA18), and then
+/// hands the transition to helper 0x1A8030 ([`conf_bf_packet_mode`] picks that
+/// mode from the two values). The helper re-persists literal store 0xBF on its
+/// success tail — `mode 0 → store←0` (wrapper call at .text FFXiMain.dll
+/// retail-2026-09 RVA 0x1A8094) and `mode ∈ {1,3,4} → store←1` (.text 0x1A80B8)
+/// — always the value the primary write already applied; neither the helper's
+/// Monstrosity bail (.text 0x1A8036, predicate 0x97D50) nor its suppressed
+/// branch rolls that write back (vault main_menu.md §59 addendum 16; bead
+/// kuluu-o9qt7.20.1.4).
+pub const CONFIG_OPTION_CONF_BF_PAIR: u32 = 0xBF;
+
+/// The announce-mode law of `conf12wi` rows 3/4 (arm .text FFXiMain.dll
+/// retail-2026-09 RVA 0x19BA32–0x19BA5D): writing 0 announces
+/// [`CONF_BF_MODE_DISABLE`] whatever was stored; writing 1 over a store that
+/// read back exactly 1 reasserts ([`CONF_BF_MODE_KEEP_ON`]); writing 1 over any
+/// other stored value (including no known value) enables
+/// ([`CONF_BF_MODE_ENABLE`]).
+#[must_use]
+pub const fn conf_bf_packet_mode(new_value: i32, old_stored: Option<i32>) -> u8 {
+    if new_value == 0 {
+        CONF_BF_MODE_DISABLE
+    } else if matches!(old_stored, Some(1)) {
+        CONF_BF_MODE_KEEP_ON
+    } else {
+        CONF_BF_MODE_ENABLE
+    }
+}
+
+/// Mode bytes as the arm picks them at .text FFXiMain.dll retail-2026-09 RVA
+/// 0x19BA32 (`cmp esi,1` on the written value → `helper(0)` at .text 0x19BA5D;
+/// writing 1 branches on the old store through `cmp edi,1` — kept-on is
+/// `helper(1)` at .text 0x19BA4F, enabling is `helper(4)` at .text 0x19BA43).
+pub const CONF_BF_MODE_DISABLE: u8 = 0;
+/// Reasserting an already-on pair announces mode 1.
+pub const CONF_BF_MODE_KEEP_ON: u8 = 1;
+/// Turning the pair on from a non-1 stored value announces mode 4.
+pub const CONF_BF_MODE_ENABLE: u8 = 4;
+
+/// Milliseconds the announce must stay silent after its previous send: guard
+/// FFXiMain.dll retail-2026-09 RVA 0x1A7D05 subtracts the stamp global from the
+/// client clock and passes only when `cmp eax, 0x2328; seta` — strictly greater.
+pub const CONF_BF_ANNOUNCE_WINDOW_MS: u64 = 0x2328;
+
+/// The suppress-or-send gate helper FFXiMain.dll retail-2026-09 RVA 0x1A804F
+/// runs through guard 0x1A7D00 before touching the wire, given the milliseconds
+/// since the last stamped announce ([`DynamicMenu::conf_bf_stamp`] — `None`
+/// passes, mirroring retail's zero-initialised stamp global so a fresh client
+/// always sends). On pass the helper stamps the clock (global store at .text
+/// 0x1A806E); on suppression it skips the packet and pokes sub-window id 0x22
+/// through the drawer singleton [0x10578158] (.text FFXiMain.dll retail-2026-09
+/// RVA 0x1A8058–0x1A8068) instead — feedback chrome with no kuluu counterpart,
+/// so the announce is simply dropped.
+#[must_use]
+pub fn conf_bf_announce_allowed(elapsed_ms: Option<u64>) -> bool {
+    elapsed_ms.is_none_or(|ms| ms > CONF_BF_ANNOUNCE_WINDOW_MS)
+}
 
 /// `conf3win`'s fifteen arms - jump table .text 0x19ac30 (guard `dec; cmp
 /// eax,0xe`) of handler FFXiMain.dll retail-2026-09 RVA 0x19AA10: rows 1/2/5 the
@@ -8897,6 +8966,59 @@ mod tests {
                 rows[position].action
             );
         }
+    }
+
+    /// Rows 3/4 of `conf12wi` are the store-0xBF pair with the polarity the shared
+    /// arm computes at .text FFXiMain.dll retail-2026-09 RVA 0x19BA0E (`cmp ax,4;
+    /// sete dl`): select id 3 writes 0, select id 4 writes 1 (bead
+    /// kuluu-o9qt7.20.1.4; vault main_menu.md §59 addendum 16).
+    #[test]
+    fn conf12wi_rows_3_and_4_are_the_bf_store_pair() {
+        assert!(matches!(
+            CONF12WI_RADIO_ARMS[2],
+            ConfigRowArm::Radio {
+                store_id: CONFIG_OPTION_CONF_BF_PAIR,
+                value: 0
+            }
+        ));
+        assert!(matches!(
+            CONF12WI_RADIO_ARMS[3],
+            ConfigRowArm::Radio {
+                store_id: CONFIG_OPTION_CONF_BF_PAIR,
+                value: 1
+            }
+        ));
+    }
+
+    /// The announce-mode law helper FFXiMain.dll retail-2026-09 RVA 0x1A8030 is
+    /// handed at .text 0x19BA32–0x19BA5D: the off row announces 0 whatever was
+    /// stored, writing 1 over a stored 1 reasserts with 1, and enabling over any
+    /// other value (absent or not-1) announces 4.
+    #[test]
+    fn conf_bf_packet_modes_follow_the_written_and_stored_values() {
+        assert_eq!(conf_bf_packet_mode(0, None), CONF_BF_MODE_DISABLE);
+        assert_eq!(conf_bf_packet_mode(0, Some(1)), CONF_BF_MODE_DISABLE);
+        assert_eq!(
+            conf_bf_packet_mode(1, Some(1)),
+            CONF_BF_MODE_KEEP_ON,
+            "stored 1 keeps reasserting — .text 0x19BA3C `cmp edi,1` takes the je"
+        );
+        assert_eq!(conf_bf_packet_mode(1, None), CONF_BF_MODE_ENABLE);
+        assert_eq!(conf_bf_packet_mode(1, Some(0)), CONF_BF_MODE_ENABLE);
+        assert_eq!(conf_bf_packet_mode(1, Some(2)), CONF_BF_MODE_ENABLE);
+    }
+
+    /// The guard FFXiMain.dll retail-2026-09 RVA 0x1A7D05 passes only strictly past
+    /// its 0x2328 ms window (`cmp eax, 0x2328; seta`), and an unstamped client
+    /// (retail's zeroed stamp global) always sends.
+    #[test]
+    fn conf_bf_announce_gate_is_strictly_past_the_window() {
+        assert!(conf_bf_announce_allowed(None));
+        assert!(!conf_bf_announce_allowed(Some(0)));
+        assert!(!conf_bf_announce_allowed(Some(CONF_BF_ANNOUNCE_WINDOW_MS)));
+        assert!(conf_bf_announce_allowed(Some(
+            CONF_BF_ANNOUNCE_WINDOW_MS + 1
+        )));
     }
 
     /// `conf3win`/`conf6win` arm tables render their law'd rows (bead

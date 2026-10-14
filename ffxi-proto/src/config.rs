@@ -131,6 +131,27 @@ pub fn build_config_change(flag: ConfigBit, on: bool) -> Vec<u8> {
     body
 }
 
+/// Wire command of the `conf12wi` store-0xBF pair announce: the send wrapper
+/// FFXiMain.dll retail-2026-09 RVA 0xFC4D0 receives this literal pushed at .text
+/// 0xE5548 and is called at .text 0xE555C (bead kuluu-o9qt7.20.1.4; vault
+/// main_menu.md §59 addendum 16). **vendor/server has no handler for c2s 0x088** —
+/// its packets/c2s/ directory carries no file for the id, so LSB drops the frame.
+pub const C2S_CONF_PAIR_ANNOUNCE_ID: u16 = 0x088;
+
+/// The announce body as the writer FFXiMain.dll retail-2026-09 RVA 0xE5520 lays
+/// it out over buffer bytes +4..+7: byte0 from `mov byte ptr [eax + 4], 0`
+/// (.text 0xE5553), byte1 the mode handed in as its first argument (`[eax + 5]`,
+/// .text 0xE553E), and byte2 bit 0 from the writer's second argument — which
+/// every `conf12wi` row site passes as zero (the arms at .text FFXiMain.dll
+/// retail-2026-09 RVA 0x19BA43/0x19BA51/0x19BA5D all push it so), and the
+/// character-flag re-sharer wrapper at .text 0x952D1 likewise passes zero. The
+/// writer draws its buffer from a per-command template cache (FC3C0 call with
+/// literal `push 0x53` at .text 0xE5524/0xE5526); the body is padded to a dword
+/// and no LSB-side consumer exists for those bits.
+pub fn build_conf_pair_announce(mode: u8) -> Vec<u8> {
+    vec![0x00, mode, 0x00, 0x00]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +195,15 @@ mod tests {
         assert!(ConfigBit::AutoParty.get(f));
         assert!(ConfigBit::NewAdventurerOff.get(f));
         assert!(!ConfigBit::Invite.get(f));
+    }
+
+    #[test]
+    fn bf_pair_announce_body_pins_the_writer_bytes() {
+        // Buffer writes [eax+4]=0, [eax+5]=mode, bit 0 of [eax+6] ← arg2 (zero at
+        // every conf site) — FFXiMain.dll retail-2026-09 RVA 0xE553E–0xE5559.
+        for mode in [0x00u8, 0x01, 0x04] {
+            let body = build_conf_pair_announce(mode);
+            assert_eq!(body.as_slice(), &[0x00, mode, 0x00, 0x00]);
+        }
     }
 }

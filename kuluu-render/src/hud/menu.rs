@@ -1547,6 +1547,15 @@ pub const RETAIL_CONFIG_PAGE_WINDOWS: [&str; 12] = [
 pub const RETAIL_CONFIG_SUB_WINDOWS: [&str; 5] =
     ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"];
 
+/// The cascade companions the Config pages name-open through menu manager
+/// FFXiMain.dll retail-2026-09 RVA 0x15E350 — their padded literals sit in
+/// .rdata (e.g. `menu    confyn  ` at VA 0x1037A744, `menu    conf11l `
+/// 0x1037A7D0, `menu    textcol2`/`textcol1` 0x1037A76C/0x1037A758; vault
+/// main_menu.md §59 addendum 4). Loaded into the row table so each page's
+/// drill has DAT rows to show even before its own arm law lands.
+pub const RETAIL_CONFIG_CASCADE_WINDOWS: [&str; 5] =
+    ["confyn", "textcol1", "textcol2", "conf11l", "conf11s"];
+
 /// The Config family's option rows, read from the DATs at runtime: each window kuluu
 /// opens maps to its item blocks in file order (= the handler's select-id space;
 /// `live_items` — NOT the partial widget list, see ffxi-dat's row-law pin),
@@ -1667,6 +1676,7 @@ fn config_window_names() -> impl Iterator<Item = &'static str> {
     std::iter::once(RETAIL_CONFIG_HUB_WINDOW)
         .chain(RETAIL_CONFIG_PAGE_WINDOWS)
         .chain(RETAIL_CONFIG_SUB_WINDOWS)
+        .chain(RETAIL_CONFIG_CASCADE_WINDOWS)
 }
 
 /// Every `conf5win` select arm writes an immediate through the store wrapper
@@ -6930,6 +6940,29 @@ mod tests {
         ] {
             let n = table.rows_for(window).len();
             assert_eq!(n, want, "{window} DAT rows vs arm table");
+        }
+    }
+
+    /// Gated on a retail install: the cascade pages' captioned item counts pin
+    /// their handlers' select-id spaces — conftxtc ids 1–5 (handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x1984F0, guard `dec; cmp eax,4`), conf11m ids 1–3
+    /// (its handler's dec chain at that RVA 0x19A0E0) and conf11l ids 1–4
+    /// (handler FFXiMain.dll retail-2026-09 RVA 0x19A160, guard `dec; cmp eax,3`);
+    /// chrome item blocks never join the select space. DAT-first: counts are read
+    /// from the install here, not transcribed (bead kuluu-o9qt7.20.1).
+    #[test]
+    fn real_cascade_pages_match_their_handler_id_spaces() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        for (window, want) in [("conftxtc", 5usize), ("conf11m", 3), ("conf11l", 4)] {
+            assert_eq!(
+                table.rows_for(window).len(),
+                want,
+                "{window} DAT live items"
+            );
         }
     }
 

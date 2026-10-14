@@ -7,6 +7,7 @@ pub mod chat_input;
 pub mod chat_panel;
 pub mod check_view;
 pub mod compass;
+pub mod controls_law;
 #[cfg(feature = "enhanced-death-countdown")]
 pub mod death_countdown;
 pub mod death_prompt;

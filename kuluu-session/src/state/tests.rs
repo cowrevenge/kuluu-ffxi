@@ -146,6 +146,7 @@ fn zone_change_sets_and_clears_myroom() {
         model: 257,
         sub_map: 0,
         exit_bit: 1,
+        door_open: false,
     };
     s.apply_event(&AgentEvent::ZoneChanged {
         from: None,

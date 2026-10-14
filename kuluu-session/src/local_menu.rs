@@ -1061,6 +1061,7 @@ mod tests {
             model: 257,
             sub_map,
             exit_bit,
+            door_open: false,
         }
     }
 

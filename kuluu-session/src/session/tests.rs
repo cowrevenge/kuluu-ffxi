@@ -702,6 +702,17 @@ fn myroom_is_packet_layout_matches_lsb_struct() {
         "Param2 little-endian (SandorianStyle)"
     );
 
+    // Both halves of the door row: which one a select sends follows the client's own door byte.
+    assert_eq!(
+        moghouse_door_packet(false),
+        (1, 0),
+        "shut house -> Kind=Open, Unk1"
+    );
+    assert_eq!(
+        moghouse_door_packet(true),
+        (2, 1),
+        "open house -> Kind=Close, Unk2"
+    );
     let door = build_subpacket_myroom_is(0, MYROOM_IS_KIND_OPEN, 0, MYROOM_IS_PARAM_DOOR_OPEN);
     assert_eq!(&door[4..8], &[1, 0, 0, 0], "door select = Open,0,Unk1 LE");
 }
@@ -823,6 +834,7 @@ fn door_menu_picks_encode_zmrq_maprect_pairs() {
         model: 257,
         sub_map: 0,
         exit_bit: 1,
+        door_open: false,
     };
     for (row, want_bit, want_mode) in [(HOME_ROW, 1u8, 0u8), (MOG_GARDEN_ROW, 0, 127)] {
         let mut menu = LocalMenuSession::new();

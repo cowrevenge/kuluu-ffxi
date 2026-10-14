@@ -4,6 +4,7 @@ use bevy::input::keyboard::{Key, KeyCode};
 use bevy::input::ButtonInput;
 use bevy::prelude::Resource;
 
+pub mod links;
 pub mod pad;
 pub mod presets;
 

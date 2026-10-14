@@ -536,6 +536,24 @@ pub(super) fn confirm_menu_at_cursor(
                 dynamic.config_option_values.insert(store_id, value);
                 return None;
             }
+            // A slider row's select arm does NOT write — it pins the window into
+            // edit mode on that store (conf2win entry arms 3–7 only set the edit
+            // bytes/mode and stash the widget; handler FFXiMain.dll retail-2026-09
+            // RVA 0x197470). The pin law lives in `handle_menu_key`; edits from
+            // vault main_menu.md §58 fill in an unknown starting value.
+            if let A::ConfigSliderEdit { store_id } = action {
+                if dynamic.option_edit.is_none() {
+                    let value = dynamic
+                        .config_option_values
+                        .get(&store_id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            kuluu_render::hud::menu::config_slider_boot_default(store_id)
+                        });
+                    dynamic.option_edit = Some((store_id, value));
+                }
+                return None;
+            }
             // Leaf option rows: retail changes the value in place with no window
             // event (vault main_menu.md §46/§48), and until the option store lands
             // on bead kuluu-o9qt7.20.1 kuluu answers them with the standard line,
@@ -1475,6 +1493,41 @@ pub(super) fn handle_menu_key(
     // dead while typing, which is also the `.29` rule.
     if stack.current().is_some_and(|l| l.macro_line_edit.is_some()) {
         macro_line_edit_key(key, bindings, stack, scene_state, cmd_tx);
+        return None;
+    }
+
+    // conf2win slider-pin law (bead kuluu-o9qt7.20.1 part B): while a slider is
+    // pinned, every window event routes to that window's key table — Up/Down are
+    // arms 0/1 and do nothing at all (the cursor cannot move), Left steps −1 only
+    // above 0 and Right +1 only below 100 (`test ecx/jle` and `cmp ecx,0x64/jge`
+    // guards), each step writing the store immediately through wrapper
+    // FFXiMain.dll retail-2026-09 RVA 0x193830, and Enter/Esc (arms 4/5 — one
+    // shared save-and-leave body) rewrite the store once more and unpin. Any
+    // other event hits the handler's `ja ret` tail: swallowed. Key tables .text
+    // 0x197874/0x19788C of conf2win handler RVA 0x197470 (vault main_menu.md
+    // §59 addendum 2). A pin only lives on its own window — any other top kind
+    // drops it.
+    if !matches!(top_kind, MenuKind::RetailConfigPage(0)) {
+        dynamic.option_edit = None;
+    } else if let Some((store_id, value)) = dynamic.option_edit {
+        if bindings.matches_logical(Action::NavLeft, key) {
+            if value > 0 {
+                dynamic.config_option_values.insert(store_id, value - 1);
+                dynamic.option_edit = Some((store_id, value - 1));
+            }
+        } else if bindings.matches_logical(Action::NavRight, key) {
+            if value < kuluu_render::hud::menu::CONFIG_SLIDER_MAX {
+                dynamic.config_option_values.insert(store_id, value + 1);
+                dynamic.option_edit = Some((store_id, value + 1));
+            }
+        } else if bindings.matches_logical(Action::NavConfirm, key)
+            || bindings.matches_logical(Action::NavCancel, key)
+        {
+            // Save-and-leave: the store already holds each stepped value; the
+            // exit arm writes it once more for identical effect, then unpins.
+            dynamic.config_option_values.insert(store_id, value);
+            dynamic.option_edit = None;
+        }
         return None;
     }
 
@@ -3046,6 +3099,92 @@ mod menu_key_tests {
         );
         assert!(matches!(stack.current().unwrap().kind, MenuKind::Root));
     }
+    /// The runtime pin law of `conf2win` (bead kuluu-o9qt7.20.1 part B, handler
+    /// FFXiMain.dll retail-2026-09 RVA 0x197470 key tables .text 0x197874/
+    /// 0x19788C): Enter pins without writing the store; Left/Right step ±1
+    /// writing each step, dying at the clamps (0 and CONFIG_SLIDER_MAX); Up/Down
+    /// are swallowed and freeze the cursor; Esc saves-and-leaves — it unpins but
+    /// never pops the window. Any other top window drops a stale pin.
+    #[test]
+    fn conf2win_slider_pin_steps_clamps_and_swallows() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf2win".to_string(),
+            (0..11u32).map(|i| (700 + i, format!("srow{i}"))).collect(),
+        );
+        harness.dynamic.rows =
+            config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(0));
+        // Row 4 selects store 0xA — boots at its max, so Right must die first.
+        stack.current_mut().unwrap().cursor = 3;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0xAu32, 100u8)),
+            "the entry arm pins at the stored-or-boot value without writing"
+        );
+        assert!(
+            !harness.dynamic.config_option_values.contains_key(&0xAu32),
+            "pinning alone writes nothing (entry arms stash only)"
+        );
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0xA, 100)),
+            "at the ceiling Right is swallowed"
+        );
+        for expected in [99u8, 98] {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+            assert_eq!(harness.dynamic.option_edit, Some((0xA, expected)));
+            assert_eq!(
+                harness.dynamic.config_option_values.get(&0xAu32),
+                Some(&expected),
+                "each step writes the store immediately"
+            );
+        }
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        assert_eq!(
+            stack.current().unwrap().cursor,
+            3,
+            "Up/Down never move a pinned window"
+        );
+        assert_eq!(harness.dynamic.option_edit, Some((0xA, 98)));
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Escape, KeyCode::Escape, &mut stack, markers);
+        assert!(
+            matches!(stack.current().unwrap().kind, MenuKind::RetailConfigPage(0)),
+            "Esc is the save-and-leave arm — it must not pop the window"
+        );
+        assert_eq!(harness.dynamic.option_edit, None);
+        assert_eq!(harness.dynamic.config_option_values.get(&0xAu32), Some(&98));
+
+        // Re-pin picks up the last written value, and a pin cannot outlive its
+        // window: closing back to Root drops it.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0xAu32, 98u8)));
+        stack.pop();
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowUp, KeyCode::ArrowUp, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit, None,
+            "the pin belongs to conf2win only"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3453,7 +3592,7 @@ mod menu_dispatch_tests {
             (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("configwi", &table, &std::collections::BTreeMap::new()),
+            rows: config_window_rows("configwi", &table, &std::collections::BTreeMap::new(), None),
             ..DynamicMenu::default()
         };
         for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
@@ -3524,7 +3663,7 @@ mod menu_dispatch_tests {
             ],
         );
         let mut launcher = DynamicMenu {
-            rows: config_window_rows("conf5m", &table, &std::collections::BTreeMap::new()),
+            rows: config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None),
             ..DynamicMenu::default()
         };
         for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
@@ -3552,7 +3691,7 @@ mod menu_dispatch_tests {
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
         let mut page = DynamicMenu {
-            rows: config_window_rows("conf7", &table, &std::collections::BTreeMap::new()),
+            rows: config_window_rows("conf7", &table, &std::collections::BTreeMap::new(), None),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
@@ -3596,7 +3735,7 @@ mod menu_dispatch_tests {
             (0..16u32).map(|i| (900 + i, format!("opt{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("conf5win", &table, &std::collections::BTreeMap::new()),
+            rows: config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None),
             ..DynamicMenu::default()
         };
         assert!(
@@ -3633,7 +3772,12 @@ mod menu_dispatch_tests {
             "the law'd row answers with a write, not the placeholder line"
         );
 
-        let rows = config_window_rows("conf5win", &table, &dynamic.config_option_values);
+        let rows = config_window_rows(
+            "conf5win",
+            &table,
+            &dynamic.config_option_values,
+            dynamic.option_edit,
+        );
         assert_eq!(rows[9].label, "\u{bb} opt9");
         assert!(!rows[8].label.starts_with('\u{bb}'));
     }

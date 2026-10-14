@@ -241,6 +241,16 @@ pub enum DynamicMenuAction {
         store_id: u32,
         value: u8,
     },
+    /// A slider row of a law'd config page (`conf2win` today): select pins the
+    /// row into edit mode instead of writing — from then on Left/Right step the
+    /// store value ±1 (immediate wrapper FFXiMain.dll retail-2026-09 RVA 0x193830
+    /// writes, clamped so Right dies at 100 and Left at 0) while Up/Down are
+    /// swallowed, and Enter/Esc both save the current value and leave edit mode
+    /// (handler select arms + key tables .text 0x197874/0x19788C/0x1978A4 of
+    /// handler RVA 0x197470; bead kuluu-o9qt7.20.1 part B).
+    ConfigSliderEdit {
+        store_id: u32,
+    },
 
     /// One filled macro slot row of the mcrselec select window (vault
     /// main_menu.md §41). Selecting stays inert until the macro-use seam is
@@ -551,6 +561,14 @@ pub struct DynamicMenu {
     /// this machine: LSB's c2s 0x0DC accepts only the named SAVE_CONF bits
     /// (vendor/server/src/map/packets/c2s/0x0dc_config.cpp), not store options.
     pub config_option_values: std::collections::BTreeMap<u32, u8>,
+    /// A slider row pinned in edit mode: (store id, live value). While set on
+    /// the top window, Left/Right step the value ±1 with retail's clamps and
+    /// write through immediately; Up/Down are swallowed so the cursor cannot
+    /// move; Enter/Esc save and unpin (conf2win key tables .text 0x197874/
+    /// 0x19788C/0x1978A4 of handler FFXiMain.dll retail-2026-09 RVA 0x197470;
+    /// bead kuluu-o9qt7.20.1 part B). Only config pages whose arms are lawed
+    /// support pinning; any other top window drops the pin.
+    pub option_edit: Option<(u32, u8)>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -1663,6 +1681,72 @@ const CONF5WIN_RADIO_ARMS: [(u32, u8); 16] = [
     (0xA4, 1),
 ];
 
+/// A law'd select arm of a Config-family row: either an immediate radio write
+/// or a slider row that pins into edit mode instead.
+pub enum ConfigRowArm {
+    Radio { store_id: u32, value: u8 },
+    Slider { store_id: u32 },
+}
+
+/// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
+/// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:
+/// rows 1–2 the radio pair on store 7 (values 0/1); rows 3/4 slider-edit rows
+/// over stores 9 and 0xA (edit bytes [esi+0x20]/[esi+0x21] at entry arms that
+/// only stash the widget — no write until a step or save); rows 5–7 set the
+/// window mode byte [esi+0x48] to 1/2/3, which pins edit on stores
+/// 0x37/0x38/0x39; rows 8/9 and 10/11 are the radio pairs on stores 0x9A
+/// (values 1/0) and 0xCA (values 0/1) (vault main_menu.md §59 addendum 2;
+/// bead kuluu-o9qt7.20.1 part B).
+pub const CONF2WIN_ROW_ARMS: [ConfigRowArm; 11] = [
+    ConfigRowArm::Radio {
+        store_id: 7,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 7,
+        value: 1,
+    },
+    ConfigRowArm::Slider { store_id: 9 },
+    ConfigRowArm::Slider { store_id: 0xA },
+    ConfigRowArm::Slider { store_id: 0x37 },
+    ConfigRowArm::Slider { store_id: 0x38 },
+    ConfigRowArm::Slider { store_id: 0x39 },
+    ConfigRowArm::Radio {
+        store_id: 0x9A,
+        value: 1,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x9A,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0xCA,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0xCA,
+        value: 1,
+    },
+];
+
+/// Ceiling of every law'd config slider — the `cmp ecx,0x64` guard that skips
+/// increment at this value (FFXiMain.dll retail-2026-09 RVA 0x19767F/0x197715
+/// and their conf-family twins; vault main_menu.md §59 addendum 2).
+pub const CONFIG_SLIDER_MAX: u8 = 100;
+
+/// Boot defaults of the slider stores from the §58 client init region
+/// (FFXiMain.dll retail-2026-09 RVA call table at 0x193D06/0x193D1B — stores
+/// 9/0xA start at their max 100 — and 0x194276/0x19428A/0x19429E — stores
+/// 0x37/0x38/0x39 start at half-scale 50; vault main_menu.md §58). A pinned
+/// slider edits from the stored value if one exists, else this default.
+pub fn config_slider_boot_default(store_id: u32) -> u8 {
+    match store_id {
+        9 | 0xA => 100,
+        0x37 | 0x38 | 0x39 => 50,
+        _ => 0,
+    }
+}
+
 /// One Config-family window's rows: DAT captions in file order, each carrying
 /// its handler-grounded select action — hub row i name-opens page i (twelve
 /// jump-table branches; the thirteenth widget falls to the default tail),
@@ -1674,6 +1758,7 @@ pub fn config_window_rows(
     window: &str,
     table: &ConfigDatRows,
     option_values: &std::collections::BTreeMap<u32, u8>,
+    option_edit: Option<(u32, u8)>,
 ) -> Vec<DynamicMenuRow> {
     let radio_arm = |position: usize| match window {
         "conf5win" => CONF5WIN_RADIO_ARMS.get(position).copied(),
@@ -1685,6 +1770,52 @@ pub fn config_window_rows(
         .enumerate()
         .map(|(position, (option_id, label))| {
             let arm = radio_arm(position);
+            let slider_store = if window == "conf2win" {
+                match CONF2WIN_ROW_ARMS.get(position) {
+                    Some(ConfigRowArm::Slider { store_id }) => Some(*store_id),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(store_id) = slider_store {
+                let live = option_edit.filter(|(pin, _)| *pin == store_id).map_or_else(
+                    || {
+                        option_values
+                            .get(&store_id)
+                            .copied()
+                            .unwrap_or_else(|| config_slider_boot_default(store_id))
+                    },
+                    |(_, val)| val,
+                );
+                let pinned = option_edit.is_some_and(|(pin, _)| pin == store_id);
+                return DynamicMenuRow {
+                    label: if pinned {
+                        format!("\u{bb} {label}: {live}")
+                    } else {
+                        format!("{label}: {live}")
+                    },
+                    action: DynamicMenuAction::ConfigSliderEdit { store_id },
+                };
+            }
+            // Radio rows of `conf2win` answer the same law through the arm table.
+            if window == "conf2win" {
+                if let Some(ConfigRowArm::Radio { store_id, value }) =
+                    CONF2WIN_ROW_ARMS.get(position)
+                {
+                    return DynamicMenuRow {
+                        label: if option_values.get(store_id) == Some(value) {
+                            format!("\u{bb} {label}")
+                        } else {
+                            label.clone()
+                        },
+                        action: DynamicMenuAction::ConfigOptionSet {
+                            store_id: *store_id,
+                            value: *value,
+                        },
+                    };
+                }
+            }
             DynamicMenuRow {
                 label: match arm {
                     Some((store_id, value)) if option_values.get(&store_id) == Some(&value) => {
@@ -2833,7 +2964,12 @@ pub fn refresh_dynamic_menu_rows(
                     .unwrap_or(""),
                 _ => "",
             };
-            config_window_rows(window, &config_rows, &dynamic.config_option_values)
+            config_window_rows(
+                window,
+                &config_rows,
+                &dynamic.config_option_values,
+                dynamic.option_edit,
+            )
         }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // The Status detail windows (bead kuluu-0oy7b): every line is live
@@ -5875,6 +6011,7 @@ mod tests {
             RETAIL_CONFIG_HUB_WINDOW,
             &table,
             &std::collections::BTreeMap::new(),
+            None,
         );
         assert_eq!(hub.len(), 13);
         for (position, row) in hub.iter().enumerate() {
@@ -5894,7 +6031,8 @@ mod tests {
             }
         }
 
-        let launcher = config_window_rows("conf5m", &table, &std::collections::BTreeMap::new());
+        let launcher =
+            config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None);
         let subs: Vec<u8> = launcher
             .iter()
             .map(|row| match row.action {
@@ -5904,7 +6042,7 @@ mod tests {
             .collect();
         assert_eq!(subs, vec![2u8, 1, 0]);
 
-        let page = config_window_rows("conf7", &table, &std::collections::BTreeMap::new());
+        let page = config_window_rows("conf7", &table, &std::collections::BTreeMap::new(), None);
         assert!(page.is_empty(), "unloaded window lists nothing");
     }
 
@@ -5923,7 +6061,7 @@ mod tests {
         );
         let mut values = std::collections::BTreeMap::new();
         values.insert(0xB4u32, 2u8);
-        let rows = config_window_rows("conf5win", &table, &values);
+        let rows = config_window_rows("conf5win", &table, &values, None);
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
         for (position, row) in rows.iter().enumerate() {
             match row.action {
@@ -5948,8 +6086,84 @@ mod tests {
         };
         let mut table = ConfigDatRows::default();
         table.ensure_loaded(Some(&root));
-        let rows = config_window_rows("conf5win", &table, &std::collections::BTreeMap::new());
+        let rows = config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
+    }
+
+    /// The `conf2win` row law (bead kuluu-o9qt7.20.1 part B): radio rows write
+    /// through immediately, slider rows pin into edit; slider labels carry the
+    /// store's value — boot default from §58 until one is written — and a
+    /// pinned row wears the marker.
+    #[test]
+    fn conf2win_rows_carry_the_radio_and_slider_law() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf2win".to_string(),
+            (0..11u32).map(|i| (700 + i, format!("row{i}"))).collect(),
+        );
+        let rows = config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
+        assert_eq!(rows.len(), CONF2WIN_ROW_ARMS.len());
+        // Rows 1-2: radio pair store 7 (0/1). Slider stores keep their §58 boot
+        // defaults; the pin marks its row and shows the live value.
+        assert!(matches!(
+            rows[0].action,
+            DynamicMenuAction::ConfigOptionSet {
+                store_id: 7,
+                value: 0
+            }
+        ));
+        assert!(matches!(
+            rows[1].action,
+            DynamicMenuAction::ConfigOptionSet {
+                store_id: 7,
+                value: 1
+            }
+        ));
+        assert_eq!(rows[2].label, "row2: 100", "store 9 boots at its max");
+        assert_eq!(rows[3].label, "row3: 100", "store 0xA boots at its max");
+        assert_eq!(rows[4].label, "row4: 50", "stores 0x37.. start half-scale");
+        for (position, store_id) in [(2u8, 9u32), (3, 0xA), (4, 0x37), (5, 0x38), (6, 0x39)] {
+            assert!(
+                matches!(rows[usize::from(position)].action,
+                    DynamicMenuAction::ConfigSliderEdit { store_id: s } if s == store_id),
+                "slider row {position}: {:?}",
+                rows[usize::from(position)].action
+            );
+        }
+        assert!(matches!(
+            rows[7].action,
+            DynamicMenuAction::ConfigOptionSet {
+                store_id: 0x9A,
+                value: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[10].action,
+            DynamicMenuAction::ConfigOptionSet {
+                store_id: 0xCA,
+                value: 1
+            }
+        ));
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(9u32, 42u8);
+        let rows = config_window_rows("conf2win", &table, &values, Some((0x37u32, 51u8)));
+        assert_eq!(
+            rows[2].label, "row2: 42",
+            "a written value replaces the boot default"
+        );
+        assert_eq!(
+            rows[4].label, "\u{bb} row4: 51",
+            "the pinned slider is marked live"
+        );
+        // A radio group member matching the store's current value wears the marker.
+        values.insert(0xCAu32, 1u8);
+        let rows = config_window_rows("conf2win", &table, &values, None);
+        assert_eq!(rows[10].label, "\u{bb} row10");
+        assert!(!rows[9].label.starts_with('\u{bb}'));
     }
 
     /// The faqsub panel law (vault main_menu.md §36): three destinations

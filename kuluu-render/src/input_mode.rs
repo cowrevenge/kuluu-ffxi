@@ -584,7 +584,18 @@ impl MenuStack {
         self.levels.last_mut()
     }
 
+    /// Open `kind` the way retail opens a window: one name is at most one window.
+    /// `OpenMenu` re-binds the existing instance when that name is already up
+    /// (FFXiMain.dll retail-2026-09 RVA 0x15E350), so a second Commands press on
+    /// Linkshell, Missions or Quests focuses the window that is already there instead
+    /// of stacking another copy. Re-binding makes it the focused level again, which in
+    /// this stack model means anything opened above it comes down.
     pub fn push(&mut self, kind: MenuKind) {
+        if let Some(existing) = self.levels.iter().position(|level| level.kind == kind) {
+            self.levels.truncate(existing + 1);
+            self.active_pane = Pane::Right;
+            return;
+        }
         self.levels.push(MenuLevel {
             kind,
             cursor: 0,
@@ -782,6 +793,50 @@ mod tests {
     fn pushed_stack_does_not_absorb() {
         let mut stack = MenuStack::default();
         assert!(!stack.take_absorb_open_minus());
+    }
+
+    /// One window name is one window: a second open of the same kind re-binds the
+    /// level already on the stack rather than adding a copy, and it keeps its own
+    /// cursor (FFXiMain.dll retail-2026-09 RVA 0x15E350 re-binds the instance).
+    #[test]
+    fn reopening_a_kind_rebinds_rather_than_stacking() {
+        let mut stack = MenuStack::root();
+        let depth_before = stack.levels.len();
+        stack.push(MenuKind::Controls);
+        stack.current_mut().unwrap().cursor = 4;
+
+        stack.push(MenuKind::Controls);
+
+        assert_eq!(stack.levels.len(), depth_before + 1, "no second copy");
+        assert_eq!(stack.levels.last().unwrap().kind, MenuKind::Controls);
+        assert_eq!(
+            stack.current().unwrap().cursor,
+            4,
+            "the re-bound window keeps where its cursor was"
+        );
+    }
+
+    /// Re-binding also brings that level back to the top: whatever had been opened
+    /// above it is gone, which is what makes a repeated Commands press land on the
+    /// single window instead of a pile of them.
+    #[test]
+    fn rebinding_brings_the_level_back_to_the_top() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Controls);
+        stack.push(MenuKind::Graphics);
+        assert_eq!(stack.levels.last().unwrap().kind, MenuKind::Graphics);
+
+        stack.push(MenuKind::Controls);
+
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Controls);
+        assert!(
+            !stack
+                .levels
+                .iter()
+                .skip(1)
+                .any(|level| level.kind == MenuKind::Graphics),
+            "the window opened above it came down with the re-bind"
+        );
     }
 
     fn history_of(lines: &[&str]) -> ChatHistory {

@@ -857,6 +857,76 @@ mod tests {
             .collect()
     }
 
+    /// Gated on a retail install. Every live row of the three command-menu
+    /// selectors resolves its retail caption/description string from the DATs
+    /// in display order — the authority kuluu renders from at runtime (bead
+    /// kuluu-1z9qs). The expected vectors below are transcribed once from this
+    /// pin; drift here fails CI rather than the user.
+    #[test]
+    fn real_selector_row_strings_in_display_order() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        let captions = |file_id| {
+            let loc = root.resolve(file_id).expect("catalog file id");
+            let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
+            ffxi_msg_table(&bytes)
+        };
+        let caption_texts = captions(CAPTION_SHORT_CATALOG_FILE_ID);
+        let row_labels = |name: &str| -> Vec<String> {
+            windows[name]
+                .items_in_display_order()
+                .into_iter()
+                .filter(|it| it.text_a_id.is_some() || it.text_b_id.is_some())
+                .map(|it| {
+                    it.text_b_id
+                        .and_then(|i| usize::try_from(i).ok())
+                        .and_then(|i| caption_texts.get(i).cloned())
+                        .unwrap_or_else(|| format!("textB:{:?}", it.text_b_id))
+                })
+                .collect()
+        };
+        // The odd retail captions are catalog entries verbatim: the file
+        // holds `Magic List`, `Set Bazaar` and `MacroPalette` as distinct
+        // NUL-terminated strings (raw XOR-0xFF scan), while kuluu had grown
+        // `Magic`, `Bazaar` and an invented `Edit Macros`.
+        assert_eq!(
+            row_labels("menuwind"),
+            vec![
+                "Status",
+                "Equipment",
+                "Magic List",
+                "Items",
+                "Synthesis",
+                "Abilities",
+                "Party",
+                "Trade",
+                "Search",
+                "Linkshell",
+                "Region Info",
+                "Map",
+            ]
+        );
+        assert_eq!(
+            row_labels("socialme"),
+            vec![
+                "Missions",
+                "Quests",
+                "Key Items",
+                "View House",
+                "Set Bazaar",
+                "MacroPalette",
+                "Config",
+                "Help Desk",
+                "Current Time",
+                "Communication",
+                "Shut Down",
+                "Log Out",
+            ]
+        );
+    }
+
     /// Gated on a retail install. The navigation law (vault brief §5: each
     /// direction reads its own neighbor byte — loader FFXiMain.dll retail-2026-09
     /// RVA 0x11B6B0): following each live row's Down byte from the topmost item

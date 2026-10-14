@@ -23,6 +23,16 @@ pub const COMM_FRIEND_LIST: &str = "Friend List";
 pub const ROOT_VIEW_HOUSE: &str = "View House";
 /// Page-1 row 11 — the four-mode Region Info panel's selector label.
 pub const ROOT_REGION_INFO: &str = "Region Info";
+/// Page-1 row 3 — the menuwind item's short-caption id resolves to `Magic
+/// List` (UI string catalog; pinned by ffxi-dat's
+/// real_selector_row_strings_in_display_order), not kuluu's earlier `Magic`.
+pub const ROOT_MAGIC_LIST: &str = "Magic List";
+/// Page-2 row 5 — the socialme item's caption is `Set Bazaar` (same pin).
+pub const ROOT_SET_BAZAAR: &str = "Set Bazaar";
+/// Page-2 row 6 — the caption id resolves to the literal `MacroPalette`; the
+/// earlier kuluu string `Edit Macros` was invented and exists nowhere in the
+/// catalog (same pin).
+pub const ROOT_MACRO_PALETTE: &str = "MacroPalette";
 
 /// Retail's Command menu (windows `menuwind`/`socialme`) shows twelve rows per
 /// page across two pages; kuluu appends a third page of its own entries. "-"
@@ -39,11 +49,14 @@ pub const ROOT_REGION_INFO: &str = "Region Info";
 /// do not enable the flag; local test batches (build_cowland.bat) pass it on
 /// RELEASE builds on purpose.
 const ROOT_ENTRIES: &[&str] = &[
-    // Page 1 (`menuwind`): Status, Equipment, Magic, Items, Synthesis,
-    // Abilities, Party, Trade, Search, Linkshell, Region Info, Map.
+    // Page 1 (`menuwind`), in the DAT block's display order: Status,
+    // Equipment, Magic List, Items, Synthesis, Abilities, Party, Trade,
+    // Search, Linkshell, Region Info, Map. Captions are the items' short-
+    // caption catalog strings (runtime override below; static copy pinned by
+    // ffxi-dat real_selector_row_strings_in_display_order).
     "Status",
     "Equipment",
-    "Magic",
+    ROOT_MAGIC_LIST,
     "Items",
     "Synthesis",
     "Abilities",
@@ -53,16 +66,15 @@ const ROOT_ENTRIES: &[&str] = &[
     "Linkshell",
     "Region Info",
     "Map",
-    // Page 2 (`socialme`): Missions, Quests, Key Items, View House, Bazaar,
-    // Edit Macros (the caption for the mcrmenu row - no bare `Macros` exists
-    // in the client's caption catalog), Config, Help Desk, Current Time,
+    // Page 2 (`socialme`), display order: Missions, Quests, Key Items, View
+    // House, Set Bazaar, MacroPalette, Config, Help Desk, Current Time,
     // Communication, Shut Down, Log Out.
     "Missions",
     "Quests",
     "Key Items",
     ROOT_VIEW_HOUSE,
-    "Bazaar",
-    "Edit Macros",
+    ROOT_SET_BAZAAR,
+    ROOT_MACRO_PALETTE,
     "Config",
     "Help Desk",
     ROOT_CURRENT_TIME,
@@ -517,6 +529,12 @@ pub fn key_item_row_label(id: u16, seen: bool) -> String {
 #[derive(bevy::prelude::Resource, Debug, Clone, Default)]
 pub struct DynamicMenu {
     pub rows: Vec<DynamicMenuRow>,
+    /// Page-1/2 Command-menu selector captions read live from the DAT window
+    /// records and short-caption catalog (`menuwind` then `socialme`, display
+    /// order). While non-empty, [`entry_label`] prefers it over the static
+    /// ROOT_ENTRIES copy for indices within its range; the copy is pinned to
+    /// the catalog by install-gated tests in both crates (bead kuluu-1z9qs).
+    pub selector_captions: Vec<String>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -915,6 +933,11 @@ pub fn entry_label(kind: MenuKind, idx: usize, dynamic: &DynamicMenu) -> &str {
             .get(idx)
             .map(|r| r.label.as_str())
             .unwrap_or("<unknown>");
+    }
+    if matches!(kind, MenuKind::Root) {
+        if let Some(label) = dynamic.selector_captions.get(idx) {
+            return label;
+        }
     }
     static_entries(kind)
         .get(idx)
@@ -1527,6 +1550,60 @@ impl ConfigDatRows {
     }
 }
 
+/// The retail selector windows' row captions, read from their DAT records at
+/// runtime (bead kuluu-1z9qs): every live item block names its caption through
+/// the short-caption catalog id (loader FFXiMain.dll retail-2026-09 RVA
+/// 0x11B6B0; catalog registry vault main_menu.md §59).
+#[derive(bevy::prelude::Resource, Debug, Default)]
+pub struct CommandSelectorCaptions {
+    loaded: bool,
+    /// `menuwind` followed by `socialme`, in block display order. Populated
+    /// only when BOTH selectors yield exactly twelve live captioned rows, so
+    /// cursor and page arithmetic can never desync from a partial read.
+    labels: Vec<String>,
+}
+
+impl CommandSelectorCaptions {
+    pub fn ensure_loaded(&mut self, dat: Option<&ffxi_dat::archive::DatRoot>) {
+        if self.loaded {
+            return;
+        }
+        let Some(root) = dat else { return };
+        let Ok(windows) = ffxi_dat::menu_windows::windows_from_root(root) else {
+            return;
+        };
+        let catalog: Option<ffxi_dat::dmsg::DmsgTable> = (|| {
+            let loc = root
+                .resolve(ffxi_dat::menu_windows::CAPTION_SHORT_CATALOG_FILE_ID)
+                .ok()?;
+            let bytes = std::fs::read(loc.path_under(root)).ok()?;
+            ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
+        })();
+        let page_labels = |name: &str| -> Option<Vec<String>> {
+            let live: Vec<_> = windows
+                .get(name)?
+                .items_in_display_order()
+                .into_iter()
+                .filter(|it| it.text_a_id.is_some() || it.text_b_id.is_some())
+                .collect();
+            if live.len() != 12 {
+                return None;
+            }
+            live.into_iter()
+                .map(|it| {
+                    let id = usize::try_from(it.text_b_id?).ok()?;
+                    catalog.as_ref()?.text(id).map(str::to_string)
+                })
+                .collect()
+        };
+        if let (Some(first), Some(second)) = (page_labels("menuwind"), page_labels("socialme")) {
+            self.labels = first.into_iter().chain(second).collect();
+        }
+        // A failed read is not retried per frame; the pinned static copy serves.
+        self.loaded = true;
+    }
+}
+
 fn config_window_names() -> impl Iterator<Item = &'static str> {
     std::iter::once(RETAIL_CONFIG_HUB_WINDOW)
         .chain(RETAIL_CONFIG_PAGE_WINDOWS)
@@ -1703,8 +1780,8 @@ pub fn craft_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
 
 pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> Option<MenuKind> {
     Some(match label {
-        "Magic" if flat_magic => MenuKind::Magic,
-        "Magic" => MenuKind::MagicGroups,
+        ROOT_MAGIC_LIST if flat_magic => MenuKind::Magic,
+        ROOT_MAGIC_LIST => MenuKind::MagicGroups,
         "Abilities" if flat_abilities => MenuKind::Abilities,
         "Abilities" => MenuKind::AbilitiesGroups,
         // Retail's Party row opens the prtyN window chosen by party state
@@ -1731,12 +1808,13 @@ pub fn root_child_kind(label: &str, flat_magic: bool, flat_abilities: bool) -> O
         // Page-2 row 5 name-opens `menu    bazaar` ungated (FFXiMain.dll retail-2026-09
         // RVA 0x14E8A1; vault main_menu.md §33): kuluu drills the stall picker its
         // data-driven reading of that browser window builds from entity flags.
-        "Bazaar" => MenuKind::BazaarStalls,
+        ROOT_SET_BAZAAR => MenuKind::BazaarStalls,
         // Page-2 row 6 is the ungated name-open of `menu    mcrmenu`
         // (FFXiMain.dll retail-2026-09 RVA 0x14E8BD; vault main_menu.md
-        // §34): the root row drills that launcher. The `Edit Macros`
-        // caption is the catalog string (§10 idx 75/109).
-        "Edit Macros" => MenuKind::MacrosPalette,
+        // §34): the root row drills that launcher. The row's caption is the
+        // literal catalog string `MacroPalette` (§59 short-caption catalog),
+        // verified in ffxi-dat real_selector_row_strings_in_display_order.
+        ROOT_MACRO_PALETTE => MenuKind::MacrosPalette,
         // Page-2 row 7 is the ungated name-open of `menu    configwi`
         // (FFXiMain.dll retail-2026-09 RVA 0x14E8D9; vault main_menu.md
         // §35): the retail Config row drills that twelve-page hub. kuluu's
@@ -2587,12 +2665,21 @@ pub fn refresh_dynamic_menu_rows(
     dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
     mut school_table: ResMut<MagicSchoolTable>,
     mut config_rows: ResMut<ConfigDatRows>,
+    mut selector_captions: ResMut<CommandSelectorCaptions>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
     let active_kind = match &*mode {
         InputMode::Menu(stack) => stack.current().map(|l| l.kind),
         _ => None,
     };
+
+    selector_captions.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+    if !selector_captions.labels.is_empty() && dynamic.selector_captions != selector_captions.labels
+    {
+        dynamic
+            .selector_captions
+            .clone_from(&selector_captions.labels);
+    }
 
     let Some(kind) = active_kind.filter(|k| is_dynamic(*k)) else {
         if !dynamic.rows.is_empty() {
@@ -3861,7 +3948,7 @@ mod tests {
         const RETAIL_P1: [&str; 12] = [
             "Status",
             "Equipment",
-            "Magic",
+            ROOT_MAGIC_LIST,
             "Items",
             "Synthesis",
             "Abilities",
@@ -3877,8 +3964,8 @@ mod tests {
             "Quests",
             "Key Items",
             "View House",
-            "Bazaar",
-            "Edit Macros",
+            ROOT_SET_BAZAAR,
+            ROOT_MACRO_PALETTE,
             "Config",
             "Help Desk",
             "Current Time",
@@ -3888,6 +3975,42 @@ mod tests {
         ];
         assert_eq!(&ROOT_ENTRIES[..12], &RETAIL_P1);
         assert_eq!(&ROOT_ENTRIES[12..24], &RETAIL_P2);
+    }
+
+    /// Live DAT captions supersede the static root copy while they last;
+    /// kuluu's page-3 rows keep falling through to it (bead kuluu-1z9qs).
+    #[test]
+    fn selector_caption_override_replaces_root_pages_but_not_page_3() {
+        let dynamic = DynamicMenu {
+            selector_captions: (0..24).map(|i| format!("row {i}")).collect(),
+            ..DynamicMenu::default()
+        };
+        assert_eq!(entry_label(MenuKind::Root, 0, &dynamic), "row 0");
+        assert_eq!(entry_label(MenuKind::Root, 23, &dynamic), "row 23");
+        let first_kuluu_row = static_entries(MenuKind::Root)[24];
+        assert_eq!(entry_label(MenuKind::Root, 24, &dynamic), first_kuluu_row);
+    }
+
+    /// Gated on a retail install. The runtime caption read — the exact loader
+    /// the refresh system feeds — yields precisely this static copy's rows, so
+    /// the pinned strings cannot drift from the catalog unnoticed (bead
+    /// kuluu-1z9qs).
+    #[test]
+    fn real_selector_captions_match_the_static_root_copy() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut captions = CommandSelectorCaptions::default();
+        captions.ensure_loaded(Some(&root));
+        assert_eq!(
+            captions.labels.len(),
+            24,
+            "both selector pages must read through, or the override stays off"
+        );
+        assert_eq!(
+            captions.labels,
+            static_entries(MenuKind::Root)[..24].to_vec()
+        );
     }
 
     fn root_menu_app(cursor: usize) -> App {
@@ -4791,7 +4914,7 @@ mod tests {
     #[test]
     fn root_magic_row_drills_into_the_picker_unless_flat_is_on() {
         assert_eq!(
-            root_child_kind("Magic", false, false),
+            root_child_kind(ROOT_MAGIC_LIST, false, false),
             Some(MenuKind::MagicGroups)
         );
         // The Abilities row mirrors Magic: picker by default, flat list behind
@@ -4808,7 +4931,10 @@ mod tests {
             root_child_kind("Abilities", false, true),
             Some(MenuKind::Abilities)
         );
-        assert_eq!(root_child_kind("Magic", true, false), Some(MenuKind::Magic));
+        assert_eq!(
+            root_child_kind(ROOT_MAGIC_LIST, true, false),
+            Some(MenuKind::Magic)
+        );
     }
 
     /// s2c COMMAND_DATA ships three bitmaps in three id spaces, so a
@@ -5603,7 +5729,7 @@ mod tests {
         );
         assert_eq!(menu_title(MenuKind::MacrosPalette), "MacroPalette");
         assert_eq!(
-            root_child_kind("Edit Macros", false, false),
+            root_child_kind(ROOT_MACRO_PALETTE, false, false),
             Some(MenuKind::MacrosPalette)
         );
     }
@@ -6354,7 +6480,7 @@ mod tests {
         assert_eq!(menu_title(MenuKind::BazaarStalls), "Bazaar");
         // The ungated page-2 arm (vault main_menu.md §33) drills it from Root.
         assert_eq!(
-            root_child_kind("Bazaar", false, false),
+            root_child_kind(ROOT_SET_BAZAAR, false, false),
             Some(MenuKind::BazaarStalls)
         );
     }

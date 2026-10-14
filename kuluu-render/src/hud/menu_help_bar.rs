@@ -161,7 +161,7 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
 /// retail-style phrasing pending captures (tracked on kuluu-5ndh).
 fn root_entry_help(label: &str) -> &'static str {
     match label {
-        "Magic" => "Cast magic.",
+        menu::ROOT_MAGIC_LIST => "Cast magic.",
         "Abilities" => "Use abilities.",
         "Items" => "Use an item.",
         "Key Items" => "Check key items.",
@@ -177,10 +177,10 @@ fn root_entry_help(label: &str) -> &'static str {
         "Missions" => "Check your current mission.",
         "Quests" => "Check quests.",
         "View House" => "Visit another player's house.",
-        "Bazaar" => "Sell items from your storage.",
+        menu::ROOT_SET_BAZAAR => "Sell items from your storage.",
         "Help Desk" => "Contact the Help Desk.",
         menu::ROOT_COMMUNICATION => "Communicate with other players.",
-        "Edit Macros" | "Macros" => "Edit macros.",
+        menu::ROOT_MACRO_PALETTE => "Edit macros.",
         "Graphics" => "Adjust graphics settings.",
         "Config" => "Change the configuration.",
         "Interface" => "Adjust interface settings.",

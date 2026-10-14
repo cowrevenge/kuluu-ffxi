@@ -65,8 +65,8 @@ fn resolve_menu_entry(
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
         magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
-        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_REGION_INFO, ROOT_SHUT_DOWN,
-        ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_REGION_INFO, ROOT_SET_BAZAAR,
+        ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
     // The Config family resolves through no labels at all: every window's rows are DAT
     // widgets read at runtime (bead kuluu-o9qt7.33; vault main_menu.md §43/§49/§57), and each
@@ -135,7 +135,7 @@ fn resolve_menu_entry(
         // Page-2 row 5 name-opens `menu    bazaar` with no gate (FFXiMain.dll
         // retail-2026-09 RVA 0x14E8A1; vault main_menu.md §33): kuluu drills the
         // stall picker built from entity BazaarFlag rows.
-        (MenuKind::Root, "Bazaar") => MenuDispatch::OpenSubmenu(MenuKind::BazaarStalls),
+        (MenuKind::Root, ROOT_SET_BAZAAR) => MenuDispatch::OpenSubmenu(MenuKind::BazaarStalls),
 
         // The Map screen is a bespoke pane (no generic right-pane preview via
         // root_child_kind), so it needs its own drill arm ahead of the catch-all.
@@ -3125,7 +3125,12 @@ mod menu_dispatch_tests {
         // §41 windows bead .19.1 built.
         use kuluu_render::hud::menu::{MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO};
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Edit Macros", false, false),
+            resolve_menu_entry(
+                MenuKind::Root,
+                kuluu_render::hud::menu::ROOT_MACRO_PALETTE,
+                false,
+                false,
+            ),
             MenuDispatch::OpenSubmenu(MenuKind::MacrosPalette)
         );
         assert_eq!(
@@ -3438,6 +3443,7 @@ mod menu_dispatch_tests {
         );
         let dynamic = DynamicMenu {
             rows: config_window_rows("configwi", &table),
+            ..DynamicMenu::default()
         };
         for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
             let mut stack = MenuStack::root();
@@ -3508,6 +3514,7 @@ mod menu_dispatch_tests {
         );
         let launcher = DynamicMenu {
             rows: config_window_rows("conf5m", &table),
+            ..DynamicMenu::default()
         };
         for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
             let mut stack = MenuStack::root();
@@ -3535,6 +3542,7 @@ mod menu_dispatch_tests {
         );
         let page = DynamicMenu {
             rows: config_window_rows("conf7", &table),
+            ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RetailConfigPage(7));
@@ -3620,7 +3628,12 @@ mod menu_dispatch_tests {
         // Ungated page-2 arm 0x14E8A1 name-open of `menu    bazaar` (vault
         // main_menu.md §33).
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Bazaar", false, false),
+            resolve_menu_entry(
+                MenuKind::Root,
+                kuluu_render::hud::menu::ROOT_SET_BAZAAR,
+                false,
+                false,
+            ),
             MenuDispatch::OpenSubmenu(MenuKind::BazaarStalls)
         );
     }
@@ -4058,11 +4071,11 @@ mod menu_dispatch_tests {
     #[test]
     fn magic_drills_the_retail_picker_and_the_flat_toggle_moves_it() {
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Magic", false, false),
+            resolve_menu_entry(MenuKind::Root, "Magic List", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::MagicGroups)
         );
         assert_eq!(
-            resolve_menu_entry(MenuKind::Root, "Magic", true, false),
+            resolve_menu_entry(MenuKind::Root, "Magic List", true, false),
             MenuDispatch::OpenSubmenu(MenuKind::Magic)
         );
 

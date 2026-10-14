@@ -1803,6 +1803,23 @@ pub(super) fn handle_menu_key(
                     .insert(store_id, i32::from(value) + 1);
                 dynamic.option_edit = Some((store_id, value + 1));
             }
+        } else if bindings.matches_logical(Action::NavUp, key)
+            || bindings.matches_logical(Action::NavDown, key)
+        {
+            // A pinned slider never silences vertical travel. Retail reads every direction
+            // from its own neighbour byte (window input switch FFXiMain.dll retail-2026-09
+            // RVA 0x118260; bead kuluu-8l5h4), so Up/Down drop the pin and move rows just as
+            // they would on an unpinned row. The store keeps whatever was stepped so far.
+            let down = bindings.matches_logical(Action::NavDown, key);
+            dynamic.option_edit = None;
+            if let Some(level) = stack.current_mut() {
+                level.cursor = kuluu_render::hud::list_view::step_cursor(
+                    level.cursor,
+                    dynamic.rows.len(),
+                    down,
+                );
+            }
+            return None;
         } else if bindings.matches_logical(Action::NavConfirm, key)
             || bindings.matches_logical(Action::NavCancel, key)
         {
@@ -3429,9 +3446,10 @@ mod menu_key_tests {
     /// The runtime pin law of `conf2win` (bead kuluu-o9qt7.20.1 part B, handler
     /// FFXiMain.dll retail-2026-09 RVA 0x197470 key tables .text 0x197874/
     /// 0x19788C): Enter pins without writing the store; Left/Right step ±1
-    /// writing each step, dying at the clamps (0 and CONFIG_SLIDER_MAX); Up/Down
-    /// are swallowed and freeze the cursor; Esc saves-and-leaves — it unpins but
-    /// never pops the window. Any other top window drops a stale pin.
+    /// writing each step, dying at the clamps (0 and CONFIG_SLIDER_MAX); Esc
+    /// saves-and-leaves — it unpins but never pops the window. Any other top window drops a
+    /// stale pin. Up/Down are not part of this law: they keep moving rows
+    /// (`slider_pin_never_silences_vertical_travel`, bead kuluu-8l5h4).
     #[test]
     fn conf2win_slider_pin_steps_clamps_and_swallows() {
         use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
@@ -3487,15 +3505,6 @@ mod menu_key_tests {
         }
 
         let markers = world.resource_mut::<MapMarkers>();
-        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
-        assert_eq!(
-            stack.current().unwrap().cursor,
-            3,
-            "Up/Down never move a pinned window"
-        );
-        assert_eq!(harness.dynamic.option_edit, Some((0xA, 98)));
-
-        let markers = world.resource_mut::<MapMarkers>();
         harness.key(&Key::Escape, KeyCode::Escape, &mut stack, markers);
         assert!(
             matches!(stack.current().unwrap().kind, MenuKind::RetailConfigPage(0)),
@@ -3516,6 +3525,64 @@ mod menu_key_tests {
             harness.dynamic.option_edit, None,
             "the pin belongs to conf2win only"
         );
+    }
+
+    /// A pinned slider owns Left/Right and nothing else. Retail routes every direction through
+    /// its own neighbour byte in the window input switch (FFXiMain.dll retail-2026-09
+    /// RVA 0x118260), so pressing Down while a value is being stepped must drop the pin and land
+    /// on the next row — never freeze the cursor (bead kuluu-8l5h4; vault main_menu.md §5 nav law).
+    #[test]
+    fn slider_pin_never_silences_vertical_travel() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf2win".to_string(),
+            (0..11u32).map(|i| (700 + i, format!("srow{i}"))).collect(),
+        );
+        harness.dynamic.rows = config_window_rows(
+            "conf2win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(0));
+        let row_count = harness.dynamic.rows.len();
+        stack.current_mut().unwrap().cursor = 3;
+
+        // Pin the store, then step it once so there is something on the row.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert!(harness.dynamic.option_edit.is_some(), "row 3 pins");
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        let stepped = harness.dynamic.config_option_values.get(&0xAu32).copied();
+
+        // Down: the pin goes and the cursor moves — the same step an unpinned row takes.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit, None,
+            "stepping off drops the pin"
+        );
+        assert_eq!(stack.current().unwrap().cursor, 4, "Down moved a row");
+
+        // Up comes straight back onto the slider row with the value it had left behind.
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowUp, KeyCode::ArrowUp, &mut stack, markers);
+        assert_eq!(stack.current().unwrap().cursor, 3);
+        assert_eq!(
+            harness.dynamic.config_option_values.get(&0xAu32).copied(),
+            stepped,
+            "leaving the row keeps what was stepped"
+        );
+        assert_eq!(row_count, 11, "the fixture is the eleven-row conf2win");
     }
 
     /// `conf3win`'s slider row (row 11) answers the same pin law but on its own

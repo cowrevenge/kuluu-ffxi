@@ -3641,13 +3641,19 @@ mod menu_dispatch_tests {
             &mut graphics,
             &mut scene_state,
         ));
-        assert!(graphics.interactive_status_rows, "toggle flips on");
+        assert!(
+            !graphics.interactive_status_rows,
+            "first flip opts into the persona-passive panel"
+        );
         handle_retail_plus_row(
             kuluu_render::hud::menu::RETAIL_STATUS_ROWS,
             &mut graphics,
             &mut scene_state,
         );
-        assert!(!graphics.interactive_status_rows, "flips back off");
+        assert!(
+            graphics.interactive_status_rows,
+            "flips back to answering rows"
+        );
     }
 
     /// Retail's equipment window equips on every select case - no toggle-off branch in the

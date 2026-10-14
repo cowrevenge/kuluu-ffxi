@@ -4040,6 +4040,18 @@ pub enum AgentCommand {
         sub_job: Option<u8>,
     },
 
+    /// One select on myroom's door row. The retail arm (handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x145460, select-id 6 arm @0x14556C) branches on the
+    /// client-side door byte at game-state +0x40C40 (predicate .text 0xF96E0):
+    /// open door → MYROOM_IS{Kind=Close}, closed door → MYROOM_IS{Kind=Open}
+    /// plus the two widget rewrites 0x118B60(5,5)/(5,7) and byte[holder+0x16]=1
+    /// (vault main_menu.md §59 addendum 20). LSB implements neither Kind process()
+    /// (both are literally "Not implemented" in
+    /// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp), so no server ever
+    /// drives that byte: the closed-door branch is the only reachable behavior on
+    /// this wire, and kuluu sends exactly one Kind=Open packet per select.
+    MogHouseDoorSelect,
+
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers
     /// (vendor/server/src/map/packets/s2c/0x02e_openmogmenu.h).
     OpenMogMenu,

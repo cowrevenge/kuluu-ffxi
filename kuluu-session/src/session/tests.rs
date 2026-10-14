@@ -601,6 +601,38 @@ fn myroom_job_packet_layout_matches_lsb_struct() {
     assert_eq!(&keep[4..6], &[0, 0], "None → 0 = keep current job");
 }
 
+/// Pins the c2s 0x0CB GP_CLI_COMMAND_MYROOM_IS layout — both the LSB struct
+/// (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h) and the byte writes of the
+/// DLL's sole sender helper FFXiMain.dll retail-2026-09 .text 0xF0A40, which stores
+/// Kind→[+4], Param1→[+5] and u16 Param2→[+6] then commits exactly 8 bytes.
+#[test]
+fn myroom_is_packet_layout_matches_lsb_struct() {
+    // GP_CLI_COMMAND_MYROOM_IS_KIND::Remodel and _PARAM2::SandorianStyle — verbatim
+    // from vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h.
+    const KIND_REMODEL: u8 = 5;
+    const SANDORIAN_STYLE: u16 = 615;
+    let buf = build_subpacket_myroom_is(0xF00D, KIND_REMODEL, 4, SANDORIAN_STYLE);
+    assert_eq!(buf.len(), 8, "4 hdr + Kind + Param1 + Param2 u16");
+    let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_IS,
+        "opcode MYROOM_IS"
+    );
+    assert_eq!(id_and_size >> 9, 2, "size_words");
+    assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xF00D, "sync");
+    assert_eq!(buf[4], KIND_REMODEL, "Kind");
+    assert_eq!(buf[5], 4, "Param1 (roomlist object slot)");
+    assert_eq!(
+        u16::from_le_bytes([buf[6], buf[7]]),
+        615,
+        "Param2 little-endian (SandorianStyle)"
+    );
+
+    let door = build_subpacket_myroom_is(0, MYROOM_IS_KIND_OPEN, 0, MYROOM_IS_PARAM_DOOR_OPEN);
+    assert_eq!(&door[4..8], &[1, 0, 0, 0], "door select = Open,0,Unk1 LE");
+}
+
 /// Pins the c2s 0x05D GP_CLI_COMMAND_MOTION layout
 /// (vendor/server/src/map/packets/c2s/0x05d_motion.h): Mode at byte 11,
 /// BEFORE Param — the s2c 0x05A layout puts Mode after Param, so a

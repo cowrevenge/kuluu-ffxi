@@ -3632,6 +3632,15 @@ const HELPDESK_PANEL_ENTRIES: &[&str] = &[FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CO
 /// and rides the c2s 0x04D PBX protocol (vault main_menu.md §53/§59).
 pub const HOME_ROW_DELIVERY_BOX: &str = "Delivery Box";
 
+/// The myroom door row — select id 6 of handler FFXiMain.dll retail-2026-09 RVA
+/// 0x145460 (arm @0x14556C, the §40 label "furniture-edit mode" corrected in vault
+/// main_menu.md §59 addendum 20). The arm branches on predicate .text 0xF96E0: byte
+/// [game-state +0x40C40] nonzero (door open) → MYROOM_IS{Kind=Close}; zero →
+/// MYROOM_IS{Kind=Open} plus widget rewrites 0x118B60(5,5)/(5,7) and byte[holder
+/// +0x16]=1. Both catalog tokens flip with the door state (147 ↔ the closed/open
+/// caption pair); LSB implements neither Kind, so kuluu keeps one reachable form.
+pub const HOME_ROW_OPEN_MOG_HOUSE: &str = "Open Mog House";
+
 /// The myroom home-view panel's captioned widgets, verbatim from the DAT
 /// chunk `myro` (ROM/0/1.DAT file-off 0x282D80 size 0x4D0) windowps tokens,
 /// each decoded against ROM/165/76.DAT. The full fourteen named widgets —
@@ -3644,14 +3653,16 @@ pub const HOME_ROW_DELIVERY_BOX: &str = "Delivery Box";
 /// chain ring. The handler answers select ids 1..7
 /// (FFXiMain.dll retail-2026-09 RVA 0x145460 jump table .rdata 0x1455BC):
 /// id1 storage, id2 mogpost, id3 jobchang, id4 "/garden", id5 "/layout" (the
-/// §40 literal pairing was swapped), id6 furniture-edit mode, id7 roomlist.
+/// §40 literal pairing was swapped), id6 the door row `Open Mog House` (vault
+/// main_menu.md §59 addendum 20; the §40 "furniture-edit mode" label was wrong),
+/// id7 roomlist.
 pub const HOME_VIEW_ROWS: &[&str] = &[
     "M.Ward.",
     "Mog Safe",
     "Storage",
     "Mog Locker",
     "Satchel",
-    "Open Mog House",
+    HOME_ROW_OPEN_MOG_HOUSE,
     "Mog Case",
     "Mog Sack",
     HOME_ROW_DELIVERY_BOX,

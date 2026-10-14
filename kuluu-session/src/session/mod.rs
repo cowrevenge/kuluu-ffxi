@@ -29,10 +29,10 @@ pub use codec::{
     build_subpacket_camp, build_subpacket_emote_list_req, build_subpacket_equip_inspect,
     build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_item_move,
     build_subpacket_item_stack, build_subpacket_item_use, build_subpacket_motion,
-    build_subpacket_myroom_job, build_subpacket_pbx, build_subpacket_reqlogout,
-    build_subpacket_reqsubmapnum, build_subpacket_shop_buy, build_subpacket_shop_sell_req,
-    build_subpacket_shop_sell_set, build_subpacket_tracking_end, build_subpacket_tracking_list,
-    build_subpacket_tracking_start, log_action_sent,
+    build_subpacket_myroom_is, build_subpacket_myroom_job, build_subpacket_pbx,
+    build_subpacket_reqlogout, build_subpacket_reqsubmapnum, build_subpacket_shop_buy,
+    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
+    build_subpacket_tracking_list, build_subpacket_tracking_start, log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -4651,6 +4651,18 @@ async fn keepalive_loop(
                         )
                         .await;
                     }
+                    Some(AgentCommand::MogHouseDoorSelect) => {
+                        send_myroom_is(
+                            map,
+                            codec::MYROOM_IS_KIND_OPEN,
+                            0,
+                            codec::MYROOM_IS_PARAM_DOOR_OPEN,
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
                     Some(AgentCommand::CommitMacros { slots }) => {
                         // Macros are client-local (vault main_menu.md §41 [V-
                         // negative wire]): no packet here — normalize under the
@@ -7967,6 +7979,33 @@ async fn send_mog_house_exit(
         });
     } else {
         *pending_maprect = Some((std::time::Instant::now(), ZMRQ_LE));
+    }
+}
+
+/// Send one c2s 0x0CB MYROOM_IS with the caller-chosen Kind/Param bytes — every
+/// sender in retail routes through the helper FFXiMain.dll retail-2026-09 .text 0xF0A40
+/// (its three call sites: door arm .text 0x145585/0x145593 and the roomlist remodel
+/// driver .text 0x1D6AF5; vault main_menu.md §59 addendum 20).
+async fn send_myroom_is(
+    map: &mut MapClient,
+    kind: u8,
+    param1: u8,
+    param2: u16,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) {
+    let payload = build_subpacket_myroom_is(*sub_seq, kind, param1, param2);
+    tracing::info!(kind, param1, param2, "sending 0x0CB MYROOM_IS");
+    *sub_seq = sub_seq.wrapping_add(1);
+    if let Err(e) = map
+        .send_encrypted(&payload, datagram_header_id(*sub_seq), server_last_seq)
+        .await
+    {
+        tracing::warn!(error = %e, "myroom_is send failed");
+        let _ = event_tx.send(AgentEvent::Error {
+            message: format!("MyRoomIs send: {e}"),
+        });
     }
 }
 

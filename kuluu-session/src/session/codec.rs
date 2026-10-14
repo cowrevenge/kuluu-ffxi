@@ -621,6 +621,34 @@ pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Opti
     buf
 }
 
+// c2s 0x0CB GP_CLI_COMMAND_MYROOM_IS: Kind u8 @4, Param1 u8 @5, Param2 u16 LE @6,
+// (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h). The DLL builds this packet only
+// through helper FFXiMain.dll retail-2026-09 .text 0xF0A40: FC3C0(0xCB,1,1) allocates the
+// 8-byte subpacket, it writes Kind→[+4], Param1→[+5], Param2→u16[+6] and commits 8 bytes
+// via FC4D0 (vault main_menu.md §59 addendum 20).
+
+/// GP_CLI_COMMAND_MYROOM_IS_KIND::Open — the door-row kind (Close=2 is its twin and
+/// Remodel=5 the roomlist kind; both unused until their beads land,
+/// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h).
+pub(crate) const MYROOM_IS_KIND_OPEN: u8 = 1;
+
+/// GP_CLI_COMMAND_MYROOM_IS_PARAM2::Unk1, sent when opening the mog house door (the
+/// header's Unk2=1 pairs with Close; 615..618 are remodel style ids), same file.
+pub(crate) const MYROOM_IS_PARAM_DOOR_OPEN: u16 = 0;
+
+pub fn build_subpacket_myroom_is(sync: u16, kind: u8, param1: u8, param2: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_IS,
+        2,
+        sync,
+    ));
+    buf[4] = kind;
+    buf[5] = param1;
+    buf[6..8].copy_from_slice(&param2.to_le_bytes());
+    buf
+}
+
 // c2s 0x0F2 GP_CLI_COMMAND_SUBMAPCHANGE: State u16 @4, SubMapNumber u16 @6
 // (vendor/server/src/map/packets/c2s/0x0f2_submapchange.h). Sent on every
 // sub-area latch change so `PChar->loc.boundary` — and the next relog's

@@ -83,6 +83,16 @@ pub mod c2s {
     // Mog House job change: MainJobIndex u8, SupportJobIndex u8 (0 = keep current).
     pub const MYROOM_JOB: u16 = 0x100;
 
+    // GP_CLI_COMMAND_MYROOM_IS, vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h.
+    // Mog House door + remodel traffic: Kind u8 @4 (GP_CLI_COMMAND_MYROOM_IS_KIND:
+    // Open=1, Close=2, Remodel=5), Param1 u8 @5, Param2 u16 @6
+    // (GP_CLI_COMMAND_MYROOM_IS_PARAM2: Unk1=0 opening the door, Unk2=1 closing it,
+    // 615..618 remodel styles). The DLL's only sender for this opcode is the helper
+    // FFXiMain.dll retail-2026-09 .text 0xF0A40, which commits exactly those four
+    // body bytes. Body-value constants live in kuluu-session/src/session/codec.rs —
+    // build.rs checks every u16 const below for opcode drift.
+    pub const MYROOM_IS: u16 = 0x0CB;
+
     // GP_CLI_COMMAND_ITEM_STACK, vendor/server/src/map/packets/c2s/0x03a_item_stack.h.
     // "Sort" for a container: the server consolidates same-id partial stacks.
     // Payload is a single u32 Category = container id (LOC_INVENTORY = 0).

@@ -1557,7 +1557,10 @@ pub(super) fn handle_menu_key(
         dynamic.option_edit = None;
     } else if let Some((store_id, value)) = dynamic.option_edit {
         if bindings.matches_logical(Action::NavLeft, key) {
-            if value > 0 {
+            // `conf3win`'s step arms also carry a floor (`cmp eax,0x19/jle`,
+            // FFXiMain.dll retail-2026-09 RVA .text 0x19ABDB), so the decrement
+            // guard is per-store rather than always zero.
+            if value > kuluu_render::hud::menu::config_slider_min(store_id) {
                 dynamic
                     .config_option_values
                     .insert(store_id, i32::from(value) - 1);
@@ -3235,6 +3238,69 @@ mod menu_key_tests {
         assert_eq!(
             harness.dynamic.option_edit, None,
             "the pin belongs to conf2win only"
+        );
+    }
+
+    /// `conf3win`'s slider row (row 11) answers the same pin law but on its own
+    /// store 0x3C with a floor: entry arms write nothing (.text FFXiMain.dll
+    /// retail-2026-09 RVA 0x19AAFB), steps land in the store between 50 and 25
+    /// (`cmp eax,0x32/jge` at .text 0x19ABF7 and `cmp eax,0x19/jle` at .text
+    /// 0x19ABDB; vault main_menu.md §59 addendum 6).
+    #[test]
+    fn conf3win_slider_steps_between_its_floor_and_ceiling() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf3win".to_string(),
+            (0..15u32).map(|i| (600 + i, format!("c3row{i}"))).collect(),
+        );
+        harness.dynamic.rows =
+            config_window_rows("conf3win", &table, &std::collections::BTreeMap::new(), None);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(4));
+        stack.current_mut().unwrap().cursor = 10;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x3Cu32, 50u8)),
+            "row 11 pins store 0x3C at its boot value without writing"
+        );
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x3C, 50)),
+            "its ceiling swallows Right"
+        );
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0x3C, 49)));
+        assert_eq!(
+            harness.dynamic.config_option_values.get(&0x3Cu32),
+            Some(&49),
+            "the step writes store 0x3C"
+        );
+
+        // At the floor another Left does nothing at all.
+        harness.dynamic.option_edit = Some((0x3C, 25));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x3C, 25)),
+            "the decrement arm only steps above 0x19"
+        );
+        assert_eq!(
+            harness.dynamic.config_option_values.get(&0x3Cu32),
+            Some(&49)
         );
     }
 }

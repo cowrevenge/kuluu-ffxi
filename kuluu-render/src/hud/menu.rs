@@ -1924,7 +1924,11 @@ const CONF3WIN_ROW_ARMS: [ConfigRowArm; 15] = [
         store_id: 0x3B,
         value: 0,
     },
-    ConfigRowArm::Plain,
+    // Row 11 is the slider entry arm (.text FFXiMain.dll retail-2026-09 RVA
+    // 0x19AAFB): it sets the edit byte [esi+0x20]=1, stashes the widget value slot
+    // [esi+0x48] into [esi+0x24] and clears the window's dirty bytes — nothing is
+    // written until a step lands in store 0x3C.
+    ConfigRowArm::Slider { store_id: 0x3C },
     ConfigRowArm::RadioBit { bit: 2, value: 1 },
     ConfigRowArm::RadioBit { bit: 2, value: 0 },
     ConfigRowArm::Radio {
@@ -2279,6 +2283,21 @@ pub fn config_slider_boot_default(store_id: u32) -> u8 {
         // 25, store 0x40 at its max 3; store 0x43's init slot takes ebx=0).
         0x3E => 25,
         0x40 => 3,
+        // `conf3win`'s slider store boots at its ceiling (option record built in
+        // the §58 init region, .text call site FFXiMain.dll retail-2026-09 RVA
+        // 0x1942D9: default and max both 0x32 = 50, floor 0x19 = 25).
+        0x3C => 50,
+        _ => 0,
+    }
+}
+
+/// Per-store floor of a law'd slider. `conf3win`'s decrement arm only steps while
+/// the value is strictly above **0x19** (`cmp eax, 0x19; jle` at FFXiMain.dll
+/// retail-2026-09 RVA .text 0x19ABDB), so store 0x3C bottoms out at 25; other
+/// sliders may reach 0 (vault main_menu.md §59 addendum 6).
+pub fn config_slider_min(store_id: u32) -> u8 {
+    match store_id {
+        0x3C => 25,
         _ => 0,
     }
 }
@@ -2292,6 +2311,9 @@ pub fn config_slider_max(store_id: u32) -> u8 {
         0x3E => 25,
         0x40 => 3,
         0x43 => 5,
+        // `conf3win`'s increment arm only steps strictly below 0x32
+        // (`cmp eax, 0x32; jge` at FFXiMain.dll retail-2026-09 RVA .text 0x19ABF7).
+        0x3C => 50,
         _ => CONFIG_SLIDER_MAX,
     }
 }
@@ -6877,7 +6899,7 @@ mod tests {
                 value: 1
             }
         ));
-        for position in [2usize, 3, 10] {
+        for position in [2usize, 3] {
             assert!(
                 matches!(
                     r3[position].action,
@@ -6886,6 +6908,12 @@ mod tests {
                 "undug conf3win row {position}"
             );
         }
+        // Row 11 is the slider entry arm on store 0x3C (boot/ceiling 50).
+        assert!(matches!(
+            r3[10].action,
+            DynamicMenuAction::ConfigSliderEdit { store_id: 0x3C }
+        ));
+        assert_eq!(r3[10].label, "conf3win10: 50");
 
         let r6 = config_window_rows("conf6win", &table, &std::collections::BTreeMap::new(), None);
         assert_eq!(r6.len(), 15);

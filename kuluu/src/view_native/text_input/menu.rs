@@ -64,35 +64,16 @@ fn resolve_menu_entry(
 ) -> MenuDispatch {
     use kuluu_render::graphics_settings::MenuAction;
     use kuluu_render::hud::menu::{
-        magic_category_for_label, retail_config_page_for_row, COMM_EMOTE_LIST, COMM_FRIEND_LIST,
-        MACRO_ROW_MACRO_RESULT, MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT,
-        ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE, SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
+        magic_category_for_label, COMM_EMOTE_LIST, COMM_FRIEND_LIST, MACRO_ROW_MACRO_RESULT,
+        MACRO_ROW_SELECT_MACRO, ROOT_CURRENT_TIME, ROOT_LOG_OUT, ROOT_SHUT_DOWN, ROOT_VIEW_HOUSE,
+        SYNTH_ROW_OPEN_LIST, SYNTH_ROW_PICK_MATERIAL,
     };
-    // Every `configwi` hub row name-opens its own page window: select-id i of the
-    // hub handler jumps to the branch pushing that page's name literal
-    // (FFXiMain.dll retail-2026-09 RVA 0x196770, jump table .text 0x1968A4; vault
-    // main_menu.md §47). kuluu drills the window as its own menu kind.
-    if matches!(kind, MenuKind::RetailConfig) {
-        if let Some(page) = retail_config_page_for_row(label) {
-            return MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(page));
-        }
-    }
+    // The Config family resolves through no labels at all: every window's rows are DAT
+    // widgets read at runtime (bead kuluu-o9qt7.33; vault main_menu.md §43/§49/§57), and each
+    // row carries its select semantics as a DynamicMenuAction — the hub's twelve jump-table
+    // drills (§42), `conf5m`'s log-window arms 0x199264/0x19927A (§47), or an option-row store
+    // id (§48). Those actions ride on confirm_menu_at_cursor's dynamic seam.
     match (kind, label) {
-        // `conf5m`'s rows name-open the per-window log pages: select-id 1 →
-        // `menu    conf5w2 `, select-id 2 → `menu    conf5w1 ` (handler
-        // FFXiMain.dll retail-2026-09 RVA 0x199240, arms 0x199264 / 0x19927A; its
-        // third arm opens `menu    conf5win` but has no captioned row of its own —
-        // vault main_menu.md §47).
-        (MenuKind::RetailConfigPage(3), l)
-            if l == kuluu_render::hud::menu::CONFIG_ROW_SHARED_LOG_WINDOWS =>
-        {
-            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(2))
-        }
-        (MenuKind::RetailConfigPage(3), l)
-            if l == kuluu_render::hud::menu::CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS =>
-        {
-            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(1))
-        }
         (MenuKind::Config, l) if l == MenuAction::Controls.label() => {
             MenuDispatch::OpenSubmenu(MenuKind::Controls)
         }
@@ -481,6 +462,28 @@ pub(super) fn confirm_menu_at_cursor(
             // main_menu.md §31) — kuluu pushes that quest's detail the same way.
             if let A::QuestOpenDetail { log, id } = action {
                 stack.push(MenuKind::QuestDetail { log, id });
+                return None;
+            }
+
+            // Config-family drill rows push their own window (handler jump tables:
+            // hub FFXiMain.dll retail-2026-09 RVA 0x196770/.text 0x1968A4, `conf5m`
+            // 0x199240; vault main_menu.md §42/§47) — the page's DAT rows arrive on
+            // the next refresh of refresh_dynamic_menu_rows.
+            if let A::OpenRetailConfigPage { page } = action {
+                stack.push(MenuKind::RetailConfigPage(page));
+                return None;
+            }
+            if let A::OpenRetailConfigSub { sub } = action {
+                stack.push(MenuKind::RetailConfigSub(sub));
+                return None;
+            }
+            // Leaf option rows: retail changes the value in place with no window
+            // event (vault main_menu.md §46/§48), and until the option store lands
+            // on bead kuluu-o9qt7.20.1 kuluu answers them with the standard line,
+            // keeping its window open like retail does.
+            if let A::ConfigOptionRow { .. } = action {
+                let label = kuluu_render::hud::menu::entry_label(kind, cursor, dynamic);
+                push_system_chat_line(scene_state, format!("[menu] {label} — not implemented"));
                 return None;
             }
 
@@ -2890,6 +2893,19 @@ mod menu_dispatch_tests {
         cmd_tx: &Sender<AgentCommand>,
         item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
     ) -> Option<InputMode> {
+        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        confirm_row_dynamic(stack, scene_state, cmd_tx, &dynamic, item_bag)
+    }
+
+    /// Same seam with caller-built dynamic rows — used for the Config family,
+    /// whose rows come from a synthetic DAT table in these tests.
+    fn confirm_row_dynamic(
+        stack: &mut MenuStack,
+        scene_state: &mut SceneState,
+        cmd_tx: &Sender<AgentCommand>,
+        dynamic: &kuluu_render::hud::menu::DynamicMenu,
+        item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
+    ) -> Option<InputMode> {
         use crate::keybinds_store::KeybindsStore;
         let mut bindings = Bindings::default();
         let mut keybinds_state = KeybindsStateRes {
@@ -2903,7 +2919,6 @@ mod menu_dispatch_tests {
         let mut audio_mute = Default::default();
         let mut vana_clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
         let mut vana_clock_visible = Default::default();
-        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
         let surface = crate::view_native::command_surface::CommandSurface::default();
         confirm_menu_at_cursor(
             &mut bindings,
@@ -2918,7 +2933,7 @@ mod menu_dispatch_tests {
             &mut audio_mute,
             &mut vana_clock,
             &mut vana_clock_visible,
-            &dynamic,
+            dynamic,
             None,
             kuluu_snapshot::Vec3::default(),
             &surface,
@@ -3024,101 +3039,150 @@ mod menu_dispatch_tests {
     #[test]
     fn config_row_drills_the_retail_hub() {
         // Ungated page-2 arm FFXiMain.dll retail-2026-09 RVA 0x14E8D9
-        // name-opens `menu    configwi` (vault main_menu.md §35); the hub's
-        // twelve rows answer through the generic stub until `.20.1` builds each
-        // page window.
+        // name-opens `menu    configwi` (vault main_menu.md §35). The hub's own
+        // rows are DAT widgets read at runtime (bead kuluu-o9qt7.33); their
+        // drills are pinned in confirm-time by config_hub_confirm_pushes_the_page_windows.
         assert_eq!(
             resolve_menu_entry(MenuKind::Root, "Config", false, false),
             MenuDispatch::OpenSubmenu(MenuKind::RetailConfig)
         );
-        // Hub captions are the DAT windowpsNNN strings (vault main_menu.md §43),
-        // and each row's select-id names the page it opens (§47's jump table).
-        assert_eq!(
-            resolve_menu_entry(
-                MenuKind::RetailConfig,
-                "Adjust the keyboard settings.",
-                false,
-                false
-            ),
-            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(0))
-        );
-        for (idx, label) in kuluu_render::hud::menu::RETAIL_CONFIG_ENTRIES
-            .iter()
-            .enumerate()
-        {
-            assert_eq!(
-                resolve_menu_entry(MenuKind::RetailConfig, label, false, false),
-                MenuDispatch::OpenSubmenu(MenuKind::RetailConfigPage(idx as u8)),
-                "hub row {idx} must drill its own page window"
-            );
-        }
     }
 
+    /// Confirm-time law for the DAT-driven Config family (bead kuluu-o9qt7.33):
+    /// hub row i pushes its own page window — the twelve jump-table branches of
+    /// FFXiMain.dll retail-2026-09 RVA 0x196770 (.text 0x1968A4; vault main_menu.md §42)
+    /// — while a thirteenth widget falls to the handler's default tail and answers as an
+    /// option row instead (vault main_menu.md §57).
     #[test]
-    fn config_page_windows_show_their_dat_option_rows_and_answer() {
-        // Each page's rows are the `windowpsNNN` widgets of its own DAT chunk,
-        // captioned from catalog table 11 (vault main_menu.md §47); selects stay
-        // "not supported yet" until the option-store writes land on the wire.
-        use kuluu_render::hud::menu::{RETAIL_CONFIG_ROWS_CONF3WIN, RETAIL_CONFIG_ROWS_CONF7};
-        assert_eq!(RETAIL_CONFIG_ROWS_CONF3WIN.len(), 11);
-        assert_eq!(RETAIL_CONFIG_ROWS_CONF7.len(), 12);
-        for page in 0..12u8 {
-            for label in
-                kuluu_render::hud::menu::entries_for(MenuKind::RetailConfigPage(page), false)
-            {
-                let dispatch =
-                    resolve_menu_entry(MenuKind::RetailConfigPage(page), label, false, false);
-                if page == 3 {
-                    // `conf5m` is the log-window launcher: its two rows name-open
-                    // their per-window pages instead of answering an option.
-                    assert!(
-                        matches!(
-                            dispatch,
-                            MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(_))
-                        ),
-                        "launcher page row {label:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(dispatch, MenuDispatch::NotImplemented(_)),
-                        "page {page} row {label:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn log_window_launcher_rows_drill_the_two_per_window_pages() {
-        // Handler 0x199240: select-id 1 → conf5w2, select-id 2 → conf5w1 (vault
-        // main_menu.md §47). Each page shows its own DAT chunk rows and answers.
+    fn config_hub_confirm_pushes_the_page_windows() {
         use kuluu_render::hud::menu::{
-            CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS, CONFIG_ROW_SHARED_LOG_WINDOWS,
-            RETAIL_CONFIG_ROWS_CONF5WIN, RETAIL_CONFIG_ROWS_LOG_PAGE,
+            config_window_rows, ConfigDatRows, DynamicMenu, RETAIL_CONFIG_PAGE_WINDOWS,
         };
-        assert_eq!(RETAIL_CONFIG_ROWS_CONF5WIN.len(), 7);
-        assert_eq!(RETAIL_CONFIG_ROWS_LOG_PAGE.len(), 3);
-        for (label, sub) in [
-            (CONFIG_ROW_SHARED_LOG_WINDOWS, 2u8),
-            (CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS, 1),
-        ] {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "configwi".to_string(),
+            (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
+        );
+        let dynamic = DynamicMenu {
+            rows: config_window_rows("configwi", &table),
+        };
+        for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::RetailConfig);
+            stack.current_mut().unwrap().cursor = page;
+            let mut scene_state = SceneState::default();
+            let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+            let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+            confirm_row_dynamic(
+                &mut stack,
+                &mut scene_state,
+                &cmd_tx,
+                &dynamic,
+                &mut item_bag,
+            );
             assert_eq!(
-                resolve_menu_entry(MenuKind::RetailConfigPage(3), label, false, false),
-                MenuDispatch::OpenSubmenu(MenuKind::RetailConfigSub(sub))
+                stack.current().map(|l| l.kind),
+                Some(MenuKind::RetailConfigPage(page as u8)),
+                "hub row {page} must push its own page window"
             );
         }
-        for sub in 0..5u8 {
-            for label in kuluu_render::hud::menu::entries_for(MenuKind::RetailConfigSub(sub), false)
-            {
-                assert!(
-                    matches!(
-                        resolve_menu_entry(MenuKind::RetailConfigSub(sub), label, false, false),
-                        MenuDispatch::NotImplemented(_)
-                    ),
-                    "sub {sub} row {label:?}"
-                );
-            }
+        // The widget past the twelve branches (GAMEPAD Config launcher) has no drill:
+        // it stays put and answers with the option line instead.
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.current_mut().unwrap().cursor = 12;
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &dynamic,
+            &mut item_bag,
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RetailConfig)
+        );
+        let toast = &scene_state.local_toasts.last().expect("answer line").text;
+        assert!(
+            toast.contains("hub12") && toast.contains("not implemented"),
+            "{toast}"
+        );
+    }
+
+    /// `conf5m`'s select law (handler FFXiMain.dll retail-2026-09 RVA 0x199240,
+    /// arms 0x199264/0x19927A; vault main_menu.md §47): its first widget name-opens
+    /// `conf5w2` (sub 2), the second `conf5w1`, and a third falls to the arm recorded as opening `conf5win`
+    /// (sub 0). A leaf option row answers with the standard line WITHOUT closing
+    /// its window — retail's leaf selects carry no window event, and the value writes ride on
+    /// c2s SAVE_CONF owned by bead kuluu-o9qt7.20.1.
+    #[test]
+    fn config_launcher_and_option_rows_follow_their_arms() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf5m".to_string(),
+            vec![
+                (901, "shared".to_string()),
+                (902, "individual".to_string()),
+                (903, "other".to_string()),
+            ],
+        );
+        let launcher = DynamicMenu {
+            rows: config_window_rows("conf5m", &table),
+        };
+        for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::RetailConfigPage(3));
+            stack.current_mut().unwrap().cursor = cursor;
+            let mut scene_state = SceneState::default();
+            let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+            let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+            confirm_row_dynamic(
+                &mut stack,
+                &mut scene_state,
+                &cmd_tx,
+                &launcher,
+                &mut item_bag,
+            );
+            assert_eq!(
+                stack.current().map(|l| l.kind),
+                Some(MenuKind::RetailConfigSub(sub)),
+                "conf5m widget {cursor} must name-open sub {sub}"
+            );
         }
+        table.by_root.insert(
+            "conf7".to_string(),
+            vec![(500, "o1".to_string()), (501, "o2".to_string())],
+        );
+        let page = DynamicMenu {
+            rows: config_window_rows("conf7", &table),
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(7));
+        stack.current_mut().unwrap().cursor = 1;
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row_dynamic(&mut stack, &mut scene_state, &cmd_tx, &page, &mut item_bag);
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RetailConfigPage(7)),
+            "option-row selects must keep the page window open"
+        );
+        let toast = &scene_state.local_toasts.last().expect("answer line").text;
+        assert!(
+            toast.contains("o2") && toast.contains("not implemented"),
+            "{toast}"
+        );
     }
 
     #[test]

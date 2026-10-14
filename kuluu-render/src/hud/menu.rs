@@ -199,6 +199,25 @@ pub enum DynamicMenuAction {
         slot: u8,
     },
 
+    /// One `configwi` hub row: select id i+1 name-opens page window
+    /// RETAIL_CONFIG_PAGE_WINDOWS[i] (jump table .text 0x1968A4 of handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x196770; vault main_menu.md §42).
+    OpenRetailConfigPage {
+        page: u8,
+    },
+    /// One `conf5m` drill row: ids 1/2 name-open `conf5w2`/`conf5w1`, and further
+    /// widgets answer the arm that opens `conf5win` (handler FFXiMain.dll retail-2026-09
+    /// RVA 0x199240; vault main_menu.md §47). Index into RETAIL_CONFIG_SUB_WINDOWS.
+    OpenRetailConfigSub {
+        sub: u8,
+    },
+    /// A `windowpsNNN` option widget. Its caption id is also the option-store record
+    /// key (vault main_menu.md §43/§48); bead .20.1 turns these into live toggles,
+    /// until then they answer the standard not-implemented line.
+    ConfigOptionRow {
+        option_id: u32,
+    },
+
     /// One filled macro slot row of the mcrselec select window (vault
     /// main_menu.md §41). Selecting stays inert until the macro-use seam is
     /// lawed end to end — the DAT grids prove capacity (2 blocks x 20 keytops),
@@ -835,6 +854,9 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::MacroSelect
             | MenuKind::MacroEditor { .. }
             | MenuKind::JobPick { .. }
+            | MenuKind::RetailConfig
+            | MenuKind::RetailConfigPage(_)
+            | MenuKind::RetailConfigSub(_)
     )
 }
 
@@ -1039,19 +1061,12 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // has none until macros execute — the grounded empty display.
         MenuKind::MacroSelect => &[],
         MenuKind::MacroResult => &[],
-        // The configwi hub's twelve page rows (handler FFXiMain.dll
-        // retail-2026-09 RVA 0x196770; vault main_menu.md §35).
-        MenuKind::RetailConfig => RETAIL_CONFIG_ENTRIES,
-        // A page window's rows are its own DAT option widgets (handler per
-        // vault main_menu.md §47; the empty pages carry only anonymous records).
-        MenuKind::RetailConfigPage(page) => match usize::from(page) {
-            idx if idx < RETAIL_CONFIG_PAGE_ROWS.len() => RETAIL_CONFIG_PAGE_ROWS[idx],
-            _ => &[],
-        },
-        MenuKind::RetailConfigSub(sub) => match usize::from(sub) {
-            idx if idx < RETAIL_CONFIG_SUB_ROWS.len() => RETAIL_CONFIG_SUB_ROWS[idx],
-            _ => &[],
-        },
+        // DAT-driven rows: the ConfigDatRows arms of refresh_dynamic_menu_rows read
+        // each window's `windowpsNNN` widgets and captions (vault main_menu.md
+        // §42/§47/§57); no transcribed row content stands here anymore.
+        MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
+            &[]
+        }
         // The faqsub Help Desk panel rows (vault main_menu.md §36: the
         // big-widget caption builder loads exactly these destination strings).
         MenuKind::HelpDeskPanel => HELPDESK_PANEL_ENTRIES,
@@ -1411,195 +1426,125 @@ pub const MACRO_ROW_SELECT_MACRO: &str = "Select Macro";
 pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
 const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
 
-/// The configwi hub's twelve rows, captioned from the DAT: each `conf` chunk widget
-/// `windowpsNNN` indexes catalog table 11 = ROM/165/75.DAT at its own suffix id — the
-/// windowpsNNN caption law (vault main_menu.md §43; supersedes §35's chrome-only reading).
-/// Row order is the chunk's widget file order [V]; the handler arms of FFXiMain.dll
-/// retail-2026-09 RVA 0x196792.. name each row's page window (§35/§42 literal run
-/// .data 0x37A618..), and that arm↔widget pairing stays [I] until the arms are walked.
-pub const RETAIL_CONFIG_ENTRIES: &[&str] = &[
-    "Adjust the keyboard settings.",
-    "Adjust in-game settings exclusive to FINAL FANTASY XI.",
-    "Adjust the filter settings for text in the log window.",
-    "Adjust the color of different types of text in the log window.",
-    "Adjust log window settings.",
-    "Adjust miscellaneous settings for FINAL FANTASY XI.",
-    "Remove onscreen battle effects to improve frame rate.",
-    "Adjust the mouse and camera settings.",
-    "Adjust global options that affect all of PlayOnline.",
-    "Adjust other miscellaneous settings for FINAL FANTASY XI.",
-    "Designate which messages appear in which window. Only active when multiple log windows are displayed.",
-    "Adjust further miscellaneous settings for FINAL FANTASY XI.",
-];
-
-/// The twelve `configwi` page windows' option rows, indexed by hub row (0..11 = the
-/// hub handler's select-id 1..12; FFXiMain.dll retail-2026-09 RVA 0x196770 jump table
-/// .text 0x1968A4 → name-open). Each list is that page window's own kind-30 DAT chunk
-/// in ROM/0/1.DAT, `menu    windowpsNNN` records in file order, with the caption read
-/// from catalog table 11 = ROM/165/75.DAT at the suffix id (the §43 caption law, which
-/// vault main_menu.md §47 shows is also the row-set law: the same ids are the option
-/// ids the page handler writes through the shared option store at [0x106626CC]).
+/// The Config family's windows, in kuluu drill order — the shape the DATs cannot
+/// state. Every row label and option id inside these windows lives only in the DATs
+/// (the `windowpsNNN` caption law, vault main_menu.md §43; generations resolved through
+/// VTABLE/FTABLE by [`ffxi_dat::menu_windows::windows_from_root`], never transcribed here).
 ///
-/// Two page windows (`conf6win`, `conf13wi`) have no record at all in the
-/// ROM/0/1.DAT generation, so their lists come from the newer DAT set where each
-/// root matches the DLL's name-open verbatim (vault main_menu.md §49).
-///
-/// Two pages stay empty — `cfilter` and `fxfilter` repeat anonymous sub-records
-/// (the filter word slots / the per-effect toggles) in **both** generations, so
-/// their rows have to be recovered from the shared handler's arms; open work.
-pub const RETAIL_CONFIG_ROWS_CONF2WIN: &[&str] = &[
-    "Automatically lock on to target at the start of battle.",
-    "Do not automatically lock on to target.",
-    "Play music in stereo.",
-    "Play music in monaural sound.",
-    "Set the volume of sound effects.",
-    "Set the volume of the background music.",
-    "Set the level of screen flicker reduction.",
-    "Automatically sort items as they enter your inventory.",
-    "Disable the autosort function, and opt to manually sort your inventory.",
-    "Sort items by category when organizing them.",
-    "Sort items by name when organizing them and stacking them when possible.",
+/// Which page window each hub row opens is the handler's jump table: select id i+1 pushes
+/// name literal `RETAIL_CONFIG_PAGE_WINDOWS[i]`, FFXiMain.dll retail-2026-09 RVA 0x196770,
+/// jump table .text 0x1968A4 — the twelve literals of §42 in branch order. The hub opens
+/// as `configwi` (the named-root generation, vault main_menu.md §42/§49); its current-gen
+/// chunk carries **thirteen** widgets but the jump table has twelve name-open branches, so
+/// row 13 (`Boots up the FINAL FANTASY XI GAMEPAD Config program.`) answers through the
+/// handler's default tail — kuluu gives it no page drill (vault main_menu.md §57).
+/// `conf5m`'s window drills further: select ids 1/2 name-open `conf5w2`/`conf5w1`, and its
+/// third arm opens `conf5win` (handler FFXiMain.dll retail-2026-09 RVA 0x199240, vault
+/// main_menu.md §47; the w↔p pairing stays [I] as recorded there). The two key-assignment
+/// windows carry only key-slot chrome in both DAT generations (§47), so nothing drills
+/// them yet and they list no captioned rows.
+pub const RETAIL_CONFIG_HUB_WINDOW: &str = "configwi";
+pub const RETAIL_CONFIG_PAGE_WINDOWS: [&str; 12] = [
+    "conf2win", "cfilter", "conftxtc", "conf5m", "conf3win", "conf6win", "fxfilter", "conf7",
+    "conf4", "conf11m", "conf12wi", "conf13wi",
 ];
-const RETAIL_CONFIG_ROWS_EMPTY: &[&str] = &[];
-const RETAIL_CONFIG_ROWS_CONFTXT: &[&str] =
-    &["Set the font colors for actions that affect others."];
-const RETAIL_CONFIG_ROWS_CONF5M: &[&str] = &[
-    "Adjust shared window settings.",
-    "Adjust individual window settings.",
-];
-pub const RETAIL_CONFIG_ROWS_CONF3WIN: &[&str] = &[
-    "Display damage in the log window only.",
-    "Display damage on the game screen and in the log window.",
-    "Make FINAL FANTASY XI character data public for party searches and Friend List searches.",
-    "Hide FINAL FANTASY XI character data from Friend List searches.",
-    "Turn on the DUALSHOCKi2 analog controller vibration function.",
-    "Turn off the DUALSHOCKi2 analog controller vibration function.",
-    "Adjust the strength of the vibration function.",
-    "Set display to standard TV screen size.",
-    "Set display to wide-screen TV size.",
-    "Display damage as pop-up graphics on the game screen only. Damage will not be shown in the log window.",
-    "Adjust the screen's brightness.",
-];
-pub const RETAIL_CONFIG_ROWS_CONF7: &[&str] = &[
-    "Use cursor as point of reference for movement.",
-    "Use your character as point of reference for movement.",
-    "The camera will rotate when the mouse pointer is moved to the edge of the screen.",
-    "The camera will not rotate when the mouse pointer is moved to the edge of the screen.",
-    "Allows unrestricted movement of the third-person camera.",
-    "Locks the third-person camera behind your character.",
-    "Reset third-person camera controls to the default setting.",
-    "Invert third-person camera controls on the Y axis.",
-    "Invert third-person camera controls on the X axis.",
-    "Reset first-person camera controls to the default setting.",
-    "Invert first-person camera controls on the Y axis.",
-    "Invert first-person camera controls on the X axis.",
-];
-const RETAIL_CONFIG_ROWS_CONF4: &[&str] =
-    &["Filter out words that could be interpreted as offensive."];
-const RETAIL_CONFIG_ROWS_CONF11M: &[&str] = &[
-    "Designate which logs appear in which window. Only active when multiple windows are displayed.",
-];
-pub const RETAIL_CONFIG_ROWS_CONF12WI: &[&str] = &[
-    "Display party member status icons.",
-    "Hide party member status icons.",
-    "Display status icon timers.",
-    "Hide status icon timers.",
-    "Enable camera collision on Mog House furniture.",
-    "Disable camera collision on Mog House furniture.",
-];
+pub const RETAIL_CONFIG_SUB_WINDOWS: [&str; 5] =
+    ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"];
 
-/// `conf6win` — this window has no record at all in ROM/0/1.DAT; its rows come
-/// from the newer DAT generation where every record root matches the DLL's
-/// name-open literal (chunk 'co13' root `conf6win`, ROM/119/51.DAT file-off
-/// 0x28B470 size 0x470; vault main_menu.md §49), captions from table 11.
-pub const RETAIL_CONFIG_ROWS_CONF6WIN: &[&str] = &[
-    "Adjust the distance of the back clipping plane of the 3D view.",
-    "Display footstep effects such as footprints and ripples.",
-    "Remove footstep effects to increase frame rate.",
-    "Limit character animation rate to maintain frame rate.",
-    "Normal input method for full-sized keyboards.",
-    "Specialized input method for compact keyboards without numeric keypads.",
-    "Adjust the background screen proportions to match your monitor's aspect ratio. Recommended for monitors with an aspect ratio other than 4:3.",
-    "Assign keys for movement, cursor, and camera controls. (Compact keyboard only)",
-    "Assign keys for shortcut commands.",
-    "Return key assignments to default settings.",
-    "New input method supporting scroll wheel and keyboard/mouse combination controls.",
-    "Adjust the size of the macro palette.",
-    "Shift macro palette to the right during combat.",
-    "Lock macro palette to the right at all times.",
-];
-/// `conf13wi` — likewise record-less in ROM/0/1.DAT; grounded from chunk 'co22'
-/// root `conf13wi` (ROM/119/51.DAT file-off 0x29D920 size 0x200) per vault
-/// main_menu.md §49.
-pub const RETAIL_CONFIG_ROWS_CONF13WI: &[&str] = &[
-    "Disable software keyboard.",
-    "Use standard software keyboard.",
-    "Use compact software keyboard.",
-    "Hide certain chat messages that contain terms designated by your filter settings. Presssing this button will reflect your edits.",
-    "Hide certain chat messages sent by player characters designated by your filter settings. Pressing this button will reflect your edits.",
-    "Term Filter disabled.",
-];
+/// The Config family's option rows, read from the DATs at runtime: each window kuluu
+/// opens maps to its chunk's `windowpsNNN` widgets in file order (= the handler's select-id
+/// space), labelled through catalog table 11 (vault main_menu.md §43). Loaded once on first
+/// use; a machine without an install shows empty windows rather than any transcribed copy,
+/// per the owner's DAT-first rule.
+#[derive(Resource, Default)]
+pub struct ConfigDatRows {
+    pub loaded: bool,
+    pub by_root: std::collections::BTreeMap<String, Vec<(u32, String)>>,
+}
 
-/// Indexed by hub row (0-based). The two empty entries are `cfilter` and
-/// `fxfilter`: those windows carry only anonymous repeated sub-records in both
-/// DAT generations, so their rows have to come from the handler side
-/// (`FFXiMain.dll retail-2026-09 RVA 0x197BE0`; vault main_menu.md §47/§49).
-pub const RETAIL_CONFIG_PAGE_ROWS: [&[&str]; 12] = [
-    RETAIL_CONFIG_ROWS_CONF2WIN,
-    RETAIL_CONFIG_ROWS_EMPTY,
-    RETAIL_CONFIG_ROWS_CONFTXT,
-    RETAIL_CONFIG_ROWS_CONF5M,
-    RETAIL_CONFIG_ROWS_CONF3WIN,
-    RETAIL_CONFIG_ROWS_CONF6WIN,
-    RETAIL_CONFIG_ROWS_EMPTY,
-    RETAIL_CONFIG_ROWS_CONF7,
-    RETAIL_CONFIG_ROWS_CONF4,
-    RETAIL_CONFIG_ROWS_CONF11M,
-    RETAIL_CONFIG_ROWS_CONF12WI,
-    RETAIL_CONFIG_ROWS_CONF13WI,
-];
+impl ConfigDatRows {
+    pub fn ensure_loaded(&mut self, dat: Option<&ffxi_dat::archive::DatRoot>) {
+        if self.loaded {
+            return;
+        }
+        let Some(root) = dat else { return };
+        let Ok(windows) = ffxi_dat::menu_windows::windows_from_root(root) else {
+            return;
+        };
+        let catalog: Option<ffxi_dat::dmsg::DmsgTable> = (|| {
+            let loc = root
+                .resolve(ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_11_FILE_ID)
+                .ok()?;
+            let bytes = std::fs::read(loc.path_under(root)).ok()?;
+            ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
+        })();
+        let mut by_root = std::collections::BTreeMap::new();
+        for name in config_window_names() {
+            if let Some(window) = windows.get(name) {
+                let rows = window
+                    .widgets
+                    .iter()
+                    .filter_map(|widget| widget.caption_id)
+                    .map(|id| {
+                        let label = catalog
+                            .as_ref()
+                            .and_then(|c| usize::try_from(id).ok().and_then(|i| c.text(i)))
+                            .map_or_else(|| format!("windowps{id}"), str::to_string);
+                        (id, label)
+                    })
+                    .collect();
+                by_root.insert(window.root.clone(), rows);
+            }
+        }
+        self.by_root = by_root;
+        self.loaded = true;
+    }
 
-pub const CONFIG_ROW_SHARED_LOG_WINDOWS: &str = "Adjust shared window settings.";
-pub const CONFIG_ROW_INDIVIDUAL_LOG_WINDOWS: &str = "Adjust individual window settings.";
+    fn rows_for(&self, window: &str) -> &[(u32, String)] {
+        self.by_root.get(window).map_or(&[], Vec::as_slice)
+    }
+}
 
-/// `conf5win` — its DAT chunk rows (vault main_menu.md §47, chunk 'co11' root
-/// `conf5`).
-pub const RETAIL_CONFIG_ROWS_CONF5WIN: &[&str] = &[
-    "Display separate log windows.",
-    "Display only one log window.",
-    "Display time stamps down to the minute in the log window.",
-    "Display time stamps down to the second in the log window.",
-    "Stop displaying timestamps in the log window(s).",
-    "Display opening/closing visual effects for windows.",
-    "Do not display opening/closing visual effects for windows.",
-];
-/// `conf5w1` and `conf5w2` — the two per-window log pages (DAT chunks 'co16'
-/// root `conf5p1` and 'co17' root `conf5p2`; the p1↔w1 / p2↔w2 pairing is by
-/// record suffix, [I] in vault main_menu.md §47).
-pub const RETAIL_CONFIG_ROWS_LOG_PAGE: &[&str] = &[
-    "Automatically adjust log window's size to match amount of text.",
-    "Fix log window to set size.",
-    "Set the time interval for automatic log window adjustment.",
-];
+fn config_window_names() -> impl Iterator<Item = &'static str> {
+    std::iter::once(RETAIL_CONFIG_HUB_WINDOW)
+        .chain(RETAIL_CONFIG_PAGE_WINDOWS)
+        .chain(RETAIL_CONFIG_SUB_WINDOWS)
+}
 
-/// Indexed by `MenuKind::RetailConfigSub` index. `k1assign`/`k2assign` carry only
-/// key-slot chrome in their DAT records, so they have no captioned rows yet.
-pub const RETAIL_CONFIG_SUB_ROWS: [&[&str]; 5] = [
-    RETAIL_CONFIG_ROWS_CONF5WIN,
-    RETAIL_CONFIG_ROWS_LOG_PAGE,
-    RETAIL_CONFIG_ROWS_LOG_PAGE,
-    &[],
-    &[],
-];
-
-/// Which `configwi` page window a hub row opens, per the handler's jump table
-/// (FFXiMain.dll retail-2026-09 RVA 0x1968A4; vault main_menu.md §47). Returns the
-/// 0-based page index for a hub caption.
-pub fn retail_config_page_for_row(label: &str) -> Option<u8> {
-    RETAIL_CONFIG_ENTRIES
+/// One Config-family window's rows: DAT captions in file order, each carrying its handler-
+/// grounded select action — hub row i name-opens page i (twelve jump-table branches; the
+/// thirteenth widget falls to the default tail), `conf5m`'s widgets drill the log windows,
+/// and every other option row keeps its store id for bead .20.1 while answering the standard
+/// not-implemented line. Empty when the DAT rows are not loaded.
+pub fn config_window_rows(window: &str, table: &ConfigDatRows) -> Vec<DynamicMenuRow> {
+    table
+        .rows_for(window)
         .iter()
-        .position(|row| *row == label)
-        .and_then(|idx| u8::try_from(idx).ok())
+        .enumerate()
+        .map(|(position, (option_id, label))| DynamicMenuRow {
+            label: label.clone(),
+            action: match window {
+                RETAIL_CONFIG_HUB_WINDOW if position < RETAIL_CONFIG_PAGE_WINDOWS.len() => {
+                    // Hub rows are jump-table branches 1..=12 in order (.text
+                    // 0x1968A4 of handler FFXiMain.dll retail-2026-09 RVA 0x196770;
+                    // vault main_menu.md §42).
+                    DynamicMenuAction::OpenRetailConfigPage {
+                        page: position as u8,
+                    }
+                }
+                "conf5m" => match position {
+                    0 => DynamicMenuAction::OpenRetailConfigSub { sub: 2 },
+                    1 => DynamicMenuAction::OpenRetailConfigSub { sub: 1 },
+                    // Third and later widgets answer the arm §47 records as opening
+                    // `conf5win`; its duplicate caption widget is still its own record.
+                    _ => DynamicMenuAction::OpenRetailConfigSub { sub: 0 },
+                },
+                _ => DynamicMenuAction::ConfigOptionRow {
+                    option_id: *option_id,
+                },
+            },
+        })
+        .collect()
 }
 
 /// The faqsub Help Desk panel's destinations. The DAT `faqs` chunk is
@@ -2563,6 +2508,7 @@ pub fn refresh_dynamic_menu_rows(
     active_bag: Res<crate::hud::item_screen::ItemScreenContainer>,
     dat_root: Option<Res<crate::dat_root::SharedDatRoot>>,
     mut school_table: ResMut<MagicSchoolTable>,
+    mut config_rows: ResMut<ConfigDatRows>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
     let active_kind = match &*mode {
@@ -2621,6 +2567,25 @@ pub fn refresh_dynamic_menu_rows(
         // The long-form/line-editor family for one keytop (§34: mcrbedit/
         // mcr1edit/mcr2edit/mcrledit collapse to this drill [I-shape]).
         MenuKind::MacroEditor { block, index } => macro_editor_rows(snap, block, index),
+        // The Config family: every window's rows are its DAT `windowpsNNN` widgets in
+        // file order (caption law §43; generation law §49/§57), actions from the
+        // handlers' jump tables (§42 hub map, §47 conf5m arms).
+        MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
+            config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+            let window = match kind {
+                MenuKind::RetailConfig => RETAIL_CONFIG_HUB_WINDOW,
+                MenuKind::RetailConfigPage(page) => RETAIL_CONFIG_PAGE_WINDOWS
+                    .get(usize::from(page))
+                    .copied()
+                    .unwrap_or(""),
+                MenuKind::RetailConfigSub(sub) => RETAIL_CONFIG_SUB_WINDOWS
+                    .get(usize::from(sub))
+                    .copied()
+                    .unwrap_or(""),
+                _ => "",
+            };
+            config_window_rows(window, &config_rows)
+        }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
@@ -5345,55 +5310,90 @@ mod tests {
         );
     }
 
-    /// The configwi hub law (vault main_menu.md §35/§43): twelve page rows in chunk
-    /// widget file order, each captioned by its `windowpsNNN` suffix id indexing catalog
-    /// table 11 = ROM/165/75.DAT (§43; supersedes §35's chrome-only numbering), the
-    /// DAT-grounded title Config (comwin token 54 = catalog string `Config`), and Root
-    /// `Config` drilling it.
+    /// The Config-family window table (vault main_menu.md §42/§47): the hub opens
+    /// `configwi`; select ids 1..=12 name-open the page windows in jump-table order;
+    /// the conf5m drills and key-assign windows follow. Row *content* is DAT-only —
+    /// measured window rows are pinned end-to-end in ffxi-dat
+    /// tests/menu_windows_current_gen.rs, never transcribed here.
     #[test]
-    fn retail_config_hub_rows_and_title_track_the_configwi_law() {
-        let entries = entries_for(MenuKind::RetailConfig, false);
-        assert_eq!(entries.len(), 12);
-        assert_eq!(entries[0], "Adjust the keyboard settings.");
+    fn config_window_tables_follow_the_handler_jump_law() {
+        assert_eq!(RETAIL_CONFIG_HUB_WINDOW, "configwi");
         assert_eq!(
-            entries[6],
-            "Remove onscreen battle effects to improve frame rate."
+            RETAIL_CONFIG_PAGE_WINDOWS,
+            [
+                "conf2win", "cfilter", "conftxtc", "conf5m", "conf3win", "conf6win", "fxfilter",
+                "conf7", "conf4", "conf11m", "conf12wi", "conf13wi",
+            ]
         );
         assert_eq!(
-            entries[10],
-            "Designate which messages appear in which window. Only active when multiple log windows are displayed."
-        );
-        assert_eq!(
-            entries[11],
-            "Adjust further miscellaneous settings for FINAL FANTASY XI."
+            RETAIL_CONFIG_SUB_WINDOWS,
+            ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"]
         );
         assert_eq!(menu_title(MenuKind::RetailConfig), "Config");
+        for page in 0..12u8 {
+            assert_eq!(menu_title(MenuKind::RetailConfigPage(page)), "Config");
+        }
         assert_eq!(
             root_child_kind("Config", false, false),
             Some(MenuKind::RetailConfig)
         );
     }
 
+    /// Select-action law (vault main_menu.md §42/§47/§57): hub row i drills page i and
+    /// the thirteenth widget (no jump-table branch) does not; `conf5m`'s widgets drill
+    /// conf5w2/conf5w1 then further widgets hit the conf5win arm; every other option
+    /// row carries its store-keyed option id. Built from a synthetic table — real rows
+    /// come from the DAT at runtime.
     #[test]
-    fn retail_config_page_rows_track_each_window_dat_chunk() {
-        // Page rows are the option widgets of each window's own DAT chunk (vault
-        // main_menu.md §47, and §49 for the two windows that exist only in the newer
-        // DAT generation). Counts pin which page is which; empty pages are `cfilter`
-        // and `fxfilter`, whose rows still have to come from handler 0x197BE0.
-        let counts: Vec<usize> = (0..12u8)
-            .map(|page| entries_for(MenuKind::RetailConfigPage(page), false).len())
-            .collect();
-        assert_eq!(counts, vec![11, 0, 1, 2, 11, 14, 0, 12, 1, 1, 6, 6]);
-        let conf6win = entries_for(MenuKind::RetailConfigPage(5), false);
-        assert_eq!(
-            conf6win[0],
-            "Adjust the distance of the back clipping plane of the 3D view."
+    fn config_window_rows_assign_handler_ground_actions() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "configwi".to_string(),
+            (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
         );
-        let conf13wi = entries_for(MenuKind::RetailConfigPage(11), false);
-        assert_eq!(conf13wi[0], "Disable software keyboard.");
-        for page in 0..12u8 {
-            assert_eq!(menu_title(MenuKind::RetailConfigPage(page)), "Config");
+        table.by_root.insert(
+            "conf5m".to_string(),
+            vec![
+                (894, "Adjust shared window settings.".to_string()),
+                (895, "Adjust individual window settings.".to_string()),
+                (895, "Adjust individual window settings.".to_string()),
+            ],
+        );
+
+        let hub = config_window_rows(RETAIL_CONFIG_HUB_WINDOW, &table);
+        assert_eq!(hub.len(), 13);
+        for (position, row) in hub.iter().enumerate() {
+            if position < RETAIL_CONFIG_PAGE_WINDOWS.len() {
+                assert!(
+                    matches!(row.action, DynamicMenuAction::OpenRetailConfigPage { page } if page as usize == position),
+                    "hub row {position}: {:?}",
+                    row.action
+                );
+            } else {
+                // The GAMEPAD-Config widget: the jump table has no branch for
+                // it (vault main_menu.md §42/§57).
+                assert!(matches!(
+                    row.action,
+                    DynamicMenuAction::ConfigOptionRow { .. }
+                ));
+            }
         }
+
+        let launcher = config_window_rows("conf5m", &table);
+        let subs: Vec<u8> = launcher
+            .iter()
+            .map(|row| match row.action {
+                DynamicMenuAction::OpenRetailConfigSub { sub } => sub,
+                other => panic!("launcher row lost its drill: {other:?}"),
+            })
+            .collect();
+        assert_eq!(subs, vec![2u8, 1, 0]);
+
+        let page = config_window_rows("conf7", &table);
+        assert!(page.is_empty(), "unloaded window lists nothing");
     }
 
     /// The faqsub panel law (vault main_menu.md §36): three destinations

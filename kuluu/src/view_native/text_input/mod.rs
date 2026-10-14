@@ -1208,6 +1208,11 @@ fn sub_target_action_for(
         // the wire, never to a target (handler FFXiMain.dll retail-2026-09
         // RVA 0x145460 arm 0x145517; vault main_menu.md §53).
         A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } | A::HomeJobRow { .. } => None,
+        // Config-family rows drill windows or answer locally (vault main_menu.md
+        // §42/§47/§48); they never take a sub-target step.
+        A::OpenRetailConfigPage { .. }
+        | A::OpenRetailConfigSub { .. }
+        | A::ConfigOptionRow { .. } => None,
     }
 }
 
@@ -1779,6 +1784,13 @@ fn dispatch_dynamic_menu_action(
         // main_menu.md §33), never as a sub-target action.
         A::BazaarStall { .. } => return,
         A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } => return,
+        // Config-family drills are pushed in confirm_menu_at_cursor (where the menu stack
+        // lives) and leaf option rows answer there until bead kuluu-o9qt7.20.1 wires the
+        // option store — no wire from here either way (vault main_menu.md §48: retail's
+        // value writes are c2s SAVE_CONF frames owned by that bead).
+        A::OpenRetailConfigPage { .. }
+        | A::OpenRetailConfigSub { .. }
+        | A::ConfigOptionRow { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

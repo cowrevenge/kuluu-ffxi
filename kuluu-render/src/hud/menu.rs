@@ -318,6 +318,16 @@ pub enum DynamicMenuAction {
     /// RVA 0x193830 — see [`key_assign_reset_defaults`]; No writes nothing (vault main_menu.md §59 addenda 7–8; bead kuluu-o9qt7.20.1.1).
     OpenKeyAssignResetPrompt,
 
+    /// A `roomlist` style row (bead kuluu-o9qt7.13.5). Retail's row callback
+    /// (.text FFXiMain.dll retail-2026-09 0x1D6B20) raises the generic yes/no dialog —
+    /// same service object [0x10664520] .text 0x210E30 as above, prompt GetText table 12
+    /// id 451 "Make changes?" — and the YES callback is the MYROOM_IS sender wrapper
+    /// .text 0x1D6AB0 → .text 0x1D6AD0 (Kind=Remodel, Param1=[obj+0x50], Param2=style).
+    /// kuluu pushes [`MenuKind::RoomListConfirm`] carrying this row's `style`.
+    MogHouseRemodelSelect {
+        style: u16,
+    },
+
     /// One filled macro slot row of the mcrselec select window (vault
     /// main_menu.md §41). Selecting stays inert until the macro-use seam is
     /// lawed end to end — the DAT grids prove capacity (2 blocks x 20 keytops),
@@ -1001,6 +1011,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::MacroSelect
             | MenuKind::MacroEditor { .. }
             | MenuKind::JobPick { .. }
+            | MenuKind::RoomList
             | MenuKind::RetailConfig
             | MenuKind::RetailConfigPage(_)
             | MenuKind::RetailConfigSub(_)
@@ -1200,6 +1211,14 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // jobchang's two widgets — catalog tokens 65/66 in DAT record 'jobc'
         // (vault main_menu.md §53); the pick lists are roster-built.
         MenuKind::JobChange => JOB_CHANGE_ROWS,
+        // The roomlist's five rows are DAT-synthesised (record slots + table-12
+        // captions through ConfigDatRows; refresh arm) — never transcribed here.
+        MenuKind::RoomList => &[],
+        // Retail raises the generic yes/no dialog on a style row (.text FFXiMain.dll
+        // retail-2026-09 0x1D6B20 → dialog service .text 0x210E30, prompt id 451
+        // "Make changes?"); kuluu serves it with the same two rows as every other
+        // confirm panel (§59 addendum 20/21).
+        MenuKind::RoomListConfirm { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::JobPick { .. } => &[],
         // Macro editor rows come from the store (one command line per row plus
         // the add/clear actions below).
@@ -1342,6 +1361,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // 'jobc' (vault main_menu.md §53); catalog caption 67 grounds both it
         // and the pick lists drilled from its rows.
         MenuKind::JobChange => "Change Jobs",
+        // Neither `roomlist` nor its confirm dialog carries a DAT title token (its
+        // widget caption tokens are all −1 [V-neg]), so both inherit the myroom row's
+        // label that opened them, like the other token-less windows here.
+        MenuKind::RoomList | MenuKind::RoomListConfirm { .. } => HOME_ROW_REMODEL,
         MenuKind::JobPick { .. } => "Change Jobs",
         // mcrledit's DAT chrome has no title token — it inherits Macros (§41
         // title law).
@@ -1693,6 +1716,16 @@ impl ConfigDatRows {
             let bytes = std::fs::read(loc.path_under(root)).ok()?;
             ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
         })();
+        // The `roomlist` window draws its five rows from GetText **table 12**, not the
+        // caption catalogs — same loader law, different DAT record id
+        // (`GETTEXT_TABLE_12_CATALOG_FILE_ID`; bead kuluu-o9qt7.13.5).
+        let style_catalog: Option<ffxi_dat::dmsg::DmsgTable> = (|| {
+            let loc = root
+                .resolve(ffxi_dat::menu_windows::GETTEXT_TABLE_12_CATALOG_FILE_ID)
+                .ok()?;
+            let bytes = std::fs::read(loc.path_under(root)).ok()?;
+            ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
+        })();
         // Rows are ITEM blocks in file order — select ids index them directly
         // (§7) — never the widget list: `conf5win` dispatches 16 items with
         // only 8 widgets (ffxi-dat real_conf_family_rows_are_items_not_widgets;
@@ -1746,6 +1779,23 @@ impl ConfigDatRows {
                                 row.caption_id,
                                 label
                                     .unwrap_or_else(|| format!("filter option {}", row.caption_id)),
+                            ));
+                        }
+                    } else if window.root == ROOMLIST_DAT_WINDOW {
+                        // `roomlist`’s five slots hold no string at all in the DAT record —
+                        // retail fills them from GetText table 12 (.text FFXiMain.dll
+                        // retail-2026-09 0x1D6900 fetches ids 458/446..449 into pool slots in
+                        // this order; bead kuluu-o9qt7.13.5), so the labels load from that
+                        // catalog here and nowhere else.
+                        for &caption_id in ROOMLIST_ROW_CAPTION_IDS.iter() {
+                            let label = usize::try_from(caption_id).ok().and_then(|i| {
+                                style_catalog
+                                    .as_ref()
+                                    .and_then(|c| c.text(i).map(str::to_string))
+                            });
+                            rows.push((
+                                caption_id,
+                                label.unwrap_or_else(|| format!("room style {caption_id}")),
                             ));
                         }
                     }
@@ -1826,7 +1876,8 @@ impl CommandSelectorCaptions {
 }
 
 fn config_window_names() -> impl Iterator<Item = &'static str> {
-    std::iter::once(RETAIL_CONFIG_HUB_WINDOW)
+    std::iter::once(ROOMLIST_DAT_WINDOW)
+        .chain(std::iter::once(RETAIL_CONFIG_HUB_WINDOW))
         .chain(RETAIL_CONFIG_PAGE_WINDOWS)
         .chain(RETAIL_CONFIG_SUB_WINDOWS)
 }
@@ -3380,6 +3431,30 @@ pub fn key_assign_reset_defaults() -> impl Iterator<Item = (u32, i32)> + Clone {
 /// its store id for bead .20.1 while answering the standard not-implemented
 /// line. A radio group member's label carries the marker when it holds the
 /// store's current value. Empty when the DAT rows are not loaded.
+/// The roomlist's five rows: labels straight from ConfigDatRows (DAT record slots +
+/// table-12 catalog), each carrying its style word. Row 0 (`Rem's Tale Chapters 2
+/// Stored`, style word 0) is display-only in kuluu because retail's sender bails before
+/// the packet for it (.text FFXiMain.dll retail-2026-09 0x1D6AD0 `test ecx,ecx; je` at
+/// .text 0x1D6AEC — select only refreshes/blips; vault main_menu.md §59 addendum 20/21).
+pub fn roomlist_rows(table: &ConfigDatRows) -> Vec<DynamicMenuRow> {
+    table
+        .rows_for(ROOMLIST_DAT_WINDOW)
+        .iter()
+        .enumerate()
+        .map(|(position, (_, label))| {
+            let style = ROOMLIST_ROW_STYLES.get(position).copied().unwrap_or(0);
+            DynamicMenuRow {
+                label: label.clone(),
+                action: if style == 0 {
+                    DynamicMenuAction::DisplayInfo
+                } else {
+                    DynamicMenuAction::MogHouseRemodelSelect { style }
+                },
+            }
+        })
+        .collect()
+}
+
 pub fn config_window_rows(
     window: &str,
     table: &ConfigDatRows,
@@ -3641,6 +3716,12 @@ pub const HOME_ROW_DELIVERY_BOX: &str = "Delivery Box";
 /// caption pair); LSB implements neither Kind, so kuluu keeps one reachable form.
 pub const HOME_ROW_OPEN_MOG_HOUSE: &str = "Open Mog House";
 
+/// The myroom Remodel row — select id 7 of handler FFXiMain.dll retail-2026-09 RVA
+/// 0x145460 (arm @.text 0x1454E7): instance [0x106631e0] refresh + tail-jmp to the
+/// roomlist control's show slot, name-opening `menu    roomlist` (.text 0x1D6820; vault
+/// main_menu.md §40/§59 addendum 20).
+pub const HOME_ROW_REMODEL: &str = "Remodel";
+
 /// The myroom home-view panel's captioned widgets, verbatim from the DAT
 /// chunk `myro` (ROM/0/1.DAT file-off 0x282D80 size 0x4D0) windowps tokens,
 /// each decoded against ROM/165/76.DAT. The full fourteen named widgets —
@@ -3670,13 +3751,32 @@ pub const HOME_VIEW_ROWS: &[&str] = &[
     "Gardening",
     "Layout",
     "Safe 2",
-    "Remodel",
+    HOME_ROW_REMODEL,
 ];
 
 /// `jobchang`'s two rows, verbatim from the DAT record 'jobc' (ROM/0/1.DAT):
 /// windowps273/274 with catalog tokens 65 "Main Job" and 66 "Support Job"
 /// (vault main_menu.md §53).
 pub const JOB_CHANGE_ROWS: &[&str] = &["Main Job", "Support Job"];
+
+/// The roomlist window's DAT record root — frame (16,208,w366), five dynamic
+/// `windowps945`-949 slots whose caption tokens are all −1 [V-negative]: the labels
+/// arrive at runtime from GetText table 12 (bead kuluu-o9qt7.13.5).
+pub const ROOMLIST_DAT_WINDOW: &str = "roomlist";
+
+/// The five table-12 catalog ids as fetched by the pool builder (.text FFXiMain.dll
+/// retail-2026-09 0x1D6900 writes them in this order at .text 0x1D695E..; labels are read
+/// from the DAT catalog file `GETTEXT_TABLE_12_CATALOG_FILE_ID` at load, never copied).
+const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [458, 446, 447, 448, 449];
+
+/// Row i of the pool sends `MYROOM_IS{Kind=Remodel, Param2 = ROW_STYLES[i]}` (sender
+/// .text FFXiMain.dll retail-2026-09 0x1D6AD0 reads Param2 = u16@[record+2], written by
+/// the fill loop from the style words {0, 615, 616, 617, 618} pushed at .text
+/// 0x1D696B..0x1D6980 — GP_CLI_COMMAND_MYROOM_IS_PARAM2 in
+/// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h). Row 0's style word is 0 and the
+/// sender bails before the packet (`test ecx,ecx; je`, .text 0x1D6AEC): its select only
+/// refreshes — no wire, ever.
+pub const ROOMLIST_ROW_STYLES: [u16; 5] = [0, 615, 616, 617, 618];
 
 /// The container an openable home-view row browses, keyed by the DAT caption.
 /// The bag identities follow the LSB CONTAINER_ID enum (vendor/server/src/map/
@@ -3927,6 +4027,9 @@ fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32
         MenuKind::FriendList => "friend",
         MenuKind::HomeView => "myroom",
         MenuKind::JobChange => "jobchang",
+        // The roomlist draws at its own record frame (16,208,w366) — companion law
+        // (vault main_menu.md §59 addendum 20; bead kuluu-o9qt7.13.5).
+        MenuKind::RoomList => ROOMLIST_DAT_WINDOW,
         MenuKind::CraftList => "cmbhlst",
         // DAT-side anchor for kuluu's collapsed macro line editor (vault main_menu.md §41
         // [I-shape]): the one surface stands in for retail's mcrbedit/mcrNedit family and
@@ -4784,6 +4887,11 @@ pub fn refresh_dynamic_menu_rows(
         // (vault main_menu.md §53); the sub side renders empty until the
         // packet's sub-job grant arrived, like LSB refusing the row.
         MenuKind::JobPick { main_pick } => job_pick_rows(snap, main_pick),
+        // roomlist's five DAT-synthesised rows (bead kuluu-o9qt7.13.5).
+        MenuKind::RoomList => {
+            config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+            roomlist_rows(&config_rows)
+        }
         // The long-form/line-editor family for one keytop (§34: mcrbedit/
         // mcr1edit/mcr2edit/mcrledit collapse to this drill [I-shape]).
         MenuKind::MacroEditor { block, index } => macro_editor_rows(snap, block, index),
@@ -6661,6 +6769,8 @@ mod tests {
             // Bead kuluu-o9qt7.30: every record the extended companion law places from.
             "quest00", "quest01", "miss00", "trade", "link5", "friend", "myroom", "jobchang",
             "cmbhlst", "mcr1edit", "scresult",
+            // Bead kuluu-o9qt7.13.5: the roomlist places from its own record (16,208,w366).
+            "roomlist",
         ] {
             assert!(
                 table.frames.contains_key(name),
@@ -6704,6 +6814,66 @@ mod tests {
         ] {
             eprintln!("DRILL {name} = {:?}", table.frames.get(name));
         }
+    }
+
+    /// Row law for bead kuluu-o9qt7.13.5 (vault main_menu.md §59 addendum 20/21):
+    /// `roomlist` row i carries style word ROOMLIST_ROW_STYLES[i]; the zero-style row
+    /// (`Rem's Tale Chapters 2 Stored`) answers as display-only because retail's sender
+    /// bails before the packet (.text FFXiMain.dll retail-2026-09 0x1D6AEC), and every
+    /// other row's action carries its Param2 style for the confirm→send chain.
+    #[test]
+    fn roomlist_rows_carry_their_style_words_and_actions() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            ROOMLIST_DAT_WINDOW.to_string(),
+            (0..5u32).map(|i| (400 + i, format!("row{i}"))).collect(),
+        );
+        let rows = roomlist_rows(&table);
+        assert_eq!(rows.len(), 5);
+        assert!(
+            matches!(rows[0].action, DynamicMenuAction::DisplayInfo),
+            "the zero-style row never arms a send"
+        );
+        for (offset, &style) in ROOMLIST_ROW_STYLES.iter().enumerate().skip(1) {
+            let DynamicMenuAction::MogHouseRemodelSelect { style: got } = rows[offset].action
+            else {
+                panic!("roomlist row {offset} must arm a remodel select");
+            };
+            assert_eq!(got, style, "row {offset} carries its Param2 style word");
+        }
+    }
+
+    /// Gated on a retail install (bead kuluu-o9qt7.13.5): the roomlist's five row labels
+    /// come from the table-12 catalog through ConfigDatRows — never transcribed — and its
+    /// record frame stays at (16,208,w366) for companion placement.
+    #[test]
+    fn real_roomlist_rows_load_from_the_record_and_table12_catalog() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        assert_eq!(
+            table.frames.get(ROOMLIST_DAT_WINDOW),
+            Some(&(16, 208, 366)),
+            "the roomlist record frame moved"
+        );
+        let rows = table.rows_for(ROOMLIST_DAT_WINDOW);
+        let labels: Vec<&str> = rows.iter().map(|(_, label)| label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Rem's Tale Chapters 2 Stored",
+                "San d'Orian style",
+                "Bastokan style",
+                "Windurstian style",
+                "Mog Patio",
+            ],
+            "roomlist captions must stay the table-12 catalog strings"
+        );
     }
 
     /// Placement law: every Config page draws at its own menu record's rect; when a

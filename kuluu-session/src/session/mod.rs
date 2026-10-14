@@ -4663,6 +4663,21 @@ async fn keepalive_loop(
                         )
                         .await;
                     }
+                    Some(AgentCommand::MogHouseRemodel { style }) => {
+                        // Param1 stays 0: LSB never reads it (validate/process only use
+                        // Kind/Param2 — vendor/server/src/map/packets/c2s/
+                        // 0x0cb_myroom_is.cpp; bead kuluu-o9qt7.13.5).
+                        send_myroom_is(
+                            map,
+                            codec::MYROOM_IS_KIND_REMODEL,
+                            0,
+                            style,
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
                     Some(AgentCommand::CommitMacros { slots }) => {
                         // Macros are client-local (vault main_menu.md §41 [V-
                         // negative wire]): no packet here — normalize under the

@@ -2571,8 +2571,10 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MogHouseExit { .. } => (),
         AgentCommand::ChangeJob { .. } => (),
         AgentCommand::OpenMogMenu { .. } => (),
-        // myroom's door row, c2s 0x0CB MYROOM_IS (bead kuluu-o9qt7.13.6).
+        // myroom's door row + roomlist remodel, c2s 0x0CB MYROOM_IS (beads
+        // kuluu-o9qt7.13.5/.6).
         AgentCommand::MogHouseDoorSelect { .. } => (),
+        AgentCommand::MogHouseRemodel { .. } => (),
         AgentCommand::CommitMacros { .. } => (),
         AgentCommand::TreasureLot { .. } => (),
         AgentCommand::TreasurePass { .. } => (),

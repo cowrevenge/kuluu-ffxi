@@ -1203,7 +1203,13 @@ fn sub_target_action_for(
         // for the home-view job picks — they commit one c2s 0x100 MYROOM_JOB on
         // the wire, never to a target (handler FFXiMain.dll retail-2026-09
         // RVA 0x145460 arm 0x145517; vault main_menu.md §53).
-        A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } | A::HomeJobRow { .. } => None,
+        A::QuestOpenDetail { .. }
+        // …and the roomlist's remodel rows drill through their own confirm dialog
+        // inside confirm_menu_at_cursor, never through a sub-target cursor (bead
+        // kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 20/21).
+        | A::MogHouseRemodelSelect { .. }
+        | A::QuestDetailRow { .. }
+        | A::HomeJobRow { .. } => None,
         // Config-family rows drill windows or answer locally (vault main_menu.md
         // §42/§47/§48); they never take a sub-target step. Status detail lines
         // are pure readouts with no command at all — the selector's dispatch is
@@ -1576,6 +1582,10 @@ fn dispatch_dynamic_menu_action(
         // The inert readout rows of the Status detail windows dispatch nothing
         // whatsoever (bead kuluu-0oy7b; FFXiMain.dll retail-2026-09 RVA 0x148D00).
         A::DisplayInfo => return,
+        // Roomlist remodel selects are consumed by their own confirm dialog in
+        // confirm_menu_at_cursor and never reach this target dispatch (bead
+        // kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 20/21).
+        A::MogHouseRemodelSelect { .. } => return,
         A::CastSpell { spell_id } => {
             let self_only =
                 ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only());

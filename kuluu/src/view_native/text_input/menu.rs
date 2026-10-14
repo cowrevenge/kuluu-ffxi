@@ -195,9 +195,9 @@ fn resolve_menu_entry(
         // selects an extra helper call 0xA1860(50); BOTH paths open the window,
         // so kuluu opens it ungated). Delivery Box (id 2) name-opens `mogpost` — the
         // mail chrome over c2s 0x04D PBX (§53; bead kuluu-o9qt7.13.4). The door row
-        // (id 6) sends its MYROOM_IS select (bead kuluu-o9qt7.13.6). The only row
-        // whose retail arm is not yet built (Remodel→`roomlist`) answers
-        // NotImplemented until its bead lands.
+        // (id 6) sends its MYROOM_IS select (bead kuluu-o9qt7.13.6); the Remodel row
+        // (id 7, arm @.text 0x1454E7) name-opens `roomlist` (bead kuluu-o9qt7.13.5).
+        // Every select id of the handler now answers.
         (MenuKind::HomeView, _) => {
             if let Some(container) = kuluu_render::hud::menu::home_view_row_container(label) {
                 MenuDispatch::BrowseBag { container }
@@ -209,6 +209,8 @@ fn resolve_menu_entry(
                 MenuDispatch::OpenDeliveryBox
             } else if label == kuluu_render::hud::menu::HOME_ROW_OPEN_MOG_HOUSE {
                 MenuDispatch::MogHouseDoor
+            } else if label == kuluu_render::hud::menu::HOME_ROW_REMODEL {
+                MenuDispatch::OpenSubmenu(MenuKind::RoomList)
             } else {
                 MenuDispatch::NotImplemented(label.to_string())
             }
@@ -563,6 +565,19 @@ pub(super) fn confirm_menu_at_cursor(
             // retail confirm.
             if matches!(action, A::OpenKeyAssignResetPrompt) {
                 stack.push(MenuKind::KeyAssignResetPrompt);
+                if let Some(level) = stack.current_mut() {
+                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
+                }
+                return None;
+            }
+            // A roomlist style row raises its Yes/No prompt on the spot and sends
+            // nothing yet — retail's row callback .text FFXiMain.dll retail-2026-09
+            // 0x1D6B20 calls the dialog service .text 0x210E30 (prompt "Make
+            // changes?"), and only the yes-callback wrapper .text 0x1D6AB0 reaches
+            // the MYROOM_IS sender (vault main_menu.md §59 addendum 20/21; bead
+            // kuluu-o9qt7.13.5). The prompt opens on No, like every retail confirm.
+            if let A::MogHouseRemodelSelect { style } = action {
+                stack.push(MenuKind::RoomListConfirm { style });
                 if let Some(level) = stack.current_mut() {
                     level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
                 }
@@ -962,6 +977,26 @@ pub(super) fn confirm_menu_at_cursor(
             }
         }
         // No (or any other answer) just dismisses the prompt.
+        stack.pop();
+        return None;
+    }
+    if let MenuKind::RoomListConfirm { style } = kind {
+        // The dialog answer lands here: Yes runs retail's yes-callback — the sender
+        // wrapper .text FFXiMain.dll retail-2026-09 0x1D6AB0 → exactly one MYROOM_IS
+        // Kind=Remodel with Param2 = this style word; No writes nothing (vendor/server/
+        // src/map/packets/c2s/0x0cb_myroom_is.cpp is the only judge once it arrives).
+        // Both answers dismiss the dialog back onto the roomlist, like every generic
+        // confirm panel (bead kuluu-o9qt7.13.5).
+        if label == kuluu_render::hud::menu::DROP_CONFIRM_YES
+            && cmd_tx
+                .try_send(AgentCommand::MogHouseRemodel { style })
+                .is_err()
+        {
+            push_system_chat_line(
+                scene_state,
+                "[menu] mog house remodel send dropped".to_string(),
+            );
+        }
         stack.pop();
         return None;
     }
@@ -3659,10 +3694,7 @@ mod menu_dispatch_tests {
             ),
             ("Open Mog House", MenuDispatch::MogHouseDoor),
             ("Delivery Box", MenuDispatch::OpenDeliveryBox),
-            (
-                "Remodel",
-                MenuDispatch::NotImplemented("Remodel".to_string()),
-            ),
+            ("Remodel", MenuDispatch::OpenSubmenu(MenuKind::RoomList)),
         ] {
             assert_eq!(
                 resolve_menu_entry(MenuKind::HomeView, label, false, false),
@@ -4018,6 +4050,110 @@ mod menu_dispatch_tests {
             AgentCommand::MogHouseDoorSelect
         );
         assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::HomeView));
+    }
+
+    /// Confirm-time law for bead kuluu-o9qt7.13.5: the myroom Remodel row opens
+    /// `roomlist`; a style row raises the yes/no prompt (retail dialog service .text
+    /// FFXiMain.dll retail-2026-09 0x210E30, opening on No) and only YES runs the
+    /// sender wrapper .text 0x1D6AB0 — exactly one MYROOM_IS Kind=Remodel carrying that
+    /// row's Param2 style word. NO dismisses without a packet; both answers land back
+    /// on the roomlist. Row 0 (style word 0, `Rem's Tale Chapters 2 Stored`) never
+    /// reaches this seam: retail's sender bails before the packet (.text 0x1D6AEC).
+    #[test]
+    fn room_list_style_row_confirms_before_its_single_remodel_send() {
+        use kuluu_render::hud::menu::{roomlist_rows, ConfigDatRows};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        // Stand-in rows with the catalog shape; the install-gated pin
+        // real_roomlist_caption_catalog_entries_match_the_dll_fetches (ffxi-dat)
+        // holds the DAT side of the labels.
+        table.by_root.insert(
+            "roomlist".to_string(),
+            vec![
+                (458, "Rem's Tale Chapters 2 Stored".to_string()),
+                (446, "San d'Orian style".to_string()),
+                (447, "Bastokan style".to_string()),
+                (448, "Windurstian style".to_string()),
+                (449, "Mog Patio".to_string()),
+            ],
+        );
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        dynamic.rows = roomlist_rows(&table);
+        assert_eq!(dynamic.rows.len(), 5);
+
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RoomList);
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(8);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        // Row 0 is display-only (style word 0): select answers but sends nothing.
+        stack.current_mut().unwrap().cursor = 0;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert!(cmd_rx.try_recv().is_err(), "row 0 never reaches the wire");
+
+        // Row 4 = Mog Patio (618): select raises the prompt on No…
+        stack.current_mut().unwrap().cursor = 4;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RoomListConfirm { style: 618 }),
+            "the prompt carries the row's Param2 style word"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "opening the prompt sends nothing"
+        );
+
+        // …and No dismisses it back onto the roomlist with no packet.
+        stack.current_mut().unwrap().cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert!(cmd_rx.try_recv().is_err(), "No writes nothing");
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::RoomList));
+
+        // Yes runs the sender: exactly one MYROOM_IS Kind=Remodel, Param2 618.
+        stack.current_mut().unwrap().cursor = 4;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        stack.current_mut().unwrap().cursor = 0; // row 0 = Yes
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert_eq!(
+            cmd_rx.try_recv().expect("Yes sends exactly one remodel"),
+            AgentCommand::MogHouseRemodel { style: 618 }
+        );
+        assert!(cmd_rx.try_recv().is_err(), "one confirm is one packet");
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::RoomList));
     }
 
     /// Confirm-time law: the Gardening row runs its literal through the runner

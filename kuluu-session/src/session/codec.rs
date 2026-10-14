@@ -628,9 +628,12 @@ pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Opti
 // via FC4D0 (vault main_menu.md §59 addendum 20).
 
 /// GP_CLI_COMMAND_MYROOM_IS_KIND::Open — the door-row kind (Close=2 is its twin and
-/// Remodel=5 the roomlist kind; both unused until their beads land,
-/// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h).
+/// never reachable, vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h).
 pub(crate) const MYROOM_IS_KIND_OPEN: u8 = 1;
+
+/// …and ::Remodel — the roomlist style rows' kind (bead kuluu-o9qt7.13.5; every remodel
+/// select rides it through sender helper FFXiMain.dll retail-2026-09 .text 0xF0A40).
+pub(crate) const MYROOM_IS_KIND_REMODEL: u8 = 5;
 
 /// GP_CLI_COMMAND_MYROOM_IS_PARAM2::Unk1, sent when opening the mog house door (the
 /// header's Unk2=1 pairs with Close; 615..618 are remodel style ids), same file.

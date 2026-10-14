@@ -4052,6 +4052,20 @@ pub enum AgentCommand {
     /// this wire, and kuluu sends exactly one Kind=Open packet per select.
     MogHouseDoorSelect,
 
+    /// One confirmed `roomlist` style row: c2s 0x0CB MYROOM_IS Kind=Remodel with
+    /// Param2 = `style` (615 Sandorian / 616 Bastokan / 617 Windurstian / 618 Mog
+    /// Patio — GP_CLI_COMMAND_MYROOM_IS_PARAM2). Retail's sender (.text FFXiMain.dll
+    /// retail-2026-09 0x1D6AD0) pairs it with Param1 = byte[roomlist obj+0x50]; LSB never
+    /// reads that field — validate() checks only Kind/Param2 and process() acts on Param2
+    /// alone (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp) — so kuluu sends
+    /// Param1=0. A confirmed style change answers MsgStd::SuccessfulRemodel, and when the
+    /// model actually changes while on MH2F (mhflag&0x40) LSB forces a same-zone rezone,
+    /// which kuluu's generic zone-change path already follows (vault main_menu.md §59
+    /// addendum 20/21; bead kuluu-o9qt7.13.5).
+    MogHouseRemodel {
+        style: u16,
+    },
+
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers
     /// (vendor/server/src/map/packets/s2c/0x02e_openmogmenu.h).
     OpenMogMenu,

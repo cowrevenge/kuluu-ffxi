@@ -377,6 +377,23 @@ pub enum MenuKind {
     /// container widgets (vault main_menu.md §40).
     HomeView,
 
+    /// The `roomlist` window the myroom Remodel row opens (select id 7 → instance
+    /// [0x106631e0] method .text FFXiMain.dll retail-2026-09 0x1D6890, tail jmp to the
+    /// control's show slot +0x70 = .text 0x1D6820 name-opening `menu    roomlist`; vault
+    /// main_menu.md §59 addendum 20/21). Five dynamic rows — captions are GetText
+    /// table-12 strings the DAT slots do not carry, read at runtime (bead
+    /// kuluu-o9qt7.13.5). Style rows confirm before they send MYROOM_IS Kind=Remodel.
+    RoomList,
+
+    /// The generic yes/no dialog a roomlist style row raises — retail runs its
+    /// confirm helper (.text FFXiMain.dll retail-2026-09 0x210E30, prompt GetText
+    /// table 12 id 451 "Make changes?") whose yes-callback IS the MYROOM_IS sender
+    /// wrapper .text 0x1D6AB0. `style` = the Param2 byte pair carried to
+    /// [`MenuKind::RoomList`] rows' send (615..618; vault §59 addendum 20/21).
+    RoomListConfirm {
+        style: u16,
+    },
+
     /// The `jobchang` window drilled from myroom's Change Jobs row (name-open
     /// arm FFXiMain.dll retail-2026-09 RVA 0x145517; both paths through its
     /// predicate open the window — vault main_menu.md §53). The DAT record

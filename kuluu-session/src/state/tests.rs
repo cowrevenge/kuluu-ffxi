@@ -2650,6 +2650,40 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
     }
 }
 
+/// Retail keeps only the server's `PlayTime` base plus a stamp of when it
+/// arrived and adds elapsed seconds at `/playtime` (FFXiMain.dll retail-2026-09
+/// RVA 0x7CAB0, store pair `.text 0xFB3EE`/`.text 0xFB3FA`), so a session zoned in
+/// some time ago has to report more than the raw base.
+#[test]
+fn play_time_sync_stores_the_base_pair_and_adds_elapsed_since_arrival() {
+    const BASE_SECS: u32 = 3 * 86_400 + 4 * 3600 + 5 * 60;
+    const ELAPSED_WHOLE_SECS: u64 = 90;
+
+    let mut state = SessionState::default();
+    assert_eq!(state.play_time_seconds(), 0);
+
+    assert!(state.apply_event(&AgentEvent::PlayTimeSynced { seconds: BASE_SECS }));
+    let base = state.play_time_base.expect("LOGIN stores the pair");
+    assert_eq!(base.base_secs, BASE_SECS);
+    assert_eq!(base.seconds_at(base.arrival_ms), u64::from(BASE_SECS));
+    assert_eq!(
+        base.seconds_at(base.arrival_ms + MS_PER_SECOND * ELAPSED_WHOLE_SECS + (MS_PER_SECOND - 1)),
+        u64::from(BASE_SECS) + ELAPSED_WHOLE_SECS,
+        "the elapsed term divides down to whole seconds like retail's"
+    );
+
+    assert!(
+        !state.apply_event(&AgentEvent::PlayTimeSynced { seconds: BASE_SECS }),
+        "an identical base is not a snapshot change"
+    );
+
+    let reported = state.play_time_seconds();
+    assert!(
+        reported >= u64::from(BASE_SECS),
+        "the wire number never drops below the server's base, got {reported}"
+    );
+}
+
 #[test]
 fn death_menu_offer_is_durable_and_clears_on_revive_or_zone_change() {
     use ffxi_proto::decode::DeathMenuOffer;
@@ -2989,6 +3023,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::HumanReleased { .. } => (),
         AgentEvent::MusicChanged { .. } => (),
         AgentEvent::DeathTimerUpdated { .. } => (),
+        AgentEvent::PlayTimeSynced { .. } => (),
         AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),

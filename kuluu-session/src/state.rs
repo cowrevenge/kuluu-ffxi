@@ -545,6 +545,12 @@ pub struct SessionState {
     #[serde(default)]
     pub death_homepoint_secs: Option<u32>,
 
+    /// Newest 0x00A LOGIN `PlayTime` and its arrival instant (retail's pair —
+    /// see [`PlayTimeBase`]). Not cleared on a zone change: retail keeps the last
+    /// value it was given, and every zone-in replaces it anyway.
+    #[serde(default)]
+    pub play_time_base: Option<PlayTimeBase>,
+
     /// Server-offered alternative to returning home while dead (s2c 0x0F9,
     /// vendor/server/src/map/packets/s2c/0x0f9_res.cpp).
     /// `None` is the ordinary home-point-only menu.
@@ -1001,6 +1007,34 @@ pub struct EquippedRef {
 
 fn default_equipment() -> [Option<EquippedRef>; EQUIPMENT_SLOTS] {
     [None; EQUIPMENT_SLOTS]
+}
+
+/// Whole milliseconds in a second — the divisor retail's `/playtime` sum uses.
+pub const MS_PER_SECOND: u64 = 1_000;
+
+/// The play-time pair retail keeps for the character: the `PlayTime` seconds the
+/// server last reported, and when that report arrived. Retail stores exactly this
+/// pair — the packet's u32 plus a clock stamp fetched immediately after it
+/// (FFXiMain.dll retail-2026-09 RVA 0xFB3EE reads `[packet+0xA0]` into
+/// `[state+0x2d67c]`, then `.text 0xFB3FA` stores the `call 0x1039E0` clock next to it)
+/// and sums base + elapsed at `/playtime` (handler RVA 0x7CAB0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PlayTimeBase {
+    /// `PlayTime` — seconds counted by the server as of that zone-in.
+    pub base_secs: u32,
+
+    /// [`process_monotonic_ms`] reading at the moment that 0x00A arrived.
+    pub arrival_ms: u64,
+}
+
+impl PlayTimeBase {
+    /// Base plus whole seconds elapsed since arrival, exactly as retail sums it
+    /// (FFXiMain.dll retail-2026-09 RVA 0x7CAB0 calls the clock helper
+    /// `.text 0xFC770` and adds the stored base).
+    pub fn seconds_at(&self, now_ms: u64) -> u64 {
+        let elapsed = now_ms.saturating_sub(self.arrival_ms) / MS_PER_SECOND;
+        u64::from(self.base_secs).saturating_add(elapsed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1649,6 +1683,14 @@ impl SessionState {
     /// we are on it, and it is the field every observer sees too.
     pub fn self_mounted(&self) -> bool {
         ffxi_proto::decode::animation::is_mounted(self.self_server_status)
+    }
+
+    /// Play time to report now: the stored base plus seconds elapsed since that
+    /// 0x00A arrived, or 0 while no LOGIN has carried `PlayTime`.
+    pub fn play_time_seconds(&self) -> u64 {
+        self.play_time_base
+            .map(|b| b.seconds_at(process_monotonic_ms()))
+            .unwrap_or(0)
     }
 
     pub fn self_position(&self) -> Option<Position> {
@@ -2771,6 +2813,15 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::PlayTimeSynced { seconds } => {
+                let arrival_ms = process_monotonic_ms();
+                let changed = self.play_time_base.map(|b| b.base_secs) != Some(*seconds);
+                self.play_time_base = Some(PlayTimeBase {
+                    base_secs: *seconds,
+                    arrival_ms,
+                });
+                changed
+            }
             AgentEvent::DeathMenuUpdated { offer } => {
                 let changed = self.death_menu_offer != *offer;
                 self.death_menu_offer = *offer;
@@ -3545,6 +3596,15 @@ pub enum AgentEvent {
 
     DeathTimerUpdated {
         seconds_until_homepoint: Option<u32>,
+    },
+
+    /// s2c 0x00A LOGIN `PlayTime` — cumulative seconds as the server counted them
+    /// at this zone-in (vendor/server/src/map/packets/s2c/0x00a_login.cpp
+    /// GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN PlayTime). Retail re-reports it every
+    /// zone-in and adds its own elapsed clock on top when `/playtime` runs
+    /// (FFXiMain.dll retail-2026-09 handler RVA 0x7CAB0).
+    PlayTimeSynced {
+        seconds: u32,
     },
 
     /// s2c 0x0F9 `GP_SERV_COMMAND_RES`

@@ -427,6 +427,28 @@ fn login_emits_the_homepoint_timer_after_the_zone_change_only_while_ko() {
     );
 }
 
+/// `/playtime` and the Status panel read 0m forever if the fold never hears the
+/// server's `PlayTime` base. Retail takes it from packet +0xA0 (body 0x9C —
+/// FFXiMain.dll retail-2026-09 `.text 0xFB3EE`) on every zone-in, so the LOGIN arm
+/// must publish it.
+#[test]
+fn login_publishes_the_play_time_base() {
+    const PLAY_SECS: u32 = 86_400 + 7_200;
+    use ffxi_proto::decode::ServerLogin;
+
+    let mut body = vec![0u8; ServerLogin::PLAY_TIME_OFFSET + 4];
+    body[ServerLogin::PLAY_TIME_OFFSET..ServerLogin::PLAY_TIME_OFFSET + 4]
+        .copy_from_slice(&PLAY_SECS.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PlayTimeSynced { seconds } if *seconds == PLAY_SECS)),
+        "LOGIN must publish its PlayTime base, got {events:?}"
+    );
+}
+
 /// A 0x051 body whose GrapIDTbl does not decode must go through
 /// [`warn_decode_err`] like every sibling arm — dropped silently, a wrong
 /// body-offset assumption looks exactly like "self kept the launcher seed"

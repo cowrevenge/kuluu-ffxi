@@ -76,7 +76,10 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         stats: s.char_stats.map(char_stats_to_wire),
         bazaar: s.bazaar.as_ref().map(bazaar_to_wire),
         auction: auction_to_wire(&s.auction),
-        play_time_s: 0,
+        // Retail's `/playtime` sum: the base the server sent at zone-in plus its
+        // own elapsed clock since that packet landed (FFXiMain.dll retail-2026-09
+        // RVA 0x7CAB0). A hard zero here is what made the panel read `0m`.
+        play_time_s: s.play_time_seconds(),
 
         self_fishing: s.self_fishing.map(|f| wire::SelfFishing {
             phase: f.phase,

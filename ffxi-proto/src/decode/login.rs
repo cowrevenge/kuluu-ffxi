@@ -109,6 +109,15 @@ pub struct ServerLogin {
     /// the raw counter needs.
     pub dead_counter: Option<u32>,
 
+    /// `PlayTime` — cumulative play time of this character, in whole seconds,
+    /// counted by the server at this zone-in
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN PlayTime =
+    /// `timer::count_seconds(PChar->GetPlayTime())`). Retail stores only this base
+    /// when the packet lands and adds its own elapsed clock at `/playtime`
+    /// (FFXiMain.dll retail-2026-09 store site `.text 0xFB3EE`, handler RVA 0x7CAB0),
+    /// so a remake that wants an honest number has to do the same arithmetic.
+    pub play_time: Option<u32>,
+
     /// Weather in force as the character zones in.
     ///
     /// The server sends 0x057 WEATHER only when the weather *changes*
@@ -246,6 +255,12 @@ impl ServerLogin {
     /// research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00A.h).
     pub const DEAD_COUNTER_OFFSET: usize = 0xA0;
 
+    /// `PlayTime`, the u32 just before `DeadCounter`:
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN PlayTime.
+    /// Retail reads it at packet offset +0xA0 — one past these constants, which
+    /// index the body (FFXiMain.dll retail-2026-09 `.text 0xFB3EE`).
+    pub const PLAY_TIME_OFFSET: usize = 0x9C;
+
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
@@ -315,6 +330,13 @@ impl ServerLogin {
                     .unwrap(),
             )
         });
+        let play_time = (body.len() >= Self::PLAY_TIME_OFFSET + 4).then(|| {
+            u32::from_le_bytes(
+                body[Self::PLAY_TIME_OFFSET..Self::PLAY_TIME_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        });
         let weather = (body.len() >= Self::WEATHER_OFFSET_TIME_OFFSET + 4).then(|| {
             let u16_at = |off: usize| u16::from_le_bytes(body[off..off + 2].try_into().unwrap());
             let u32_at = |off: usize| u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
@@ -339,6 +361,7 @@ impl ServerLogin {
             zone_in_event,
             look: LookData::decode_grap_id_tbl(body, Self::GRAP_ID_TBL_OFFSET),
             dead_counter,
+            play_time,
             weather,
         })
     }
@@ -427,6 +450,11 @@ pin_s2c_offset!(
     ServerLogin::DEAD_COUNTER_OFFSET,
     lsb::DEAD_COUNTER,
     "GP_SERV_COMMAND_LOGIN.DeadCounter"
+);
+pin_s2c_offset!(
+    ServerLogin::PLAY_TIME_OFFSET,
+    lsb::PLAY_TIME,
+    "GP_SERV_COMMAND_LOGIN.PlayTime"
 );
 pin_s2c_offset!(
     ServerLoginMyroom::LOGIN_STATE_OFFSET,
@@ -584,6 +612,27 @@ mod server_login_tests {
         let l = ServerLogin::decode(&buf).unwrap();
         assert_eq!(l.dead_counter, None);
         assert_eq!(l.seconds_until_homepoint(), None);
+    }
+
+    /// `PlayTime` is the u32 immediately before `DeadCounter`, and retail reads
+    /// both from one body (FFXiMain.dll retail-2026-09 `.text 0xFB3EE` takes the
+    /// packet's +0xA0), so the two must not read into each other — and a short
+    /// body yields `None`, never a partial read.
+    #[test]
+    fn server_login_play_time_reads_the_u32_before_dead_counter() {
+        const SECS: u32 = 86_400 + 9_017;
+        let mut buf = vec![0u8; ServerLogin::DEAD_COUNTER_OFFSET + 4];
+        buf[ServerLogin::PLAY_TIME_OFFSET..ServerLogin::PLAY_TIME_OFFSET + 4]
+            .copy_from_slice(&SECS.to_le_bytes());
+        buf[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+            .copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.play_time, Some(SECS));
+        assert_eq!(l.dead_counter, Some(0xDEAD_BEEF));
+
+        let short = vec![0u8; ServerLogin::PLAY_TIME_OFFSET + 3];
+        assert_eq!(ServerLogin::decode(&short).unwrap().play_time, None);
     }
 
     #[test]

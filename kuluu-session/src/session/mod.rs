@@ -1164,6 +1164,15 @@ fn handle_sub_packet(
                     });
                 }
 
+                // Retail keeps this base together with a clock stamp taken right
+                // after it (FFXiMain.dll retail-2026-09 RVA 0xFB3EE, `.text
+                // 0xFB3FA`) and only sums the two when `/playtime` runs (handler
+                // FFXiMain.dll retail-2026-09 RVA 0x7CAB0), so our fold stores the
+                // pair and adds elapsed at report time.
+                if let Some(seconds) = login.play_time {
+                    let _ = event_tx.send(AgentEvent::PlayTimeSynced { seconds });
+                }
+
                 if let Some(music) = login.music_num {
                     for (slot, track_id) in music.iter().enumerate() {
                         tracing::info!(slot, track_id, "LOGIN MusicNum");

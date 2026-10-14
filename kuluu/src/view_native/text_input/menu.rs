@@ -550,10 +550,15 @@ pub(super) fn confirm_menu_at_cursor(
             // vault main_menu.md §58 fill in an unknown starting value.
             if let A::ConfigSliderEdit { store_id } = action {
                 if dynamic.option_edit.is_none() {
+                    // Slider stores only ever hold step values 0..=100; the
+                    // negative off-value lawed on `conf4` lives on its
+                    // level-only store 0x41 and never reaches a pin (bead
+                    // kuluu-o9qt7.20.1).
                     let value = dynamic
                         .config_option_values
                         .get(&store_id)
                         .copied()
+                        .map(|v| v as u8)
                         .unwrap_or_else(|| {
                             kuluu_render::hud::menu::config_slider_boot_default(store_id)
                         });
@@ -1523,12 +1528,16 @@ pub(super) fn handle_menu_key(
     } else if let Some((store_id, value)) = dynamic.option_edit {
         if bindings.matches_logical(Action::NavLeft, key) {
             if value > 0 {
-                dynamic.config_option_values.insert(store_id, value - 1);
+                dynamic
+                    .config_option_values
+                    .insert(store_id, i32::from(value) - 1);
                 dynamic.option_edit = Some((store_id, value - 1));
             }
         } else if bindings.matches_logical(Action::NavRight, key) {
             if value < kuluu_render::hud::menu::config_slider_max(store_id) {
-                dynamic.config_option_values.insert(store_id, value + 1);
+                dynamic
+                    .config_option_values
+                    .insert(store_id, i32::from(value) + 1);
                 dynamic.option_edit = Some((store_id, value + 1));
             }
         } else if bindings.matches_logical(Action::NavConfirm, key)
@@ -1536,7 +1545,9 @@ pub(super) fn handle_menu_key(
         {
             // Save-and-leave: the store already holds each stepped value; the
             // exit arm writes it once more for identical effect, then unpins.
-            dynamic.config_option_values.insert(store_id, value);
+            dynamic
+                .config_option_values
+                .insert(store_id, i32::from(value));
             dynamic.option_edit = None;
         }
         return None;
@@ -3165,7 +3176,7 @@ mod menu_key_tests {
             assert_eq!(harness.dynamic.option_edit, Some((0xA, expected)));
             assert_eq!(
                 harness.dynamic.config_option_values.get(&0xAu32),
-                Some(&expected),
+                Some(&i32::from(expected)),
                 "each step writes the store immediately"
             );
         }
@@ -3714,13 +3725,17 @@ mod menu_dispatch_tests {
                 "conf5m widget {cursor} must name-open sub {sub}"
             );
         }
+        // `conftxtc` is the placeholder leaf page: its handler (FFXiMain.dll
+        // retail-2026-09 RVA 0x1984F0) has no arm table yet, so its rows keep
+        // the §46 option-record fallback (`conf7` earned real arms on bead
+        // kuluu-o9qt7.20.1 and writes silently).
         table.by_root.insert(
-            "conf7".to_string(),
+            "conftxtc".to_string(),
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
         let mut page = DynamicMenu {
             rows: config_window_rows(
-                "conf7",
+                "conftxtc",
                 &table,
                 &std::collections::BTreeMap::new(),
                 None,
@@ -3729,7 +3744,7 @@ mod menu_dispatch_tests {
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::RetailConfigPage(7));
+        stack.push(MenuKind::RetailConfigPage(2));
         stack.current_mut().unwrap().cursor = 1;
         let mut scene_state = SceneState::default();
         let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -3743,7 +3758,7 @@ mod menu_dispatch_tests {
         );
         assert_eq!(
             stack.current().map(|l| l.kind),
-            Some(MenuKind::RetailConfigPage(7)),
+            Some(MenuKind::RetailConfigPage(2)),
             "option-row selects must keep the page window open"
         );
         let toast = &scene_state.local_toasts.last().expect("answer line").text;
@@ -4556,7 +4571,7 @@ mod menu_dispatch_tests {
         let (cmd_tx, _rx) = tokio::sync::mpsc::channel(8);
         let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
         for (cursor, store_id, value) in [
-            (0usize, 0xC9u32, 0u8),
+            (0usize, 0xC9u32, 0i32),
             (1, 0xC9, 1),
             (2, 0xC9, 2),
             (3, 0xCE, 1),
@@ -4626,7 +4641,7 @@ mod menu_dispatch_tests {
             );
         }
         // The BE pair's on-member is select id 2 (row index 1).
-        assert_eq!(dynamic.config_option_values.get(&0xBEu32), Some(&1u8));
+        assert_eq!(dynamic.config_option_values.get(&0xBEu32), Some(&1i32));
         // Rows 7/8 (index 6/7) write bank-2 store 7 - off then on.
         for cursor in [6usize, 7] {
             stack.current_mut().unwrap().cursor = cursor;
@@ -4638,7 +4653,7 @@ mod menu_dispatch_tests {
                 &mut bag,
             );
         }
-        assert_eq!(dynamic.config_option_values_bank2.get(&7u32), Some(&1u8));
+        assert_eq!(dynamic.config_option_values_bank2.get(&7u32), Some(&1i32));
         assert!(!dynamic.config_option_values.contains_key(&7u32));
         // Rows 9/10 (index 8/9) write the primary store reversed: row 9 is on.
         stack.current_mut().unwrap().cursor = 8;
@@ -4649,6 +4664,6 @@ mod menu_dispatch_tests {
             &mut dynamic,
             &mut bag,
         );
-        assert_eq!(dynamic.config_option_values.get(&0xC2u32), Some(&1u8));
+        assert_eq!(dynamic.config_option_values.get(&0xC2u32), Some(&1i32));
     }
 }

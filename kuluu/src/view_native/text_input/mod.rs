@@ -1209,10 +1209,13 @@ fn sub_target_action_for(
         // RVA 0x145460 arm 0x145517; vault main_menu.md §53).
         A::QuestOpenDetail { .. } | A::QuestDetailRow { .. } | A::HomeJobRow { .. } => None,
         // Config-family rows drill windows or answer locally (vault main_menu.md
-        // §42/§47/§48); they never take a sub-target step.
+        // §42/§47/§48); they never take a sub-target step. Status detail lines
+        // are pure readouts with no command at all — the selector's dispatch is
+        // OPEN-only (FFXiMain.dll retail-2026-09 RVA 0x148D00; bead kuluu-0oy7b).
         A::OpenRetailConfigPage { .. }
         | A::OpenRetailConfigSub { .. }
-        | A::ConfigOptionRow { .. } => None,
+        | A::ConfigOptionRow { .. }
+        | A::DisplayInfo => None,
     }
 }
 
@@ -1564,6 +1567,9 @@ fn dispatch_dynamic_menu_action(
     };
 
     let (kind_name, cmd) = match action {
+        // The inert readout rows of the Status detail windows dispatch nothing
+        // whatsoever (bead kuluu-0oy7b; FFXiMain.dll retail-2026-09 RVA 0x148D00).
+        A::DisplayInfo => return,
         A::CastSpell { spell_id } => {
             let self_only =
                 ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only());

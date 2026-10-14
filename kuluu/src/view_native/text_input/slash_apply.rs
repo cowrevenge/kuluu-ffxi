@@ -101,6 +101,10 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         // …and so does a config sub-window (vault main_menu.md §47).
         kuluu_render::MenuKind::RetailConfigSub(_) => "Config".into(),
         kuluu_render::MenuKind::HelpDeskPanel => "Help Desk".into(),
+        // A statcom2 companion inherits the Status caption (its retail window
+        // titles come from their own sheet, not a menu title token; vault
+        // main_menu.md §59).
+        kuluu_render::MenuKind::StatusDetail { .. } => "Status".into(),
         // commenu Friend List widget (vault main_menu.md §37).
         kuluu_render::MenuKind::FriendList => "Friend List".into(),
         // Equipment-row variants (vault main_menu.md §39): pupequip

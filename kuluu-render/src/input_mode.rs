@@ -343,6 +343,19 @@ pub enum MenuKind {
     /// The `faqsub` Help Desk panel opened by the page-2 row's trampoline
     /// (vault main_menu.md §36); three destinations per the transfer-message law.
     HelpDeskPanel,
+
+    /// A Status detail window, opened beside the selector exactly as the retail
+    /// statcom2 select handler dispatches it (FFXiMain.dll retail-2026-09 RVA
+    /// 0x148D00 over the detail table RVA 0x3716B8; vault main_menu.md §59): re-opening
+    /// the same row changes nothing, and a different row closes the previous
+    /// detail first (helper RVA 0x148AC0). `entry` indexes `STATUS_ENTRIES` —
+    /// whose order is statcom2's own display order (the record's block y-sorted
+    /// item ids run 1,2,12,3,..., engine-side pin `STATCOM2_DISPLAY_ITEM_IDS`).
+    /// The Play Time row never opens one of these: it runs `/playtime` instead
+    /// (vault main_menu.md §59).
+    StatusDetail {
+        entry: u8,
+    },
     /// The commenu Friend List widget's window; rows arrive with a local friend
     /// store in `.23.1` — LSB ships only black-list c2s 0x03c, no friends list
     /// (vault main_menu.md §37).

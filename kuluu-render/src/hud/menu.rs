@@ -437,6 +437,13 @@ pub enum DynamicMenuAction {
         block: u8,
         index: u8,
     },
+
+    /// A read-only info line in a Status detail window (bead kuluu-0oy7b). The
+    /// retail detail companions of statcom2 hold no commands at all — the
+    /// selector's dispatch is OPEN-only and these windows never act on a press
+    /// (FFXiMain.dll retail-2026-09 select handler RVA 0x148D00 over detail
+    /// table RVA 0x3716B8) — so selecting such a row keeps its window open.
+    DisplayInfo,
 }
 
 impl DynamicMenuAction {
@@ -530,6 +537,7 @@ const STATUS_LABELS: &[&str] = &[
     "Play Time",
     "Merit Points",
     "Job Points",
+    "Alter Ego Points",
 ];
 
 const CONTROLS_ENTRIES: &[&str] = &[
@@ -857,6 +865,7 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::RetailConfig
             | MenuKind::RetailConfigPage(_)
             | MenuKind::RetailConfigSub(_)
+            | MenuKind::StatusDetail { .. }
     )
 }
 
@@ -1013,6 +1022,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::Status => STATUS_LABELS,
 
+        // The detail windows' rows are the live snapshot readout built by
+        // refresh_dynamic_menu_rows (vault main_menu.md §59); nothing static stands here.
+        MenuKind::StatusDetail { .. } => &[],
+
         MenuKind::ItemAction { .. } => &[],
         MenuKind::ItemDropConfirm { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::PowerPrompt { .. } => DROP_CONFIRM_ENTRIES,
@@ -1154,6 +1167,13 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
             shut_down: false, ..
         } => ROOT_LOG_OUT,
         MenuKind::Status => "Status",
+        // The companion window's retail title IS its subject; the detail table
+        // (FFXiMain.dll retail-2026-09 RVA 0x3716B8) opens each under the same
+        // Status heading, so kuluu titles it by the row that opened it.
+        MenuKind::StatusDetail { entry } => STATUS_LABELS
+            .get(entry as usize)
+            .copied()
+            .unwrap_or("Status"),
         MenuKind::EquipSlot(_) => "Equip",
         MenuKind::Communication => "Communication",
         MenuKind::FriendList => "Friend List",
@@ -1846,7 +1866,7 @@ pub fn spawn_main_menu(mut commands: Commands) {
 }
 
 /// The read-only mirror of the level under focus - a second framed window, so
-/// a companion never appears to replace its selector (ground truth §1).
+/// a companion never appears to replace its selector (vault main_menu.md §59).
 fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
     node.width = Val::Px(MENU_PANE_WIDTH);
@@ -1857,7 +1877,7 @@ fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
             // Mirror nodes carry the same MainMenu title/row components as the
             // focused pane (one query fills both; the CompanionTitle marker
             // says which is which). They deliberately lack Button: only the
-            // topmost interactive window takes mouse or keys (ground truth §5).
+            // topmost interactive window takes mouse or keys (vault main_menu.md §59).
             c.spawn((
                 MainMenuTitle,
                 CompanionTitle,
@@ -2643,6 +2663,18 @@ pub fn refresh_dynamic_menu_rows(
             config_window_rows(window, &config_rows)
         }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
+        // The Status detail windows (bead kuluu-0oy7b): every line is live
+        // snapshot data or a grounded empty readout; selecting stays inert per
+        // the retail dispatch law (FFXiMain.dll retail-2026-09 RVA 0x148D00).
+        MenuKind::StatusDetail { entry } => {
+            crate::hud::status_panel::status_detail_lines(usize::from(entry), snap)
+                .into_iter()
+                .map(|label| DynamicMenuRow {
+                    label,
+                    action: DynamicMenuAction::DisplayInfo,
+                })
+                .collect()
+        }
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.
         MenuKind::AbilitiesGroup(group) => crate::hud::action_model::AbilityGroup::ALL
@@ -3178,7 +3210,7 @@ pub fn update_main_menu(
     >,
     // One fill for both windows: mirror nodes carry the same title/row
     // components, and the `Option<&Companion*>` markers pick which view they
-    // show (ground truth §1 - the selector stays framed under its companion).
+    // show (vault main_menu.md §59).
     #[allow(clippy::type_complexity)] mut row_q: Query<
         (
             &MainMenuRow,
@@ -3240,8 +3272,7 @@ pub fn update_main_menu(
 
     let view = current_view(stack);
 
-    // The selector stays on screen under its companion (ground truth §1:
-    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
+    // The selector stays on screen under its companion (vault main_menu.md §59    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
     // OpenMenu RVA 0x15E350 keeps the selector open). v1 mirrors only the
     // level directly under focus; deeper retail stacks keep more windows open
     // and land as follow-on beads.
@@ -3289,7 +3320,7 @@ pub fn update_main_menu(
 
     for (row, comp, mut row_node, mut text, mut color, mut bg) in row_q.iter_mut() {
         if comp.is_some() {
-            // Mirror row: the selector's list, read-only (ground truth §1).
+            // Mirror row: the selector's list, read-only (vault main_menu.md §59).
             let Some(parent) = parent_view else {
                 hide(&mut row_node);
                 continue;

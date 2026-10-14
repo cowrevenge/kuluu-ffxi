@@ -25,6 +25,38 @@ pub enum StatusEntryKind {
     PlayTime,
     MeritPoints,
     JobPoints,
+    /// statcom2 id 13 (`fp_cat` — the record's caption reads "Displays
+    /// Categories for which alternate...", vault main_menu.md §59): the Facet
+    /// Points category browser. Kuluu has no facet store yet, so its detail
+    /// window shows the grounded empty readout.
+    FacetCategories,
+}
+
+/// statcom2's live rows in DISPLAY order (block y), paired with each row's
+/// handler-visible item id: the selector dispatches on these ids (FFXiMain.dll
+/// retail-2026-09 select handler RVA 0x148D00 over detail table RVA 0x3716B8)
+/// while rows draw where their block y says — so Master Levels (id 12) sits
+/// third and Play Time (id 9) tenth, the record read in `ffxi-dat`
+/// `menu_windows` pins (vault main_menu.md §59). STATUS_ENTRIES follows this
+/// order row for row.
+pub const STATCOM2_DISPLAY_ITEM_IDS: [i16; 13] = [1, 2, 12, 3, 4, 5, 6, 10, 11, 9, 7, 8, 13];
+
+/// The focus law (vault main_menu.md §59): display-only windows never receive keys,
+/// so while one is open the selector underneath keeps navigating. These are
+/// exactly retail's display-only statcom2 companions — profile, joblevel,
+/// btlskill, mgcskill, trdskill, masterle (detail table entries behind
+/// FFXiMain.dll retail-2026-09 RVA 0x148D00; the close-details helper at
+/// RVA 0x148AC0 only ever closes these six).
+pub fn status_detail_display_only(kind: StatusEntryKind) -> bool {
+    matches!(
+        kind,
+        StatusEntryKind::Profile
+            | StatusEntryKind::JobLevels
+            | StatusEntryKind::MasterLevels
+            | StatusEntryKind::CombatSkill
+            | StatusEntryKind::MagicSkill
+            | StatusEntryKind::CraftSkill
+    )
 }
 
 pub const STATUS_ENTRIES: &[StatusEntry] = &[
@@ -86,6 +118,14 @@ pub const STATUS_ENTRIES: &[StatusEntry] = &[
     StatusEntry {
         kind: StatusEntryKind::JobPoints,
         label: "Job Points",
+        enabled: true,
+    },
+    StatusEntry {
+        kind: StatusEntryKind::FacetCategories,
+        // The record's description (catalog table 11 id 1096) reads "Displays
+        // Categories for which alter ego points may be spent to increase
+        // attributes" — the label follows that wording (vault main_menu.md §59).
+        label: "Alter Ego Points",
         enabled: true,
     },
 ];
@@ -319,6 +359,84 @@ fn attr_value(stats: &kuluu_snapshot::CharStats, attr_index: usize) -> Option<u1
     })
 }
 
+/// The detail window's rows for one Status selector row (vault main_menu.md §59).
+/// Every line is either live snapshot data or a grounded empty readout — the
+/// display-only companions in retail show exactly what their source object
+/// holds, and kuluu shows nothing more than that from a window it has not
+/// built packet readers for yet. Selecting any of these rows is inert
+/// ([`crate::hud::menu::DynamicMenuAction::DisplayInfo`]); the windows carry no
+/// commands (statcom2's detail table maps ids to OPEN actions only, FFXiMain.dll
+/// retail-2026-09 RVA 0x148D00).
+pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapshot) -> Vec<String> {
+    let Some(entry) = STATUS_ENTRIES.get(entry_idx) else {
+        return vec!["(no such status row)".to_string()];
+    };
+    let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
+    match entry.kind {
+        StatusEntryKind::Profile => {
+            let mut lines = vec![profile_header(snap, me)];
+            lines.push(match me {
+                Some(m) => format!("HP {}   MP {}   TP {}", m.hp, m.mp, m.tp),
+                None => "HP —   MP —   TP —".to_string(),
+            });
+            lines.push(match snap.stats.as_ref().filter(|s| s.item_level > 0) {
+                Some(s) => format!("Item Level: {}", s.item_level),
+                _ => "Item Level: —".to_string(),
+            });
+            for (attr_index, name) in PRIMARY_ATTRS.iter().enumerate() {
+                lines.push(match snap.stats.as_ref() {
+                    Some(s) => {
+                        let base = attr_value(s, attr_index).unwrap_or(0);
+                        let bonus = s.bonus.get(attr_index).copied().unwrap_or(0);
+                        if bonus != 0 {
+                            format!("{name:<4}{base:>4} {bonus:+}")
+                        } else {
+                            format!("{name:<4}{base:>4}")
+                        }
+                    }
+                    None => format!("{name:<4}   —"),
+                });
+            }
+            lines
+        }
+        StatusEntryKind::JobLevels => match snap.jobs.as_ref() {
+            Some(list) => {
+                let mut lines: Vec<String> = list
+                    .job_levels
+                    .iter()
+                    .enumerate()
+                    .filter(|(job_id, _)| *job_id != 0)
+                    .filter(|(_, &level)| level > 0)
+                    .map(|(job_id, &level)| {
+                        format!("{:<16} {}", job_abbrev(job_id as u8), level)
+                    })
+                    .collect();
+                if lines.is_empty() {
+                    lines.push("(no job levels reported yet)".to_string());
+                }
+                lines
+            }
+            None => vec!["(job roster not received yet)".to_string()],
+        },
+        StatusEntryKind::MasterLevels => vec![
+            "(master-level roster has no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string(),
+        ],
+        StatusEntryKind::CombatSkill | StatusEntryKind::MagicSkill | StatusEntryKind::CraftSkill => {
+            vec!["(skill lists arrive with the login skill packet — not captured yet)".to_string()]
+        }
+        StatusEntryKind::Currencies | StatusEntryKind::Currencies2 => {
+            vec!["(event-item currency list not received yet)".to_string()]
+        }
+        StatusEntryKind::Unity => vec!["(unity campaign data not received yet)".to_string()],
+        StatusEntryKind::PlayTime => vec![play_time_chat_line(snap)],
+        StatusEntryKind::MeritPoints => vec!["(merit points have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()],
+        StatusEntryKind::JobPoints => vec!["(job-point category not received yet)".to_string()],
+        StatusEntryKind::FacetCategories => {
+            vec!["(facet-point categories have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()]
+        }
+    }
+}
+
 pub fn play_time_chat_line(snap: &kuluu_snapshot::SceneSnapshot) -> String {
     let total = snap.play_time_s;
     let days = total / 86_400;
@@ -380,11 +498,39 @@ mod tests {
     fn status_entry_order_matches_retail() {
         assert_eq!(STATUS_ENTRIES[0].kind, StatusEntryKind::Profile);
         assert_eq!(STATUS_ENTRIES[1].kind, StatusEntryKind::JobLevels);
-        assert_eq!(status_entry_count(), 12);
+        // statcom2 displays 13 live rows (ffxi-dat record pin, vault
+        // main_menu.md §59); the engine list follows that display order.
+        assert_eq!(status_entry_count(), STATCOM2_DISPLAY_ITEM_IDS.len());
         assert_eq!(
             STATUS_ENTRIES.last().unwrap().kind,
-            StatusEntryKind::JobPoints
+            StatusEntryKind::FacetCategories
         );
+    }
+
+    #[test]
+    fn statcom_display_only_set_matches_retail_detail_table() {
+        // The retail set is profile/joblevel/btlskill/mgcskill/trdskill/
+        // masterle: exactly what FFXiMain.dll retail-2026-09 close-details
+        // helper RVA 0x148AC0 acts on (vault main_menu.md §59).
+        for kind in [
+            StatusEntryKind::Profile,
+            StatusEntryKind::JobLevels,
+            StatusEntryKind::MasterLevels,
+            StatusEntryKind::CombatSkill,
+            StatusEntryKind::MagicSkill,
+            StatusEntryKind::CraftSkill,
+        ] {
+            assert!(status_detail_display_only(kind), "{kind:?} display-only");
+        }
+        for kind in [
+            StatusEntryKind::Currencies,
+            StatusEntryKind::MeritPoints,
+            StatusEntryKind::JobPoints,
+            StatusEntryKind::Unity,
+            StatusEntryKind::FacetCategories,
+        ] {
+            assert!(!status_detail_display_only(kind), "{kind:?} interactive");
+        }
     }
 
     #[test]

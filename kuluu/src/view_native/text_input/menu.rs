@@ -251,6 +251,68 @@ fn resolve_menu_entry(
 
 const EQUIP_SLOT_INDEX_MAX: u8 = (kuluu_render::equip_slot::EquipmentIndex::ALL.len() - 1) as u8;
 
+/// Apply one statcom2 select (vault main_menu.md §59 FFXiMain.dll retail-2026-09
+/// handler RVA 0x148D00 over detail table RVA 0x3716B8): Play Time runs the
+/// `/playtime` chat command and opens nothing; re-selecting the row whose
+/// detail already shows changes nothing; any other select closes the previous
+/// display-only detail (helper RVA 0x148AC0) by REPLACING it, then opens the
+/// new one beside the selector. The Profile window's former overlay lives on
+/// as this detail level's own rows, so the legacy `StatusProfileOpen` flag
+/// stays false — one surface per companion, never two.
+fn open_statcom_detail(
+    stack: &mut MenuStack,
+    cursor: usize,
+    status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
+) {
+    use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
+    let Some(entry_idx) = STATUS_ENTRIES.get(cursor).map(|_| cursor as u8) else {
+        return;
+    };
+    if matches!(
+        STATUS_ENTRIES[usize::from(entry_idx)].kind,
+        StatusEntryKind::PlayTime
+    ) {
+        // Handled by the caller's chat side effect; never opens a window (§2 id 9).
+        return;
+    }
+    let detail = MenuKind::StatusDetail { entry: entry_idx };
+    status_profile_open.0 = false;
+    if let Some(top) = stack.levels.last_mut() {
+        if let MenuKind::StatusDetail { entry: prev } = top.kind {
+            if usize::from(prev) == usize::from(entry_idx) {
+                return; // re-selecting the same row is a no-op (§2 step 3)
+            }
+            top.kind = detail; // switch: prior display-only detail closes first
+            return;
+        }
+    }
+    stack.push(detail);
+}
+
+/// While a DISPLAY-ONLY statcom2 companion tops the stack, it must not hold
+/// the keys — they stay on the selector underneath (focus law, vault
+/// main_menu.md §59: display-only windows are skipped; only these six are,
+/// per the FFXiMain.dll retail-2026-09 detail table behind RVA 0x148D00).
+/// Returns the index of the Status level to drive instead.
+fn statcom_selector_below(stack: &MenuStack) -> Option<usize> {
+    let n = stack.levels.len();
+    if n < 2 {
+        return None;
+    }
+    let top = stack.levels[n - 1].kind;
+    let MenuKind::StatusDetail { entry } = top else {
+        return None;
+    };
+    let Some(entry_def) = kuluu_render::hud::status_panel::STATUS_ENTRIES.get(usize::from(entry))
+    else {
+        return None;
+    };
+    if !kuluu_render::hud::status_panel::status_detail_display_only(entry_def.kind) {
+        return None;
+    }
+    (stack.levels[n - 2].kind == MenuKind::Status).then_some(n - 2)
+}
+
 /// Confirm the entry under the cursor. Retail lists Use for every item and
 /// refuses an unusable or cooling-down one silently: no sub-target cursor, no
 /// chat line, the submenu stays put. The item drop confirm unwinds both the
@@ -312,37 +374,15 @@ pub(super) fn confirm_menu_at_cursor(
             return None;
         }
         use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
-        let entry = STATUS_ENTRIES.get(cursor)?;
-        match entry.kind {
-            StatusEntryKind::Profile => {
-                status_profile_open.0 = true;
-            }
-            StatusEntryKind::PlayTime => {
+        match STATUS_ENTRIES.get(cursor).map(|e| e.kind) {
+            // §2 id 9: Play Time runs `/playtime` and opens no window.
+            Some(StatusEntryKind::PlayTime) => {
                 let line =
                     kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
                 push_system_chat_line(scene_state, line);
             }
-
-            StatusEntryKind::MasterLevels | StatusEntryKind::MeritPoints => {
-                push_system_chat_line(
-                    scene_state,
-                    format!("[menu] {} — not available", entry.label),
-                );
-            }
-
-            StatusEntryKind::JobLevels
-            | StatusEntryKind::CombatSkill
-            | StatusEntryKind::MagicSkill
-            | StatusEntryKind::CraftSkill
-            | StatusEntryKind::Currencies
-            | StatusEntryKind::Currencies2
-            | StatusEntryKind::Unity
-            | StatusEntryKind::JobPoints => {
-                push_system_chat_line(
-                    scene_state,
-                    format!("[menu] {} — not yet decoded", entry.label),
-                );
-            }
+            Some(_) => open_statcom_detail(stack, cursor, status_profile_open),
+            None => {}
         }
         return None;
     }
@@ -376,6 +416,12 @@ pub(super) fn confirm_menu_at_cursor(
     if kuluu_render::hud::menu::is_dynamic(kind) {
         if let Some(action) = kuluu_render::hud::menu::entry_action(kind, cursor, dynamic) {
             use kuluu_render::hud::menu::DynamicMenuAction as A;
+            // Status detail windows are pure readouts: their rows hold no
+            // command (FFXiMain.dll retail-2026-09 RVA 0x148D00 opens only),
+            // so a press keeps the window open and changes nothing.
+            if matches!(action, A::DisplayInfo) {
+                return None;
+            }
             if let A::OpenItemAction {
                 container,
                 index,
@@ -1358,6 +1404,59 @@ pub(super) fn handle_menu_key(
         return None;
     }
 
+    // statcom2 focus law (bead kuluu-0oy7b, vault main_menu.md §59): a display-only
+    // detail companion never takes the keys — Up/Down keep moving the Status
+    // selector underneath and Enter re-dispatches its current row.
+    if let Some(sel) = statcom_selector_below(stack) {
+        let sel_cursor = stack.levels[sel].cursor;
+        let sel_count = kuluu_render::hud::menu::entry_count(
+            MenuKind::Status,
+            dynamic,
+            graphics.dlss_supported,
+        );
+        if bindings.matches_logical(Action::NavUp, key) {
+            let up = if sel_cursor == 0 {
+                sel_count.saturating_sub(1)
+            } else {
+                sel_cursor - 1
+            };
+            stack.levels[sel].cursor = kuluu_render::hud::menu::settle_cursor(
+                MenuKind::Status,
+                graphics.dlss_supported,
+                up,
+                false,
+            );
+            return None;
+        }
+        if bindings.matches_logical(Action::NavDown, key) {
+            let next = sel_cursor + 1;
+            let down = if next >= sel_count { 0 } else { next };
+            stack.levels[sel].cursor = kuluu_render::hud::menu::settle_cursor(
+                MenuKind::Status,
+                graphics.dlss_supported,
+                down,
+                true,
+            );
+            return None;
+        }
+        if bindings.matches_logical(Action::NavConfirm, key) {
+            use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
+            if !graphics.interactive_status_rows {
+                return None;
+            }
+            match STATUS_ENTRIES.get(sel_cursor).map(|e| e.kind) {
+                Some(StatusEntryKind::PlayTime) => {
+                    let line =
+                        kuluu_render::hud::status_panel::play_time_chat_line(&scene_state.snapshot);
+                    push_system_chat_line(scene_state, line);
+                }
+                Some(_) => open_statcom_detail(stack, sel_cursor, status_profile_open),
+                None => {}
+            }
+            return None;
+        }
+    }
+
     // mcrledit line editor (bead kuluu-o9qt7.19.3): while the window holds an
     // edit buffer every keystroke belongs to it — retail's macro line editor
     // owns input until Enter commits or Esc discards (FFXiMain.dll
@@ -1630,6 +1729,12 @@ pub(super) fn handle_menu_key(
         return next;
     }
     if bindings.matches_logical(Action::NavCancel, key) {
+        // statcom2 carries registry flag 0x2 so Esc reaches it: with a
+        // display-only detail up the handler's close-details step fires first;
+        // closing the selector cascades over its companions (statcom2's close
+        // code — FFXiMain.dll retail-2026-09 RVA 0x148BB0 — closes persona,
+        // whose close closes level; vault main_menu.md §59). Kuluu mirrors the
+        // cascade by popping one stack level per Esc.
         if matches!(kind, MenuKind::Status) {
             status_profile_open.0 = false;
         }
@@ -2666,6 +2771,177 @@ mod menu_key_tests {
             harness._cmd_rx.try_recv().is_err(),
             "a run is not a store write"
         );
+    }
+
+    /// Select law step 3 (statcom2 select handler FFXiMain.dll
+    /// retail-2026-09 RVA 0x148D00 over detail table RVA 0x3716B8): a row
+    /// select opens its detail companion beside the selector, and re-selecting
+    /// the same row changes nothing.
+    #[test]
+    fn statcom_row_select_opens_detail_and_reselect_is_a_noop() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        // Display row 2 of the selector is Job Levels (statcom2 item id 2).
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = 1;
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry: 1 }
+        ));
+        let depth = stack.levels.len();
+
+        // The companion is display-only, so Enter lands on the selector again —
+        // same row: retail changes nothing.
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), depth, "re-select is a no-op");
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry: 1 }
+        ));
+    }
+
+    /// Switch half of the select law (close-details helper FFXiMain.dll
+    /// retail-2026-09 RVA 0x148AC0): switching rows closes the previous detail;
+    /// never two details stack up.
+    #[test]
+    fn statcom_switch_replaces_the_previous_detail() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = 1;
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        // Move the SELECTOR (pass-through keys) and select another row.
+        harness.key(
+            &Key::ArrowDown,
+            KeyCode::ArrowDown,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 3, "one detail window only");
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry: 2 }
+        ));
+    }
+
+    /// Item id 9 of the selector's dispatch table: Play Time runs `/playtime`
+    /// and opens no window (FFXiMain.dll retail-2026-09 RVA 0x148D00; vault
+    /// main_menu.md §59).
+    #[test]
+    fn statcom_play_time_row_runs_the_command_without_a_window() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        // Play Time is display row 10 (statcom2 item id 9).
+        stack.levels[1].cursor = 9;
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 2, "no detail window for Play Time");
+        let toast = harness
+            .scene_state
+            .local_toasts
+            .last()
+            .expect("playtime line");
+        assert!(toast.text.contains("Play time:"), "{:?}", toast.text);
+    }
+
+    /// The focus law (vault main_menu.md §59, statcom2 registry flag 0x1 companions):
+    /// while a display-only detail tops the stack its keys stay on the selector
+    /// — Down moves the selector cursor, never the companion's.
+    #[test]
+    fn display_only_detail_keeps_the_selector_keys() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = 0;
+
+        // Open Profile (display-only), then navigate: the selector moves.
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry: 0 }
+        ));
+        harness.key(
+            &Key::ArrowDown,
+            KeyCode::ArrowDown,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 3, "still selector + one companion");
+        assert_eq!(
+            stack.levels[1].cursor, 1,
+            "the selector underneath keeps navigating"
+        );
+    }
+
+    /// Esc closes the detail before the selector (statcom2 flag 0x2 law: the
+    /// handler's close-details step first, then itself — cascade outwards).
+    #[test]
+    fn esc_closes_the_detail_then_the_selector() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.levels.len(), 3);
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(stack.current().unwrap().kind, MenuKind::Status,));
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(stack.current().unwrap().kind, MenuKind::Root));
     }
 }
 

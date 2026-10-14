@@ -437,19 +437,64 @@ fn find_in_range(hay: &[u8], end: usize, needle: &[u8], from: usize) -> Option<u
     (from..=last_start).find(|i| &hay[*i..*i + needle.len()] == needle)
 }
 
+/// Blocks a chunk actually yielded: its frame plus every item block whose fields
+/// survived the walk. Zero means the body carried no length-worded chain at all.
+fn parsed_block_count(window: &MenuWindow) -> usize {
+    usize::from(window.frame.is_some()) + window.items.len()
+}
+
+/// Root-keyed accumulator of [`windows_from_root`], split out so the collision
+/// rule is testable without an install.
+#[derive(Default)]
+struct MergedWindows(BTreeMap<String, (u32, MenuWindow)>);
+
+impl MergedWindows {
+    fn merge(&mut self, file_id: u32, windows: impl IntoIterator<Item = MenuWindow>) {
+        for window in windows {
+            if let Some((prev_file, prev)) = self.0.get(&window.root) {
+                // A later chunk from the same file only replaces an earlier one
+                // that parsed at least as many blocks; see `windows_from_root`.
+                if *prev_file == file_id && parsed_block_count(prev) >= parsed_block_count(&window)
+                {
+                    continue;
+                }
+            }
+            self.0.insert(window.root.clone(), (file_id, window));
+        }
+    }
+
+    fn into_windows(self) -> BTreeMap<String, MenuWindow> {
+        self.0
+            .into_iter()
+            .map(|(root, (_file_id, window))| (root, window))
+            .collect()
+    }
+}
+
 /// All windows of the candidate menu DATs keyed by record root; newest file
 /// wins per root ([`MENU_WINDOW_DAT_FILE_IDS`] is newest-first).
+///
+/// Same-file collisions need a second rule. The UI DAT carries, for some roots,
+/// a *second* chunk with the same fourcc and name whose body is not the block
+/// chain at all — measured on retail-2026-09 `ROM/119/51.DAT`: `cfil`/`cfilter`
+/// has its record at 0x2819B0 (frame + 14 items) and an argument-less twin
+/// (`MENU`-run body, header word 0x4D7F) later at 0x2AAC30; the same shape repeats for `evit`/`evitem`
+/// (0x2A98C0), `buff` (0x2AACB0) and `fep` (0x2A43F0), and identically in the
+/// legacy `ROM/0/1.DAT`. Only one of them is what the record loaders
+/// (FFXiMain.dll retail-2026-09 RVA 0x11B010 → frame 0x11B3B0, item 0x11B6B0)
+/// can walk, so a chunk that yields blocks must never be shadowed by its
+/// block-less twin *within one file* [I]. Across files the newest generation
+/// still wins outright, which is what §47/§49 pins.
 pub fn windows_from_root(dat: &DatRoot) -> Result<BTreeMap<String, MenuWindow>> {
-    let mut map = BTreeMap::new();
+    let mut merged = MergedWindows::default();
     // Walk oldest→newest and overwrite, so the newest file wins for a root.
     for &file_id in MENU_WINDOW_DAT_FILE_IDS.iter().rev() {
         let loc = dat.resolve(file_id)?;
         let path = loc.path_under(dat);
         let bytes = std::fs::read(&path).map_err(|source| DatError::Io { path, source })?;
-        for window in parse_windows(&bytes) {
-            map.insert(window.root.clone(), window);
-        }
+        merged.merge(file_id, parse_windows(&bytes));
     }
+    let map = merged.into_windows();
     if map.is_empty() {
         return Err(DatError::Io {
             path: dat.root().to_path_buf(),
@@ -1027,6 +1072,73 @@ mod tests {
             }
             assert_eq!(got, want, "{name}: Down-byte chain == display order");
         }
+    }
+
+    /// The same-file collision law: a block-less twin chunk must not shadow the
+    /// record that actually carries blocks, whichever order they appear in.
+    /// Measured on retail-2026-09 `ROM/119/51.DAT`, where four roots have such a
+    /// pair (see `windows_from_root`'s doc).
+    #[test]
+    fn a_block_less_twin_never_shadows_the_record_with_blocks() {
+        let rich = MenuWindow {
+            fourcc: "cfil".into(),
+            root: "cfilter".into(),
+            offset: 0x2819B0,
+            size: 0x400,
+            widgets: Vec::new(),
+            item_count: 14,
+            frame: Some(FrameBlock {
+                x: 16,
+                y: 48,
+                cursor_a: 0,
+                cursor_b: 0,
+                width: 366,
+                height: 248,
+                anchor: 0,
+            }),
+            items: vec![Some(ItemBlock {
+                id: 1,
+                x: 34,
+                y: 21,
+                width: 256,
+                height: 16,
+                up: None,
+                down: Some(2),
+                right: Some(2),
+                left: None,
+                text_a_id: None,
+                text_b_id: None,
+            })],
+        };
+        let stub = MenuWindow {
+            fourcc: "cfil".into(),
+            root: "cfilter".into(),
+            offset: 0x2AAC30,
+            size: 0x80,
+            widgets: Vec::new(),
+            item_count: 77,
+            frame: None,
+            items: Vec::new(),
+        };
+
+        for (first, second) in [(&rich, &stub), (&stub, &rich)] {
+            let mut merged = MergedWindows::default();
+            merged.merge(7, [first.clone()]);
+            merged.merge(7, [second.clone()]);
+            let windows = merged.into_windows();
+            let kept = &windows["cfilter"];
+            assert_eq!(
+                kept.offset, rich.offset,
+                "rich record survives whichever chunk order (first={first:#?})",
+            );
+            assert!(kept.frame.is_some(), "the frame block is the law-bearer");
+        }
+
+        // Across files the newest generation still wins outright (§47/§49 law).
+        let mut merged = MergedWindows::default();
+        merged.merge(LEGACY_UI_DAT_FILE_ID, [rich.clone()]);
+        merged.merge(NAMED_ROOT_UI_DAT_FILE_ID, [stub.clone()]);
+        assert_eq!(merged.into_windows()["cfilter"].offset, stub.offset);
     }
 
     #[test]

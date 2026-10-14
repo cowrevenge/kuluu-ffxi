@@ -2883,11 +2883,12 @@ const MENU_RIGHT_EDGE: f32 = 8.0;
 /// Any window whose record sits left of this design x draws as a side window.
 const LEFT_HALF_MAX_X: f32 = 256.0;
 
-/// The Config-family windows whose DAT record carries no frame block (the
-/// `cfil` fourcc body, bead kuluu-o9qt7.20.1.3): retail still draws them the
-/// class-wide way — fxfilter's parsed rect is the sibling evidence [I].
-pub const CLASS_DEFAULT_FRAME_LEFT_WIDE: (f32, f32, f32) = (16.0, 48.0, 366.0);
-
+/// Where a Config-family window draws: strictly its own menu record's frame.
+/// Every page of the family has one on retail-2026-09 — `cfilter` included,
+/// once its duplicate-chunk collision stopped shadowing the parseable copy
+/// (bead kuluu-o9qt7.20.1.3; vault main_menu.md §59 addendum 12). No page keeps
+/// a placeholder rect: if a record ever fails to carry a frame, placement falls
+/// back to kuluu's default column instead of an invented one.
 fn config_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
     let name = match kind {
         MenuKind::RetailConfig => "configwi",
@@ -2904,11 +2905,7 @@ fn config_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f
     if name.is_empty() {
         return None;
     }
-    match frames.window_frame(name) {
-        Some(frame) => Some(frame),
-        None if matches!(name, "cfilter") => Some(CLASS_DEFAULT_FRAME_LEFT_WIDE),
-        None => None,
-    }
+    frames.window_frame(name)
 }
 
 /// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
@@ -5599,16 +5596,29 @@ mod tests {
         }
     }
 
-    /// cfilter's record carries no frame block (vault main_menu.md §59 addendum
-    /// 11): kuluu falls back to the class-wide rect its sibling fxfilter shows.
+    /// Placement law: every Config page draws at its own menu record's rect; when a
+    /// record's frame is unavailable the page falls back to kuluu's normal column,
+    /// never to an invented wide-window rect (bead kuluu-o9qt7.20.1.3; vault
+    /// main_menu.md §59 addendum 12).
     #[test]
-    fn cfilter_falls_back_to_the_class_wide_rect() {
+    fn config_pages_place_only_from_their_own_record_frame() {
         let mut frames = ConfigDatRows::default();
-        frames.frames.insert("fxfilter".into(), (16, 48, 366));
+        // Hub jump-table branch order (FFXiMain.dll retail-2026-09 RVA 0x196770):
+        // conf2win is page 0, cfilter page 1 and fxfilter page 6.
+        for page in [0u8, 1, 6] {
+            let name = RETAIL_CONFIG_PAGE_WINDOWS[usize::from(page)];
+            frames.frames.insert(name.into(), (16, 48, 366));
+            assert_eq!(
+                config_record_frame(MenuKind::RetailConfigPage(page), &frames),
+                Some((16.0, 48.0, 366.0)),
+                "{name} (page {page}) places from its own record"
+            );
+        }
+        frames.frames.remove("cfilter");
         assert_eq!(
             config_record_frame(MenuKind::RetailConfigPage(1), &frames),
-            Some((16.0, 48.0, 366.0)),
-            "cfilter without a record frame gets the class default"
+            None,
+            "no placeholder survives for a page whose frame is missing"
         );
     }
 

@@ -124,6 +124,39 @@ fn caption_ids_read_real_strings_from_catalog_table_11() {
     );
 }
 
+/// Four roots appear as two chunks per UI DAT (`cfilter`, `evitem`, `buff`,
+/// `fep`): one carries the length-worded block chain, the later one is an
+/// argument-less twin. The reader must resolve them to the block-bearing copy,
+/// or kuluu loses their geometry and rows (bead kuluu-o9qt7.20.1.3 — this was
+/// why `cfilter` looked frameless and needed a placeholder rect).
+#[test]
+fn duplicate_chunk_roots_resolve_to_the_block_bearing_copy() {
+    let Some(root) = open_test_install() else {
+        eprintln!("SKIP: no FFXI install");
+        return;
+    };
+    let windows = windows_from_root(&root).expect("menu window records parse from the install");
+    for name in ["cfilter", "evitem", "buff", "fep"] {
+        let window = windows
+            .get(name)
+            .unwrap_or_else(|| panic!("window {name} resolves"));
+        let Some(f) = &window.frame else {
+            panic!(
+                "{name}: the block-less twin must not win (kept offset {:#x}, declared items {})",
+                window.offset, window.item_count
+            );
+        };
+        println!(
+            "collision-winner[{name}] off={:#x} x={} y={} w={} h={}",
+            window.offset, f.x, f.y, f.width, f.height
+        );
+        assert!(
+            !window.items_in_display_order().is_empty(),
+            "{name}: item blocks must survive the merge"
+        );
+    }
+}
+
 /// Placement census (bead kuluu-o9qt7.30): every Config-family record's own
 /// frame, printed for the vault pin and asserted only on invariants we already
 /// lawed — top edge y=48 everywhere except moved-by-code windows, and the hub
@@ -137,8 +170,8 @@ fn config_family_frames_census() {
     let windows = windows_from_root(&root).expect("menu window records parse from the install");
     for name in [
         "socialme", "configwi", "conf2win", "cfilter", "conftxtc", "conf5m", "conf3win",
-        "conf6win", "fxfilter", "conf7", "conf4", "conf11m", "conf12wi", "conf13wi",
-        "keylayou", "k1assign", "k2assign", "conf5win", "conf5w1", "conf5w2", "conftxtc",
+        "conf6win", "fxfilter", "conf7", "conf4", "conf11m", "conf12wi", "conf13wi", "keylayou",
+        "k1assign", "k2assign", "conf5win", "conf5w1", "conf5w2", "conftxtc",
     ] {
         let Some(w) = windows.get(name) else {
             println!("frame[{name}] MISSING");

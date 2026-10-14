@@ -857,6 +857,47 @@ mod tests {
             .collect()
     }
 
+    /// Gated on a retail install. The navigation law (vault brief §5: each
+    /// direction reads its own neighbor byte — loader FFXiMain.dll retail-2026-09
+    /// RVA 0x11B6B0): following each live row's Down byte from the topmost item
+    /// visits exactly the y-sorted display sequence on all three command-menu
+    /// selectors. That is what makes kuluu's list ±1 cursor provably equivalent
+    /// to retail's per-byte chain on single-column selectors (bead kuluu-o9qt7.29).
+    #[test]
+    fn real_selectors_down_chain_visits_rows_in_display_order() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        for name in ["menuwind", "socialme", "statcom2"] {
+            let win = &windows[name];
+            let live: Vec<&ItemBlock> = win
+                .items_in_display_order()
+                .into_iter()
+                .filter(|it| it.text_a_id.is_some() || it.text_b_id.is_some())
+                .collect();
+            let mut by_id: std::collections::BTreeMap<i16, &ItemBlock> =
+                live.iter().map(|it| (it.id, *it)).collect();
+            let want: Vec<i16> = live.iter().map(|it| it.id).collect();
+            // The chain is CIRCULAR: the last row's Down byte wraps to the
+            // first (measured on all three selectors), so drop visited ids from
+            // the map — starting with the seed row.
+            by_id.remove(&want[0]);
+            let mut got = vec![want[0]];
+            let mut cur = live[0];
+            while let Some(next) = cur.down {
+                // Own-id byte means parked; removing each visited id also
+                // guards against any loop in the data.
+                let Some(nxt) = by_id.remove(&next).filter(|_| next != cur.id) else {
+                    break;
+                };
+                got.push(next);
+                cur = nxt;
+            }
+            assert_eq!(got, want, "{name}: Down-byte chain == display order");
+        }
+    }
+
     #[test]
     fn chunk_chain_stops_at_a_bogus_header() {
         let mut bytes = chunk(b"con7", root_record("conf3win"));

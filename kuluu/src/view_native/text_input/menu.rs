@@ -1622,21 +1622,26 @@ pub(super) fn handle_menu_key(
             }
         }
         if label == kuluu_render::hud::menu::RETAIL_CAMERA_LEASH {
-            let dir = if bindings.matches_logical(Action::NavLeft, key) {
-                -1
-            } else if bindings.matches_logical(Action::NavRight, key) {
-                1
+            // A stepper owns Left/Right ONLY (bead kuluu-o9qt7.29): Up, Down,
+            // Enter and Esc must keep reaching the generic handlers while the
+            // cursor sits on this row — in retail every direction reads its own
+            // neighbor byte, so a horizontal control can never silence vertical
+            // travel (window input switch FFXiMain.dll retail-2026-09 RVA 0x118260;
+            // vault main_menu.md §5 nav law).
+            let left = bindings.matches_logical(Action::NavLeft, key);
+            let right = bindings.matches_logical(Action::NavRight, key);
+            if !left && !right {
+                // Not a stepper keystroke: fall through to list navigation.
             } else {
+                let units = (graphics.camera_leash_yalms
+                    / kuluu_render::graphics_settings::CAMERA_LEASH_STEP_YALMS)
+                    .round() as i32
+                    + if left { -1 } else { 1 };
+                graphics.camera_leash_yalms = (units.max(0) as f32
+                    * kuluu_render::graphics_settings::CAMERA_LEASH_STEP_YALMS)
+                    .min(kuluu_render::graphics_settings::CAMERA_LEASH_MAX_YALMS);
                 return None;
-            };
-            let units = (graphics.camera_leash_yalms
-                / kuluu_render::graphics_settings::CAMERA_LEASH_STEP_YALMS)
-                .round() as i32
-                + dir;
-            graphics.camera_leash_yalms = (units.max(0) as f32
-                * kuluu_render::graphics_settings::CAMERA_LEASH_STEP_YALMS)
-                .min(kuluu_render::graphics_settings::CAMERA_LEASH_MAX_YALMS);
-            return None;
+            }
         }
     }
 
@@ -2910,6 +2915,61 @@ mod menu_key_tests {
             stack.levels[1].cursor, 1,
             "the selector underneath keeps navigating"
         );
+    }
+
+    /// Bead kuluu-o9qt7.29 regression: a Left/Right stepper row must never
+    /// swallow vertical travel while it holds the cursor (the camera_leash bug).
+    #[test]
+    fn stepper_row_never_swallows_up_down_or_esc() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Debug);
+        let rows = kuluu_render::hud::menu::entries_for(MenuKind::Debug, false);
+        let idx = rows
+            .iter()
+            .position(|l| *l == kuluu_render::hud::menu::RETAIL_CAMERA_LEASH)
+            .expect("camera_leash row exists");
+        stack.levels[1].cursor = idx;
+        // Park the value one step below its default-ish middle so a Right press
+        // must raise it; `moved` is that same step's midpoint check.
+        use kuluu_render::graphics_settings::CAMERA_LEASH_STEP_YALMS as LEASH_STEP;
+        let park = 4.0 * LEASH_STEP;
+        harness.graphics.camera_leash_yalms = park;
+
+        harness.key(
+            &Key::ArrowRight,
+            KeyCode::ArrowRight,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(
+            harness.graphics.camera_leash_yalms > park,
+            "stepper consumed its own axis"
+        );
+
+        // After the stepper press, Up still moves the cursor off the row.
+        harness.key(
+            &Key::ArrowUp,
+            KeyCode::ArrowUp,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().cursor,
+            idx - 1,
+            "vertical travel survives a stepper row (bead .29)"
+        );
+
+        // And Esc still pops the window while parked on the stepper.
+        stack.current_mut().unwrap().cursor = idx;
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(stack.current().unwrap().kind, MenuKind::Root));
     }
 
     /// Esc closes the detail before the selector (statcom2 flag 0x2 law: the

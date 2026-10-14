@@ -536,6 +536,13 @@ pub(super) fn confirm_menu_at_cursor(
                 dynamic.config_option_values.insert(store_id, value);
                 return None;
             }
+            // Bank-2 radio rows (conf12wi 7/8 + 13/14) answer identically through
+            // the second store wrapper FFXiMain.dll retail-2026-09 RVA 0x1938F0 -
+            // also client-local, no wire (bead kuluu-o9qt7.20.1).
+            if let A::ConfigOptionSet2 { store_id, value } = action {
+                dynamic.config_option_values_bank2.insert(store_id, value);
+                return None;
+            }
             // A slider row's select arm does NOT write — it pins the window into
             // edit mode on that store (conf2win entry arms 3–7 only set the edit
             // bytes/mode and stash the widget; handler FFXiMain.dll retail-2026-09
@@ -3118,8 +3125,13 @@ mod menu_key_tests {
             "conf2win".to_string(),
             (0..11u32).map(|i| (700 + i, format!("srow{i}"))).collect(),
         );
-        harness.dynamic.rows =
-            config_window_rows("conf2win", &table, &std::collections::BTreeMap::new(), None);
+        harness.dynamic.rows = config_window_rows(
+            "conf2win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RetailConfigPage(0));
         // Row 4 selects store 0xA — boots at its max, so Right must die first.
@@ -3592,7 +3604,13 @@ mod menu_dispatch_tests {
             (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("configwi", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "configwi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
@@ -3663,7 +3681,13 @@ mod menu_dispatch_tests {
             ],
         );
         let mut launcher = DynamicMenu {
-            rows: config_window_rows("conf5m", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf5m",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
@@ -3691,7 +3715,13 @@ mod menu_dispatch_tests {
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
         let mut page = DynamicMenu {
-            rows: config_window_rows("conf7", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf7",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
@@ -3735,7 +3765,13 @@ mod menu_dispatch_tests {
             (0..16u32).map(|i| (900 + i, format!("opt{i}"))).collect(),
         );
         let mut dynamic = DynamicMenu {
-            rows: config_window_rows("conf5win", &table, &std::collections::BTreeMap::new(), None),
+            rows: config_window_rows(
+                "conf5win",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
             ..DynamicMenu::default()
         };
         assert!(
@@ -3777,6 +3813,7 @@ mod menu_dispatch_tests {
             &table,
             &dynamic.config_option_values,
             dynamic.option_edit,
+            &dynamic.config_option_values_bank2,
         );
         assert_eq!(rows[9].label, "\u{bb} opt9");
         assert!(!rows[8].label.starts_with('\u{bb}'));
@@ -4482,5 +4519,132 @@ mod menu_dispatch_tests {
             Some(S::Spell(1))
         );
         assert_eq!(sub_target_action_for(A::Dismount), None);
+    }
+
+    /// `conf13wi` rows answer their jump-table triples immediately: rows 1-3
+    /// share store 0xC9 (values 0/1/2), rows 4-6 store 0xCE (1/2/0); marking
+    /// follows the next row build (vault main_menu.md §59 addendum 2; bead
+    /// kuluu-o9qt7.20.1).
+    #[test]
+    fn conf13wi_triples_write_the_option_store() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf13wi".to_string(),
+            (0..6u32).map(|i| (600 + i, format!("c13_{i}"))).collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows(
+                "conf13wi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..DynamicMenu::default()
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(11));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        for (cursor, store_id, value) in [
+            (0usize, 0xC9u32, 0u8),
+            (1, 0xC9, 1),
+            (2, 0xC9, 2),
+            (3, 0xCE, 1),
+            (4, 0xCE, 2),
+            (5, 0xCE, 0),
+        ] {
+            stack.current_mut().unwrap().cursor = cursor;
+            confirm_row_dynamic(
+                &mut stack,
+                &mut scene_state,
+                &cmd_tx,
+                &mut dynamic,
+                &mut bag,
+            );
+            assert_eq!(dynamic.config_option_values.get(&store_id), Some(&value));
+        }
+        let rows = config_window_rows(
+            "conf13wi",
+            &table,
+            &dynamic.config_option_values,
+            None,
+            &dynamic.config_option_values_bank2,
+        );
+        // store 0xCE currently holds 0 (row 6) - only that row wears the mark.
+        assert_eq!(rows[5].label, "\u{bb} c13_5");
+        assert!(!rows[4].label.starts_with('\u{bb}'));
+    }
+
+    /// `conf12wi`'s per-row sete/setne values (vault main_menu.md §59 addendum 2;
+    /// bead kuluu-o9qt7.20.1): the two bank-2 pairs land in
+    /// `config_option_values_bank2`, everything else in the primary store - and
+    /// each pair writes its own polarity, not a uniform off/on order.
+    #[test]
+    fn conf12wi_pairs_write_both_store_banks() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf12wi".to_string(),
+            (0..14u32).map(|i| (800 + i, format!("c12_{i}"))).collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows(
+                "conf12wi",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..DynamicMenu::default()
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(10));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        for cursor in [0usize, 1] {
+            stack.current_mut().unwrap().cursor = cursor;
+            confirm_row_dynamic(
+                &mut stack,
+                &mut scene_state,
+                &cmd_tx,
+                &mut dynamic,
+                &mut bag,
+            );
+        }
+        // The BE pair's on-member is select id 2 (row index 1).
+        assert_eq!(dynamic.config_option_values.get(&0xBEu32), Some(&1u8));
+        // Rows 7/8 (index 6/7) write bank-2 store 7 - off then on.
+        for cursor in [6usize, 7] {
+            stack.current_mut().unwrap().cursor = cursor;
+            confirm_row_dynamic(
+                &mut stack,
+                &mut scene_state,
+                &cmd_tx,
+                &mut dynamic,
+                &mut bag,
+            );
+        }
+        assert_eq!(dynamic.config_option_values_bank2.get(&7u32), Some(&1u8));
+        assert!(!dynamic.config_option_values.contains_key(&7u32));
+        // Rows 9/10 (index 8/9) write the primary store reversed: row 9 is on.
+        stack.current_mut().unwrap().cursor = 8;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(dynamic.config_option_values.get(&0xC2u32), Some(&1u8));
     }
 }

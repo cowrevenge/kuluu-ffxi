@@ -1216,6 +1216,7 @@ fn sub_target_action_for(
         | A::OpenRetailConfigSub { .. }
         | A::ConfigOptionRow { .. }
         | A::ConfigOptionSet { .. }
+        | A::ConfigOptionSet2 { .. }
         | A::ConfigSliderEdit { .. }
         | A::DisplayInfo => None,
     }
@@ -1802,6 +1803,7 @@ fn dispatch_dynamic_menu_action(
         | A::OpenRetailConfigSub { .. }
         | A::ConfigOptionRow { .. }
         | A::ConfigOptionSet { .. }
+        | A::ConfigOptionSet2 { .. }
         | A::ConfigSliderEdit { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,

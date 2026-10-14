@@ -42,8 +42,18 @@ pub const LEGACY_UI_DAT_FILE_ID: u32 = 1;
 pub const NAMED_ROOT_UI_DAT_FILE_ID: u32 = UI_SHEET_FILE_ID;
 
 /// Catalog table 11 (`ROM/165/75.DAT`, EN, `parse_d_msg` n=1099 — the GetText
-/// table behind every `windowpsNNN` caption, vault main_menu.md §43).
+/// table behind every `windowpsNNN` caption, vault main_menu.md §43). Menu
+/// item `textA` ids resolve here too (selector help lines; content-verified
+/// row by row on retail-2026-09 against the handler semantics of FFXiMain.dll
+/// retail-2026-09 RVA 0x148D00, vault main_menu.md §59).
 pub const CAPTION_CATALOG_TABLE_11_FILE_ID: u32 = 55651;
+
+/// The short-caption catalog (`ROM/165/76.DAT`, EN, `parse_d_msg` n=201 —
+/// menu item `textB` ids decode exactly the Command-menu row labels there,
+/// e.g. `Status` (81), `Magic List` (76) and `Set Bazaar` (15); file id
+/// resolved through the install's own FTABLE word law, vault main_menu.md
+/// §59). GetText wrapper: FFXiMain.dll retail-2026-09 RVA 0x152EF0.
+pub const CAPTION_SHORT_CATALOG_FILE_ID: u32 = 55652;
 
 /// Candidate list [`windows_from_root`] consults, newest first.
 pub const MENU_WINDOW_DAT_FILE_IDS: &[u32] = &[NAMED_ROOT_UI_DAT_FILE_ID, LEGACY_UI_DAT_FILE_ID];
@@ -103,6 +113,14 @@ pub struct ItemBlock {
     pub down: Option<i16>,
     pub right: Option<i16>,
     pub left: Option<i16>,
+    /// The item's two UI-string ids, stored as ASCII decimals inside the
+    /// block (loader FFXiMain.dll retail-2026-09 RVA 0x11B6B0; field table of
+    /// vault brief §7). `text_a_id` indexes [`CAPTION_CATALOG_TABLE_11_FILE_ID`]
+    /// (descriptions — the only text statcom2 carries), `text_b_id` indexes
+    /// [`CAPTION_SHORT_CATALOG_FILE_ID`] (short row captions; menuwind/socialme
+    /// carry these, statcom2 stores -1). `-1` or empty → `None`.
+    pub text_a_id: Option<i32>,
+    pub text_b_id: Option<i32>,
 }
 
 fn read_i16(bytes: &[u8], at: usize) -> Option<i16> {
@@ -138,6 +156,18 @@ impl MenuWindow {
     /// repeated rows, kept.
     pub fn option_row_ids(&self) -> Vec<u32> {
         self.widgets.iter().filter_map(|w| w.caption_id).collect()
+    }
+
+    /// The window's parsed items ordered as they DISPLAY: sorted by the block's
+    /// y (then x) — file order is id order (the loader expects id = 1-based
+    /// position, FFXiMain.dll retail-2026-09 RVA 0x11B6B0), but retail draws
+    /// rows wherever their y says. Measured on statcom2/menuwind: the Synthesis
+    /// row (menuwind id 10) and Master Levels (statcom2 id 12) both display out
+    /// of id order purely from their block y.
+    pub fn items_in_display_order(&self) -> Vec<&ItemBlock> {
+        let mut items: Vec<&ItemBlock> = self.items.iter().flatten().collect();
+        items.sort_by_key(|it| (it.y, it.x));
+        items
     }
 
     /// Rows as catalog strings; a caption missing from the table falls back to
@@ -303,6 +333,7 @@ fn parse_blocks(
                 v if (v as i8) < 0 => None,
                 v => Some(v as i16),
             };
+            let (text_a_id, text_b_id) = read_block_text(bytes, b, ITEM_TEXT_A_PART_COUNT_OFF);
             Some(ItemBlock {
                 id: read_i16(bytes, b + OFF_ITEM_ID).unwrap_or(0),
                 x: read_i16(bytes, b + OFF_X).unwrap_or(0),
@@ -313,6 +344,8 @@ fn parse_blocks(
                 down: nb(OFF_NEIGHBORS + 1),
                 right: nb(OFF_NEIGHBORS + 2),
                 left: nb(OFF_NEIGHBORS + 3),
+                text_a_id,
+                text_b_id,
             })
         } else {
             None
@@ -343,6 +376,39 @@ const OFF_ANCHOR: usize = 0x13;
 const OFF_ITEM_ID: usize = 0x12;
 /// First of the four neighbor s8s: Up, Down, Right, Left.
 const OFF_NEIGHBORS: usize = 0x17;
+/// Item block: part count byte (then textA/textB length bytes at +2/+3),
+/// parts from 0x20 followed by the two ASCII-decimal string ids (loader
+/// FFXiMain.dll retail-2026-09 RVA 0x11B6B0, vault brief §7).
+const ITEM_TEXT_A_PART_COUNT_OFF: usize = 0x1B;
+const ITEM_BLOCKS_BODY_OFF: usize = 0x20;
+
+/// Read an item block's two text fields: after `parts * 20` bytes from +0x20
+/// sit textA (decimal digits, NUL) then textB. A `-1`, empty or non-digit run
+/// reads as `None` — the record says "no string here".
+fn read_block_text(
+    bytes: &[u8],
+    block: usize,
+    part_count_off: usize,
+) -> (Option<i32>, Option<i32>) {
+    let Some(len_a_raw) = bytes.get(block + part_count_off + 2).copied() else {
+        return (None, None);
+    };
+    let parts = bytes.get(block + part_count_off).copied().unwrap_or(0) as usize;
+    let text_start = block + ITEM_BLOCKS_BODY_OFF + parts * 20;
+    let parse_at = |at: Option<usize>, len: u8| -> Option<i32> {
+        let at = at?;
+        if len == 0 {
+            return None;
+        }
+        let run = std::str::from_utf8(bytes.get(at..at + len as usize)?).ok()?;
+        run.trim().parse::<i32>().ok().filter(|v| *v >= 0)
+    };
+    let a = parse_at(Some(text_start), len_a_raw);
+    let b_at = text_start.checked_add(len_a_raw as usize + 1);
+    let len_b = bytes.get(block + part_count_off + 3).copied().unwrap_or(0);
+    let b = parse_at(b_at, len_b);
+    (a, b)
+}
 /// A frame block must at least cover through the anchor byte.
 const FRAME_BLOCK_MIN_LEN: i16 = (OFF_ANCHOR + 1) as i16;
 /// An item block must at least cover all four neighbor bytes.
@@ -654,6 +720,141 @@ mod tests {
         for it in &pitems {
             assert!(it.up.is_some() && it.down.is_some());
         }
+    }
+
+    /// textA/textB law on a synthetic block (loader FFXiMain.dll retail-2026-09
+    /// RVA 0x11B6B0, vault brief §7): after parts from +0x20 sit the two
+    /// ASCII-decimal ids; `-1` reads as None.
+    #[test]
+    fn item_blocks_decode_their_ui_string_ids() {
+        let mut block = vec![0x40u8, 0x00];
+        while block.len() < ITEM_TEXT_A_PART_COUNT_OFF {
+            block.push(0);
+        }
+        block.push(0); // parts = 0
+        block.push(0);
+        block.extend_from_slice(&[3, 2]); // lenA=3 ("480"), lenB=2 ("-1")
+        while block.len() < ITEM_BLOCKS_BODY_OFF {
+            block.push(0);
+        }
+        block.extend_from_slice(b"480\0-1\0");
+        let (a, b) = read_block_text(&block, 0, ITEM_TEXT_A_PART_COUNT_OFF);
+        assert_eq!((a, b), (Some(480), None));
+
+        // A textB caption id parses too: overwrite the "-1" run with "81".
+        let mut block2 = block.clone();
+        let n = ITEM_BLOCKS_BODY_OFF + 4; // after "480\0"
+        assert_eq!(&block2[n..n + 2], b"-1");
+        block2[n..n + 2].copy_from_slice(b"81");
+        assert_eq!(
+            read_block_text(&block2, 0, ITEM_TEXT_A_PART_COUNT_OFF).1,
+            Some(81)
+        );
+    }
+
+    /// Gated on a retail install. The selector rows carry their labels as UI
+    /// string ids resolved through the two catalogs (GetText wrapper FFXiMain.dll
+    /// retail-2026-09 RVA 0x152EF0; vault main_menu.md §59): menuwind/socialme
+    /// items wear short captions from [`CAPTION_SHORT_CATALOG_FILE_ID`] and
+    /// help descriptions from [`CAPTION_CATALOG_TABLE_11_FILE_ID`], read in
+    /// DISPLAY (y) order — which puts Synthesis at page-1 row 5 exactly as the
+    /// pair-table law of vault §4 says, straight out of block coordinates.
+    #[test]
+    fn real_selector_captions_and_descriptions_resolve_from_catalogs() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        let captions = |file_id| {
+            let loc = root.resolve(file_id).expect("catalog file id");
+            let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
+            ffxi_msg_table(&bytes)
+        };
+        let caption_texts = captions(CAPTION_SHORT_CATALOG_FILE_ID);
+        let desc_texts = captions(CAPTION_CATALOG_TABLE_11_FILE_ID);
+
+        // Chrome blocks (menuwind ids 13-15 at x=-16/x=113 and the blocked
+        // trailing row) carry neither string field; live rows always do.
+        let has_strings = |it: &&ItemBlock| it.text_a_id.is_some() || it.text_b_id.is_some();
+        let menuwind = &windows["menuwind"];
+        let rows: Vec<(&ItemBlock, Option<&str>)> = menuwind
+            .items_in_display_order()
+            .into_iter()
+            .filter(has_strings)
+            .map(|it| {
+                (
+                    it,
+                    it.text_b_id
+                        .and_then(|i| usize::try_from(i).ok())
+                        .and_then(|i| caption_texts.get(i).map(String::as_str)),
+                )
+            })
+            .collect();
+        let labels: Vec<&str> = rows
+            .iter()
+            .map(|(_, c)| c.expect("caption id resolves"))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Status",
+                "Equipment",
+                "Magic List",
+                "Items",
+                "Synthesis",
+                "Abilities",
+                "Party",
+                "Trade",
+                "Search",
+                "Linkshell",
+                "Region Info",
+                "Map",
+            ]
+        );
+
+        // statcom2 carries only descriptions (textB is -1), and its display
+        // order comes straight from block y: id 12 (Master Levels) sits third.
+        let stat = &windows["statcom2"];
+        let disp_ids: Vec<i16> = stat
+            .items_in_display_order()
+            .iter()
+            .filter(|i| i.text_a_id.is_some() || i.text_b_id.is_some())
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(disp_ids, [1, 2, 12, 3, 4, 5, 6, 10, 11, 9, 7, 8, 13]);
+        let desc_of = |id: i16| -> String {
+            let it = stat
+                .items
+                .iter()
+                .flatten()
+                .find(|i| i.id == id)
+                .expect("statcom2 item");
+            it.text_a_id
+                .and_then(|a| usize::try_from(a).ok())
+                .and_then(|a| desc_texts.get(a).cloned())
+                .expect("description resolves")
+        };
+        assert!(desc_of(9).starts_with("Display total time spent")); // /playtime row
+        assert!(desc_of(12).starts_with("View all master levels"));
+        // The two evitem rows share their description id (720).
+        let ta = |id: i16| {
+            stat.items
+                .iter()
+                .flatten()
+                .find(|i| i.id == id)
+                .and_then(|i| i.text_a_id)
+        };
+        assert_eq!(ta(6), Some(720));
+        assert_eq!(ta(6), ta(10));
+    }
+
+    /// Parse a d_msg catalog's entries into plain strings (same law as
+    /// [`crate::dmsg::DmsgTable`], kept local so the test reads as one table).
+    fn ffxi_msg_table(bytes: &[u8]) -> Vec<String> {
+        let table = crate::dmsg::DmsgTable::parse(bytes).expect("d_msg catalog");
+        (0..table.len())
+            .map(|i| table.text(i).unwrap_or("").to_string())
+            .collect()
     }
 
     #[test]

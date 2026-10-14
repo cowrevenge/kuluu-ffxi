@@ -55,6 +55,12 @@ pub const CAPTION_CATALOG_TABLE_11_FILE_ID: u32 = 55651;
 /// §59). GetText wrapper: FFXiMain.dll retail-2026-09 RVA 0x152EF0.
 pub const CAPTION_SHORT_CATALOG_FILE_ID: u32 = 55652;
 
+/// GetText **table 12** (`parse_d_msg` n=526 — the runtime caption source the roomlist
+/// remodel driver fills its five dynamic slots from, .text FFXiMain.dll retail-2026-09
+/// 0x1D6900 pushing (12, 458/446..449), plus the confirm prompt (12, 451); vault
+/// main_menu.md §59 addendum 21). File id resolved through the install's own FTABLE.
+pub const GETTEXT_TABLE_12_CATALOG_FILE_ID: u32 = 55653;
+
 /// Candidate list [`windows_from_root`] consults, newest first.
 pub const MENU_WINDOW_DAT_FILE_IDS: &[u32] = &[NAMED_ROOT_UI_DAT_FILE_ID, LEGACY_UI_DAT_FILE_ID];
 
@@ -1139,6 +1145,40 @@ mod tests {
         merged.merge(LEGACY_UI_DAT_FILE_ID, [rich.clone()]);
         merged.merge(NAMED_ROOT_UI_DAT_FILE_ID, [stub.clone()]);
         assert_eq!(merged.into_windows()["cfilter"].offset, stub.offset);
+    }
+
+    /// Gated on a retail install. The roomlist remodel driver (.text FFXiMain.dll
+    /// retail-2026-09 0x1D6900) fetches its five row captions and the remodel
+    /// confirm string via GetText(table 12, ids 446..=449 + 458/451); the install
+    /// carries them in the catalog at [`GETTEXT_TABLE_12_CATALOG_FILE_ID`] (n=526).
+    /// Transcribed once by run — drift fails CI rather than the player (bead
+    /// kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 21).
+    #[test]
+    fn real_roomlist_caption_catalog_entries_match_the_dll_fetches() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let loc = root
+            .resolve(GETTEXT_TABLE_12_CATALOG_FILE_ID)
+            .expect("table-12 catalog file id");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
+        let table = crate::dmsg::DmsgTable::parse(&bytes).expect("d_msg catalog");
+        assert_eq!(table.len(), 526, "measured entry count (JP/EN twins alike)");
+        // Row pool order as built at .text 0x1D695E..: style words {0, 615, 616,
+        // 617, 618} paired with caption ids fetched in the same write order.
+        assert_eq!(
+            table.text(458),
+            Some("Rem's Tale Chapters 2 Stored"),
+            "row 0 (style word 0 — select refreshes locally, never sends)"
+        );
+        assert_eq!(table.text(446), Some("San d'Orian style"));
+        assert_eq!(table.text(447), Some("Bastokan style"));
+        assert_eq!(table.text(448), Some("Windurstian style"));
+        assert_eq!(table.text(449), Some("Mog Patio"));
+        println!(
+            "confirm-string id 451 = {:?}",
+            table.text(451).unwrap_or_default()
+        );
     }
 
     #[test]

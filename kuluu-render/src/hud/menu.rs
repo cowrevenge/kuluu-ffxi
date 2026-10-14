@@ -225,6 +225,18 @@ pub enum DynamicMenuAction {
     OpenRetailConfigSub {
         sub: u8,
     },
+    /// A companion drill of a law'd Config page (`conftxtc`/`conf11m`/
+    /// `conf11l`): kuluu records the mode dword retail writes into the companion
+    /// object (handler FFXiMain.dll retail-2026-09 RVA 0x1984F0 arm body —
+    /// `[textcol1]+0x14`, `[textcol2]+0x1C`, `[textcol3]+0x18`; RVA 0x19A0E0 —
+    /// `[conf11l]+0x14`; RVA 0x19A160 — `conf11s`+0x34/0x38) and pushes the
+    /// window retail leaves focused, i.e. the LAST entry of `opens` (manager
+    /// open call order at .text 0x1985A8 then 0x1985BB; vault main_menu.md §59
+    /// addendum 5).
+    OpenRetailConfigCompanion {
+        mode: i32,
+        opens: &'static [u8],
+    },
     /// A config row whose select arm is not lawed yet: kuluu keeps its record
     /// string id (§59) and answers the standard not-implemented line. The store
     /// ids live per-handler in the jump arms, NOT in this id (§48 correction via
@@ -583,6 +595,13 @@ pub struct DynamicMenu {
     /// bead kuluu-o9qt7.20.1 part B). Only config pages whose arms are lawed
     /// support pinning; any other top window drops the pin.
     pub option_edit: Option<(u32, u8)>,
+    /// The mode dword retail writes into a companion window object when its row
+    /// drills it open (`[textcol1]+0x14`, `[textcol2]+0x1C`, `[conf11l]+0x14` …;
+    /// handlers FFXiMain.dll retail-2026-09 RVA 0x1984F0/0x19A0E0/0x19A160).
+    /// Keyed by the companion's index into RETAIL_CONFIG_SUB_WINDOWS, so a
+    /// companion's own rows can read which option opened it (vault main_menu.md
+    /// §59 addendum 5; bead kuluu-o9qt7.20.1). Absent = never drilled.
+    pub config_companion_modes: std::collections::BTreeMap<u8, i32>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -1544,17 +1563,28 @@ pub const RETAIL_CONFIG_PAGE_WINDOWS: [&str; 12] = [
     "conf2win", "cfilter", "conftxtc", "conf5m", "conf3win", "conf6win", "fxfilter", "conf7",
     "conf4", "conf11m", "conf12wi", "conf13wi",
 ];
-pub const RETAIL_CONFIG_SUB_WINDOWS: [&str; 5] =
-    ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"];
+/// The windows a Config-family page drills into, indexed by the arm tables
+/// below. Indices 5..=10 are the cascade companions: `confyn` (padded literal
+/// `menu    confyn  `, VA 0x1037A744), `textcol1`/`textcol2`
+/// 0x1037A758/0x1037A76C, the RGB channel panel `textcol3` 0x1037A780 — the
+/// window behind widget slot [0x10662738], whose menu record is registry
+/// FFXiMain.dll retail-2026-09 RVA 0x3751F0 — and `conf11l`/`conf11s`
+/// 0x1037A7D0/0x1037A7E4. Every one is opened through menu manager
+/// FFXiMain.dll retail-2026-09 RVA 0x15E350 (vault main_menu.md §59 addenda
+/// 4/5). They load here so each drill has DAT rows even before its own arm law
+/// lands.
+pub const RETAIL_CONFIG_SUB_WINDOWS: [&str; 11] = [
+    "conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign", "confyn", "textcol1", "textcol2",
+    "textcol3", "conf11l", "conf11s",
+];
 
-/// The cascade companions the Config pages name-open through menu manager
-/// FFXiMain.dll retail-2026-09 RVA 0x15E350 — their padded literals sit in
-/// .rdata (e.g. `menu    confyn  ` at VA 0x1037A744, `menu    conf11l `
-/// 0x1037A7D0, `menu    textcol2`/`textcol1` 0x1037A76C/0x1037A758; vault
-/// main_menu.md §59 addendum 4). Loaded into the row table so each page's
-/// drill has DAT rows to show even before its own arm law lands.
-pub const RETAIL_CONFIG_CASCADE_WINDOWS: [&str; 5] =
-    ["confyn", "textcol1", "textcol2", "conf11l", "conf11s"];
+/// Cascade-companion indices into [`RETAIL_CONFIG_SUB_WINDOWS`], named for the
+/// handler arms that open them.
+pub const CONFIG_SUB_CONFYN: u8 = 5;
+pub const CONFIG_SUB_TEXTCOL2: u8 = 6;
+pub const CONFIG_SUB_TEXTCOL1: u8 = 7;
+pub const CONFIG_SUB_CONF11L: u8 = 9;
+pub const CONFIG_SUB_CONF11S: u8 = 10;
 
 /// The Config family's option rows, read from the DATs at runtime: each window kuluu
 /// opens maps to its item blocks in file order (= the handler's select-id space;
@@ -1676,7 +1706,6 @@ fn config_window_names() -> impl Iterator<Item = &'static str> {
     std::iter::once(RETAIL_CONFIG_HUB_WINDOW)
         .chain(RETAIL_CONFIG_PAGE_WINDOWS)
         .chain(RETAIL_CONFIG_SUB_WINDOWS)
-        .chain(RETAIL_CONFIG_CASCADE_WINDOWS)
 }
 
 /// Every `conf5win` select arm writes an immediate through the store wrapper
@@ -1732,6 +1761,21 @@ pub enum ConfigRowArm {
     /// `k2assign`, vault main_menu.md §59 addendum 3).
     Sub {
         sub: u8,
+    },
+    /// A companion drill: the arm first writes a mode dword into the companion
+    /// objects it is about to open, then name-opens every window of `opens` in
+    /// order (`conftxtc` ids 1–4 = handler FFXiMain.dll retail-2026-09 RVA
+    /// 0x1984F0 writing `[textcol1]+0x14`/`[textcol2]+0x1C`/`[textcol3]+0x18`
+    /// then opening both; `conf11m` ids 1/2 = RVA 0x19A0E0 writing
+    /// `[conf11l]+0x14`; `conf11l` ids 1–4 = RVA 0x19A160 driving `conf11s`
+    /// +0x34/+0x38; vault main_menu.md §59 addendum 5). kuluu pushes the LAST
+    /// opened window — the one retail leaves focused — and keeps the mode for
+    /// it: retail's `textcol1` cancel arm closes both companions together
+    /// (.text 0x19888E/0x19889D through manager close-by-name RVA 0x15E910), so
+    /// one kuluu stack level pops the pair as a unit.
+    Companion {
+        mode: i32,
+        opens: &'static [u8],
     },
     /// Position in a law'd page whose select arm is not dug yet (window-local
     /// flag rows and the dialog arm at conf6win id 10, conf3win ids 3/4 and
@@ -2082,8 +2126,100 @@ pub const CONF7_ROW_ARMS: [ConfigRowArm; 14] = [
 
 /// The law'd select-arm table of a Config page window, by position. Pages
 /// without an entry keep the §46 option-record fallback.
+/// The Text Color launcher's five select arms — handler FFXiMain.dll retail-2026-09
+/// RVA 0x1984F0 answers event id 5 only (jump table .text 0x198604, guard
+/// `dec; cmp eax,4`): rows 1–4 write their own index (id−1) into `[textcol1]+0x14`,
+/// `[textcol2]+0x1C` and `[textcol3]+0x18` (.text 0x198512/0x19853A/0x198562/0x198584),
+/// then name-open `menu    textcol2` (.text 0x1985A8) followed by `menu    textcol1`
+/// (0x1985BB). Row 5 opens `menu    confyn  ` (0x1985D1) and zeroes `[confyn]+0x14`;
+/// when the panel already holds a window it also runs cursor helper
+/// FFXiMain.dll retail-2026-09 RVA 0x118E90(2) (.text 0x1985F5). kuluu encodes the row-5
+/// helper as part of the same drill — it only moves that panel's cursor, never a value.
+/// (vault main_menu.md §59 addendum 5; bead kuluu-o9qt7.20.1)
+pub const CONFTEXT_ROW_ARMS: [ConfigRowArm; 5] = [
+    ConfigRowArm::Companion {
+        mode: 0,
+        opens: CONFTXT_TEXT_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 1,
+        opens: CONFTXT_TEXT_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 2,
+        opens: CONFTXT_TEXT_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 3,
+        opens: CONFTXT_TEXT_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 0,
+        opens: CONFIG_CONFYN_OPENS,
+    },
+];
+
+/// `conf11m`'s three arms — handler FFXiMain.dll retail-2026-09 RVA 0x19A0E0 answers
+/// event id 5 only, a dec-chain over ids 1–3: rows 1/2 write `[conf11l]+0x14` =
+/// 0/1 (.text 0x19A13B/0x19A12C) and name-open `menu    conf11l ` (0x19A150); row 3
+/// opens `menu    confyn  ` (0x19A0FA) with `[confyn]+0x14` = 1 plus the same helper
+/// FFXiMain.dll retail-2026-09 RVA 0x118E90(2) when its window exists.
+pub const CONF11M_ROW_ARMS: [ConfigRowArm; 3] = [
+    ConfigRowArm::Companion {
+        mode: 0,
+        opens: CONFIG_CONF11L_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 1,
+        opens: CONFIG_CONF11L_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 1,
+        opens: CONFIG_CONFYN_OPENS,
+    },
+];
+
+/// `conf11l`'s four arms — handler FFXiMain.dll retail-2026-09 RVA 0x19A160 answers
+/// event id 5, guard `dec; cmp eax,3`: every arm copies this window's own mode word
+/// `[this+0x14]` into `[conf11s]+0x34`, writes its select id−1 to `[conf11s]+0x38`
+/// and name-opens `menu    conf11s `, so the row's id is the mode kuluu carries.
+pub const CONF11L_ROW_ARMS: [ConfigRowArm; 4] = [
+    ConfigRowArm::Companion {
+        mode: 0,
+        opens: CONFIG_CONF11S_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 1,
+        opens: CONFIG_CONF11S_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 2,
+        opens: CONFIG_CONF11S_OPENS,
+    },
+    ConfigRowArm::Companion {
+        mode: 3,
+        opens: CONFIG_CONF11S_OPENS,
+    },
+];
+
+/// Windows each companion drill name-opens, in the handler's manager-open order
+/// (`conftxtc` .text 0x1985A8 then 0x1985BB; the rest are single-window arms).
+pub const CONFTXT_TEXT_OPENS: &[u8] = &[CONFIG_SUB_TEXTCOL2, CONFIG_SUB_TEXTCOL1];
+/// `confyn` is one window — the Yes/No panel answers event id 5 with select id 1
+/// only and maps its own `[this+0x14]` {0→write 1, 1→write 2} through wrapper
+/// FFXiMain.dll retail-2026-09 RVA 0x193870 before closing itself (handler
+/// RVA 0x199170; vault main_menu.md §59 addendum 5).
+pub const CONFIG_CONFYN_OPENS: &[u8] = &[CONFIG_SUB_CONFYN];
+/// `conf11l`, drilled by `conf11m` rows 1/2.
+pub const CONFIG_CONF11L_OPENS: &[u8] = &[CONFIG_SUB_CONF11L];
+/// `conf11s`, drilled by every `conf11l` row.
+pub const CONFIG_CONF11S_OPENS: &[u8] = &[CONFIG_SUB_CONF11S];
+
 pub fn config_page_arms(window: &str) -> Option<&'static [ConfigRowArm]> {
     match window {
+        "conftxtc" => Some(&CONFTEXT_ROW_ARMS),
+        "conf11m" => Some(&CONF11M_ROW_ARMS),
+        "conf11l" => Some(&CONF11L_ROW_ARMS),
         "conf2win" => Some(&CONF2WIN_ROW_ARMS),
         "conf3win" => Some(&CONF3WIN_ROW_ARMS),
         "conf6win" => Some(&CONF6WIN_ROW_ARMS),
@@ -2261,6 +2397,12 @@ pub fn config_window_rows(
                     return DynamicMenuRow {
                         label: label.clone(),
                         action: DynamicMenuAction::OpenRetailConfigSub { sub: *sub },
+                    };
+                }
+                Some(ConfigRowArm::Companion { mode, opens }) => {
+                    return DynamicMenuRow {
+                        label: label.clone(),
+                        action: DynamicMenuAction::OpenRetailConfigCompanion { mode: *mode, opens },
                     };
                 }
                 _ => {}
@@ -6421,7 +6563,10 @@ mod tests {
         );
         assert_eq!(
             RETAIL_CONFIG_SUB_WINDOWS,
-            ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"]
+            [
+                "conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign", "confyn", "textcol1",
+                "textcol2", "textcol3", "conf11l", "conf11s",
+            ]
         );
         assert_eq!(menu_title(MenuKind::RetailConfig), "Config");
         for page in 0..12u8 {
@@ -6984,7 +7129,72 @@ mod tests {
                 want,
                 "{window} DAT live items"
             );
+            let arms = config_page_arms(window).unwrap_or_default();
+            assert_eq!(
+                arms.len(),
+                want,
+                "{window} handler select ids must cover every DAT row"
+            );
         }
+    }
+
+    /// The companion-drill law (vault main_menu.md §59 addendum 5): the Text
+    /// Color rows open `textcol2` then `textcol1` (focused) carrying their own
+    /// index as the mode dword; row 5 opens the Yes/No panel. `conf11m` drills
+    /// `conf11l`, whose rows in turn drill `conf11s`.
+    #[test]
+    fn companion_drills_open_the_windows_of_their_handler_arms() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..ConfigDatRows::default()
+        };
+        for (window, n) in [("conftxtc", 5), ("conf11m", 3), ("conf11l", 4)] {
+            table.by_root.insert(
+                window.to_string(),
+                (0..n)
+                    .map(|i| (900 + i as u32, format!("{window}{i}")))
+                    .collect(),
+            );
+        }
+        let empty = std::collections::BTreeMap::new();
+        let rows = config_window_rows("conftxtc", &table, &empty, None, &empty);
+        for mode in 0..4i32 {
+            assert!(
+                matches!(
+                    &rows[mode as usize].action,
+                    DynamicMenuAction::OpenRetailConfigCompanion { mode: m, opens }
+                        if *m == mode && **opens == [CONFIG_SUB_TEXTCOL2, CONFIG_SUB_TEXTCOL1]
+                ),
+                "conftxtc row {mode} companion drill"
+            );
+        }
+        assert!(
+            matches!(
+                &rows[4].action,
+                DynamicMenuAction::OpenRetailConfigCompanion { mode: 0, opens }
+                    if **opens == [CONFIG_SUB_CONFYN]
+            ),
+            "conftxtc row 5 opens the Yes/No panel"
+        );
+
+        let rows = config_window_rows("conf11m", &table, &empty, None, &empty);
+        for (position, mode) in [(0usize, 0i32), (1, 1)] {
+            assert!(
+                matches!(
+                    &rows[position].action,
+                    DynamicMenuAction::OpenRetailConfigCompanion { mode: m, opens }
+                        if *m == mode && **opens == [CONFIG_SUB_CONF11L]
+                ),
+                "conf11m row {position} drills conf11l with mode {mode}"
+            );
+        }
+
+        let rows = config_window_rows("conf11l", &table, &empty, None, &empty);
+        assert!(rows.iter().enumerate().all(|(position, row)| matches!(
+            &row.action,
+            DynamicMenuAction::OpenRetailConfigCompanion { mode, opens }
+                if *mode == position as i32 && **opens == [CONFIG_SUB_CONF11S]
+        )));
     }
 
     /// The faqsub panel law (vault main_menu.md §36): three destinations

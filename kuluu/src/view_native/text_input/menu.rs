@@ -525,6 +525,19 @@ pub(super) fn confirm_menu_at_cursor(
                 stack.push(MenuKind::RetailConfigSub(sub));
                 return None;
             }
+            // A companion drill writes retail's mode dword and pushes the window
+            // the handler leaves focused — its manager-open order ends with that
+            // window (FFXiMain.dll retail-2026-09 RVA 0x15E350 calls at .text
+            // 0x1985A8/0x1985BB of handler RVA 0x1984F0; vault main_menu.md §59
+            // addendum 5). Retail's `textcol1` cancel arm closes its sibling by
+            // name (.text 0x19888E/0x19889D), so the pair leaves as one level.
+            if let A::OpenRetailConfigCompanion { mode, opens } = action {
+                if let Some(&focused) = opens.last() {
+                    dynamic.config_companion_modes.insert(focused, mode);
+                    stack.push(MenuKind::RetailConfigSub(focused));
+                }
+                return None;
+            }
             // A radio row of a law'd config page writes its record through the
             // store wrapper FFXiMain.dll retail-2026-09 RVA 0x193830(store_id,
             // value) (vault main_menu.md §58; bead kuluu-o9qt7.20.1): the write
@@ -3725,17 +3738,19 @@ mod menu_dispatch_tests {
                 "conf5m widget {cursor} must name-open sub {sub}"
             );
         }
-        // `conftxtc` is the placeholder leaf page: its handler (FFXiMain.dll
-        // retail-2026-09 RVA 0x1984F0) has no arm table yet, so its rows keep
-        // the §46 option-record fallback (`conf7` earned real arms on bead
-        // kuluu-o9qt7.20.1 and writes silently).
+        // `textcol2` is the placeholder leaf window, and permanently so: its
+        // vtable VA 0x10337678 answers no window command at all — slot +0x18
+        // holds the generic `ret 8` stub FFXiMain.dll retail-2026-09 RVA
+        // 0x1012AC60 (vault main_menu.md §59 addendum 5). Its rows therefore keep
+        // the §46 option-record fallback forever (`conftxtc` earned its companion
+        // arms this cycle; `conf7` before it).
         table.by_root.insert(
-            "conftxtc".to_string(),
+            "textcol2".to_string(),
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
         let mut page = DynamicMenu {
             rows: config_window_rows(
-                "conftxtc",
+                "textcol2",
                 &table,
                 &std::collections::BTreeMap::new(),
                 None,
@@ -3744,7 +3759,9 @@ mod menu_dispatch_tests {
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
-        stack.push(MenuKind::RetailConfigPage(2));
+        stack.push(MenuKind::RetailConfigSub(
+            kuluu_render::hud::menu::CONFIG_SUB_TEXTCOL2,
+        ));
         stack.current_mut().unwrap().cursor = 1;
         let mut scene_state = SceneState::default();
         let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -3758,13 +3775,77 @@ mod menu_dispatch_tests {
         );
         assert_eq!(
             stack.current().map(|l| l.kind),
-            Some(MenuKind::RetailConfigPage(2)),
+            Some(MenuKind::RetailConfigSub(
+                kuluu_render::hud::menu::CONFIG_SUB_TEXTCOL2
+            )),
             "option-row selects must keep the page window open"
         );
         let toast = &scene_state.local_toasts.last().expect("answer line").text;
         assert!(
             toast.contains("o2") && toast.contains("not implemented"),
             "{toast}"
+        );
+    }
+
+    /// The companion-drill seam (vault main_menu.md §59 addendum 5): a Text
+    /// Color row's select pushes the window retail leaves focused (`textcol1`,
+    /// sub index CONFIG_SUB_TEXTCOL1) and records the mode dword its handler
+    /// wrote into that companion object; nothing goes on the wire.
+    #[test]
+    fn conf_companion_row_pushes_the_focused_window_with_its_mode() {
+        use kuluu_render::hud::menu::{
+            config_page_arms, config_window_rows, ConfigRowArm, CONFIG_SUB_TEXTCOL1,
+            CONFTXT_TEXT_OPENS,
+        };
+        let mut table = kuluu_render::hud::menu::ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        let arms = config_page_arms("conftxtc").unwrap_or_default();
+        // One DAT row per handler select id (the install pin on this table's
+        // length lives in kuluu-render).
+        table.by_root.insert(
+            "conftxtc".to_string(),
+            (0..arms.len())
+                .map(|i| (900 + i as u32, format!("txt{i}")))
+                .collect(),
+        );
+        assert!(matches!(
+            &arms[2],
+            ConfigRowArm::Companion { mode: 2, opens } if *opens == CONFTXT_TEXT_OPENS
+        ));
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu {
+            rows: config_window_rows(
+                "conftxtc",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..Default::default()
+        };
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigPage(2));
+        stack.current_mut().unwrap().cursor = 2;
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RetailConfigSub(CONFIG_SUB_TEXTCOL1)),
+            "the row opens the companion retail leaves focused"
+        );
+        assert_eq!(
+            dynamic.config_companion_modes.get(&CONFIG_SUB_TEXTCOL1),
+            Some(&2),
+            "retail writes the row index into the companion mode dword"
         );
     }
 

@@ -1212,8 +1212,10 @@ fn sub_target_action_for(
         // §42/§47/§48); they never take a sub-target step. Status detail lines
         // are pure readouts with no command at all — the selector's dispatch is
         // OPEN-only (FFXiMain.dll retail-2026-09 RVA 0x148D00; bead kuluu-0oy7b).
+        // Companion drills are window pushes too (vault main_menu.md §59 addendum 5).
         A::OpenRetailConfigPage { .. }
         | A::OpenRetailConfigSub { .. }
+        | A::OpenRetailConfigCompanion { .. }
         | A::ConfigOptionRow { .. }
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionSet2 { .. }
@@ -1801,6 +1803,7 @@ fn dispatch_dynamic_menu_action(
         // client-local, never a wire event.
         A::OpenRetailConfigPage { .. }
         | A::OpenRetailConfigSub { .. }
+        | A::OpenRetailConfigCompanion { .. }
         | A::ConfigOptionRow { .. }
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionSet2 { .. }

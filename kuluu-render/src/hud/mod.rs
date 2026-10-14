@@ -252,6 +252,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<menu::MagicSchoolTable>();
         app.init_resource::<menu::ConfigDatRows>();
         app.init_resource::<menu::CommandSelectorCaptions>();
+        app.init_resource::<menu::EquipRecords>();
 
         app.init_resource::<overlay::ActiveOverlay>();
         app.init_resource::<chat_panel::ActiveChatTab>();

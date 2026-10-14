@@ -4878,6 +4878,7 @@ pub fn refresh_dynamic_menu_rows(
     mut school_table: ResMut<MagicSchoolTable>,
     mut config_rows: ResMut<ConfigDatRows>,
     mut selector_captions: ResMut<CommandSelectorCaptions>,
+    mut equip_records: ResMut<EquipRecords>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
     // The remodel prompt's question is DAT text, so it rides in with every refresh (bead
@@ -4891,6 +4892,9 @@ pub fn refresh_dynamic_menu_rows(
         _ => None,
     };
 
+    // The equip gate needs item records whatever window is open, so the DATs resolve once here
+    // rather than per arm.
+    equip_records.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
     selector_captions.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
     if !selector_captions.labels.is_empty() && dynamic.selector_captions != selector_captions.labels
     {
@@ -5010,7 +5014,7 @@ pub fn refresh_dynamic_menu_rows(
             index,
             item_no,
         } => item_action_rows(snap, container, index, item_no),
-        MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot),
+        MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot, Some(&equip_records)),
         _ => Vec::new(),
     };
 
@@ -5095,23 +5099,21 @@ fn order_dynamic_rows(kind: MenuKind, auto_sort: bool, rows: &mut [DynamicMenuRo
 /// event-id 8 state==2; vault main_menu.md §20/§50): every inventory slot whose
 /// item can legally land in `equip_slot`.
 ///
-/// The candidate predicate mirrors the server's own acceptance gate, which is the
-/// authority for what a select can succeed at: `EquipArmor` refuses items whose
-/// equip-slot bit (`slot`), job bit (`1 << (GetMJob() - 1)`) or `level` fails
-/// (vendor/server/src/map/utils/charutils.cpp EquipArmor). Those three are the
-/// columns kuluu scrapes into `ffxi_vocab::equip_info`; the two remaining server
-/// gates (superior-level mod, race mod) live in item *mods*, not in
-/// vendor/server/sql/item_equipment.sql, so they cannot be filtered here yet —
-/// vault main_menu.md §50 records that as the pick list's known gap.
+/// The predicate is retail's own equip legality check, FFXiMain.dll retail-2026-09 RVA 0x132050:
+/// the client runs it while building this very list, and again on select — a refusal there costs
+/// only the buzzer (caller `.text 0x132A1E` branches to its refusal sound right after). Every
+/// requirement comes from the item's own DAT record, as [`record_allows_equip`] restates, so kuluu
+/// reads it from there via [`EquipRecords`], resolved from the same install as every other DAT read.
+///
+/// With no readable record (no install) the list falls back to the scraped LSB columns, i.e. the
+/// server's acceptance gate in vendor/server/src/map/utils/charutils.cpp `EquipArmor` (slot bit,
+/// job bit, `level`) — it cannot express race or superior limits, so it is only ever a fallback.
 pub fn equip_slot_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     equip_slot: u8,
+    records: Option<&EquipRecords>,
 ) -> Vec<DynamicMenuRow> {
-    let (main_job, main_lv) = snap
-        .self_char_id
-        .and_then(|id| snap.party.iter().find(|m| m.id == id))
-        .map(|m| (m.main_job, m.main_job_lv))
-        .unwrap_or((0, 0));
+    let actor = equip_actor(snap);
     let rows: Vec<DynamicMenuRow> = snap
         .inventory_main()
         .iter()
@@ -5120,11 +5122,14 @@ pub fn equip_slot_rows(
             if !ffxi_vocab::equip_info::fits_slot(&info, equip_slot) {
                 return None;
             }
-            if main_job != 0 && !ffxi_vocab::equip_info::fits_job(&info, main_job) {
-                return None;
-            }
-            if main_lv != 0 && info.level > main_lv {
-                return None;
+            match records.and_then(|r| r.record(slot.item_no)) {
+                Some(record) => {
+                    if !record_allows_equip(EquipRecordGates::from_record(&record), actor) {
+                        return None;
+                    }
+                }
+                None if equip_scrape_refuses(&info, actor) => return None,
+                None => {}
             }
             let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
             let label = if info.level > 0 {
@@ -5144,6 +5149,138 @@ pub fn equip_slot_rows(
         })
         .collect();
     rows
+}
+
+/// The equip gate's item records: retail keeps every requirement an equip depends on inside
+/// the item's own DAT record: FFXiMain.dll retail-2026-09 RVA 0x15C4E0 attaches the record to the
+/// item object at +0xB4 and the legality check (RVA 0x132050) reads it straight from there — races
+/// mask `.text 0x1320D4`, jobs mask `.text 0x1320E5`, level `.text 0x1320F8`, superior
+/// `.text 0x13210D`. kuluu therefore resolves the same records from the installed DATs rather than
+/// carrying requirement columns in code (bead kuluu-o9qt7.3.4).
+#[derive(Resource, Default)]
+pub struct EquipRecords {
+    table: Option<std::sync::Arc<ffxi_dat::item_dat::ItemTable>>,
+}
+
+impl EquipRecords {
+    /// Opens the installed item DATs once; a missing install leaves it unloaded so the next call
+    /// retries, matching every other DAT-backed menu resource here.
+    pub fn ensure_loaded(&mut self, dat: Option<&ffxi_dat::archive::DatRoot>) {
+        if self.table.is_some() {
+            return;
+        }
+        let Some(root) = dat else { return };
+        let table = ffxi_dat::item_dat::ItemTable::open(root.root());
+        if table.is_empty() {
+            return;
+        }
+        self.table = Some(std::sync::Arc::new(table));
+    }
+
+    pub fn record(&self, item_no: u16) -> Option<ffxi_dat::item_dat::ItemStatic> {
+        self.table.as_ref()?.lookup(item_no)
+    }
+}
+
+/// The actor side of retail's equip legality check. `race` comes from our own entity's look, which
+/// is where FFXiMain.dll retail-2026-09 reads it too (`mov bl, byte ptr [entity + 0xEF]`,
+/// `.text 0x132099` inside RVA 0x132050); `None` means the spawn carrying that byte has not
+/// arrived yet.
+#[derive(Debug, Clone, Copy)]
+pub struct EquipActor {
+    pub race: Option<u8>,
+    pub main_job: u8,
+    pub main_lv: u8,
+    pub su_lv: u8,
+}
+
+fn equip_actor(snap: &kuluu_snapshot::SceneSnapshot) -> EquipActor {
+    let (main_job, main_lv) = snap
+        .self_char_id
+        .and_then(|id| snap.party.iter().find(|m| m.id == id))
+        .map(|m| (m.main_job, m.main_job_lv))
+        .unwrap_or((0, 0));
+    let race = snap
+        .self_char_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .and_then(|e| match e.look.as_ref()? {
+            kuluu_snapshot::EntityLook::Equipped { race, .. } => Some(*race),
+            _ => None,
+        });
+    EquipActor {
+        race,
+        main_job,
+        main_lv,
+        su_lv: snap.stats.map_or(0, |s| s.su_lv),
+    }
+}
+
+/// The four record columns retail tests per equip. Fields are the record's own bytes at the
+/// offsets the legality check indexes (record `level u16 +0xC`, `slots u16 +0xE`,
+/// `races u16 +0x10`, `jobs u32 +0x14`, `su u8 +0x18`), indexed by FFXiMain.dll retail-2026-09
+/// RVA 0x132050 across `.text 0x1320D4..0x13210F`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquipRecordGates {
+    pub races_mask: u16,
+    pub jobs_mask: u32,
+    pub level: u8,
+    pub superior_level: u8,
+}
+
+impl EquipRecordGates {
+    pub fn from_record(record: &ffxi_dat::item_dat::ItemStatic) -> Self {
+        Self {
+            races_mask: record.races_mask,
+            jobs_mask: record.jobs_mask,
+            level: record.level,
+            superior_level: record.superior_level,
+        }
+    }
+}
+
+/// Retail's equip legality law, FFXiMain.dll retail-2026-09 RVA 0x132050, in the DLL's own order
+/// (races → jobs → item level → superior, `.text 0x1320D4..0x13210F`), with helpers
+/// `.text 0x1CC5D0` for the effective main-job level and `.text 0x1CC600` for the player's `su`.
+/// A failing step returns immediately, so a record already refused for its race never reaches
+/// the job test.
+///
+/// An unknown input skips only its own step — no entity look yet means no race test. Superior is
+/// the exception: retail always compares, so an actor whose `su` is unknown (0) fails every item
+/// carrying a superior requirement, exactly as the DLL's `cmp al, [ecx]; jb refuse` does.
+///
+/// A fifth test follows (`.text 0x132111`: the record's slot mask against the slots currently made
+/// usable by `.text 0xFD350`). It answers a different question from "does this item fit the slot
+/// window we are picking for", so kuluu's pick lists keep their own slot filter and do not apply it.
+pub fn record_allows_equip(gates: EquipRecordGates, actor: EquipActor) -> bool {
+    if let Some(race) = actor.race {
+        let Some(bit) = (1u16).checked_shl(u32::from(race)) else {
+            return false;
+        };
+        if gates.races_mask & bit == 0 {
+            return false;
+        }
+    }
+    if actor.main_job != 0 {
+        let Some(bit) = (1u32).checked_shl(u32::from(actor.main_job)) else {
+            return false;
+        };
+        if gates.jobs_mask & bit == 0 {
+            return false;
+        }
+    }
+    if actor.main_lv != 0 && gates.level > actor.main_lv {
+        return false;
+    }
+    gates.superior_level <= actor.su_lv
+}
+
+/// The fallback predicate while no item record is readable: the scraped LSB equipment columns
+/// (the caller has already tested the slot bit), which carry job and level only and therefore
+/// cannot express a race or superior limit — bead kuluu-o9qt7.3.4 keeps this path for machines
+/// with no install, never as a substitute for the record.
+fn equip_scrape_refuses(info: &ffxi_vocab::equip_info::EquipInfo, actor: EquipActor) -> bool {
+    (actor.main_job != 0 && !ffxi_vocab::equip_info::fits_job(info, actor.main_job))
+        || (actor.main_lv != 0 && info.level > actor.main_lv)
 }
 
 /// One row per owned key item, ascending global id, name from the scraped LSB
@@ -8298,7 +8435,7 @@ mod tests {
     /// What the window actually shows: `equip_slot_rows` then the refresh pass's
     /// ordering step for this kind.
     fn equip_pick_labels(snap: &kuluu_snapshot::SceneSnapshot, equip_slot: u8) -> Vec<String> {
-        let mut rows = equip_slot_rows(snap, equip_slot);
+        let mut rows = equip_slot_rows(snap, equip_slot, None);
         order_dynamic_rows(MenuKind::EquipSlot(equip_slot), true, &mut rows);
         rows.iter().map(|r| r.label.clone()).collect()
     }
@@ -8340,7 +8477,7 @@ mod tests {
     #[test]
     fn equip_pick_rows_carry_the_equip_set_fields_and_hint_when_empty() {
         let snap = equip_bag_snapshot(1, 40);
-        let rows = equip_slot_rows(&snap, 4);
+        let rows = equip_slot_rows(&snap, 4, None);
         assert_eq!(
             rows.iter().map(|r| r.action).collect::<Vec<_>>(),
             vec![DynamicMenuAction::EquipItem {
@@ -8358,6 +8495,295 @@ mod tests {
             entry_label(MenuKind::EquipSlot(4), 0, &empty),
             "(no equippable items for this slot)"
         );
+    }
+
+    /// Retail's legality check (FFXiMain.dll retail-2026-09 RVA 0x132050) runs four steps in a
+    /// fixed order and returns as soon as one fails, so each step is pinned on its own: a
+    /// reordering must fail loudly rather than quietly offer gear a player cannot use.
+    #[test]
+    fn record_equip_gate_follows_the_dll_step_order() {
+        let base = || EquipRecordGates {
+            races_mask: 0b0000_0010,
+            jobs_mask: 1 << 1,
+            level: 1,
+            superior_level: 0,
+        };
+        let actor = || EquipActor {
+            race: Some(1),
+            main_job: 1,
+            main_lv: 40,
+            su_lv: 0,
+        };
+        assert!(record_allows_equip(base(), actor()));
+
+        // Step 1, races: the bit index is the entity's race byte, so a record whose mask omits
+        // it dies before the job test even runs.
+        let wrong_race = EquipActor {
+            race: Some(2),
+            ..actor()
+        };
+        assert!(!record_allows_equip(base(), wrong_race));
+        // No entity look yet means no race step — skipped, never guessed as a refusal.
+        assert!(record_allows_equip(
+            base(),
+            EquipActor {
+                race: None,
+                ..actor()
+            }
+        ));
+
+        // Step 2, jobs (the record's mask is indexed by the job id itself — `.text 0x1320EE`).
+        assert!(!record_allows_equip(
+            base(),
+            EquipActor {
+                main_job: 7,
+                ..actor()
+            }
+        ));
+
+        // Step 3, item level against the effective main-job level.
+        let lv50 = EquipRecordGates {
+            level: 50,
+            ..base()
+        };
+        assert!(!record_allows_equip(lv50, actor()));
+        assert!(record_allows_equip(
+            lv50,
+            EquipActor {
+                main_lv: 60,
+                ..actor()
+            }
+        ));
+
+        // Step 4, superior level — always compared, so su 0 refuses every Su item and the gate
+        // lifts exactly at the record's own requirement.
+        let su4 = EquipRecordGates {
+            superior_level: 4,
+            ..base()
+        };
+        assert!(!record_allows_equip(su4, actor()));
+        assert!(record_allows_equip(
+            su4,
+            EquipActor {
+                su_lv: 4,
+                ..actor()
+            }
+        ));
+
+        // An earlier failing step is the only reason reported: a record bad for race stays bad
+        // however good its other columns are (the DLL's early-out).
+        assert!(!record_allows_equip(
+            EquipRecordGates {
+                races_mask: 1 << 9,
+                jobs_mask: u32::MAX,
+                level: 0,
+                superior_level: 0,
+            },
+            actor()
+        ));
+    }
+
+    /// On a machine with the retail DATs installed, the gate must come from the record — and the
+    /// record's columns must line up with the scraped server columns where both express the same
+    /// rule (bead kuluu-o9qt7.3.4). Measured on the 2026-09 install over a strided sample of the
+    /// equipment range: slot masks agree exactly, job bits use the same job numbering as the
+    /// server's own list except that a handful of items omit Rune Fencer (job 22) client-side,
+    /// and item levels differ only for empty placeholder slots.
+    #[test]
+    fn installed_records_drive_the_equip_gate() {
+        let Some(root_path) = crate::scheduler_runtime::install_root_from_env() else {
+            eprintln!("no install: pin skipped");
+            return;
+        };
+        let root = ffxi_dat::DatRoot::open(&root_path).expect("install opens");
+        let mut recs = EquipRecords::default();
+        recs.ensure_loaded(Some(&root));
+        // The two newest job ids (GEO, RUN) are the only places where the server's item list and
+        // retail's installed records disagree: LSB carries them on gear whose retail record omits
+        // the bit. Every other job bit matched for every sampled record.
+        const JOB_BITS_WHERE_LSB_LEADS_RETAIL: std::ops::RangeInclusive<u8> = 21..=22;
+        let mut sampled = 0u32;
+        let (mut compared, mut level_off, mut job_off) = (0usize, Vec::new(), Vec::new());
+        let mut su_items = 0u32;
+        let mut race_restricted = 0u32;
+        for id in (0x1001u32..=0x6FFF).step_by(0x3B) {
+            let id = id as u16;
+            let Some(rec) = recs.record(id) else { continue };
+            // Unused record slots carry no real name (a lone `.` or nothing at all) and hold
+            // placeholder columns, so they take part in no comparison.
+            if rec.slot_mask == 0
+                || !rec
+                    .name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                continue;
+            }
+            sampled += 1;
+            if rec.superior_level > 0 {
+                su_items += 1;
+                // A superior item is refused below its own requirement and taken at it.
+                let gates = EquipRecordGates::from_record(&rec);
+                let short = 1;
+                assert!(
+                    !record_allows_equip(
+                        gates,
+                        EquipActor {
+                            race: Some(0),
+                            main_job: 0,
+                            main_lv: u8::MAX,
+                            su_lv: rec.superior_level.saturating_sub(short)
+                        }
+                    ),
+                    "{id} {} (su {}) must be refused at su {}",
+                    rec.name,
+                    rec.superior_level,
+                    rec.superior_level - short
+                );
+            }
+            if rec.races_mask != 0 && rec.races_mask != u16::MAX {
+                race_restricted += 1;
+            }
+            let Some(info) = ffxi_vocab::equip_info::lookup(id) else {
+                continue;
+            };
+            compared += 1;
+            assert_eq!(
+                rec.slot_mask, info.slot_mask,
+                "{id} {} slot mask: record vs server scrape",
+                rec.name
+            );
+            if rec.level != info.level {
+                level_off.push(format!(
+                    "{id} {}: record {} / server {}",
+                    rec.name, rec.level, info.level
+                ));
+            }
+            for job in 1..=31u8 {
+                let scraped = ffxi_vocab::equip_info::fits_job(&info, job);
+                if scraped != gates_has_job(&rec.jobs_mask, job)
+                    && !JOB_BITS_WHERE_LSB_LEADS_RETAIL.contains(&job)
+                {
+                    job_off.push(format!("{id} {} job {job}", rec.name));
+                }
+            }
+        }
+        assert!(
+            job_off.is_empty(),
+            "job-bit disagreements outside GEO/RUN ({compared} compared): {job_off:?}"
+        );
+        // A handful of records are for things no equip window lists (pet food and its family);
+        // their retail level column simply differs from the server's list. They must stay a small
+        // minority or the record columns cannot be trusted to drive the gate.
+        const MAX_RECORD_LEVEL_DISAGREEMENT_DENOMINATOR: usize = 4;
+        assert!(
+            level_off.len() * MAX_RECORD_LEVEL_DISAGREEMENT_DENOMINATOR <= compared,
+            "{}/{} sampled records disagree on required level: {level_off:?}",
+            level_off.len(),
+            compared
+        );
+        assert!(sampled > 200, "only {sampled} records sampled");
+        assert!(
+            su_items > 5,
+            "no superior-requirement gear found among {sampled}"
+        );
+        assert!(
+            race_restricted > 5,
+            "no race-restricted gear among {sampled}"
+        );
+    }
+
+    /// The record's job mask is indexed by the job id (`1 << main_job`, `.text FFXiMain.dll
+    /// retail-2026-09 0x1320EE`), unlike the server scrape, which stores job j at bit j-1.
+    fn gates_has_job(jobs_mask: &u32, job: u8) -> bool {
+        (1u32)
+            .checked_shl(u32::from(job))
+            .is_some_and(|bit| jobs_mask & bit != 0)
+    }
+
+    /// Dev measurement behind `installed_records_drive_the_equip_gate`: prints, over a strided
+    /// sample of the equipment range, how the record columns compare with the scraped server
+    /// columns (run with
+    /// `cargo test -p kuluu-render --lib measure_record_vs_scrape_columns -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "measurement printout; needs the installed retail DATs"]
+    fn measure_record_vs_scrape_columns() {
+        let Some(root_path) = crate::scheduler_runtime::install_root_from_env() else {
+            eprintln!("NO INSTALL");
+            return;
+        };
+        let root = ffxi_dat::DatRoot::open(&root_path).expect("install opens");
+        let mut recs = EquipRecords::default();
+        recs.ensure_loaded(Some(&root));
+        let (mut both, mut lv_eq, mut job_eq) = (0u32, 0u32, 0u32);
+        let (mut job_mism, mut slot_mism) = (Vec::new(), Vec::new());
+        let mut race_hist: std::collections::BTreeMap<u16, u32> = Default::default();
+        for id in (0x2800u32..=0x6FFF).step_by(0x41) {
+            let id = id as u16;
+            let Some(rec) = recs.record(id) else { continue };
+            if rec.slot_mask == 0 {
+                continue;
+            }
+            *race_hist.entry(rec.races_mask).or_default() += 1;
+            let Some(info) = ffxi_vocab::equip_info::lookup(id) else {
+                continue;
+            };
+            both += 1;
+            if rec.level == info.level {
+                lv_eq += 1;
+            }
+            let mut same = true;
+            for job in 1..=31u8 {
+                let scrape = ffxi_vocab::equip_info::fits_job(&info, job);
+                let record = rec.jobs_mask & (1u32 << u32::from(job)) != 0;
+                if scrape != record {
+                    same = false;
+                }
+            }
+            let sql_bits: Vec<u8> = (1..=31u8)
+                .filter(|j| ffxi_vocab::equip_info::fits_job(&info, *j))
+                .collect();
+            let rec_bits: Vec<u8> = (0..=31u8)
+                .filter(|j| rec.jobs_mask & (1u32 << *j) != 0)
+                .collect();
+            if sql_bits.len() == 1 {
+                eprintln!(
+                    "single-sql id={id} {:?} sql_job={:?} rec_bits={:?} lv {} vs {}",
+                    rec.name, sql_bits, rec_bits, rec.level, info.level
+                );
+            }
+            if rec.level != info.level {
+                eprintln!(
+                    "LEVEL MISMATCH id={id} {:?} rec={} sql={} jobs_mask={:08X}",
+                    rec.name, rec.level, info.level, rec.jobs_mask
+                );
+            }
+            if rec.slot_mask != info.slot_mask {
+                slot_mism.push((id, rec.slot_mask, info.slot_mask));
+            }
+            if same {
+                job_eq += 1;
+            } else {
+                job_mism.push((
+                    id,
+                    format!(
+                        "{:?} sql={:?} rec={:08X}/{:?}",
+                        rec.name, sql_bits, rec.jobs_mask, rec_bits
+                    ),
+                ));
+            }
+        }
+        eprintln!("both={both} level_equal={lv_eq} jobs_identical={job_eq}");
+        eprintln!("race masks: {race_hist:?}");
+        eprintln!(
+            "slot mismatch count={} sample={:?}",
+            slot_mism.len(),
+            &slot_mism[..slot_mism.len().min(6)]
+        );
+        for m in job_mism.iter().take(16) {
+            eprintln!("JOBS MISMATCH {}", m.1);
+        }
     }
 
     /// The quick-menu Items rows fire Use directly and skip unusable slots;

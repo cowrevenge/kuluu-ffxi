@@ -64,6 +64,53 @@ pub struct WindowWidget {
     pub caption_id: Option<u32>,
 }
 
+/// The window's frame block — its own position in the 512x448 menu design
+/// space. Field law from the record loaders FFXiMain.dll retail-2026-09
+/// RVA 0x11B3B0 (block at record +0x20: `len, x, y, cursor a, cursor b, w, h`
+/// as s16s; anchor u8 at block +0x13), placement arithmetic at RVA 0x1193F0:
+/// anchor bit 1 adds `W - 512` (right edge) and bit 2 adds `H - 448` (bottom),
+/// where W/H are the live menu-layer size. Companion windows own their frame;
+/// nothing in a DAT marks one as "beside" another — the DLL opens them with
+/// the selector left open (OpenMenu RVA 0x15E350, `activate=1, exclusive=0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameBlock {
+    pub x: i16,
+    pub y: i16,
+    pub cursor_a: i16,
+    pub cursor_b: i16,
+    pub width: i16,
+    pub height: i16,
+    /// 0 none, 1 right-edge, 2 bottom-edge, 3 both.
+    pub anchor: u8,
+}
+
+/// One selectable item block (record loaders FFXiMain.dll retail-2026-09
+/// RVA 0x11B6B0). `id` (block +0x12) is what the window handler receives and
+/// what selector tables dispatch on; the neighbor bytes (+0x17 Up, +0x18 Down,
+/// +0x19 Right, +0x1A Left) are per-item s8 target ids — negative means no
+/// move — so arrow navigation is data, never an axis rule (vault §5 nav law:
+/// L/R can never break Up/Down when rows follow these bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemBlock {
+    pub id: i16,
+    /// x/y relative to the window origin.
+    pub x: i16,
+    pub y: i16,
+    pub width: i16,
+    pub height: i16,
+    /// Neighbor item ids; `None` when the byte is negative (blocked).
+    pub up: Option<i16>,
+    pub down: Option<i16>,
+    pub right: Option<i16>,
+    pub left: Option<i16>,
+}
+
+fn read_i16(bytes: &[u8], at: usize) -> Option<i16> {
+    bytes
+        .get(at..at + 2)
+        .map(|w| i16::from_le_bytes([w[0], w[1]]))
+}
+
 /// One window record (one mini-chunk) and its children in file order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuWindow {
@@ -75,6 +122,14 @@ pub struct MenuWindow {
     pub offset: usize,
     pub size: usize,
     pub widgets: Vec<WindowWidget>,
+    /// Item count declared in the record header byte at +0x11 (record loader
+    /// FFXiMain.dll retail-2026-09 RVA 0x11B010).
+    pub item_count: u8,
+    /// The frame block (position, size, anchor) when present.
+    pub frame: Option<FrameBlock>,
+    /// Item blocks walked by their length words right after the frame block.
+    /// `None` entries mark a block whose declared span cut a field short.
+    pub items: Vec<Option<ItemBlock>>,
 }
 
 impl MenuWindow {
@@ -157,6 +212,12 @@ pub fn parse_windows(bytes: &[u8]) -> Vec<MenuWindow> {
         if !root.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
             continue;
         }
+        // Frame + item blocks (§7 law): back-to-back length-worded blocks
+        // starting at record +0x20 (= chunk +0x30), walked exactly as the
+        // loaders FFXiMain.dll retail-2026-09 RVA 0x11B010 walk them.
+        let declared_items = bytes.get(off + 0x21).copied().unwrap_or(0);
+        let (frame, items) = parse_blocks(bytes, off + 0x30, off + size, declared_items);
+
         // Children: widget names inside the body, located by scan (records are
         // variable-length and not quad-aligned in a stable way).
         let body_start = off + 0x20;
@@ -182,10 +243,110 @@ pub fn parse_windows(bytes: &[u8]) -> Vec<MenuWindow> {
             offset: off,
             size,
             widgets,
+            item_count: declared_items,
+            frame,
+            items,
         });
     }
     out
 }
+
+/// Walk the back-to-back blocks after a window's header. The first block is
+/// the frame; the following `declared` are items (FFXiMain.dll retail-2026-09
+/// RVA 0x11B3B0/0x11B6B0). A length word outside `MIN_BLOCK_LEN..=remaining`
+/// ends the walk — the loaders stop there too. Blocks too short for their
+/// fields still consume their span and yield `None` items.
+fn parse_blocks(
+    bytes: &[u8],
+    mut at: usize,
+    end: usize,
+    declared_items: u8,
+) -> (Option<FrameBlock>, Vec<Option<ItemBlock>>) {
+    let block_len = |at: usize| -> Option<usize> {
+        let raw = read_i16(bytes, at)?;
+        if !(MIN_BLOCK_LEN..=0x2000).contains(&raw) || at + raw as usize > end {
+            return None;
+        }
+        Some(raw as usize)
+    };
+    let mut frame = None;
+    if let Some(len) = block_len(at) {
+        let b = at;
+        // Frame fields (FFXiMain.dll retail-2026-09 RVA 0x11B3B0).
+        if len >= FRAME_BLOCK_MIN_LEN as usize {
+            let (Some(x), Some(y)) = (read_i16(bytes, b + OFF_X), read_i16(bytes, b + OFF_Y))
+            else {
+                return (None, Vec::new());
+            };
+            frame = Some(FrameBlock {
+                x,
+                y,
+                cursor_a: read_i16(bytes, b + OFF_CURSOR_A).unwrap_or(0),
+                cursor_b: read_i16(bytes, b + OFF_CURSOR_B).unwrap_or(0),
+                width: read_i16(bytes, b + OFF_WIDTH).unwrap_or(0),
+                height: read_i16(bytes, b + OFF_HEIGHT).unwrap_or(0),
+                anchor: bytes[b + OFF_ANCHOR],
+            });
+        }
+        at += len;
+    } else {
+        return (None, Vec::new());
+    }
+    let mut items = Vec::new();
+    while items.len() < declared_items as usize {
+        let Some(len) = block_len(at) else { break };
+        let b = at;
+        // Item fields (FFXiMain.dll retail-2026-09 RVA 0x11B6B0).
+        let item = if len >= ITEM_BLOCK_MIN_LEN as usize {
+            // Negative s8 means "no move in this direction" (blocked).
+            let nb = |off: usize| match bytes[b + off] {
+                v if (v as i8) < 0 => None,
+                v => Some(v as i16),
+            };
+            Some(ItemBlock {
+                id: read_i16(bytes, b + OFF_ITEM_ID).unwrap_or(0),
+                x: read_i16(bytes, b + OFF_X).unwrap_or(0),
+                y: read_i16(bytes, b + OFF_Y).unwrap_or(0),
+                width: read_i16(bytes, b + OFF_WIDTH).unwrap_or(0),
+                height: read_i16(bytes, b + OFF_HEIGHT).unwrap_or(0),
+                up: nb(OFF_NEIGHBORS),
+                down: nb(OFF_NEIGHBORS + 1),
+                right: nb(OFF_NEIGHBORS + 2),
+                left: nb(OFF_NEIGHBORS + 3),
+            })
+        } else {
+            None
+        };
+        items.push(item);
+        at += len;
+    }
+    (frame, items)
+}
+
+/// Smallest block a length word may claim (smallest measured item/frame
+/// block is 0x40 on retail-2026-09; `ITEM_BLOCK_MIN_LEN` is the field floor,
+/// so accept from there and let the loader's own stop rule — overrun — end
+/// short chains).
+const MIN_BLOCK_LEN: i16 = ITEM_BLOCK_MIN_LEN;
+
+/// Block field offsets, counted from the block start (FFXiMain.dll
+/// retail-2026-09 record loaders RVA 0x11B3B0/0x11B6B0).
+const OFF_X: usize = 0x02;
+const OFF_Y: usize = 0x04;
+const OFF_CURSOR_A: usize = 0x06;
+const OFF_CURSOR_B: usize = 0x08;
+const OFF_WIDTH: usize = 0x0A;
+const OFF_HEIGHT: usize = 0x0C;
+/// Frame anchor byte, u8 (vault brief §4 placement law).
+const OFF_ANCHOR: usize = 0x13;
+/// Item handler id, s16 (vault brief §7).
+const OFF_ITEM_ID: usize = 0x12;
+/// First of the four neighbor s8s: Up, Down, Right, Left.
+const OFF_NEIGHBORS: usize = 0x17;
+/// A frame block must at least cover through the anchor byte.
+const FRAME_BLOCK_MIN_LEN: i16 = (OFF_ANCHOR + 1) as i16;
+/// An item block must at least cover all four neighbor bytes.
+const ITEM_BLOCK_MIN_LEN: i16 = (OFF_NEIGHBORS + 4) as i16;
 
 fn find_in_range(hay: &[u8], end: usize, needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || end > hay.len() {
@@ -310,6 +471,189 @@ mod tests {
         assert_eq!(parse_widget_suffix(b"12\x00\x00"), Some(12));
         // Six digits is beyond the measured id space — treat as not a caption.
         assert_eq!(parse_widget_suffix(b"123456\0"), None);
+    }
+
+    /// Frame + item blocks decoded from bytes shaped after the real chunks
+    /// (persona/statcom2, ROM/119/51.DAT): position, anchor and per-item
+    /// neighbor ids come out of the length-worded block walk.
+    #[test]
+    fn decodes_frame_and_item_blocks() {
+        // The record body is name (0x10 bytes) then the header padded out to
+        // 0x20 — frame and item blocks start at body +0x20 (= chunk +0x30).
+        let mut full = root_record("statcom2");
+        full.resize(0x20, 0);
+        // Item count lives after the name in the header (FFXiMain.dll
+        // retail-2026-09 RVA 0x11B010).
+        full[0x11] = 2;
+
+        // Frame block (len 0x50): x=384 y=48 w=112 h=218 anchor@+0x13 = 1.
+        let mut frame = vec![0x50, 0x00];
+        frame.extend_from_slice(&384i16.to_le_bytes());
+        frame.extend_from_slice(&48i16.to_le_bytes());
+        while frame.len() < OFF_WIDTH {
+            frame.push(0);
+        }
+        frame.extend_from_slice(&112i16.to_le_bytes());
+        frame.extend_from_slice(&218i16.to_le_bytes());
+        frame.resize(0x50, 0);
+        frame[OFF_ANCHOR] = 1;
+
+        // Two item blocks (len 0x40): ids 1 and 2, vertically chained,
+        // left/right blocked (-1).
+        let item_block = |id: i16, up: u8, down: u8, right: u8, left: u8| {
+            let mut v = vec![0x40, 0x00];
+            while v.len() < OFF_ITEM_ID {
+                v.push(0);
+            }
+            v.extend_from_slice(&id.to_le_bytes());
+            while v.len() < OFF_NEIGHBORS {
+                v.push(0);
+            }
+            v.extend_from_slice(&[up, down, right, left]);
+            v.resize(0x40, 0);
+            v
+        };
+        let it1 = item_block(1, 1, 2, 0xFF, 0xFF);
+        let it2 = item_block(2, 1, 1, 0xFF, 0xFF);
+
+        let mut chunk_body = full;
+        chunk_body.extend_from_slice(&frame);
+        chunk_body.extend_from_slice(&it1);
+        chunk_body.extend_from_slice(&it2);
+        let bytes = chunk(b"sta2", chunk_body);
+        let windows = parse_windows(&bytes);
+        assert_eq!(windows.len(), 1);
+        let w = &windows[0];
+        assert_eq!(w.item_count, 2);
+        assert_eq!(
+            w.frame,
+            Some(FrameBlock {
+                x: 384,
+                y: 48,
+                cursor_a: 0,
+                cursor_b: 0,
+                width: 112,
+                height: 218,
+                anchor: 1
+            })
+        );
+        let items: Vec<&ItemBlock> = w.items.iter().flatten().collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            (items[0].id, items[0].up, items[0].down),
+            (1, Some(1), Some(2))
+        );
+        assert_eq!((items[0].right, items[0].left), (None, None));
+        assert_eq!(items[1].id, 2);
+    }
+
+    /// Gated on a retail install (self-skips without one). Frames measured on
+    /// ROM/119/51.DAT via the §7 walk: selectors wear x=384 anchor 1 (right
+    /// edge of the design space), companions sit left — conf2win at x=16,
+    /// persona at (16,48) with its code-move on top, profile at x=130.
+    #[test]
+    fn real_windows_carry_their_own_frames() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        let frame_of = |name: &str| -> FrameBlock {
+            *windows[name]
+                .frame
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} frame missing"))
+        };
+        assert_eq!(
+            frame_of("persona"),
+            FrameBlock {
+                x: 16,
+                y: 48,
+                cursor_a: 0,
+                cursor_b: 0,
+                width: 112,
+                height: 190,
+                anchor: 0
+            }
+        );
+        assert_eq!(
+            frame_of("profile"),
+            FrameBlock {
+                x: 130,
+                y: 48,
+                cursor_a: 0,
+                cursor_b: 0,
+                width: 252,
+                height: 178,
+                anchor: 0
+            }
+        );
+        for selector in ["menuwind", "socialme", "configwi", "statcom2"] {
+            let f = frame_of(selector);
+            assert_eq!((f.x, f.anchor), (384, 1), "{selector} right-edge law");
+            assert_eq!(
+                (f.width, f.height),
+                (
+                    112,
+                    if selector == "menuwind" || selector == "socialme" {
+                        202
+                    } else {
+                        218
+                    }
+                ),
+                "{selector} size"
+            );
+        }
+        let page = frame_of("conf2win");
+        assert_eq!(
+            (page.x, page.y, page.width, page.height, page.anchor),
+            (16, 48, 366, 296, 0)
+        );
+    }
+
+    /// Gated on a retail install. statcom2 is the live Status selector (vault
+    /// brief §2): header-declared item count matches the walk, ids run 1..=13
+    /// plus one all-blocked trailing block, and its single-column rows keep
+    /// Left/Right parked on their own id while Up/Down chain through real
+    /// neighbors — the same bytes conf2win uses to step between an option and
+    /// its value column (.29's fix rides these, not any axis rule).
+    #[test]
+    fn real_statcom2_and_conf2win_items_carry_neighbor_laws() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        let sel = &windows["statcom2"];
+        assert_eq!(sel.item_count, 14);
+        let items: Vec<&ItemBlock> = sel.items.iter().flatten().collect();
+        assert_eq!(items.len(), 14, "walk must complete the declared blocks");
+        for (i, it) in items.iter().enumerate() {
+            assert_eq!(it.id as usize, i + 1, "ids equal 1-based position");
+        }
+        let blocked = items.last().unwrap();
+        assert_eq!(
+            (blocked.up, blocked.down, blocked.right, blocked.left),
+            (None, None, None, None)
+        );
+        // Single-column selector: L/R parked on own id everywhere else.
+        for it in &items[..13] {
+            assert_eq!(it.right, Some(it.id));
+            assert_eq!(it.left, Some(it.id));
+            assert_ne!(it.up, None);
+            assert_ne!(it.down, None);
+        }
+        // conf2win's option/value grid: Right steps across columns.
+        let page = &windows["conf2win"];
+        let pitems: Vec<&ItemBlock> = page.items.iter().flatten().collect();
+        assert_eq!(pitems.len(), 11);
+        assert_eq!(
+            (pitems[0].id, pitems[0].right, pitems[0].left),
+            (1, Some(2), Some(2))
+        );
+        // Up/Down still move rows even though Left/Right also do: the graph
+        // is data (up/down ∈ 1..=11 everywhere, never blocked).
+        for it in &pitems {
+            assert!(it.up.is_some() && it.down.is_some());
+        }
     }
 
     #[test]

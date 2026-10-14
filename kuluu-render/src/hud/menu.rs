@@ -554,6 +554,14 @@ pub enum DynamicMenuAction {
     /// (FFXiMain.dll retail-2026-09 select handler RVA 0x148D00 over detail
     /// table RVA 0x3716B8) — so selecting such a row keeps its window open.
     DisplayInfo,
+
+    /// One of kuluu's Controls-page preset commands: apply it to the live store
+    /// and let the page re-list on top of it (bead kuluu-o9qt7.26.1). Kuluu-only;
+    /// retail assigns keys per row instead (`ControlsPreset` has no DLL handler).
+    ControlsPreset(crate::keybinds::Preset),
+
+    /// …and the reset command, answering through the same seam as `/keybinds reset`.
+    ControlsReset,
 }
 
 impl DynamicMenuAction {
@@ -699,13 +707,48 @@ const STATUS_LABELS: &[&str] = &[
     "Alter Ego Points",
 ];
 
-const CONTROLS_ENTRIES: &[&str] = &[
-    "Standard",
-    "Compact 1",
-    "Compact 2",
-    "Reset to defaults",
-    "Show current bindings",
-];
+/// kuluu's Controls page is dynamic (bead kuluu-o9qt7.26.1): its body lists the
+/// **live** key map, one row per bound action, and these four commands trail it.
+/// The labels stay fixed so help-bar copy and tests can name them; retail has no
+/// preset rows at all (its own 29-row key-assignment law lives in
+/// [`crate::hud::controls_law`]), so the whole page is kuluu-only — page 3.
+pub const CONTROLS_COMMAND_LABELS: [&str; 4] =
+    ["Standard", "Compact 1", "Compact 2", "Reset to defaults"];
+
+/// Build the Controls page from the live [`Bindings`](crate::keybinds::Bindings)
+/// store: one `name: KEY` row per bound action in store order (retail's law of
+/// drawing each row's key straight from its binding table — `.text 0x19CF60`
+/// over FFXiMain.dll retail-2026-09 `.data 0x36D6B0`, vault main_menu.md §59
+/// addendum 25 — applied to kuluu's store), then the preset/reset commands.
+/// Because [`refresh_dynamic_menu_rows`] re-runs this every frame, a remap made
+/// elsewhere (`/keybinds …`) shows on the open page without any restart.
+pub fn controls_rows(bindings: &crate::keybinds::Bindings) -> Vec<DynamicMenuRow> {
+    let mut rows: Vec<DynamicMenuRow> = bindings
+        .iter()
+        .map(|(action, _)| {
+            let key = bindings.key_label(action).unwrap_or("...");
+            DynamicMenuRow {
+                label: format!("{}: {}", action.display_name(), key),
+                action: DynamicMenuAction::DisplayInfo,
+            }
+        })
+        .collect();
+    rows.extend(
+        CONTROLS_COMMAND_LABELS
+            .iter()
+            .zip([
+                DynamicMenuAction::ControlsPreset(crate::keybinds::Preset::Standard),
+                DynamicMenuAction::ControlsPreset(crate::keybinds::Preset::Compact1),
+                DynamicMenuAction::ControlsPreset(crate::keybinds::Preset::Compact2),
+                DynamicMenuAction::ControlsReset,
+            ])
+            .map(|(label, action)| DynamicMenuRow {
+                label: (*label).to_string(),
+                action,
+            }),
+    );
+    rows
+}
 
 pub const DEBUG_PERF: &str = "Perf";
 pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
@@ -1026,6 +1069,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::RetailConfigPage(_)
             | MenuKind::RetailConfigSub(_)
             | MenuKind::StatusDetail { .. }
+            // kuluu's live key map (bead kuluu-o9qt7.26.1) — the store is the rows.
+            | MenuKind::Controls
     )
 }
 
@@ -1166,7 +1211,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
     match kind {
         MenuKind::Root => ROOT_ENTRIES,
         MenuKind::Config => &[],
-        MenuKind::Controls => CONTROLS_ENTRIES,
+        // The live key map arrives via controls_rows in refresh_dynamic_menu_rows
+        // (bead kuluu-o9qt7.26.1); nothing static stands here.
+        MenuKind::Controls => &[],
         MenuKind::Debug => DEBUG_ENTRIES,
         MenuKind::Graphics => &[],
 
@@ -4946,6 +4993,7 @@ pub fn refresh_dynamic_menu_rows(
     mut config_rows: ResMut<ConfigDatRows>,
     mut selector_captions: ResMut<CommandSelectorCaptions>,
     mut equip_records: ResMut<EquipRecords>,
+    bindings: Res<crate::keybinds::Bindings>,
     mut dynamic: ResMut<DynamicMenu>,
 ) {
     // The remodel prompt's question is DAT text, so it rides in with every refresh (bead
@@ -5094,6 +5142,9 @@ pub fn refresh_dynamic_menu_rows(
             item_no,
         } => item_action_rows(snap, container, index, item_no),
         MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot, Some(&equip_records)),
+        // The live key map (bead kuluu-o9qt7.26.1): rows are the store itself plus
+        // the trailing preset commands, so any remap shows without a restart.
+        MenuKind::Controls => controls_rows(&bindings),
         _ => Vec::new(),
     };
 
@@ -7994,8 +8045,62 @@ mod tests {
             root_child_kind("Config", false, false),
             Some(MenuKind::RetailConfig)
         );
-        assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
+        // The Controls page is dynamic now (bead kuluu-o9qt7.26.1): nothing
+        // static stands, and its command rows trail the live key map.
+        assert!(static_entries(MenuKind::Controls).is_empty());
+        let std_rows = controls_rows(&crate::keybinds::Preset::Standard.bindings());
+        for label in CONTROLS_COMMAND_LABELS {
+            assert!(std_rows.iter().any(|r| r.label == label));
+        }
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
+    }
+
+    /// The bead law: bindings appear on the page **after a change, without any
+    /// restart** — rows are rebuilt from the live store every refresh.
+    #[test]
+    fn controls_page_lists_the_live_key_map_and_follows_the_store() {
+        use crate::keybinds::{Action, Bindings, KeyBind};
+        let mut bindings = Bindings::empty();
+        bindings.insert(
+            Action::ConfirmAction,
+            KeyBind::new(bevy::input::keyboard::KeyCode::Enter),
+        );
+        bindings.insert(
+            Action::OpenChat,
+            KeyBind::with(
+                bevy::input::keyboard::KeyCode::Space,
+                crate::keybinds::Modifiers::CTRL,
+            ),
+        );
+        let rows = controls_rows(&bindings);
+        assert_eq!(rows.len(), 2 + CONTROLS_COMMAND_LABELS.len());
+        // Store order (Action's Ord) puts OpenChat before ConfirmAction.
+        // A modified bind has no plain key name, and draws the placeholder.
+        assert_eq!(rows[0].label, "Open chat: ...");
+        assert_eq!(rows[1].label, "Confirm: Enter");
+        // Remapping the same store re-lists it — no restart involved.
+        bindings.insert(
+            Action::ConfirmAction,
+            KeyBind::new(bevy::input::keyboard::KeyCode::KeyJ),
+        );
+        let after = controls_rows(&bindings);
+        assert_eq!(after[1].label, "Confirm: J");
+    }
+
+    #[test]
+    fn controls_command_rows_carry_preset_and_reset_actions() {
+        use crate::keybinds::{Bindings, Preset};
+        let rows = controls_rows(&Bindings::empty());
+        let actions: Vec<DynamicMenuAction> = rows.iter().map(|r| r.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                DynamicMenuAction::ControlsPreset(Preset::Standard),
+                DynamicMenuAction::ControlsPreset(Preset::Compact1),
+                DynamicMenuAction::ControlsPreset(Preset::Compact2),
+                DynamicMenuAction::ControlsReset,
+            ]
+        );
     }
 
     // FFXiMain.dll retail-2026-09 RVA 0x13F750 answers mgcmenu selects and maps

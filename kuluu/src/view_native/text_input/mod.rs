@@ -8,7 +8,7 @@ use kuluu_render::dat_mzb::LoadMzbRequest;
 use kuluu_render::hud::chat_panel::{ActiveChatTab, ChatScroll};
 use kuluu_render::{
     Action, Bindings, ChatBuffer, ChatHistory, DialogCursor, InputMode, MenuKind, MenuStack,
-    Preset, QuickActionState, SceneState, Target,
+    QuickActionState, SceneState, Target,
 };
 
 use super::debug_heights::DebugHeightsRequest;
@@ -1227,6 +1227,10 @@ fn sub_target_action_for(
         | A::ConfigWindowChoiceSet { .. }
         // The dialog row raises its prompt at the confirm seam; no target step.
         | A::OpenKeyAssignResetPrompt
+        // …and neither does kuluu's Controls-page command rows — they write the
+        // key store on the spot (bead kuluu-o9qt7.26.1).
+        | A::ControlsPreset(_)
+        | A::ControlsReset
         | A::DisplayInfo => None,
     }
 }
@@ -1822,8 +1826,12 @@ fn dispatch_dynamic_menu_action(
         | A::ConfigCfilterSelect { .. }
         | A::ConfigSliderEdit { .. }
         | A::ConfigWindowChoiceSet { .. }
-        // The reset prompt writes its answer at the confirm seam — never a wire event.
-        | A::OpenKeyAssignResetPrompt => return,
+        // The reset prompt writes its answer at the confirm seam — never a wire
+        // event, and neither do kuluu's Controls-page command rows (their whole
+        // effect is the local key store; bead kuluu-o9qt7.26.1).
+        | A::OpenKeyAssignResetPrompt
+        | A::ControlsPreset(_)
+        | A::ControlsReset => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

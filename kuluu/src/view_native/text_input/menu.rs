@@ -26,8 +26,9 @@ enum MenuDispatch {
         container: u8,
     },
 
-    KeybindUpdate(KeybindUpdate),
-
+    // (`KeybindUpdate` lived here until bead kuluu-o9qt7.26.1: the Controls page
+    // answers its commands at the confirm seam directly, so no dispatch routes
+    // through this variant any more.)
     /// View House (page-2 row 4): the retail arm opens the Mog Menu locally —
     /// FFXiMain.dll retail-2026-09 RVA 0x14E8F5 name-opens `menu    mogcont`
     /// with no packet on the wire; kuluu's built Mog Menu is the session dialog
@@ -256,21 +257,10 @@ fn resolve_menu_entry(
             "Equipment — pending Stage 1 (s2c 0x050 equip_list)".into(),
         ),
 
-        (MenuKind::Controls, "Standard") => {
-            MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Standard))
-        }
-        (MenuKind::Controls, "Compact 1") => {
-            MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
-        }
-        (MenuKind::Controls, "Compact 2") => {
-            MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact2))
-        }
-        (MenuKind::Controls, "Reset to defaults") => {
-            MenuDispatch::KeybindUpdate(KeybindUpdate::Reset)
-        }
-        (MenuKind::Controls, "Show current bindings") => {
-            MenuDispatch::KeybindUpdate(KeybindUpdate::List)
-        }
+        // The Controls page no longer resolves by label (bead kuluu-o9qt7.26.1):
+        // it is dynamic now — its body lists the live key map (read-only rows) and
+        // its four command rows carry `ControlsPreset`/`ControlsReset` actions, all
+        // consumed at the confirm seam beside `A::DisplayInfo`.
         (_, other) => MenuDispatch::NotImplemented(other.to_string()),
     }
 }
@@ -450,6 +440,21 @@ pub(super) fn confirm_menu_at_cursor(
             // command (FFXiMain.dll retail-2026-09 RVA 0x148D00 opens only),
             // so a press keeps the window open and changes nothing.
             if matches!(action, A::DisplayInfo) {
+                return None;
+            }
+            // kuluu's Controls-page commands (bead kuluu-o9qt7.26.1): applied
+            // through the same seam as `/keybinds preset|reset`, then KEEP the page
+            // open — `refresh_dynamic_menu_rows` re-lists its live rows on top of
+            // the new store, so a remap shows immediately (the bead's "after
+            // change, without restart" law). Retail has no such rows: it assigns
+            // one key per row (.text 0x19CFA0 writing across the link group; vault
+            // main_menu.md §59 addendum 25) — page-3 kuluu-only surface.
+            if matches!(action, A::ControlsPreset(_) | A::ControlsReset) {
+                let update = match action {
+                    A::ControlsPreset(preset) => KeybindUpdate::Preset(preset),
+                    _ => KeybindUpdate::Reset,
+                };
+                apply_keybind_update(update, bindings, keybinds_state, scene_state);
                 return None;
             }
             if let A::OpenItemAction {
@@ -1240,15 +1245,6 @@ pub(super) fn confirm_menu_at_cursor(
             // `reset_map_screen_on_open` clears the submode as the screen appears.
             stack.push(submenu);
             None
-        }
-        MenuDispatch::KeybindUpdate(update) => {
-            let stay = matches!(update, KeybindUpdate::List);
-            apply_keybind_update(update, bindings, keybinds_state, scene_state);
-            if stay {
-                None
-            } else {
-                Some(InputMode::World)
-            }
         }
         MenuDispatch::NotImplemented(label) => {
             push_system_chat_line(scene_state, format!("[menu] {label} — not implemented"));
@@ -2273,9 +2269,20 @@ mod menu_key_tests {
             world.resource_mut::<MapMarkers>(),
         );
         assert_eq!(stack.current().unwrap().kind, MenuKind::Controls);
+        // …and the page-3 Controls list is live now (bead kuluu-o9qt7.26.1): its
+        // command rows carry their actions instead of resolving by label.
+        let rows = kuluu_render::hud::menu::controls_rows(
+            &kuluu_render::keybinds::Preset::Standard.bindings(),
+        );
+        let compact_row = rows
+            .iter()
+            .find(|r| r.label == "Compact 1")
+            .expect("preset command row");
         assert_eq!(
-            resolve_menu_entry(MenuKind::Controls, "Compact 1", false, false),
-            MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
+            compact_row.action,
+            kuluu_render::hud::menu::DynamicMenuAction::ControlsPreset(
+                kuluu_render::keybinds::Preset::Compact1,
+            )
         );
     }
 

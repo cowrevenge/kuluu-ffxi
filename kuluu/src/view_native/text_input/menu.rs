@@ -1514,7 +1514,11 @@ pub(super) fn handle_menu_key(
     // 0x197874/0x19788C of conf2win handler RVA 0x197470 (vault main_menu.md
     // §59 addendum 2). A pin only lives on its own window — any other top kind
     // drops it.
-    if !matches!(top_kind, MenuKind::RetailConfigPage(0)) {
+    let slider_page = matches!(top_kind, MenuKind::RetailConfigPage(page)
+        if kuluu_render::hud::menu::RETAIL_CONFIG_PAGE_WINDOWS
+            .get(usize::from(page))
+            .is_some_and(|w| kuluu_render::hud::menu::config_page_supports_slider_pin(w)));
+    if !slider_page {
         dynamic.option_edit = None;
     } else if let Some((store_id, value)) = dynamic.option_edit {
         if bindings.matches_logical(Action::NavLeft, key) {
@@ -1523,7 +1527,7 @@ pub(super) fn handle_menu_key(
                 dynamic.option_edit = Some((store_id, value - 1));
             }
         } else if bindings.matches_logical(Action::NavRight, key) {
-            if value < kuluu_render::hud::menu::CONFIG_SLIDER_MAX {
+            if value < kuluu_render::hud::menu::config_slider_max(store_id) {
                 dynamic.config_option_values.insert(store_id, value + 1);
                 dynamic.option_edit = Some((store_id, value + 1));
             }

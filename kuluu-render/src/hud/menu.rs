@@ -1710,6 +1710,12 @@ pub enum ConfigRowArm {
     Slider {
         store_id: u32,
     },
+    /// Position in a law'd page whose select arm is not dug yet (window-local
+    /// flag rows and name-open rows at conf6win ids 8-10, conf3win ids 3/4 and
+    /// the conf3win slider entry id 11 - handlers FFXiMain.dll retail-2026-09
+    /// RVA 0x19B200/0x19AA10): keeps the option-record fallback while its dig
+    /// completes on bead kuluu-o9qt7.20.1.
+    Plain,
 }
 
 /// `conf13wi`'s six select arms — jump table .text 0x19be98 (guard `dec;
@@ -1813,11 +1819,131 @@ pub const CONF12WI_RADIO_ARMS: &[ConfigRowArm] = &[
     },
 ];
 
+/// `conf3win`'s fifteen arms - jump table .text 0x19ac30 (guard `dec; cmp
+/// eax,0xe`) of handler FFXiMain.dll retail-2026-09 RVA 0x19AA10: rows 1/2/5 the
+/// triple on store 0x13 (values ebx=0 from the prologue's `xor ebx,ebx`, 1, 2);
+/// rows 3/4 set window-local bytes [esi+0x38]/[esi+0x3c] only (semantics open);
+/// rows 6/7/8 store 0x3A {2, ebx=0, 1}; rows 9/10 store 0x3B {1, ebx=0}; row 11
+/// pins a slider (widget [esi+0x48], edit byte [esi+0x20]) whose store lives in
+/// the pin region from .text 0x19AB94 - open; rows 12/13 write bank-2 wrapper
+/// 0x1938F0 (store 2, values 1/ebx=0); rows 14/15 store 0xA5 {ebx=0, 1} (vault
+/// main_menu.md §59 addendum 3; bead kuluu-o9qt7.20.1).
+const CONF3WIN_ROW_ARMS: [ConfigRowArm; 15] = [
+    ConfigRowArm::Radio {
+        store_id: 0x13,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x13,
+        value: 1,
+    },
+    ConfigRowArm::Plain,
+    ConfigRowArm::Plain,
+    ConfigRowArm::Radio {
+        store_id: 0x13,
+        value: 2,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3A,
+        value: 2,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3A,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3A,
+        value: 1,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3B,
+        value: 1,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3B,
+        value: 0,
+    },
+    ConfigRowArm::Plain,
+    ConfigRowArm::Radio2 {
+        store_id: 2,
+        value: 1,
+    },
+    ConfigRowArm::Radio2 {
+        store_id: 2,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0xA5,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0xA5,
+        value: 1,
+    },
+];
+
+/// `conf6win`'s fifteen arms - jump table .text 0x19b534 (guard `dec; cmp
+/// eax,0xe`) of handler FFXiMain.dll retail-2026-09 RVA 0x19B200: rows 1/4/7 are
+/// slider pins on stores 0x3E/0x40/0x43 (edit bytes [esi+0x20]/[esi+0x21]/
+/// [esi+0x22]; increment guards `cmp eax,0x19` / `cmp eax,3` / `cmp eax,5`); rows
+/// 2/3 the pair on store 0x3F {ebx=0, 1}; rows 5/6/11 the triple on store 0x42
+/// {ebx=0, 1, 2}; row 8 name-opens `menu    k1assign` and row 9 `menu    k2assign`
+/// through menu manager FFXiMain.dll retail-2026-09 RVA 0x15E350 (padded strings
+/// at file-off 0x4C4BC/0x4C4E8); row 10 is a GetText+dialog arm; rows 12/13 store
+/// 0x9D {ebx=0, 1}; rows 14/15 store 0x9E {ebx=0, 1} (vault main_menu.md §59
+/// addendum 3; bead kuluu-o9qt7.20.1).
+const CONF6WIN_ROW_ARMS: [ConfigRowArm; 15] = [
+    ConfigRowArm::Slider { store_id: 0x3E },
+    ConfigRowArm::Radio {
+        store_id: 0x3F,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x3F,
+        value: 1,
+    },
+    ConfigRowArm::Slider { store_id: 0x40 },
+    ConfigRowArm::Radio {
+        store_id: 0x42,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x42,
+        value: 1,
+    },
+    ConfigRowArm::Slider { store_id: 0x43 },
+    ConfigRowArm::Plain,
+    ConfigRowArm::Plain,
+    ConfigRowArm::Plain,
+    ConfigRowArm::Radio {
+        store_id: 0x42,
+        value: 2,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x9D,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x9D,
+        value: 1,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x9E,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: 0x9E,
+        value: 1,
+    },
+];
+
 /// The law'd select-arm table of a Config page window, by position. Pages
 /// without an entry keep the §46 option-record fallback.
 pub fn config_page_arms(window: &str) -> Option<&'static [ConfigRowArm]> {
     match window {
         "conf2win" => Some(&CONF2WIN_ROW_ARMS),
+        "conf3win" => Some(&CONF3WIN_ROW_ARMS),
+        "conf6win" => Some(&CONF6WIN_ROW_ARMS),
         "conf13wi" => Some(CONF13WI_RADIO_ARMS),
         "conf12wi" => Some(CONF12WI_RADIO_ARMS),
         _ => None,
@@ -1878,9 +2004,36 @@ pub const CONFIG_SLIDER_MAX: u8 = 100;
 pub fn config_slider_boot_default(store_id: u32) -> u8 {
     match store_id {
         9 | 0xA => 100,
-        0x37 | 0x38 | 0x39 => 50,
+        0x37..=0x39 => 50,
+        // conf6win sliders boot from their §58 init values (FFXiMain.dll
+        // retail-2026-09 RVA call sites 0x194301/0x1942ED: store 0x3E at its max
+        // 25, store 0x40 at its max 3; store 0x43's init slot takes ebx=0).
+        0x3E => 25,
+        0x40 => 3,
         _ => 0,
     }
+}
+
+/// Per-store ceiling of a law'd slider: the conf2win-family arms guard increment
+/// with `cmp ecx,0x64`; the conf6win pin arms use `cmp eax,0x19` (store 0x3E),
+/// `cmp eax,3` (0x40) and `cmp eax,5` (0x43) at FFXiMain.dll retail-2026-09 RVA
+/// 0x19B407/0x19B491/0x19B4F8 - the step only runs strictly below the bound.
+pub fn config_slider_max(store_id: u32) -> u8 {
+    match store_id {
+        0x3E => 25,
+        0x40 => 3,
+        0x43 => 5,
+        _ => CONFIG_SLIDER_MAX,
+    }
+}
+
+/// True when the Config page's own arm table contains a slider row - only those
+/// windows keep a pin alive (conf2win and conf6win today).
+pub fn config_page_supports_slider_pin(window: &str) -> bool {
+    config_page_arms(window).is_some_and(|arms| {
+        arms.iter()
+            .any(|arm| matches!(arm, ConfigRowArm::Slider { .. }))
+    })
 }
 
 /// One Config-family window's rows: DAT captions in file order, each carrying
@@ -6421,6 +6574,127 @@ mod tests {
         }
     }
 
+    /// `conf3win`/`conf6win` arm tables render their law'd rows (bead
+    /// kuluu-o9qt7.20.1): radios/pairs/triples carry resolved stores, slider rows
+    /// pin with per-store boot values and ceilings, and undug positions keep the
+    /// option-record fallback.
+    #[test]
+    fn conf3win_and_conf6win_rows_answer_their_arm_tables() {
+        let mark = "\u{bb}";
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        for w in ["conf3win", "conf6win"] {
+            table.by_root.insert(
+                w.to_string(),
+                (0..15u32).map(|i| (400 + i, format!("{w}{i}"))).collect(),
+            );
+        }
+        let r3 = config_window_rows(
+            "conf3win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(r3.len(), 15);
+        for (position, store_id) in [(0usize, 0x13u32), (4, 0x13)] {
+            let want = if position == 4 { 2 } else { 0 };
+            assert!(
+                matches!(r3[position].action, DynamicMenuAction::ConfigOptionSet { store_id: s, value: v } if s == store_id && v == want),
+                "conf3win radio {position}: {:?}",
+                r3[position].action
+            );
+        }
+        for (position, value) in [(5usize, 2u8), (6, 0), (7, 1)] {
+            assert!(
+                matches!(r3[position].action, DynamicMenuAction::ConfigOptionSet { store_id: 0x3A, value: v } if v == value)
+            );
+        }
+        for (position, value) in [(8usize, 1u8), (9, 0)] {
+            assert!(
+                matches!(r3[position].action, DynamicMenuAction::ConfigOptionSet { store_id: 0x3B, value: v } if v == value)
+            );
+        }
+        assert!(matches!(
+            r3[11].action,
+            DynamicMenuAction::ConfigOptionSet2 { store_id: 2, .. }
+        ));
+        assert!(matches!(
+            r3[12].action,
+            DynamicMenuAction::ConfigOptionSet2 {
+                store_id: 2,
+                value: 0
+            }
+        ));
+        assert!(matches!(
+            r3[14].action,
+            DynamicMenuAction::ConfigOptionSet {
+                store_id: 0xA5,
+                value: 1
+            }
+        ));
+        for position in [2usize, 3, 10] {
+            assert!(
+                matches!(
+                    r3[position].action,
+                    DynamicMenuAction::ConfigOptionRow { .. }
+                ),
+                "undug conf3win row {position}"
+            );
+        }
+
+        let r6 = config_window_rows(
+            "conf6win",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(r6.len(), 15);
+        for (position, store_id) in [(0usize, 0x3Eu32), (3, 0x40), (6, 0x43)] {
+            assert!(
+                matches!(r6[position].action, DynamicMenuAction::ConfigSliderEdit { store_id: s } if s == store_id),
+                "conf6win slider row {position}: {:?}",
+                r6[position].action
+            );
+        }
+        assert_eq!(r6[0].label, "conf6win0: 25");
+        assert_eq!(r6[3].label, "conf6win3: 3");
+        for (position, value) in [(4usize, 0u8), (5, 1), (10, 2)] {
+            assert!(
+                matches!(r6[position].action, DynamicMenuAction::ConfigOptionSet { store_id: 0x42, value: v } if v == value)
+            );
+        }
+        for position in [7usize, 8, 9] {
+            assert!(
+                matches!(
+                    r6[position].action,
+                    DynamicMenuAction::ConfigOptionRow { .. }
+                ),
+                "conf6win row {position} placeholder"
+            );
+        }
+        // Store 0x9D writes through the primary wrapper, so its active-row
+        // mark comes from `option_values` (handler FFXiMain.dll retail-2026-09
+        // RVA 0x19B358), not bank 2.
+        let mut primary = std::collections::BTreeMap::new();
+        primary.insert(0x9Du32, 1u8);
+        let r6 = config_window_rows(
+            "conf6win",
+            &table,
+            &primary,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(
+            r6[12].label.starts_with(mark),
+            "primary mark on store 0x9D row: {}",
+            r6[12].label
+        );
+    }
+
     /// Gated on a retail install: every law'd config page's DAT item count must
     /// equal the arm table length - each select id inside the handler guard maps
     /// to an arm (conf2win 11, conf13wi 6, conf12wi 14; bead kuluu-o9qt7.20.1).
@@ -6433,6 +6707,8 @@ mod tests {
         table.ensure_loaded(Some(&root));
         for (window, want) in [
             ("conf2win", CONF2WIN_ROW_ARMS.len()),
+            ("conf3win", CONF3WIN_ROW_ARMS.len()),
+            ("conf6win", CONF6WIN_ROW_ARMS.len()),
             ("conf13wi", CONF13WI_RADIO_ARMS.len()),
             ("conf12wi", CONF12WI_RADIO_ARMS.len()),
         ] {

@@ -109,6 +109,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         myroom: s.myroom.map(|m| wire::MyRoom {
             model: m.model,
             sub_map: m.sub_map,
+            door_open: m.door_open,
         }),
 
         mh_2f_unlocked: s.mh_2f_unlocked,
@@ -1604,14 +1605,17 @@ mod tests {
             model: 615,
             sub_map: 2,
             exit_bit: 1,
+            door_open: true,
         });
         let snap = state_to_snapshot(&s);
-        // exit_bit stays session-side: the exit menu is DialogState-driven.
+        // exit_bit stays session-side: the exit menu is DialogState-driven. The open-door byte does
+        // cross, since that byte alone greys myroom's Layout/Remodel rows and flips its caption.
         assert_eq!(
             snap.myroom,
             Some(wire::MyRoom {
                 model: 615,
-                sub_map: 2
+                sub_map: 2,
+                door_open: true
             })
         );
     }

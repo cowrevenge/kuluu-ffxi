@@ -1564,6 +1564,14 @@ impl SceneSnapshot {
 pub struct MyRoom {
     pub model: u16,
     pub sub_map: u8,
+    /// Whether the Mog House door is currently open to visitors. Retail keeps it as one client
+    /// byte (game-state `+0x40C40`, getter FFXiMain.dll retail-2026-09 `.text 0xF96E0`) whose only
+    /// writer is the s2c 0x067 entity update (`.text 0xF9740`, called at `.text 0x9D075`) — and LSB
+    /// ships no such packet, so kuluu owns the byte and flips it optimistically together with the
+    /// MYROOM_IS Open/Close it sends. Reset law is LSB's note: zoning or moving floors clears the
+    /// open flag (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp).
+    #[serde(default)]
+    pub door_open: bool,
 }
 
 /// On-screen fishing arrow during the active mini-game state.
@@ -2771,6 +2779,7 @@ mod tests {
             myroom: Some(MyRoom {
                 model: 257,
                 sub_map: 0,
+                door_open: false,
             }),
             mh_2f_unlocked: None,
             sub_area: None,
@@ -3066,7 +3075,8 @@ mod tests {
                     s.myroom,
                     Some(MyRoom {
                         model: 257,
-                        sub_map: 0
+                        sub_map: 0,
+                        door_open: false
                     })
                 );
                 assert_eq!(s.auction, sample_auction());

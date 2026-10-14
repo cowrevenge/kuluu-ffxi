@@ -195,7 +195,8 @@ fn resolve_menu_entry(
         // selects an extra helper call 0xA1860(50); BOTH paths open the window,
         // so kuluu opens it ungated). Delivery Box (id 2) name-opens `mogpost` — the
         // mail chrome over c2s 0x04D PBX (§53; bead kuluu-o9qt7.13.4). The door row
-        // (id 6) sends its MYROOM_IS select (bead kuluu-o9qt7.13.6); the Remodel row
+        // (id 6) sends its MYROOM_IS select, choosing Kind from the door byte (beads
+        // kuluu-o9qt7.13.6/.13.6.1); the Remodel row
         // (id 7, arm @.text 0x1454E7) name-opens `roomlist` (bead kuluu-o9qt7.13.5).
         // Every select id of the handler now answers.
         (MenuKind::HomeView, _) => {
@@ -1057,12 +1058,21 @@ pub(super) fn confirm_menu_at_cursor(
         stack.pop();
         return None;
     }
-    match resolve_menu_entry(
-        kind,
-        label,
-        graphics.magic_flat_list,
-        graphics.abilities_flat_list,
-    ) {
+    // The myroom door row is identified by its select id (id 6 of handler FFXiMain.dll retail-2026-09
+    // `.text 0x145460`), not by the words on it: while the house stands open the row wears the other
+    // catalog caption, and a label-only match would strand it on "Not supported yet".
+    let door_row = matches!(kind, MenuKind::HomeView)
+        && cursor == kuluu_render::hud::menu::home_door_row_index();
+    match if door_row {
+        MenuDispatch::MogHouseDoor
+    } else {
+        resolve_menu_entry(
+            kind,
+            label,
+            graphics.magic_flat_list,
+            graphics.abilities_flat_list,
+        )
+    } {
         MenuDispatch::OpenMogMenu => {
             // The arm's veto: in a Mog-house capital without being inside your
             // own house it ends at the error sound (FFXiMain.dll retail-2026-09
@@ -1138,11 +1148,10 @@ pub(super) fn confirm_menu_at_cursor(
             None
         }
         MenuDispatch::MogHouseDoor => {
-            // Retail raises MYROOM_IS{Kind=Open} for a closed door (the only arm LSB
-            // can ever reach — see the variant's law); kuluu queues exactly that one
-            // packet per select and keeps the panel open, as the retail arm returns
-            // without touching the window. The caption flip ([holder+0x16]=1 + the
-            // catalog 147 pair) is chrome deferred on bead kuluu-o9qt7.13.6.
+            // One packet per select, keeping the panel open as the retail arm does (it returns
+            // without touching the window). The row's caption rides the DAT catalog pair with the
+            // door byte, and Layout/Remodel go dim while the house is open — both in kuluu-render's
+            // `entry_label` and `menu_row_disabled`.
             if cmd_tx.try_send(AgentCommand::MogHouseDoorSelect).is_err() {
                 push_system_chat_line(
                     scene_state,
@@ -4166,16 +4175,16 @@ mod menu_dispatch_tests {
         );
     }
 
-    /// Confirm-time law for bead kuluu-o9qt7.13.6: the door row (select id 6 of
-    /// handler FFXiMain.dll retail-2026-09 RVA 0x145460, arm @0x14556C) queues exactly
-    /// one MYROOM_IS door select — Kind=Open is the only reachable arm on this wire
-    /// (the door byte at game-state +0x40C40 that predicate .text 0xF96E0 tests has no
-    /// producer while both LSB Kind process()s are "Not implemented";
-    /// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp, vault main_menu.md §59
-    /// addendum 20). A re-select queues a second such packet — retail re-sends too.
-    /// The panel level stays up: the retail arm returns without touching the window.
+    /// Confirm-time law for bead kuluu-o9qt7.13.6/.13.6.1: one press on the door row (select id 6 of
+    /// handler FFXiMain.dll retail-2026-09 `.text 0x145460`, arm @`.text 0x14556C`) queues exactly
+    /// one MYROOM_IS door select. Which Kind that is follows the client's own door byte (Open for a
+    /// shut house, Close for an open one — `codec::moghouse_door_packet`), because LSB implements
+    /// neither kind and ships nothing that could acknowledge it
+    /// (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp; vault main_menu.md §59 addendum 24).
+    /// A re-select queues a second such packet — retail re-sends too. The panel level stays up: the
+    /// retail arm returns without touching the window.
     #[test]
-    fn mog_house_door_row_queues_exactly_one_open_per_select() {
+    fn mog_house_door_row_queues_exactly_one_door_select_per_press() {
         let mut stack = MenuStack::root();
         stack_home_view_with_cursor(&mut stack, kuluu_render::hud::menu::HOME_ROW_OPEN_MOG_HOUSE);
         let mut scene_state = SceneState::default();

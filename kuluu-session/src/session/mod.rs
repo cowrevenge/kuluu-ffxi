@@ -1064,11 +1064,15 @@ fn handle_sub_packet(
                 mog.in_myroom = login.myroom.is_some_and(|m| {
                     m.login_state == decode::ServerLoginMyroom::LOGIN_STATE_MYROOM
                 });
+                // A fresh myroom cluster always starts with the door shut: retail's open byte is
+                // game-state-only and LSB resets it on zoning/floor change
+                // (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp).
                 mog.myroom = login.myroom.and_then(|m| {
                     m.myroom_model().map(|model| crate::state::MyRoomInfo {
                         model,
                         sub_map: m.sub_map_number,
                         exit_bit: m.exit_bit,
+                        door_open: false,
                     })
                 });
                 mog.mog_zone_flag = login.myroom.is_some_and(|m| m.mog_zone_flag != 0);
@@ -4678,16 +4682,18 @@ async fn keepalive_loop(
                         .await;
                     }
                     Some(AgentCommand::MogHouseDoorSelect) => {
-                        send_myroom_is(
-                            map,
-                            codec::MYROOM_IS_KIND_OPEN,
-                            0,
-                            codec::MYROOM_IS_PARAM_DOOR_OPEN,
-                            &mut sub_seq,
-                            server_last_seq,
-                            &event_tx,
-                        )
-                        .await;
+                        // The retail select arm (FFXiMain.dll retail-2026-09 `.text 0x14556C`) sends
+                        // Open for a shut door and Close for an open one, pairing Kind with
+                        // PARAM2::Unk1/Unk2; both come from the client's own door byte because LSB
+                        // implements neither kind and never acknowledges one, so kuluu flips its copy
+                        // in the same step instead of waiting on a reply.
+                        let open_door = mog.myroom.is_some_and(|m| m.door_open);
+                        if let Some(room) = mog.myroom.as_mut() {
+                            room.door_open = !room.door_open;
+                        }
+                        let (kind, param2) = codec::moghouse_door_packet(open_door);
+                        send_myroom_is(map, kind, 0, param2, &mut sub_seq, server_last_seq, &event_tx)
+                            .await;
                     }
                     Some(AgentCommand::MogHouseRemodel { style }) => {
                         // Param1 stays 0: LSB never reads it (validate/process only use

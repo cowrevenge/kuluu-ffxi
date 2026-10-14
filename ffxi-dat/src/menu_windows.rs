@@ -61,6 +61,18 @@ pub const CAPTION_SHORT_CATALOG_FILE_ID: u32 = 55652;
 /// main_menu.md §59 addendum 21). File id resolved through the install's own FTABLE.
 pub const GETTEXT_TABLE_12_CATALOG_FILE_ID: u32 = 55653;
 
+/// The myroom door row's caption pair, fetched by the window's update slot as
+/// GetText **table 0x0E** — closed when the door byte is zero (FFXiMain.dll retail-2026-09
+/// `.text 0x145439`) and open otherwise (`.text 0x145357`). Table 0x0E is
+/// [`CAPTION_CATALOG_TABLE_11_FILE_ID`]; the row's own DAT caption token stays -1.
+pub const MOGHOUSE_DOOR_CAPTION_CLOSED_ID: usize = 666;
+pub const MOGHOUSE_DOOR_CAPTION_OPEN_ID: usize = 667;
+/// …and its help-line pair, GetText **table 0x0D** = [`CAPTION_SHORT_CATALOG_FILE_ID`], closed
+/// FFXiMain.dll retail-2026-09 `.text 0x14541F` / open `.text 0x14533D`. The two setters write
+/// different widget fields (caption `+0x4C` via `.text 0x11ADB0`, help `+0x50` via `.text 0x11ADE0`).
+pub const MOGHOUSE_DOOR_HELP_CLOSED_ID: usize = 147;
+pub const MOGHOUSE_DOOR_HELP_OPEN_ID: usize = 148;
+
 /// Candidate list [`windows_from_root`] consults, newest first.
 pub const MENU_WINDOW_DAT_FILE_IDS: &[u32] = &[NAMED_ROOT_UI_DAT_FILE_ID, LEGACY_UI_DAT_FILE_ID];
 
@@ -1194,5 +1206,38 @@ mod tests {
         bytes[n + 4..n + 8].copy_from_slice(&(999_999u32 << 7 | 0x30u32).to_le_bytes());
         let windows = parse_windows(&bytes);
         assert_eq!(windows.len(), 1);
+    }
+
+    /// The myroom door row's four catalog ids answer in this install, and they pair the way the
+    /// window's update slot pairs them: the caption comes from GetText table 0x0E (`+0x4C` setter),
+    /// the help line from table 0x0D (`+0x50` setter).
+    #[test]
+    fn real_moghouse_door_caption_and_help_pairs_resolve() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let catalog = |file_id| {
+            let loc = root.resolve(file_id).expect("catalog file id");
+            let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
+            crate::dmsg::DmsgTable::parse(&bytes).expect("d_msg catalog")
+        };
+        let captions = catalog(CAPTION_CATALOG_TABLE_11_FILE_ID);
+        assert_eq!(
+            captions.text(MOGHOUSE_DOOR_CAPTION_CLOSED_ID),
+            Some("Open your Mog House to party and alliance members.")
+        );
+        assert_eq!(
+            captions.text(MOGHOUSE_DOOR_CAPTION_OPEN_ID),
+            Some("Close your Mog House to visitors.")
+        );
+        let helps = catalog(CAPTION_SHORT_CATALOG_FILE_ID);
+        assert_eq!(
+            helps.text(MOGHOUSE_DOOR_HELP_CLOSED_ID),
+            Some("Open Mog House")
+        );
+        assert_eq!(
+            helps.text(MOGHOUSE_DOOR_HELP_OPEN_ID),
+            Some("Close Mog House")
+        );
     }
 }

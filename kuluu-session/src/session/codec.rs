@@ -627,17 +627,38 @@ pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Opti
 // 8-byte subpacket, it writes Kind→[+4], Param1→[+5], Param2→u16[+6] and commits 8 bytes
 // via FC4D0 (vault main_menu.md §59 addendum 20).
 
-/// GP_CLI_COMMAND_MYROOM_IS_KIND::Open — the door-row kind (Close=2 is its twin and
-/// never reachable, vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h).
+/// GP_CLI_COMMAND_MYROOM_IS_KIND::Open — the door-row kind for a closed door. Its twin Close=2 is
+/// the other half of the same row (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h); which one
+/// the select sends follows the client's own door byte, exactly as FFXiMain.dll retail-2026-09
+/// `.text 0x14556C` branches on it.
 pub(crate) const MYROOM_IS_KIND_OPEN: u8 = 1;
+
+/// …and ::Close, sent when the client's door byte says the house is already open to visitors.
+pub(crate) const MYROOM_IS_KIND_CLOSE: u8 = 2;
 
 /// …and ::Remodel — the roomlist style rows' kind (bead kuluu-o9qt7.13.5; every remodel
 /// select rides it through sender helper FFXiMain.dll retail-2026-09 .text 0xF0A40).
 pub(crate) const MYROOM_IS_KIND_REMODEL: u8 = 5;
 
-/// GP_CLI_COMMAND_MYROOM_IS_PARAM2::Unk1, sent when opening the mog house door (the
-/// header's Unk2=1 pairs with Close; 615..618 are remodel style ids), same file.
+/// GP_CLI_COMMAND_MYROOM_IS_PARAM2::Unk1, sent when opening the mog house door (the header's
+/// Unk2=1 pairs with Close; 615..618 are remodel style ids), same file.
 pub(crate) const MYROOM_IS_PARAM_DOOR_OPEN: u16 = 0;
+
+/// …and ::Unk2, its closing twin.
+pub(crate) const MYROOM_IS_PARAM_DOOR_CLOSE: u16 = 1;
+
+/// The (Kind, Param2) a single door-row select sends, chosen the way retail's arm picks them from
+/// its door byte (FFXiMain.dll retail-2026-09 `.text 0x14556C` tests game-state `+0x40C40` via
+/// predicate `.text 0xF96E0`, then sends Kind=Open with PARAM2::Unk1 for a shut house and Kind=Close
+/// with PARAM2::Unk2 for an open one — GP_CLI_COMMAND_MYROOM_IS_KIND/::_PARAM2 in
+/// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h).
+pub(crate) fn moghouse_door_packet(door_open: bool) -> (u8, u16) {
+    if door_open {
+        (MYROOM_IS_KIND_CLOSE, MYROOM_IS_PARAM_DOOR_CLOSE)
+    } else {
+        (MYROOM_IS_KIND_OPEN, MYROOM_IS_PARAM_DOOR_OPEN)
+    }
+}
 
 pub fn build_subpacket_myroom_is(sync: u16, kind: u8, param1: u8, param2: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];

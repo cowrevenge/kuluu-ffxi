@@ -525,6 +525,7 @@ mod tests {
                 myroom: Some(MyRoom {
                     model: 256,
                     sub_map: 0,
+                    door_open: false,
                 }),
                 ..Default::default()
             },
@@ -533,7 +534,8 @@ mod tests {
             snap.myroom,
             Some(MyRoom {
                 model: 256,
-                sub_map: 0
+                sub_map: 0,
+                door_open: false
             })
         );
 
@@ -542,7 +544,8 @@ mod tests {
             snap.myroom,
             Some(MyRoom {
                 model: 256,
-                sub_map: 0
+                sub_map: 0,
+                door_open: false
             }),
             "None delta must not clear myroom"
         );
@@ -560,6 +563,7 @@ mod tests {
         snap.myroom = Some(MyRoom {
             model: 257,
             sub_map: 0,
+            door_open: false,
         });
         assert_eq!(
             effective_zone_file_id(&snap),

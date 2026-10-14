@@ -421,6 +421,14 @@ pub struct MyRoomInfo {
     pub model: u16,
     pub sub_map: u8,
     pub exit_bit: u8,
+    /// Client-owned "the door is open to visitors" byte. Retail reads/writes game-state
+    /// `+0x40C40` (getter FFXiMain.dll retail-2026-09 `.text 0xF96E0`, sole writer `.text 0xF9740`
+    /// from the s2c 0x067 entity update); LSB implements neither MYROOM_IS Kind and ships no 0x067,
+    /// so this client keeps the byte. Every fresh myroom cluster rebuilds it as closed, which is
+    /// exactly LSB's stated reset law (zoning / floor change)
+    /// (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp).
+    #[serde(default)]
+    pub door_open: bool,
 }
 
 /// s2c 0x01B JOB_INFO; `job_levels` is indexed by JOBTYPE and `unlocked` bit 0
@@ -4125,16 +4133,16 @@ pub enum AgentCommand {
         sub_job: Option<u8>,
     },
 
-    /// One select on myroom's door row. The retail arm (handler FFXiMain.dll
-    /// retail-2026-09 RVA 0x145460, select-id 6 arm @0x14556C) branches on the
-    /// client-side door byte at game-state +0x40C40 (predicate .text 0xF96E0):
-    /// open door → MYROOM_IS{Kind=Close}, closed door → MYROOM_IS{Kind=Open}
-    /// plus the two widget rewrites 0x118B60(5,5)/(5,7) and byte[holder+0x16]=1
-    /// (vault main_menu.md §59 addendum 20). LSB implements neither Kind process()
-    /// (both are literally "Not implemented" in
-    /// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp), so no server ever
-    /// drives that byte: the closed-door branch is the only reachable behavior on
-    /// this wire, and kuluu sends exactly one Kind=Open packet per select.
+    /// One select on myroom's door row (select id 6 of handler FFXiMain.dll retail-2026-09
+    /// `.text 0x145460`, arm @`.text 0x14556C`). The arm branches on the client-side door byte at
+    /// game-state `+0x40C40` (predicate `.text 0xF96E0`): closed door -> MYROOM_IS{Kind=Open,
+    /// Param2=Unk1(0)}, open door -> MYROOM_IS{Kind=Close, Param2=Unk2(1)} - the Kind and PARAM2
+    /// values in vendor/server/src/map/packets/c2s/0x0cb_myroom_is.h. kuluu answers that same branch
+    /// from [`MyRoomInfo::door_open`] and flips it optimistically: LSB implements neither Kind
+    /// (`process()` is literally "Not implemented" twice in
+    /// vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp) and ships no s2c 0x067, so no wire
+    /// could ever disagree with the client's own byte. Which rows the update slot greys while the
+    /// door is open (Layout / Remodel) lives in kuluu-render's `menu_row_disabled`.
     MogHouseDoorSelect,
 
     /// One confirmed `roomlist` style row: c2s 0x0CB MYROOM_IS Kind=Remodel with

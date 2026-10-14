@@ -629,6 +629,10 @@ pub struct DynamicMenu {
     /// [`refresh_dynamic_menu_rows`] (GetText id [`ROOMLIST_CONFIRM_PROMPT_ID`]; bead
     /// kuluu-o9qt7.13.5.2). `None` while that catalog has not loaded or holds no such string.
     pub roomlist_prompt: Option<String>,
+    /// The myroom door row's caption for the current door state, folded in by
+    /// [`refresh_dynamic_menu_rows`] from [`ConfigDatRows::home_door_captions`]. `None` until that
+    /// catalog loads, in which case the static [`HOME_ROW_OPEN_MOG_HOUSE`] copy shows instead.
+    pub home_door_caption: Option<String>,
     /// Page-1/2 Command-menu selector captions read live from the DAT window
     /// records and short-caption catalog (`menuwind` then `socialme`, display
     /// order). While non-empty, [`entry_label`] prefers it over the static
@@ -1072,6 +1076,12 @@ pub fn entry_label(kind: MenuKind, idx: usize, dynamic: &DynamicMenu) -> &str {
     }
     if matches!(kind, MenuKind::Root) {
         if let Some(label) = dynamic.selector_captions.get(idx) {
+            return label;
+        }
+    }
+    // A shut house and an open one can never share visible text once the catalog has loaded.
+    if matches!(kind, MenuKind::HomeView) && idx == home_door_row_index() {
+        if let Some(label) = dynamic.home_door_caption.as_deref() {
             return label;
         }
     }
@@ -1696,6 +1706,13 @@ pub struct ConfigDatRows {
     /// anchor law vault main_menu.md §7/§16) — window placement IS DAT data
     /// (companion_windows law: each window sits at its record's rect).
     pub frames: std::collections::BTreeMap<String, (i16, i16, i16)>,
+    /// The myroom door row's two visible captions: closed at
+    /// [`ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_CLOSED_ID`] and open at
+    /// `.._OPEN_ID`, both from the caption catalog (index 0 = shut, 1 = open). Retail rewrites the
+    /// row's text field on every `myroom` update — FFXiMain.dll retail-2026-09 `.text 0x145439`
+    /// (shut) / `.text 0x145357` (open), through the caption setter `.text 0x11ADB0` — and picks by
+    /// its door byte, so kuluu picks from [`kuluu_snapshot::MyRoom::door_open`] the same way.
+    pub home_door_captions: [Option<String>; 2],
     /// The roomlist remodel confirm question, read from GetText **table 12 id
     /// [`ROOMLIST_CONFIRM_PROMPT_ID`]** at load — retail's row callback hands exactly that string
     /// to the dialog service (.text FFXiMain.dll retail-2026-09 0x1D6B85 fetches it just before
@@ -1824,6 +1841,23 @@ impl ConfigDatRows {
             }
         }
         self.frames = frames;
+        // …and the door row's two captions, which live in this same catalog (id pair above).
+        let mut captions_pair: [Option<String>; 2] = [None, None];
+        for (slot, id) in [
+            (
+                0usize,
+                ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_CLOSED_ID,
+            ),
+            (
+                1usize,
+                ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_OPEN_ID,
+            ),
+        ] {
+            captions_pair[slot] = catalog
+                .as_ref()
+                .and_then(|c| c.text(id).map(str::to_string));
+        }
+        self.home_door_captions = captions_pair;
         self.roomlist_prompt = usize::try_from(ROOMLIST_CONFIRM_PROMPT_ID)
             .ok()
             .and_then(|i| {
@@ -3734,6 +3768,29 @@ pub const HOME_ROW_DELIVERY_BOX: &str = "Delivery Box";
 /// caption pair); LSB implements neither Kind, so kuluu keeps one reachable form.
 pub const HOME_ROW_OPEN_MOG_HOUSE: &str = "Open Mog House";
 
+/// Which of the two DAT captions the door row wears: index 1 while the client's door byte says the
+/// house is open to visitors, index 0 otherwise (the pair `[shut, open]` comes straight from
+/// [`ConfigDatRows::home_door_captions`], never transcribed). `None` before that catalog loads.
+pub fn home_door_caption(captions: &[Option<String>; 2], door_open: bool) -> Option<&str> {
+    captions[usize::from(door_open)].as_deref()
+}
+
+/// The door row's position in [`HOME_VIEW_ROWS`] — select id 6 of the handler, not a row number.
+pub fn home_door_row_index() -> usize {
+    HOME_VIEW_ROWS
+        .iter()
+        .position(|label| *label == HOME_ROW_OPEN_MOG_HOUSE)
+        .unwrap_or(usize::MAX)
+}
+
+/// Which home-view rows an open door greys: Layout and Remodel (select ids 5 and 7 of the handler),
+/// matched by caption so a re-ordered [`HOME_VIEW_ROWS`] cannot silently move the gate.
+fn home_row_gated_by_door(index: usize) -> bool {
+    HOME_VIEW_ROWS
+        .get(index)
+        .is_some_and(|label| *label == "Layout" || *label == HOME_ROW_REMODEL)
+}
+
 /// The myroom Remodel row — select id 7 of handler FFXiMain.dll retail-2026-09 RVA
 /// 0x145460 (arm @.text 0x1454E7): instance [0x106631e0] refresh + tail-jmp to the
 /// roomlist control's show slot, name-opening `menu    roomlist` (.text 0x1D6820; vault
@@ -3828,11 +3885,21 @@ pub fn menu_row_disabled(
         MenuKind::RoomList => {
             index == ROOMLIST_PATIO_ROW_POSITION && !snap.key_items.contains(&PATIO_BELL_KEY_ITEM)
         }
+        // While the door stands open the myroom update slot parks Layout (select id 5) and Remodel
+        // (id 7) in widget state 5 - dim, select answers only the refusal bell - where its shut-door
+        // path writes the interactive state 0xB: handler FFXiMain.dll retail-2026-09 `.text
+        // 0x145240` calls the widget setter with (id 5, state 5) at `.text 0x1452FE` and (id 7,
+        // state 5) at `.text 0x14531A`, against (id 5, 0xB)/(id 7, 0xB) at `.text 0x1453C6` /
+        // `.text 0x1453ED`. Only the door half of retail's gates is reachable from kuluu data: the
+        // shut-door path also demands helpers `0x97B40` and (for Remodel) `0xF97A0`, neither of
+        // which has a client-side source yet, so those rows stay live while the door is shut.
+        MenuKind::HomeView => {
+            snap.myroom.is_some_and(|room| room.door_open) && home_row_gated_by_door(index)
+        }
         _ => false,
     }
 }
 
-/// The container an openable home-view row browses, keyed by the DAT caption.
 /// The bag identities follow the LSB CONTAINER_ID enum (vendor/server/src/map/
 /// item_container.h: MOGSAFE=1, STORAGE=2, MOGLOCKER=4, MOGSATCHEL=5, MOGSACK=
 /// 6, MOGCASE=7, WARDROBE=8, MOGSAFE2=9 — vault main_menu.md §53); the 'M.Ward.'
@@ -4886,6 +4953,18 @@ pub fn refresh_dynamic_menu_rows(
     if dynamic.roomlist_prompt != config_rows.roomlist_prompt {
         let prompt = config_rows.roomlist_prompt.clone();
         dynamic.roomlist_prompt = prompt;
+    }
+    // The door row wears its caption from the catalog whichever window is open, and `myroom` is a
+    // static-kind menu whose rows never pass through the per-arm loads below.
+    let dat_for_captions = dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v);
+    config_rows.ensure_loaded(dat_for_captions);
+    let wanted_door_caption = home_door_caption(
+        &config_rows.home_door_captions,
+        scene.snapshot.myroom.is_some_and(|room| room.door_open),
+    )
+    .map(str::to_string);
+    if dynamic.home_door_caption != wanted_door_caption {
+        dynamic.home_door_caption = wanted_door_caption;
     }
     let active_kind = match &*mode {
         InputMode::Menu(stack) => stack.current().map(|l| l.kind),
@@ -7407,6 +7486,7 @@ mod tests {
             myroom: Some(kuluu_snapshot::MyRoom {
                 model: 289,
                 sub_map: 0,
+                door_open: false,
             }),
             containers: vec![
                 // Slot 0 carries Gil (retail keeps it in inventory slot 0).
@@ -10395,6 +10475,7 @@ mod tests {
             myroom: Some(kuluu_snapshot::MyRoom {
                 model: 615,
                 sub_map: 1,
+                door_open: false,
             }),
             ..Default::default()
         };
@@ -10405,6 +10486,65 @@ mod tests {
     /// against ROM/165/76.DAT; vault main_menu.md §40 as corrected by §53 —
     /// fourteen named widgets, display order pinned twice over by the geometry
     /// y column 0x15..0xE5 and the records' prev/next chain ring).
+    /// The door row sits at `HOME_VIEW_ROWS` index 5 while the handler answers it as select id 6 —
+    /// rows are never ids (FFXiMain.dll retail-2026-09 `.text 0x145460` switch). Its two DAT
+    /// captions pair shut=index 0 / open=index 1, exactly as the handler fetches them at `.text
+    /// 0x145439` (shut) and `.text 0x145357` (open).
+    #[test]
+    fn home_door_row_index_and_caption_pair_follow_the_handler() {
+        assert_eq!(home_door_row_index(), 5);
+        let captions: [Option<String>; 2] = [
+            Some("Open your Mog House to party and alliance members.".to_string()),
+            Some("Close your Mog House to visitors.".to_string()),
+        ];
+        assert_eq!(
+            home_door_caption(&captions, false),
+            Some("Open your Mog House to party and alliance members.")
+        );
+        assert_eq!(
+            home_door_caption(&captions, true),
+            Some("Close your Mog House to visitors.")
+        );
+    }
+
+    /// The open-door gate: Layout (select id 5) and Remodel (id 7) go dim and refuse their select
+    /// while the house is open to visitors; every other home-view row stays live, and no row is
+    /// greyed while the door is shut or outside a Mog House altogether (handler FFXiMain.dll
+    /// retail-2026-09 `.text 0x1452FE`/`.text 0x14531A`, against the interactive state its shut-door
+    /// path writes at `.text 0x1453C6`/`.text 0x1453ED`).
+    #[test]
+    fn an_open_mog_house_door_greys_layout_and_remodel_only() {
+        let shut = kuluu_snapshot::MyRoom {
+            model: 257,
+            sub_map: 0,
+            door_open: false,
+        };
+        let open = kuluu_snapshot::MyRoom {
+            door_open: true,
+            ..shut
+        };
+
+        for (index, label) in HOME_VIEW_ROWS.iter().enumerate() {
+            let gated = *label == "Layout" || *label == HOME_ROW_REMODEL;
+            let mut snap = kuluu_snapshot::SceneSnapshot::default();
+            assert!(
+                !menu_row_disabled(MenuKind::HomeView, index, &snap),
+                "no myroom at all keeps row {label} live"
+            );
+            snap.myroom = Some(shut);
+            assert!(
+                !menu_row_disabled(MenuKind::HomeView, index, &snap),
+                "a shut house keeps row {label} live"
+            );
+            snap.myroom = Some(open);
+            assert_eq!(
+                menu_row_disabled(MenuKind::HomeView, index, &snap),
+                gated,
+                "row {label} gated={gated} while the door stands open"
+            );
+        }
+    }
+
     #[test]
     fn home_view_rows_and_title_track_the_myro_dat_law() {
         assert_eq!(

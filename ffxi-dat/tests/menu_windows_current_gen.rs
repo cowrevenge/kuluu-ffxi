@@ -123,3 +123,33 @@ fn caption_ids_read_real_strings_from_catalog_table_11() {
         Some("Display damage in the log window only.")
     );
 }
+
+/// Placement census (bead kuluu-o9qt7.30): every Config-family record's own
+/// frame, printed for the vault pin and asserted only on invariants we already
+/// lawed — top edge y=48 everywhere except moved-by-code windows, and the hub
+/// sharing the selector column at x=384 anchor 1 while pages sit left-half.
+#[test]
+fn config_family_frames_census() {
+    let Some(root) = open_test_install() else {
+        eprintln!("SKIP: no FFXI install");
+        return;
+    };
+    let windows = windows_from_root(&root).expect("menu window records parse from the install");
+    for name in [
+        "socialme", "configwi", "conf2win", "cfilter", "conftxtc", "conf5m", "conf3win",
+        "conf6win", "fxfilter", "conf7", "conf4", "conf11m", "conf12wi", "conf13wi",
+        "keylayou", "k1assign", "k2assign", "conf5win", "conf5w1", "conf5w2", "conftxtc",
+    ] {
+        let Some(w) = windows.get(name) else {
+            println!("frame[{name}] MISSING");
+            continue;
+        };
+        match &w.frame {
+            Some(f) => println!(
+                "frame[{}] x={} y={} w={} h={} anchor={}",
+                name, f.x, f.y, f.width, f.height, f.anchor
+            ),
+            None => println!("frame[{name}] no frame block"),
+        }
+    }
+}

@@ -2877,6 +2877,40 @@ pub struct MenuRowActivated {
 /// reuses it so the pane widths can't drift.
 pub const MENU_PANE_WIDTH: f32 = 220.0;
 
+/// Screen-space right anchor of the selector column (retail record x=384 in a
+/// 512-wide design, i.e. flush right with a small margin).
+const MENU_RIGHT_EDGE: f32 = 8.0;
+/// Any window whose record sits left of this design x draws as a side window.
+const LEFT_HALF_MAX_X: f32 = 256.0;
+
+/// The Config-family windows whose DAT record carries no frame block (the
+/// `cfil` fourcc body, bead kuluu-o9qt7.20.1.3): retail still draws them the
+/// class-wide way — fxfilter's parsed rect is the sibling evidence [I].
+pub const CLASS_DEFAULT_FRAME_LEFT_WIDE: (f32, f32, f32) = (16.0, 48.0, 366.0);
+
+fn config_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
+    let name = match kind {
+        MenuKind::RetailConfig => "configwi",
+        MenuKind::RetailConfigPage(page) => RETAIL_CONFIG_PAGE_WINDOWS
+            .get(usize::from(page))
+            .copied()
+            .unwrap_or(""),
+        MenuKind::RetailConfigSub(sub) => RETAIL_CONFIG_SUB_WINDOWS
+            .get(usize::from(sub))
+            .copied()
+            .unwrap_or(""),
+        _ => return None,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    match frames.window_frame(name) {
+        Some(frame) => Some(frame),
+        None if matches!(name, "cfilter") => Some(CLASS_DEFAULT_FRAME_LEFT_WIDE),
+        None => None,
+    }
+}
+
 /// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
 /// (longest: `> Texture Filtering:[Aniso 16x]`, 31 chars) that overflow the
 /// 220px command column at 14px and used to wrap, doubling row heights and
@@ -2915,11 +2949,14 @@ pub fn spawn_main_menu(mut commands: Commands) {
             MainMenu,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(48.0),
-                right: Val::Px(8.0),
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
                 display: Display::None,
                 ..default()
             },
+            bevy::picking::Pickable::IGNORE,
         ))
         .with_children(|root| {
             spawn_companion_frame(root);
@@ -2931,6 +2968,9 @@ pub fn spawn_main_menu(mut commands: Commands) {
 /// a companion never appears to replace its selector (vault main_menu.md §59).
 fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
+    node.position_type = PositionType::Absolute;
+    node.top = Val::Px(48.0);
+    node.right = Val::Px(MENU_RIGHT_EDGE + MENU_PANE_WIDTH);
     node.width = Val::Px(MENU_PANE_WIDTH);
     node.display = Display::None;
     parent
@@ -2964,6 +3004,9 @@ fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
 
 fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
+    node.position_type = PositionType::Absolute;
+    node.top = Val::Px(48.0);
+    node.right = Val::Px(MENU_RIGHT_EDGE);
     node.width = Val::Px(MENU_PANE_WIDTH);
     parent
         .spawn((MainMenuPane, node, bg, border))
@@ -4260,6 +4303,7 @@ pub fn update_main_menu(
 
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
+    config_rows: Res<ConfigDatRows>,
     mut menu_q: Query<
         &mut Node,
         (
@@ -4333,10 +4377,40 @@ pub fn update_main_menu(
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
-    let want_width = Val::Px(pane_width_for(top_kind));
+    let want_width = pane_width_for(top_kind);
+    // Second-window law (vault main_menu.md §59 addendum 10/11): each window is
+    // drawn at its own record rect — left-half Config pages (conf2win…k2assign,
+    // cfilter/fxfilter) open WIDE on the left while the parent list stays
+    // visible in the selector column; right-column kinds keep kuluu's anchor.
+    let place =
+        config_record_frame(top_kind, &config_rows).filter(|(x, _, _)| *x < LEFT_HALF_MAX_X);
     for mut pane_node in pane_q.iter_mut() {
-        if pane_node.width != want_width {
-            pane_node.width = want_width;
+        if let Some((x, y, w)) = place {
+            if pane_node.left != Val::Px(x) {
+                pane_node.left = Val::Px(x);
+            }
+            if pane_node.top != Val::Px(y) {
+                pane_node.top = Val::Px(y);
+            }
+            if !matches!(pane_node.right, Val::Auto) {
+                pane_node.right = Val::Auto;
+            }
+            if pane_node.width != Val::Px(w) {
+                pane_node.width = Val::Px(w);
+            }
+        } else {
+            if !matches!(pane_node.left, Val::Auto) {
+                pane_node.left = Val::Auto;
+            }
+            if pane_node.top != Val::Px(48.0) {
+                pane_node.top = Val::Px(48.0);
+            }
+            if pane_node.right != Val::Px(MENU_RIGHT_EDGE) {
+                pane_node.right = Val::Px(MENU_RIGHT_EDGE);
+            }
+            if pane_node.width != Val::Px(want_width) {
+                pane_node.width = Val::Px(want_width);
+            }
         }
     }
 
@@ -4503,10 +4577,26 @@ pub fn update_main_menu(
         }
         return;
     };
-    let want_width = Val::Px(pane_width_for(parent.kind));
+    let mirror_width = pane_width_for(parent.kind);
+    // The mirror keeps its seat: beside the selector column when that column
+    // still owns its right anchor, and IN the right-anchor seat itself once the
+    // focused window has moved left (retail draws the parent list there).
     for mut frame in comp_frame_q.iter_mut() {
-        if frame.width != want_width {
-            frame.width = want_width;
+        if place.is_some() {
+            if frame.right != Val::Px(MENU_RIGHT_EDGE) {
+                frame.right = Val::Px(MENU_RIGHT_EDGE);
+            }
+        } else {
+            let seat = MENU_RIGHT_EDGE + mirror_width;
+            if frame.right != Val::Px(seat) {
+                frame.right = Val::Px(seat);
+            }
+        }
+        if frame.top != Val::Px(48.0) {
+            frame.top = Val::Px(48.0);
+        }
+        if frame.width != Val::Px(mirror_width) {
+            frame.width = Val::Px(mirror_width);
         }
         if frame.display != Display::Flex {
             frame.display = Display::Flex;
@@ -5209,7 +5299,8 @@ mod tests {
             .init_resource::<crate::hud::HudPanels>()
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
-            .init_resource::<DynamicMenu>();
+            .init_resource::<DynamicMenu>()
+            .init_resource::<ConfigDatRows>();
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<crate::audio::AudioMuteState>();
 
@@ -5446,6 +5537,79 @@ mod tests {
         );
         let (mirror, _, _) = companion_frame_visible(&mut app);
         assert!(!mirror, "and no Commands mirror beside it either");
+    }
+
+    /// The second-window law (vault main_menu.md §59 addendum 11): every
+    /// left-half Config page record sits at x=16,w366, so its rows draw in a
+    /// wide window THERE while the parent list keeps the selector column.
+    /// Frames seeded by hand keep this deterministic on machines without an
+    /// install; `config_family_frames_census` (ffxi-dat) pins the real values.
+    #[test]
+    fn config_pages_open_wide_on_the_left_with_the_parent_kept_right() {
+        let mut app = root_menu_app(0);
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.loaded = true;
+            rows.frames.insert("configwi".into(), (384, 48, 112));
+            rows.frames.insert("conf2win".into(), (16, 48, 366));
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        app.update();
+        {
+            let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+            let pane = q.iter(app.world()).next().expect("pane exists").1;
+            assert!(
+                matches!(pane.left, Val::Auto),
+                "configwi stays in the column"
+            );
+            assert_eq!(pane.right, Val::Px(8.0));
+        }
+
+        stack.push(MenuKind::RetailConfigPage(0)); // conf2win
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        {
+            let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+            let pane = q.iter(app.world()).next().expect("pane exists").1;
+            assert_eq!(pane.left, Val::Px(16.0), "wide page window at record x");
+            assert_eq!(pane.top, Val::Px(48.0));
+            assert_eq!(pane.width, Val::Px(366.0), "record width");
+            assert!(matches!(pane.right, Val::Auto));
+        }
+        let (visible, title, rows) = companion_frame_visible(&mut app);
+        assert!(visible, "the parent list stays visible on the right");
+        assert_eq!(title, menu_title(MenuKind::RetailConfig));
+        assert!(!rows.is_empty());
+
+        // Going back moves nothing: pop closes the page only (retail keeps the
+        // hub), so the column owns its anchor again.
+        let mut back = MenuStack::root();
+        back.push(MenuKind::RetailConfig);
+        app.insert_resource(InputMode::Menu(back));
+        app.update();
+        {
+            let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+            let pane = q.iter(app.world()).next().expect("pane exists").1;
+            assert!(
+                matches!(pane.left, Val::Auto),
+                "back to the selector column"
+            );
+            assert_eq!(pane.right, Val::Px(8.0));
+        }
+    }
+
+    /// cfilter's record carries no frame block (vault main_menu.md §59 addendum
+    /// 11): kuluu falls back to the class-wide rect its sibling fxfilter shows.
+    #[test]
+    fn cfilter_falls_back_to_the_class_wide_rect() {
+        let mut frames = ConfigDatRows::default();
+        frames.frames.insert("fxfilter".into(), (16, 48, 366));
+        assert_eq!(
+            config_record_frame(MenuKind::RetailConfigPage(1), &frames),
+            Some((16.0, 48.0, 366.0)),
+            "cfilter without a record frame gets the class default"
+        );
     }
 
     /// The selector-window law: opening the retail Config hub over the Command

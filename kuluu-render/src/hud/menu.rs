@@ -1628,7 +1628,16 @@ pub const CONFIG_SUB_CONF11S: u8 = 10;
 #[derive(Resource, Default)]
 pub struct ConfigDatRows {
     pub loaded: bool,
+    /// Rows per window root in **record file order** — the handler's select-id space
+    /// (`configwi`'s inline class handler FFXiMain.dll retail-2026-09 RVA 0x196770 switches on
+    /// `select-id − 1`, jump table .text 0x1968A4, so the arm tables index this order).
     pub by_root: std::collections::BTreeMap<String, Vec<(u32, String)>>,
+    /// Each root's row block y in the same file order as [`Self::by_root`]. Retail draws a
+    /// page wherever each item block says (`y`, then `x`) and that order is NOT select-id
+    /// order — measured on `configwi`, whose thirteen rows display as ids
+    /// 1,2,3,4,10,5,6,11,12,7,8,9,13 (vault main_menu.md §59 addendum 14). The arm stays
+    /// attached to its own row, so only the finished row list is reordered.
+    pub row_ys: std::collections::BTreeMap<String, Vec<i16>>,
     /// Every menu record's own frame (x, y, width in the 512×448 design space;
     /// anchor law vault main_menu.md §7/§16) — window placement IS DAT data
     /// (companion_windows law: each window sits at its record's rect).
@@ -1665,26 +1674,30 @@ impl ConfigDatRows {
         // bead kuluu-o9qt7.20.1). Each row's textA names its caption in this
         // same catalog; chrome blocks carry no string and are dropped.
         let mut by_root = std::collections::BTreeMap::new();
+        let mut row_ys = std::collections::BTreeMap::new();
         for name in config_window_names() {
             if let Some(window) = windows.get(name) {
-                let rows = window
-                    .live_items()
-                    .into_iter()
-                    .filter_map(|it| it.text_a_id.or(it.text_b_id))
-                    .map(|id| {
-                        let label = usize::try_from(id).ok().and_then(|i| {
-                            catalog.as_ref().and_then(|c| c.text(i).map(str::to_string))
-                        });
-                        (
-                            id as u32,
-                            label.unwrap_or_else(|| format!("item text {id}")),
-                        )
-                    })
-                    .collect();
+                let mut rows: Vec<(u32, String)> = Vec::new();
+                let mut ys: Vec<i16> = Vec::new();
+                for item in window.live_items() {
+                    let Some(id) = item.text_a_id.or(item.text_b_id) else {
+                        continue;
+                    };
+                    let label = usize::try_from(id)
+                        .ok()
+                        .and_then(|i| catalog.as_ref().and_then(|c| c.text(i).map(str::to_string)));
+                    rows.push((
+                        id as u32,
+                        label.unwrap_or_else(|| format!("item text {id}")),
+                    ));
+                    ys.push(item.y);
+                }
                 by_root.insert(window.root.clone(), rows);
+                row_ys.insert(window.root.clone(), ys);
             }
         }
         self.by_root = by_root;
+        self.row_ys = row_ys;
         let mut frames = std::collections::BTreeMap::new();
         for (name, window) in &windows {
             if let Some(frame) = &window.frame {
@@ -2480,7 +2493,8 @@ pub fn config_window_rows(
         "conf5win" => CONF5WIN_RADIO_ARMS.get(position).copied(),
         _ => None,
     };
-    table
+    // Built in record file order (select-id space); reordered for display below.
+    let rows = table
         .rows_for(window)
         .iter()
         .enumerate()
@@ -2625,7 +2639,44 @@ pub fn config_window_rows(
                 },
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    reorder_rows_by_record_y(window, table, rows)
+}
+
+/// Reorder a Config page's finished rows into retail **draw** order (item-block `y`, file
+/// order as the tie-break) without disturbing their arms: each row already carries the action
+/// its select-id earned, and only the order the player sees moves (`configwi` draws ids
+/// 1,2,3,4,10,5,6,11,12,7,8,9,13 while its handler still switches on the raw id — vault
+/// main_menu.md §59 addendum 14). A window whose geometry list disagrees with its row count is
+/// left in file order rather than guessed.
+fn reorder_rows_by_record_y(
+    window: &str,
+    table: &ConfigDatRows,
+    rows: Vec<DynamicMenuRow>,
+) -> Vec<DynamicMenuRow> {
+    let Some(ys) = table.row_ys.get(window) else {
+        return rows;
+    };
+    if ys.len() != rows.len() {
+        return rows;
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&index| (ys[index], index));
+    if order
+        .iter()
+        .enumerate()
+        .all(|(position, &index)| position == index)
+    {
+        return rows;
+    }
+    let mut slots: Vec<Option<DynamicMenuRow>> = rows.into_iter().map(Some).collect();
+    let mut ordered = Vec::with_capacity(order.len());
+    for index in order {
+        if let Some(row) = slots[index].take() {
+            ordered.push(row);
+        }
+    }
+    ordered
 }
 
 /// The faqsub Help Desk panel's destinations. The DAT `faqs` chunk is
@@ -7276,6 +7327,119 @@ mod tests {
     /// conf5w2/conf5w1 then further widgets hit the conf5win arm; every other option
     /// row carries its store-keyed option id. Built from a synthetic table — real rows
     /// come from the DAT at runtime.
+    /// Retail draws a Config page by item-block y, but the handler dispatches on the raw select
+    /// id — `configwi`'s thirteen rows display as ids 1,2,3,4,10,5,6,11,12,7,8,9,13 while its
+    /// jump table stays in id order (vault main_menu.md §59 addendum 14). The reorder therefore
+    /// moves labels only: every row keeps the page drill its own select-id earned.
+    #[test]
+    fn config_page_rows_display_by_record_y_but_keep_their_select_id_arms() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "configwi".to_string(),
+            (0..13u32)
+                .map(|i| (226 + i, format!("hub{}", i + 1)))
+                .collect(),
+        );
+        // The measured y column of configwi's item blocks, in file (= select-id) order.
+        table.row_ys.insert(
+            "configwi".to_string(),
+            vec![6, 22, 38, 54, 86, 102, 150, 166, 182, 70, 118, 134, 198],
+        );
+
+        let hub = config_window_rows(
+            RETAIL_CONFIG_HUB_WINDOW,
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(hub.len(), 13);
+        let labels: Vec<&str> = hub.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "hub1", "hub2", "hub3", "hub4", "hub10", "hub5", "hub6", "hub11", "hub12", "hub7",
+                "hub8", "hub9", "hub13",
+            ],
+        );
+        // Display row 5 is item id 10 → jump-table branch 10 = conf11m, page index 9.
+        assert!(matches!(
+            hub[4].action,
+            DynamicMenuAction::OpenRetailConfigPage { page: 9 }
+        ));
+        // …and every drawn row still carries the page of its OWN select id (the list is what
+        // moves, never the arm): display slot → jump-table branch it came from.
+        let pages_by_display_row: [Option<u8>; 13] = [
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(9),
+            Some(4),
+            Some(5),
+            Some(10),
+            Some(11),
+            Some(6),
+            Some(7),
+            Some(8),
+            None,
+        ];
+        for (position, row) in hub.iter().enumerate() {
+            match (pages_by_display_row[position], &row.action) {
+                (Some(page), DynamicMenuAction::OpenRetailConfigPage { page: got }) => assert_eq!(
+                    *got, page,
+                    "display row {position} ({}) lost its arm",
+                    labels[position]
+                ),
+                (None, DynamicMenuAction::ConfigOptionRow { .. }) => {}
+                (expected, action) => {
+                    panic!(
+                        "hub display row {position} ({}): expected {expected:?}, got {action:?}",
+                        labels[position]
+                    )
+                }
+            }
+        }
+    }
+
+    /// Gated on a retail install: the hub's draw order really is the record y column, and the
+    /// row that lands in display slot 5 opens `conf11m` because its own item id is 10.
+    #[test]
+    fn real_config_hub_rows_draw_in_record_y_order_with_their_own_page_drills() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        assert_eq!(table.rows_for(RETAIL_CONFIG_HUB_WINDOW).len(), 13);
+        assert_eq!(
+            table.row_ys.get(RETAIL_CONFIG_HUB_WINDOW).map(Vec::len),
+            Some(13)
+        );
+
+        let hub = config_window_rows(
+            RETAIL_CONFIG_HUB_WINDOW,
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(
+            hub[4].label.starts_with("Designate which messages appear"),
+            "display row 5: {:?}",
+            hub[4].label
+        );
+        assert!(matches!(
+            hub[4].action,
+            DynamicMenuAction::OpenRetailConfigPage { page: 9 }
+        ));
+        // conf11m is jump-table branch 10; the row that opens it sits in display slot 5.
+        assert_eq!(RETAIL_CONFIG_PAGE_WINDOWS[9], "conf11m");
+    }
+
     #[test]
     fn config_window_rows_assign_handler_ground_actions() {
         let mut table = ConfigDatRows {

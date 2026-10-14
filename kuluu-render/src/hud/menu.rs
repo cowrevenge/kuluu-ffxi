@@ -3870,13 +3870,16 @@ const MENU_RIGHT_EDGE: f32 = 8.0;
 /// Any window whose record sits left of this design x draws as a side window.
 const LEFT_HALF_MAX_X: f32 = 256.0;
 
-/// Where a Config-family window draws: strictly its own menu record's frame.
-/// Every page of the family has one on retail-2026-09 — `cfilter` included,
-/// once its duplicate-chunk collision stopped shadowing the parseable copy
-/// (bead kuluu-o9qt7.20.1.3; vault main_menu.md §59 addendum 12). No page keeps
-/// a placeholder rect: if a record ever fails to carry a frame, placement falls
-/// back to kuluu's default column instead of an invented one.
-fn config_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
+/// Second-window law (bead kuluu-o9qt7.30): every menu window that owns a DAT record draws
+/// at strictly its own record frame. The Status flow first proved it, then the whole Config
+/// family (retail-2026-09 `cfilter` included once its duplicate-chunk collision stopped
+/// shadowing the parseable copy; vault main_menu.md §59 addendum 12), and after the
+/// install-wide census (`real_menu_window_frames_census_surfaces_every_record_rect`, 426
+/// records) every remaining kind whose retail window owns a left-half record joins: each
+/// record name below is that window's own placement data, never an invented placeholder.
+/// Kinds with no owned record (or one sitting on the selector side) fall through to
+/// kuluu's default column.
+fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
     let name = match kind {
         MenuKind::RetailConfig => "configwi",
         MenuKind::RetailConfigPage(page) => RETAIL_CONFIG_PAGE_WINDOWS
@@ -3887,6 +3890,25 @@ fn config_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f
             .get(usize::from(sub))
             .copied()
             .unwrap_or(""),
+        // `/quest` chains through exactly these two windows (vault main_menu.md §31).
+        MenuKind::QuestList => "quest00",
+        MenuKind::QuestDetail { .. } => "quest01",
+        // `miss00` is the only mission-detail record — it serves every port (vault main_menu.md §30).
+        MenuKind::MissionDetail { .. } => "miss00",
+        // Retail opens its trade pair left-half; kuluu merges both windows into one
+        // surface anchored on its own side's record (vault main_menu.md §25).
+        MenuKind::Trade => "trade",
+        // The Linkshell row always name-opens `menu    link5` (vault main_menu.md §27.3).
+        MenuKind::Linkshell => "link5",
+        MenuKind::FriendList => "friend",
+        MenuKind::HomeView => "myroom",
+        MenuKind::JobChange => "jobchang",
+        MenuKind::CraftList => "cmbhlst",
+        // DAT-side anchor for kuluu's collapsed macro line editor (vault main_menu.md §41
+        // [I-shape]): the one surface stands in for retail's mcrbedit/mcrNedit family and
+        // block N draws at `mcr{N}edit`'s own frame.
+        MenuKind::MacroEditor { block: 0, .. } => "mcr1edit",
+        MenuKind::MacroEditor { block: 1, .. } => "mcr2edit",
         _ => return None,
     };
     if name.is_empty() {
@@ -5362,12 +5384,11 @@ pub fn update_main_menu(
         node.display = Display::Flex;
     }
     let want_width = pane_width_for(top_kind);
-    // Second-window law (vault main_menu.md §59 addendum 10/11): each window is
-    // drawn at its own record rect — left-half Config pages (conf2win…k2assign,
-    // cfilter/fxfilter) open WIDE on the left while the parent list stays
-    // visible in the selector column; right-column kinds keep kuluu's anchor.
+    // Second-window law (vault main_menu.md §59 addendum 10/11 and addendum 17):
+    // a left-half companion draws at its own record rect while the parent list
+    // stays visible in the selector column; right-column kinds keep kuluu's seat.
     let place =
-        config_record_frame(top_kind, &config_rows).filter(|(x, _, _)| *x < LEFT_HALF_MAX_X);
+        companion_record_frame(top_kind, &config_rows).filter(|(x, _, _)| *x < LEFT_HALF_MAX_X);
     for mut pane_node in pane_q.iter_mut() {
         if let Some((x, y, w)) = place {
             if pane_node.left != Val::Px(x) {
@@ -6583,6 +6604,84 @@ mod tests {
         }
     }
 
+    /// The whole-record frame census, read live from the install (bead
+    /// kuluu-o9qt7.30): every menu window record's own rect is placement data
+    /// (companion_windows law §4), so the loader must surface them for ALL
+    /// windows, not just the Config family. Prints every left-half window (x <
+    /// 256) — the companion-placement candidate set — and pins that both known
+    /// halves of it resolve: a Status-flow selector (`statcom2`, interactive,
+    /// sits right) next to its display companions (`persona`, `level`) and the
+    /// Config hub (`configwi`).
+    #[test]
+    fn real_menu_window_frames_census_surfaces_every_record_rect() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        let left_half: Vec<(&String, &(i16, i16, i16))> = table
+            .frames
+            .iter()
+            .filter(|(_, (x, _, _))| *x < 256)
+            .collect();
+        // SAFETY: a thin parse would make every contains_key below vacuous; 426 windows
+        // on retail-2026-09, so demand well over a hundred.
+        assert!(
+            table.frames.len() > 100,
+            "frame census too thin: {} windows",
+            table.frames.len()
+        );
+        for name in [
+            "configwi", "statcom2", "persona", "level", "conf2win", "cfilter", "fxfilter",
+            "conf12wi",
+            // Bead kuluu-o9qt7.30: every record the extended companion law places from.
+            "quest00", "quest01", "miss00", "trade", "link5", "friend", "myroom", "jobchang",
+            "cmbhlst", "mcr1edit",
+        ] {
+            assert!(
+                table.frames.contains_key(name),
+                "{name} lost its record frame in the census"
+            );
+        }
+        eprintln!(
+            "FRAME CENSUS ({} windows, {} left-half):",
+            table.frames.len(),
+            left_half.len()
+        );
+        for (name, (x, y, w)) in &left_half {
+            eprintln!("  {name} x={x} y={y} w={w}");
+        }
+        for name in [
+            "missionm",
+            "mgcmenu",
+            "abimenu",
+            "searchma",
+            "lscswin",
+            "commenu",
+            "cmbmenu",
+            "inventor",
+            "link1",
+            "ut_menu",
+            "conftxtc",
+            "keylayout",
+            "prtyjoin",
+            // Absence probes for bead kuluu-o9qt7.30: `None` means the name has no parsed
+            // record frame at all, so nothing companion-places from a DAT rect there.
+            "mcrmenu",
+            "bazaar",
+            "region",
+            "pupequip",
+            "mp_mncst",
+            "keyitem",
+            "quset",
+            "scresult",
+            "emote",
+            "gift",
+        ] {
+            eprintln!("DRILL {name} = {:?}", table.frames.get(name));
+        }
+    }
+
     /// Placement law: every Config page draws at its own menu record's rect; when a
     /// record's frame is unavailable the page falls back to kuluu's normal column,
     /// never to an invented wide-window rect (bead kuluu-o9qt7.20.1.3; vault
@@ -6596,17 +6695,77 @@ mod tests {
             let name = RETAIL_CONFIG_PAGE_WINDOWS[usize::from(page)];
             frames.frames.insert(name.into(), (16, 48, 366));
             assert_eq!(
-                config_record_frame(MenuKind::RetailConfigPage(page), &frames),
+                companion_record_frame(MenuKind::RetailConfigPage(page), &frames),
                 Some((16.0, 48.0, 366.0)),
                 "{name} (page {page}) places from its own record"
             );
         }
         frames.frames.remove("cfilter");
         assert_eq!(
-            config_record_frame(MenuKind::RetailConfigPage(1), &frames),
+            companion_record_frame(MenuKind::RetailConfigPage(1), &frames),
             None,
             "no placeholder survives for a page whose frame is missing"
         );
+    }
+
+    /// The extended second-window law (bead kuluu-o9qt7.30): each companion kind draws
+    /// strictly from its own record — the frames are the retail-2026-09 census values
+    /// (`real_menu_window_frames_census_surfaces_every_record_rect`) — and kinds with no
+    /// owned left-half record keep kuluu's default seat instead of being over-mapped.
+    #[test]
+    fn companion_windows_place_strictly_from_their_own_record() {
+        let mut frames = ConfigDatRows::default();
+        for (name, frame) in [
+            ("quest00", (16, 48, 366)),
+            ("quest01", (16, 48, 366)),
+            ("miss00", (16, 48, 366)),
+            ("trade", (16, 48, 182)),
+            ("link5", (16, 106, 366)),
+            ("friend", (16, 48, 366)),
+            ("myroom", (16, 208, 112)),
+            ("jobchang", (16, 256, 112)),
+            ("cmbhlst", (16, 48, 182)),
+            ("mcr1edit", (16, 48, 480)),
+            ("mcr2edit", (16, 48, 480)),
+        ] {
+            frames.frames.insert(name.into(), frame);
+        }
+        for (kind, name) in [
+            (MenuKind::QuestList, "quest00"),
+            (MenuKind::QuestDetail { log: 1, id: 7 }, "quest01"),
+            (MenuKind::MissionDetail { port: 0x00D0 }, "miss00"),
+            (MenuKind::Trade, "trade"),
+            (MenuKind::Linkshell, "link5"),
+            (MenuKind::FriendList, "friend"),
+            (MenuKind::HomeView, "myroom"),
+            (MenuKind::JobChange, "jobchang"),
+            (MenuKind::CraftList, "cmbhlst"),
+            (MenuKind::MacroEditor { block: 0, index: 1 }, "mcr1edit"),
+            (MenuKind::MacroEditor { block: 1, index: 1 }, "mcr2edit"),
+        ] {
+            assert_eq!(
+                companion_record_frame(kind, &frames),
+                frames.window_frame(name),
+                "{name} must place the window at its own record frame"
+            );
+        }
+        // Over-mapping guards: these kinds have no parsed left-half record of their own
+        // (census [V-negative]: no `bazaar`, and macro launcher/select windows sit on the
+        // selector side), so they keep kuluu's seat.
+        for kind in [
+            MenuKind::MacrosPalette,
+            MenuKind::MacroSelect,
+            MenuKind::MacroResult,
+            MenuKind::BazaarStalls,
+            MenuKind::EmoteList,
+            MenuKind::KeyItems,
+        ] {
+            assert_eq!(
+                companion_record_frame(kind, &frames),
+                None,
+                "{kind:?} keeps kuluu's default seat"
+            );
+        }
     }
 
     /// The selector-window law: opening the retail Config hub over the Command

@@ -330,7 +330,7 @@ pub(super) fn confirm_menu_at_cursor(
     audio_mute: &mut kuluu_render::audio::AudioMuteState,
     vana_clock: &mut kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
-    dynamic: &kuluu_render::hud::menu::DynamicMenu,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
     self_pos: kuluu_snapshot::Vec3,
     command_surface: &crate::view_native::command_surface::CommandSurface,
@@ -523,6 +523,17 @@ pub(super) fn confirm_menu_at_cursor(
             }
             if let A::OpenRetailConfigSub { sub } = action {
                 stack.push(MenuKind::RetailConfigSub(sub));
+                return None;
+            }
+            // A radio row of a law'd config page writes its record through the
+            // store wrapper FFXiMain.dll retail-2026-09 RVA 0x193830(store_id,
+            // value) (vault main_menu.md §58; bead kuluu-o9qt7.20.1): the write
+            // is silent, keeps the window open, and stays on this machine —
+            // LSB's c2s 0x0DC grammar accepts only the named SAVE_CONF bits
+            // (vendor/server/src/map/packets/c2s/0x0dc_config.cpp), never store
+            // options. The row marker arrives with the next refresh.
+            if let A::ConfigOptionSet { store_id, value } = action {
+                dynamic.config_option_values.insert(store_id, value);
                 return None;
             }
             // Leaf option rows: retail changes the value in place with no window
@@ -1343,7 +1354,7 @@ pub(super) fn handle_menu_key(
     item_menu_focus: &mut kuluu_render::hud::item_detail::ItemMenuFocus,
     item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
     item_viewport: &mut kuluu_render::hud::item_screen::ItemListViewport,
-    dynamic: &kuluu_render::hud::menu::DynamicMenu,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
     target_id: Option<u32>,
     self_pos: kuluu_snapshot::Vec3,
     map_state: &mut kuluu_render::hud::map_screen::MapScreenState,
@@ -1849,7 +1860,7 @@ mod menu_key_tests {
                 &mut self.item_menu_focus,
                 &mut self.item_bag,
                 &mut self.item_viewport,
-                &self.dynamic,
+                &mut self.dynamic,
                 None,
                 kuluu_snapshot::Vec3::default(),
                 &mut self.map_state,
@@ -2269,7 +2280,7 @@ mod menu_key_tests {
             &mut harness.item_menu_focus,
             &mut harness.item_bag,
             &mut harness.item_viewport,
-            &harness.dynamic,
+            &mut harness.dynamic,
             target_id,
             kuluu_snapshot::Vec3::default(),
             &mut harness.map_state,
@@ -3268,8 +3279,8 @@ mod menu_dispatch_tests {
         cmd_tx: &Sender<AgentCommand>,
         item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
     ) -> Option<InputMode> {
-        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
-        confirm_row_dynamic(stack, scene_state, cmd_tx, &dynamic, item_bag)
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        confirm_row_dynamic(stack, scene_state, cmd_tx, &mut dynamic, item_bag)
     }
 
     /// Same seam with caller-built dynamic rows — used for the Config family,
@@ -3278,7 +3289,7 @@ mod menu_dispatch_tests {
         stack: &mut MenuStack,
         scene_state: &mut SceneState,
         cmd_tx: &Sender<AgentCommand>,
-        dynamic: &kuluu_render::hud::menu::DynamicMenu,
+        dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
         item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
     ) -> Option<InputMode> {
         use crate::keybinds_store::KeybindsStore;
@@ -3441,8 +3452,8 @@ mod menu_dispatch_tests {
             "configwi".to_string(),
             (0..13u32).map(|i| (200 + i, format!("hub{i}"))).collect(),
         );
-        let dynamic = DynamicMenu {
-            rows: config_window_rows("configwi", &table),
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows("configwi", &table, &std::collections::BTreeMap::new()),
             ..DynamicMenu::default()
         };
         for page in 0..RETAIL_CONFIG_PAGE_WINDOWS.len() {
@@ -3456,7 +3467,7 @@ mod menu_dispatch_tests {
                 &mut stack,
                 &mut scene_state,
                 &cmd_tx,
-                &dynamic,
+                &mut dynamic,
                 &mut item_bag,
             );
             assert_eq!(
@@ -3477,7 +3488,7 @@ mod menu_dispatch_tests {
             &mut stack,
             &mut scene_state,
             &cmd_tx,
-            &dynamic,
+            &mut dynamic,
             &mut item_bag,
         );
         assert_eq!(
@@ -3512,8 +3523,8 @@ mod menu_dispatch_tests {
                 (903, "other".to_string()),
             ],
         );
-        let launcher = DynamicMenu {
-            rows: config_window_rows("conf5m", &table),
+        let mut launcher = DynamicMenu {
+            rows: config_window_rows("conf5m", &table, &std::collections::BTreeMap::new()),
             ..DynamicMenu::default()
         };
         for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
@@ -3527,7 +3538,7 @@ mod menu_dispatch_tests {
                 &mut stack,
                 &mut scene_state,
                 &cmd_tx,
-                &launcher,
+                &mut launcher,
                 &mut item_bag,
             );
             assert_eq!(
@@ -3540,8 +3551,8 @@ mod menu_dispatch_tests {
             "conf7".to_string(),
             vec![(500, "o1".to_string()), (501, "o2".to_string())],
         );
-        let page = DynamicMenu {
-            rows: config_window_rows("conf7", &table),
+        let mut page = DynamicMenu {
+            rows: config_window_rows("conf7", &table, &std::collections::BTreeMap::new()),
             ..DynamicMenu::default()
         };
         let mut stack = MenuStack::root();
@@ -3550,7 +3561,13 @@ mod menu_dispatch_tests {
         let mut scene_state = SceneState::default();
         let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
-        confirm_row_dynamic(&mut stack, &mut scene_state, &cmd_tx, &page, &mut item_bag);
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut page,
+            &mut item_bag,
+        );
         assert_eq!(
             stack.current().map(|l| l.kind),
             Some(MenuKind::RetailConfigPage(7)),
@@ -3561,6 +3578,64 @@ mod menu_dispatch_tests {
             toast.contains("o2") && toast.contains("not implemented"),
             "{toast}"
         );
+    }
+
+    /// `conf5win`'s radio law (bead kuluu-o9qt7.20.1): each row writes its
+    /// jump-table (store id, value) pair into the client-side option store —
+    /// silently, window open, nothing on the wire (LSB's c2s 0x0DC only ever
+    /// accepts SAVE_CONF bits). The next row build marks the chosen one.
+    #[test]
+    fn conf5win_radio_rows_write_the_option_store_and_mark() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf5win".to_string(),
+            (0..16u32).map(|i| (900 + i, format!("opt{i}"))).collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows("conf5win", &table, &std::collections::BTreeMap::new()),
+            ..DynamicMenu::default()
+        };
+        assert!(
+            !dynamic.rows.iter().any(|r| r.label.starts_with('\u{bb}')),
+            "unknown value renders unmarked"
+        );
+
+        // Row 9 is the arm (store 0x12, set value 3).
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigSub(0));
+        stack.current_mut().unwrap().cursor = 9;
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RetailConfigSub(0)),
+            "radio select keeps the window open"
+        );
+        assert_eq!(dynamic.config_option_values.get(&0x12), Some(&3));
+        assert!(
+            !scene_state
+                .local_toasts
+                .iter()
+                .any(|t| t.text.contains("not implemented")),
+            "the law'd row answers with a write, not the placeholder line"
+        );
+
+        let rows = config_window_rows("conf5win", &table, &dynamic.config_option_values);
+        assert_eq!(rows[9].label, "\u{bb} opt9");
+        assert!(!rows[8].label.starts_with('\u{bb}'));
     }
 
     #[test]
@@ -3960,7 +4035,7 @@ mod menu_dispatch_tests {
         let mut audio_mute = Default::default();
         let mut vana_clock = kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0);
         let mut vana_clock_visible = Default::default();
-        let dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
         let surface = crate::view_native::command_surface::CommandSurface::default();
 
         let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
@@ -3977,7 +4052,7 @@ mod menu_dispatch_tests {
             &mut audio_mute,
             &mut vana_clock,
             &mut vana_clock_visible,
-            &dynamic,
+            &mut dynamic,
             None,
             kuluu_snapshot::Vec3::default(),
             &surface,

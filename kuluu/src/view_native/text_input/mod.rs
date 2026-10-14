@@ -275,7 +275,7 @@ pub(crate) fn text_input_system(
 
     mut chat_scroll: ResMut<ChatScroll>,
 
-    dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
+    mut dynamic_menu: ResMut<kuluu_render::hud::menu::DynamicMenu>,
 
     cutscene_mode: Res<kuluu_render::cutscene::CutsceneMode>,
 ) {
@@ -478,7 +478,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.item_menu_focus,
                     &mut slash_writers.item_screen_container,
                     &mut slash_writers.item_viewport,
-                    &dynamic_menu,
+                    &mut dynamic_menu,
                     current_target,
                     self_pos,
                     &mut slash_writers.map_screen_state,
@@ -1215,6 +1215,7 @@ fn sub_target_action_for(
         A::OpenRetailConfigPage { .. }
         | A::OpenRetailConfigSub { .. }
         | A::ConfigOptionRow { .. }
+        | A::ConfigOptionSet { .. }
         | A::DisplayInfo => None,
     }
 }
@@ -1794,9 +1795,12 @@ fn dispatch_dynamic_menu_action(
         // lives) and leaf option rows answer there until bead kuluu-o9qt7.20.1 wires the
         // option store — no wire from here either way (vault main_menu.md §48: retail's
         // value writes are c2s SAVE_CONF frames owned by that bead).
+        // Radio writes answer at the confirm seam (bead kuluu-o9qt7.20.1) —
+        // client-local, never a wire event.
         A::OpenRetailConfigPage { .. }
         | A::OpenRetailConfigSub { .. }
-        | A::ConfigOptionRow { .. } => return,
+        | A::ConfigOptionRow { .. }
+        | A::ConfigOptionSet { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged
@@ -2042,7 +2046,7 @@ pub fn mouse_nav_dispatch_system(
     target: Res<Target>,
     mut scene_state: ResMut<SceneState>,
     mut menu_writers: MenuConfirmWriters,
-    dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
+    mut dynamic_menu: ResMut<kuluu_render::hud::menu::DynamicMenu>,
     command_surface: Res<crate::view_native::command_surface::CommandSurface>,
     mut check_target: ResMut<kuluu_render::hud::check_view::CheckTarget>,
     mut trade_state: ResMut<kuluu_render::hud::trade::TradeState>,
@@ -2072,7 +2076,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut menu_writers.audio_mute,
                 &mut menu_writers.vana_clock,
                 &mut menu_writers.vana_clock_visible,
-                &dynamic_menu,
+                &mut dynamic_menu,
                 current_target,
                 self_pos,
                 &command_surface,

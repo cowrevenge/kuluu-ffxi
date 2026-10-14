@@ -170,6 +170,21 @@ impl MenuWindow {
         items
     }
 
+    /// The window's selectable rows as retail defines them: item blocks in
+    /// FILE order (= select id − 1, §7), dropping chrome — blocks carrying no
+    /// UI string at all (§59). Config windows prove this is the row law and
+    /// NOT the `windowpsNNN` widget list: `conf5win` declares 8 widgets but
+    /// draws and dispatches its 16 captioned items (vault main_menu.md §43/
+    /// §57; engine bead kuluu-o9qt7.20.1), and the Config hub hides its one
+    /// chrome block (id 14, no string).
+    pub fn live_items(&self) -> Vec<&ItemBlock> {
+        self.items
+            .iter()
+            .flatten()
+            .filter(|it| it.text_a_id.is_some() || it.text_b_id.is_some())
+            .collect()
+    }
+
     /// Rows as catalog strings; a caption missing from the table falls back to
     /// its id so a row is never silently dropped.
     pub fn option_rows(&self, mut catalog: impl FnMut(usize) -> Option<String>) -> Vec<String> {
@@ -855,6 +870,52 @@ mod tests {
         (0..table.len())
             .map(|i| table.text(i).unwrap_or("").to_string())
             .collect()
+    }
+
+    /// Gated on a retail install. The config-family row law is ITEM blocks,
+    /// not widgets: `conf5win` dispatches 16 items while carrying only 8
+    /// `windowpsNNN` captions, and every item's own textA resolves through the
+    /// description catalog (vault main_menu.md §43/§59; bead kuluu-o9qt7.20.1).
+    #[test]
+    fn real_conf_family_rows_are_items_not_widgets() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let windows = windows_from_root(&root).expect("menu windows");
+        let win = &windows["conf5win"];
+        assert_eq!(win.option_row_ids().len(), 8, "widget list under-counts");
+        assert_eq!(win.live_items().len(), 16);
+        assert!(
+            windows["configwi"]
+                .items
+                .iter()
+                .flatten()
+                .any(|it| it.id == 14 && it.text_a_id.is_none() && it.text_b_id.is_none()),
+            "the hub's chrome block carries no UI string"
+        );
+        assert_eq!(windows["configwi"].live_items().len(), 13);
+        let loc = root
+            .resolve(CAPTION_CATALOG_TABLE_11_FILE_ID)
+            .expect("catalog");
+        let table = crate::dmsg::DmsgTable::parse(&std::fs::read(loc.path_under(&root)).unwrap())
+            .expect("d_msg");
+        let label_of = |it: &ItemBlock| {
+            it.text_a_id
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| table.text(i))
+                .unwrap_or("")
+                .to_string()
+        };
+        let rows = win.live_items();
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(
+            label_of(rows[0]),
+            "Separate the log window into an upper and lower version."
+        );
+        assert_eq!(
+            label_of(rows[6]),
+            "Set window pattern to type one. (Default)"
+        );
     }
 
     /// Gated on a retail install. Every live row of the three command-menu

@@ -225,11 +225,21 @@ pub enum DynamicMenuAction {
     OpenRetailConfigSub {
         sub: u8,
     },
-    /// A `windowpsNNN` option widget. Its caption id is also the option-store record
-    /// key (vault main_menu.md §43/§48); bead .20.1 turns these into live toggles,
-    /// until then they answer the standard not-implemented line.
+    /// A config row whose select arm is not lawed yet: kuluu keeps its record
+    /// string id (§59) and answers the standard not-implemented line. The store
+    /// ids live per-handler in the jump arms, NOT in this id (§48 correction via
+    /// §58; bead .20.1 converts rows once their arm is read).
     ConfigOptionRow {
         option_id: u32,
+    },
+    /// A radio choice of a law'd config page: select writes
+    /// (store_id, value) through the store wrapper FFXiMain.dll retail-2026-09
+    /// RVA 0x193830 — rows of one group share a store id and each sets its own
+    /// value (vault main_menu.md §58; bead kuluu-o9qt7.20.1). The live value in
+    /// [`DynamicMenu::config_option_values`] marks the active row.
+    ConfigOptionSet {
+        store_id: u32,
+        value: u8,
     },
 
     /// One filled macro slot row of the mcrselec select window (vault
@@ -535,6 +545,12 @@ pub struct DynamicMenu {
     /// ROOT_ENTRIES copy for indices within its range; the copy is pinned to
     /// the catalog by install-gated tests in both crates (bead kuluu-1z9qs).
     pub selector_captions: Vec<String>,
+    /// The client-side config option store, keyed by retail store id (§58;
+    /// bead kuluu-o9qt7.20.1). Absent keys have no known current value — radio
+    /// rows render unmarked rather than guess a default. Config writes stay on
+    /// this machine: LSB's c2s 0x0DC accepts only the named SAVE_CONF bits
+    /// (vendor/server/src/map/packets/c2s/0x0dc_config.cpp), not store options.
+    pub config_option_values: std::collections::BTreeMap<u32, u8>,
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -1100,8 +1116,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::MacroSelect => &[],
         MenuKind::MacroResult => &[],
         // DAT-driven rows: the ConfigDatRows arms of refresh_dynamic_menu_rows read
-        // each window's `windowpsNNN` widgets and captions (vault main_menu.md
-        // §42/§47/§57); no transcribed row content stands here anymore.
+        // each window's captioned item blocks (row law vault main_menu.md §59;
+        // drill law §42/§47; generations §49/§57); no transcribed row content
+        // stands here anymore.
         MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
             &[]
         }
@@ -1472,9 +1489,11 @@ pub const MACRO_ROW_MACRO_RESULT: &str = "Macro Result";
 const MACRO_LAUNCHER_ENTRIES: &[&str] = &[MACRO_ROW_SELECT_MACRO, MACRO_ROW_MACRO_RESULT];
 
 /// The Config family's windows, in kuluu drill order — the shape the DATs cannot
-/// state. Every row label and option id inside these windows lives only in the DATs
-/// (the `windowpsNNN` caption law, vault main_menu.md §43; generations resolved through
-/// VTABLE/FTABLE by [`ffxi_dat::menu_windows::windows_from_root`], never transcribed here).
+/// state. Every row label inside these windows lives only in the DATs: rows are
+/// the item blocks with a UI string (§59; `live_items`), their captions the
+/// textA catalog strings (vault main_menu.md §43/§49/§57; generations resolved
+/// through VTABLE/FTABLE by [`ffxi_dat::menu_windows::windows_from_root`], never
+/// transcribed here).
 ///
 /// Which page window each hub row opens is the handler's jump table: select id i+1 pushes
 /// name literal `RETAIL_CONFIG_PAGE_WINDOWS[i]`, FFXiMain.dll retail-2026-09 RVA 0x196770,
@@ -1497,10 +1516,11 @@ pub const RETAIL_CONFIG_SUB_WINDOWS: [&str; 5] =
     ["conf5win", "conf5w1", "conf5w2", "k1assign", "k2assign"];
 
 /// The Config family's option rows, read from the DATs at runtime: each window kuluu
-/// opens maps to its chunk's `windowpsNNN` widgets in file order (= the handler's select-id
-/// space), labelled through catalog table 11 (vault main_menu.md §43). Loaded once on first
-/// use; a machine without an install shows empty windows rather than any transcribed copy,
-/// per the owner's DAT-first rule.
+/// opens maps to its item blocks in file order (= the handler's select-id space;
+/// `live_items` — NOT the partial widget list, see ffxi-dat's row-law pin),
+/// labelled through their textA catalog strings (vault main_menu.md §43/§59).
+/// Loaded once on first use; a machine without an install shows empty windows
+/// rather than any transcribed copy, per the owner's DAT-first rule.
 #[derive(Resource, Default)]
 pub struct ConfigDatRows {
     pub loaded: bool,
@@ -1523,19 +1543,26 @@ impl ConfigDatRows {
             let bytes = std::fs::read(loc.path_under(root)).ok()?;
             ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
         })();
+        // Rows are ITEM blocks in file order — select ids index them directly
+        // (§7) — never the widget list: `conf5win` dispatches 16 items with
+        // only 8 widgets (ffxi-dat real_conf_family_rows_are_items_not_widgets;
+        // bead kuluu-o9qt7.20.1). Each row's textA names its caption in this
+        // same catalog; chrome blocks carry no string and are dropped.
         let mut by_root = std::collections::BTreeMap::new();
         for name in config_window_names() {
             if let Some(window) = windows.get(name) {
                 let rows = window
-                    .widgets
-                    .iter()
-                    .filter_map(|widget| widget.caption_id)
+                    .live_items()
+                    .into_iter()
+                    .filter_map(|it| it.text_a_id.or(it.text_b_id))
                     .map(|id| {
-                        let label = catalog
-                            .as_ref()
-                            .and_then(|c| usize::try_from(id).ok().and_then(|i| c.text(i)))
-                            .map_or_else(|| format!("windowps{id}"), str::to_string);
-                        (id, label)
+                        let label = usize::try_from(id).ok().and_then(|i| {
+                            catalog.as_ref().and_then(|c| c.text(i).map(str::to_string))
+                        });
+                        (
+                            id as u32,
+                            label.unwrap_or_else(|| format!("item text {id}")),
+                        )
                     })
                     .collect();
                 by_root.insert(window.root.clone(), rows);
@@ -1610,38 +1637,94 @@ fn config_window_names() -> impl Iterator<Item = &'static str> {
         .chain(RETAIL_CONFIG_SUB_WINDOWS)
 }
 
-/// One Config-family window's rows: DAT captions in file order, each carrying its handler-
-/// grounded select action — hub row i name-opens page i (twelve jump-table branches; the
-/// thirteenth widget falls to the default tail), `conf5m`'s widgets drill the log windows,
-/// and every other option row keeps its store id for bead .20.1 while answering the standard
-/// not-implemented line. Empty when the DAT rows are not loaded.
-pub fn config_window_rows(window: &str, table: &ConfigDatRows) -> Vec<DynamicMenuRow> {
+/// Every `conf5win` select arm writes an immediate through the store wrapper
+/// FFXiMain.dll retail-2026-09 RVA 0x193830 — read from that handler's select
+/// jump table .text 0x1994AC of handler RVA 0x199360 (vault main_menu.md §58;
+/// engine bead kuluu-o9qt7.20.1). Row position = DAT widget file order =
+/// select id − 1 (§43): four radio groups — stores 0xB4 and 0xB5 (values
+/// 1/2/0), the eight-row list over store 0x12 (values 0..7) and the pair on
+/// store 0xA4.
+const CONF5WIN_RADIO_ARMS: [(u32, u8); 16] = [
+    (0xB4, 1),
+    (0xB4, 2),
+    (0xB4, 0),
+    (0xB5, 1),
+    (0xB5, 2),
+    (0xB5, 0),
+    (0x12, 0),
+    (0x12, 1),
+    (0x12, 2),
+    (0x12, 3),
+    (0x12, 4),
+    (0x12, 5),
+    (0x12, 6),
+    (0x12, 7),
+    (0xA4, 0),
+    (0xA4, 1),
+];
+
+/// One Config-family window's rows: DAT captions in file order, each carrying
+/// its handler-grounded select action — hub row i name-opens page i (twelve
+/// jump-table branches; the thirteenth widget falls to the default tail),
+/// `conf5m`'s widgets drill the log windows, and every other option row keeps
+/// its store id for bead .20.1 while answering the standard not-implemented
+/// line. A radio group member's label carries the marker when it holds the
+/// store's current value. Empty when the DAT rows are not loaded.
+pub fn config_window_rows(
+    window: &str,
+    table: &ConfigDatRows,
+    option_values: &std::collections::BTreeMap<u32, u8>,
+) -> Vec<DynamicMenuRow> {
+    let radio_arm = |position: usize| match window {
+        "conf5win" => CONF5WIN_RADIO_ARMS.get(position).copied(),
+        _ => None,
+    };
     table
         .rows_for(window)
         .iter()
         .enumerate()
-        .map(|(position, (option_id, label))| DynamicMenuRow {
-            label: label.clone(),
-            action: match window {
-                RETAIL_CONFIG_HUB_WINDOW if position < RETAIL_CONFIG_PAGE_WINDOWS.len() => {
-                    // Hub rows are jump-table branches 1..=12 in order (.text
-                    // 0x1968A4 of handler FFXiMain.dll retail-2026-09 RVA 0x196770;
-                    // vault main_menu.md §42).
-                    DynamicMenuAction::OpenRetailConfigPage {
-                        page: position as u8,
+        .map(|(position, (option_id, label))| {
+            let arm = radio_arm(position);
+            DynamicMenuRow {
+                label: match arm {
+                    Some((store_id, value)) if option_values.get(&store_id) == Some(&value) => {
+                        format!("\u{bb} {label}")
                     }
-                }
-                "conf5m" => match position {
-                    0 => DynamicMenuAction::OpenRetailConfigSub { sub: 2 },
-                    1 => DynamicMenuAction::OpenRetailConfigSub { sub: 1 },
-                    // Third and later widgets answer the arm §47 records as opening
-                    // `conf5win`; its duplicate caption widget is still its own record.
-                    _ => DynamicMenuAction::OpenRetailConfigSub { sub: 0 },
+                    _ => label.clone(),
                 },
-                _ => DynamicMenuAction::ConfigOptionRow {
-                    option_id: *option_id,
+                action: match arm {
+                    Some((store_id, value)) => {
+                        DynamicMenuAction::ConfigOptionSet { store_id, value }
+                    }
+                    None if matches!(window, "conf5win") => {
+                        // Past the law'd arm table the widget keeps its plain
+                        // option-record identity rather than a guessed one.
+                        DynamicMenuAction::ConfigOptionRow {
+                            option_id: *option_id,
+                        }
+                    }
+                    None if window == RETAIL_CONFIG_HUB_WINDOW
+                        && position < RETAIL_CONFIG_PAGE_WINDOWS.len() =>
+                    {
+                        // Hub rows are jump-table branches 1..=12 in order (.text
+                        // 0x1968A4 of handler FFXiMain.dll retail-2026-09 RVA 0x196770;
+                        // vault main_menu.md §42).
+                        DynamicMenuAction::OpenRetailConfigPage {
+                            page: position as u8,
+                        }
+                    }
+                    None if window == "conf5m" => match position {
+                        0 => DynamicMenuAction::OpenRetailConfigSub { sub: 2 },
+                        1 => DynamicMenuAction::OpenRetailConfigSub { sub: 1 },
+                        // Third and later widgets answer the arm §47 records as opening
+                        // `conf5win`; its duplicate caption widget is still its own record.
+                        _ => DynamicMenuAction::OpenRetailConfigSub { sub: 0 },
+                    },
+                    None => DynamicMenuAction::ConfigOptionRow {
+                        option_id: *option_id,
+                    },
                 },
-            },
+            }
         })
         .collect()
 }
@@ -2732,8 +2815,9 @@ pub fn refresh_dynamic_menu_rows(
         // The long-form/line-editor family for one keytop (§34: mcrbedit/
         // mcr1edit/mcr2edit/mcrledit collapse to this drill [I-shape]).
         MenuKind::MacroEditor { block, index } => macro_editor_rows(snap, block, index),
-        // The Config family: every window's rows are its DAT `windowpsNNN` widgets in
-        // file order (caption law §43; generation law §49/§57), actions from the
+        // The Config family: every window's rows are its DAT captioned item blocks
+        // in file order (row law §59 via `live_items`; generation law §49/§57),
+        // actions from the
         // handlers' jump tables (§42 hub map, §47 conf5m arms).
         MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
             config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
@@ -2749,7 +2833,7 @@ pub fn refresh_dynamic_menu_rows(
                     .unwrap_or(""),
                 _ => "",
             };
-            config_window_rows(window, &config_rows)
+            config_window_rows(window, &config_rows, &dynamic.config_option_values)
         }
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // The Status detail windows (bead kuluu-0oy7b): every line is live
@@ -5787,7 +5871,11 @@ mod tests {
             ],
         );
 
-        let hub = config_window_rows(RETAIL_CONFIG_HUB_WINDOW, &table);
+        let hub = config_window_rows(
+            RETAIL_CONFIG_HUB_WINDOW,
+            &table,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(hub.len(), 13);
         for (position, row) in hub.iter().enumerate() {
             if position < RETAIL_CONFIG_PAGE_WINDOWS.len() {
@@ -5806,7 +5894,7 @@ mod tests {
             }
         }
 
-        let launcher = config_window_rows("conf5m", &table);
+        let launcher = config_window_rows("conf5m", &table, &std::collections::BTreeMap::new());
         let subs: Vec<u8> = launcher
             .iter()
             .map(|row| match row.action {
@@ -5816,8 +5904,52 @@ mod tests {
             .collect();
         assert_eq!(subs, vec![2u8, 1, 0]);
 
-        let page = config_window_rows("conf7", &table);
+        let page = config_window_rows("conf7", &table, &std::collections::BTreeMap::new());
         assert!(page.is_empty(), "unloaded window lists nothing");
+    }
+
+    /// The `conf5win` rows carry their jump-table (store id, value) pair and
+    /// only the row matching the store's current value wears the marker
+    /// (bead kuluu-o9qt7.20.1).
+    #[test]
+    fn conf5win_radio_table_marks_the_current_choice() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf5win".to_string(),
+            (0..16u32).map(|i| (900 + i, format!("opt{i}"))).collect(),
+        );
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(0xB4u32, 2u8);
+        let rows = config_window_rows("conf5win", &table, &values);
+        assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
+        for (position, row) in rows.iter().enumerate() {
+            match row.action {
+                DynamicMenuAction::ConfigOptionSet { store_id, value } => {
+                    let (want_store, want_value) = CONF5WIN_RADIO_ARMS[position];
+                    assert_eq!((store_id, value), (want_store, want_value));
+                }
+                other => panic!("radio arm lost to {other:?} at position {position}"),
+            }
+        }
+        // Arms 0..3 are (0xB4,1) (0xB4,2) — the marker sits on row 1 alone.
+        assert_eq!(rows[1].label, "\u{bb} opt1");
+        assert!(!rows[0].label.starts_with('\u{bb}'));
+    }
+
+    /// Gated on a retail install: `conf5win`'s widget count is exactly the
+    /// law'd radio-table length, so no row can silently miss its arm.
+    #[test]
+    fn real_conf5win_widgets_match_the_radio_table() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        let rows = config_window_rows("conf5win", &table, &std::collections::BTreeMap::new());
+        assert_eq!(rows.len(), CONF5WIN_RADIO_ARMS.len());
     }
 
     /// The faqsub panel law (vault main_menu.md §36): three destinations

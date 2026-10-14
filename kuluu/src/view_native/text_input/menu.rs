@@ -580,6 +580,24 @@ pub(super) fn confirm_menu_at_cursor(
                 );
                 return None;
             }
+            // A filter-list page row (`fxfilter`) flips one bit of the single option dword its
+            // window persists: class C's store method (.text FFXiMain.dll retail-2026-09 RVA
+            // 0x198390) writes `[obj+0x30]` back through wrapper 0x193830 and its mark rides the
+            // bit test .text 0x193960 (vault main_menu.md §59 addendum 14; bead kuluu-o9qt7.20.1.3).
+            // Silent, window stays open, nothing on the wire — LSB has no packet for this store
+            // (`vendor/server/src/map/packets/c2s/0x0db_config_language.cpp` carries only
+            // MessageFilter/MessageFilter2).
+            if let A::ConfigOptionToggleBit { store_id, bit } = action {
+                let mask = dynamic
+                    .config_option_values
+                    .get(&store_id)
+                    .copied()
+                    .unwrap_or(0) as u32;
+                dynamic
+                    .config_option_values
+                    .insert(store_id, (mask ^ (1u32 << bit)) as i32);
+                return None;
+            }
             // The window-local pair rows (`conf3win` ids 3/4, arms .text FFXiMain.dll
             // retail-2026-09 RVA 0x19aa85/0x19aa92) write only their own object field
             // — kuluu keeps the choice in `config_window_choices`: never the option
@@ -5047,5 +5065,87 @@ mod menu_dispatch_tests {
             &mut bag,
         );
         assert_eq!(dynamic.config_option_values.get(&0xC2u32), Some(&1i32));
+    }
+
+    /// One select on an `fxfilter` row flips only its own descriptor bit of option
+    /// 0x92 — class C's whole-dword store .text FFXiMain.dll retail-2026-09 RVA
+    /// 0x198390 (vault main_menu.md §59 addendum 14; bead kuluu-o9qt7.20.1.3). The
+    /// page stays open, silent like every other config write: LSB accepts no such
+    /// packet (`vendor/server/src/map/packets/c2s/0x0db_config_language.cpp`).
+    #[test]
+    fn fxfilter_rows_toggle_one_bit_and_keep_the_page_open() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "fxfilter".to_string(),
+            (0..18u32).map(|i| (153 + i, format!("fx{i}"))).collect(),
+        );
+        let mut dynamic = DynamicMenu {
+            rows: config_window_rows(
+                "fxfilter",
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            ),
+            ..DynamicMenu::default()
+        };
+        let mut stack = MenuStack::root();
+        // fxfilter is hub page index 6 of RETAIL_CONFIG_PAGE_WINDOWS.
+        stack.push(MenuKind::RetailConfigPage(6));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        stack.current_mut().unwrap().cursor = 2;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_FILTER_CONSOLE_FLAGS),
+            Some(&(1 << 2))
+        );
+        stack.current_mut().unwrap().cursor = 5;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_FILTER_CONSOLE_FLAGS),
+            Some(&((1 << 2) | (1 << 5)))
+        );
+        // Toggling the first row again clears only its own bit.
+        stack.current_mut().unwrap().cursor = 2;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(
+            dynamic
+                .config_option_values
+                .get(&kuluu_render::hud::menu::CONFIG_OPTION_FILTER_CONSOLE_FLAGS),
+            Some(&(1 << 5))
+        );
+        // The window never closed itself — retail's store method returns to the drawer.
+        assert!(matches!(
+            stack.current().unwrap().kind,
+            MenuKind::RetailConfigPage(6)
+        ));
     }
 }

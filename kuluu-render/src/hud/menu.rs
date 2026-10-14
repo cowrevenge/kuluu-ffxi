@@ -268,6 +268,16 @@ pub enum DynamicMenuAction {
         bit: u8,
         value: i32,
     },
+    /// A filter-list page row (`fxfilter` today): select **flips** one bit of the option dword
+    /// the window persists — class C's load method (.text FFXiMain.dll retail-2026-09 RVA
+    /// 0x198370) reads [`CONFIG_OPTION_FILTER_CONSOLE_FLAGS`] into `[obj+0x30]` and its store
+    /// method (.text 0x198390) writes it straight back; the row's descriptor byte picks the bit.
+    /// Retail has no clear-pair here: the row toggles in place (vault main_menu.md §59
+    /// addendum 14; bead kuluu-o9qt7.20.1.3).
+    ConfigOptionToggleBit {
+        store_id: u32,
+        bit: u8,
+    },
     /// A slider row of a law'd config page (`conf2win` today): select pins the
     /// row into edit mode instead of writing — from then on Left/Right step the
     /// store value ±1 (immediate wrapper FFXiMain.dll retail-2026-09 RVA 0x193830
@@ -1692,6 +1702,25 @@ impl ConfigDatRows {
                     ));
                     ys.push(item.y);
                 }
+                if rows.is_empty() {
+                    // The filter-list windows hold their row table in code — the DAT record behind
+                    // them has fourteen slots and not one string (§59 addendum 12) — while every
+                    // label stays catalog-11 text read here, exactly as the window's drawer asks
+                    // GetText for it (.text FFXiMain.dll retail-2026-09 RVA 0x1983B0; bead
+                    // kuluu-o9qt7.20.1.3).
+                    if let Some(spec) = filter_list_rows(&window.root) {
+                        for row in spec {
+                            let label = usize::try_from(row.caption_id).ok().and_then(|i| {
+                                catalog.as_ref().and_then(|c| c.text(i).map(str::to_string))
+                            });
+                            rows.push((
+                                row.caption_id,
+                                label
+                                    .unwrap_or_else(|| format!("filter option {}", row.caption_id)),
+                            ));
+                        }
+                    }
+                }
                 by_root.insert(window.root.clone(), rows);
                 row_ys.insert(window.root.clone(), ys);
             }
@@ -1821,6 +1850,12 @@ pub enum ConfigRowArm {
     RadioBit {
         bit: u8,
         value: i32,
+    },
+    /// One row of a filter-list window: flips its own descriptor bit of the page's persisted
+    /// option dword (`fxfilter`, see [`FILTER_LIST_FXFILTER_ARMS`]).
+    FilterBit {
+        store_id: u32,
+        bit: u8,
     },
     Slider {
         store_id: u32,
@@ -2305,9 +2340,88 @@ pub fn config_page_arms(window: &str) -> Option<&'static [ConfigRowArm]> {
         "conf7" => Some(&CONF7_ROW_ARMS),
         "conf13wi" => Some(CONF13WI_RADIO_ARMS),
         "conf12wi" => Some(CONF12WI_RADIO_ARMS),
+        "fxfilter" => Some(&FILTER_LIST_FXFILTER_ARMS),
         _ => None,
     }
 }
+
+/// `fxfilter`'s select arms — one per descriptor row of [`FXFILTER_ROWS`]: the bit flips in option
+/// [`CONFIG_OPTION_FILTER_CONSOLE_FLAGS`] (mark law .text FFXiMain.dll retail-2026-09 RVA 0x193960
+/// over `[obj+0x30]`, drawer .text 0x1983B0; vault main_menu.md §59 addendum 14).
+pub const FILTER_LIST_FXFILTER_ARMS: [ConfigRowArm; 18] = [
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 0,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 1,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 2,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 3,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 4,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 5,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 6,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 7,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 8,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 9,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 10,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 11,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 12,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 13,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 14,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 15,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 16,
+    },
+    ConfigRowArm::FilterBit {
+        store_id: CONFIG_OPTION_FILTER_CONSOLE_FLAGS,
+        bit: 17,
+    },
+];
 
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:
@@ -2436,6 +2550,120 @@ pub fn config_window_state_key(window: &str) -> Option<u8> {
 /// state of several Config pairs (`conf12wi` bits 7 and 6, `conf3win` bit 2;
 /// vault main_menu.md §59 addendum 5).
 pub const CONFIG_OPTION_MISC_FLAGS: u32 = 0x99;
+
+/// The one option dword the filter-list window class persists: its load method (.text
+/// FFXiMain.dll retail-2026-09 RVA 0x198370, `fxfilter`'s vtable slot +0x44) reads it through
+/// wrapper 0x193850 into `[obj+0x30]`; its store method (.text 0x198390) writes the same id back
+/// through 0x193830. Every row's state glyph is one bit of it (test helper .text 0x193960,
+/// write helper .text 0x193980). Client-local: LSB carries only MessageFilter/MessageFilter2 on
+/// c2s 0x0DB (`vendor/server/src/map/packets/c2s/0x0db_config_language.cpp`), never this store
+/// (vault main_menu.md §59 addendum 14; bead kuluu-o9qt7.20.1.3).
+pub const CONFIG_OPTION_FILTER_CONSOLE_FLAGS: u32 = 0x92;
+
+/// One row of a filter-list window as its **code-side** descriptor table states it. The DAT
+/// record behind these windows supplies geometry only — all fourteen item blocks there carry no
+/// string at all (vault main_menu.md §59 addendum 12), so the row list is DLL data while every
+/// label stays catalog data read from the DATs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterListRow {
+    /// Bit index inside [`CONFIG_OPTION_FILTER_CONSOLE_FLAGS`] (`descriptor[0]`).
+    pub bit: u8,
+    /// Row caption: catalog table 11 string id (`descriptor+2`, resolved through
+    /// [`CAPTION_CATALOG_TABLE_11_FILE_ID`](ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_11_FILE_ID)).
+    pub caption_id: u32,
+}
+
+/// `fxfilter`'s complete row list = descriptor table .rdata **0x379B08** of FFXiMain.dll
+/// retail-2026-09: exactly eighteen entries `{bit 0..=0x11, zero byte, catalog-11 id 153..170}`.
+/// Its load method returns row count **0x12** (.text 0x198383) and the drawer (.text 0x1983B0)
+/// labels every slot with `GetText(table 0xb, descriptor+2)` through wrapper RVA 0x152EF0 (vault
+/// main_menu.md §59 addendum 14; bead kuluu-o9qt7.20.1.3).
+pub const FXFILTER_ROWS: [FilterListRow; 18] = [
+    FilterListRow {
+        bit: 0,
+        caption_id: 153,
+    },
+    FilterListRow {
+        bit: 1,
+        caption_id: 154,
+    },
+    FilterListRow {
+        bit: 2,
+        caption_id: 155,
+    },
+    FilterListRow {
+        bit: 3,
+        caption_id: 156,
+    },
+    FilterListRow {
+        bit: 4,
+        caption_id: 157,
+    },
+    FilterListRow {
+        bit: 5,
+        caption_id: 158,
+    },
+    FilterListRow {
+        bit: 6,
+        caption_id: 159,
+    },
+    FilterListRow {
+        bit: 7,
+        caption_id: 160,
+    },
+    FilterListRow {
+        bit: 8,
+        caption_id: 161,
+    },
+    FilterListRow {
+        bit: 9,
+        caption_id: 162,
+    },
+    FilterListRow {
+        bit: 10,
+        caption_id: 163,
+    },
+    FilterListRow {
+        bit: 11,
+        caption_id: 164,
+    },
+    FilterListRow {
+        bit: 12,
+        caption_id: 165,
+    },
+    FilterListRow {
+        bit: 13,
+        caption_id: 166,
+    },
+    FilterListRow {
+        bit: 14,
+        caption_id: 167,
+    },
+    FilterListRow {
+        bit: 15,
+        caption_id: 168,
+    },
+    FilterListRow {
+        bit: 16,
+        caption_id: 169,
+    },
+    FilterListRow {
+        bit: 17,
+        caption_id: 170,
+    },
+];
+
+/// The code-side row tables of the filter-list windows. `cfilter`'s table (.rdata **0x379A2C**,
+/// 54 rows `{kind, param, id}`) still lacks its per-row option-lane law — helper
+/// FFXiMain.dll retail-2026-09 RVA 0x1939A0's callee chain maps `kind` onto one of five persisted
+/// dwords (options 0x32/0x33/0x34/0x35/0x47, load .text 0x197F50) — so only `fxfilter` answers
+/// rows yet (bead kuluu-o9qt7.20.1.3).
+pub fn filter_list_rows(window: &str) -> Option<&'static [FilterListRow]> {
+    match window {
+        "fxfilter" => Some(&FXFILTER_ROWS),
+        _ => None,
+    }
+}
 
 /// Base factory templates the two key-assignment panels write through store
 /// wrapper FFXiMain.dll retail-2026-09 RVA 0x193830 when their vtable slot +0x48
@@ -2572,6 +2800,23 @@ pub fn config_window_rows(
                             window_key: key,
                             obj_off: *obj_off,
                             value: *value,
+                        },
+                    };
+                }
+                // A filter-list row's mark is one bit of the page's persisted dword (test helper
+                // .text FFXiMain.dll retail-2026-09 RVA 0x193960 over `[obj+0x30]`); select flips
+                // that bit in place — no pair row, and nothing on the wire.
+                Some(ConfigRowArm::FilterBit { store_id, bit }) => {
+                    let mask = option_values.get(store_id).copied().unwrap_or(0) as u32;
+                    return DynamicMenuRow {
+                        label: if mask & (1u32 << bit) != 0 {
+                            format!("\u{bb} {label}")
+                        } else {
+                            label.clone()
+                        },
+                        action: DynamicMenuAction::ConfigOptionToggleBit {
+                            store_id: *store_id,
+                            bit: *bit,
                         },
                     };
                 }
@@ -7331,6 +7576,95 @@ mod tests {
     /// id — `configwi`'s thirteen rows display as ids 1,2,3,4,10,5,6,11,12,7,8,9,13 while its
     /// jump table stays in id order (vault main_menu.md §59 addendum 14). The reorder therefore
     /// moves labels only: every row keeps the page drill its own select-id earned.
+    /// `fxfilter` row law (vault main_menu.md §59 addendum 14; bead kuluu-o9qt7.20.1.3): all
+    /// eighteen descriptor rows (.rdata FFXiMain.dll retail-2026-09 RVA 0x379B08) toggle their own
+    /// bit of the single persisted dword [`CONFIG_OPTION_FILTER_CONSOLE_FLAGS`] — class C's store
+    /// method .text 0x198390 writes `[obj+0x30]` back whole, and the drawer's mark rides the bit
+    /// test .text 0x193960. A fresh store marks nothing; mask `(1<<3)|(1<<17)` marks exactly rows 3
+    /// and 17.
+    #[test]
+    fn fxfilter_rows_come_from_the_descriptor_table_and_toggle_one_bit() {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "fxfilter".to_string(),
+            FXFILTER_ROWS
+                .iter()
+                .map(|row| (row.caption_id, format!("fx{}", row.bit)))
+                .collect(),
+        );
+
+        let rows = config_window_rows(
+            "fxfilter",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(rows.len(), 18);
+        for (position, row) in rows.iter().enumerate() {
+            assert!(
+                !row.label.starts_with('\u{bb}'),
+                "fresh store marked {position}"
+            );
+            match row.action {
+                DynamicMenuAction::ConfigOptionToggleBit { store_id, bit } => {
+                    assert_eq!(store_id, CONFIG_OPTION_FILTER_CONSOLE_FLAGS);
+                    assert_eq!(
+                        bit, position as u8,
+                        "row {position} lost its descriptor bit"
+                    );
+                }
+                other => panic!("fxfilter row {position}: unexpected {other:?}"),
+            }
+        }
+
+        let mut options = std::collections::BTreeMap::new();
+        options.insert(CONFIG_OPTION_FILTER_CONSOLE_FLAGS, (1 << 3) | (1 << 17));
+        let marked: Vec<usize> = config_window_rows(
+            "fxfilter",
+            &table,
+            &options,
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.label.starts_with('\u{bb}'))
+        .map(|(position, _)| position)
+        .collect();
+        assert_eq!(marked, vec![3, 17]);
+    }
+
+    /// Gated on a retail install: `fxfilter`'s eighteen captions really come from catalog table 11 —
+    /// the DAT record behind the window carries fourteen string-less blocks (§59 addendum 12), so
+    /// any other source would mean kuluu had transcribed the labels itself.
+    #[test]
+    fn real_fxfilter_page_labels_come_from_the_caption_catalog() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut table = ConfigDatRows::default();
+        table.ensure_loaded(Some(&root));
+        // The synthesis path filled the string-less record from the descriptor table.
+        assert_eq!(table.rows_for("fxfilter").len(), 18);
+        assert_eq!(table.rows_for("fxfilter")[0].0, 153);
+
+        let rows = config_window_rows(
+            "fxfilter",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(rows.len(), 18);
+        assert_eq!(rows[0].label, "Return key assignments to default settings.");
+        // Bit 4 ↔ catalog id 157 (vault §59 addendum 14 row table).
+        assert_eq!(rows[4].label, "Play music in stereo.");
+    }
+
     #[test]
     fn config_page_rows_display_by_record_y_but_keep_their_select_id_arms() {
         let mut table = ConfigDatRows {

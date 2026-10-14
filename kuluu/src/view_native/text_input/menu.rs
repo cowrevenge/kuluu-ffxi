@@ -586,6 +586,20 @@ pub(super) fn confirm_menu_at_cursor(
             // the MYROOM_IS sender (vault main_menu.md §59 addendum 20/21; bead
             // kuluu-o9qt7.13.5). The prompt opens on No, like every retail confirm.
             if let A::MogHouseRemodelSelect { style } = action {
+                // The patio row keeps its bell: retail leaves that row dim and turns its
+                // select into nothing but the error bell (.text FFXiMain.dll retail-2026-09
+                // 0x1D6B63), so with no key item 3051 there is no prompt and no send
+                // (bead kuluu-o9qt7.13.5.1).
+                let gated = stack.current().is_some_and(|level| {
+                    kuluu_render::hud::menu::menu_row_disabled(
+                        MenuKind::RoomList,
+                        level.cursor,
+                        &scene_state.snapshot,
+                    )
+                });
+                if gated {
+                    return None;
+                }
                 stack.push(MenuKind::RoomListConfirm { style });
                 if let Some(level) = stack.current_mut() {
                     level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
@@ -4172,8 +4186,29 @@ mod menu_dispatch_tests {
         );
         assert!(cmd_rx.try_recv().is_err(), "row 0 never reaches the wire");
 
-        // Row 4 = Mog Patio (618): select raises the prompt on No…
+        // Row 4 = Mog Patio (618) is gated before it answers anything: retail keeps the row
+        // dim and reduces its select to the error bell until the character owns key item
+        // 3051 (.text FFXiMain.dll retail-2026-09 0x1D6B63), so no prompt opens and nothing
+        // reaches the wire.
         stack.current_mut().unwrap().cursor = 4;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut item_bag,
+        );
+        assert_eq!(
+            stack.current().map(|l| l.kind),
+            Some(MenuKind::RoomList),
+            "without the patio bell the row answers nothing"
+        );
+
+        // Earn the bell through the s2c 0x055 have store and the same select works.
+        scene_state
+            .snapshot
+            .key_items
+            .push(kuluu_render::hud::menu::PATIO_BELL_KEY_ITEM);
         confirm_row_dynamic(
             &mut stack,
             &mut scene_state,

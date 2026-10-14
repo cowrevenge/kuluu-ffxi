@@ -3780,6 +3780,34 @@ const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [450, 446, 447, 448, 449];
 /// refreshes — no wire, ever.
 pub const ROOMLIST_ROW_STYLES: [u16; 5] = [0, 615, 616, 617, 618];
 
+/// The one roomlist row that needs the patio bell before it answers anything: record
+/// position 4 (style word 618). The pool builder stores `HasKeyItem(3051)` into roomlist
+/// object +0x51 (.text FFXiMain.dll retail-2026-09 0x1D6890); without it the row paints in
+/// the dim colour word 0x80404040 (.text 0x1D6A1A) and its select is only the error bell
+/// (.text 0x1D6B63) — neither the confirm dialog nor the MYROOM_IS send is reached.
+pub const ROOMLIST_PATIO_ROW_POSITION: usize = 4;
+pub const PATIO_BELL_KEY_ITEM: u16 = 3051;
+
+/// The single place that decides which rows draw dim and refuse their select, so no window
+/// can grey a row its handler still answers. Status gates per entry kind (the `statcom2`
+/// open code disables ids 3/4/5/12/13 at .text FFXiMain.dll retail-2026-09 0x148B50, and
+/// content lifts it); the roomlist gates its patio row on [`PATIO_BELL_KEY_ITEM`].
+pub fn menu_row_disabled(
+    kind: MenuKind,
+    index: usize,
+    snap: &kuluu_snapshot::SceneSnapshot,
+) -> bool {
+    match kind {
+        MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
+            .get(index)
+            .is_some_and(|entry| !crate::hud::status_panel::status_row_enabled(entry.kind, snap)),
+        MenuKind::RoomList => {
+            index == ROOMLIST_PATIO_ROW_POSITION && !snap.key_items.contains(&PATIO_BELL_KEY_ITEM)
+        }
+        _ => false,
+    }
+}
+
 /// The container an openable home-view row browses, keyed by the DAT caption.
 /// The bag identities follow the LSB CONTAINER_ID enum (vendor/server/src/map/
 /// item_container.h: MOGSAFE=1, STORAGE=2, MOGLOCKER=4, MOGSATCHEL=5, MOGSACK=
@@ -5699,12 +5727,7 @@ pub fn update_main_menu(
         // (FFXiMain.dll retail-2026-09 `.text 0x148B50`), and its dim is exactly half
         // of ordinary grey — the same pair read for roomlist's gated row, where a
         // disabled line paints 0x80404040 instead of 0x80808080 (`.text 0x1D6A1A`).
-        let gated = matches!(view.kind, MenuKind::Status)
-            && crate::hud::status_panel::STATUS_ENTRIES
-                .get(list_idx)
-                .is_some_and(|entry| {
-                    !crate::hud::status_panel::status_row_enabled(entry.kind, &scene.snapshot)
-                });
+        let gated = menu_row_disabled(view.kind, list_idx, &scene.snapshot);
         let base_color = if gated {
             theme::TEXT_DISABLED
         } else if is_cursor {
@@ -6842,6 +6865,39 @@ mod tests {
     /// FFXiMain.dll retail-2026-09 RVA 0x1D6B52 tests its style word zero and only
     /// refreshes/blips (.text 0x1D6B10), never arming a send — and every
     /// other row's action carries its Param2 style for the confirm→send chain.
+    /// One law decides dim rows for both gated windows: Status gates per entry kind (the
+    /// `statcom2` open code disables ids 3/4/5/12/13 at .text FFXiMain.dll retail-2026-09
+    /// 0x148B50 and content lifts it), and the roomlist gates only its patio row, on key item
+    /// 3051 (dim word .text 0x1D6A1A; bell-only select .text 0x1D6B63).
+    #[test]
+    fn disabled_rows_track_their_own_gate() {
+        let plain = kuluu_snapshot::SceneSnapshot::default();
+        assert!(
+            menu_row_disabled(MenuKind::RoomList, ROOMLIST_PATIO_ROW_POSITION, &plain),
+            "the patio row is dim without the bell"
+        );
+        for position in 0..ROOMLIST_ROW_STYLES.len() {
+            if position == ROOMLIST_PATIO_ROW_POSITION {
+                continue;
+            }
+            assert!(
+                !menu_row_disabled(MenuKind::RoomList, position, &plain),
+                "roomlist row {position} is live whatever the bell says"
+            );
+        }
+
+        let mut with_bell = kuluu_snapshot::SceneSnapshot::default();
+        with_bell.key_items.push(PATIO_BELL_KEY_ITEM);
+        assert!(
+            !menu_row_disabled(MenuKind::RoomList, ROOMLIST_PATIO_ROW_POSITION, &with_bell),
+            "owning the bell lifts the row"
+        );
+
+        // Status keeps its own gate through the same door: Combat Skill (row 3) is dim until
+        // s2c 0x062 brings a visible word.
+        assert!(menu_row_disabled(MenuKind::Status, 3, &plain));
+    }
+
     #[test]
     fn roomlist_rows_carry_their_style_words_and_actions() {
         let mut table = ConfigDatRows {

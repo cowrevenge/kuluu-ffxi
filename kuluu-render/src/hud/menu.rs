@@ -3900,6 +3900,10 @@ fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32
         MenuKind::Trade => "trade",
         // The Linkshell row always name-opens `menu    link5` (vault main_menu.md §27.3).
         MenuKind::Linkshell => "link5",
+        // kuluu's Search surface lists the model results (§26 select law), which in retail is
+        // the boot-instantiated `scresult` window — never name-opened, always drawn from its
+        // record (vault main_menu.md §59 addendum 18 [V]).
+        MenuKind::Search => "scresult",
         MenuKind::FriendList => "friend",
         MenuKind::HomeView => "myroom",
         MenuKind::JobChange => "jobchang",
@@ -6636,7 +6640,7 @@ mod tests {
             "conf12wi",
             // Bead kuluu-o9qt7.30: every record the extended companion law places from.
             "quest00", "quest01", "miss00", "trade", "link5", "friend", "myroom", "jobchang",
-            "cmbhlst", "mcr1edit",
+            "cmbhlst", "mcr1edit", "scresult",
         ] {
             assert!(
                 table.frames.contains_key(name),
@@ -6721,6 +6725,7 @@ mod tests {
             ("miss00", (16, 48, 366)),
             ("trade", (16, 48, 182)),
             ("link5", (16, 106, 366)),
+            ("scresult", (16, 48, 366)),
             ("friend", (16, 48, 366)),
             ("myroom", (16, 208, 112)),
             ("jobchang", (16, 256, 112)),
@@ -6736,6 +6741,7 @@ mod tests {
             (MenuKind::MissionDetail { port: 0x00D0 }, "miss00"),
             (MenuKind::Trade, "trade"),
             (MenuKind::Linkshell, "link5"),
+            (MenuKind::Search, "scresult"),
             (MenuKind::FriendList, "friend"),
             (MenuKind::HomeView, "myroom"),
             (MenuKind::JobChange, "jobchang"),
@@ -6749,9 +6755,11 @@ mod tests {
                 "{name} must place the window at its own record frame"
             );
         }
-        // Over-mapping guards: these kinds have no parsed left-half record of their own
-        // (census [V-negative]: no `bazaar`, and macro launcher/select windows sit on the
-        // selector side), so they keep kuluu's seat.
+        // Over-mapping guards, per bead kuluu-o9qt7.30.1 waivers: the `emote` window is never
+        // name-opened (its two DLL string copies have zero xrefs — vault main_menu.md §59
+        // addendum 18) so EmoteList keeps its seat; macro launcher/select windows sit on the
+        // selector side (census); bazaar/region/pupequip/mp_mncst share the 384 seat. `quset`
+        // is a dead DAT alias — the bytes "quset" appear nowhere in FFXiMain.dll [V-neg].
         for kind in [
             MenuKind::MacrosPalette,
             MenuKind::MacroSelect,

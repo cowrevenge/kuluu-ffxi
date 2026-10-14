@@ -153,6 +153,10 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
             "LogOutPrompt"
         }
         .into(),
+        // The Config family's reset dialog echoes the family caption (its retail body
+        // text is a DAT string, catalog table 0xb id 0x8F; vault main_menu.md §59
+        // addenda 7–8).
+        kuluu_render::MenuKind::KeyAssignResetPrompt => "Config".into(),
     }
 }
 

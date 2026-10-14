@@ -277,6 +277,15 @@ pub enum DynamicMenuAction {
         store_id: u32,
     },
 
+    /// The dialog row of `conf6win` (select id 10, arm .text FFXiMain.dll
+    /// retail-2026-09 RVA 0x19B309): nothing is written at select — the handler only launches
+    /// a yes/no prompt through the generic dialog service object ([0x10664520],
+    /// FFXiMain.dll retail-2026-09 RVA 0x210E30) and returns. The callback .text 0x196F30
+    /// acts on the answer: non-zero (Yes) tail-calls vtable slot +0x48 on both
+    /// key-assignment panels, writing their factory-default templates through store wrapper
+    /// RVA 0x193830 — see [`key_assign_reset_defaults`]; No writes nothing (vault main_menu.md §59 addenda 7–8; bead kuluu-o9qt7.20.1.1).
+    OpenKeyAssignResetPrompt,
+
     /// One filled macro slot row of the mcrselec select window (vault
     /// main_menu.md §41). Selecting stays inert until the macro-use seam is
     /// lawed end to end — the DAT grids prove capacity (2 blocks x 20 keytops),
@@ -1120,6 +1129,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::ItemAction { .. } => &[],
         MenuKind::ItemDropConfirm { .. } => DROP_CONFIRM_ENTRIES,
         MenuKind::PowerPrompt { .. } => DROP_CONFIRM_ENTRIES,
+        // The key-assignment reset prompt answers through the same Yes/No law as
+        // every other retail confirm (dialog service FFXiMain.dll retail-2026-09
+        // RVA 0x210E30; vault main_menu.md §59 addenda 7–8).
+        MenuKind::KeyAssignResetPrompt => DROP_CONFIRM_ENTRIES,
         // The pick list is always snapshot-built (equip_slot_rows); an empty bag
         // renders the `empty_dynamic_hint` for this kind, never a loading stub.
         MenuKind::EquipSlot(_) => &[],
@@ -1258,6 +1271,8 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::PowerPrompt {
             shut_down: false, ..
         } => ROOT_LOG_OUT,
+        // The reset prompt belongs to the Config family; retail's dialog carries its body text from DAT (caption catalog table 0xb, string id 0x8F), so kuluu keeps the family title for the frame.
+        MenuKind::KeyAssignResetPrompt => "Config",
         MenuKind::Status => "Status",
         // The companion window's retail title IS its subject; the detail table
         // (FFXiMain.dll retail-2026-09 RVA 0x3716B8) opens each under the same
@@ -1781,11 +1796,13 @@ pub enum ConfigRowArm {
         mode: i32,
         opens: &'static [u8],
     },
-    /// Position in a law'd page whose select arm is not dug yet (window-local
-    /// flag rows and the dialog arm at conf6win id 10, conf3win ids 3/4 and
-    /// the conf3win slider entry id 11 - handlers FFXiMain.dll retail-2026-09
-    /// RVA 0x19B200/0x19AA10): keeps the option-record fallback while its dig
-    /// completes on bead kuluu-o9qt7.20.1.
+    /// A confirm-dialog row: select launches a Yes/No prompt (retail through
+    /// the generic dialog service object [0x10664520], FFXiMain.dll retail-2026-09 RVA 0x210E30) and answers later — on Yes the callback factory-resets both key-assignment option ranges (see [`key_assign_reset_defaults`]); No is inert (`conf6win` select id 10, arm .text FFXiMain.dll retail-2026-09 RVA 0x19B309; vault main_menu.md §59 addenda 7–8).
+    ConfirmResetKeyAssignments,
+    /// Position in a law'd page whose select arm is not dug yet (the window-local
+    /// flag rows at conf3win ids 3/4 — handler FFXiMain.dll retail-2026-09 RVA
+    /// 0x19AA10): keeps the option-record fallback while its dig completes on
+    /// bead kuluu-o9qt7.20.1.
     Plain,
 }
 
@@ -1973,10 +1990,12 @@ const CONF6WIN_ROW_ARMS: [ConfigRowArm; 15] = [
     ConfigRowArm::Slider { store_id: 0x43 },
     // Ids 8/9 are the name-opens through menu manager FFXiMain.dll
     // retail-2026-09 RVA 0x15E350 (padded immediates `menu    k1assign`/
-    // `menu    k2assign`); id10 is the GetText+dialog arm, still a gap.
+    // `menu    k2assign`); id10 is the confirm-dialog arm (.text 0x19B309 —
+    // GetText(table 0xb, string id 0x8F) into buffer [0x106626D8], then the
+    // dialog service; vault main_menu.md §59 addenda 7–8).
     ConfigRowArm::Sub { sub: 3 },
     ConfigRowArm::Sub { sub: 4 },
-    ConfigRowArm::Plain,
+    ConfigRowArm::ConfirmResetKeyAssignments,
     ConfigRowArm::Radio {
         store_id: 0x42,
         value: 2,
@@ -2333,6 +2352,38 @@ pub fn config_page_supports_slider_pin(window: &str) -> bool {
 /// vault main_menu.md §59 addendum 5).
 pub const CONFIG_OPTION_MISC_FLAGS: u32 = 0x99;
 
+/// Base factory templates the two key-assignment panels write through store
+/// wrapper FFXiMain.dll retail-2026-09 RVA 0x193830 when their vtable slot +0x48
+/// runs (.text 0x19d1c0 for `k1assign`, .text 0x19ce70 for `k2assign` — the same method both constructors tail-invoke). Index is the panel's shadow byte (+0x29..=+0x48): k1 maps it to option ids **0x4A..=0x69** (offset + 0x21, loop .text 0x19d285) and k2 to **0x6A..=0x89** (offset + 0x41, loop .text 0x19cf2b).
+/// Retail patches a few bytes when its keyboard-layout selector `[0x10456a28]+8` reports 2 or 3 (.text blocks 0x19d24e/0x19d272 and 0x19cf03/0x19cf19) — that selector is undug [I], so kuluu ships the base template until it lands with the live keymap (bead kuluu-o9qt7.26.1). These are DLL-code immediates, not DAT content, so encoding them here stands under the DAT-first rule.
+const KEY_ASSIGN_K1_DEFAULTS: [i32; 32] = [
+    0x11, 0x1f, 0x1e, 0x20, 0x17, 0x25, 0x24, 0x26, 0x00, 0x00, 0x00, 0x00, 0x34, 0x33, 0x00, 0x00,
+    0x00, 0x00, 0x15, 0x31, 0x2f, 0x13, 0x23, 0x21, 0x0c, 0x2c, 0x1b, 0x1a, 0x12, 0x10, 0x00, 0x00,
+];
+const KEY_ASSIGN_K2_DEFAULTS: [i32; 32] = [
+    0x1e, 0x17, 0x32, 0x24, 0x11, 0x30, 0x15, 0x31, 0x0c, 0x21, 0x1b, 0x1a, 0x2c, 0x34, 0x33, 0x00,
+    0x00, 0x12, 0x2f, 0x23, 0x2e, 0x1f, 0x19, 0x14, 0x26, 0x13, 0x16, 0x2d, 0x10, 0x00, 0x00, 0x00,
+];
+
+/// The first option id of each panel's store range (k1 loop edi=0x4A..0x69;
+/// k2 edi=0x6A..0x89).
+pub const KEY_ASSIGN_K1_FIRST_OPTION: u32 = 0x4A;
+pub const KEY_ASSIGN_K2_FIRST_OPTION: u32 = 0x6A;
+
+/// All (option_id, default) pairs the reset writes — the Yes branch of `conf6win`'s dialog row. Client-local like every other config-store law: LSB's c2s 0x0DC accepts only the named SAVE_CONF bits (vendor/server/src/map/packets/c2s/0x0dc_config.cpp).
+pub fn key_assign_reset_defaults() -> impl Iterator<Item = (u32, i32)> + Clone {
+    KEY_ASSIGN_K1_DEFAULTS
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| (KEY_ASSIGN_K1_FIRST_OPTION + i as u32, value))
+        .chain(
+            KEY_ASSIGN_K2_DEFAULTS
+                .iter()
+                .enumerate()
+                .map(|(i, &value)| (KEY_ASSIGN_K2_FIRST_OPTION + i as u32, value)),
+        )
+}
+
 /// One Config-family window's rows: DAT captions in file order, each carrying
 /// its handler-grounded select action — hub row i name-opens page i (twelve
 /// jump-table branches; the thirteenth widget falls to the default tail),
@@ -2423,6 +2474,15 @@ pub fn config_window_rows(
                     return DynamicMenuRow {
                         label: label.clone(),
                         action: DynamicMenuAction::OpenRetailConfigCompanion { mode: *mode, opens },
+                    };
+                }
+                // The dialog row writes nothing at select — it only raises the
+                // prompt; retail's callback is where the answer acts (arm .text
+                // FFXiMain.dll retail-2026-09 RVA 0x19B309).
+                Some(ConfigRowArm::ConfirmResetKeyAssignments) => {
+                    return DynamicMenuRow {
+                        label: label.clone(),
+                        action: DynamicMenuAction::OpenKeyAssignResetPrompt,
                     };
                 }
                 _ => {}
@@ -5595,6 +5655,31 @@ mod tests {
         assert_eq!(labels(&rows), ["Apple", "Zeta"]);
     }
 
+    /// `conf6win` id 10 raises a Yes/No prompt instead of writing at select (arm
+    /// .text FFXiMain.dll retail-2026-09 RVA 0x19B309; vault main_menu.md §59
+    /// addenda 7–8): the prompt shares the Drop confirm's law, and its Yes branch
+    /// writes both panels' factory templates (slot +0x48 methods .text
+    /// 0x19d1c0/0x19ce70) over option ids 0x4A..=0x69 and 0x6A..=0x89.
+    #[test]
+    fn conf6win_reset_prompt_takes_the_yes_no_law_and_pins_both_templates() {
+        assert_eq!(
+            static_entries(MenuKind::KeyAssignResetPrompt),
+            DROP_CONFIRM_ENTRIES
+        );
+        assert_eq!(menu_title(MenuKind::KeyAssignResetPrompt), "Config");
+        let pairs = key_assign_reset_defaults().collect::<Vec<_>>();
+        assert_eq!(pairs.len(), 64, "32 options per panel (.text loop bounds)");
+        // k1 shadow +0x29 = 0x11 written by .text 0x19d1ca through the loop at
+        // .text 0x19d285; k2 shadow +0x29 = 0x1e from .text 0x19ce7a.
+        assert_eq!(pairs[0], (KEY_ASSIGN_K1_FIRST_OPTION, 0x11));
+        assert_eq!(pairs[31], (0x69, 0)); // k1 range closes at option 0x69
+        assert_eq!(pairs[32], (KEY_ASSIGN_K2_FIRST_OPTION, 0x1e));
+        // pairs[58] = k2 template slot 26 → shadow byte +0x43 = 0x16 (.text
+        // 0x19cede), option id 0x6A+26 = 0x84.
+        assert_eq!(pairs[58], (0x84, 0x16));
+        assert_eq!(pairs[63], (0x89, 0)); // k2 range closes at option 0x89
+    }
+
     /// Retail's Log Out / Shut Down rows answer through a yes/no prompt titled
     /// after the row, sharing the Drop confirm's Yes/No law (cursor default No).
     #[test]
@@ -6931,8 +7016,9 @@ mod tests {
                 matches!(r6[position].action, DynamicMenuAction::ConfigOptionSet { store_id: 0x42, value: v } if v == value)
             );
         }
-        // Ids 8/9 (index 7/8) drill k1assign/k2assign; id10's dialog arm is
-        // still a gap and keeps the option-record fallback.
+        // Ids 8/9 (index 7/8) drill k1assign/k2assign; id10 arms the confirm
+        // dialog (.text FFXiMain.dll retail-2026-09 RVA 0x19B309), which raises
+        // the reset prompt instead of writing anything.
         assert!(matches!(
             r6[7].action,
             DynamicMenuAction::OpenRetailConfigSub { sub: 3 }
@@ -6941,9 +7027,10 @@ mod tests {
             r6[8].action,
             DynamicMenuAction::OpenRetailConfigSub { sub: 4 }
         ));
+        assert_eq!(r6[9].label, "conf6win9"); // no store mark on a dialog row
         assert!(matches!(
             r6[9].action,
-            DynamicMenuAction::ConfigOptionRow { .. }
+            DynamicMenuAction::OpenKeyAssignResetPrompt
         ));
         // Store 0x9D writes through the primary wrapper, so its active-row mark
         // comes straight from `option_values` (handler FFXiMain.dll retail-2026-09

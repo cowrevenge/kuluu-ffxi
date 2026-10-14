@@ -538,6 +538,18 @@ pub(super) fn confirm_menu_at_cursor(
                 }
                 return None;
             }
+            // The dialog row raises its Yes/No prompt on the spot and writes nothing
+            // yet — retail's arm .text 0x19B309 only calls the dialog service RVA
+            // 0x210E30 and returns; the callback is where the answer lands (vault
+            // main_menu.md §59 addenda 7–8). The prompt opens on No, like every other
+            // retail confirm.
+            if matches!(action, A::OpenKeyAssignResetPrompt) {
+                stack.push(MenuKind::KeyAssignResetPrompt);
+                if let Some(level) = stack.current_mut() {
+                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
+                }
+                return None;
+            }
             // A radio row of a law'd config page writes its record through the
             // store wrapper FFXiMain.dll retail-2026-09 RVA 0x193830(store_id,
             // value) (vault main_menu.md §58; bead kuluu-o9qt7.20.1): the write
@@ -842,6 +854,20 @@ pub(super) fn confirm_menu_at_cursor(
             }
         }
         // No (or any other answer) just dismisses the prompt.
+        stack.pop();
+        return None;
+    }
+    if matches!(kind, MenuKind::KeyAssignResetPrompt) {
+        // Retail's callback .text 0x196F30 gets the answer at [esp+8]: non-zero
+        // tail-calls vtable slot +0x48 on both assignment panels — their factory
+        // reset through wrapper FFXiMain.dll retail-2026-09 RVA 0x193830 (option ids
+        // 0x4A..=0x69, then 0x6A..=0x89; vault main_menu.md §59 addendum 8). No touches
+        // nothing. Client-local like every other config-store write — no wire here.
+        if label == kuluu_render::hud::menu::DROP_CONFIRM_YES {
+            for (option_id, value) in kuluu_render::hud::menu::key_assign_reset_defaults() {
+                dynamic.config_option_values.insert(option_id, value);
+            }
+        }
         stack.pop();
         return None;
     }
@@ -3538,6 +3564,102 @@ mod menu_dispatch_tests {
     ) -> Option<InputMode> {
         let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
         confirm_row_dynamic(stack, scene_state, cmd_tx, &mut dynamic, item_bag)
+    }
+
+    /// `conf6win` row 10 (index 9) is the dialog arm (.text FFXiMain.dll
+    /// retail-2026-09 RVA 0x19B309): select pushes the Yes/No prompt (opens on No),
+    /// No leaves the option store untouched, and Yes runs both panels' factory reset —
+    /// options 0x4A..=0x69 and 0x6A..=0x89 rewritten from the templates in
+    /// `key_assign_reset_defaults` (vault main_menu.md §59 addenda 7–8; bead
+    /// kuluu-o9qt7.20.1.1). Nothing of this rides the wire.
+    #[test]
+    fn conf6win_dialog_row_asks_first_and_only_yes_factory_resets() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf6win".to_string(),
+            (0..15u32).map(|i| (700 + i, format!("c6_{i}"))).collect(),
+        );
+        let mut dynamic = kuluu_render::hud::menu::DynamicMenu::default();
+        for id in 0x4Au32..=0x89 {
+            dynamic.config_option_values.insert(id, -7);
+        }
+        dynamic.rows = config_window_rows("conf6win", &table, &dynamic.config_option_values, None);
+        let mut stack = MenuStack::root();
+        // Page index 5 of RETAIL_CONFIG_PAGE_WINDOWS is `conf6win`.
+        stack.push(MenuKind::RetailConfigPage(5));
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        let mut bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        // Select id 10: the prompt goes up with the cursor on No and nothing is written.
+        stack.current_mut().unwrap().cursor = 9;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        {
+            let level = stack.current().expect("reset prompt pushed");
+            assert!(
+                matches!(level.kind, MenuKind::KeyAssignResetPrompt),
+                "conf6win row 10 must raise the reset prompt, got {:?}",
+                level.kind
+            );
+            assert_eq!(
+                level.cursor,
+                kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT,
+                "retail's dialog callback defaults to the negative answer"
+            );
+        }
+        // Answer No: dismissed, both option ranges keep their old values.
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(stack.levels.len(), 2, "No returns to the conf6win page");
+        assert!(dynamic
+            .config_option_values
+            .values()
+            .all(|&value| value == -7));
+
+        // Answer Yes: every option in both panels' ranges takes its template default.
+        stack.current_mut().unwrap().cursor = 9;
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        stack.current_mut().unwrap().cursor = 0; // Yes
+        confirm_row_dynamic(
+            &mut stack,
+            &mut scene_state,
+            &cmd_tx,
+            &mut dynamic,
+            &mut bag,
+        );
+        assert_eq!(stack.levels.len(), 2, "the answer dismisses the prompt");
+        for (option_id, value) in kuluu_render::hud::menu::key_assign_reset_defaults() {
+            assert_eq!(
+                dynamic.config_option_values.get(&option_id),
+                Some(&value),
+                "option {option_id:#x} after factory reset"
+            );
+        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the store law is client-local — no wire from a config reset"
+        );
     }
 
     /// Same seam with caller-built dynamic rows — used for the Config family,

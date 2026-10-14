@@ -471,6 +471,9 @@ pub enum MenuKind {
         shut_down: bool,
     },
 
+    /// The Yes/No step under `conf6win`'s key-assignment reset row (select id 10): retail arms it through the generic dialog service object ([0x10664520], FFXiMain.dll retail-2026-09 RVA 0x210E30) with callback .text 0x196F30; the answer byte arrives at [esp+8] and a non-zero (Yes) tail-calls vtable slot +0x48 on both assignment panels — their factory reset, writing option ids 0x4A..=0x69 and 0x6A..=0x89 through wrapper RVA 0x193830 (vault main_menu.md §59 addenda 7–8; bead kuluu-o9qt7.20.1.1).
+    KeyAssignResetPrompt,
+
     Equipment,
 
     Status,

@@ -1220,6 +1220,8 @@ fn sub_target_action_for(
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionBitSet { .. }
         | A::ConfigSliderEdit { .. }
+        // The dialog row raises its prompt at the confirm seam; no target step.
+        | A::OpenKeyAssignResetPrompt
         | A::DisplayInfo => None,
     }
 }
@@ -1807,7 +1809,9 @@ fn dispatch_dynamic_menu_action(
         | A::ConfigOptionRow { .. }
         | A::ConfigOptionSet { .. }
         | A::ConfigOptionBitSet { .. }
-        | A::ConfigSliderEdit { .. } => return,
+        | A::ConfigSliderEdit { .. }
+        // The reset prompt writes its answer at the confirm seam — never a wire event.
+        | A::OpenKeyAssignResetPrompt => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

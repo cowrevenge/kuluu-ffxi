@@ -303,9 +303,11 @@ pub(super) fn confirm_menu_at_cursor(
     }
 
     if matches!(kind, MenuKind::Status) {
-        // Retail's persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60
-        // is a ret-8 stub; vault main_menu.md §11.1): default is the passive panel, and kuluu's
-        // actionable rows live behind the Retail+ "Status Rows" toggle.
+        // The live Status window is `statcom2`: its select handler (FFXiMain.dll
+        // retail-2026-09 RVA 0x148D00) drives the detail table RVA 0x3716B8, so
+        // rows answer by default. The persona WINDOW alone answers no command
+        // events (RVA 0x12AC60 is a ret-8 stub); the old kuluu panel-wide
+        // silence lives on only as the opt-out flip of "Status Rows".
         if !graphics.interactive_status_rows {
             return None;
         }
@@ -3619,17 +3621,19 @@ mod menu_dispatch_tests {
         );
     }
 
-    /// Retail persona answers no command events (FFXiMain.dll retail-2026-09 RVA 0x12AC60), so the
-    /// Status panel is passive by default; kuluu's actionable rows sit behind the "Status Rows"
-    /// Retail+ toggle, flipped via the shared Debug-row handler.
+    /// The live Status selector is statcom2 — its select handler (FFXiMain.dll
+    /// retail-2026-09 RVA 0x148D00 over detail table 0x3716B8) answers every row,
+    /// so the panel is interactive by default. Persona-passive silence (the ret-8
+    /// stub at RVA 0x12AC60 covers the persona window alone) is an opt-in flip of
+    /// the "Status Rows" Retail+ toggle.
     #[test]
-    fn status_rows_passive_by_default_with_retail_plus_toggle() {
+    fn status_rows_active_by_default_with_persona_passive_option() {
         use kuluu_render::GraphicsSettings;
 
         let mut graphics = GraphicsSettings::default();
         assert!(
-            !graphics.interactive_status_rows,
-            "retail default: persona rows are display-only"
+            graphics.interactive_status_rows,
+            "retail statcom2 law: selector rows answer by default"
         );
         let mut scene_state = SceneState::default();
         assert!(handle_retail_plus_row(

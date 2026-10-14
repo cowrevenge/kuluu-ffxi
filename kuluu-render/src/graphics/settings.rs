@@ -683,11 +683,15 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub mob_hp_under: bool,
 
-    /// Retail+ gate for the actionable Status panel rows. Retail opens persona, whose menu-window
-    /// handler is a ret-8 stub (FFXiMain.dll retail-2026-09 RVA 0x12AC60 answers no command events):
-    /// its rows are pure display. Kuluu's interactive rows (Profile, Play Time echo, ...) sit behind
-    /// this toggle; OFF by default = the retail passive panel. Persisted here so the choice sticks.
-    #[serde(default)]
+    /// Rows in the Status panel answer (FFXiMain.dll retail-2026-09: the live
+    /// Status selector is `statcom2`, whose select handler RVA 0x148D00 drives
+    /// the detail table RVA 0x3716B8 — profile/joblevel/btlskill/mgcskill/
+    /// trdskill/masterle/merit pages; the persona WINDOW itself is the
+    /// display-only piece, answers none at RVA 0x12AC60). Interactive is the
+    /// retail default (owner ruling 2026-10-14 after an earlier reading had
+    /// shipped the panel dead); OFF opts into the old persona-passive kuluu
+    /// behavior. Persisted here so the choice sticks.
+    #[serde(default = "default_interactive_status_rows")]
     pub interactive_status_rows: bool,
 
     /// Retail+ gate for re-selecting the item already in an equip slot to unequip it. The retail
@@ -889,6 +893,9 @@ pub fn retail_default_fov_deg() -> f32 {
     (2.0 * (RETAIL_PROJECTION_HALF_HEIGHT / RETAIL_DEFAULT_FOCAL_LENGTH).atan()).to_degrees()
 }
 
+fn default_interactive_status_rows() -> bool {
+    true
+}
 fn default_shadowed_lights() -> u32 {
     DEFAULT_SHADOWED_LIGHTS
 }
@@ -1038,7 +1045,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,
@@ -1090,7 +1097,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,
@@ -1142,7 +1149,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,
@@ -1194,7 +1201,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,
@@ -1250,7 +1257,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,
@@ -1303,7 +1310,7 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                interactive_status_rows: false,
+                interactive_status_rows: true,
                 reselect_unequip: false,
                 magic_flat_list: false,
                 abilities_flat_list: false,

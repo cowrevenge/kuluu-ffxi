@@ -3625,6 +3625,13 @@ pub const FAQ_ROW_MENTOR: &str = "Mentor Search";
 pub const FAQ_ROW_CONFIG: &str = "Config";
 const HELPDESK_PANEL_ENTRIES: &[&str] = &[FAQ_ROW_QA, FAQ_ROW_MENTOR, FAQ_ROW_CONFIG];
 
+/// The home-view row that opens the mail chrome: select id 2 of handler
+/// FFXiMain.dll retail-2026-09 RVA 0x145460 routes through holder method .text
+/// 0x145BA0, which stores the sub-frame field and name-opens `menu    mogpost`
+/// (literal pushed at .text 0x145BAB); the window carries no inline captions
+/// and rides the c2s 0x04D PBX protocol (vault main_menu.md §53/§59).
+pub const HOME_ROW_DELIVERY_BOX: &str = "Delivery Box";
+
 /// The myroom home-view panel's captioned widgets, verbatim from the DAT
 /// chunk `myro` (ROM/0/1.DAT file-off 0x282D80 size 0x4D0) windowps tokens,
 /// each decoded against ROM/165/76.DAT. The full fourteen named widgets —
@@ -3647,7 +3654,7 @@ pub const HOME_VIEW_ROWS: &[&str] = &[
     "Open Mog House",
     "Mog Case",
     "Mog Sack",
-    "Delivery Box",
+    HOME_ROW_DELIVERY_BOX,
     "Change Jobs",
     "Gardening",
     "Layout",
@@ -3900,9 +3907,11 @@ fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32
         MenuKind::Trade => "trade",
         // The Linkshell row always name-opens `menu    link5` (vault main_menu.md §27.3).
         MenuKind::Linkshell => "link5",
-        // kuluu's Search surface lists the model results (§26 select law), which in retail is
-        // the boot-instantiated `scresult` window — never name-opened, always drawn from its
-        // record (vault main_menu.md §59 addendum 18 [V]).
+        // kuluu's Search surface lists the model results (§26 select law) = retail's
+        // boot-instantiated `scresult` window. Its name lifecycle is owned solely by its own
+        // search-session methods (.text FFXiMain.dll retail-2026-09 RVA 0x20BFC4 opens,
+        // .text 0x20C02D closes with `scoption`) — no command-menu chain opens it, and the
+        // draw is always from its own record (vault main_menu.md §59 addendum 18 corrected).
         MenuKind::Search => "scresult",
         MenuKind::FriendList => "friend",
         MenuKind::HomeView => "myroom",
@@ -6755,11 +6764,13 @@ mod tests {
                 "{name} must place the window at its own record frame"
             );
         }
-        // Over-mapping guards, per bead kuluu-o9qt7.30.1 waivers: the `emote` window is never
-        // name-opened (its two DLL string copies have zero xrefs — vault main_menu.md §59
-        // addendum 18) so EmoteList keeps its seat; macro launcher/select windows sit on the
-        // selector side (census); bazaar/region/pupequip/mp_mncst share the 384 seat. `quset`
-        // is a dead DAT alias — the bytes "quset" appear nowhere in FFXiMain.dll [V-neg].
+        // Over-mapping guards, per bead kuluu-o9qt7.30.1 waivers: `menu emote` belongs to the
+        // abisortw pairing opened only by helper .text FFXiMain.dll retail-2026-09 RVA 0x225460
+        // (vault main_menu.md §59 addendum 18 corrected; family banked as bead kuluu-o9qt7.34),
+        // so the Communication-side EmoteList keeps its seat; macro launcher/select windows sit
+        // on the selector side (census); bazaar/region/pupequip/mp_mncst share the 384 seat.
+        // `quset` is a dead DAT alias — the bytes "quset" appear nowhere in FFXiMain.dll
+        // [V-neg].
         for kind in [
             MenuKind::MacrosPalette,
             MenuKind::MacroSelect,

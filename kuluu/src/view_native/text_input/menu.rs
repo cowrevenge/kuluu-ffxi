@@ -35,6 +35,14 @@ enum MenuDispatch {
     /// routes through the same `AgentCommand::OpenMogMenu` seam.
     OpenMogMenu,
 
+    /// myroom's Delivery Box row (select id 2 of handler FFXiMain.dll retail-2026-09 RVA
+    /// 0x145460 → holder method .text 0x145BA0, which name-opens `menu    mogpost` at
+    /// .text 0x145BAB). That window is the mail chrome riding c2s 0x04D PBX; kuluu's
+    /// server-owned delivery screen answers it, opening incoming-first through the
+    /// driver's Work→Check sequence (kuluu-session/src/delivery_box.rs; vault
+    /// main_menu.md §53).
+    OpenDeliveryBox,
+
     NotImplemented(String),
 }
 
@@ -176,9 +184,10 @@ fn resolve_menu_entry(
         // two text-command rows run their literals and close the panel, Change
         // Jobs name-opens `jobchang` (id3 arm @0x145517 — its predicate only
         // selects an extra helper call 0xA1860(50); BOTH paths open the window,
-        // so kuluu opens it ungated). The rows whose retail arms are not yet
-        // built (Delivery Box→`mogpost`, Remodel→`roomlist`, Open Mog House)
-        // answer NotImplemented until their beads land (vault §53).
+        // so kuluu opens it ungated). Delivery Box (id 2) name-opens `mogpost` — the
+        // mail chrome over c2s 0x04D PBX (§53; bead kuluu-o9qt7.13.4). The rows whose
+        // retail arms are not yet built (Remodel→`roomlist`, Open Mog House) answer
+        // NotImplemented until their beads land.
         (MenuKind::HomeView, _) => {
             if let Some(container) = kuluu_render::hud::menu::home_view_row_container(label) {
                 MenuDispatch::BrowseBag { container }
@@ -186,6 +195,8 @@ fn resolve_menu_entry(
                 MenuDispatch::HomeTextCommand(cmd)
             } else if label == "Change Jobs" {
                 MenuDispatch::OpenSubmenu(MenuKind::JobChange)
+            } else if label == kuluu_render::hud::menu::HOME_ROW_DELIVERY_BOX {
+                MenuDispatch::OpenDeliveryBox
             } else {
                 MenuDispatch::NotImplemented(label.to_string())
             }
@@ -1039,6 +1050,21 @@ pub(super) fn confirm_menu_at_cursor(
         MenuDispatch::BrowseBag { container } => {
             item_bag.0 = container;
             stack.push(MenuKind::Items);
+            None
+        }
+        MenuDispatch::OpenDeliveryBox => {
+            // Retail raises the `mogpost` chrome; kuluu's delivery screen is
+            // server-owned, so the row opens the incoming box — the driver's
+            // Work→Check sequence streams its list (kuluu-session/src/
+            // delivery_box.rs mirrors retail's op order).
+            if cmd_tx
+                .try_send(AgentCommand::DeliveryBox {
+                    op: kuluu_session::state::DeliveryBoxOp::PostOpen,
+                })
+                .is_err()
+            {
+                push_system_chat_line(scene_state, "[menu] delivery box open dropped".to_string());
+            }
             None
         }
         MenuDispatch::OpenSubmenu(submenu) => {
@@ -3539,9 +3565,10 @@ mod menu_dispatch_tests {
     /// container rows
     /// open their LSB bags (id1's `menu    storage`/`storage2` arms and the
     /// locker-family widgets), Gardening/Layout hand their literals to the
-    /// runner, Change Jobs drills `jobchang`; only the still-unbuilt retail
-    /// arms (Delivery Box→`mogpost`, Remodel→`roomlist`, the Mog House door)
-    /// stay on NotImplemented until their beads.
+    /// runner, Change Jobs drills `jobchang`, Delivery Box opens the incoming
+    /// delivery box over c2s 0x04D PBX (`mogpost`'s protocol); only the still-unbuilt
+    /// retail arms (Remodel→`roomlist`, the Mog House door) stay on NotImplemented
+    /// until their beads.
     #[test]
     fn home_view_rows_resolve_through_the_select_family() {
         use ffxi_proto::map::container as c;
@@ -3608,10 +3635,7 @@ mod menu_dispatch_tests {
                 "Open Mog House",
                 MenuDispatch::NotImplemented("Open Mog House".to_string()),
             ),
-            (
-                "Delivery Box",
-                MenuDispatch::NotImplemented("Delivery Box".to_string()),
-            ),
+            ("Delivery Box", MenuDispatch::OpenDeliveryBox),
             (
                 "Remodel",
                 MenuDispatch::NotImplemented("Remodel".to_string()),
@@ -3906,6 +3930,34 @@ mod menu_dispatch_tests {
         assert_eq!(
             kinds,
             vec![MenuKind::Root, MenuKind::HomeView, MenuKind::Items]
+        );
+    }
+
+    /// Confirm-time law for bead kuluu-o9qt7.13.4: the Delivery Box row (select id 2,
+    /// holder method .text FFXiMain.dll retail-2026-09 RVA 0x145BA0 name-opening
+    /// `menu    mogpost` at .text 0x145BAB) queues exactly one PBX open — the incoming
+    /// box, whose Work→Check list is what that window shows (kuluu-session/src/
+    /// delivery_box.rs; vault main_menu.md §53). The panel level stays until the
+    /// server-owned screen takes the display through `delivery_mode_sync_system`.
+    #[test]
+    fn delivery_box_row_opens_the_incoming_box_over_pbx() {
+        let mut stack = MenuStack::root();
+        stack_home_view_with_cursor(&mut stack, kuluu_render::hud::menu::HOME_ROW_DELIVERY_BOX);
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        confirm_row(&mut stack, &mut scene_state, &cmd_tx, &mut item_bag);
+        assert_eq!(
+            cmd_rx
+                .try_recv()
+                .expect("row must queue exactly one PBX open"),
+            AgentCommand::DeliveryBox {
+                op: kuluu_session::state::DeliveryBoxOp::PostOpen
+            }
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "one select is one request — retail sends no second PBX op here"
         );
     }
 

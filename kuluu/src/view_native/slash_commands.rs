@@ -769,6 +769,16 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 summary: "set the furniture arrangement control style (Mog House)",
                 handler: |c| parse_layoutctrl(c.rest),
             },
+            // `/statusparty` — slash id **0x86**, handler FFXiMain.dll retail-2026-09 `.text
+            // 0x7EAE0`: off→store 0xC2 := 0, on→1 (not inverted); a bare or unknown word queries
+            // AND rewrites the stored dword normalized (bead kuluu-o9qt7.42).
+            Command {
+                names: &["statusparty"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "toggle party member status icons",
+                handler: |c| parse_statusparty(c.rest),
+            },
             // Retail's page-2 Key Items row runs this literal (FFXiMain.dll
             // retail-2026-09 RVA 0x14E855, .data 0x371B40); the client registry
             // knows /keyitem = id 0x4C and LSB has no server handler for it —
@@ -1294,13 +1304,18 @@ pub enum SlashOutcome {
         message_id: u16,
     },
 
-    /// …and the bare-query arm, which both handlers also fall through to for an unrecognized
+    /// …and the bare-query arm, which all three handlers also fall through to for an unrecognized
     /// word (retail never rejects the argument): read the store and emit whichever message
     /// matches its non-zero-ness. Absent keys report as zero, like retail's zeroed store BSS.
+    /// `write_back_normalized` is the `/statusparty` family only: there the query path bool-
+    /// normalizes the stored dword (`neg/sbb/inc`) and re-runs the setter at merge .text
+    /// FFXiMain.dll retail-2026-09 **0x7EB1C**, so reading it back yields 0/1 afterwards; the
+    /// `/furcc` and `/layoutctrl` getters only test the value (bead kuluu-o9qt7.42).
     ConfigQuery {
         store_id: u32,
         nonzero_message_id: u16,
         zero_message_id: u16,
+        write_back_normalized: bool,
     },
 }
 
@@ -2301,6 +2316,10 @@ mod config_toggle_messages {
     pub(super) const LAYOUT_SET_TYPE2: u16 = 0x132;
     pub(super) const LAYOUT_IS_TYPE1: u16 = 0x133;
     pub(super) const LAYOUT_IS_TYPE2: u16 = 0x134;
+    // `/statusparty`'s pair — chosen by the WRITTEN value at the handler's shared message
+    // tail (.text FFXiMain.dll retail-2026-09 0x7EB2A), not per-arm.
+    pub(super) const STATUSPARTY_ENABLED: u16 = 0x138; // store == 1
+    pub(super) const STATUSPARTY_DISABLED: u16 = 0x139; // store == 0
 }
 use config_toggle_messages::*;
 
@@ -2327,6 +2346,39 @@ fn parse_furcc(rest: &str) -> SlashOutcome {
             store_id: key,
             nonzero_message_id: FURCC_IS_OFF,
             zero_message_id: FURCC_IS_ON,
+            write_back_normalized: false,
+        },
+    }
+}
+
+/// `/statusparty`'s arm table — handler FFXiMain.dll retail-2026-09 `.text 0x7EAE0`: pair table
+/// .data **0x357AAC** = {`off`,`on`} (same index+1 helper .text 0x7B6A0), writing option
+/// [`CONFIG_OPTION_STATUS_PARTY_ICONS`](kuluu_render::hud::menu::CONFIG_OPTION_STATUS_PARTY_ICONS)
+/// := **0**/**1** — NOT inverted, store 1 means enabled. The handler then picks its line from the
+/// written value at one shared tail (`sub esi,0` / `dec esi`, .text 0x7EB2A): 1 →
+/// [`STATUSPARTY_ENABLED`], 0 → [`STATUSPARTY_DISABLED`] — so each setter arm's msg follows its
+/// value. Any other token queries: getter `.text 0x193850`(0xC2), bool-normalized (`neg/sbb/inc`) and
+/// **rewritten** through the setter at merge .text **0x7EB1C**, hence `write_back_normalized`, with
+/// the message chosen from that normalized value (vault main_menu.md §59 addendum 35; bead
+/// kuluu-o9qt7.42).
+fn parse_statusparty(rest: &str) -> SlashOutcome {
+    let key = kuluu_render::hud::menu::CONFIG_OPTION_STATUS_PARTY_ICONS;
+    match rest.trim() {
+        "off" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 0,
+            message_id: STATUSPARTY_DISABLED,
+        },
+        "on" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 1,
+            message_id: STATUSPARTY_ENABLED,
+        },
+        _ => SlashOutcome::ConfigQuery {
+            store_id: key,
+            nonzero_message_id: STATUSPARTY_ENABLED,
+            zero_message_id: STATUSPARTY_DISABLED,
+            write_back_normalized: true,
         },
     }
 }
@@ -2353,6 +2405,7 @@ fn parse_layoutctrl(rest: &str) -> SlashOutcome {
             store_id: key,
             nonzero_message_id: LAYOUT_IS_TYPE2,
             zero_message_id: LAYOUT_IS_TYPE1,
+            write_back_normalized: false,
         },
     }
 }
@@ -3537,6 +3590,7 @@ mod tests {
             (&["garden"], 0x0083),
             (&["furcc"], 0x0084),
             (&["layoutctrl"], 0x0085),
+            (&["statusparty"], 0x0086),
             (&["keyitem"], 0x004c),
             (&["quest"], 0x004d),
             (&["bank"], 0x006c),
@@ -3626,10 +3680,11 @@ mod tests {
         for line in ["/furcc", "/furcc junk", "/furcc ON"] {
             let q = parse_slash_t(line, &[], origin(), None, None);
             assert!(
-                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id }
+                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id, write_back_normalized }
                     if *store_id == key
                         && *nonzero_message_id == FURCC_IS_OFF
-                        && *zero_message_id == FURCC_IS_ON),
+                        && *zero_message_id == FURCC_IS_ON
+                        && !*write_back_normalized),
                 "{line}: {q:?}"
             );
         }
@@ -3657,10 +3712,44 @@ mod tests {
         for line in ["/layoutctrl", "/layoutctrl on"] {
             let q = parse_slash_t(line, &[], origin(), None, None);
             assert!(
-                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id }
+                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id, write_back_normalized }
                     if *store_id == key
                         && *nonzero_message_id == LAYOUT_IS_TYPE2
-                        && *zero_message_id == LAYOUT_IS_TYPE1),
+                        && *zero_message_id == LAYOUT_IS_TYPE1
+                        && !*write_back_normalized),
+                "{line}: {q:?}"
+            );
+        }
+    }
+
+    /// `/statusparty` (slash id 0x86) branch law — handler .text FFXiMain.dll retail-2026-09
+    /// `.text 0x7EAE0`. Pair {off,on} writes store key **0xC2** := **0**/**1** (NOT inverted);
+    /// the message follows the written value at the shared tail (0x138/0x139). A bare or
+    /// unrecognized word queries AND rewrites the stored dword normalized (`neg/sbb/inc`,
+    /// setter re-run at merge .text 0x7EB1C) — unlike furcc/layoutctrl's read-only getters.
+    #[test]
+    fn statusparty_writes_plain_values_and_query_rewrites_normalized() {
+        let key = kuluu_render::hud::menu::CONFIG_OPTION_STATUS_PARTY_ICONS;
+        let off = parse_slash_t("/statusparty off", &[], origin(), None, None);
+        assert!(
+            matches!(&off, SlashOutcome::ConfigSet { store_id, value, message_id }
+                if *store_id == key && *value == 0 && *message_id == STATUSPARTY_DISABLED),
+            "{off:?}"
+        );
+        let on = parse_slash_t("/statusparty on", &[], origin(), None, None);
+        assert!(
+            matches!(&on, SlashOutcome::ConfigSet { store_id, value, message_id }
+                if *store_id == key && *value == 1 && *message_id == STATUSPARTY_ENABLED),
+            "{on:?}"
+        );
+        for line in ["/statusparty", "/statusparty ON"] {
+            let q = parse_slash_t(line, &[], origin(), None, None);
+            assert!(
+                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id, write_back_normalized }
+                    if *store_id == key
+                        && *nonzero_message_id == STATUSPARTY_ENABLED
+                        && *zero_message_id == STATUSPARTY_DISABLED
+                        && *write_back_normalized),
                 "{line}: {q:?}"
             );
         }

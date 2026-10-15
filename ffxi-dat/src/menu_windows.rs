@@ -1272,6 +1272,16 @@ mod tests {
             table.text(0x134),
             Some("Layout control style is currently set to type 2.")
         );
+        // `/statusparty` — handler .text FFXiMain.dll retail-2026-09 `.text 0x7EAE0` picks these
+        // two from the WRITTEN value (1 → enabled, 0 → disabled) at its shared message tail.
+        assert_eq!(
+            table.text(0x138),
+            Some("Party member status icons are enabled.")
+        );
+        assert_eq!(
+            table.text(0x139),
+            Some("Party member status icons are disabled.")
+        );
     }
 
     #[test]

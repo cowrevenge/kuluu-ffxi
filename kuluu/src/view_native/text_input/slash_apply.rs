@@ -359,11 +359,12 @@ pub(super) fn apply_slash_outcome(
             store_id,
             nonzero_message_id,
             zero_message_id,
+            write_back_normalized,
         } => {
-            let current = *dynamic_menu
-                .config_option_values
-                .get(&store_id)
-                .unwrap_or(&0);
+            // `/statusparty`'s merge point (.text FFXiMain.dll retail-2026-09 0x7EB1C) re-runs
+            // the setter with the bool-normalized value; `config_query` carries that law plus
+            // the plain-read getters for furcc/layoutctrl.
+            let current = dynamic_menu.config_query(store_id, write_back_normalized);
             let message_id = if current != 0 {
                 nonzero_message_id
             } else {

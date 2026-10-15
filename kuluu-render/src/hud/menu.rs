@@ -755,6 +755,24 @@ impl DynamicMenu {
             None => format!("[system message {message_id:#05X}]"),
         }
     }
+
+    /// Read one config-option store key the way retail's slash query arms do. Plain getters
+    /// (`.text FFXiMain.dll retail-2026-09 0x193890` for `/furcc`, `.text 0x193850` for
+    /// `/layoutctrl`) only test the value; `/statusparty` instead bool-normalizes it
+    /// (`neg/sbb/inc`) and **rewrites** it through setter `.text 0x193830` at merge .text
+    /// **0x7EB1C**, so `write_back_normalized` stores 0/1 back for that family (bead
+    /// kuluu-o9qt7.42; vault main_menu.md §59 addendum 35). Absent keys read as zero, like
+    /// retail's zeroed store.
+    pub fn config_query(&mut self, store_id: u32, write_back_normalized: bool) -> i32 {
+        let raw = *self.config_option_values.get(&store_id).unwrap_or(&0);
+        if write_back_normalized {
+            let normalized = i32::from(raw != 0);
+            self.config_option_values.insert(store_id, normalized);
+            normalized
+        } else {
+            raw
+        }
+    }
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -3094,6 +3112,11 @@ pub const CONFIG_OPTION_FURNISHING_CAMERA_COLLISION: u32 = 6;
 /// 0x193850`. Keywords are `type1`/`type2` (pair table .data 0x357AA0), values **0**/**1**
 /// in that order — not on/off (§59 addendum 35; bead kuluu-o9qt7.41).
 pub const CONFIG_OPTION_LAYOUT_CONTROL_TYPE: u32 = 0xC1;
+/// `/statusparty`'s party-member-status-icons option — slash id **0x86**, handler .text
+/// FFXiMain.dll retail-2026-09 `.text 0x7EAE0`; pair table .data 0x357AAC = {off,on} writes **0**/**1**
+/// (NOT inverted: 1 = enabled), and its query path normalizes the stored dword to a bool and rewrites it
+/// through setter `.text 0x193830` at merge **.text 0x7EB1C** (§59 addendum 35; bead kuluu-o9qt7.42).
+pub const CONFIG_OPTION_STATUS_PARTY_ICONS: u32 = 0xC2;
 
 /// One row of class B's code-side descriptor table — `.rdata` **FFXiMain.dll retail-2026-09 RVA
 /// 0x379A28**, stride 4 bytes `{u8 kind, i8 param, u16 caption id}`. The DAT record behind the
@@ -12002,5 +12025,43 @@ mod tests {
         assert_ne!(*menu.config_option_values.get(&key).unwrap_or(&0), 0);
         menu.config_option_values.insert(key, 0);
         assert_eq!(*menu.config_option_values.get(&key).unwrap_or(&0), 0);
+    }
+
+    /// `DynamicMenu::config_query` splits retail's two query shapes: plain getters that only
+    /// test the value (`/furcc`, `/layoutctrl`) leave any dword untouched, while `/statusparty`
+    /// bool-normalizes (`neg/sbb/inc`) and **rewrites** through the setter at merge .text
+    /// FFXiMain.dll retail-2026-09 0x7EB1C — so a stored 5 reads back as 1 afterwards, and an
+    /// absent key answers zero either way (bead kuluu-o9qt7.42; vault §59 addendum 35).
+    #[test]
+    fn config_query_plain_reads_survive_and_statusparty_normalizes_the_store() {
+        let mut menu = DynamicMenu::default();
+        // Plain read: raw non-zero is reported as-is, store untouched.
+        menu.config_option_values
+            .insert(CONFIG_OPTION_LAYOUT_CONTROL_TYPE, 5);
+        assert_eq!(
+            menu.config_query(CONFIG_OPTION_LAYOUT_CONTROL_TYPE, false),
+            5
+        );
+        assert_eq!(
+            *menu
+                .config_option_values
+                .get(&CONFIG_OPTION_LAYOUT_CONTROL_TYPE)
+                .unwrap_or(&0),
+            5,
+            "furcc/layoutctrl getters never write back"
+        );
+        // statusparty family: normalize + rewrite, and absent keys read as zero.
+        assert_eq!(menu.config_query(CONFIG_OPTION_STATUS_PARTY_ICONS, true), 0);
+        menu.config_option_values
+            .insert(CONFIG_OPTION_STATUS_PARTY_ICONS, -3);
+        assert_eq!(menu.config_query(CONFIG_OPTION_STATUS_PARTY_ICONS, true), 1);
+        assert_eq!(
+            *menu
+                .config_option_values
+                .get(&CONFIG_OPTION_STATUS_PARTY_ICONS)
+                .unwrap_or(&0),
+            1,
+            "the normalized bool is stored back at the merge point"
+        );
     }
 }

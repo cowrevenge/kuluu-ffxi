@@ -273,6 +273,7 @@ pub(super) fn apply_slash_outcome(
     #[cfg(unix)] agent_paused: Option<&crate::view_native::AgentPaused>,
     session_event_tx: Option<&crate::view_native::SessionEventTx>,
     slash_writers: &mut SlashWriters,
+    dynamic_menu: &mut kuluu_render::hud::menu::DynamicMenu,
     draw_distance: &mut kuluu_render::dat_mzb::DrawDistance,
 ) {
     #[cfg(not(unix))]
@@ -336,6 +337,40 @@ pub(super) fn apply_slash_outcome(
         SlashOutcome::SetWeatherClient(w) => {
             scene_state.snapshot.weather = Some(w);
             push_system_chat_line(scene_state, format!("weather override: {w:?}"));
+        }
+        // The client-side config-option store write (`/furcc`, `/layoutctrl`). Retail's
+        // setters (.text FFXiMain.dll retail-2026-09 `.text 0x1938F0` for key 6, `.text
+        // 0x193830` for key 0xC1) are plain stores — no packet, no cache flush — and each
+        // setter arm immediately echoes through the chat emitter (`.text 0x129DE0`) with a
+        // GetText table-9 id; kuluu renders that id from DAT via `client_message`.
+        SlashOutcome::ConfigSet {
+            store_id,
+            value,
+            message_id,
+        } => {
+            dynamic_menu.config_option_values.insert(store_id, value);
+            let line = dynamic_menu.client_message(slash_writers.dat_root.0.as_deref(), message_id);
+            push_system_chat_line(scene_state, line);
+        }
+        // …and the query arm both handlers fall through to for a bare or unrecognized
+        // word (store getters `.text 0x193890`/`.text 0x193850`; `test al,al` picks the
+        // non-zero/zero message — bead kuluu-o9qt7.41). Absent keys read as zero.
+        SlashOutcome::ConfigQuery {
+            store_id,
+            nonzero_message_id,
+            zero_message_id,
+        } => {
+            let current = *dynamic_menu
+                .config_option_values
+                .get(&store_id)
+                .unwrap_or(&0);
+            let message_id = if current != 0 {
+                nonzero_message_id
+            } else {
+                zero_message_id
+            };
+            let line = dynamic_menu.client_message(slash_writers.dat_root.0.as_deref(), message_id);
+            push_system_chat_line(scene_state, line);
         }
         SlashOutcome::SetSitStance(toggle) => {
             use crate::view_native::slash_commands::SitToggle;

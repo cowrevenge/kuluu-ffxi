@@ -744,6 +744,31 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
+            // Mog House option toggles (bead kuluu-o9qt7.41). `/furcc` is slash id **0x84**,
+            // handler FFXiMain.dll retail-2026-09 `.text 0x7E9B0`: the token helper `.text
+            // 0x79170` returns 1 for `on`, 2 for `off`, and anything else (bare included)
+            // falls through to a QUERY of option key **6** — never an error. The stored value
+            // is INVERTED: the `on` arm writes **0** (msg "camera collision has been turned
+            // on.") and `off` writes 1; vault main_menu.md §59 addendum 35. `/layoutctrl` id
+            // **0x85**, handler `.text 0x7EA40`: its pair table .data 0x357AA0 carries the
+            // keywords `type1`/`type2` (NOT on/off), writing option **0xC1** := 0/**1**; a bare
+            // or unrecognized word queries instead. Both emit through the chat emitter `.text
+            // 0x129DE0` with ids into GetText table 9 — kuluu reads those strings from DAT
+            // (`DynamicMenu::client_message`).
+            Command {
+                names: &["furcc"],
+                set: CommandSet::Retail,
+                usage: "[on|off]",
+                summary: "toggle the furnishing camera collision (Mog House)",
+                handler: |c| parse_furcc(c.rest),
+            },
+            Command {
+                names: &["layoutctrl"],
+                set: CommandSet::Retail,
+                usage: "[type1|type2]",
+                summary: "set the furniture arrangement control style (Mog House)",
+                handler: |c| parse_layoutctrl(c.rest),
+            },
             // Retail's page-2 Key Items row runs this literal (FFXiMain.dll
             // retail-2026-09 RVA 0x14E855, .data 0x371B40); the client registry
             // knows /keyitem = id 0x4C and LSB has no server handler for it —
@@ -1257,6 +1282,25 @@ pub enum SlashOutcome {
 
     CopyToasts {
         n: usize,
+    },
+
+    /// A write to the client's config-option store plus the chat confirmation id —
+    /// `/furcc`'s and `/layoutctrl`'s setter arms (FFXiMain.dll retail-2026-09 `.text
+    /// 0x7E9B0`/`.text 0x7EA40`; bead kuluu-o9qt7.41). `message_id` indexes the DAT-sourced
+    /// table-9 catalog read by [`kuluu_render::hud::menu::DynamicMenu::client_message`].
+    ConfigSet {
+        store_id: u32,
+        value: i32,
+        message_id: u16,
+    },
+
+    /// …and the bare-query arm, which both handlers also fall through to for an unrecognized
+    /// word (retail never rejects the argument): read the store and emit whichever message
+    /// matches its non-zero-ness. Absent keys report as zero, like retail's zeroed store BSS.
+    ConfigQuery {
+        store_id: u32,
+        nonzero_message_id: u16,
+        zero_message_id: u16,
     },
 }
 
@@ -2243,6 +2287,74 @@ fn parse_use_item(ctx: &SlashCtx) -> SlashOutcome {
         target_id,
         target_index,
     })
+}
+
+/// Chat message ids from the table-9 catalog (emitter FFXiMain.dll retail-2026-09
+/// `.text 0x129DE0`); text lives in DAT ([`ffxi_dat::menu_windows::GETTEXT_TABLE_9_CATALOG_FILE_ID`],
+/// pinned by install-gated test `real_table9_chat_message_catalog_carries_the_option_toggle_lines`).
+mod config_toggle_messages {
+    pub(super) const FURCC_SET_ON: u16 = 0x12D; // "…camera collision has been turned on." (value := 0)
+    pub(super) const FURCC_SET_OFF: u16 = 0x12E; // …turned off. (value := 1)
+    pub(super) const FURCC_IS_ON: u16 = 0x12F; // query, store value zero
+    pub(super) const FURCC_IS_OFF: u16 = 0x130; // query, non-zero
+    pub(super) const LAYOUT_SET_TYPE1: u16 = 0x131;
+    pub(super) const LAYOUT_SET_TYPE2: u16 = 0x132;
+    pub(super) const LAYOUT_IS_TYPE1: u16 = 0x133;
+    pub(super) const LAYOUT_IS_TYPE2: u16 = 0x134;
+}
+use config_toggle_messages::*;
+
+/// `/furcc`'s arm table, exactly as handler FFXiMain.dll retail-2026-09 `.text 0x7E9B0`
+/// branches it: `on` writes **0** with msg [`FURCC_SET_ON`], `off` writes 1 with
+/// [`FURCC_SET_OFF`] (store inverted — the DAT wording proves which side is which, vault
+/// main_menu.md §59 addendum 35), and every other token — including none — queries key **6**
+/// ([.text 0x193890](vault)): non-zero answers [`FURCC_IS_OFF`], zero [`FURCC_IS_ON`] (.text
+/// 0x7E9D9's `test al,al`). Byte-compares are case-sensitive (`repe cmpsb`, .text 0x7918D).
+fn parse_furcc(rest: &str) -> SlashOutcome {
+    let key = kuluu_render::hud::menu::CONFIG_OPTION_FURNISHING_CAMERA_COLLISION;
+    match rest.trim() {
+        "on" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 0,
+            message_id: FURCC_SET_ON,
+        },
+        "off" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 1,
+            message_id: FURCC_SET_OFF,
+        },
+        _ => SlashOutcome::ConfigQuery {
+            store_id: key,
+            nonzero_message_id: FURCC_IS_OFF,
+            zero_message_id: FURCC_IS_ON,
+        },
+    }
+}
+
+/// `/layoutctrl`'s arm table — handler `.text 0x7EA40`: keywords come from the pair table
+/// .data **0x357AA0** = {`type1`,`type2`} (helper .text 0x7B6A0 returns entry index + 1),
+/// writing option [`CONFIG_OPTION_LAYOUT_CONTROL_TYPE`](kuluu_render::hud::menu::CONFIG_OPTION_LAYOUT_CONTROL_TYPE)
+/// := 0/1 with msgs [`LAYOUT_SET_TYPE1`]/[`LAYOUT_SET_TYPE2`]; anything else queries
+/// ([.text 0x193850]): zero → [`LAYOUT_IS_TYPE1`], non-zero → [`LAYOUT_IS_TYPE2`] (.text 0x7EA6F).
+fn parse_layoutctrl(rest: &str) -> SlashOutcome {
+    let key = kuluu_render::hud::menu::CONFIG_OPTION_LAYOUT_CONTROL_TYPE;
+    match rest.trim() {
+        "type1" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 0,
+            message_id: LAYOUT_SET_TYPE1,
+        },
+        "type2" => SlashOutcome::ConfigSet {
+            store_id: key,
+            value: 1,
+            message_id: LAYOUT_SET_TYPE2,
+        },
+        _ => SlashOutcome::ConfigQuery {
+            store_id: key,
+            nonzero_message_id: LAYOUT_IS_TYPE2,
+            zero_message_id: LAYOUT_IS_TYPE1,
+        },
+    }
 }
 
 fn parse_bank(rest: &str) -> SlashOutcome {
@@ -3423,6 +3535,8 @@ mod tests {
             (&["map"], 0x004f),
             (&["layout"], 0x007f),
             (&["garden"], 0x0083),
+            (&["furcc"], 0x0084),
+            (&["layoutctrl"], 0x0085),
             (&["keyitem"], 0x004c),
             (&["quest"], 0x004d),
             (&["bank"], 0x006c),
@@ -3483,6 +3597,71 @@ mod tests {
             assert!(
                 matches!(&outcome, SlashOutcome::Command(AgentCommand::MyroomMode { mode }) if *mode == want_mode),
                 "{line}: {outcome:?}"
+            );
+        }
+    }
+
+    /// `/furcc` (slash id 0x84) branch law — handler .text FFXiMain.dll retail-2026-09 `.text
+    /// 0x7E9B0`. The token helper (.text 0x79170) byte-compares the argument (`repe cmpsb`,
+    /// case-sensitive): `on` writes store key 6 := **0** with msg 0x12D, `off` writes 1 with
+    /// msg 0x12E (the store is INVERTED — vault main_menu.md §59 addendum 35); any other word,
+    /// the bare command included, falls through to a QUERY of getter .text 0x193890 whose `test
+    /// al,al` answers zero → "currently on" (0x12F) and non-zero → "currently off" (0x130).
+    #[test]
+    fn furcc_branches_the_inverted_collision_store_and_queries_otherwise() {
+        let key = kuluu_render::hud::menu::CONFIG_OPTION_FURNISHING_CAMERA_COLLISION;
+        let on = parse_slash_t("/furcc on", &[], origin(), None, None);
+        assert!(
+            matches!(&on, SlashOutcome::ConfigSet { store_id, value, message_id }
+                if *store_id == key && *value == 0 && *message_id == FURCC_SET_ON),
+            "{on:?}"
+        );
+        let off = parse_slash_t("/furcc off", &[], origin(), None, None);
+        assert!(
+            matches!(&off, SlashOutcome::ConfigSet { store_id, value, message_id }
+                if *store_id == key && *value == 1 && *message_id == FURCC_SET_OFF),
+            "{off:?}"
+        );
+        // Bare and unrecognized words both query; "ON" does NOT match the byte-compare.
+        for line in ["/furcc", "/furcc junk", "/furcc ON"] {
+            let q = parse_slash_t(line, &[], origin(), None, None);
+            assert!(
+                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id }
+                    if *store_id == key
+                        && *nonzero_message_id == FURCC_IS_OFF
+                        && *zero_message_id == FURCC_IS_ON),
+                "{line}: {q:?}"
+            );
+        }
+    }
+
+    /// `/layoutctrl` (slash id 0x85) branch law — handler .text FFXiMain.dll retail-2026-09
+    /// `.text 0x7EA40`. Its keyword pair table (.data 0x357AA0) is {`type1`,`type2`} — NOT
+    /// on/off: type1 writes store key 0xC1 := 0 with msg 0x131, type2 := 1 with msg 0x132;
+    /// everything else queries getter .text 0x193850 (zero → "type 1" 0x133, non-zero →
+    /// "type 2" 0x134).
+    #[test]
+    fn layoutctrl_branches_type_keywords_not_on_off() {
+        let key = kuluu_render::hud::menu::CONFIG_OPTION_LAYOUT_CONTROL_TYPE;
+        for (word, value, msg) in [
+            ("type1", 0, LAYOUT_SET_TYPE1),
+            ("type2", 1, LAYOUT_SET_TYPE2),
+        ] {
+            let set = parse_slash_t(&format!("/layoutctrl {word}"), &[], origin(), None, None);
+            assert!(
+                matches!(&set, SlashOutcome::ConfigSet { store_id, value: v, message_id }
+                    if *store_id == key && *v == value && *message_id == msg),
+                "{word}: {set:?}"
+            );
+        }
+        for line in ["/layoutctrl", "/layoutctrl on"] {
+            let q = parse_slash_t(line, &[], origin(), None, None);
+            assert!(
+                matches!(&q, SlashOutcome::ConfigQuery { store_id, nonzero_message_id, zero_message_id }
+                    if *store_id == key
+                        && *nonzero_message_id == LAYOUT_IS_TYPE2
+                        && *zero_message_id == LAYOUT_IS_TYPE1),
+                "{line}: {q:?}"
             );
         }
     }

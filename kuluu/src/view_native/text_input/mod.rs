@@ -452,6 +452,7 @@ pub(crate) fn text_input_system(
                     session_gates.session_event_tx.as_deref(),
                     fishing_gate,
                     &mut slash_writers,
+                    &mut dynamic_menu,
                     &mut draw_distance,
                 );
             }
@@ -658,6 +659,7 @@ pub(crate) fn text_input_system(
             session_gates.session_event_tx.as_deref(),
             fishing_gate,
             &mut slash_writers,
+            &mut dynamic_menu,
             &mut draw_distance,
         );
     }
@@ -963,6 +965,7 @@ fn apply_chat_action(
     session_event_tx: Option<&super::SessionEventTx>,
     fishing_gate: kuluu_render::fishing_spot::FishingGate,
     slash_writers: &mut SlashWriters,
+    dynamic_menu: &mut kuluu_render::hud::menu::DynamicMenu,
     draw_distance: &mut kuluu_render::dat_mzb::DrawDistance,
 ) {
     match action {
@@ -1062,6 +1065,7 @@ fn apply_chat_action(
                     agent_paused,
                     session_event_tx,
                     slash_writers,
+                    dynamic_menu,
                     draw_distance,
                 );
                 if let Some(next) = mode_override {

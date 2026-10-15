@@ -61,6 +61,14 @@ pub const CAPTION_SHORT_CATALOG_FILE_ID: u32 = 55652;
 /// main_menu.md §59 addendum 21). File id resolved through the install's own FTABLE.
 pub const GETTEXT_TABLE_12_CATALOG_FILE_ID: u32 = 55653;
 
+/// GetText **table 9** (`parse_d_msg` n=348 — the chat-message catalog behind the client's
+/// local emitter `.text FFXiMain.dll retail-2026-09 RVA 0x129DE0`, vault main_menu.md §59
+/// addendum 35). Ids **0x12D..0x134** are `/furcc`'s and `/layoutctrl`'s confirmation and
+/// state-query lines (bead kuluu-o9qt7.41); idx 0xC3 = `Q&A` is §34's pairing pin against the
+/// JP twin ROM/165/56.DAT. File id resolved through the install's own FTABLE word law
+/// (`real_table9_chat_message_catalog_carries_the_option_toggle_lines`).
+pub const GETTEXT_TABLE_9_CATALOG_FILE_ID: u32 = 55648;
+
 /// The myroom door row's caption pair, fetched by the window's update slot as
 /// GetText **table 0x0E** — closed when the door byte is zero (FFXiMain.dll retail-2026-09
 /// `.text 0x145439`) and open otherwise (`.text 0x145357`). Table 0x0E is
@@ -1193,6 +1201,76 @@ mod tests {
             table.text(451),
             Some("Make changes?"),
             "the dialog the row callback raises (.text FFXiMain.dll retail-2026-09 RVA 0x1D6B85)"
+        );
+    }
+
+    /// Gated on a retail install. The `/furcc` and `/layoutctrl` slash handlers (.text
+    /// FFXiMain.dll retail-2026-09 `.text 0x7E9B0`/`.text 0x7EA40`) emit ids 0x12D..0x134
+    /// through the chat emitter (`.text 0x129DE0`), which resolves them in GetText **table
+    /// 9**; this install carries that catalog at [`GETTEXT_TABLE_9_CATALOG_FILE_ID`]. The
+    /// option store is inverted for `/furcc` — value 0 IS collision ON — and the catalog
+    /// wording proves it (`turned on.` rides the `on` arm's write of 0; vault main_menu.md
+    /// §59 addendum 35, bead kuluu-o9qt7.41).
+    #[test]
+    fn real_table9_chat_message_catalog_carries_the_option_toggle_lines() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let loc = root
+            .resolve(GETTEXT_TABLE_9_CATALOG_FILE_ID)
+            .expect("table-9 catalog file id");
+        assert_eq!(
+            (
+                loc.path_under(&root).parent().unwrap().file_name().unwrap(),
+                loc.path_under(&root).file_name().unwrap()
+            ),
+            (std::ffi::OsStr::new("165"), std::ffi::OsStr::new("72.DAT")),
+            "FTABLE word law points table 9 at ROM/165/72.DAT"
+        );
+        let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
+        let table = crate::dmsg::DmsgTable::parse(&bytes).expect("d_msg catalog");
+        assert_eq!(
+            table.len(),
+            348,
+            "measured entry count (EN; JP twin ROM/165/56 identical)"
+        );
+        assert_eq!(table.text(0xC3), Some("Q&A"), "§34's pairing pin");
+        // `/furcc` — setter arms .text 0x7E9F2 (value 1, msg 0x12E) and 0x7EA13 (value 0,
+        // msg 0x12D); query getter arm reports 0x130 for non-zero, 0x12F for zero.
+        assert_eq!(
+            table.text(0x12D),
+            Some("Furnishing camera collision has been turned on."),
+            "written by the `on` arm alongside value 0 — store inverted"
+        );
+        assert_eq!(
+            table.text(0x12E),
+            Some("Furnishing camera collision has been turned off.")
+        );
+        assert_eq!(
+            table.text(0x12F),
+            Some("Furnishing camera collision is currently on.")
+        );
+        assert_eq!(
+            table.text(0x130),
+            Some("Furnishing camera collision is currently off.")
+        );
+        // `/layoutctrl` — pair table .data 0x357AA0 = {type1, type2}: setter arms value 0 /
+        // msg 0x131 and value 1 / msg 0x132; query reports 0x133 (zero) / 0x134 (non-zero).
+        assert_eq!(
+            table.text(0x131),
+            Some("Layout control style has been set to type 1.")
+        );
+        assert_eq!(
+            table.text(0x132),
+            Some("Layout control style has been set to type 2.")
+        );
+        assert_eq!(
+            table.text(0x133),
+            Some("Layout control style is currently set to type 1.")
+        );
+        assert_eq!(
+            table.text(0x134),
+            Some("Layout control style is currently set to type 2.")
         );
     }
 

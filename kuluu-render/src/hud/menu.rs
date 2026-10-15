@@ -682,6 +682,12 @@ pub struct DynamicMenu {
     /// ROOT_ENTRIES copy for indices within its range; the copy is pinned to
     /// the catalog by install-gated tests in both crates (bead kuluu-1z9qs).
     pub selector_captions: Vec<String>,
+    /// Chat lines the client emits locally ride ids into GetText **table 9**
+    /// (emitter .text FFXiMain.dll retail-2026-09 `.text 0x129DE0`, vault main_menu.md
+    /// §59 addendum 35); this is that catalog, loaded once from DAT on the first
+    /// [`Self::client_message`] and `None` while no install resolves it — text stays
+    /// DAT-sourced, never transcribed (bead kuluu-o9qt7.41).
+    pub client_messages: Option<ffxi_dat::dmsg::DmsgTable>,
     /// The client-side config option store, keyed by retail store id (§58;
     /// bead kuluu-o9qt7.20.1). Absent keys have no known current value — radio
     /// rows render unmarked rather than guess a default. Config writes stay on
@@ -717,6 +723,38 @@ pub struct DynamicMenu {
     /// subtraction at RVA 0x1A7D05 (vault main_menu.md §59 addendum 16; bead
     /// kuluu-o9qt7.20.1.4). `None` = never announced, like retail's zeroed BSS.
     pub conf_bf_stamp: Option<std::time::Instant>,
+}
+
+impl DynamicMenu {
+    /// The chat line for a client-local message id — retail's emitter `.text
+    /// FFXiMain.dll retail-2026-09 `.text 0x129DE0` resolves every id through GetText **table
+    /// 9**; this loads that catalog once (id [`ffxi_dat::menu_windows::GETTEXT_TABLE_9_CATALOG_FILE_ID`],
+    /// vault main_menu.md §59 addendum 35) and reads the text from DAT. Without an install or a
+    /// missing entry the line never drops silently: it names the id numerically instead.
+    pub fn client_message(
+        &mut self,
+        dat: Option<&ffxi_dat::archive::DatRoot>,
+        message_id: u16,
+    ) -> String {
+        if self.client_messages.is_none() {
+            self.client_messages = (|| {
+                let root = dat?;
+                let loc = root
+                    .resolve(ffxi_dat::menu_windows::GETTEXT_TABLE_9_CATALOG_FILE_ID)
+                    .ok()?;
+                let bytes = std::fs::read(loc.path_under(root)).ok()?;
+                ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
+            })();
+        }
+        match self
+            .client_messages
+            .as_ref()
+            .and_then(|t| t.text(usize::from(message_id)))
+        {
+            Some(text) => text.to_owned(),
+            None => format!("[system message {message_id:#05X}]"),
+        }
+    }
 }
 
 pub const DYNAMIC_VISIBLE_ROWS: usize = 22;
@@ -3045,6 +3083,17 @@ pub const CONFIG_OPTION_CFILTER_GROUP_LEVEL: u32 = 0x35;
 /// FFXiMain.dll retail-2026-09 RVA 0x198124) when its toggle lands that bit clear, and a set
 /// master switches that row's glyph to the {3,4} variants (.text 0x19827C).
 pub const CONFIG_OPTION_CFILTER_MASTER: u32 = 0x47;
+
+/// `/furcc`'s furnishing-camera-collision option — slash id **0x84**, handler .text
+/// FFXiMain.dll retail-2026-09 `.text 0x7E9B0`; setter `.text 0x1938F0`, getter `.text
+/// 0x193890`. The stored value is INVERTED from the words: `/furcc on` writes **0** and
+/// `/furcc off` writes **1** (vault main_menu.md §59 addendum 35; bead kuluu-o9qt7.41).
+pub const CONFIG_OPTION_FURNISHING_CAMERA_COLLISION: u32 = 6;
+/// `/layoutctrl`'s arrangement-control-style option — slash id **0x85**, handler .text
+/// FFXiMain.dll retail-2026-09 `.text 0x7EA40`; setter `.text 0x193830`, getter `.text
+/// 0x193850`. Keywords are `type1`/`type2` (pair table .data 0x357AA0), values **0**/**1**
+/// in that order — not on/off (§59 addendum 35; bead kuluu-o9qt7.41).
+pub const CONFIG_OPTION_LAYOUT_CONTROL_TYPE: u32 = 0xC1;
 
 /// One row of class B's code-side descriptor table — `.rdata` **FFXiMain.dll retail-2026-09 RVA
 /// 0x379A28**, stride 4 bytes `{u8 kind, i8 param, u16 caption id}`. The DAT record behind the
@@ -11901,5 +11950,57 @@ mod tests {
         assert!(bazaar_stall_rows(&snap)[0]
             .label
             .contains("no player bazaars"));
+    }
+
+    /// `DynamicMenu::client_message` reads the DAT-sourced table-9 catalog once (retail's
+    /// emitter `.text FFXiMain.dll retail-2026-09 `.text 0x129DE0`; vault main_menu.md §59
+    /// addendum 35) and never loses a line: without an install — or for an id the catalog
+    /// lacks — it names the id numerically instead (bead kuluu-o9qt7.41).
+    #[test]
+    fn client_message_falls_back_to_the_numeric_id_without_an_install() {
+        let mut menu = DynamicMenu::default();
+        assert_eq!(
+            menu.client_message(None, 0x12D),
+            "[system message 0x12D]",
+            "no install → the numeric line, never a dropped toast"
+        );
+    }
+
+    /// Install-gated half of the same law: on a retail install the exact catalog wording is
+    /// returned (the strings live only in DAT — file id 55648, ROM/165/72.DAT per FTABLE).
+    #[test]
+    fn client_message_returns_the_table9_dat_wording_on_a_retail_install() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut menu = DynamicMenu::default();
+        assert_eq!(
+            menu.client_message(Some(&root), 0x12D),
+            "Furnishing camera collision has been turned on."
+        );
+        // The second call is served from the cached catalog, and setter vs query wording
+        // stays distinct (0x132 "has been set", 0x134 "is currently set").
+        assert_eq!(
+            menu.client_message(Some(&root), 0x132),
+            "Layout control style has been set to type 2."
+        );
+        assert_eq!(
+            menu.client_message(Some(&root), 0x134),
+            "Layout control style is currently set to type 2."
+        );
+    }
+
+    /// The store side of `/furcc`/`/layoutctrl`: the ConfigSet arm writes the raw inverted
+    /// value and a follow-up query must read it back non-zero/zero — pinning the exact
+    /// `BTreeMap::get` semantics the apply seam relies on (bead kuluu-o9qt7.41).
+    #[test]
+    fn config_option_store_roundtrip_reports_the_written_side() {
+        let mut menu = DynamicMenu::default();
+        let key = CONFIG_OPTION_FURNISHING_CAMERA_COLLISION;
+        assert_eq!(*menu.config_option_values.get(&key).unwrap_or(&0), 0);
+        menu.config_option_values.insert(key, 1);
+        assert_ne!(*menu.config_option_values.get(&key).unwrap_or(&0), 0);
+        menu.config_option_values.insert(key, 0);
+        assert_eq!(*menu.config_option_values.get(&key).unwrap_or(&0), 0);
     }
 }

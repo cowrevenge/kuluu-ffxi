@@ -710,6 +710,7 @@ fn push_param(out: &mut String, bytes: &[u8], i: &mut usize, name: &str) {
 /// and one XOR-0xFF-obscured region covering an offset table (optional) plus entry
 /// blocks. Law mirrors the vault tool semantic_resolver.py `parse_d_msg` (itself re-expressed
 /// from cexi's ROM_165_84 notes), verified against 75.DAT and its JP twins in §43.
+#[derive(Debug, Clone)]
 pub struct DmsgTable {
     strings: Vec<String>,
 }

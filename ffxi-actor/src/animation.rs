@@ -40,13 +40,16 @@ fn on_side_of(q: [f32; 4], reference: [f32; 4]) -> [f32; 4] {
     }
 }
 
-/// `|w|` of `q` normalised: 1 at the bind orientation, 0 half a turn away. A sum with no length counts as furthest.
-fn nearness_to_bind(q: [f32; 4]) -> f32 {
-    let length = dot4(q, q).sqrt();
-    if length <= f32::EPSILON {
+/// A record's bind orientation: the rotation a bone no clip keys stands in.
+const BIND_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// How near `q` stands to `to`, normalised: 1 on it, 0 half a turn away. A sum with no length counts as furthest.
+fn nearness(q: [f32; 4], to: [f32; 4]) -> f32 {
+    let lengths = (dot4(q, q) * dot4(to, to)).sqrt();
+    if lengths <= f32::EPSILON {
         0.0
     } else {
-        q[3].abs() / length
+        dot4(q, to).abs() / lengths
     }
 }
 
@@ -62,24 +65,26 @@ struct HeldArc {
 
 impl HeldArc {
     /// The way a merge sets out: the incoming pose the short way round from the outgoing one. Turning toward
-    /// the target ([`TransitionParams::turn_toward_target`]), where the short way swings the bone round behind
-    /// both poses it blends between, it sets out the opposite way instead, which comes round through the bind
-    /// orientation: the body faces its target, so a left/right side-step crossfade turns through the target.
-    fn set_out(outgoing: [f32; 4], incoming: [f32; 4], toward_target: bool) -> Self {
+    /// the target ([`TransitionParams::turn_toward_target`]), `facing` is the bone's own record in the clip
+    /// that faces the target, and where the short way swings the bone round behind both poses as seen from
+    /// there, the merge sets out the opposite way instead, which comes round through it: a left/right
+    /// side-step crossfade turns through the target. Each bone is measured against its own record there,
+    /// never against bind, so a bone the clips all key near a half turn from bind is behind nothing.
+    fn set_out(outgoing: [f32; 4], incoming: [f32; 4], facing: Option<[f32; 4]>) -> Self {
         let short = on_side_of(incoming, outgoing);
-        if !toward_target {
+        let Some(facing) = facing else {
             return Self {
                 outgoing,
                 incoming: short,
             };
-        }
+        };
         let opposite = short.map(|c| -c);
-        let short_mid = nearness_to_bind(weighted_sum(outgoing, short, 0.5));
-        let behind_both = short_mid < nearness_to_bind(outgoing).min(nearness_to_bind(incoming));
-        let through_bind = nearness_to_bind(weighted_sum(outgoing, opposite, 0.5)) > short_mid;
+        let short_mid = nearness(weighted_sum(outgoing, short, 0.5), facing);
+        let behind_both = short_mid < nearness(outgoing, facing).min(nearness(incoming, facing));
+        let comes_through = nearness(weighted_sum(outgoing, opposite, 0.5), facing) > short_mid;
         Self {
             outgoing,
-            incoming: if behind_both && through_bind {
+            incoming: if behind_both && comes_through {
                 opposite
             } else {
                 short
@@ -176,6 +181,8 @@ impl BoneMotionMask {
 #[derive(Default)]
 pub struct BonePoseScratch {
     records: Vec<Option<KeyFrameTransform>>,
+    /// The slot whose layer wrote each record this frame.
+    writers: Vec<Option<usize>>,
 }
 
 impl BonePoseScratch {
@@ -189,6 +196,8 @@ impl BonePoseScratch {
         if self.records.len() != bones {
             self.records.clear();
             self.records.resize(bones, None);
+            self.writers.clear();
+            self.writers.resize(bones, None);
         }
     }
 
@@ -210,18 +219,29 @@ impl BonePoseScratch {
         self.records.get(bone).copied().flatten()
     }
 
+    /// The slot whose layer wrote this frame's record; `None` with no record.
+    pub fn writer(&self, bone: usize) -> Option<usize> {
+        self.writers.get(bone).copied().flatten()
+    }
+
     /// Drop every carried record (pose-state reset or model swap).
     pub fn clear(&mut self) {
         for record in self.records.iter_mut() {
             *record = None;
         }
+        for writer in self.writers.iter_mut() {
+            *writer = None;
+        }
     }
 
     /// Record what this frame sampled for one bone, including the empty case: an unkeyed bone is cleared,
     /// not inherited.
-    fn write(&mut self, bone: usize, sampled: Option<KeyFrameTransform>) {
+    fn write(&mut self, bone: usize, sampled: Option<(usize, KeyFrameTransform)>) {
         if let Some(slot) = self.records.get_mut(bone) {
-            *slot = sampled;
+            *slot = sampled.map(|(_, record)| record);
+        }
+        if let Some(writer) = self.writers.get_mut(bone) {
+            *writer = sampled.map(|(slot, _)| slot);
         }
     }
 }
@@ -255,7 +275,14 @@ pub struct TransitionParams {
     pub in_step: bool,
     /// The crossfade turns toward the target rather than the short way round where the short way would swing
     /// a bone behind both poses ([`HeldArc::set_out`]): set while the actor is locked on, facing its target.
+    /// The pose that faces the target is [`Self::facing`] when the request names one, otherwise the clip the slot
+    /// holds when the request comes in: locked on, the chooser never goes from one side step straight to the other
+    /// but shows the straight gait between them ([`crate::actor_state::SideStepFlipLatch`]), or idle when the feet
+    /// stopped in between.
     pub turn_toward_target: bool,
+    /// The pose that faces the target, when the request knows one better than the clip the slot holds: a clip
+    /// authored turned off the actor's forward is no measure of where the target is.
+    pub facing: Option<AnimationSnapshot>,
 }
 
 impl Default for TransitionParams {
@@ -266,6 +293,7 @@ impl Default for TransitionParams {
             eager_transition_out: false,
             in_step: false,
             turn_toward_target: false,
+            facing: None,
         }
     }
 }
@@ -391,11 +419,28 @@ impl SkeletonAnimationContext {
     }
 }
 
+#[derive(Clone)]
 pub struct AnimationSnapshot {
     joint_snapshots: HashMap<usize, KeyFrameTransform>,
 }
 
 impl AnimationSnapshot {
+    /// The pose `layers` compose on their first frame, the lowest slot keying a bone owning it, the way the
+    /// coordinator composes its slots.
+    pub fn of_layers<'a>(layers: impl IntoIterator<Item = &'a SkeletonAnimation>) -> Self {
+        let mut layers: Vec<&SkeletonAnimation> = layers.into_iter().collect();
+        layers.sort_by_key(|clip| clip.id.final_digit().unwrap_or(0));
+        let mut joint_snapshots = HashMap::new();
+        for clip in layers {
+            for &joint in clip.key_frame_sets.keys() {
+                if let Some(t) = clip.get_joint_transform(joint, 0.0) {
+                    joint_snapshots.entry(joint as usize).or_insert(t);
+                }
+            }
+        }
+        AnimationSnapshot { joint_snapshots }
+    }
+
     pub fn from_context(ctx: &SkeletonAnimationContext) -> Self {
         let mut joint_snapshots = HashMap::new();
         for &joint in ctx.animation.key_frame_sets.keys() {
@@ -487,8 +532,10 @@ pub struct AnimationTransition {
     progress: f32,
     /// Per bone, the pair this merge stood on at its last tick; empty until its first.
     arcs: Vec<Option<HeldArc>>,
-    /// Whether a bone's merge sets out toward the target ([`TransitionParams::turn_toward_target`]).
-    toward_target: bool,
+    /// Turning toward the target ([`TransitionParams::turn_toward_target`]), the pose that faces it: the one the
+    /// request named ([`TransitionParams::facing`]), or else the slot's clip as it stood when the request came in.
+    /// `None` sets every merge out the short way.
+    facing: Option<AnimationSnapshot>,
 }
 
 impl AnimationTransition {
@@ -496,7 +543,7 @@ impl AnimationTransition {
         previous: PreviousSide,
         next: SkeletonAnimationContext,
         transition_duration: f32,
-        toward_target: bool,
+        facing: Option<AnimationSnapshot>,
     ) -> Self {
         AnimationTransition {
             previous,
@@ -504,8 +551,17 @@ impl AnimationTransition {
             transition_duration,
             progress: 0.0,
             arcs: Vec::new(),
-            toward_target,
+            facing,
         }
+    }
+
+    /// The record `joint` stands on in the pose that faces the target, when this merge turns toward it: a bone
+    /// that pose does not key stands in its bind orientation there.
+    fn facing(&self, joint: usize) -> Option<[f32; 4]> {
+        self.facing.as_ref().map(|pose| {
+            pose.get_joint_transform(joint)
+                .map_or(BIND_ROTATION, |record| record.rotation)
+        })
     }
 
     /// Every tick under the blend steps both layers and the in-flight request
@@ -534,7 +590,7 @@ impl AnimationTransition {
                 held,
                 outgoing.rotation,
                 incoming.rotation,
-                self.toward_target,
+                self.facing(joint),
             );
             if self.arcs.len() <= joint {
                 self.arcs.resize(joint + 1, None);
@@ -550,6 +606,11 @@ impl AnimationTransition {
 
     pub fn is_complete(&self) -> bool {
         self.progress >= self.transition_duration
+    }
+
+    /// Frames this blend has run.
+    pub fn progress(&self) -> f32 {
+        self.progress
     }
 
     /// One weighted sum of the outgoing and incoming bone records, with no third pose in it (`FFXiMain.dll
@@ -572,7 +633,7 @@ impl AnimationTransition {
                     held,
                     outgoing.rotation,
                     incoming.rotation,
-                    self.toward_target,
+                    self.facing(joint),
                 );
                 Some(KeyFrameTransform {
                     rotation: arc.rotation(t),
@@ -590,11 +651,11 @@ fn arc_for(
     held: Option<HeldArc>,
     outgoing: [f32; 4],
     incoming: [f32; 4],
-    toward_target: bool,
+    facing: Option<[f32; 4]>,
 ) -> HeldArc {
     match held {
         Some(arc) => arc.held(outgoing, incoming),
-        None => HeldArc::set_out(outgoing, incoming, toward_target),
+        None => HeldArc::set_out(outgoing, incoming, facing),
     }
 }
 
@@ -695,19 +756,73 @@ impl SkeletonAnimator {
                 None => PreviousSide::Live(current.clone()),
             };
 
+            // Turning toward the target, the pose the request names faces it, or else the slot's clip as it stands
+            // now ([`TransitionParams::turn_toward_target`]).
+            let facing = transition_params
+                .filter(|tp| tp.turn_toward_target)
+                .map(|tp| {
+                    tp.facing
+                        .clone()
+                        .unwrap_or_else(|| AnimationSnapshot::from_context(current))
+                });
             self.transition = Some(AnimationTransition::new(
                 previous,
                 fresh_copy(&ctx),
                 transition_duration,
-                transition_params.is_some_and(|tp| tp.turn_toward_target),
+                facing,
             ));
         }
 
         self.current_animation = Some(ctx);
     }
 
+    /// A handover that settles instead of playing out. The outgoing side is snapshotted at the tick of
+    /// registration and never advances again - a stop asks for rest, so nothing may swing further than
+    /// it already was (see `register_idle_animation_matched`). The incoming clip enters at `start_frame`,
+    /// chosen by the caller to match that frozen pose, and rises over `fade_frames`. Slot 5 behaves as in
+    /// [`Self::set_next_animation`]: replaced outright, no blend.
+    pub fn set_settled_animation(
+        &mut self,
+        animation: SkeletonAnimation,
+        loop_params: LoopParams,
+        start_frame: f32,
+        fade_frames: f32,
+    ) {
+        let mut ctx = SkeletonAnimationContext::new(animation, loop_params, None);
+        let length = ctx.animation.length_in_frames();
+        if length > 0.0 {
+            ctx.current_frame = start_frame.rem_euclid(length);
+        }
+        if self.current_animation.is_none() || fade_frames <= 0.0 || self.animation_slot == 5 {
+            self.transition = None;
+            self.current_animation = Some(ctx);
+            return;
+        }
+        let previous = match &self.transition {
+            // Interrupting a live blend: freeze the composite on screen, exactly as a retarget during a
+            // blend does in `set_next_animation`.
+            Some(t) => PreviousSide::Frozen(AnimationSnapshot::from_transition(t)),
+            None => PreviousSide::Frozen(AnimationSnapshot::from_context(
+                self.current_animation.as_ref().unwrap(),
+            )),
+        };
+        self.transition = Some(AnimationTransition::new(
+            previous,
+            fresh_copy(&ctx),
+            fade_frames,
+            None,
+        ));
+        self.current_animation = Some(ctx);
+    }
+
     pub fn get_joint_transform(&self, joint: usize) -> Option<KeyFrameTransform> {
         self.sample(joint, true)
+    }
+
+    /// Whether this layer takes every request outright, with no blend: slot 5 does, in
+    /// [`Self::set_next_animation`] and [`Self::set_settled_animation`] alike.
+    pub fn replaces_outright(&self) -> bool {
+        self.animation_slot == 5
     }
 
     /// Sample this layer for one bone, refusing the crossfade when the bone's mask has cleared bit 7.
@@ -837,6 +952,34 @@ impl SkeletonAnimationCoordinator {
         self.register_animation(animation, LoopParams::low_priority_loop(), None, |_| true)
     }
 
+    /// The idle registration for a stop: the outgoing pose is frozen where it stands and the incoming
+    /// clip takes its playhead from the key frame closest to that pose. A held gait is still playing at
+    /// the tick the movement ends, and letting it run under the crossfade winds limbs back past what
+    /// they were holding before landing in idle - measured on Hume M at 15-30 deg of fresh swing after
+    /// release against holds of 20 deg or less (`stopping_a_held_movement_never_winds_the_arms_up_
+    /// after_release`, kuluu-render). A stop settles: it matches key frames and smooths, and plays no
+    /// animation further.
+    pub fn register_idle_animation_matched(
+        &mut self,
+        animation: SkeletonAnimation,
+        start_frame: f32,
+        fade_frames: f32,
+    ) -> bool {
+        let slot = animation.id.final_digit().unwrap_or(0) as usize;
+        let slot = slot.min(7);
+        let animator = self.get_or_put(slot);
+        if !ready_for_transition_out(animator, true) {
+            return false;
+        }
+        animator.set_settled_animation(
+            animation,
+            LoopParams::low_priority_loop(),
+            start_frame,
+            fade_frames,
+        );
+        true
+    }
+
     /// This frame's transform for one bone. Ownership is per bone, never per slot: retail samples every
     /// active layer into the shared pose scratch (`.data 0x1045F030`) with each sample overwriting only
     /// the bones its clip keys, walking layer indices descending (`mov edi,4` … `dec edi` / `jge`,
@@ -852,17 +995,49 @@ impl SkeletonAnimationCoordinator {
     }
 
     pub fn sample_joint(&self, joint: usize) -> Option<KeyFrameTransform> {
+        self.sample_joint_by_slot(joint).map(|(_, record)| record)
+    }
+
+    /// [`Self::sample_joint`] with the slot whose layer wrote the bone.
+    pub fn sample_joint_by_slot(&self, joint: usize) -> Option<(usize, KeyFrameTransform)> {
         let mask = self.mask_at(joint);
         if !mask.writable() {
             return None;
         }
         let blend_allowed = mask.accepts_blend_layers();
-        for animator in self.animations.iter().flatten() {
+        for (slot, animator) in self.animations.iter().enumerate() {
+            let Some(animator) = animator else {
+                continue;
+            };
             if let Some(t) = animator.sample(joint, blend_allowed) {
-                return Some(t);
+                return Some((slot, t));
             }
         }
         None
+    }
+
+    /// The bone as the layers under `slot` alone would write it: who owns it once `slot` stops writing it, under
+    /// the same law as [`Self::sample_joint_by_slot`]. `None` is nothing, so the bone would rest on its bind data.
+    pub fn sample_joint_under(
+        &self,
+        slot: usize,
+        joint: usize,
+    ) -> Option<(usize, KeyFrameTransform)> {
+        let mask = self.mask_at(joint);
+        if !mask.writable() {
+            return None;
+        }
+        let blend_allowed = mask.accepts_blend_layers();
+        self.animations
+            .iter()
+            .enumerate()
+            .skip(slot + 1)
+            .find_map(|(under, animator)| {
+                animator
+                    .as_ref()?
+                    .sample(joint, blend_allowed)
+                    .map(|record| (under, record))
+            })
     }
 
     /// A frame of the pose pass: retail's reset pass first (`FFXiMain.dll retail-2026-09` RVA
@@ -872,7 +1047,7 @@ impl SkeletonAnimationCoordinator {
         self.set_bone_count(bones);
         scratch.begin_frame(bones);
         for bone in 0..scratch.bone_count() {
-            let sampled = self.sample_joint(bone);
+            let sampled = self.sample_joint_by_slot(bone);
             scratch.write(bone, sampled);
         }
     }
@@ -1302,6 +1477,41 @@ mod tests {
         );
     }
 
+    /// Who writes a bone once a slot stops writing it: the next layer down that keys it, under the same ownership
+    /// law, or nothing.
+    #[test]
+    fn the_layers_under_a_slot_name_the_bone_s_next_owner() {
+        let mut coord = SkeletonAnimationCoordinator::new();
+        let loops = LoopParams {
+            loop_duration: None,
+            num_loops: None,
+            low_priority: false,
+        };
+        coord.register_animation(authored("aaa0", 5, 1.0), loops, None, |_| true);
+        coord.register_animation(authored("bbb2", 5, 2.0), loops, None, |_| true);
+        coord.update(1.0);
+        assert_eq!(coord.sample_joint_by_slot(5).map(|(slot, _)| slot), Some(0));
+        let (slot, record) = coord.sample_joint_under(0, 5).expect("slot 2 keys bone 5");
+        assert_eq!(slot, 2);
+        assert!((record.translation[0] - 2.0).abs() < 1e-6);
+        assert!(
+            coord.sample_joint_under(2, 5).is_none(),
+            "nothing under slot 2 keys bone 5"
+        );
+        coord.set_mask(5, BoneMotionMask::BLOCKED);
+        assert!(
+            coord.sample_joint_under(0, 5).is_none(),
+            "a bone nothing may write has no owner under any slot"
+        );
+    }
+
+    #[test]
+    fn slot_five_alone_takes_every_request_outright() {
+        for slot in 0..8 {
+            assert_eq!(SkeletonAnimator::new(slot).replaces_outright(), slot == 5);
+        }
+    }
+
     /// The other direction: when only the incoming side keys a bone, that side owns the bone outright —
     /// there is no ramp in from wherever the frame before left it and no blend against bind.
     #[test]
@@ -1636,17 +1846,24 @@ mod tests {
         );
     }
 
-    /// A crossfade between poses turned past a right angle either side, a left side step to a right one, turns
-    /// through the target when it turns toward it: it sets out the opposite way to the short one, which swings the
-    /// bone round behind both. Any other crossfade keeps the short way.
+    /// Locked on, a left side step never goes straight to a right one: the chooser shows the straight gait for two
+    /// frames between them (`actor_state::SideStepFlipLatch`), so the side step that lands the flip is asked for
+    /// while the slot holds that gait, and crossfades from a still that is nearly all the first side step. Between
+    /// poses turned past a right angle either side the short way swings the bone round behind both; turning toward
+    /// the target it comes round through the gait, which faces the target. A bone every pose keeps near a half
+    /// turn from bind has the gait there too, and keeps its short way. Any other crossfade keeps the short way.
     #[test]
     fn a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way() {
         const BLEND: f32 = 8.0;
-        const FRONT_NEARNESS: f32 = 0.9;
-        const BACK_NEARNESS: f32 = 0.1;
-        let mid_blend = |toward_target: bool| {
+        // At 60 fps the gait's two rendered frames run one key frame of its blend before the side step lands.
+        const STRAIGHT_FRAMES: f32 = 1.0;
+        const NEAR: f32 = 0.9;
+        const FAR: f32 = 0.1;
+        let mid_blend = |left: f32, gait: f32, right: f32, toward_target: bool| {
             let mut animator = SkeletonAnimator::new(0);
-            request(&mut animator, turned("mvl1", 100.0), None);
+            request(&mut animator, turned("mvl1", left), None);
+            request(&mut animator, turned("run1", gait), Some(BLEND));
+            animator.update(STRAIGHT_FRAMES);
             let tp = TransitionParams {
                 turn_toward_target: toward_target,
                 ..locomotion_blend(BLEND)
@@ -1657,23 +1874,83 @@ mod tests {
                 low_priority: false,
             };
             animator.set_next_animation(
-                SkeletonAnimationContext::new(turned("mvr1", -100.0), looping, Some(tp.clone())),
+                SkeletonAnimationContext::new(turned("mvr1", right), looping, Some(tp.clone())),
                 Some(&tp),
             );
             animator.update(BLEND / 2.0);
-            nearness_to_bind(animator.get_joint_transform(0).unwrap().rotation)
+            animator.get_joint_transform(0).unwrap().rotation
         };
-        let toward = mid_blend(true);
+        let off =
+            |q: [f32; 4], deg: f32| (2.0 * nearness(q, yaw_quat(deg)).min(1.0).acos()).to_degrees();
+
+        let toward = mid_blend(100.0, 0.0, -100.0, true);
         assert!(
-            toward > FRONT_NEARNESS,
+            nearness(toward, BIND_ROTATION) > NEAR,
             "turning toward the target, mid-crossfade sits {} deg off it",
-            (2.0 * toward.acos()).to_degrees()
+            off(toward, 0.0)
         );
-        let short = mid_blend(false);
+        let short = mid_blend(100.0, 0.0, -100.0, false);
         assert!(
-            short < BACK_NEARNESS,
-            "any other crossfade keeps the short way round the back: {} deg",
-            (2.0 * short.acos()).to_degrees()
+            nearness(short, BIND_ROTATION) < FAR,
+            "any other crossfade keeps the short way round the back: {} deg off the front",
+            off(short, 0.0)
+        );
+        let half_turned = mid_blend(165.0, 180.0, -165.0, true);
+        assert!(
+            nearness(half_turned, yaw_quat(180.0)) > NEAR,
+            "a bone the gait holds near a half turn keeps its short way through it: {} deg off it",
+            off(half_turned, 180.0)
+        );
+    }
+
+    /// A gait authored turned off the actor's forward (a battle set's) is no measure of where the target is. Measured
+    /// from it, a flip between side steps turned past a right angle either side keeps the short way round the back;
+    /// measured from the pose the request names as facing the target, it comes round through the front.
+    #[test]
+    fn a_crossfade_toward_the_target_measures_from_the_pose_it_is_given() {
+        const BLEND: f32 = 8.0;
+        // At 60 fps the gait's two rendered frames run one key frame of its blend before the side step lands.
+        const STRAIGHT_FRAMES: f32 = 1.0;
+        const SIDE_ON_GAIT_DEG: f32 = -60.0;
+        const FRONT_DEG: f32 = 30.0;
+        const BEHIND_DEG: f32 = 150.0;
+        let mid_blend = |facing: Option<AnimationSnapshot>| {
+            let mut animator = SkeletonAnimator::new(0);
+            request(&mut animator, turned("mvl1", 110.0), None);
+            request(&mut animator, turned("run1", SIDE_ON_GAIT_DEG), Some(BLEND));
+            animator.update(STRAIGHT_FRAMES);
+            let tp = TransitionParams {
+                turn_toward_target: true,
+                facing,
+                ..locomotion_blend(BLEND)
+            };
+            let looping = LoopParams {
+                loop_duration: None,
+                num_loops: None,
+                low_priority: false,
+            };
+            animator.set_next_animation(
+                SkeletonAnimationContext::new(turned("mvr1", -110.0), looping, Some(tp.clone())),
+                Some(&tp),
+            );
+            animator.update(BLEND / 2.0);
+            animator.get_joint_transform(0).unwrap().rotation
+        };
+        let off_front =
+            |q: [f32; 4]| (2.0 * nearness(q, BIND_ROTATION).min(1.0).acos()).to_degrees();
+
+        let from_gait = mid_blend(None);
+        assert!(
+            off_front(from_gait) > BEHIND_DEG,
+            "measured from the side-on gait the flip keeps the short way: {} deg off the front",
+            off_front(from_gait)
+        );
+        let standing = turned("idl1", 0.0);
+        let toward = mid_blend(Some(AnimationSnapshot::of_layers([&standing])));
+        assert!(
+            off_front(toward) < FRONT_DEG,
+            "measured from the pose that faces the target, mid-crossfade sits {} deg off it",
+            off_front(toward)
         );
     }
 

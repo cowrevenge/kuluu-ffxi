@@ -5913,6 +5913,7 @@ mod tests {
             frame,
             stage: SchedulerStage {
                 animation_mode: None,
+                hand: None,
                 stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                 kind,
                 raw_type,

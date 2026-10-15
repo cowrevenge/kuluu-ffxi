@@ -138,9 +138,11 @@ impl LookAtBasis {
 ///    BEHIND_PROJECTION_FACTOR` (RVA 0x2B264..0x2B278). Since `scale` multiplies the offsets while the bound stays
 ///    authored, a record of `(0.24, 0.16)` with `scale 0.5` bounds the turn near `atan(0.24/0.5)` across and
 ///    `atan(0.16/0.5)` up/down.
-/// 5. Compare `hypot(u,w)` against that radius (RVA 0x2B2A0..0x2B2AE). Inside it returns the projected vector
-///    unchanged — the copy at RVA 0x2B33F..0x2B371, which also writes `w = 1.0` and makes the function report not
-///    clamped. On the rim: bearing from `fpatan` (RVA 0x2B2BD), rebuilt as `(cosθ·radius, sinθ·radius)` with the
+/// 5. Compare `hypot(u,w)` against that radius (RVA 0x2B2A0..0x2B2AE). Inside it hands back the caller's own
+///    `look`: RVA 0x2B343..0x2B350 pushes the look pointer and the output pointer into the vec3 copy at RVA 0x26EB0,
+///    then writes `w = 1.0` and reports not clamped (RVA 0x2B35C..0x2B368). The doubled, stretched projection above
+///    only measures the point; it is never handed back. On the rim: bearing from `fpatan` (RVA 0x2B2BD), rebuilt as
+///    `(cosθ·radius, sinθ·radius)` with the
 ///    depth slot written as the record's own `scale` (the raw `[ecx+8]` load/store at RVA 0x2B2DD / 0x2B2EB), then
 ///    step 3's ratio is undone on exactly the axis it stretched (`fld [esp+0xc] / fdiv [esp+8]` vs `fld [esp+0x10] /
 ///    fdiv [esp+8]`, selected by the compare against `ylim` at RVA 0x2B2E7..0x2B30C), then the vector goes back out
@@ -182,7 +184,7 @@ pub fn clamp_bend_axis(forward: Vec3, look: Vec3, record: &LookAtLimit) -> Optio
     };
 
     if (u * u + w * w).sqrt() <= radius {
-        return Some((basis.unproject(v), false));
+        return Some((look, false));
     }
 
     // `out`'s depth slot carries the record's own `scale`, re-read straight off the record (`FFXiMain.dll
@@ -309,6 +311,28 @@ pub fn apply_look_bends(
     if weight <= 0.0 {
         return;
     }
+    for (joint, rot) in look_bends(
+        pose,
+        skeleton,
+        look_point_pose,
+        forward,
+        records,
+        anchor_origin_y_drop,
+    ) {
+        rotate_about_pivot(pose, skeleton, parent_overrides, joint, rot, weight);
+    }
+}
+
+/// Pass 1 of the bend on its own: each authored record's full-weight turn in `pose`'s space, shallow-first, for a
+/// caller that composes the bends itself ([`apply_look_bends`] turns `pose` by them).
+pub fn look_bends(
+    pose: &[Mat4],
+    skeleton: &Skeleton,
+    look_point_pose: Vec3,
+    forward: Vec3,
+    records: usize,
+    anchor_origin_y_drop: f32,
+) -> Vec<(usize, Quat)> {
     let Some(frame) = BendFrame::new(
         pose,
         skeleton,
@@ -316,7 +340,7 @@ pub fn apply_look_bends(
         forward,
         anchor_origin_y_drop,
     ) else {
-        return;
+        return Vec::new();
     };
     // Pass 1 (`FFXiMain.dll retail-2026-09` RVA 0x2AED1..0x2AF90) clamps every record against the SAME operands.
     // Pass 2 (RVA 0x2AFBD..0x2B0F4) multiplies each bend onto that bone's own node orientation and stores it in a
@@ -350,15 +374,16 @@ pub fn apply_look_bends(
         ));
     }
     bends.sort_by_key(|(_, _, depth)| *depth);
-    for (joint, rot, _) in bends {
-        rotate_about_pivot(pose, skeleton, parent_overrides, joint, rot, weight);
-    }
+    bends
+        .into_iter()
+        .map(|(joint, rot, _)| (joint, rot))
+        .collect()
 }
 
 /// Hops to the root of a joint's parent chain; used only to order bends shallow-first so a bone is rotated after its
 /// ancestors (`FFXiMain.dll retail-2026-09` composes local orientations through the hierarchy at RVA 0x2AFBD..0x2B0F4
 /// rather than rotating world-space subtrees).
-fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
+pub fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
     let mut depth = 0;
     let mut current = skeleton.joints.get(joint).and_then(|j| j.parent);
     while let Some(parent) = current {
@@ -373,7 +398,7 @@ fn joint_depth(skeleton: &Skeleton, joint: usize) -> usize {
 
 /// Rigid subtree rotation about the joint's own pivot: re-posing descendants without recomposing the whole hierarchy
 /// for a look.
-fn rotate_about_pivot(
+pub fn rotate_about_pivot(
     pose: &mut [Mat4],
     skeleton: &Skeleton,
     parent_overrides: &[(usize, usize)],
@@ -645,6 +670,54 @@ mod tests {
             clamp_bend_axis(Vec3::Z, Vec3::new(0.05, 0.05, 1.0).normalize(), &record).unwrap();
         assert!(!saturated);
         assert!(aim.angle_between(Vec3::new(0.05, 0.05, 1.0)) < 1e-4);
+    }
+
+    /// An uneven ellipse hands a point inside it back as it went in too, never the projection it stretched to measure
+    /// it (`FFXiMain.dll retail-2026-09` RVA 0x2B343..0x2B350 copies the caller's look through RVA 0x26EB0). Handing
+    /// back that projection would lift the narrow axis by the record's aspect ratio: 1.5 on the PC rigs' head record
+    /// and 2.7 on their chest record.
+    #[test]
+    fn a_point_inside_an_uneven_ellipse_comes_back_as_it_went_in() {
+        let look = Vec3::new(0.06, -0.09, 3.0);
+        for record in [
+            limit(0.24, 0.16, 0.5),
+            limit(0.16, 0.06, 0.5),
+            limit(0.06, 0.16, 0.5),
+        ] {
+            let (aim, saturated) = clamp_bend_axis(Vec3::Z, look, &record).unwrap();
+            assert!(!saturated, "{record:?} should hold {look} inside");
+            assert_eq!(aim, look, "{record:?}");
+        }
+    }
+
+    /// The clamp is continuous across its rim: a point a hair inside and one a hair past come back a hair apart, in
+    /// every direction off the steered axis. A stretched projection handed back inside, against a rim that undoes the
+    /// stretch, would jump the aim by the aspect ratio at the rim (11 deg up or down on the PC chest record), and a
+    /// walking actor's bob carries the point across it on every step.
+    #[test]
+    fn the_clamp_never_jumps_at_its_rim() {
+        const STEP_DEG: f32 = 0.05;
+        for record in [limit(0.24, 0.16, 0.5), limit(0.16, 0.06, 0.5)] {
+            for (side, up) in [(0.0, 1.0), (0.0, -1.0), (1.0, 0.0), (0.6, 0.8)] {
+                let mut last: Option<Vec3> = None;
+                // Out to 35 deg off the steered axis, past both of these records' rims.
+                for step in 0..=700 {
+                    let off = (step as f32 * STEP_DEG).to_radians();
+                    let look = Vec3::new(side * off.sin(), up * off.sin(), off.cos());
+                    let (aim, _) = clamp_bend_axis(Vec3::Z, look, &record).unwrap();
+                    let aim = aim.normalize();
+                    if let Some(last) = last {
+                        let moved = last.angle_between(aim).to_degrees();
+                        assert!(
+                            moved <= STEP_DEG + 1e-2,
+                            "{record:?} toward ({side}, {up}): the aim jumped {moved:.2} deg at {:.2} deg off",
+                            off.to_degrees()
+                        );
+                    }
+                    last = Some(aim);
+                }
+            }
+        }
     }
 
     /// A record is only inert when both semi-axes are zero (`FFXiMain.dll retail-2026-09` RVA 0x2AEE3..0x2AF00 asks

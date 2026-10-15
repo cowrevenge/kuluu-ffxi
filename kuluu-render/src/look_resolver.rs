@@ -337,6 +337,7 @@ pub fn dispatch_look_driven_models(
                     // motion selectors, which the seat pose still needs.
                     main_weapon: equipment_dat_id(dll, EQUIP_SLOT_MAIN, main, race),
                     sub_weapon: equipment_dat_id(dll, EQUIP_SLOT_SUB, sub, race),
+                    sub_model: Some(sub),
                 },
             });
             info!(

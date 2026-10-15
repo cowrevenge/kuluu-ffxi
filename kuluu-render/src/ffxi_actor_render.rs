@@ -15,9 +15,8 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use crate::look_at_gates::{self as look_at_gates, LockLookAtInterval, LookAtLockTask};
 use ffxi_actor::actor_state::{self, ActorAnimInputs, RestKind};
 use ffxi_actor::animation::{
-    BonePoseScratch, LoopParams, SkeletonAnimationCoordinator, TransitionParams,
+    AnimationSnapshot, BonePoseScratch, LoopParams, SkeletonAnimationCoordinator, TransitionParams,
 };
-use ffxi_actor::look_bend::apply_look_bends;
 use ffxi_actor::skeleton_instance::{
     pose_world, pose_world_mounted_into, standard_joint_world_position, MountAttach, PoseScratch,
     RootTransform,
@@ -27,9 +26,9 @@ use ffxi_dat::cib::{Cib, MovementType};
 use ffxi_dat::d3m::D3m;
 use ffxi_dat::datid::DatId;
 use ffxi_dat::resource_dir::ResourceDir;
-use ffxi_dat::scheduler::{Scheduler, StageKind};
+use ffxi_dat::scheduler::{HandStage, Scheduler, StageKind, WeaponHand};
 use ffxi_dat::skel::Skeleton;
-use ffxi_dat::skel_anim::SkeletonAnimation;
+use ffxi_dat::skel_anim::{KeyFrameTransform, SkeletonAnimation};
 use ffxi_dat::skel_mesh::{MeshBuffer, MeshType, SkelMesh};
 use ffxi_dat::texture::{decode_texture, DecodedTexture};
 use ffxi_dat::{walk_tree, ChunkKind, ChunkNode, DatRoot};
@@ -39,6 +38,7 @@ pub use crate::combat_stance::{infers_walk_gait, WALK_RUN_BOUNDARY};
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::scene::BakedActor;
 use crate::scheduler_runtime::main_dll_for_root;
+use crate::skeleton_authority::{Composition, Correction, Look, SkeletonAuthority};
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
     FfxiSkinSlot, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0,
@@ -60,6 +60,9 @@ pub enum ActorSubject {
         body: Option<u32>,
         main_weapon: Option<u32>,
         sub_weapon: Option<u32>,
+        /// The look's sub slot word, when the PC came from one: retail decides dual wield from the sub slot's model
+        /// ([`load_pc_with_sub_model`]).
+        sub_model: Option<u16>,
     },
 
     Npc {
@@ -91,7 +94,14 @@ pub struct FfxiRenderRoot(pub Entity);
 pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
 
-pub const LOCOMOTION_XFADE_IN: f32 = 9.0;
+/// The blend retail's motion queue runs when a locomotion request retakes a slot (`FFXiMain.dll
+/// retail-2026-09` RVA 0xC85F8..0xC8613, K6, see [`research/cow_ffxi_disassembly/Disassembly_Docs/locomotion_motion_camera_k_pass.md`]).
+pub const RETAIL_LOCOMOTION_XFADE_IN: f32 = 16.0;
+
+/// The blend clock every locomotion handover runs on. Playtest pace choice: half retail.
+/// Downstream consumers (carry-over-blend, hold ramps, matched idle entry) all read this one
+/// constant, so the settle stays internally consistent at either length.
+pub const LOCOMOTION_XFADE_IN: f32 = RETAIL_LOCOMOTION_XFADE_IN / 2.0;
 
 pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 
@@ -298,9 +308,12 @@ pub struct LoadedActor {
     /// resource/InfoSection.kt readMountDefinition).
     cib: Option<Cib>,
 
-    /// `(handle joint, hand bone)` pairs to re-parent while the actor is display-engaged; see
-    /// [`weapon_handle_overrides`]. Main-hand first, then sub.
-    pub weapon_handles: Vec<(usize, usize)>,
+    /// Each equipped weapon's handle joint and the hand bone it re-parents onto while that hand holds it; see
+    /// [`weapon_handle_overrides`] and [`WeaponHolds`].
+    pub weapon_handles: Vec<WeaponHandle>,
+
+    /// The draw and sheathe this actor plays, named by its main-hand weapon's Info ([`EngageRoutines`]).
+    pub engage_routines: EngageRoutines,
 }
 
 /// A parsed motion chunk the pose pass can actually play: at least one key frame set and at
@@ -512,6 +525,7 @@ pub enum ActorPrepKey {
         body: Option<u32>,
         main_weapon: Option<u32>,
         sub_weapon: Option<u32>,
+        sub_model: Option<u16>,
         mipmaps: bool,
         anisotropy: u16,
     },
@@ -540,6 +554,7 @@ fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> A
             body,
             main_weapon,
             sub_weapon,
+            sub_model,
         } => ActorPrepKey::Pc {
             race: *race,
             mounted: *mounted,
@@ -547,6 +562,7 @@ fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> A
             body: *body,
             main_weapon: *main_weapon,
             sub_weapon: *sub_weapon,
+            sub_model: *sub_model,
             mipmaps: q.mipmaps,
             anisotropy: q.anisotropy,
         },
@@ -759,6 +775,7 @@ pub fn load_npc(root: &DatRoot, file_id: u32) -> Result<LoadedActor, String> {
         model_dat: model_dat_label(root, file_id),
         cib: dir.first_cib(),
         weapon_handles: Vec::new(),
+        engage_routines: EngageRoutines::default(),
     })
 }
 
@@ -859,6 +876,7 @@ pub fn load_mount_race(root: &DatRoot, race: u8) -> Result<LoadedActor, String> 
         // layout would misread poseType as a scale byte, so mounts carry no CIB.
         cib: None,
         weapon_handles: Vec::new(),
+        engage_routines: EngageRoutines::default(),
     })
 }
 
@@ -903,38 +921,64 @@ fn action_anim_dat(
     read_dat(root, u32::from(base + offset))
 }
 
-/// The `(handle joint, hand bone)` pairs retail re-parents while a PC is display-engaged
-/// (research/xim resource/SkeletonInstance.kt computeJointParentOverrides): each equipped weapon names
-/// its handle through its Info standard-joint byte resolved in this skeleton's reference table, and the
-/// pair is that joint with the bone the hand standard position names. A held mesh binds to a child of
-/// the handle joint, so without the re-parent it rides the hip chain - rotating with every torso step -
-/// instead of following the arm.
+/// One equipped weapon's re-parent: the handle joint its Info standard-joint byte names, and the bone of the hand that
+/// holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeaponHandle {
+    pub hand: WeaponHand,
+    pub handle: usize,
+    pub bone: usize,
+}
+
+/// The weapon re-parents retail makes on a PC (`FFXiMain.dll retail-2026-09` RVA 0x2A1C7..0x2A25B): the main weapon's
+/// standard joint (Info +0x06, kept at actor +0x87E) onto the right-hand standard position (0x7F), the sub weapon's
+/// (actor +0x888) onto the left (0x7E), each resolved in this skeleton's reference table. A held mesh binds to a child
+/// of the handle joint, so without the re-parent it rides the hip chain - rotating with every torso step - instead of
+/// following the arm. Whether a pair applies on a frame is its hand's hold ([`WeaponHolds`]).
 fn weapon_handle_overrides(
     skeleton: &Skeleton,
     main_weapon: Option<&Cib>,
     sub_weapon: Option<&Cib>,
-) -> Vec<(usize, usize)> {
-    let mut handles = Vec::new();
-    for (weapon, hand_slot) in [
-        (main_weapon, ffxi_dat::skel::standard_position::RIGHT_HAND),
-        (sub_weapon, ffxi_dat::skel::standard_position::LEFT_HAND),
+) -> Vec<WeaponHandle> {
+    let mut handles: Vec<WeaponHandle> = Vec::new();
+    for (weapon, hand, hand_slot) in [
+        (
+            main_weapon,
+            WeaponHand::Main,
+            ffxi_dat::skel::standard_position::RIGHT_HAND,
+        ),
+        (
+            sub_weapon,
+            WeaponHand::Sub,
+            ffxi_dat::skel::standard_position::LEFT_HAND,
+        ),
     ] {
         let Some(slot) = weapon.and_then(|c| c.standard_joint).map(usize::from) else {
             continue;
         };
-        let (Some(handle), Some(hand)) = (
+        let (Some(handle), Some(bone)) = (
             skeleton.reference_at(slot),
             skeleton.reference_at(hand_slot),
         ) else {
             continue;
         };
-        if handle.index != hand.index && !handles.contains(&(handle.index, hand.index)) {
-            handles.push((handle.index, hand.index));
+        if handle.index != bone.index
+            && !handles
+                .iter()
+                .any(|h| h.handle == handle.index && h.bone == bone.index)
+        {
+            handles.push(WeaponHandle {
+                hand,
+                handle: handle.index,
+                bone: bone.index,
+            });
         }
     }
     handles
 }
 
+/// [`load_pc_with_sub_model`] for a PC built without a look: no sub slot model, so dual wield is read off the sub
+/// weapon's own Info.
 pub fn load_pc(
     root: &DatRoot,
     race: u8,
@@ -943,6 +987,91 @@ pub fn load_pc(
     body: Option<u32>,
     main_weapon: Option<u32>,
     sub_weapon: Option<u32>,
+) -> Result<LoadedActor, String> {
+    load_pc_with_sub_model(
+        root,
+        race,
+        mounted,
+        equipment,
+        body,
+        main_weapon,
+        sub_weapon,
+        None,
+    )
+}
+
+/// Whether a PC fights with a weapon in each hand. Retail decides it from the sub slot's model alone (`FFXiMain.dll
+/// retail-2026-09` RVA 0xD3CFC..0xD3D2B, a model out of the slot's range reading as model 0 at RVA 0xD3C81..0xD3CAB),
+/// by the build-scoped ranges the left-swing reaction already reads ([`ffxi_dat::client_profile::OffhandModelRule`]).
+/// Without the sub slot's model, or on an install with no measured rule, the sub weapon's own animation byte stands in
+/// (research/xim poc/Model.kt PcModel.isDualWield).
+fn pc_dual_wields(
+    root: &DatRoot,
+    dll: Option<&ffxi_dat::main_dll::MainDll>,
+    race: u8,
+    sub_model: Option<u16>,
+    sub_animation_type: Option<u8>,
+) -> bool {
+    let rule = root
+        .profile()
+        .known
+        .and_then(|client| client.offhand_model_rule);
+    match (rule, dll, sub_model) {
+        (Some(rule), Some(dll), Some(sub_model)) => {
+            crate::look_resolver::offhand_model_id(dll, sub_model, race)
+                .is_some_and(|model| rule.qualifies(model))
+        }
+        _ => dll.is_some() && sub_animation_type.is_some_and(|b| b != ffxi_dat::cib::CIB_UNSET),
+    }
+}
+
+/// Retail loads a PC's weapon blocks and nothing else once its weapon names a battle type (`FFXiMain.dll
+/// retail-2026-09` RVA 0xD16C0 loads that type's block, RVA 0xD1970 the two dual-wield blocks). kuluu keeps the
+/// race-wide block behind them for families no weapon block authors, but it must not lend a member to a family one
+/// does: every member of a family plays as a layer of the same motion, so a borrowed one posed another weapon's limbs
+/// under this weapon's.
+fn drop_borrowed_family_members(
+    clips: Arc<Vec<SkeletonAnimation>>,
+    weapon_dirs: &[ResourceDir],
+) -> Arc<Vec<SkeletonAnimation>> {
+    let family = |id: &DatId| [id.0[0], id.0[1], id.0[2]];
+    // The clip names alone, off the chunk headers: the clips themselves were parsed once already.
+    let weapon_ids: std::collections::HashSet<DatId> = weapon_dirs
+        .iter()
+        .flat_map(|dir| ffxi_dat::chunk::walk(dir.bytes()).flatten())
+        .filter(|chunk| ChunkKind::from_u8(chunk.kind) == Some(ChunkKind::AnimMo2))
+        .map(|chunk| DatId::from_name(&chunk.name))
+        .collect();
+    let weapon_families: std::collections::HashSet<[u8; 3]> =
+        weapon_ids.iter().map(family).collect();
+    if clips
+        .iter()
+        .all(|clip| weapon_ids.contains(&clip.id) || !weapon_families.contains(&family(&clip.id)))
+    {
+        return clips;
+    }
+    Arc::new(
+        clips
+            .iter()
+            .filter(|clip| {
+                weapon_ids.contains(&clip.id) || !weapon_families.contains(&family(&clip.id))
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// A PC's model and motion sets. `sub_model` is the look's sub slot word, which decides dual wield ([`pc_dual_wields`]).
+#[allow(clippy::too_many_arguments)]
+pub fn load_pc_with_sub_model(
+    root: &DatRoot,
+    race: u8,
+    mounted: bool,
+    equipment: &[u32],
+    body: Option<u32>,
+    main_weapon: Option<u32>,
+    sub_weapon: Option<u32>,
+    sub_model: Option<u16>,
 ) -> Result<LoadedActor, String> {
     // One parsed FFXiMain.dll per install root, shared with every other consumer;
     // `None` (unreadable) degrades to the shipped fallback tables for the
@@ -1088,23 +1217,30 @@ pub fn load_pc(
     let main_weapon_cib = weapon_cib(main_weapon);
     let sub_weapon_cib = weapon_cib(sub_weapon);
     let weapon_anim_type = main_weapon_cib.map(|c| c.motion_index).unwrap_or(0);
-    // The sub slot's own animation byte is what makes a rig dual-wield, and it selects the off-hand
-    // block too (research/xim poc/Model.kt PcModel.isDualWield).
+    // The sub weapon's own animation byte picks its off-hand block (Info +0x03 to actor +0x88A only on a dual
+    // wielder, `FFXiMain.dll retail-2026-09` RVA 0xD0CB7..0xD0CCB).
     let sub_weapon_anim_type = sub_weapon_cib.map(|c| c.motion_index);
+    let dual_wield = pc_dual_wields(root, dll.as_deref(), race, sub_model, sub_weapon_anim_type);
     let weapon_handles =
         weapon_handle_overrides(&skeleton, main_weapon_cib.as_ref(), sub_weapon_cib.as_ref());
+    let engage_routines =
+        EngageRoutines::for_weapons(main_weapon_cib.as_ref(), sub_weapon_cib.as_ref());
+    // What retail loads for the weapons in hand, then the race-wide block kuluu keeps behind them.
     let mut battle_dirs = Vec::new();
+    let mut weapon_dir_count = 0;
     let mut waist_battle_clips = Vec::new();
     if let Some(base) = combat_stance::motion_dat_for_race(dll.as_deref(), race) {
-        // One weapon pairing block per actor in the body's motion pool: `battle base + main-hand byte`, or
-        // that pairing's dual-wield main-hand base. The off-hand block stays out: it authors a new member of an
-        // existing id family and pose_clip_matches registers every clip matching a parameterized id as a
-        // simultaneous layer, so merging it would pose a second stance and move an equipped mesh off its hand.
+        // The weapon pairing's blocks join the body's motion pool: `battle base + main-hand byte`, or with a weapon in
+        // each hand the dual-wield main-hand block plus the off-hand block (`FFXiMain.dll retail-2026-09` RVA 0xD1970).
+        // The off-hand block authors new members of the main block's families (its stance and swings for the left
+        // side) and the off hand's own draw and sheathe routines, which the main block's routines start through
+        // hand-routine stages.
         let blocks = combat_stance::BattleMotionBlocks::resolve(
             dll.as_deref(),
             race,
             weapon_anim_type,
             sub_weapon_anim_type,
+            dual_wield,
         );
         let stance_block = blocks.map(|blocks| blocks.main);
         // The waist/cloth block's waist-slot clips join it: the battle stance's own `btl2` and the swings'
@@ -1137,6 +1273,14 @@ pub fn load_pc(
                 battle_dirs.push(dir);
             }
         }
+        if let Some(dir) = blocks
+            .and_then(|blocks| blocks.off_hand)
+            .and_then(|file| read_dat(root, file))
+            .map(ResourceDir::from_bytes)
+        {
+            battle_dirs.push(dir);
+        }
+        weapon_dir_count = battle_dirs.len();
 
         if let Some(dir) = read_dat(root, base).map(ResourceDir::from_bytes) {
             battle_dirs.push(dir);
@@ -1154,6 +1298,11 @@ pub fn load_pc(
 
     let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &battle_dirs);
+    let battle_clips = if weapon_dir_count == 0 {
+        battle_clips
+    } else {
+        drop_borrowed_family_members(battle_clips, &battle_dirs[..weapon_dir_count])
+    };
     let battle_clips = if waist_battle_clips.is_empty() {
         battle_clips
     } else {
@@ -1180,6 +1329,7 @@ pub fn load_pc(
         model_dat: model_dat_label(root, skel_file_id),
         cib: race_cib,
         weapon_handles,
+        engage_routines,
     })
 }
 
@@ -1518,14 +1668,11 @@ pub struct FfxiRenderActor {
     head_look: HeadLook,
 
     /// Locked on and moving this frame (self only): the walker aimed the body at the target, so a side step's
-    /// look-at measures from the chest ([`crate::locked_torso`]).
+    /// look-at turns each record from the bone it carries ([`Correction::Held`]).
     pub locked_on: bool,
 
-    /// How far that applies; it ramps over the locomotion crossfade the side-step clip itself fades in on.
-    locked_torso_weight: f32,
-
-    /// The chest joint and axis of this rig; `None` for a rig without a chest reference.
-    upper_body: Option<crate::locked_torso::UpperBody>,
+    /// The final say over this actor's bones each pose pass ([`crate::skeleton_authority`]).
+    skeleton_authority: SkeletonAuthority,
 
     /// What the motion-name chooser read last frame, and the straight frames a side-step flip still owes
     /// ([`actor_state::SideStepFlipLatch`]).
@@ -1565,10 +1712,15 @@ pub struct FfxiRenderActor {
     /// buffer is not reallocated per frame.
     pose_scratch: BonePoseScratch,
 
-    /// The `(handle joint, hand bone)` pairs this actor's equipped weapons resolve to; empty unless
-    /// the model loaded with a weapon naming a handle. Applied while display-engaged - see
-    /// [`weapon_handle_overrides`].
-    weapon_handles: Vec<(usize, usize)>,
+    /// This actor's equipped weapons' re-parents; empty unless the model loaded with a weapon naming a handle. Each
+    /// applies while its hand holds the weapon ([`weapon_handle_overrides`], [`WeaponHolds`]).
+    weapon_handles: Vec<WeaponHandle>,
+
+    /// Which hands hold their weapon this frame, and what the running draw or sheathe still owes them.
+    weapon_holds: WeaponHolds,
+
+    /// The draw and sheathe this actor plays ([`EngageRoutines`]).
+    engage_routines: EngageRoutines,
 
     point_light_selection: Option<ActorPointLightSelection>,
 }
@@ -1800,6 +1952,256 @@ impl FfxiRenderActor {
             cast_pose: false,
             settle: None,
         });
+    }
+}
+
+/// The draw and sheathe routines, `in n` and `out n`, where n is the main-hand weapon's Info byte 0x04
+/// ([`Cib::motion_option`]). Retail stores that byte on the actor when the main-hand model loads (`FFXiMain.dll
+/// retail-2026-09` RVA 0xD0C76, Info +0x04 to actor +0x87C) and builds both ids from it, a negative byte reading as 0
+/// (RVA 0xD2ED0 for `in `, RVA 0xD2EF0 for `out`). No main-hand weapon leaves the byte at 0. The sub weapon's Info byte
+/// 0x04 is stored beside it (RVA 0xD0C9C, to actor +0x87F): a hand-routine stage builds each hand's own routine from its
+/// hand's byte ([`HandStage::routine_name`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EngageRoutines {
+    draw: DatId,
+    sheathe: DatId,
+    main_option: u8,
+    sub_option: u8,
+}
+
+impl EngageRoutines {
+    /// The pair a main-hand Info byte 0x04 names.
+    pub fn for_motion_option(motion_option: u8) -> Self {
+        let number = b'0' + (motion_option as i8).max(0) as u8;
+        Self {
+            draw: DatId::from_name(&[b'i', b'n', b' ', number]),
+            sheathe: DatId::from_name(&[b'o', b'u', b't', number]),
+            main_option: motion_option,
+            sub_option: 0,
+        }
+    }
+
+    /// The pair the equipped main-hand weapon's Info names.
+    pub fn for_main_weapon(main_weapon: Option<&Cib>) -> Self {
+        Self::for_motion_option(main_weapon.map_or(0, |info| info.motion_option))
+    }
+
+    /// The pair the main-hand weapon's Info names, keeping the sub weapon's Info byte 0x04 for its hand's routines.
+    pub fn for_weapons(main_weapon: Option<&Cib>, sub_weapon: Option<&Cib>) -> Self {
+        Self {
+            sub_option: sub_weapon.map_or(0, |info| info.motion_option),
+            ..Self::for_main_weapon(main_weapon)
+        }
+    }
+
+    /// The routine a hand-routine stage starts on this actor.
+    fn hand_routine(self, stage: HandStage) -> DatId {
+        DatId::from_name(&stage.routine_name(self.main_option, self.sub_option))
+    }
+}
+
+impl Default for EngageRoutines {
+    fn default() -> Self {
+        Self::for_motion_option(0)
+    }
+}
+
+/// What a draw or sheathe routine does over its run, read off its own stages and those of every routine it starts on
+/// this actor: a linked routine, or each hand's own routine through a hand-routine stage. Times are skeleton frames from
+/// the routine's start: a stage's fire frame on the routine clock over
+/// [`crate::scheduler_runtime::SKELETON_FRAME_DIVISOR`].
+#[derive(Clone, Debug, Default, PartialEq)]
+struct EngageTimeline {
+    /// The motion clips it plays, by start time. One starting later takes the slots it shares with an earlier one.
+    motions: Vec<(f32, DatId)>,
+    /// The hold changes its stages make, by time: (frame, hand, holds).
+    holds: Vec<(f32, WeaponHand, bool)>,
+    /// The busy stages it runs ([`StageKind::BusyFor`]), by start: (start, end).
+    busy: Vec<(f32, f32)>,
+}
+
+impl EngageTimeline {
+    /// When the engage machine steps again after the routine starts: the end of the busy stages that keep the actor
+    /// busy from the routine's first frame, one picking up where another ends, or 0 when none starts on it.
+    fn busy_until(&self) -> f32 {
+        let mut until = 0.0_f32;
+        for &(start, end) in &self.busy {
+            if start > until {
+                break;
+            }
+            until = until.max(end);
+        }
+        until
+    }
+}
+
+/// How far down a routine's starts are followed: each hand's routine is one level below the draw, a sound routine it
+/// links one more. Deeper than this is a cycle.
+const ENGAGE_ROUTINE_DEPTH: usize = 4;
+
+fn engage_timeline(
+    routine: DatId,
+    routines: &HashMap<DatId, Scheduler>,
+    engage_routines: EngageRoutines,
+) -> EngageTimeline {
+    fn walk(
+        name: DatId,
+        start: u32,
+        depth: usize,
+        routines: &HashMap<DatId, Scheduler>,
+        engage_routines: EngageRoutines,
+        out: &mut EngageTimeline,
+    ) {
+        if depth > ENGAGE_ROUTINE_DEPTH {
+            return;
+        }
+        let Some(sched) = routines.get(&name) else {
+            return;
+        };
+        let frames = |routine_frame: u32| {
+            routine_frame as f32 / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR
+        };
+        for t in &sched.stages {
+            // A random block's members are alternatives retail picks one of per run, not stages that all fire.
+            if t.stage.random_group.is_some() {
+                continue;
+            }
+            let at = start + t.frame;
+            match (t.stage.kind, t.stage.hand) {
+                (StageKind::Motion, _) => out
+                    .motions
+                    .push((frames(at), DatId::from_name(&t.stage.id))),
+                (StageKind::WeaponHoldFor, Some(hand)) => {
+                    out.holds.push((frames(at), hand.hand, true));
+                    let end = at + u32::from(t.stage.duration_frames);
+                    out.holds.push((frames(end), hand.hand, false));
+                }
+                (StageKind::WeaponHold, Some(hand)) => {
+                    out.holds.push((frames(at), hand.hand, true))
+                }
+                (StageKind::WeaponRelease, Some(hand)) => {
+                    out.holds.push((frames(at), hand.hand, false))
+                }
+                (StageKind::BusyFor, _) => out
+                    .busy
+                    .push((frames(at), frames(at + u32::from(t.stage.duration_frames)))),
+                (StageKind::HandRoutine, Some(hand)) => walk(
+                    engage_routines.hand_routine(hand),
+                    at,
+                    depth + 1,
+                    routines,
+                    engage_routines,
+                    out,
+                ),
+                (StageKind::SubRoutine | StageKind::BlockingSubRoutine, _) => walk(
+                    DatId::from_name(&t.stage.id),
+                    at,
+                    depth + 1,
+                    routines,
+                    engage_routines,
+                    out,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = EngageTimeline::default();
+    walk(routine, 0, 0, routines, engage_routines, &mut out);
+    out.motions.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.holds.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.busy.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
+
+/// How long a draw or sheathe owns the pose: until its last motion clip has played out, each clip as long as this
+/// actor's sets hold it (the battle set's copy, the base set's only when the battle set has none).
+fn engage_window(
+    timeline: &EngageTimeline,
+    battle_clips: &[SkeletonAnimation],
+    animations: &[SkeletonAnimation],
+) -> f32 {
+    timeline
+        .motions
+        .iter()
+        .map(|&(start, clip)| {
+            let battle = rest_clip_len_frames(battle_clips, clip);
+            start
+                + if battle > 0.0 {
+                    battle
+                } else {
+                    rest_clip_len_frames(animations, clip)
+                }
+        })
+        .fold(0.0, f32::max)
+}
+
+/// Which hands hold their weapon, kept the way the client keeps it (`FFXiMain.dll retail-2026-09`). The skeleton puts
+/// a hand's weapon on the hand only while that hand holds it (RVA 0x2A153..0x2A1C1 reads the flags through PC actor
+/// vtable slot bytes 0x320 and 0x328): while either hand's routine override is up, each hand follows its own override;
+/// otherwise both follow the engaged flag. The engage machine drops that flag as it starts the sheathe (RVA
+/// 0x8B98C..0x8B9A6) and raises it on its first update after it starts the draw (RVA 0x8B789..0x8B794), but it does not
+/// step at all while the actor's busy count is up (RVA 0x8B49B..0x8B4C1), and a busy stage ([`StageKind::BusyFor`]) at
+/// the draw's start holds that count up. So the flag rises as the busy stages running from the draw's start end
+/// ([`EngageTimeline::busy_until`]), and until then the weapon stands where the draw's clips carry it out of its sheath.
+/// The overrides move only on routine stages ([`StageKind::WeaponHoldFor`], [`StageKind::WeaponHold`],
+/// [`StageKind::WeaponRelease`]) and keep their value until a stage moves them again or the actor resets, which clears
+/// the flag and both overrides (RVA 0xC5DA2..0xC5DD8).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WeaponHolds {
+    /// The per-hand routine override, actor +0x83E (main) / +0x83F (sub).
+    overrides: [bool; 2],
+    /// The engaged flag, actor +0x83C.
+    engaged: bool,
+    /// Whether the routine started last is the draw: the side of the engage machine the actor is on.
+    drawn: bool,
+    /// When the running draw raises the engaged flag, on its clock ([`EngageTimeline::busy_until`]).
+    engaged_at: Option<f32>,
+    /// Override changes the running draw or sheathe still owes, by routine time, and that routine's clock.
+    pending: Vec<(f32, WeaponHand, bool)>,
+    clock: f32,
+}
+
+impl WeaponHolds {
+    /// A draw (`drawn`) or a sheathe has started with this routine's timeline: whatever the routine before it still
+    /// owed lands at once, the engaged flag drops, and the new routine's hold changes and, for a draw, the flag's rise
+    /// run on its own clock from its first frame.
+    fn start(&mut self, drawn: bool, timeline: EngageTimeline) {
+        for (_, hand, held) in self.pending.drain(..) {
+            self.overrides[hand.index()] = held;
+        }
+        self.drawn = drawn;
+        self.engaged = false;
+        self.engaged_at = drawn.then(|| timeline.busy_until());
+        self.pending = timeline.holds;
+        self.clock = 0.0;
+        self.advance(0.0);
+    }
+
+    fn advance(&mut self, frames: f32) {
+        self.clock += frames;
+        let clock = self.clock;
+        if self.engaged_at.is_some_and(|at| at <= clock) {
+            self.engaged = true;
+            self.engaged_at = None;
+        }
+        let due = self
+            .pending
+            .iter()
+            .take_while(|(at, ..)| *at <= clock)
+            .count();
+        for (_, hand, held) in self.pending.drain(..due) {
+            self.overrides[hand.index()] = held;
+        }
+    }
+
+    /// Whether `hand` holds its weapon now.
+    pub fn holds(&self, hand: WeaponHand) -> bool {
+        if self.overrides.iter().any(|&held| held) {
+            self.overrides[hand.index()]
+        } else {
+            self.engaged
+        }
     }
 }
 
@@ -2310,8 +2712,7 @@ pub fn make_render_actor(
         action_clips: Vec::new(),
         head_look: HeadLook::default(),
         locked_on: false,
-        locked_torso_weight: 0.0,
-        upper_body: crate::locked_torso::UpperBody::of(&loaded.skeleton),
+        skeleton_authority: SkeletonAuthority::of(&loaded.skeleton),
         side_step_latch: actor_state::SideStepFlipLatch::default(),
         wire_animation: ffxi_proto::decode::animation::NONE,
         anim_modes: ActorAnimModes::default(),
@@ -2323,6 +2724,8 @@ pub fn make_render_actor(
         pose_work: PoseScratch::default(),
         pose_scratch: BonePoseScratch::new(),
         weapon_handles: loaded.weapon_handles.clone(),
+        weapon_holds: WeaponHolds::default(),
+        engage_routines: loaded.engage_routines,
         point_light_selection: None,
     }
 }
@@ -2344,6 +2747,7 @@ fn empty_loaded_actor(skeleton: Skeleton, cib: Option<Cib>) -> LoadedActor {
         model_dat: String::new(),
         cib,
         weapon_handles: Vec::new(),
+        engage_routines: EngageRoutines::default(),
     }
 }
 
@@ -2944,34 +3348,30 @@ fn retry_idle_registrations(
     }
 }
 
-/// The draw/sheathe window is the length of the `in 0`/`out0` routine's
-/// motion clip as it plays: the battle set's copy, or the base set's only when
-/// the battle set has none (`select_pose_clips_layered` overlays the battle
-/// set first). Not the max of the two: `rest_clip_len_frames` matches the `?`
-/// wild across every variant in a set, and the base PC set holds draw clips
-/// for weapons not in hand.
+/// The draw/sheathe window runs until the draw or sheathe routine's ([`EngageRoutines`]) last
+/// motion clip has played out, the routines it starts included ([`engage_window`]): each clip
+/// the battle set's copy, or the base set's only when the battle set has none
+/// (`select_pose_clips_layered` overlays the battle set first). Not the max of the two:
+/// `rest_clip_len_frames` matches the `?` wild across every variant in a set, and the base PC
+/// set holds draw clips for weapons not in hand.
 fn advance_engage(
     machine: &mut EngageMachine,
     want_engaged: bool,
+    engage_routines: EngageRoutines,
     routines: &HashMap<DatId, Scheduler>,
-    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
     battle_clips: &[SkeletonAnimation],
     animations: &[SkeletonAnimation],
     elapsed_frames: f32,
 ) -> actor_state::EngageAnimationState {
     use actor_state::EngageAnimationState as S;
 
-    let transition_len = |routine: &str| -> f32 {
-        routine_motion_clip(routines, rejected_routines, DatId::from_str(routine))
-            .map(|clip| {
-                let battle = rest_clip_len_frames(battle_clips, clip);
-                if battle > 0.0 {
-                    battle
-                } else {
-                    rest_clip_len_frames(animations, clip)
-                }
-            })
-            .unwrap_or(0.0)
+    // A routine the model does not ship, or whose parse was rejected, is not in `routines` and plays nothing.
+    let transition_len = |routine: DatId| -> f32 {
+        engage_window(
+            &engage_timeline(routine, routines, engage_routines),
+            battle_clips,
+            animations,
+        )
     };
 
     match *machine {
@@ -2979,7 +3379,7 @@ fn advance_engage(
             if !want_engaged {
                 return S::NotEngaged;
             }
-            let len = transition_len("in 0");
+            let len = transition_len(engage_routines.draw);
             if len > 0.0 {
                 *machine = EngageMachine::Drawing { remaining: len };
                 S::Engaging
@@ -2990,7 +3390,7 @@ fn advance_engage(
         }
         EngageMachine::Drawing { remaining } => {
             if !want_engaged {
-                let len = transition_len("out0");
+                let len = transition_len(engage_routines.sheathe);
                 if len > 0.0 {
                     *machine = EngageMachine::Sheathing { remaining: len };
                     return S::Disengaging;
@@ -3011,7 +3411,7 @@ fn advance_engage(
             if want_engaged {
                 return S::Engaged;
             }
-            let len = transition_len("out0");
+            let len = transition_len(engage_routines.sheathe);
             if len > 0.0 {
                 *machine = EngageMachine::Sheathing { remaining: len };
                 S::Disengaging
@@ -3022,7 +3422,7 @@ fn advance_engage(
         }
         EngageMachine::Sheathing { remaining } => {
             if want_engaged {
-                let len = transition_len("in 0");
+                let len = transition_len(engage_routines.draw);
                 if len > 0.0 {
                     *machine = EngageMachine::Drawing { remaining: len };
                     return S::Engaging;
@@ -3073,13 +3473,15 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
 
     actor.action = None;
     actor.engage = EngageMachine::NotEngaged;
+    actor.weapon_holds = WeaponHolds::default();
     actor.knockback = None;
     actor.look_at_tasks.clear();
     actor.wire_animation = ffxi_proto::decode::animation::NONE;
     actor.coordinator.clear();
     // A carried record belongs to the clip that wrote it, so a reset drops them with the layers: the
-    // next pose pass starts from the bind pose again.
+    // next pose pass starts from the bind pose again. What the bones were still owed goes with them.
     actor.pose_scratch.clear();
+    actor.skeleton_authority.reset();
     actor.current_clip = None;
     actor.registered_slots = [None; 8];
     actor.pending_idle_registrations = [None; 8];
@@ -3094,6 +3496,17 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name
         name,
     );
     actor.death_phase = actor_state::DeathPhase::Unobserved;
+}
+
+/// The standing pose (`idl?`) from the actor's own sets, the pose that faces the target when a crossfade turns
+/// toward it.
+const STANDING_POSE: &str = "idl?";
+
+/// Whether this request brings in a side step (`mvl` / `mvr`), the crossfade that turns toward the target
+/// under lock.
+fn brings_in_side_step(next: DatId) -> bool {
+    let id = next.as_str();
+    id.starts_with("mvl") || id.starts_with("mvr")
 }
 
 /// Runs inside the parallel per-actor pass: it touches only the actor's own fields, leaving the
@@ -3131,8 +3544,7 @@ fn advance_actor_pose(
         action_clips,
         head_look,
         locked_on,
-        locked_torso_weight,
-        upper_body,
+        skeleton_authority,
         side_step_latch,
         wire_animation,
         last_clip,
@@ -3141,6 +3553,8 @@ fn advance_actor_pose(
         pose_work,
         pose_scratch,
         weapon_handles,
+        weapon_holds,
+        engage_routines,
         rejected_clips,
         rejected_routines,
         model_dat,
@@ -3184,16 +3598,21 @@ fn advance_actor_pose(
     // finish looping, which a hold loop never does on its own.
     let action_just_ended = action_pre && action.is_none();
 
-    let engage_overlay = match *engage {
-        EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. } => {
+    // The draw or sheathe owns the pose with every motion its routine has started by now, the routines it starts
+    // included ([`engage_timeline`]): with a weapon in each hand, both hands' routines at once. A routine that yields no
+    // motion at all names its miss.
+    let engage_overlay: Vec<DatId> = match *engage {
+        EngageMachine::Drawing { remaining } | EngageMachine::Sheathing { remaining } => {
             let routine = if matches!(*engage, EngageMachine::Drawing { .. }) {
-                DatId::from_str("in 0")
+                engage_routines.draw
             } else {
-                DatId::from_str("out0")
+                engage_routines.sheathe
             };
-            match routine_motion_lookup(routines, rejected_routines, routine, false) {
-                Ok(clip) => clip,
-                Err(miss) => {
+            let timeline = engage_timeline(routine, routines, *engage_routines);
+            if timeline.motions.is_empty() {
+                if let Err(miss) =
+                    routine_motion_lookup(routines, rejected_routines, routine, false)
+                {
                     routine_motion_miss(
                         actor.world_id,
                         name.unwrap_or("-"),
@@ -3201,12 +3620,41 @@ fn advance_actor_pose(
                         routine,
                         &miss,
                     );
-                    None
                 }
+                Vec::new()
+            } else {
+                let elapsed =
+                    (engage_window(&timeline, battle_clips, animations) - remaining).max(0.0);
+                timeline
+                    .motions
+                    .iter()
+                    .filter(|&&(start, _)| start <= elapsed)
+                    .map(|&(_, clip)| clip)
+                    .collect()
             }
         }
-        _ => None,
+        _ => Vec::new(),
     };
+
+    // The engage machine stepped before this pass: a flip onto the engaged side started the draw, a flip off it the
+    // sheathe, and that routine's hold changes, and a draw's engaged flag, run from here ([`WeaponHolds`]).
+    let engaged_side = matches!(
+        *engage,
+        EngageMachine::Drawing { .. } | EngageMachine::Engaged
+    );
+    if engaged_side != weapon_holds.drawn {
+        let routine = if engaged_side {
+            engage_routines.draw
+        } else {
+            engage_routines.sheathe
+        };
+        weapon_holds.start(
+            engaged_side,
+            engage_timeline(routine, routines, *engage_routines),
+        );
+    } else {
+        weapon_holds.advance(elapsed_frames);
+    }
 
     // research/xim Actor.kt (updateFishingState) — the fishing macro-pose overrides
     // locomotion/idle/rest. fsh0 (cast/wait) and fsh1 (fighting) loop; fsh2..fsh6
@@ -3346,7 +3794,13 @@ fn advance_actor_pose(
     let chosen = collapse_id
         .and_then(|id| try_tier(id, false, PoseTier::Death))
         .or_else(|| action_id.and_then(|id| try_tier(id, false, PoseTier::Action)))
-        .or_else(|| engage_overlay.and_then(|id| try_tier(id, false, PoseTier::EngageOverlay)))
+        // The latest motion the draw or sheathe has started names the pose, so a start re-registers its layers.
+        .or_else(|| {
+            engage_overlay
+                .iter()
+                .rev()
+                .find_map(|&id| try_tier(id, false, PoseTier::EngageOverlay))
+        })
         .or_else(|| fishing.and_then(|fc| try_tier(fc.id, fc.looping, PoseTier::Fishing)))
         .or_else(|| special_clip_id.and_then(|id| try_tier(id, false, PoseTier::Special)))
         .or_else(|| {
@@ -3389,7 +3843,21 @@ fn advance_actor_pose(
     // A chosen tier resolved to a usable chunk above, so this is non-empty unless we fell
     // through every tier and the idle family itself (ffxi-actor/src/actor_state.rs
     // idle_animation_id) is missing from the model.
-    let matches: Vec<&SkeletonAnimation> = resolve(selected_id);
+    let mut matches: Vec<&SkeletonAnimation> = resolve(selected_id);
+    // Every motion the draw or sheathe has started plays at once, a later start taking the slots it shares with an
+    // earlier one, the way each Motion stage registers its own clips when it fires.
+    if matches!(selected_tier, PoseTier::EngageOverlay) && engage_overlay.len() > 1 {
+        let slot_of =
+            |clip: &SkeletonAnimation| (clip.id.final_digit().unwrap_or(0) as usize).min(7);
+        let mut layers: Vec<&SkeletonAnimation> = Vec::new();
+        for &id in &engage_overlay {
+            for clip in resolve(id) {
+                layers.retain(|held| slot_of(held) != slot_of(clip));
+                layers.push(clip);
+            }
+        }
+        matches = layers;
+    }
     if matches.is_empty() {
         clip_warn_once(
             actor.world_id,
@@ -3479,14 +3947,42 @@ fn advance_actor_pose(
         }
 
         if is_idle {
+            // A stop settles instead of playing out: the locomotion on screen is frozen at this
+            // tick and idle rises from its own key frame closest to that pose. Letting the held
+            // gait keep running under the crossfade made limbs wind back past what they were
+            // holding before landing forward in idle - 15-30 deg of fresh swing after release
+            // against holds of 20 deg or less, on spine and arm joints alike
+            // (`stopping_a_held_movement_never_winds_the_arms_up_after_release`). Every settling
+            // layer enters on the one frame closest over all of them: legs, upper body and waist
+            // idle are one authored motion, and a frame matched per layer plays them out of step.
+            let mut settling = Vec::new();
             for &clip in &matches {
                 let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
                 let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
                 if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
                     continue;
                 }
+                if let Some(outgoing) = settling_locomotion(coordinator, slot) {
+                    settling.push((outgoing, clip));
+                }
+            }
+            let shared_start = matched_idle_start(&settling);
+            for &clip in &matches {
+                let slot = (clip.id.final_digit().unwrap_or(0) as usize).min(7);
+                let from_battle = battle_clips.iter().any(|b| std::ptr::eq(b, clip));
+                if slot_keeps_clip(coordinator, registered_slots, slot, (clip.id, from_battle)) {
+                    continue;
+                }
+                let settled_from =
+                    shared_start.filter(|_| settling_locomotion(coordinator, slot).is_some());
                 let accepted = if action_just_ended {
                     coordinator.register_idle_animation_eager(clip.clone())
+                } else if let Some(frame) = settled_from {
+                    coordinator.register_idle_animation_matched(
+                        clip.clone(),
+                        frame,
+                        LOCOMOTION_XFADE_IN,
+                    )
                 } else {
                     coordinator.register_idle_animation(clip.clone(), true)
                 };
@@ -3504,11 +4000,37 @@ fn advance_actor_pose(
             // a completion motion, honor its parsed transition + loop params; otherwise use the
             // locomotion crossfade defaults.
             let action = action.filter(|a| a.clip_id == selected_id);
+            // Locked on, a crossfade into a side step turns toward the target
+            // (`a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way` in ffxi-actor), and so does
+            // the straight gait the flip latch shows between two side steps while the travel is still to a side: it is
+            // the first half of the flip. From the gait or a stop the short way already passes through the target, so
+            // only a flip comes at it from the far side. A release into the gait keeps the short route: measured on
+            // Hume M, routing wide pairs long-way swings the chest chain 30+ deg/tick past anything the gait itself
+            // reaches.
+            let flip_shows_straight = travel == actor_state::Direction::Forward
+                && matches!(
+                    inputs.travel(),
+                    actor_state::Direction::Left | actor_state::Direction::Right
+                );
+            let turn_toward_target =
+                *locked_on && (brings_in_side_step(selected_id) || flip_shows_straight);
             let tp = TransitionParams {
                 transition_in_time: action.map_or(LOCOMOTION_XFADE_IN, |a| a.transition_in),
                 transition_out_time: action.map_or(LOCOMOTION_XFADE_OUT, |a| a.transition_out),
                 in_step: action.is_none() && matches!(selected_tier, PoseTier::Locomotion),
-                turn_toward_target: *locked_on,
+                turn_toward_target,
+                // What faces the target is the actor's standing pose from its own sets: the walker keeps the target
+                // dead ahead, and that pose stands square to it. Engaged, the gait and stance a slot holds are the
+                // battle set's, authored side-on (Hume M's weapon blocks turn the stance's chest 21 to 33 deg off the
+                // root and the battle run's up to 52, against 2 deg standing); measured from a side-on gait, Mithra's
+                // flip went round her back.
+                facing: turn_toward_target.then(|| {
+                    AnimationSnapshot::of_layers(pose_clip_matches(
+                        animations,
+                        std::iter::empty(),
+                        DatId::from_str(STANDING_POSE),
+                    ))
+                }),
                 ..Default::default()
             };
             // Fishing resolution clips (fsh2..fsh6) have no ActionPlayback, so without an
@@ -3665,42 +4187,45 @@ fn advance_actor_pose(
     coordinator.sample_pose(skeleton.joints.len(), pose_scratch);
 
     // Retail re-parents each equipped weapon's handle joint onto the bone its hand standard position
-    // names, and only while the actor is display-engaged (research/xim resource/SkeletonInstance.kt
-    // computeJointParentOverrides). The override drops that joint's own authored transform: measured on
-    // Hume M, a strafe clip puts handle joints 3/4/9 between 150 and 178 degrees away from the battle
-    // stance, so a held mesh left riding its chain swings across the body on every direction change.
-    let mut handle_overrides: Vec<(usize, usize)> = Vec::new();
-    if use_battle {
-        handle_overrides.extend(weapon_handles.iter().copied());
-    }
+    // names while that hand holds it ([`weapon_handle_overrides`], [`WeaponHolds`]): from the end of the draw's
+    // busy stages to the sheathe's start, unless the running routines' hold stages say otherwise for a hand.
+    // The override drops that joint's own authored transform: measured on Hume M, a strafe clip puts handle joints
+    // 3/4/9 between 150 and 178 degrees away from the battle stance, so a held mesh left riding its chain
+    // swings across the body on every direction change.
+    let handle_overrides: Vec<(usize, usize)> = weapon_handles
+        .iter()
+        .filter(|weapon| weapon_holds.holds(weapon.hand))
+        .map(|weapon| (weapon.handle, weapon.bone))
+        .collect();
 
-    // Keyed on the clip that is actually playing, not on the travel direction: a side-step clip turns the chest off
-    // the walker's aim, and the look-at below measures from the chest while one plays.
+    // Keyed on the clip that is actually playing, not on the travel direction: a side-step clip (the DAT's own `mvl` /
+    // `mvr` motions) turns the body off the walker's aim, and locked on, the authority turns each look-at record from
+    // the bone it carries while one plays.
     let side_step =
         matches!(selected_tier, PoseTier::Locomotion) && inputs.moving && !inputs.walking && {
             let selected = selected_id.as_str();
             selected.starts_with("mvl") || selected.starts_with("mvr")
         };
-    let torso_step = elapsed_frames / LOCOMOTION_XFADE_IN;
-    *locked_torso_weight = if *locked_on && side_step {
-        (*locked_torso_weight + torso_step).min(1.0)
-    } else {
-        (*locked_torso_weight - torso_step).max(0.0)
-    };
 
-    pose_world_mounted_into(
-        world_pose,
-        pose_work,
-        skeleton,
-        |joint| pose_scratch.get(joint),
-        RootTransform {
+    // The clips' pose, as the coordinator wrote it this frame.
+    let composition = Composition {
+        root: RootTransform {
             facing_dir: *facing_dir,
             skew: 0.0,
             slope_oriented: false,
             scale: Vec3::splat(*scale),
         },
-        &handle_overrides,
+        parent_overrides: &handle_overrides,
         mount,
+    };
+    pose_world_mounted_into(
+        world_pose,
+        pose_work,
+        skeleton,
+        |joint| pose_scratch.get(joint),
+        composition.root,
+        composition.parent_overrides,
+        composition.mount,
     );
 
     // Retail removes the actor's yaw from a posed point and nothing else (`FFXiMain.dll retail-2026-09` RVA
@@ -3721,17 +4246,9 @@ fn advance_actor_pose(
         && target_pose.is_some_and(|p| !look_at_release(p));
     head_look.advance(aiming, target_pose, elapsed_frames);
     // The chased point is already in the space `world_pose` lives in (yaw removed once at the boundary above), so it
-    // reaches the bend untouched and every authored limit opens along this actor's own nose.
-    // Locked and side-stepping, the bend measures from where the chest really faces, and it runs even under a status
-    // that holds the look-at off: the walker keeps the target dead ahead of the root, so with nothing else aiming the
-    // point is that target at neck height.
-    let bend_forward = crate::locked_torso::bend_reference(
-        POSE_FORWARD,
-        upper_body
-            .as_ref()
-            .and_then(|upper| upper.chest_facing(world_pose)),
-        *locked_torso_weight,
-    );
+    // reaches the bend untouched and every authored limit opens along this actor's own nose. Locked on a side step the
+    // correction runs even under a status that holds the look-at off: the walker keeps the target dead ahead of the
+    // root, so with nothing else aiming the point is that target at neck height.
     let bend_point = if head_look.weight > 0.0 {
         Some(head_look.chased_pose)
     } else {
@@ -3742,19 +4259,27 @@ fn advance_actor_pose(
         )
         .map(|neck| neck.origin + POSE_FORWARD * HEAD_LOOK_NEUTRAL_AHEAD)
     };
-
-    if let Some(bend_point) = bend_point {
-        apply_look_bends(
-            world_pose,
-            skeleton,
-            &handle_overrides,
-            bend_point,
-            bend_forward,
-            head_look.weight.max(*locked_torso_weight),
-            look_at_gates::look_at_bend_records(*wire_animation),
-            look_at_gates::look_at_anchor_y_drop(*wire_animation),
-        );
-    }
+    skeleton_authority.settle(
+        world_pose,
+        pose_work,
+        skeleton,
+        pose_scratch,
+        coordinator,
+        composition,
+        bend_point.map(|point| Look {
+            point,
+            weight: head_look.weight,
+            pace: HEAD_LOOK_WEIGHT_PER_FRAME,
+            records: look_at_gates::look_at_bend_records(*wire_animation),
+            anchor_drop: look_at_gates::look_at_anchor_y_drop(*wire_animation),
+        }),
+        if *locked_on && side_step {
+            Correction::Held
+        } else {
+            Correction::Free
+        },
+        elapsed_frames,
+    );
 
     if let Some(detail) = bone_log_detail() {
         bone_trace_frame(
@@ -3763,10 +4288,79 @@ fn advance_actor_pose(
             selected_id,
             registered_slots,
             coordinator,
+            skeleton_authority,
             skeleton,
             world_pose,
         );
     }
+}
+
+/// The locomotion layer a stop freezes in `slot`, when one is playing there.
+fn settling_locomotion(
+    coordinator: &SkeletonAnimationCoordinator,
+    slot: usize,
+) -> Option<&ffxi_actor::animation::SkeletonAnimationContext> {
+    coordinator.animations[slot]
+        .as_ref()
+        .and_then(|a| a.current_animation.as_ref())
+        .filter(|c| {
+            let id = c.animation.id.as_str();
+            id.starts_with("mv") || id.starts_with("run") || id.starts_with("wlk")
+        })
+}
+
+/// The one key frame every idle layer of a stop enters on: the frame whose keys sit closest to where the
+/// outgoing layers stand this tick - summed degrees of rotation over every joint each idle clip shares with
+/// the layer it replaces (`register_idle_animation_matched`). Each clip reads that frame on its own loop, as
+/// layers registered together at frame 0 do. None when no layer shares a joint to compare, which leaves the
+/// plain idle handover in place.
+fn matched_idle_start(
+    layers: &[(
+        &ffxi_actor::animation::SkeletonAnimationContext,
+        &SkeletonAnimation,
+    )],
+) -> Option<f32> {
+    let compared: Vec<(&SkeletonAnimation, Vec<(u32, KeyFrameTransform)>)> = layers
+        .iter()
+        .filter(|(_, idle)| idle.length_in_frames() >= 1.0)
+        .map(|(outgoing, idle)| {
+            let poses: Vec<(u32, KeyFrameTransform)> = idle
+                .key_frame_sets
+                .keys()
+                .filter_map(|j| Some((*j, outgoing.get_joint_transform(*j as usize)?)))
+                .collect();
+            (*idle, poses)
+        })
+        .filter(|(_, poses)| !poses.is_empty())
+        .collect();
+    let frames = compared
+        .iter()
+        .map(|(idle, _)| idle.length_in_frames().floor() as u32)
+        .max()?;
+    let mut best: Option<(f32, f32)> = None; // (total angle from the frozen poses, frame)
+    for frame in 0..frames {
+        let mut total = 0.0_f32;
+        for (idle, outgoing_poses) in &compared {
+            let at = (frame as f32).rem_euclid(idle.length_in_frames());
+            for (joint, from) in outgoing_poses {
+                let Some(to) = idle.get_joint_transform(*joint, at) else {
+                    continue;
+                };
+                // Shortest rotation between the two authored quaternions, per joint.
+                let dot: f32 = from
+                    .rotation
+                    .iter()
+                    .zip(&to.rotation)
+                    .map(|(a, b)| a * b)
+                    .sum();
+                total += (2.0 * dot.abs().clamp(0.0, 1.0).acos()).to_degrees();
+            }
+        }
+        if best.is_none_or(|(best_total, _)| total < best_total) {
+            best = Some((total, frame as f32));
+        }
+    }
+    best.map(|(_, frame)| frame)
 }
 
 /// `KULUU_BONE_LOG` — a play-test probe for "which bone ended up where": one line per posed frame
@@ -3789,13 +4383,16 @@ fn bone_log_detail() -> Option<&'static [usize]> {
     spec.as_deref()
 }
 
-/// One frame's bone trace: positions of the whole skeleton, then axes/keying for the named joints.
+/// One frame's bone trace: positions of the whole skeleton, then axes/keying for the named joints with what the
+/// skeleton authority did to each (the law in force, the slot that wrote it, the correction's turn on it and what it
+/// is still owed).
 fn bone_trace_frame(
     detail: &[usize],
     world_id: u32,
     selected: DatId,
     registered_slots: &[Option<(DatId, bool)>; 8],
     coordinator: &SkeletonAnimationCoordinator,
+    authority: &SkeletonAuthority,
     skeleton: &ffxi_dat::skel::Skeleton,
     world_pose: &[Mat4],
 ) {
@@ -3866,7 +4463,7 @@ fn bone_trace_frame(
         let (col0, col1, col2) = (m.x_axis, m.y_axis, m.z_axis);
         tracing::debug!(
             target: "bone",
-            "BONE_DET id={:#x} j={} bind_t=({:.3},{:.3},{:.3}) pose_t=({:.3},{:.3},{:.3}) fwd=({:.2},{:.2},{:.2}) up=({:.2},{:.2},{:.2}) side=({:.2},{:.2},{:.2}) keyed_by=[{}]",
+            "BONE_DET id={:#x} j={} bind_t=({:.3},{:.3},{:.3}) pose_t=({:.3},{:.3},{:.3}) fwd=({:.2},{:.2},{:.2}) up=({:.2},{:.2},{:.2}) side=({:.2},{:.2},{:.2}) keyed_by=[{}] {}",
             world_id,
             joint,
             skeleton.joints[joint].translation[0],
@@ -3877,6 +4474,7 @@ fn bone_trace_frame(
             -col1.x, -col1.y, -col1.z,
             col2.x, col2.y, col2.z,
             keyed_by.trim_end(),
+            authority.describe(joint),
         );
     }
 }
@@ -3913,16 +4511,19 @@ const LOOK_RELEASE_HORIZON: f32 = 0.3;
 /// ... or a forward component past half a unit behind the shoulder line (`FFXiMain.dll
 /// retail-2026-09 RVA 0xD5DBF`, `-0.5f` from `.rdata`).
 const LOOK_RELEASE_FORWARD: f32 = -0.5;
-/// The blend weight opens and closes at ±0.04 per frame (`FFXiMain.dll retail-2026-09`: the immediate
+/// The blend weight opens and closes at ±0.04 per frame in retail (`FFXiMain.dll retail-2026-09`: the immediate
 /// `0x3d23d70a` written at RVA 0xD5D33). A second arm replaces it with a percent: when the gate call
 /// `0x87060` passes and `[vt+0x144]()` returns non-zero (RVA 0xD5D44..0xD5D70), the step becomes
 /// `[vt+0x144]() × .rdata 0x10329A18 (= 0.01) × .rdata 0x1032a85c (= 0.04)`; `vt+0x144` is the getter at
 /// RVA 0x84B80 = `[actor+0x70] → [+0xE0]`, which defaults to **100** when there is no such object, so the arm
-/// reproduces the same 0.04 by default and kuluu has no producer for a different percentage.
-const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 0.04;
-/// The look point chases the target at 1/32 of what is left per tick (`FFXiMain.dll
-/// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71).
-const HEAD_LOOK_CHASE_FRACTION: f32 = 1.0 / 32.0;
+/// reproduces the same 0.04 by default and kuluu has no producer for a different percentage. kuluu opens and closes
+/// it half again as fast, the same playtest call as [`HEAD_LOOK_CHASE_FRACTION`]: retail's 25 frames left the head
+/// trailing every turn.
+const HEAD_LOOK_WEIGHT_PER_FRAME: f32 = 1.5 * 0.04;
+/// The look point chases the target by this share of what is left per tick. Retail chases 1/32 (`FFXiMain.dll
+/// retail-2026-09`: the bend at RVA 0x2AC60 pushes `0x3d000000` at RVA 0x2AD71); kuluu turns the head half again
+/// as fast, a playtest call that retail's share leaves the head trailing its target.
+const HEAD_LOOK_CHASE_FRACTION: f32 = 1.5 / 32.0;
 /// At weight 0 the look point resets to straight ahead on a 20-unit point (`FFXiMain.dll
 /// retail-2026-09` default block at `.rdata`).
 const HEAD_LOOK_NEUTRAL_AHEAD: f32 = 20.0;
@@ -4391,7 +4992,7 @@ mod head_look_tests {
     }
 
     #[test]
-    fn weight_opens_over_about_25_frames_and_closes_the_same_way() {
+    fn weight_opens_over_about_17_frames_and_closes_the_same_way() {
         let target = Vec3::new(4.0, 0.0, 0.0);
         let mut head = HeadLook::default();
         let mut open_frames = 0;
@@ -4406,10 +5007,10 @@ mod head_look_tests {
             close_frames += 1;
             assert!(close_frames < 60, "weight stuck at {}", head.weight);
         }
-        // ±1 frame of the 25 that 0.04/frame implies at 60 fps.
-        assert!((24..=27).contains(&open_frames), "opened in {open_frames}");
+        // ±1 frame of the 17 that 0.06/frame implies, half again as fast as retail's 25.
+        assert!((16..=18).contains(&open_frames), "opened in {open_frames}");
         assert!(
-            (24..=27).contains(&close_frames),
+            (16..=18).contains(&close_frames),
             "closed in {close_frames}"
         );
     }
@@ -4621,7 +5222,8 @@ pub fn kick_load_actor_tasks(
                     body,
                     main_weapon,
                     sub_weapon,
-                } => load_pc(
+                    sub_model,
+                } => load_pc_with_sub_model(
                     &root,
                     race,
                     mounted,
@@ -4629,6 +5231,7 @@ pub fn kick_load_actor_tasks(
                     body,
                     main_weapon,
                     sub_weapon,
+                    sub_model,
                 ),
             }?;
             let scale = match (npc_graph_size, loaded.cib) {
@@ -5653,8 +6256,8 @@ pub fn tick_live_ffxi_actors(
                 advance_engage(
                     &mut actor.engage,
                     engaged,
+                    actor.engage_routines,
                     &actor.routines,
-                    &actor.rejected_routines,
                     &actor.battle_clips,
                     &actor.animations,
                     elapsed_frames,
@@ -6390,6 +6993,7 @@ mod actor_texture_tests {
             model_dat: "test.DAT".to_string(),
             cib: None,
             weapon_handles: Vec::new(),
+            engage_routines: EngageRoutines::default(),
         }
     }
 
@@ -6568,6 +7172,7 @@ mod mesh_dedup_tests {
             rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
+            engage_routines: EngageRoutines::default(),
         };
         let skel_built = (0..n_parts)
             .map(|_| BuiltGroup {
@@ -6756,6 +7361,14 @@ mod pose_resolution_tests {
         Some(load_pc(&root, 1, false, &[], None, None, None).expect("load Hume M"))
     }
 
+    const MITHRA: u8 = 7;
+
+    fn load_mithra() -> Option<LoadedActor> {
+        let root = ffxi_dat::archive::open_test_install()?;
+
+        Some(load_pc(&root, MITHRA, false, &[], None, None, None).expect("load Mithra"))
+    }
+
     const HUME_M: u8 = 1;
     /// The main-hand slot's model id for the dagger whose mesh binds every vertex to joint 10.
     const DAGGER_MODEL: u16 = 2;
@@ -6790,8 +7403,8 @@ mod pose_resolution_tests {
             advance_engage(
                 &mut actor.engage,
                 true,
+                actor.engage_routines,
                 &actor.routines,
-                &actor.rejected_routines,
                 &actor.battle_clips,
                 &actor.animations,
                 1.0,
@@ -6823,7 +7436,14 @@ mod pose_resolution_tests {
         assert_eq!(loaded.skeleton.joints[anchor].parent, Some(handle));
 
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
-        assert_eq!(actor.weapon_handles, vec![(handle, hand)]);
+        assert_eq!(
+            actor.weapon_handles,
+            vec![WeaponHandle {
+                hand: WeaponHand::Main,
+                handle,
+                bone: hand,
+            }]
+        );
 
         for _ in 0..4 {
             actor.inputs = inputs_for_pose(PoseState::Idle, false);
@@ -6866,7 +7486,9 @@ mod pose_resolution_tests {
             return;
         };
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
-        let (handle, hand) = actor.weapon_handles[0];
+        let WeaponHandle {
+            handle, bone: hand, ..
+        } = actor.weapon_handles[0];
         advance_engaged(&mut actor, 45);
 
         let mut settled_gap: Option<f32> = None;
@@ -7427,8 +8049,8 @@ mod pose_resolution_tests {
             advance_engage(
                 &mut actor.engage,
                 want,
+                actor.engage_routines,
                 &actor.routines,
-                &actor.rejected_routines,
                 &actor.battle_clips,
                 &actor.animations,
                 step,
@@ -7485,6 +8107,298 @@ mod pose_resolution_tests {
             saw_sheathe_hold,
             "the sheathe clip never held its last frame"
         );
+    }
+
+    /// A weapon draw and sheathe play once and hold their end frame
+    /// (`engage_transition_clips_play_once_and_hold_their_last_frame`), and each is authored to end where the next
+    /// motion takes over, so the bones it hands on change hands as the clips write them: while a slot blends away
+    /// from a played-out transition clip, every bone that slot writes stands on its own record. The skeleton
+    /// authority carried those handovers on top, which kept the weapon moving after the draw or sheathe had
+    /// finished, as if it played again: on Hume M's race-wide battle set the bone the drawn weapon rides on stood up
+    /// to 84 deg off its record after the draw.
+    #[test]
+    fn a_finished_draw_or_sheathe_hands_its_bones_on_as_the_clips_write_them() {
+        const RECORD_TOLERANCE_DEG: f32 = 0.5;
+        let Some(loaded) = load_hume_m() else { return };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let step = 0.5_f32;
+        let mut work = PoseScratch::default();
+        let mut clips_pose = Vec::new();
+        let mut checked = 0_usize;
+
+        let script: Vec<bool> = std::iter::repeat_n(false, 4)
+            .chain(std::iter::repeat_n(true, 200))
+            .chain(std::iter::repeat_n(false, 200))
+            .collect();
+        for (index, want) in script.into_iter().enumerate() {
+            actor.inputs = inputs_for_pose(PoseState::Idle, want);
+            advance_engage(
+                &mut actor.engage,
+                want,
+                actor.engage_routines,
+                &actor.routines,
+                &actor.battle_clips,
+                &actor.animations,
+                step,
+            );
+            advance_actor_pose_standalone(&mut actor, step, None);
+
+            // The clips' pose this pass, as the coordinator wrote it.
+            pose_world_mounted_into(
+                &mut clips_pose,
+                &mut work,
+                &actor.skeleton,
+                |joint| actor.pose_scratch.get(joint),
+                RootTransform {
+                    facing_dir: actor.facing_dir,
+                    skew: 0.0,
+                    slope_oriented: false,
+                    scale: Vec3::splat(actor.scale),
+                },
+                &[],
+                None,
+            );
+            let shown = actor.world_pose();
+            let local = |pose: &[Mat4], joint: usize| match actor.skeleton.joints[joint].parent {
+                Some(parent) => pose[parent].inverse() * pose[joint],
+                None => pose[joint],
+            };
+            for slot in 0..actor.coordinator.animations.len() {
+                if !actor.coordinator.holds_finished_one_shot(slot) {
+                    continue;
+                }
+                for joint in 0..actor.skeleton.joints.len() {
+                    if actor.pose_scratch.writer(joint) != Some(slot) {
+                        continue;
+                    }
+                    let (_, on, _) = local(shown, joint).to_scale_rotation_translation();
+                    let (_, record, _) = local(&clips_pose, joint).to_scale_rotation_translation();
+                    let off_deg = on.angle_between(record).to_degrees();
+                    assert!(
+                        off_deg < RECORD_TOLERANCE_DEG,
+                        "step {index}: joint {joint} of slot {slot} stands {off_deg:.2} deg off its record \
+                         while the slot hands on a played-out transition clip"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no slot ever handed on from a played-out transition clip"
+        );
+    }
+
+    /// A weapon is on its hand exactly while that hand holds it ([`WeaponHolds`]), and otherwise stands where the clips
+    /// put it. With no hold stage in their routines, the draw takes the weapon onto the hand once its busy stages end
+    /// ([`EngageTimeline::busy_until`]), the weapon riding the draw's clips until then, and the sheathe lets it go from
+    /// its first frame. Every race holding the dagger, driven the way the live tick drives it; the stance the draw ends
+    /// in holds the weapon on the hand.
+    #[test]
+    fn a_pc_holds_its_weapon_exactly_while_its_hand_holds_it() {
+        const SAME_PLACE: f32 = 1e-5;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        let step = 0.5_f32;
+        let script: Vec<bool> = std::iter::repeat_n(false, 4)
+            .chain(std::iter::repeat_n(true, 200))
+            .chain(std::iter::repeat_n(false, 200))
+            .collect();
+        let mut checked = 0_usize;
+        for race in 1..=8u8 {
+            let Some(dagger) = crate::look_resolver::equipment_dat_id(&dll, 6, DAGGER_MODEL, race)
+            else {
+                continue;
+            };
+            let loaded = load_pc(&root, race, false, &[dagger], None, Some(dagger), None)
+                .expect("load a PC holding the dagger");
+            let Some(&WeaponHandle {
+                handle, bone: hand, ..
+            }) = loaded.weapon_handles.first()
+            else {
+                continue;
+            };
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            let holds_nothing = |routine: DatId| {
+                engage_timeline(routine, &actor.routines, actor.engage_routines)
+                    .holds
+                    .is_empty()
+            };
+            let (draw_plain, sheathe_plain) = (
+                holds_nothing(actor.engage_routines.draw),
+                holds_nothing(actor.engage_routines.sheathe),
+            );
+            let draw_busy = engage_timeline(
+                actor.engage_routines.draw,
+                &actor.routines,
+                actor.engage_routines,
+            )
+            .busy_until();
+            let mut draw_clock = 0.0_f32;
+            let mut work = PoseScratch::default();
+            let mut clips_pose = Vec::new();
+            let (mut drew, mut sheathed, mut held_in_stance) = (false, false, false);
+            for want in script.iter().copied() {
+                let state = advance_engage(
+                    &mut actor.engage,
+                    want,
+                    actor.engage_routines,
+                    &actor.routines,
+                    &actor.battle_clips,
+                    &actor.animations,
+                    step,
+                );
+                actor.inputs = inputs_for_pose(PoseState::Idle, want);
+                actor.inputs.engage_state = state;
+                advance_actor_pose_standalone(&mut actor, step, None);
+                let held = actor.weapon_holds.holds(WeaponHand::Main);
+                let shown = actor.world_pose();
+                if held {
+                    let off = (shown[handle].w_axis - shown[hand].w_axis)
+                        .truncate()
+                        .length();
+                    assert!(
+                        off < SAME_PLACE,
+                        "race {race}: {:?} holds the weapon {off:.3} off the hand",
+                        actor.engage
+                    );
+                } else {
+                    pose_world_mounted_into(
+                        &mut clips_pose,
+                        &mut work,
+                        &actor.skeleton,
+                        |joint| actor.pose_scratch.get(joint),
+                        RootTransform {
+                            facing_dir: actor.facing_dir,
+                            skew: 0.0,
+                            slope_oriented: false,
+                            scale: Vec3::splat(actor.scale),
+                        },
+                        &[],
+                        None,
+                    );
+                    let off = (shown[handle].w_axis - clips_pose[handle].w_axis)
+                        .truncate()
+                        .length();
+                    assert!(
+                        shown[handle].abs_diff_eq(clips_pose[handle], SAME_PLACE),
+                        "race {race}: {:?} posed the weapon {off:.3} from where its clips put it",
+                        actor.engage
+                    );
+                }
+                match actor.engage {
+                    EngageMachine::Drawing { .. } => {
+                        if drew {
+                            draw_clock += step;
+                        }
+                        drew = true;
+                        assert!(
+                            held == (draw_clock >= draw_busy) || !draw_plain,
+                            "race {race}: {draw_clock} frames into the draw the hand's hold is {held}, and the draw's \
+                             busy stages end at {draw_busy}"
+                        );
+                    }
+                    EngageMachine::Sheathing { .. } => {
+                        sheathed = true;
+                        assert!(
+                            !held || !sheathe_plain,
+                            "race {race}: the sheathe kept the weapon on the hand"
+                        );
+                    }
+                    EngageMachine::Engaged => held_in_stance |= held,
+                    EngageMachine::NotEngaged => {}
+                }
+            }
+            assert!(
+                drew && sheathed,
+                "race {race}: the script never drew and sheathed"
+            );
+            assert!(
+                held_in_stance,
+                "race {race}: the stance never held the weapon on the hand"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no race loaded holding the dagger");
+    }
+
+    /// A PC draws and sheathes on the routines its main-hand weapon's Info names ([`EngageRoutines`]): the pair is read
+    /// off the equipped weapon when the PC loads, and while the draw or sheathe plays the clips on screen are that
+    /// routine's motion. Every race holding the dagger, driven the way the live tick drives it.
+    #[test]
+    fn a_pc_draws_and_sheathes_on_the_routines_its_weapon_names() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        let step = 0.5_f32;
+        let script: Vec<bool> = std::iter::repeat_n(false, 4)
+            .chain(std::iter::repeat_n(true, 200))
+            .chain(std::iter::repeat_n(false, 200))
+            .collect();
+        let mut checked = 0_usize;
+        for race in 1..=8u8 {
+            let Some(dagger) = crate::look_resolver::equipment_dat_id(&dll, 6, DAGGER_MODEL, race)
+            else {
+                continue;
+            };
+            let info = read_dat(&root, dagger)
+                .map(ResourceDir::from_bytes)
+                .and_then(|dir| dir.first_cib());
+            let loaded = load_pc(&root, race, false, &[dagger], None, Some(dagger), None)
+                .expect("load a PC holding the dagger");
+            assert_eq!(
+                loaded.engage_routines,
+                EngageRoutines::for_main_weapon(info.as_ref()),
+                "race {race}: the routines are not the ones the dagger's Info names"
+            );
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            let motion = |routine: DatId| {
+                routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+            };
+            let (draw, sheathe) = (
+                motion(actor.engage_routines.draw),
+                motion(actor.engage_routines.sheathe),
+            );
+            let (mut drew, mut sheathed) = (false, false);
+            for want in script.iter().copied() {
+                let state = advance_engage(
+                    &mut actor.engage,
+                    want,
+                    actor.engage_routines,
+                    &actor.routines,
+                    &actor.battle_clips,
+                    &actor.animations,
+                    step,
+                );
+                actor.inputs = inputs_for_pose(PoseState::Idle, want);
+                actor.inputs.engage_state = state;
+                advance_actor_pose_standalone(&mut actor, step, None);
+                let playing = actor.current_clip.map(|(id, _)| id);
+                match actor.engage {
+                    EngageMachine::Drawing { .. } => {
+                        assert_eq!(playing, draw, "race {race}: the draw played {playing:?}");
+                        drew = true;
+                    }
+                    EngageMachine::Sheathing { .. } => {
+                        assert_eq!(
+                            playing, sheathe,
+                            "race {race}: the sheathe played {playing:?}"
+                        );
+                        sheathed = true;
+                    }
+                    EngageMachine::NotEngaged | EngageMachine::Engaged => {}
+                }
+            }
+            assert!(
+                drew && sheathed,
+                "race {race}: the script never drew and sheathed"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no race loaded holding the dagger");
     }
 
     /// A transition window that outlasts its own clip must not hand it a second pass. Live, the
@@ -7564,8 +8478,8 @@ mod pose_resolution_tests {
             advance_engage(
                 &mut actor.engage,
                 want,
+                actor.engage_routines,
                 &actor.routines,
-                &actor.rejected_routines,
                 &actor.battle_clips,
                 &actor.animations,
                 dt * WINDOW_OVER_POSE_CLOCK,
@@ -7718,6 +8632,200 @@ mod pose_resolution_tests {
         );
     }
 
+    /// A locked A held straight into D turns the body through the target, never round its back, and so does a
+    /// let-go of A with D pressed a couple of frames later, on every race's own clips, weapon away or engaged with the
+    /// dagger drawn. The chooser shows the straight gait for two frames between the side steps
+    /// (actor_state::SideStepFlipLatch), or idle when the feet stop, so the side step that lands the flip crossfades
+    /// from a still that is nearly all the other side step. A rig whose side steps key a bone past a right angle either
+    /// way swung the chest round its back on the short way; one whose side steps do not came round the front either
+    /// way. Engaged, the gait and stance are the battle set's and the status byte holds the look-at off, as live.
+    #[test]
+    fn a_locked_side_step_flip_turns_the_body_through_the_target() {
+        // How far the chest may face off the target before the body has turned its back on it.
+        const BEHIND_DEG: f32 = 90.0;
+        use PoseState::{Idle, StrafeLeft, StrafeRight};
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        for race in 1..=8u8 {
+            for engaged in [false, true] {
+                let loaded = if engaged {
+                    let Some(dagger) =
+                        crate::look_resolver::equipment_dat_id(&dll, 6, DAGGER_MODEL, race)
+                    else {
+                        continue;
+                    };
+                    load_pc(&root, race, false, &[dagger], None, Some(dagger), None)
+                        .expect("load a PC holding the dagger")
+                } else {
+                    load_pc(&root, race, false, &[], None, None, None).expect("bare PC")
+                };
+                let chest = loaded
+                    .skeleton
+                    .reference_at(ffxi_dat::skel::standard_position::CHEST)
+                    .map(|reference| reference.index)
+                    .expect("chest reference");
+                let bind = pose_world(&loaded.skeleton, |_| None, RootTransform::identity(), &[]);
+                let (_, bind_rotation, _) = bind[chest].to_scale_rotation_translation();
+                let chest_forward = bind_rotation.inverse() * POSE_FORWARD;
+                for (from, to) in [(StrafeLeft, StrafeRight), (StrafeRight, StrafeLeft)] {
+                    for still in [0_usize, 2] {
+                        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                        actor.locked_on = true;
+                        if engaged {
+                            actor.engage = EngageMachine::Engaged;
+                            actor.wire_animation = ffxi_proto::decode::animation::ATTACK;
+                        }
+                        for tick in 0..90_usize {
+                            actor.inputs = inputs_for_pose(
+                                if tick < 60 {
+                                    from
+                                } else if tick < 60 + still {
+                                    Idle
+                                } else {
+                                    to
+                                },
+                                engaged,
+                            );
+                            if engaged {
+                                advance_actor_pose(
+                                    &mut actor,
+                                    0.5,
+                                    crate::look_at_gates::LookState::Suppressed,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                );
+                            } else {
+                                advance_actor_pose(
+                                    &mut actor,
+                                    0.5,
+                                    crate::look_at_gates::LookState::Aiming,
+                                    Some(LookAtInput {
+                                        pose_rotation: Quat::IDENTITY,
+                                        actor_world: Vec3::ZERO,
+                                        target_attach_world: Vec3::new(19.0, -1.4, 0.0),
+                                    }),
+                                    None,
+                                    false,
+                                    None,
+                                );
+                            }
+                            let (_, rotation, _) =
+                                actor.world_pose()[chest].to_scale_rotation_translation();
+                            let facing = rotation * chest_forward;
+                            let off_deg = facing.z.atan2(facing.x).to_degrees().abs();
+                            assert!(
+                                off_deg < BEHIND_DEG,
+                                "race {race} engaged {engaged}: {from:?} into {to:?} with {still} still frames \
+                                 between turned the chest {off_deg:.1} deg off the target at tick {tick}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Engaged, a locked flip turns through the target even where the battle set's straight gait and stance are
+    /// authored side-on: what faces the target is the actor's standing pose, not the gait the slot holds. A rig whose
+    /// side steps turn its spine past a right angle either side, and whose battle gait and stance turn it 60 deg off
+    /// the root. Measured from that gait, the flip swung the spine round the back.
+    #[test]
+    fn an_engaged_flip_turns_through_the_target_whatever_way_the_battle_gait_faces() {
+        use ffxi_dat::skel::Joint;
+        use PoseState::{Idle, StrafeLeft, StrafeRight};
+        const SIDE_STEP_DEG: f32 = 110.0;
+        const SIDE_ON_DEG: f32 = -60.0;
+        // Through the front the spine turns no further off the target than the side steps hold it, give or take the
+        // blend's own slack; round the back it passes a half turn.
+        const REACH_DEG: f32 = SIDE_STEP_DEG + 5.0;
+        const SPINE: usize = 1;
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: vec![
+                Joint {
+                    rotation: Quat::IDENTITY.to_array(),
+                    translation: [0.0; 3],
+                    parent: None,
+                },
+                Joint {
+                    rotation: Quat::IDENTITY.to_array(),
+                    translation: [0.0, -1.0, 0.0],
+                    parent: Some(0),
+                },
+            ],
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+            look_at_limits: Vec::new(),
+        };
+        let turned = |id: &[u8; 4], deg: f32| {
+            let key = KeyFrameTransform {
+                rotation: Quat::from_rotation_y(deg.to_radians()).to_array(),
+                ..KeyFrameTransform::default()
+            };
+            SkeletonAnimation {
+                id: DatId::from_name(id),
+                num_joints: SPINE + 1,
+                num_frames: 2,
+                key_frame_duration: 1.0,
+                key_frame_sets: [(SPINE as u32, vec![key; 2])].into_iter().collect(),
+            }
+        };
+        let mut loaded = empty_loaded_actor(skeleton, None);
+        loaded.animations = Arc::new(vec![
+            turned(b"idl0", 0.0),
+            turned(b"run0", 0.0),
+            turned(b"mvl0", SIDE_STEP_DEG),
+            turned(b"mvr0", -SIDE_STEP_DEG),
+        ]);
+        loaded.battle_clips = Arc::new(vec![
+            turned(b"run0", SIDE_ON_DEG),
+            turned(b"btl0", SIDE_ON_DEG),
+        ]);
+        for (from, to) in [(StrafeLeft, StrafeRight), (StrafeRight, StrafeLeft)] {
+            for still in [0_usize, 2] {
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = true;
+                actor.engage = EngageMachine::Engaged;
+                actor.wire_animation = ffxi_proto::decode::animation::ATTACK;
+                for tick in 0..120_usize {
+                    actor.inputs = inputs_for_pose(
+                        if tick < 60 {
+                            from
+                        } else if tick < 60 + still {
+                            Idle
+                        } else {
+                            to
+                        },
+                        true,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        0.5,
+                        crate::look_at_gates::LookState::Suppressed,
+                        None,
+                        None,
+                        false,
+                        None,
+                    );
+                    let (_, rotation, _) =
+                        actor.world_pose()[SPINE].to_scale_rotation_translation();
+                    let off_deg = (rotation * POSE_FORWARD)
+                        .angle_between(POSE_FORWARD)
+                        .to_degrees();
+                    assert!(
+                        off_deg < REACH_DEG,
+                        "{from:?} into {to:?} with {still} still frames between turned the spine {off_deg:.1} deg off \
+                         the target at tick {tick}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Travel back from the target, the locked S, plays the back step `mvb?`, walking or running, from
     /// the run or from a stop. Stand-in clips with one keyed bone each: the clip choice is the subject,
     /// not the pose.
@@ -7753,6 +8861,101 @@ mod pose_resolution_tests {
         assert_eq!(step(Back, false), "mvb?", "from the run");
         assert_eq!(step(Idle, false), "idl?");
         assert_eq!(step(Back, true), "mvb?", "walking, from a stop");
+    }
+
+    /// Locked on and stepping back from a target, the head follows the point and the walk, nothing else. Each target
+    /// starts at twice the up/down reach of one of the rig's own look-at records, above or below the neck, and recedes
+    /// as the actor backs off, so the point crosses that record's rim with the back step's bob carrying it back and
+    /// forth. A clamp handing back its stretched projection inside the rim and the true rim point past it jumps the
+    /// head 7 to 11 deg in a frame there, back and forth on every step (#1023, measured on Mithra's and Hume M's
+    /// clips). Every race in the install, off its own skeleton and clips.
+    #[test]
+    fn a_locked_back_step_never_jumps_the_head_at_a_records_rim() {
+        use crate::look_at_gates::LookState;
+        use ffxi_actor::look_bend::{attach_frame, authored_bones, BEND_RECORDS_MAX};
+        use ffxi_dat::skel::standard_position::NECK;
+        // Frames for the look-at to open and its point to settle on the target before the target recedes.
+        const SETTLE_TICKS: usize = 150;
+        const RECEDE_TICKS: usize = 240;
+        const START_DISTANCE: f32 = 1.0;
+        // A slow back step: the point's own motion stays well under a degree a frame.
+        const RECEDE_PER_TICK: f32 = 0.0125;
+        // How much the look-at may add to the largest frame-to-frame step the clip gives the neck on its own.
+        const MARGIN_DEG: f32 = 2.0;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        for race in 1..=8u8 {
+            let loaded = load_pc(&root, race, false, &[], None, None, None).expect("bare PC");
+            let skeleton = &loaded.skeleton;
+            let neck = skeleton
+                .reference_at(NECK)
+                .map(|reference| reference.index)
+                .expect("neck reference");
+            let bind = pose_world(skeleton, |_| None, RootTransform::identity(), &[]);
+            let (_, bind_rotation, _) = bind[neck].to_scale_rotation_translation();
+            let neck_forward = bind_rotation.inverse() * POSE_FORWARD;
+            let neck_origin = attach_frame(&bind, skeleton, NECK)
+                .expect("neck frame")
+                .origin;
+            // How far above level the neck faces (pose space stands up `-Y`).
+            let pitch = |pose: &[Mat4]| {
+                let (_, rotation, _) = pose[neck].to_scale_rotation_translation();
+                let facing = rotation * neck_forward;
+                (-facing.y)
+                    .atan2(Vec2::new(facing.x, facing.z).length())
+                    .to_degrees()
+            };
+            for bone in authored_bones(skeleton, BEND_RECORDS_MAX) {
+                let reach = (bone.limit.y_limit / bone.limit.scale).atan();
+                for above in [true, false] {
+                    let rise =
+                        START_DISTANCE * (2.0 * reach).tan() * if above { -1.0 } else { 1.0 };
+                    let largest_step = |aiming: bool| {
+                        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                        actor.locked_on = true;
+                        let mut last: Option<f32> = None;
+                        let mut largest = 0.0_f32;
+                        for tick in 0..SETTLE_TICKS + RECEDE_TICKS {
+                            let ahead = START_DISTANCE
+                                + RECEDE_PER_TICK * tick.saturating_sub(SETTLE_TICKS) as f32;
+                            actor.inputs = inputs_for_pose(PoseState::Back, false);
+                            advance_actor_pose(
+                                &mut actor,
+                                0.5,
+                                if aiming {
+                                    LookState::Aiming
+                                } else {
+                                    LookState::IdleNoTarget
+                                },
+                                aiming.then_some(LookAtInput {
+                                    pose_rotation: Quat::IDENTITY,
+                                    actor_world: Vec3::ZERO,
+                                    target_attach_world: neck_origin + Vec3::new(ahead, rise, 0.0),
+                                }),
+                                None,
+                                false,
+                                None,
+                            );
+                            let now = pitch(actor.world_pose());
+                            if let Some(last) = last.filter(|_| tick >= SETTLE_TICKS) {
+                                largest = largest.max((now - last).abs());
+                            }
+                            last = Some(now);
+                        }
+                        largest
+                    };
+                    let (aimed, clip) = (largest_step(true), largest_step(false));
+                    assert!(
+                        aimed <= clip + MARGIN_DEG,
+                        "race {race}: a target {} the neck, crossing joint {}'s rim, stepped the neck {aimed:.2} deg \
+                         in a frame where the clip alone steps it {clip:.2}",
+                        if above { "above" } else { "below" },
+                        bone.joint
+                    );
+                }
+            }
+        }
     }
 
     /// A side step taken from the run starts in step with it over the locomotion blend
@@ -7796,6 +8999,984 @@ mod pose_resolution_tests {
         assert!(
             (frame - (start + 1.0)).abs() < 1e-4,
             "the side step should run on from frame {start}, got {frame}"
+        );
+    }
+
+    /// This frame's sampled bone rotations, before world mounting and the look-at bends.
+    fn rotation_snapshot(actor: &FfxiRenderActor) -> Vec<Option<[f32; 4]>> {
+        (0..actor.pose_scratch.bone_count())
+            .map(|bone| actor.pose_scratch.get(bone).map(|record| record.rotation))
+            .collect()
+    }
+
+    /// The largest rotation any single bone covers between two consecutive pose samples, in degrees.
+    fn max_pose_delta(previous: &[Option<[f32; 4]>], current: &[Option<[f32; 4]>]) -> f32 {
+        previous
+            .iter()
+            .zip(current)
+            .filter_map(|(past, now)| match (past, now) {
+                (Some(past), Some(now)) => Some((past, now)),
+                _ => None,
+            })
+            .map(|(past, now)| {
+                let dot: f32 = past.iter().zip(now).fold(0.0, |sum, (a, b)| sum + a * b);
+                (2.0 * dot.abs().clamp(0.0, 1.0).acos()).to_degrees()
+            })
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// A locked release from a side step into the gait must not move any bone further in one tick
+    /// than that same bone ever moves inside the running gait alone. Locked re-gaits used to route every
+    /// crossfade through the long way (`HeldArc::set_out`'s toward-target flip), which swung the chest
+    /// chain past 30 deg/tick over its own reach — the flicker at strafe end. Only flips between opposite
+    /// side steps keep that routing (`a_crossfade_toward_the_target_turns_through_it_and_any_other_the_short_way`).
+    #[test]
+    fn releasing_a_locked_side_step_never_overswings_the_gaits_own_reach() {
+        // Headroom over each bone's own gait maximum: the release tick carries a small clip-swap pop
+        // in every mode, locked or not; the long-way swing it must stay under sat 3x past this.
+        const OVERSWING_MARGIN_DEG: f32 = 12.0;
+
+        let Some(loaded) = load_hume_m() else { return };
+        let disp = |a: &Mat4, b: &Mat4| -> f32 {
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            (one(a.x_axis.truncate(), b.x_axis.truncate())
+                + one(a.y_axis.truncate(), b.y_axis.truncate())
+                + one(a.z_axis.truncate(), b.z_axis.truncate()))
+                / 3.0
+        };
+
+        for locked in [true, false] {
+            let mut ceiling = vec![0.0f32; loaded.skeleton.joints.len()];
+            let mut events: Vec<(f32, i32, usize, f32)> = Vec::new();
+            for run_ticks in [35_u32, 47] {
+                // Ceilings from pure-run ticks across two drives at different phases.
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = locked;
+                let mut prev: Option<Vec<Mat4>> = None;
+                for tick in 0..(run_ticks + 25 + 28) {
+                    let release_at = run_ticks + 25;
+                    actor.inputs = inputs_for_pose(
+                        if tick < run_ticks {
+                            PoseState::Run
+                        } else if tick < release_at {
+                            PoseState::StrafeLeft
+                        } else {
+                            PoseState::Run
+                        },
+                        false,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        1.0,
+                        crate::look_at_gates::LookState::Aiming,
+                        Some(LookAtInput {
+                            pose_rotation: Quat::IDENTITY,
+                            actor_world: Vec3::ZERO,
+                            target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                        }),
+                        None,
+                        false,
+                        None,
+                    );
+                    let now = actor.world_pose().to_vec();
+                    if let Some(p) = &prev {
+                        for bone in 0..loaded.skeleton.joints.len() {
+                            let d = disp(&p[bone], &now[bone]);
+                            if tick < run_ticks {
+                                ceiling[bone] = ceiling[bone].max(d);
+                            } else if (release_at.saturating_sub(3)..release_at + 24)
+                                .contains(&tick)
+                            {
+                                let excess = d - ceiling[bone];
+                                if excess > OVERSWING_MARGIN_DEG {
+                                    events.push((excess, tick as i32 - release_at as i32, bone, d));
+                                }
+                            }
+                        }
+                    }
+                    prev = Some(now);
+                }
+            }
+            events.sort_by(|a, c| c.0.total_cmp(&a.0));
+            assert!(
+                events.is_empty(),
+                "locked={}: {} release ticks swung a bone past its own gait reach; worst:",
+                locked,
+                events.len()
+            );
+        }
+    }
+    /// A locked stop must not hand a joint back in one frame. The second-layer locomotion clips key
+    /// joints 38..47 while `idl2` keys only {38,40,42,43,44,47}, so every stop releases joints
+    /// {39,41,45,46} mid-playback; their final records now ride to rest over the handover that let them go
+    /// ([`crate::skeleton_authority`]). Joint 46's pose is watched relative to its parent against the bind-local
+    /// placement. The tick after the stop blend dies was measured at -15.9 deg with no glide (identical
+    /// across drives and modes), then frozen for good; a live side-step steps at most ~10 deg/tick by
+    /// its own motion, so the boundary is asserted continuous while gait ticks are left alone.
+    #[test]
+    fn releasing_a_locked_stop_glides_released_joints_to_rest() {
+        // Between the honest gait's largest single step (~10) and the measured snap (15.9): what the
+        // eye caught at side-step end was that boundary jump, not the gait.
+        const MAX_BOUNDARY_STEP_DEG: f32 = 12.0;
+
+        let Some(loaded) = load_hume_m() else { return };
+        let disp = |a: &Mat4, b: &Mat4| -> f32 {
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            (one(a.x_axis.truncate(), b.x_axis.truncate())
+                + one(a.y_axis.truncate(), b.y_axis.truncate())
+                + one(a.z_axis.truncate(), b.y_axis.truncate()))
+                / 3.0
+        };
+
+        // The joint's placement under bind composition (no records at all), parent-relative: the rest
+        // position a released bone settles to.
+        let mut bind_pose = Vec::new();
+        ffxi_actor::skeleton_instance::pose_world_into(
+            &mut bind_pose,
+            &mut PoseScratch::default(),
+            &loaded.skeleton,
+            |_| None as Option<KeyFrameTransform>,
+            RootTransform {
+                facing_dir: 0.0,
+                skew: 0.0,
+                slope_oriented: false,
+                scale: Vec3::ONE,
+            },
+            &[],
+        );
+        let parent = loaded.skeleton.joints[46].parent.unwrap();
+        let rest_local = bind_pose[parent].inverse() * bind_pose[46];
+
+        for (locked, aim) in [(true, true), (false, false)] {
+            // Three strafe lengths put the release at different points of the side-step loop.
+            for strafe_ticks in [23_u32, 35, 47] {
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = locked;
+                let release_at = strafe_ticks;
+                let mut previous: Option<(u32, f32)> = None;
+                let mut was_transitioning = false;
+                for tick in 0..release_at + 24 {
+                    actor.inputs = inputs_for_pose(
+                        if tick < release_at {
+                            PoseState::StrafeLeft
+                        } else {
+                            PoseState::Idle
+                        },
+                        false,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        1.0,
+                        crate::look_at_gates::LookState::Aiming,
+                        if aim {
+                            Some(LookAtInput {
+                                pose_rotation: Quat::IDENTITY,
+                                actor_world: Vec3::ZERO,
+                                target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                            })
+                        } else {
+                            None
+                        },
+                        None,
+                        false,
+                        None,
+                    );
+                    let transitioning = actor.coordinator.is_transitioning();
+                    if tick >= release_at.saturating_sub(1) {
+                        let now = actor.world_pose();
+                        let dev_from_rest = disp(&rest_local, &(now[parent].inverse() * now[46]));
+                        // Assert exactly at the blend-death boundary: the frame's step against the one
+                        // before it. Live-gait ticks stay unmeasured - a running side-step legitimately
+                        // steps ~10 deg/tick by its own motion, and that is not what this pins.
+                        if was_transitioning && !transitioning {
+                            if let Some((prev_tick, prev_dev)) = previous {
+                                let step = (dev_from_rest - prev_dev).abs();
+                                assert!(
+                                    step <= MAX_BOUNDARY_STEP_DEG,
+                                    "locked={locked} aim={aim} strafe={strafe_ticks}: joint 46 moved                                      {step:.1} deg against its rest placement on the blend-death tick                                      ({prev_tick}->{tick}); released records must glide to rest over                                      the gait handover window",
+                                );
+                            }
+                        }
+                        previous = Some((tick, dev_from_rest));
+                    }
+                    was_transitioning = transitioning;
+                }
+            }
+        }
+    }
+
+    /// Every phase of a locked stop hands over at gait speed: across the whole handover window,
+    /// no parented joint moves further in one tick than it ever does while the side step runs.
+    /// Measured before this rule held for every phase: stopping with the playhead near its loop
+    /// seam (frame 23 of a 24-frame cycle) sized a 1-tick crossfade, which dies inside its own
+    /// registration tick without ever blending - spine joint 25 stepped 21.7 deg in one frame
+    /// there while the same joint's gait step tops out near 3. Mid-cycle phases blended clean.
+    /// A stop now hands over settled: the held pose is frozen at the release tick and idle rises
+    /// from its matching key frame (`a_stop_freezes_the_gait_it_leaves`), so every phase blends -
+    /// none can collapse to a swap or play fresh gait frames.
+    #[test]
+    fn a_locked_stop_hands_over_at_gait_speed_from_any_phase() {
+        // Headroom over each joint's own gait step, parent-relative: measured 4.6 deg worst on
+        // blended handovers and 21.7 on the unblended swap; ceiling + this margin separates them.
+        const STEP_MARGIN_DEG: f32 = 8.0;
+
+        let Some(loaded) = load_hume_m() else { return };
+        let disp = |a: &Mat4, b: &Mat4| -> f32 {
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            (one(a.x_axis.truncate(), b.x_axis.truncate())
+                + one(a.y_axis.truncate(), b.y_axis.truncate())
+                + one(a.z_axis.truncate(), b.z_axis.truncate()))
+                / 3.0
+        };
+        let parented: Vec<usize> = (0..loaded.skeleton.joints.len())
+            .filter(|j| loaded.skeleton.joints[*j].parent.is_some() && *j != 2)
+            .collect();
+
+        for strafe_ticks in [23_u32, 35, 47] {
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            actor.locked_on = true;
+            let release_at = strafe_ticks;
+            let mut ceiling = vec![0.0f32; loaded.skeleton.joints.len()];
+            let mut previous: Option<Vec<Mat4>> = None;
+            let mut worst: Vec<(usize, f32, u32)> = Vec::new();
+            for tick in 0..release_at + 45 {
+                actor.inputs = inputs_for_pose(
+                    if tick < release_at {
+                        PoseState::StrafeLeft
+                    } else {
+                        PoseState::Idle
+                    },
+                    false,
+                );
+                advance_actor_pose(
+                    &mut actor,
+                    1.0,
+                    crate::look_at_gates::LookState::Aiming,
+                    Some(LookAtInput {
+                        pose_rotation: Quat::IDENTITY,
+                        actor_world: Vec3::ZERO,
+                        target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                    }),
+                    None,
+                    false,
+                    None,
+                );
+                // Parent-relative placements only: the root's own turn is not a joint moving.
+                let pose = actor.world_pose().to_vec();
+                let locals: Vec<(usize, Mat4)> = parented
+                    .iter()
+                    .map(|j| {
+                        let p = loaded.skeleton.joints[*j].parent.unwrap();
+                        (*j, pose[p].inverse() * pose[*j])
+                    })
+                    .collect();
+                if let Some(prev_mats) = &previous {
+                    for (j, l) in &locals {
+                        let pp = loaded.skeleton.joints[*j].parent.unwrap();
+                        let prev_local = prev_mats[pp].inverse() * prev_mats[*j];
+                        let d = disp(&prev_local, l);
+                        if tick <= release_at - 2 {
+                            ceiling[*j] = ceiling[*j].max(d);
+                        } else if d > ceiling[*j] + STEP_MARGIN_DEG {
+                            worst.push((*j, d - ceiling[*j], tick));
+                        }
+                    }
+                }
+                previous = Some(pose);
+            }
+            worst.sort_by(|a, c| c.1.total_cmp(&a.1));
+            assert!(
+                worst.is_empty(),
+                "strafe={strafe_ticks}: {} handover ticks swung a joint past its own gait step; worst: {:?}",
+                worst.len(),
+                worst
+                    .iter()
+                    .take(3)
+                    .map(|(j, d, t)| format!("joint {j} +{d:.1} deg at tick +{}", t - release_at))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Mithra's side steps are the only motions that key joint 36, the spine base her whole upper body hangs from
+    /// (`mvl1`/`mvr1` twist it 40 deg and no idle clip keys it), so every locked side step hands that joint over
+    /// twice: the side step taking it, and the stop's settle letting it go. Measured on her shipped clips at 30, 60
+    /// and 144 fps before the skeleton authority carried those handovers: the torso snapped into the twist on the
+    /// first strafe tick (26.6 deg past both neighbouring ticks, a finger bone 90), stood frozen in it for the whole
+    /// settle with the hip-hung sword passing through her, and the neck snapped 7.5 to 9.7 deg on the tick the
+    /// settle landed, the look-at turning from a clip pose the twist had already left. The joints are read off the
+    /// clips, not named, so another rig runs through the same law.
+    #[test]
+    fn a_locked_side_step_hands_over_the_bones_only_it_keys_with_its_blends() {
+        // A tick past both of its neighbours by more than this is a jump, not a blend: measured at most 1.5 deg on
+        // every joint once the handovers are carried, against the 7.5 to 90 above.
+        const SPIKE_LIMIT_DEG: f32 = 3.0;
+        // Half way through the settle a bone it hands to rest has gone about half way; held, it has gone nowhere.
+        const HALF_SETTLE_SHARE_MOVED: f32 = 0.25;
+        // A bone the side step barely turns says nothing about whether it was held.
+        const HELD_TURN_MIN_DEG: f32 = 5.0;
+        // 60 fps in skeleton frames.
+        const DT: f32 = 0.5;
+
+        let Some(loaded) = load_mithra() else { return };
+        let keyed = |prefix: &str| -> std::collections::BTreeSet<usize> {
+            loaded
+                .all_animations()
+                .iter()
+                .filter(|clip| clip.id.as_str().starts_with(prefix))
+                .flat_map(|clip| clip.key_frame_sets.keys().map(|&joint| joint as usize))
+                .collect()
+        };
+        let side_only: Vec<usize> = keyed("mvl").difference(&keyed("idl")).copied().collect();
+        assert!(
+            side_only.contains(&36),
+            "Mithra's side step should be all that keys her upper body's root; side-only joints {side_only:?}"
+        );
+        let disp = |a: &Mat4, b: &Mat4| -> f32 {
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            (one(a.x_axis.truncate(), b.x_axis.truncate())
+                + one(a.y_axis.truncate(), b.y_axis.truncate())
+                + one(a.z_axis.truncate(), b.z_axis.truncate()))
+                / 3.0
+        };
+        let local = |pose: &[Mat4], joint: usize| -> Mat4 {
+            pose[loaded.skeleton.joints[joint].parent.unwrap()].inverse() * pose[joint]
+        };
+        let bind = ffxi_actor::skeleton_instance::pose_world(
+            &loaded.skeleton,
+            |_| None,
+            RootTransform::identity(),
+            &[],
+        );
+        let parented: Vec<usize> = (0..loaded.skeleton.joints.len())
+            .filter(|j| loaded.skeleton.joints[*j].parent.is_some() && *j != 2)
+            .collect();
+        let idle_ticks = 60_usize;
+        let settle_ticks = (LOCOMOTION_XFADE_IN / DT) as usize;
+
+        for strafe_ticks in [78_usize, 120, 186] {
+            let release_at = idle_ticks + strafe_ticks;
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            actor.locked_on = true;
+            let mut steps: Vec<Vec<f32>> = vec![Vec::new(); loaded.skeleton.joints.len()];
+            let mut held: Vec<(usize, f32)> = Vec::new();
+            let mut previous: Option<Vec<Mat4>> = None;
+            for tick in 0..release_at + 2 * settle_ticks {
+                actor.inputs = inputs_for_pose(
+                    if (idle_ticks..release_at).contains(&tick) {
+                        PoseState::StrafeLeft
+                    } else {
+                        PoseState::Idle
+                    },
+                    false,
+                );
+                advance_actor_pose(
+                    &mut actor,
+                    DT,
+                    crate::look_at_gates::LookState::Aiming,
+                    Some(LookAtInput {
+                        pose_rotation: Quat::IDENTITY,
+                        actor_world: Vec3::ZERO,
+                        target_attach_world: Vec3::new(5.0, -0.3, 0.0),
+                    }),
+                    None,
+                    false,
+                    None,
+                );
+                let pose = actor.world_pose().to_vec();
+                if let Some(past) = &previous {
+                    if tick + 5 >= idle_ticks {
+                        for &joint in &parented {
+                            steps[joint].push(disp(&local(past, joint), &local(&pose, joint)));
+                        }
+                    }
+                    if tick == release_at {
+                        held = side_only
+                            .iter()
+                            .map(|&joint| (joint, disp(&local(&bind, joint), &local(past, joint))))
+                            .filter(|&(_, turned)| turned >= HELD_TURN_MIN_DEG)
+                            .collect();
+                    }
+                }
+                if tick == release_at + settle_ticks / 2 {
+                    for &(joint, turned) in &held {
+                        let left = disp(&local(&bind, joint), &local(&pose, joint));
+                        assert!(
+                            left <= turned * (1.0 - HALF_SETTLE_SHARE_MOVED),
+                            "strafe={strafe_ticks}: half way through the settle joint {joint} still stands \
+                             {left:.1} of the {turned:.1} deg only the side step keys"
+                        );
+                    }
+                }
+                previous = Some(pose);
+            }
+            assert!(
+                held.iter().any(|&(joint, _)| joint == 36),
+                "strafe={strafe_ticks}: the side step never turned joint 36"
+            );
+            let mut spikes: Vec<(usize, f32, usize)> = Vec::new();
+            for &joint in &parented {
+                let series = &steps[joint];
+                for tick in 1..series.len().saturating_sub(1) {
+                    let spike = series[tick] - series[tick - 1].max(series[tick + 1]);
+                    if spike > SPIKE_LIMIT_DEG {
+                        spikes.push((joint, spike, tick));
+                    }
+                }
+            }
+            spikes.sort_by(|a, c| c.1.total_cmp(&a.1));
+            assert!(
+                spikes.is_empty(),
+                "strafe={strafe_ticks}: {} ticks jumped a joint past both neighbours; worst: {:?}",
+                spikes.len(),
+                spikes
+                    .iter()
+                    .take(4)
+                    .map(|(joint, spike, tick)| format!(
+                        "joint {joint} +{spike:.1} deg at tick {:+}",
+                        *tick as i64 - 5 - strafe_ticks as i64
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Locked on, a stop leaves Mithra's head on the target and only untwists her body: the target did not move, so
+    /// neither does the head. Measured on her shipped clips before standing and stepping shared one aim, standing put
+    /// her head twice as far round as the point (19.8 deg for a point 10 deg off, 37.1 for 20) while the locked side
+    /// step put it on the point, so every stop swung her head 10 to 28 deg with the target standing still. The head
+    /// is where the neck record's chain fans out, read off the rig.
+    #[test]
+    fn a_locked_stop_keeps_mithras_head_on_the_target() {
+        // Measured at most 1.9 deg off the target from the last strafe tick through the stop, against 9.9 while
+        // standing and stepping aimed apart.
+        // Measured at handover speed: 1.9 deg on the retail clock, 2.8 on this half one (was 9.9
+        // before one-aim). Re-measure if LOCOMOTION_XFADE_IN moves.
+        const HEAD_OFF_TARGET_MAX_DEG: f32 = 4.0;
+        // 60 fps in skeleton frames.
+        const DT: f32 = 0.5;
+
+        let Some(loaded) = load_mithra() else { return };
+        let skeleton = &loaded.skeleton;
+        let mut head = skeleton
+            .reference_at(ffxi_dat::skel::standard_position::NECK)
+            .map(|reference| reference.index)
+            .expect("Mithra's neck reference");
+        loop {
+            let mut children =
+                (0..skeleton.joints.len()).filter(|&j| skeleton.joints[j].parent == Some(head));
+            match (children.next(), children.next()) {
+                (Some(only), None) => head = only,
+                _ => break,
+            }
+        }
+        let bind = ffxi_actor::skeleton_instance::pose_world(
+            skeleton,
+            |_| None,
+            RootTransform::identity(),
+            &[],
+        );
+        let (_, head_bind, _) = bind[head].to_scale_rotation_translation();
+        let head_axis = head_bind.inverse() * POSE_FORWARD;
+        let ground_yaw = |v: Vec3| v.z.atan2(v.x).to_degrees();
+
+        for state in [PoseState::StrafeLeft, PoseState::StrafeRight] {
+            // Locked, the target sits about dead ahead of her.
+            for target_deg in [0.0_f32, 10.0, -10.0] {
+                let yaw = target_deg.to_radians();
+                let target = Vec3::new(19.0 * yaw.cos(), -1.4, 19.0 * yaw.sin());
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = true;
+                let idle_ticks = 90_usize;
+                let release_at = idle_ticks + 120;
+                let mut worst = 0.0_f32;
+                for tick in 0..release_at + 90 {
+                    actor.inputs = inputs_for_pose(
+                        if (idle_ticks..release_at).contains(&tick) {
+                            state
+                        } else {
+                            PoseState::Idle
+                        },
+                        false,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        DT,
+                        crate::look_at_gates::LookState::Aiming,
+                        Some(LookAtInput {
+                            pose_rotation: Quat::IDENTITY,
+                            actor_world: Vec3::ZERO,
+                            target_attach_world: target,
+                        }),
+                        None,
+                        false,
+                        None,
+                    );
+                    if tick + 1 < release_at {
+                        continue;
+                    }
+                    let pose = actor.world_pose();
+                    let (_, rotation, _) = pose[head].to_scale_rotation_translation();
+                    let neck = ffxi_actor::look_bend::attach_frame(
+                        pose,
+                        skeleton,
+                        ffxi_dat::skel::standard_position::NECK,
+                    )
+                    .expect("Mithra's neck frame");
+                    let off = ground_yaw(rotation * head_axis) - ground_yaw(target - neck.origin);
+                    worst = worst.max(off.abs());
+                }
+                assert!(
+                    worst <= HEAD_OFF_TARGET_MAX_DEG,
+                    "{} with the target at {target_deg} deg: her head turned {worst:.1} deg off it through the stop",
+                    state.label()
+                );
+            }
+        }
+    }
+
+    /// A stop freezes the locomotion it leaves. The registration that hands a slot from a held gait
+    /// clip to idle must carry its outgoing side as a snapshot - `PreviousSide::Frozen` - so nothing
+    /// plays after the intent ends: whatever swing a joint had left becomes where the settle starts,
+    /// not something more of the gait gets played through it (`stopping_a_held_movement_never_winds_
+    /// the_arms_up_after_release`: "MATCH the key frame instead of playing animations"). A live side
+    /// here would let the arm finish the cycle's wind-up after release and land forward - the exact
+    /// reported error. Re-gaits (movement to movement) keep their live crossfade untouched.
+    #[test]
+    fn a_stop_freezes_the_gait_it_leaves() {
+        let Some(loaded) = load_hume_m() else { return };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        actor.locked_on = true;
+        let release_at: u32 = 9;
+        for tick in 0..release_at + 2 {
+            actor.inputs = inputs_for_pose(
+                if tick < release_at {
+                    PoseState::StrafeLeft
+                } else {
+                    PoseState::Idle
+                },
+                false,
+            );
+            advance_actor_pose(
+                &mut actor,
+                1.0,
+                crate::look_at_gates::LookState::Aiming,
+                Some(LookAtInput {
+                    pose_rotation: Quat::IDENTITY,
+                    actor_world: Vec3::ZERO,
+                    target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                }),
+                None,
+                false,
+                None,
+            );
+            if tick != release_at {
+                continue;
+            }
+            for slot in 0..3 {
+                let animator = actor.coordinator.animations[slot]
+                    .as_ref()
+                    .expect("the side step runs every slot");
+                assert!(
+                    animator.current_animation.as_ref().is_some_and(|c| c
+                        .animation
+                        .id
+                        .as_str()
+                        .starts_with("idl")),
+                    "slot {slot}: the stop should have installed the idle"
+                );
+                let transition = animator.transition.as_ref().unwrap_or_else(|| {
+                    panic!("slot {slot}: a settled handover should be blending")
+                });
+                assert!(
+                    matches!(
+                        transition.previous, ffxi_actor::animation::PreviousSide::Frozen(_)
+                    ),
+                    "slot {slot}: the held side step kept playing into the stop instead of freezing \
+                     at the release tick"
+                );
+            }
+        }
+    }
+
+    /// Releasing a held movement settles: while the pose comes to rest, no joint may wind further
+    /// from its bind placement than it ever was under the hold's own control or within anything the
+    /// two contents themselves reach. Two laws, both measured on Hume M (see constants): a stop must
+    /// not start a fresh back-swing after the intent ends - releasing with an arm mid-cycle used to
+    /// watch that arm finish the cycle's wind-up first (`prev LIVE` tape rolling through its loop
+    /// seam under the fade) before jumping forward into idle: "arms go too far backwards then snap
+    /// to idle forward". The handover matches the incoming key frame to the outgoing pose and lets
+    /// it settle there instead of playing either animation further.
+    #[test]
+    fn stopping_a_held_movement_never_winds_the_arms_up_after_release() {
+        // Winding past anything both clip contents reach: measured bulges of 6-13 deg mid-blend when
+        // the two sides' arm phases disagree; a matched settle stays under 2. Tighter than that is
+        // clip-interpolation noise, and the live-playing offender sat far above.
+        const ENVELOPE_MARGIN_DEG: f32 = 4.0;
+        // Winding past where the joint was at the moment of release while settling toward rest:
+        // measured +7 deg spine overshoots when the gait plays on through its wind-up frames; a
+        // matched settle must not need to move away from the released pose further than a step.
+        const RELEASE_HEADROOM_DEG: f32 = 4.0;
+
+        let Some(loaded) = load_hume_m() else { return };
+        let mut bind_pose = Vec::new();
+        ffxi_actor::skeleton_instance::pose_world_into(
+            &mut bind_pose,
+            &mut PoseScratch::default(),
+            &loaded.skeleton,
+            |_| None as Option<KeyFrameTransform>,
+            RootTransform {
+                facing_dir: 0.0,
+                skew: 0.0,
+                slope_oriented: false,
+                scale: Vec3::ONE,
+            },
+            &[],
+        );
+        let joints = &loaded.skeleton.joints;
+        // Axis-agnostic distance from bind, per joint, parent-relative so the root never counts.
+        let dev_from_bind = |pose: &[Mat4], bone: usize| -> Option<f32> {
+            let p = joints.get(bone)?.parent?;
+            let one = |ua: Vec3, ub: Vec3| ua.dot(ub).clamp(-1.0, 1.0).acos().to_degrees();
+            let local = pose[p].inverse() * pose[bone];
+            let b = bind_pose[p].inverse() * bind_pose[bone];
+            let r = b.inverse() * local;
+            Some(
+                (one(r.x_axis.truncate(), b.x_axis.truncate())
+                    + one(r.y_axis.truncate(), b.y_axis.truncate())
+                    + one(r.z_axis.truncate(), b.z_axis.truncate()))
+                    / 3.0,
+            )
+        };
+
+        let scenarios: [(&str, PoseState, &[u32], bool); 4] = [
+            ("strafeL", PoseState::StrafeLeft, &[6_u32, 17, 23], true),
+            ("run", PoseState::Run, &[12_u32, 18, 30], true),
+            ("walk", PoseState::Walk, &[9_u32], false),
+            ("run-free", PoseState::Run, &[24_u32], false),
+        ];
+        let n = joints.len();
+
+        for (label, gait, holds, locked) in scenarios {
+            // Steady drives first: the contents' own reach, per joint.
+            let mut drive = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            drive.locked_on = locked;
+            let mut env_hold = vec![(f32::MIN, f32::MAX); n];
+            let mut env_idle = vec![(f32::MIN, f32::MAX); n];
+            for tick in 0..96 {
+                drive.inputs =
+                    inputs_for_pose(if tick < 80 { gait } else { PoseState::Idle }, false);
+                advance_actor_pose(
+                    &mut drive,
+                    1.0,
+                    if locked {
+                        crate::look_at_gates::LookState::Aiming
+                    } else {
+                        crate::look_at_gates::LookState::IdleNoTarget
+                    },
+                    locked.then_some(LookAtInput {
+                        pose_rotation: Quat::IDENTITY,
+                        actor_world: Vec3::ZERO,
+                        target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                    }),
+                    None,
+                    false,
+                    None,
+                );
+                let pose = drive.world_pose().to_vec();
+                for bone in 0..n {
+                    let Some(d) = dev_from_bind(&pose, bone) else {
+                        continue;
+                    };
+                    let band = if (60..80).contains(&tick) {
+                        &mut env_hold
+                    } else if tick >= 89 {
+                        &mut env_idle
+                    } else {
+                        continue;
+                    };
+                    band[bone].0 = band[bone].0.min(d);
+                    band[bone].1 = band[bone].1.max(d);
+                }
+            }
+
+            let mut violations: Vec<(f32, String)> = Vec::new();
+            for release_at in holds {
+                let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+                actor.locked_on = locked;
+                let mut held_tail_max = vec![0.0f32; n];
+                // The window the settling owns: one handover fade plus the released-record glide.
+                // Past it the pose is idle's own content, which this law does not speak to.
+                let settle_end = *release_at + LOCOMOTION_XFADE_IN as u32 * 2;
+                for tick in 0..settle_end + 1 {
+                    actor.inputs = inputs_for_pose(
+                        if tick < *release_at {
+                            gait
+                        } else {
+                            PoseState::Idle
+                        },
+                        false,
+                    );
+                    advance_actor_pose(
+                        &mut actor,
+                        1.0,
+                        if locked {
+                            crate::look_at_gates::LookState::Aiming
+                        } else {
+                            crate::look_at_gates::LookState::IdleNoTarget
+                        },
+                        locked.then_some(LookAtInput {
+                            pose_rotation: Quat::IDENTITY,
+                            actor_world: Vec3::ZERO,
+                            target_attach_world: Vec3::new(0.0, 1.2, 3.0),
+                        }),
+                        None,
+                        false,
+                        None,
+                    );
+                    let pose = actor.world_pose().to_vec();
+                    for bone in 0..n {
+                        let Some(d) = dev_from_bind(&pose, bone) else {
+                            continue;
+                        };
+                        // The hold's last ticks: how far the joint already was when intent ended.
+                        if (release_at.saturating_sub(2)..*release_at).contains(&tick) {
+                            held_tail_max[bone] = held_tail_max[bone].max(d);
+                            continue;
+                        }
+                        if tick < *release_at {
+                            continue;
+                        }
+                        let past_content =
+                            d - (env_hold[bone].1.max(env_idle[bone].1) + ENVELOPE_MARGIN_DEG);
+                        if past_content > 0.0 {
+                            violations.push((past_content, format!("{label} stop {release_at} joint {bone} tick +{}: dev {:.1} (content reach {:.1})", tick - release_at, d, env_hold[bone].1.max(env_idle[bone].1))));
+                        }
+                        // ...and while the handover is alive, a joint may move toward where idle
+                        // itself holds it but no further: fresh swing measured against the released
+                        // pose (the gait playing on) sat far past both, and so does any bulge the
+                        // blend could sneak between the two poses.
+                        if tick - *release_at < LOCOMOTION_XFADE_IN as u32 {
+                            let ceiling =
+                                held_tail_max[bone].max(env_idle[bone].1) + RELEASE_HEADROOM_DEG;
+                            let past_release = d - ceiling;
+                            if past_release > 0.0 {
+                                violations.push((past_release, format!("{label} stop {release_at} joint {bone} tick +{}: dev {:.1} (held {:.1})", tick - release_at, d, held_tail_max[bone])));
+                            }
+                        }
+                    }
+                }
+            }
+            violations.sort_by(|a, c| c.0.total_cmp(&a.0));
+            assert!(
+                violations.is_empty(),
+                "{label}: {} settling ticks wound a joint past its release or its content; worst:{}",
+                violations.len(),
+                violations
+                    .iter()
+                    .take(6)
+                    .map(|(_, v)| format!("\n  {v}"))
+                    .collect::<String>()
+            );
+        }
+    }
+
+    /// Releasing side step into forward hands over with no snap: across the tick where the locomotion
+    /// blend lands and the first frames after it, no bone moves further per tick than the running gait
+    /// ever covers alone. The release's blend wiring goes with it — every layer crossfades for exactly
+    /// `LOCOMOTION_XFADE_IN`, once, settling inside its own window.
+    #[test]
+    fn releasing_a_side_step_hands_off_without_a_pose_snap() {
+        // The window that holds the landing tick and the frames straight after it.
+        const HANDOFF_WATCH_TICKS: u32 = 4;
+        // A handover must not swing more than half again what the running gait reaches per tick;
+        // shorter blends compress the same pose travel into fewer ticks, so the ratio scales by
+        // retail/handover length and any surprise twist still trips it.
+        const HANDOFF_POSE_SLEW_RATIO_LIMIT: f32 =
+            1.5 * (RETAIL_LOCOMOTION_XFADE_IN / LOCOMOTION_XFADE_IN);
+
+        let Some(loaded) = load_hume_m() else { return };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        let mut previous: Option<Vec<Option<[f32; 4]>>> = None;
+        let mut step_pose = |actor: &mut FfxiRenderActor, state| {
+            actor.inputs = inputs_for_pose(state, false);
+            advance_actor_pose_standalone(actor, 1.0, None);
+            let now = rotation_snapshot(actor);
+            let delta = previous
+                .as_ref()
+                .map_or(0.0, |past| max_pose_delta(past, &now));
+            previous = Some(now);
+            delta
+        };
+
+        // The baseline: a running gait ticking alone, no crossfade anywhere near it.
+        let mut baseline_slew = 0.0_f32;
+        for _ in 0..40 {
+            baseline_slew = baseline_slew.max(step_pose(&mut actor, PoseState::Run));
+        }
+
+        // Release at several points of the side step's cycle, including a release that cuts across
+        // the side step's own entry blend.
+        let window = LOCOMOTION_XFADE_IN as u32 + 2;
+        for strafe_ticks in [2_u32, 9, 16, 23] {
+            for _ in 0..strafe_ticks {
+                step_pose(&mut actor, PoseState::StrafeLeft);
+            }
+            let mut handoff_slew = 0.0_f32;
+            for tick in 0..window {
+                let delta = step_pose(&mut actor, PoseState::Run);
+                if tick >= window - HANDOFF_WATCH_TICKS {
+                    handoff_slew = handoff_slew.max(delta);
+                }
+                if tick == 0 {
+                    let blending: Vec<f32> = actor
+                        .coordinator
+                        .animations
+                        .iter()
+                        .flatten()
+                        .filter_map(|a| a.transition.as_ref())
+                        .map(|t| t.transition_duration)
+                        .collect();
+                    assert!(
+                        !blending.is_empty()
+                            && blending
+                                .iter()
+                                .all(|d| *d == LOCOMOTION_XFADE_IN),
+                        "every layer the release re-gaits should blend for {LOCOMOTION_XFADE_IN}, got {blending:?}"
+                    );
+                }
+            }
+            assert!(
+                !actor.coordinator.is_transitioning(),
+                "the gait blend outlived its window after {strafe_ticks} ticks of side step"
+            );
+            assert!(
+                handoff_slew <= baseline_slew * HANDOFF_POSE_SLEW_RATIO_LIMIT,
+                "the pose swung {handoff_slew:.1} deg/tick across the handoff, {:.2}x the run's own \
+                 {baseline_slew:.1}",
+                handoff_slew / baseline_slew.max(0.001)
+            );
+        }
+    }
+
+    /// A rig carrying both look-at records the way Hume M authors them (neck on reference 3, chest on reference 7),
+    /// standing up `-Y` and facing `+X`: root, hips, spine, chest, neck, head.
+    fn look_rig() -> Skeleton {
+        use ffxi_dat::skel::{Joint, JointReference, LookAtLimit};
+        let joint = |parent: Option<usize>, rise: f32| Joint {
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            translation: [0.0, -rise, 0.0],
+            parent,
+        };
+        let reference = |index: usize| JointReference {
+            index,
+            rotation: [0.0; 3],
+            position_offset: [0.0; 3],
+        };
+        let mut references: Vec<JointReference> = (0..=ffxi_dat::skel::standard_position::CHEST)
+            .map(|_| reference(0))
+            .collect();
+        references[ffxi_dat::skel::standard_position::NECK] = reference(4);
+        references[ffxi_dat::skel::standard_position::CHEST] = reference(3);
+        Skeleton {
+            id: DatId::from_str("look"),
+            joints: vec![
+                joint(None, 0.0),
+                joint(Some(0), 1.0),
+                joint(Some(1), 0.1),
+                joint(Some(2), 0.2),
+                joint(Some(3), 0.25),
+                joint(Some(4), 0.12),
+            ],
+            references,
+            bounding_boxes: Vec::new(),
+            look_at_limits: vec![
+                LookAtLimit {
+                    x_limit: 0.24,
+                    y_limit: 0.16,
+                    scale: 0.5,
+                },
+                LookAtLimit {
+                    x_limit: 0.16,
+                    y_limit: 0.06,
+                    scale: 0.5,
+                },
+            ],
+        }
+    }
+
+    /// Stopping a locked side step hands the correction back on the stop's own blend: no record bone is still owed
+    /// anything past the tick the coordinator's handover lands, so chest and legs settle together.
+    #[test]
+    fn a_locked_stop_hands_the_correction_back_on_its_own_blend() {
+        const LAND_TOLERANCE_TICKS: i32 = 1;
+        const CHEST: usize = 3;
+        const NECK: usize = 4;
+
+        let keyed = |id: &[u8; 4], chest_twist: f32| {
+            let mut clip = synth_anim(id, 8);
+            for joint in 0..6_u32 {
+                let rotation = if joint as usize == CHEST {
+                    Quat::from_rotation_y(chest_twist).to_array()
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                };
+                clip.key_frame_sets.insert(
+                    joint,
+                    vec![
+                        KeyFrameTransform {
+                            rotation,
+                            ..Default::default()
+                        };
+                        clip.num_frames
+                    ],
+                );
+            }
+            clip
+        };
+        let loaded = empty_loaded_actor(look_rig(), None);
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        actor.animations = Arc::new(vec![
+            keyed(b"idl0", 0.0),
+            keyed(b"run0", 0.0),
+            keyed(b"mvl0", 0.7),
+        ]);
+
+        for _ in 0..(LOCOMOTION_XFADE_IN as u32 + 8) {
+            actor.inputs = inputs_for_pose(PoseState::StrafeLeft, false);
+            actor.locked_on = true;
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(
+            !actor.coordinator.is_transitioning(),
+            "the side step settled before the stop"
+        );
+
+        // Standing again: the lock flag goes with the movement and the side step settles into idle.
+        let mut owed_until = None;
+        let mut blend_until = None;
+        for tick in 1..=(LOCOMOTION_XFADE_IN as i32 + 4) {
+            actor.inputs = inputs_for_pose(PoseState::Idle, false);
+            actor.locked_on = false;
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            let owed = [CHEST, NECK]
+                .iter()
+                .any(|&joint| actor.skeleton_authority.owes(joint));
+            if owed_until.is_none() && !owed {
+                owed_until = Some(tick);
+            }
+            if blend_until.is_none() && !actor.coordinator.is_transitioning() {
+                blend_until = Some(tick);
+            }
+        }
+        let (owed, blend) = match (owed_until, blend_until) {
+            (Some(owed), Some(blend)) => (owed, blend),
+            _ => panic!("the stop never landed: owed {owed_until:?}, blend {blend_until:?}"),
+        };
+        assert!(owed > 1, "the correction was dropped in one frame");
+        assert!(
+            (owed - blend).abs() <= LAND_TOLERANCE_TICKS,
+            "the blend landed on tick {blend} but the correction was still owed until tick {owed}"
         );
     }
 
@@ -7993,8 +10174,8 @@ mod pose_resolution_tests {
             advance_engage(
                 &mut actor.engage,
                 *eng,
+                actor.engage_routines,
                 &actor.routines,
-                &actor.rejected_routines,
                 &actor.battle_clips,
                 &actor.animations,
                 step,
@@ -8780,6 +10961,7 @@ mod pose_resolution_tests {
                             actor_rotation: None,
                             turn_toward_step_degrees: None,
                             animation_mode: None,
+                            hand: None,
                             max_loops: 0,
                             transition_in: 0,
                             transition_out: 0,
@@ -8835,6 +11017,7 @@ mod pose_resolution_tests {
                             actor_rotation: None,
                             turn_toward_step_degrees: None,
                             animation_mode: None,
+                            hand: None,
                             max_loops: 1,
                             transition_in: 0,
                             transition_out: 0,
@@ -10006,8 +12189,17 @@ mod pose_resolution_tests {
 
         let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
         let mut m = EngageMachine::NotEngaged;
-        let step =
-            |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &[], &anims, &[], 1.0);
+        let step = |m: &mut EngageMachine, want| {
+            advance_engage(
+                m,
+                want,
+                EngageRoutines::default(),
+                &routines,
+                &anims,
+                &[],
+                1.0,
+            )
+        };
 
         assert_eq!(step(&mut m, true), S::Engaging);
         assert_eq!(step(&mut m, true), S::Engaging);
@@ -10027,11 +12219,27 @@ mod pose_resolution_tests {
         let anims: Vec<SkeletonAnimation> = Vec::new();
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &anims, &[], 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &anims,
+                &[],
+                1.0
+            ),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &[], &anims, &[], 1.0),
+            advance_engage(
+                &mut m,
+                false,
+                EngageRoutines::default(),
+                &routines,
+                &anims,
+                &[],
+                1.0
+            ),
             S::NotEngaged
         );
     }
@@ -10046,20 +12254,52 @@ mod pose_resolution_tests {
         let base = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaging
         );
         assert!(matches!(m, EngageMachine::Drawing { .. }));
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaging
         );
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                false,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Disengaging
         );
         assert!(matches!(m, EngageMachine::Sheathing { .. }));
@@ -10075,7 +12315,15 @@ mod pose_resolution_tests {
         let base = vec![synth_anim(b"ind3", 20), synth_anim(b"otd3", 20)];
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaging
         );
         assert!(
@@ -10083,21 +12331,668 @@ mod pose_resolution_tests {
             "the window must be the battle clip's 2 frames, got {m:?}"
         );
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaging
         );
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                true,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &[], &battle, &base, 1.0),
+            advance_engage(
+                &mut m,
+                false,
+                EngageRoutines::default(),
+                &routines,
+                &battle,
+                &base,
+                1.0
+            ),
             S::Disengaging
         );
         assert!(
             matches!(m, EngageMachine::Sheathing { remaining } if (remaining - 1.0).abs() < f32::EPSILON),
             "the sheathe window must be the battle clip's 1 frame, got {m:?}"
         );
+    }
+
+    /// The draw and sheathe ids are built the way the client builds them from the main-hand Info byte 0x04
+    /// (`FFXiMain.dll retail-2026-09` RVA 0xD2ED0 / 0xD2EF0): the byte as a digit after `in ` and `out`, a negative
+    /// byte reading as 0. No main-hand weapon reads as 0.
+    #[test]
+    fn the_draw_and_sheathe_ids_are_built_from_the_main_weapon_info() {
+        let ids = |pair: EngageRoutines| (pair.draw.as_str(), pair.sheathe.as_str());
+        assert_eq!(
+            ids(EngageRoutines::for_motion_option(0)),
+            ("in 0".to_string(), "out0".to_string())
+        );
+        assert_eq!(
+            ids(EngageRoutines::for_motion_option(1)),
+            ("in 1".to_string(), "out1".to_string())
+        );
+        assert_eq!(
+            ids(EngageRoutines::for_motion_option(u8::MAX)),
+            ("in 0".to_string(), "out0".to_string()),
+            "a negative Info byte reads as 0"
+        );
+        assert_eq!(
+            EngageRoutines::for_main_weapon(None),
+            EngageRoutines::default()
+        );
+    }
+
+    /// The engage machine times the pair the weapon names, not routine 0: a set shipping both `in 0`/`out0` and
+    /// `in 1`/`out1` opens its windows on whichever the main-hand Info byte picks.
+    #[test]
+    fn the_engage_machine_times_the_routines_the_weapon_names() {
+        use actor_state::EngageAnimationState as S;
+        let routines = synth_routines(&[
+            (b"in 0", b"ind?"),
+            (b"out0", b"otd?"),
+            (b"in 1", b"inb?"),
+            (b"out1", b"otb?"),
+        ]);
+        let battle = vec![
+            synth_anim(b"ind0", 2),
+            synth_anim(b"otd0", 1),
+            synth_anim(b"inb0", 5),
+            synth_anim(b"otb0", 3),
+        ];
+        for (motion_option, draw, sheathe) in [(0_u8, 2.0_f32, 1.0_f32), (1, 5.0, 3.0)] {
+            let pair = EngageRoutines::for_motion_option(motion_option);
+            let mut m = EngageMachine::NotEngaged;
+            assert_eq!(
+                advance_engage(&mut m, true, pair, &routines, &battle, &[], 1.0),
+                S::Engaging
+            );
+            assert!(
+                matches!(m, EngageMachine::Drawing { remaining } if (remaining - draw).abs() < f32::EPSILON),
+                "routine {motion_option}: the draw window is {m:?}, its clip is {draw} frames"
+            );
+            m = EngageMachine::Engaged;
+            assert_eq!(
+                advance_engage(&mut m, false, pair, &routines, &battle, &[], 1.0),
+                S::Disengaging
+            );
+            assert!(
+                matches!(m, EngageMachine::Sheathing { remaining } if (remaining - sheathe).abs() < f32::EPSILON),
+                "routine {motion_option}: the sheathe window is {m:?}, its clip is {sheathe} frames"
+            );
+        }
+    }
+
+    /// One routine stage at its fire frame (routine frames), carrying a hand payload when it has one.
+    fn hand_test_stage(
+        frame: u32,
+        kind: StageKind,
+        raw_type: u8,
+        id: &[u8; 4],
+        duration_frames: u16,
+        hand: Option<HandStage>,
+    ) -> ffxi_dat::scheduler::TimedStage {
+        let mut stage = synth_routines(&[(b"tmp0", id)])[&DatId::from_name(b"tmp0")].stages[0];
+        stage.frame = frame;
+        stage.stage.kind = kind;
+        stage.stage.raw_type = raw_type;
+        stage.stage.duration_frames = duration_frames;
+        stage.stage.hand = hand;
+        stage
+    }
+
+    fn hand_test_routine(
+        name: &[u8; 4],
+        stages: Vec<ffxi_dat::scheduler::TimedStage>,
+    ) -> (DatId, Scheduler) {
+        (
+            DatId::from_name(name),
+            Scheduler {
+                name: *name,
+                stages,
+            },
+        )
+    }
+
+    fn hand_of(hand: WeaponHand, sheathe: bool) -> Option<HandStage> {
+        Some(HandStage { hand, sheathe })
+    }
+
+    /// A clip that keys `joint` on every frame, so the pose pass can play it.
+    fn keyed_test_anim(id: &[u8; 4], joint: u32, length: usize) -> SkeletonAnimation {
+        SkeletonAnimation {
+            id: DatId::from_name(id),
+            num_joints: joint as usize + 1,
+            num_frames: length + 1,
+            key_frame_duration: 1.0,
+            key_frame_sets: [(joint, vec![KeyFrameTransform::default(); length + 1])]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// A draw or sheathe is read off its own stages and every routine it starts: each hand's routine through a
+    /// hand-routine stage (named from that hand's Info byte 0x04) and a linked routine, each at the frame its stage
+    /// fires. Motions, hold changes and busy stages come out in skeleton frames, by time, and the engage machine steps
+    /// again once the busy stages running from the first frame end.
+    #[test]
+    fn a_draw_or_sheathe_reads_the_holds_and_motions_of_every_routine_it_starts() {
+        use ffxi_dat::scheduler::NO_STAGE_ID;
+        let routines: HashMap<DatId, Scheduler> = [
+            hand_test_routine(
+                b"out2",
+                vec![
+                    hand_test_stage(0, StageKind::BusyFor, 0x1F, &NO_STAGE_ID, 72, None),
+                    hand_test_stage(
+                        0,
+                        StageKind::HandRoutine,
+                        0x84,
+                        &NO_STAGE_ID,
+                        0,
+                        hand_of(WeaponHand::Main, true),
+                    ),
+                    hand_test_stage(
+                        4,
+                        StageKind::HandRoutine,
+                        0x84,
+                        &NO_STAGE_ID,
+                        0,
+                        hand_of(WeaponHand::Sub, true),
+                    ),
+                    hand_test_stage(4, StageKind::SubRoutine, 0x57, b"sotr", 0, None),
+                ],
+            ),
+            hand_test_routine(
+                b"ot12",
+                vec![
+                    hand_test_stage(0, StageKind::Motion, 0x05, b"om1?", 0, None),
+                    hand_test_stage(
+                        2,
+                        StageKind::WeaponHoldFor,
+                        0x9B,
+                        &NO_STAGE_ID,
+                        20,
+                        hand_of(WeaponHand::Main, false),
+                    ),
+                    hand_test_stage(100, StageKind::BusyFor, 0x1F, &NO_STAGE_ID, 10, None),
+                ],
+            ),
+            hand_test_routine(
+                b"ot21",
+                vec![
+                    hand_test_stage(0, StageKind::Motion, 0x05, b"os2?", 0, None),
+                    hand_test_stage(2, StageKind::BusyFor, 0x1F, &NO_STAGE_ID, 80, None),
+                    hand_test_stage(
+                        6,
+                        StageKind::WeaponRelease,
+                        0xA8,
+                        &NO_STAGE_ID,
+                        0,
+                        hand_of(WeaponHand::Sub, false),
+                    ),
+                ],
+            ),
+            hand_test_routine(
+                b"sotr",
+                vec![hand_test_stage(
+                    0,
+                    StageKind::WeaponHold,
+                    0xA7,
+                    &NO_STAGE_ID,
+                    0,
+                    hand_of(WeaponHand::Sub, false),
+                )],
+            ),
+        ]
+        .into_iter()
+        .collect();
+        // Main hand's Info byte 0x04 = 2 names `out2` and `ot12`; the sub hand's = 1 names `ot21`.
+        let pair = EngageRoutines {
+            sub_option: 1,
+            ..EngageRoutines::for_motion_option(2)
+        };
+        let timeline = engage_timeline(pair.sheathe, &routines, pair);
+        assert_eq!(
+            timeline,
+            EngageTimeline {
+                motions: vec![
+                    (0.0, DatId::from_str("om1?")),
+                    (2.0, DatId::from_str("os2?"))
+                ],
+                holds: vec![
+                    (1.0, WeaponHand::Main, true),
+                    (2.0, WeaponHand::Sub, true),
+                    (5.0, WeaponHand::Sub, false),
+                    (11.0, WeaponHand::Main, false),
+                ],
+                busy: vec![(0.0, 36.0), (3.0, 43.0), (50.0, 55.0)],
+            }
+        );
+        // The sub hand's busy stage starts inside the first one and runs on past it; the main hand's starts after.
+        assert_eq!(timeline.busy_until(), 43.0);
+    }
+
+    /// The client's hold law (`FFXiMain.dll retail-2026-09` RVA 0x2A153..0x2A1C1): while either hand's routine
+    /// override is up, each hand follows its own override; otherwise both follow the engaged flag.
+    #[test]
+    fn a_hand_override_decides_both_hands_while_either_is_up() {
+        let timeline = |holds: Vec<(f32, WeaponHand, bool)>| EngageTimeline {
+            holds,
+            ..EngageTimeline::default()
+        };
+        let mut holds = WeaponHolds::default();
+        holds.start(true, timeline(Vec::new()));
+        assert!(holds.holds(WeaponHand::Main) && holds.holds(WeaponHand::Sub));
+        holds.start(
+            true,
+            timeline(vec![
+                (1.0, WeaponHand::Main, true),
+                (3.0, WeaponHand::Main, false),
+            ]),
+        );
+        holds.advance(1.0);
+        assert!(holds.holds(WeaponHand::Main));
+        assert!(
+            !holds.holds(WeaponHand::Sub),
+            "while the main hand's override is up the sub hand follows its own, which is down"
+        );
+        holds.advance(2.0);
+        assert!(holds.holds(WeaponHand::Main) && holds.holds(WeaponHand::Sub));
+        holds.start(false, timeline(vec![(0.0, WeaponHand::Sub, true)]));
+        assert!(!holds.holds(WeaponHand::Main) && holds.holds(WeaponHand::Sub));
+        holds.start(false, timeline(Vec::new()));
+        assert!(
+            holds.holds(WeaponHand::Sub),
+            "an override keeps its value until a stage moves it"
+        );
+    }
+
+    /// A PC with a weapon in each hand, on a skeleton whose handles sit on the hip and whose hands hang elsewhere:
+    /// main handle reference 0x74 on joint 2, sub 0x75 on joint 4, right hand on joint 3, left on joint 5.
+    fn two_weapon_test_actor(
+        routines: HashMap<DatId, Scheduler>,
+        battle_clips: Vec<SkeletonAnimation>,
+        pair: EngageRoutines,
+    ) -> FfxiRenderActor {
+        use ffxi_dat::skel::{standard_position, Joint, JointReference};
+        const MAIN_REFERENCE: u8 = 0x74;
+        const SUB_REFERENCE: u8 = 0x75;
+        let joint = |translation: [f32; 3], parent: Option<usize>| Joint {
+            rotation: Quat::IDENTITY.to_array(),
+            translation,
+            parent,
+        };
+        let reference = |index: usize| JointReference {
+            index,
+            rotation: [0.0; 3],
+            position_offset: [0.0; 3],
+        };
+        let mut references = vec![reference(0); standard_position::RIGHT_HAND + 1];
+        references[usize::from(MAIN_REFERENCE)] = reference(2);
+        references[usize::from(SUB_REFERENCE)] = reference(4);
+        references[standard_position::RIGHT_HAND] = reference(3);
+        references[standard_position::LEFT_HAND] = reference(5);
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: vec![
+                joint([0.0, 0.0, 0.0], None),
+                joint([0.0, -1.0, 0.0], Some(0)),
+                joint([0.3, 0.0, 0.0], Some(1)),
+                joint([-0.5, -1.2, 0.4], Some(0)),
+                joint([-0.3, 0.0, 0.0], Some(1)),
+                joint([0.5, -1.2, 0.4], Some(0)),
+            ],
+            references,
+            bounding_boxes: Vec::new(),
+            look_at_limits: Vec::new(),
+        };
+        let weapon = |standard_joint: u8| {
+            let mut body = [0u8; ffxi_dat::cib::CIB_LEN];
+            body[0x06] = standard_joint;
+            Cib::parse(*b"cib0", &body).unwrap()
+        };
+        let mut loaded = empty_loaded_actor(skeleton, None);
+        loaded.weapon_handles = weapon_handle_overrides(
+            &loaded.skeleton,
+            Some(&weapon(MAIN_REFERENCE)),
+            Some(&weapon(SUB_REFERENCE)),
+        );
+        loaded.routines = Arc::new(routines);
+        loaded.battle_clips = Arc::new(battle_clips);
+        loaded.engage_routines = pair;
+        make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0)
+    }
+
+    fn drive_engage(actor: &mut FfxiRenderActor, want: bool) {
+        let state = advance_engage(
+            &mut actor.engage,
+            want,
+            actor.engage_routines,
+            &actor.routines,
+            &actor.battle_clips,
+            &actor.animations,
+            1.0,
+        );
+        actor.inputs = inputs_for_pose(PoseState::Idle, want);
+        actor.inputs.engage_state = state;
+        advance_actor_pose_standalone(actor, 1.0, None);
+    }
+
+    /// Whether the weapon in `hand` stands on the hand that holds it this frame.
+    fn weapon_on_hand(actor: &FfxiRenderActor, hand: WeaponHand) -> bool {
+        let weapon = actor
+            .weapon_handles
+            .iter()
+            .find(|w| w.hand == hand)
+            .expect("the test actor holds a weapon in each hand");
+        let pose = actor.world_pose();
+        (pose[weapon.handle].w_axis - pose[weapon.bone].w_axis)
+            .truncate()
+            .length()
+            < 1e-5
+    }
+
+    /// With no hold or busy stage in its routines, a hand takes its weapon as the draw starts and keeps it through the
+    /// stance, and lets it go as the sheathe starts (`FFXiMain.dll retail-2026-09` RVA 0x8B789..0x8B794 raises the
+    /// engaged flag the update after the draw routine starts; RVA 0x8B98C..0x8B9A6 drops it as the sheathe routine
+    /// starts).
+    #[test]
+    fn a_hand_takes_its_weapon_as_the_draw_starts_and_lets_go_as_the_sheathe_starts() {
+        use actor_state::EngageAnimationState as S;
+        let routines = synth_routines(&[(b"in 0", b"ind?"), (b"out0", b"otd?")]);
+        let clips = vec![
+            keyed_test_anim(b"ind0", 1, 4),
+            keyed_test_anim(b"otd0", 1, 4),
+        ];
+        let mut actor = two_weapon_test_actor(routines, clips, EngageRoutines::default());
+        let both_held = |actor: &FfxiRenderActor| {
+            weapon_on_hand(actor, WeaponHand::Main) && weapon_on_hand(actor, WeaponHand::Sub)
+        };
+        let neither_held = |actor: &FfxiRenderActor| {
+            !weapon_on_hand(actor, WeaponHand::Main) && !weapon_on_hand(actor, WeaponHand::Sub)
+        };
+
+        drive_engage(&mut actor, false);
+        assert!(
+            neither_held(&actor),
+            "unengaged, both weapons ride their own chains"
+        );
+        drive_engage(&mut actor, true);
+        assert_eq!(actor.inputs.engage_state, S::Engaging);
+        assert!(
+            both_held(&actor),
+            "the draw's first frame holds both weapons"
+        );
+        for _ in 0..8 {
+            drive_engage(&mut actor, true);
+            assert!(both_held(&actor), "{:?} let a weapon go", actor.engage);
+        }
+        assert!(matches!(actor.engage, EngageMachine::Engaged));
+        drive_engage(&mut actor, false);
+        assert_eq!(actor.inputs.engage_state, S::Disengaging);
+        assert!(
+            neither_held(&actor),
+            "the sheathe's first frame lets both weapons go"
+        );
+        for _ in 0..8 {
+            drive_engage(&mut actor, false);
+            assert!(neither_held(&actor), "{:?} held a weapon", actor.engage);
+        }
+        assert!(matches!(actor.engage, EngageMachine::NotEngaged));
+    }
+
+    /// A draw whose routine keeps its actor busy ([`StageKind::BusyFor`]) leaves each weapon where the draw's clip
+    /// carries it until that stage ends, and only then does the hand take it (`FFXiMain.dll retail-2026-09`: the engage
+    /// machine does not step while the busy count is up, RVA 0x8B49B..0x8B4C1). The clip here carries each handle from
+    /// the hip to its hand over its first 6 frames and the busy stage runs 8, so each hand takes its weapon where the
+    /// clip already put it.
+    #[test]
+    fn the_hand_takes_its_weapon_once_the_draws_busy_stages_end() {
+        use ffxi_dat::scheduler::NO_STAGE_ID;
+        const GRAB: usize = 6;
+        const BUSY_ROUTINE_FRAMES: u16 = 16;
+        let mut routines = synth_routines(&[(b"out0", b"otd?")]);
+        routines.extend([hand_test_routine(
+            b"in 0",
+            vec![
+                hand_test_stage(0, StageKind::Motion, 0x05, b"ind?", 0, None),
+                hand_test_stage(
+                    0,
+                    StageKind::BusyFor,
+                    0x1F,
+                    &NO_STAGE_ID,
+                    BUSY_ROUTINE_FRAMES,
+                    None,
+                ),
+            ],
+        )]);
+        // Each handle's way from where it rests to its hand: main joint 2 to the right hand (joint 3), sub joint 4 to
+        // the left (joint 5).
+        let reach = |to: Vec3| -> Vec<KeyFrameTransform> {
+            (0..GRAB + 5)
+                .map(|frame| KeyFrameTransform {
+                    translation: (to * (frame.min(GRAB) as f32 / GRAB as f32)).to_array(),
+                    ..KeyFrameTransform::default()
+                })
+                .collect()
+        };
+        let draw = SkeletonAnimation {
+            id: DatId::from_name(b"ind0"),
+            num_joints: 5,
+            num_frames: GRAB + 5,
+            key_frame_duration: 1.0,
+            key_frame_sets: [
+                (2, reach(Vec3::new(-0.8, -0.2, 0.4))),
+                (4, reach(Vec3::new(0.8, -0.2, 0.4))),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let clips = vec![draw, keyed_test_anim(b"otd0", 1, 4)];
+        let mut actor =
+            two_weapon_test_actor(routines.clone(), clips.clone(), EngageRoutines::default());
+        // The same actor with nothing re-parented shows where the clips alone put each handle.
+        let mut bare = two_weapon_test_actor(routines, clips, EngageRoutines::default());
+        bare.weapon_handles.clear();
+        let busy_end =
+            f32::from(BUSY_ROUTINE_FRAMES) / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
+
+        drive_engage(&mut actor, false);
+        drive_engage(&mut bare, false);
+        for frame in 0..10 {
+            drive_engage(&mut actor, true);
+            drive_engage(&mut bare, true);
+            assert!(matches!(actor.engage, EngageMachine::Drawing { .. }));
+            if frame == 0 {
+                assert!(
+                    !weapon_on_hand(&actor, WeaponHand::Main),
+                    "the draw's first frame put the weapon on the hand"
+                );
+            }
+            let (shown, clips_pose) = (actor.world_pose(), bare.world_pose());
+            for weapon in &actor.weapon_handles {
+                let held = actor.weapon_holds.holds(weapon.hand);
+                assert_eq!(
+                    held,
+                    frame as f32 >= busy_end,
+                    "draw frame {frame}: the {:?} hand's hold",
+                    weapon.hand
+                );
+                if held {
+                    let jump = (clips_pose[weapon.handle].w_axis - shown[weapon.bone].w_axis)
+                        .truncate()
+                        .length();
+                    assert!(
+                        weapon_on_hand(&actor, weapon.hand) && jump < 1e-4,
+                        "draw frame {frame}: the {:?} hand took its weapon {jump:.3} from where the clip had it",
+                        weapon.hand
+                    );
+                } else {
+                    assert!(
+                        shown[weapon.handle].abs_diff_eq(clips_pose[weapon.handle], 1e-5),
+                        "draw frame {frame}: the {:?} weapon left the clip before its hand took it",
+                        weapon.hand
+                    );
+                }
+            }
+        }
+    }
+
+    /// A sheathe whose routine holds the main hand (stage 0x9B) keeps the main weapon on the hand for the stage's
+    /// length and lets it go after; while that override is up the sub hand follows its own, which no stage raised.
+    #[test]
+    fn a_hold_stage_keeps_its_hand_on_the_weapon_for_its_length() {
+        use ffxi_dat::scheduler::NO_STAGE_ID;
+        let mut routines = synth_routines(&[(b"in 0", b"ind?")]);
+        routines.extend([hand_test_routine(
+            b"out0",
+            vec![
+                hand_test_stage(0, StageKind::Motion, 0x05, b"otd?", 0, None),
+                hand_test_stage(
+                    0,
+                    StageKind::WeaponHoldFor,
+                    0x9B,
+                    &NO_STAGE_ID,
+                    6,
+                    hand_of(WeaponHand::Main, false),
+                ),
+            ],
+        )]);
+        let clips = vec![
+            keyed_test_anim(b"ind0", 1, 4),
+            keyed_test_anim(b"otd0", 1, 8),
+        ];
+        let mut actor = two_weapon_test_actor(routines, clips, EngageRoutines::default());
+        for _ in 0..8 {
+            drive_engage(&mut actor, true);
+        }
+        assert!(matches!(actor.engage, EngageMachine::Engaged));
+
+        // 6 routine frames are 3 skeleton frames: the sheathe's frames 0, 1 and 2 hold the main hand.
+        for frame in 0..3 {
+            drive_engage(&mut actor, false);
+            assert!(
+                weapon_on_hand(&actor, WeaponHand::Main),
+                "sheathe frame {frame}: the hold stage let the main weapon go"
+            );
+            assert!(
+                !weapon_on_hand(&actor, WeaponHand::Sub),
+                "sheathe frame {frame}: the sub hand held a weapon no stage holds"
+            );
+        }
+        drive_engage(&mut actor, false);
+        assert!(matches!(actor.engage, EngageMachine::Sheathing { .. }));
+        assert!(
+            !weapon_on_hand(&actor, WeaponHand::Main),
+            "the hold stage ended but the main weapon stayed on the hand"
+        );
+    }
+
+    /// A draw or sheathe made of hand-routine stages plays both hands' routines at once: the window runs to the end of
+    /// the longer, and the pose carries every clip each one names, a later start taking the slots it shares.
+    #[test]
+    fn a_two_hand_sheathe_plays_both_hands_routines_at_once() {
+        use ffxi_dat::scheduler::NO_STAGE_ID;
+        let mut routines =
+            synth_routines(&[(b"in 0", b"ind?"), (b"ot10", b"om1?"), (b"ot20", b"os2?")]);
+        routines.extend([hand_test_routine(
+            b"out0",
+            vec![
+                hand_test_stage(
+                    0,
+                    StageKind::HandRoutine,
+                    0x84,
+                    &NO_STAGE_ID,
+                    0,
+                    hand_of(WeaponHand::Main, true),
+                ),
+                hand_test_stage(
+                    0,
+                    StageKind::HandRoutine,
+                    0x84,
+                    &NO_STAGE_ID,
+                    0,
+                    hand_of(WeaponHand::Sub, true),
+                ),
+            ],
+        )]);
+        let clips = vec![
+            keyed_test_anim(b"ind0", 1, 4),
+            keyed_test_anim(b"om10", 1, 6),
+            keyed_test_anim(b"om11", 3, 6),
+            keyed_test_anim(b"os21", 5, 9),
+        ];
+        let mut actor = two_weapon_test_actor(routines, clips, EngageRoutines::default());
+        for _ in 0..8 {
+            drive_engage(&mut actor, true);
+        }
+        assert!(matches!(actor.engage, EngageMachine::Engaged));
+        drive_engage(&mut actor, false);
+        // The main hand's clips run 6 frames, the sub hand's 9.
+        assert!(
+            matches!(actor.engage, EngageMachine::Sheathing { remaining } if (remaining - 9.0).abs() < 1e-4),
+            "the window runs to the end of the longer routine: {:?}",
+            actor.engage
+        );
+        let playing: Vec<String> = actor
+            .coordinator
+            .animations
+            .iter()
+            .flatten()
+            .filter_map(|slot| slot.current_animation.as_ref())
+            .map(|clip| clip.animation.id.as_str())
+            .collect();
+        assert!(
+            playing.contains(&"om10".to_string()) && playing.contains(&"os21".to_string()),
+            "both hands' routines play: {playing:?}"
+        );
+        assert!(
+            !playing.contains(&"om11".to_string()),
+            "the sub hand's routine starts with the main hand's and takes slot 1: {playing:?}"
+        );
+    }
+
+    /// The race-wide block behind a weapon block lends no member to a family the weapon block authors, and keeps the
+    /// families only it carries.
+    #[test]
+    fn the_race_wide_block_lends_no_member_to_a_family_the_weapon_block_plays() {
+        let weapon_block = ResourceDir::from_bytes(
+            [b"otd1", b"btl0"]
+                .iter()
+                .flat_map(|name| {
+                    let mut header = name.to_vec();
+                    header.extend_from_slice(
+                        &((1u32 << 7) | u32::from(ChunkKind::AnimMo2 as u8)).to_le_bytes(),
+                    );
+                    header.extend_from_slice(&[0; 8]);
+                    header
+                })
+                .collect(),
+        );
+        let merged = Arc::new(
+            [b"otd1", b"btl0", b"otd0", b"btl1", b"dfm1"]
+                .map(|id| synth_anim(id, 1))
+                .to_vec(),
+        );
+        let kept: Vec<String> = drop_borrowed_family_members(merged, &[weapon_block])
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect();
+        assert_eq!(kept, ["otd1", "btl0", "dfm1"]);
     }
 
     /// The self pose reads the wire motion only under the goals where the
@@ -10884,6 +13779,7 @@ mod actor_dat_root_tests {
                 body: None,
                 main_weapon: None,
                 sub_weapon: None,
+                sub_model: None,
             },
         });
         app.update();

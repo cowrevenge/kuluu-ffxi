@@ -434,6 +434,7 @@ mod tests {
                 control_flow: None,
                 actor_rotation: None,
                 animation_mode: None,
+                hand: None,
                 turn_toward_step_degrees: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
             },

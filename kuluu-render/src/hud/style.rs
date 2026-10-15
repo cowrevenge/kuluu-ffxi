@@ -50,6 +50,14 @@ pub mod theme {
     /// (FFXiMain.dll retail-2026-09 `.text 0x1D6A1A`), and the same halving covers the
     /// `statcom2` rows disabled at open (`.text 0x148B50`). Half of TEXT.
     pub const TEXT_DISABLED: Color = Color::srgb(0.455, 0.46, 0.475);
+    /// An item row wearable right now. Retail's per-row colour resolvers paint ARGB
+    /// 0x80909040 when the equip legality check answers true (FFXiMain.dll retail-2026-09
+    /// `.text 0x1DE18D`, repeated at `.text 0x20F788` and `.text 0x1EC8DA`).
+    pub const TEXT_EQUIP_OK: Color = Color::srgb(0.565, 0.565, 0.251);
+    /// An item row whose id already stands in one of the equip slots the client scans —
+    /// ARGB 0x80509050 (FFXiMain.dll retail-2026-09 `.text 0x1DE173`, scan helper
+    /// `.text 0x131FA0`), which takes precedence over the wearable-now lime.
+    pub const TEXT_EQUIP_SAME_KIND: Color = Color::srgb(0.314, 0.565, 0.314);
 }
 
 /// The row prefix marking the cursor in every list menu — "> " on the selected

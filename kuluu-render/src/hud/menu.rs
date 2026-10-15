@@ -168,6 +168,11 @@ pub struct DynamicMenuRow {
     pub label: String,
 
     pub action: DynamicMenuAction,
+
+    /// Retail's per-row colour law for item rows the legality check has an opinion on
+    /// ([`equip_row_tint`] carries the law); `None` is ordinary text. Only builders that have
+    /// tested equip legality set it — today that is [`equip_slot_rows`].
+    pub tint: Option<MenuRowTint>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -758,6 +763,7 @@ pub fn controls_rows(bindings: &crate::keybinds::Bindings) -> Vec<DynamicMenuRow
         .map(|(action, _)| {
             let key = bindings.key_label(action).unwrap_or("...");
             DynamicMenuRow {
+                tint: None,
                 label: format!("{}: {}", action.display_name(), key),
                 action: DynamicMenuAction::DisplayInfo,
             }
@@ -773,6 +779,7 @@ pub fn controls_rows(bindings: &crate::keybinds::Bindings) -> Vec<DynamicMenuRow
                 DynamicMenuAction::ControlsReset,
             ])
             .map(|(label, action)| DynamicMenuRow {
+                tint: None,
                 label: (*label).to_string(),
                 action,
             }),
@@ -1486,10 +1493,12 @@ pub fn party_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     if let Some(invite) = &snap.party_invite {
         return vec![
             DynamicMenuRow {
+                tint: None,
                 label: format!("Yes (join {})", invite.name),
                 action: DynamicMenuAction::AcceptPartyInvite,
             },
             DynamicMenuRow {
+                tint: None,
                 label: "No".to_string(),
                 action: DynamicMenuAction::DeclinePartyInvite,
             },
@@ -1498,6 +1507,7 @@ pub fn party_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     snap.party
         .iter()
         .map(|m| DynamicMenuRow {
+            tint: None,
             label: m.name.clone().unwrap_or_else(|| format!("{:08X}", m.id)),
             action: DynamicMenuAction::PartyMemberRow { char_id: m.id },
         })
@@ -1547,10 +1557,12 @@ pub fn trade_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
             .unwrap_or_else(|| format!("{:08X}", trade.partner_id));
         return vec![
             DynamicMenuRow {
+                tint: None,
                 label: format!("Yes (accept {})", name),
                 action: DynamicMenuAction::TradeAcceptInvite,
             },
             DynamicMenuRow {
+                tint: None,
                 label: "No".to_string(),
                 action: DynamicMenuAction::TradeDeclineInvite,
             },
@@ -1558,11 +1570,13 @@ pub fn trade_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     }
     let mut rows = Vec::new();
     rows.push(DynamicMenuRow {
+        tint: None,
         label: trade_cell_label(trade.my_slots.first().copied().flatten(), true),
         action: DynamicMenuAction::TradeGilRow,
     });
     for idx in 1..ffxi_proto::decode::TRADE_SLOT_COUNT {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: trade_cell_label(trade.my_slots.get(idx).copied().flatten(), false),
             action: DynamicMenuAction::TradeOwnSlot {
                 trade_index: idx as u8,
@@ -1570,6 +1584,7 @@ pub fn trade_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
         });
     }
     rows.push(DynamicMenuRow {
+        tint: None,
         label: if trade.my_confirmed {
             "Confirm (waiting for partner)".to_string()
         } else {
@@ -1578,11 +1593,13 @@ pub fn trade_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
         action: DynamicMenuAction::TradeConfirmRow,
     });
     rows.push(DynamicMenuRow {
+        tint: None,
         label: "Exit".to_string(),
         action: DynamicMenuAction::TradeCancelRow,
     });
     for idx in 0..ffxi_proto::decode::TRADE_SLOT_COUNT {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: trade_cell_label(trade.partner_slots.get(idx).copied().flatten(), idx == 0),
             action: DynamicMenuAction::TradePartnerOfferRow {
                 trade_index: idx as u8,
@@ -1607,6 +1624,7 @@ pub fn trade_pick_rows(
         .filter_map(|slot| {
             let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
             Some(DynamicMenuRow {
+                tint: None,
                 label: if slot.quantity > 1 {
                     format!("{name} x{}", slot.quantity)
                 } else {
@@ -1634,6 +1652,7 @@ pub fn trade_pick_rows(
 /// documented follow-ups for this bead family.
 pub fn search_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
     let mut rows = vec![DynamicMenuRow {
+        tint: None,
         label: "Run Search".to_string(),
         action: DynamicMenuAction::SearchRun,
     }];
@@ -1656,6 +1675,7 @@ pub fn search_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMe
             _ => "???".to_string(),
         };
         rows.push(DynamicMenuRow {
+            tint: None,
             label: format!("{}  {shape}  Z{}", hit.name, hit.zone),
             action: DynamicMenuAction::SearchHitRow { index },
         });
@@ -1695,6 +1715,7 @@ pub fn linkshell_window_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<Dynami
                 format!("Link Shell {}   (no pearl equipped)", slot)
             };
             DynamicMenuRow {
+                tint: None,
                 label,
                 action: DynamicMenuAction::LinkShellSlot {
                     linkshell_slot: slot,
@@ -3636,6 +3657,7 @@ pub fn roomlist_rows(table: &ConfigDatRows) -> Vec<DynamicMenuRow> {
         .map(|(position, (_, label))| {
             let style = ROOMLIST_ROW_STYLES.get(position).copied().unwrap_or(0);
             DynamicMenuRow {
+                tint: None,
                 label: label.clone(),
                 action: if style == 0 {
                     DynamicMenuAction::DisplayInfo
@@ -3687,6 +3709,7 @@ pub fn config_window_rows(
                 );
                 let pinned = option_edit.is_some_and(|(pin, _)| pin == store_id);
                 return DynamicMenuRow {
+                    tint: None,
                     label: if pinned {
                         format!("\u{bb} {label}: {live}")
                     } else {
@@ -3699,6 +3722,7 @@ pub fn config_window_rows(
             match config_page_arms(window).and_then(|a| a.get(position)) {
                 Some(ConfigRowArm::Radio { store_id, value }) => {
                     return DynamicMenuRow {
+                        tint: None,
                         label: if option_values.get(store_id) == Some(value) {
                             format!("\u{bb} {label}")
                         } else {
@@ -3717,6 +3741,7 @@ pub fn config_window_rows(
                         .get(&CONFIG_OPTION_MISC_FLAGS)
                         .is_some_and(|mask| (((*mask as u32) >> *bit) & 1) as i32 == *value);
                     return DynamicMenuRow {
+                        tint: None,
                         label: if marked {
                             format!("\u{bb} {label}")
                         } else {
@@ -3734,6 +3759,7 @@ pub fn config_window_rows(
                 Some(ConfigRowArm::WindowLocal { obj_off, value }) => {
                     let key = config_window_state_key(window).unwrap_or_default();
                     return DynamicMenuRow {
+                        tint: None,
                         label: if window_choices.get(&(key, *obj_off)) == Some(value) {
                             format!("\u{bb} {label}")
                         } else {
@@ -3752,6 +3778,7 @@ pub fn config_window_rows(
                 Some(ConfigRowArm::FilterBit { store_id, bit }) => {
                     let mask = option_values.get(store_id).copied().unwrap_or(0) as u32;
                     return DynamicMenuRow {
+                        tint: None,
                         label: if mask & (1u32 << bit) != 0 {
                             format!("\u{bb} {label}")
                         } else {
@@ -3768,6 +3795,7 @@ pub fn config_window_rows(
                 // the shared select method's transition table (vault main_menu.md §59 addendum 15).
                 Some(ConfigRowArm::CfilterSelect { table_idx }) => {
                     return DynamicMenuRow {
+                        tint: None,
                         label: if cfilter_row_state(*table_idx as usize, option_values) != 0 {
                             format!("\u{bb} {label}")
                         } else {
@@ -3780,12 +3808,14 @@ pub fn config_window_rows(
                 }
                 Some(ConfigRowArm::Sub { sub }) => {
                     return DynamicMenuRow {
+                        tint: None,
                         label: label.clone(),
                         action: DynamicMenuAction::OpenRetailConfigSub { sub: *sub },
                     };
                 }
                 Some(ConfigRowArm::Companion { mode, opens }) => {
                     return DynamicMenuRow {
+                        tint: None,
                         label: label.clone(),
                         action: DynamicMenuAction::OpenRetailConfigCompanion { mode: *mode, opens },
                     };
@@ -3795,6 +3825,7 @@ pub fn config_window_rows(
                 // FFXiMain.dll retail-2026-09 RVA 0x19B309).
                 Some(ConfigRowArm::ConfirmResetKeyAssignments) => {
                     return DynamicMenuRow {
+                        tint: None,
                         label: label.clone(),
                         action: DynamicMenuAction::OpenKeyAssignResetPrompt,
                     };
@@ -3802,6 +3833,7 @@ pub fn config_window_rows(
                 _ => {}
             }
             DynamicMenuRow {
+                tint: None,
                 label: match arm {
                     Some((store_id, value)) if option_values.get(&store_id) == Some(&value) => {
                         format!("\u{bb} {label}")
@@ -4126,6 +4158,7 @@ pub fn craft_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
             *cell = Some(entry);
         }
         rows.push(DynamicMenuRow {
+            tint: None,
             label: recipe.name.to_string(),
             action: DynamicMenuAction::SynthesizeRecipe {
                 crystal_id: held_crystal_id,
@@ -4498,6 +4531,7 @@ pub fn spell_rows(spells_known: &[u16]) -> Vec<DynamicMenuRow> {
         .iter()
         .filter_map(|&id| {
             ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
+                tint: None,
                 label: name.to_string(),
                 action: DynamicMenuAction::CastSpell { spell_id: id },
             })
@@ -4516,6 +4550,7 @@ pub fn magic_school_rows(
         .filter(|&&id| school_of(id) == Some(school))
         .filter_map(|&id| {
             ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
+                tint: None,
                 label: name.to_string(),
                 action: DynamicMenuAction::CastSpell { spell_id: id },
             })
@@ -4579,6 +4614,7 @@ pub fn region_info_rows(mode: u8, zone: Option<u16>) -> Vec<DynamicMenuRow> {
                 ""
             };
             DynamicMenuRow {
+                tint: None,
                 label: format!("{marker}{label}"),
                 action: DynamicMenuAction::RegionInfoMode { mode: i as u8 },
             }
@@ -4615,6 +4651,7 @@ pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     let mut rows = Vec::new();
     if let Some(info) = &snap.missions.info {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: format!(
                 "{}: mission #{}",
                 mission_nation_name(info.nation),
@@ -4636,6 +4673,7 @@ pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
             .find(|(p, _)| *p == entry.port)
         {
             rows.push(DynamicMenuRow {
+                tint: None,
                 label: format!("Completed missions — {name}"),
                 action: DynamicMenuAction::MissionOpenLog { port: *port },
             });
@@ -4643,6 +4681,7 @@ pub fn mission_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     }
     if rows.is_empty() {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: "(no mission logs reported)".to_string(),
             action: DynamicMenuAction::MissionLogRow { port: 0 },
         });
@@ -4727,6 +4766,7 @@ pub fn automaton_equip_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<Dynamic
         return Vec::new();
     };
     let named = |word: &str, name: Option<&'static str>, slot: u8| DynamicMenuRow {
+        tint: None,
         label: format!("{word}: {}", name.unwrap_or("(empty)")),
         action: DynamicMenuAction::AutomatonSlotRow { slot },
     };
@@ -4768,6 +4808,7 @@ pub fn macro_select_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     slots
         .into_iter()
         .map(|m| DynamicMenuRow {
+            tint: None,
             label: format!("B{}/{}: {}", m.block + 1, m.index + 1, m.text),
             action: DynamicMenuAction::MacroSlotRow {
                 block: m.block,
@@ -4788,12 +4829,14 @@ pub fn bazaar_stall_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
         .iter()
         .filter(|e| is_bazaar_stall_entity(e, snap.self_char_id))
         .map(|e| DynamicMenuRow {
+            tint: None,
             label: format!("{}'s Bazaar", e.name.as_deref().unwrap_or_default()),
             action: DynamicMenuAction::BazaarStall { char_id: e.id },
         })
         .collect();
     if rows.is_empty() {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: "(no player bazaars open nearby)".to_string(),
             action: DynamicMenuAction::BazaarStall { char_id: u32::MAX },
         });
@@ -4848,12 +4891,14 @@ pub fn mission_detail_rows(snap: &kuluu_snapshot::SceneSnapshot, port: u16) -> V
     let mut rows: Vec<DynamicMenuRow> = rows
         .into_iter()
         .map(|label| DynamicMenuRow {
+            tint: None,
             label,
             action: DynamicMenuAction::MissionLogRow { port },
         })
         .collect();
     if rows.is_empty() {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: "(nothing recorded)".to_string(),
             action: DynamicMenuAction::MissionLogRow { port },
         });
@@ -4880,6 +4925,7 @@ pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
     let mut rows: Vec<DynamicMenuRow> = statuses
         .iter()
         .map(|(&(log, id), &complete)| DynamicMenuRow {
+            tint: None,
             label: match quest_caption(log, id) {
                 Some(name) if complete => format!("{name} (complete)"),
                 Some(name) => name.to_string(),
@@ -4891,6 +4937,7 @@ pub fn quest_list_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuR
         .collect();
     if rows.is_empty() {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: "(no quests reported)".to_string(),
             action: DynamicMenuAction::QuestDetailRow { log: 0, id: 0 },
         });
@@ -4937,12 +4984,14 @@ pub fn quest_detail_rows(
     let mut rows: Vec<DynamicMenuRow> = lines
         .into_iter()
         .map(|label| DynamicMenuRow {
+            tint: None,
             label,
             action: DynamicMenuAction::QuestDetailRow { log, id },
         })
         .collect();
     if rows.is_empty() {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: "(nothing recorded)".to_string(),
             action: DynamicMenuAction::QuestDetailRow { log, id },
         });
@@ -4969,6 +5018,7 @@ pub fn job_pick_rows(snap: &kuluu_snapshot::SceneSnapshot, main_pick: bool) -> V
         .map(|job_id| {
             let level = jobs.job_levels[usize::from(job_id)];
             DynamicMenuRow {
+                tint: None,
                 label: format!(
                     "{} LV{}",
                     ffxi_vocab::job_names::lookup(u16::from(job_id)).unwrap_or("???"),
@@ -5013,6 +5063,7 @@ pub fn macro_editor_rows(
                 .into_iter()
                 .enumerate()
                 .map(|(i, line)| DynamicMenuRow {
+                    tint: None,
                     label: line.to_string(),
                     action: DynamicMenuAction::MacroEditLine {
                         line_index: Some(i),
@@ -5029,15 +5080,18 @@ pub fn macro_editor_rows(
         .any(|s| s.block == block && s.index == index);
     if slot_present {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: MACRO_ROW_USE.to_string(),
             action: DynamicMenuAction::MacroUse { block, index },
         });
     }
     rows.push(DynamicMenuRow {
+        tint: None,
         label: MACRO_ROW_ADD_LINE.to_string(),
         action: DynamicMenuAction::MacroEditLine { line_index: None },
     });
     rows.push(DynamicMenuRow {
+        tint: None,
         label: MACRO_ROW_CLEAR_SLOT.to_string(),
         action: DynamicMenuAction::MacroClearSlot,
     });
@@ -5244,6 +5298,7 @@ pub fn refresh_dynamic_menu_rows(
             )
             .into_iter()
             .map(|label| DynamicMenuRow {
+                tint: None,
                 label,
                 action: DynamicMenuAction::DisplayInfo,
             })
@@ -5296,6 +5351,7 @@ pub fn refresh_dynamic_menu_rows(
             _ => None,
         } {
             rows.push(DynamicMenuRow {
+                tint: None,
                 label: format!("{} > {}_", MACRO_ROW_ADD_LINE, buf.text),
                 action: DynamicMenuAction::MacroEditLine {
                     line_index: buf.line_no,
@@ -5326,6 +5382,7 @@ pub fn inventory_rows(
         .filter_map(|slot| {
             let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
             Some(DynamicMenuRow {
+                tint: None,
                 label: name.to_string(),
                 action: DynamicMenuAction::OpenItemAction {
                     container: slot.container,
@@ -5404,6 +5461,13 @@ pub fn equip_slot_rows(
             } else {
                 name.to_string()
             };
+            // Every row that survives the gate is wearable right now, so it carries retail's
+            // lime; the same-id equip-slot scan takes precedence, exactly as the colour
+            // resolver orders them (FFXiMain.dll retail-2026-09 `.text 0x1DE157`).
+            let tint = equip_row_tint(
+                true,
+                same_id_equipped_in_scanned_slots(&snap.equipped, slot.item_no),
+            );
             Some(DynamicMenuRow {
                 label,
                 action: DynamicMenuAction::EquipItem {
@@ -5412,6 +5476,7 @@ pub fn equip_slot_rows(
                     equip_slot,
                     item_no: slot.item_no,
                 },
+                tint,
             })
         })
         .collect();
@@ -5459,6 +5524,10 @@ pub struct EquipActor {
     pub main_job: u8,
     pub main_lv: u8,
     pub su_lv: u8,
+    /// The player's per-slot equip-block dword (s2c 0x061 packet +0x60, the dword
+    /// `.text FFXiMain.dll retail-2026-09 0xFD350` hands to the fifth legality test).
+    /// 0 blocks nothing — what an unknown or absent player reads as.
+    pub equip_slot_block: u32,
 }
 
 fn equip_actor(snap: &kuluu_snapshot::SceneSnapshot) -> EquipActor {
@@ -5479,16 +5548,20 @@ fn equip_actor(snap: &kuluu_snapshot::SceneSnapshot) -> EquipActor {
         main_job,
         main_lv,
         su_lv: snap.stats.map_or(0, |s| s.su_lv),
+        equip_slot_block: snap.stats.map_or(0, |s| s.equip_slot_block),
     }
 }
 
-/// The four record columns retail tests per equip. Fields are the record's own bytes at the
+/// The record columns retail tests per equip. Fields are the record's own bytes at the
 /// offsets the legality check indexes (record `level u16 +0xC`, `slots u16 +0xE`,
 /// `races u16 +0x10`, `jobs u32 +0x14`, `su u8 +0x18`), indexed by FFXiMain.dll retail-2026-09
-/// RVA 0x132050 across `.text 0x1320D4..0x13210F`.
+/// RVA 0x132050 across `.text 0x1320D4..0x132134`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EquipRecordGates {
     pub races_mask: u16,
+    /// The record's slot mask (record +0xE). Only the fifth test reads it — against the
+    /// player's equip-block dword, never against "the slot this pick list is for".
+    pub slots_mask: u16,
     pub jobs_mask: u32,
     pub level: u8,
     pub superior_level: u8,
@@ -5498,6 +5571,7 @@ impl EquipRecordGates {
     pub fn from_record(record: &ffxi_dat::item_dat::ItemStatic) -> Self {
         Self {
             races_mask: record.races_mask,
+            slots_mask: record.slot_mask,
             jobs_mask: record.jobs_mask,
             level: record.level,
             superior_level: record.superior_level,
@@ -5506,7 +5580,7 @@ impl EquipRecordGates {
 }
 
 /// Retail's equip legality law, FFXiMain.dll retail-2026-09 RVA 0x132050, in the DLL's own order
-/// (races → jobs → item level → superior, `.text 0x1320D4..0x13210F`), with helpers
+/// (races → jobs → item level → superior → slot block, `.text 0x1320D4..0x132134`), with helpers
 /// `.text 0x1CC5D0` for the effective main-job level and `.text 0x1CC600` for the player's `su`.
 /// A failing step returns immediately, so a record already refused for its race never reaches
 /// the job test.
@@ -5515,9 +5589,12 @@ impl EquipRecordGates {
 /// the exception: retail always compares, so an actor whose `su` is unknown (0) fails every item
 /// carrying a superior requirement, exactly as the DLL's `cmp al, [ecx]; jb refuse` does.
 ///
-/// A fifth test follows (`.text 0x132111`: the record's slot mask against the slots currently made
-/// usable by `.text 0xFD350`). It answers a different question from "does this item fit the slot
-/// window we are picking for", so kuluu's pick lists keep their own slot filter and do not apply it.
+/// The fifth test (`.text 0x132111`) intersects the record's slot mask with the player's
+/// equip-block dword — game state `+0x40DF0`, read through `.text 0xFD350` and fed by s2c 0x061
+/// packet +0x60 (stored at `.text 0xF0982`) — and refuses on any intersection. It answers a
+/// different question from "does this item fit the slot window we are picking for", so kuluu's
+/// pick lists keep their own slot filter too; no player object means `.text 0xFD350` returns 0,
+/// which blocks nothing — that is also how an actor without the mask reads.
 pub fn record_allows_equip(gates: EquipRecordGates, actor: EquipActor) -> bool {
     if let Some(race) = actor.race {
         let Some(bit) = (1u16).checked_shl(u32::from(race)) else {
@@ -5538,7 +5615,12 @@ pub fn record_allows_equip(gates: EquipRecordGates, actor: EquipActor) -> bool {
     if actor.main_lv != 0 && gates.level > actor.main_lv {
         return false;
     }
-    gates.superior_level <= actor.su_lv
+    if gates.superior_level > actor.su_lv {
+        return false;
+    }
+    // The fifth test: `.text FFXiMain.dll retail-2026-09 0x132111` refuses when the record's
+    // slot word and the equip-block dword intersect (`test edx, eax; sete al`).
+    (u32::from(gates.slots_mask) & actor.equip_slot_block) == 0
 }
 
 /// The fallback predicate while no item record is readable: the scraped LSB equipment columns
@@ -5550,6 +5632,43 @@ fn equip_scrape_refuses(info: &ffxi_vocab::equip_info::EquipInfo, actor: EquipAc
         || (actor.main_lv != 0 && info.level > actor.main_lv)
 }
 
+/// The two colours retail paints item rows with around the equip windows, beyond the shared
+/// cursor/disabled pair. ARGB words from FFXiMain.dll retail-2026-09's per-row colour resolvers
+/// (`.text 0x1DE143`, `.text 0x20F745`): the same-id-equip-slot scan result wins, else a row the
+/// legality check accepts paints the wearable-now lime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuRowTint {
+    /// ARGB 0x80909040 — wearable right now (`.text FFXiMain.dll retail-2026-09 0x1DE18D`).
+    WearableNow,
+    /// ARGB 0x80509050 — this id already stands in a scanned equip slot
+    /// (`.text FFXiMain.dll retail-2026-09 0x1DE173`); beats the lime.
+    SameKindEquipped,
+}
+
+/// The slots `.text FFXiMain.dll retail-2026-09 0x131FA0` walks when looking for an already-
+/// equipped copy of a row's id: its on-stack table is {0, 8, 9, A, B, C, D, E, F} — the ear/
+/// ring/back group plus slot 0. The scan compares the equipped item *ids*, not slots.
+pub const EQUIP_COLLISION_SCAN_SLOTS: [usize; 9] = [0, 8, 9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF];
+
+/// [`EQUIP_COLLISION_SCAN_SLOTS`] applied to the snapshot's equipped table.
+pub fn same_id_equipped_in_scanned_slots(equipped: &[Option<u16>; 16], item_no: u16) -> bool {
+    EQUIP_COLLISION_SCAN_SLOTS
+        .iter()
+        .any(|&slot| equipped.get(slot).copied().flatten() == Some(item_no))
+}
+
+/// The resolver's choice of tints, in retail's own precedence order (`.text FFXiMain.dll
+/// retail-2026-09 0x1DE157`: scan first, then legality; neither → no tint).
+pub fn equip_row_tint(allows_now: bool, same_id_equipped: bool) -> Option<MenuRowTint> {
+    if same_id_equipped {
+        Some(MenuRowTint::SameKindEquipped)
+    } else if allows_now {
+        Some(MenuRowTint::WearableNow)
+    } else {
+        None
+    }
+}
+
 /// One row per owned key item, ascending global id, name from the scraped LSB
 /// table, unseen ids suffixed with [`KEY_ITEM_UNSEEN_SUFFIX`].
 pub fn key_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
@@ -5557,6 +5676,7 @@ pub fn key_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow
     ids.sort_unstable();
     ids.into_iter()
         .map(|id| DynamicMenuRow {
+            tint: None,
             label: key_item_row_label(id, snap.key_items_seen.binary_search(&id).is_ok()),
             action: DynamicMenuAction::KeyItem { id },
         })
@@ -5631,6 +5751,7 @@ pub fn committed_emote_swap(
 pub fn append_abisortw_chain_row(rows: &mut Vec<DynamicMenuRow>, caption: Option<&str>) {
     if let Some(caption) = caption {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: caption.to_string(),
             action: DynamicMenuAction::AbisortwSelect { mode: 1 },
         });
@@ -5664,6 +5785,7 @@ pub fn emote_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
                     .is_some_and(|bits| ffxi_proto::decode::EmoteList::job_bit_set(bits, main_job))
         })
         .map(|id| DynamicMenuRow {
+            tint: None,
             label: format!(
                 "{} (/{})",
                 ffxi_vocab::emote_names::lookup(id).unwrap_or("?"),
@@ -5737,6 +5859,7 @@ pub fn usable_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenu
         .filter_map(|slot| {
             let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
             Some(DynamicMenuRow {
+                tint: None,
                 label: name.to_string(),
                 action: DynamicMenuAction::UseItem {
                     container: slot.container,
@@ -5789,6 +5912,7 @@ pub fn item_action_rows(
     };
 
     let mut rows = vec![DynamicMenuRow {
+        tint: None,
         label: ITEM_ACTION_USE.to_string(),
         action: DynamicMenuAction::UseItem {
             container,
@@ -5805,6 +5929,7 @@ pub fn item_action_rows(
         item_no != ffxi_proto::map::GIL_ITEM_NO && !slot.locked && container != c::LOC_RECYCLEBIN;
     if droppable {
         rows.push(DynamicMenuRow {
+            tint: None,
             label: ITEM_ACTION_DROP.to_string(),
             action: DynamicMenuAction::DropItem {
                 container,
@@ -5839,6 +5964,7 @@ pub fn item_action_rows(
                 format!("Put in {name}")
             };
             rows.push(DynamicMenuRow {
+                tint: None,
                 label,
                 action: DynamicMenuAction::MoveItem {
                     quantity: slot.quantity,
@@ -5878,18 +6004,21 @@ pub fn ability_flat_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMen
     );
     out.extend(snap.job_abilities_known.iter().filter_map(|&id| {
         ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+            tint: None,
             label: name.to_string(),
             action: DynamicMenuAction::JobAbility { ability_id: id },
         })
     }));
     out.extend(snap.weaponskills_known.iter().filter_map(|&id| {
         weapon_skill_row_name(id).map(|name| DynamicMenuRow {
+            tint: None,
             label: format!("{name} (WS)"),
             action: DynamicMenuAction::Weaponskill { skill_id: id },
         })
     }));
     out.extend(snap.pet_abilities_known.iter().filter_map(|&id| {
         ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+            tint: None,
             label: format!("{name} (Pet)"),
             action: DynamicMenuAction::PetAbility { ability_id: id },
         })
@@ -5911,6 +6040,7 @@ pub fn ability_group_rows(
             .iter()
             .filter_map(|&id| {
                 ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                    tint: None,
                     label: name.to_string(),
                     action: DynamicMenuAction::JobAbility { ability_id: id },
                 })
@@ -5921,6 +6051,7 @@ pub fn ability_group_rows(
             .iter()
             .filter_map(|&id| {
                 weapon_skill_row_name(id).map(|name| DynamicMenuRow {
+                    tint: None,
                     label: name.to_string(),
                     action: DynamicMenuAction::Weaponskill { skill_id: id },
                 })
@@ -5931,12 +6062,14 @@ pub fn ability_group_rows(
             .iter()
             .filter_map(|&id| {
                 ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                    tint: None,
                     label: name.to_string(),
                     action: DynamicMenuAction::PetAbility { ability_id: id },
                 })
             })
             .collect(),
         G::RangedAttack => vec![DynamicMenuRow {
+            tint: None,
             label: "Ranged Attack".to_string(),
             action: DynamicMenuAction::RangedAttack,
         }],
@@ -5947,10 +6080,12 @@ pub fn ability_group_rows(
         // exist while riding, which is also when this group has anything in it.
         G::Mount if snap.self_mount.is_some() => vec![
             DynamicMenuRow {
+                tint: None,
                 label: "Dismount".to_string(),
                 action: DynamicMenuAction::Dismount,
             },
             DynamicMenuRow {
+                tint: None,
                 label: "Dig".to_string(),
                 action: DynamicMenuAction::ChocoboDig,
             },
@@ -6246,12 +6381,28 @@ pub fn update_main_menu(
         // of ordinary grey — the same pair read for roomlist's gated row, where a
         // disabled line paints 0x80404040 instead of 0x80808080 (`.text 0x1D6A1A`).
         let gated = menu_row_disabled(view.kind, list_idx, &scene.snapshot);
+        // Beyond cursor/grey, a builder may hand the row one of retail's two item tints —
+        // wearable-now lime or same-kind-equipped green (`.text FFXiMain.dll retail-2026-09
+        // 0x1DE143` paints these regardless of selection; only the dim outranks them).
+        let tint = if is_dynamic(view.kind) {
+            dynamic.rows.get(list_idx).and_then(|r| r.tint)
+        } else {
+            None
+        };
         let base_color = if gated {
             theme::TEXT_DISABLED
-        } else if is_cursor {
-            theme::CURSOR
         } else {
-            theme::TEXT
+            match tint {
+                Some(MenuRowTint::SameKindEquipped) => theme::TEXT_EQUIP_SAME_KIND,
+                Some(MenuRowTint::WearableNow) => theme::TEXT_EQUIP_OK,
+                None => {
+                    if is_cursor {
+                        theme::CURSOR
+                    } else {
+                        theme::TEXT
+                    }
+                }
+            }
         };
         let (want, want_color, want_bg) = if is_cursor {
             (format!("> {body}"), base_color, Color::NONE)
@@ -7177,10 +7328,12 @@ mod tests {
             let mut d = app.world_mut().resource_mut::<DynamicMenu>();
             d.rows = vec![
                 DynamicMenuRow {
+                    tint: None,
                     label: "Cowrevenge".into(),
                     action: DynamicMenuAction::DisplayInfo,
                 },
                 DynamicMenuRow {
+                    tint: None,
                     label: "Blue Mage - Level 75".into(),
                     action: DynamicMenuAction::DisplayInfo,
                 },
@@ -8124,10 +8277,12 @@ mod tests {
         };
         vec![
             DynamicMenuRow {
+                tint: None,
                 label: "Apple".to_string(),
                 action: item_row(50),
             },
             DynamicMenuRow {
+                tint: None,
                 label: "Zeta".to_string(),
                 action: item_row(10),
             },
@@ -8913,6 +9068,7 @@ mod tests {
     fn record_equip_gate_follows_the_dll_step_order() {
         let base = || EquipRecordGates {
             races_mask: 0b0000_0010,
+            slots_mask: 0x1234,
             jobs_mask: 1 << 1,
             level: 1,
             superior_level: 0,
@@ -8922,6 +9078,7 @@ mod tests {
             main_job: 1,
             main_lv: 40,
             su_lv: 0,
+            equip_slot_block: 0,
         };
         assert!(record_allows_equip(base(), actor()));
 
@@ -8984,11 +9141,95 @@ mod tests {
         assert!(!record_allows_equip(
             EquipRecordGates {
                 races_mask: 1 << 9,
+                slots_mask: 0x1234,
                 jobs_mask: u32::MAX,
                 level: 0,
                 superior_level: 0,
             },
             actor()
+        ));
+    }
+
+    /// The scan helper (`.text FFXiMain.dll retail-2026-09 0x131FA0`) walks its own slot
+    /// table — ears/ring/back group plus main — comparing equipped item ids; a copy in an
+    /// unscanned slot stays invisible to the green.
+    #[test]
+    fn same_id_scan_walks_only_the_dll_slot_table() {
+        let mut equipped = [None; 16];
+        for &slot in EQUIP_COLLISION_SCAN_SLOTS.iter().take(4) {
+            equipped[slot] = Some(0x2C3A);
+        }
+        assert!(same_id_equipped_in_scanned_slots(&equipped, 0x2C3A));
+        // Slot 5 (legs) is not in the table; neither is slot 1's ring group here.
+        let mut elsewhere = [None; 16];
+        elsewhere[5] = Some(0x2C3A);
+        elsewhere[7] = Some(0x2C3A);
+        assert!(!same_id_equipped_in_scanned_slots(&elsewhere, 0x2C3A));
+        // Ids must match exactly — the scanned slot holding a different item is no collision.
+        let mut other_item = [None; 16];
+        other_item[0] = Some(0x1111);
+        assert!(!same_id_equipped_in_scanned_slots(&other_item, 0x2C3A));
+    }
+
+    /// Precedence (`.text FFXiMain.dll retail-2026-09 0x1DE157`): the green scan wins over
+    /// the lime; a row that neither scans nor passes legality carries no tint at all.
+    #[test]
+    fn equip_row_tint_follows_the_resolver_precedence() {
+        assert_eq!(
+            equip_row_tint(false, true),
+            Some(MenuRowTint::SameKindEquipped)
+        );
+        assert_eq!(equip_row_tint(true, false), Some(MenuRowTint::WearableNow));
+        // Green outranks lime even when both apply.
+        assert_eq!(
+            equip_row_tint(true, true),
+            Some(MenuRowTint::SameKindEquipped)
+        );
+        assert_eq!(equip_row_tint(false, false), None);
+    }
+
+    /// The fifth test (`.text FFXiMain.dll retail-2026-09 0x132111`): the record's slot word
+    /// intersected with the player's equip-block dword refuses on any shared bit, and a zero
+    /// block — what `.text 0xFD350` answers for an absent player — never refuses.
+    #[test]
+    fn fifth_test_intersects_record_slots_with_the_player_block() {
+        let gates = || EquipRecordGates {
+            races_mask: u16::MAX,
+            slots_mask: 0x0000_1100,
+            jobs_mask: u32::MAX,
+            level: 0,
+            superior_level: 0,
+        };
+        let actor = || EquipActor {
+            race: Some(1),
+            main_job: 1,
+            main_lv: 75,
+            su_lv: 0,
+            equip_slot_block: 0,
+        };
+        // Disjoint bitmaps still pass; the base fixture's block of 0 passes everything.
+        assert!(record_allows_equip(
+            gates(),
+            EquipActor {
+                equip_slot_block: 0x00FF,
+                ..actor()
+            }
+        ));
+        // Any single shared bit refuses (bit 8 here is in both).
+        assert!(!record_allows_equip(
+            gates(),
+            EquipActor {
+                equip_slot_block: 0x0100,
+                ..actor()
+            }
+        ));
+        // The record's own slots do not have to be inside the block — only intersection matters.
+        assert!(!record_allows_equip(
+            gates(),
+            EquipActor {
+                equip_slot_block: u32::MAX,
+                ..actor()
+            }
         ));
     }
 
@@ -9042,7 +9283,8 @@ mod tests {
                             race: Some(0),
                             main_job: 0,
                             main_lv: u8::MAX,
-                            su_lv: rec.superior_level.saturating_sub(short)
+                            su_lv: rec.superior_level.saturating_sub(short),
+                            equip_slot_block: 0,
                         }
                     ),
                     "{id} {} (su {}) must be refused at su {}",
@@ -10952,6 +11194,7 @@ mod tests {
     #[test]
     fn abisortw_chain_row_rides_only_with_its_caption() {
         let mut rows = vec![DynamicMenuRow {
+            tint: None,
             label: "Wave (/wave)".to_string(),
             action: DynamicMenuAction::Emote { emote_id: 6 },
         }];

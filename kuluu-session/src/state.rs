@@ -411,6 +411,11 @@ pub struct CharStatsRaw {
     /// job; FFXiMain.dll retail-2026-09 `.text 0x148B20`).
     #[serde(default)]
     pub master_level_unlocked: bool,
+    /// s2c 0x061 packet +0x60 — the per-slot equip-block mask the fifth CanEquip test
+    /// intersects record slot masks against (FFXiMain.dll retail-2026-09 `.text 0xFD350`,
+    /// stored to game state `+0x40DF0` at `.text 0xF0982`; refusal at `.text 0x132111`).
+    #[serde(default)]
+    pub equip_slot_block: u32,
 }
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`

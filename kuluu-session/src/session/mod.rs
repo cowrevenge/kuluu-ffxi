@@ -1865,6 +1865,7 @@ fn handle_sub_packet(
                         exp_next: cs.exp_next,
                         ilvl: cs.ilvl,
                         su_lv: cs.su_lv,
+                        equip_slot_block: cs.equip_slot_block,
                         master_level_unlocked: cs.master_level_unlocked,
                     },
                 });

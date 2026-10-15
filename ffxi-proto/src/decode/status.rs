@@ -161,6 +161,9 @@ pub struct CliStatus {
     /// (CanEquip compares an item's `su` against it) and fills the persona panel's
     /// `Su` line (FFXiMain.dll retail-2026-09 RVA 0x147287).
     pub su_lv: u8,
+    /// The per-slot equip-block mask (s2c 0x061 packet +0x60; see
+    /// [`Self::EQUIP_SLOT_BLOCK_OFFSET`] for the client law it feeds).
+    pub equip_slot_block: u32,
     /// bit 0 of `mastery_info.flags` — master-level play unlocked for this character.
     /// Retail greys the Status window's Master Levels row unless this bit is set
     /// *and* the main job is level 99 (FFXiMain.dll retail-2026-09 `.text 0x148B20`,
@@ -190,6 +193,13 @@ impl CliStatus {
     pub(crate) const SU_LV_OFFSET: usize = 0x4E;
     // ... masteryinfo_t flags byte (packet +0x66): the master-level unlock.
     pub(crate) const MASTERY_INFO_FLAGS_OFFSET: usize = 0x62;
+    /// The dword at `unity_chat_color_flag` (packet +0x60). Despite that XiPackets name, its
+    /// consumer is equipment law: the client copies it straight into game state (+0x40DF0) from
+    /// this packet's parse (FFXiMain.dll retail-2026-09 `.text 0xF0982`) and reads it back through
+    /// `.text 0xFD350`; the equip legality check refuses when an item's record slot mask intersects
+    /// it (`.text 0x132111` in RVA 0x132050, and again at `.text 0x1321AC`). Per-slot bits; a
+    /// zero dword blocks nothing.
+    pub(crate) const EQUIP_SLOT_BLOCK_OFFSET: usize = 0x5C;
     /// MASTER_LEVEL_UNLOCK_BIT — bit 0 of `mastery_info.flags`.
     pub(crate) const MASTER_LEVEL_UNLOCK_BIT: u8 = 1;
     const NEEDED: usize = Self::MASTERY_INFO_FLAGS_OFFSET + 1;
@@ -232,6 +242,7 @@ impl CliStatus {
             def_elem,
             ilvl: body[Self::ILVL_OFFSET],
             su_lv: body[Self::SU_LV_OFFSET],
+            equip_slot_block: rd32(Self::EQUIP_SLOT_BLOCK_OFFSET),
             master_level_unlocked: body[Self::MASTERY_INFO_FLAGS_OFFSET]
                 & Self::MASTER_LEVEL_UNLOCK_BIT
                 != 0,
@@ -374,6 +385,11 @@ pin_s2c_offset!(
     CliStatus::MASTERY_INFO_FLAGS_OFFSET,
     lsb::STATUSDATA_MASTERY_INFO_FLAGS,
     "CLISTATUS.mastery_info.flags"
+);
+pin_s2c_offset!(
+    CliStatus::EQUIP_SLOT_BLOCK_OFFSET,
+    lsb::STATUSDATA_UNITY_CHAT_COLOR_FLAG,
+    "CLISTATUS.unity_chat_color_flag (the equip-block dword)"
 );
 
 /// s2c 0x01B GP_SERV_COMMAND_JOB_INFO — per-job levels + unlocked-jobs bitmask for
@@ -535,6 +551,8 @@ mod cli_status_tests {
         buf[48..50].copy_from_slice(&(-15i16).to_le_bytes()); // fire resist
         buf[81] = 119; // ilvl
         buf[CliStatus::SU_LV_OFFSET] = 3; // su_lv (packet +0x52)
+        buf[CliStatus::EQUIP_SLOT_BLOCK_OFFSET..CliStatus::EQUIP_SLOT_BLOCK_OFFSET + 4]
+            .copy_from_slice(&0xDEAD_00F0u32.to_le_bytes());
         buf[CliStatus::MASTERY_INFO_FLAGS_OFFSET] = CliStatus::MASTER_LEVEL_UNLOCK_BIT;
 
         let cs = CliStatus::decode(&buf).expect("decodes");
@@ -554,6 +572,10 @@ mod cli_status_tests {
         assert_eq!(cs.def_elem[0], -15, "fire resist signed");
         assert_eq!(cs.ilvl, 119);
         assert_eq!(cs.su_lv, 3, "superior level (persona `Su` + equip gate)");
+        assert_eq!(
+            cs.equip_slot_block, 0xDEAD_00F0,
+            "per-slot equip-block dword (fifth legality test)"
+        );
         assert!(cs.master_level_unlocked, "mastery_info flags bit 0");
         assert!(
             CliStatus::decode(&buf[..CliStatus::NEEDED - 1]).is_err(),

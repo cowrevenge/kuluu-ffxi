@@ -354,6 +354,7 @@ fn char_stats_to_wire(c: crate::state::CharStatsRaw) -> wire::CharStats {
         bonus: c.bonus,
         resist: c.resist,
         su_lv: c.su_lv,
+        equip_slot_block: c.equip_slot_block,
         master_level_unlocked: c.master_level_unlocked,
     }
 }

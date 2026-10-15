@@ -1703,6 +1703,11 @@ pub struct CharStats {
     /// main job) — FFXiMain.dll retail-2026-09 `.text 0x148B20`.
     #[serde(default)]
     pub master_level_unlocked: bool,
+    /// s2c 0x061 packet +0x60 — per-slot equip-block mask. The client's equip legality check
+    /// refuses when an item's record slot mask intersects it (FFXiMain.dll retail-2026-09
+    /// `.text 0xFD350` reads the stored dword; intersection test at `.text 0x132111`).
+    #[serde(default)]
+    pub equip_slot_block: u32,
 }
 
 /// Mirror of `kuluu`'s browsed-bazaar model (s2c 0x105 rows keyed by the

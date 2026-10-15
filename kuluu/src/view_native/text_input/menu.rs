@@ -2987,6 +2987,7 @@ mod menu_key_tests {
         let mut stack = MenuStack::root();
         stack.push(MenuKind::MacroSelect);
         harness.dynamic.rows = vec![DynamicMenuRow {
+            tint: None,
             label: "B1/5: /ra".to_string(),
             action: DynamicMenuAction::MacroSlotRow { block: 0, index: 4 },
         }];

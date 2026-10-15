@@ -500,6 +500,40 @@ fn clistatus2_folds_the_whole_skill_block() {
     );
 }
 
+/// s2c 0x061's equip-block dword (body +0x5C) folds through SessionState and out to the
+/// snapshot, where the equip legality check reads it as the fifth test — the same dword
+/// FFXiMain.dll retail-2026-09 copies into game state at `.text 0xF0982` and hands back
+/// through `.text 0xFD350`, refused against by `.text 0x132111` (bead kuluu-o9qt7.3.4.1).
+#[test]
+fn clistatus_carries_the_equip_block_dword_to_the_snapshot() {
+    const BLOCK: u32 = 0x0000_0B00;
+    let mut body = vec![0u8; 0x63];
+    body[0x5C..0x60].copy_from_slice(&BLOCK.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::CLISTATUS, &body);
+    let stats = events.iter().find_map(|e| match e {
+        AgentEvent::CharStatsUpdated { stats } => Some(*stats),
+        _ => None,
+    });
+    assert_eq!(
+        stats.map(|s| s.equip_slot_block),
+        Some(BLOCK),
+        "0x061 +0x5C publishes the equip-block dword"
+    );
+
+    let mut state = crate::state::SessionState::default();
+    for event in &events {
+        state.apply_event(event);
+    }
+    assert_eq!(state.char_stats.map(|s| s.equip_slot_block), Some(BLOCK));
+    let snapshot = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(
+        snapshot.stats.map(|s| s.equip_slot_block),
+        Some(BLOCK),
+        "the mask reaches the snapshot for the equip gate's fifth test"
+    );
+}
+
 /// s2c 0x113/0x118 currency reports fold as RAW blocks with the mode discriminant picking the
 /// family (one-shot reply law, FFXiMain.dll retail-2026-09 `.text 0x99640`/`.text 0x99660`; bead
 /// kuluu-o9qt7.35) — bytes through unchanged so the render-side getter table reads them like the

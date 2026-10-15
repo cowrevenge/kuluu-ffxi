@@ -2618,6 +2618,15 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::CommitEmoteOrder { .. } => (),
         // Header-only currency report requests (bead kuluu-o9qt7.35).
         AgentCommand::RequestCurrencies { .. } => (),
+        AgentCommand::RequestUnityRanking { .. } => (),
+        AgentCommand::RequestUnityQuest { .. } => (),
+        AgentCommand::SetUnityChat { .. } => (),
+        AgentCommand::RequestAlterEgoPoints { .. } => (),
+        AgentCommand::UpgradeAlterEgo { .. } => (),
+        AgentCommand::SetMeritMode { .. } => (),
+        AgentCommand::EditMerit { .. } => (),
+        AgentCommand::SpendJobPoint { .. } => (),
+        AgentCommand::RequestJobPoints => (),
         AgentCommand::TreasureLot { .. } => (),
         AgentCommand::TreasurePass { .. } => (),
         AgentCommand::MarkKeyItemsSeen { .. } => (),
@@ -3146,6 +3155,15 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::PlayTimeSynced { .. } => (),
         AgentEvent::CharSkillsUpdated { .. } => (),
         AgentEvent::MeritsUpdated { .. } => (),
+        AgentEvent::AlterEgoPointsUpdated { .. } => (),
+        AgentEvent::UnityRankingChunk { .. } => (),
+        AgentEvent::UnityRankingRequested { .. } => (),
+        AgentEvent::UnityQuestUpdated { .. } => (),
+        AgentEvent::UnityQuestRequested { .. } => (),
+        AgentEvent::LoginStateSynced { .. } => (),
+        AgentEvent::MeritsListed { .. } => (),
+        AgentEvent::JobPointsListed { .. } => (),
+        AgentEvent::JobPointsRecordUpdated { .. } => (),
         AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),
@@ -3568,5 +3586,253 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
             .map(|o| (o.container, o.slot))
             .collect::<Vec<_>>(),
         vec![(crate::myroom_furniture::CONTAINER_MOGSAFE, 4)],
+    );
+}
+
+/// The Unity ranking fold (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md):
+/// chunks 1 and 2 fill members and points of their set (any nonzero result set is set 1), the last
+/// chunk marks the set complete, and a sent c2s 0x116 clears that mark; s2c 0x110 arms c2s 0x117
+/// and the sent 0x117 disarms it. Every arrival rides the snapshot.
+#[test]
+fn unity_ranking_chunks_complete_sets_and_requests_clear_the_marks() {
+    use ffxi_proto::decode::MiscdataUnity;
+    use kuluu_snapshot::UNITY_CONCORDS;
+    let members = [3u32; UNITY_CONCORDS];
+    let points = [900u32; UNITY_CONCORDS];
+    let mut state = SessionState::default();
+    assert!(state.apply_event(&AgentEvent::UnityRankingChunk {
+        result_set: 2,
+        data_type: MiscdataUnity::DATA_TYPE_MEMBERS,
+        concord_values: members,
+    }));
+    assert!(state.apply_event(&AgentEvent::UnityRankingChunk {
+        result_set: 1,
+        data_type: MiscdataUnity::DATA_TYPE_POINTS,
+        concord_values: points,
+    }));
+    assert_eq!(state.unity.rankings[1].members, members, "nonzero is set 1");
+    assert_eq!(state.unity.rankings[1].points, points);
+    assert!(!state.unity.rankings[1].complete);
+    assert_eq!(state.unity.rankings[0], Default::default());
+
+    assert!(state.apply_event(&AgentEvent::UnityRankingChunk {
+        result_set: 1,
+        data_type: MiscdataUnity::LAST_CHUNK,
+        concord_values: [0; UNITY_CONCORDS],
+    }));
+    assert!(state.unity.rankings[1].complete);
+    assert_eq!(
+        state.unity.rankings[1].points, points,
+        "the last chunk carries no values to overwrite"
+    );
+    assert!(
+        crate::wire_translate::state_to_snapshot(&state)
+            .unity
+            .rankings[1]
+            .complete,
+        "rides the snapshot"
+    );
+
+    assert!(!state.apply_event(&AgentEvent::UnityRankingRequested { result_set: 0 }));
+    assert!(state.apply_event(&AgentEvent::UnityRankingRequested { result_set: 1 }));
+    assert!(!state.unity.rankings[1].complete);
+
+    assert!(state.apply_event(&AgentEvent::UnityQuestUpdated {
+        sparks: 0,
+        deeds: 0,
+        plaudits: 0,
+    }));
+    assert!(state.unity.quest_armed);
+    assert!(state.apply_event(&AgentEvent::UnityQuestRequested));
+    assert!(!state.unity.quest_armed);
+}
+
+/// s2c 0x08E replaces the alter ego point block, the first s2c 0x119 readies the Status data for
+/// good, and zone-in's login state lands as sent; none of it is cleared by a zone change.
+#[test]
+fn alter_ego_points_status_ready_and_login_state_fold() {
+    let mut state = SessionState::default();
+    let block = kuluu_snapshot::AlterEgoPoints {
+        points: 640,
+        upgrades: [1; kuluu_snapshot::ALTER_EGO_UPGRADE_SLOTS],
+        costs: [2; kuluu_snapshot::ALTER_EGO_UPGRADE_SLOTS],
+    };
+    assert!(state.apply_event(&AgentEvent::AlterEgoPointsUpdated { points: block }));
+    assert!(!state.apply_event(&AgentEvent::AlterEgoPointsUpdated { points: block }));
+    assert_eq!(state.alter_ego_points, Some(block));
+
+    assert!(!state.status_data_ready);
+    assert!(state.apply_event(&AgentEvent::AbilityRecastsUpdated {
+        recasts: Vec::new()
+    }));
+    assert!(
+        state.status_data_ready,
+        "an empty 0x119 still readies Status"
+    );
+    assert!(!state.apply_event(&AgentEvent::AbilityRecastsUpdated {
+        recasts: Vec::new()
+    }));
+
+    assert!(state.apply_event(&AgentEvent::LoginStateSynced {
+        login_state: 5,
+        is_monstrosity: true,
+    }));
+    state.apply_event(&AgentEvent::ZoneChanged {
+        from: Some(100),
+        to: 101,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(snap.alter_ego_points, Some(block));
+    assert!(snap.status_data_ready);
+    assert_eq!(snap.login_state, 5);
+    assert!(snap.login_is_monstrosity);
+}
+
+/// s2c 0x08C entries are stored by merit index with bit 0 of the wire id ignored: an entry with
+/// bit 0 set deletes its merit, any other inserts or replaces it
+/// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+#[test]
+fn merit_entries_fold_by_index_and_odd_ids_delete() {
+    use crate::state::{merit_index_of_wire_id, MeritWire, MERIT_WIRE_DELETE_BIT};
+    use kuluu_snapshot::MeritEntry;
+    const HP_WIRE_ID: u16 = 0x40;
+    const MP_WIRE_ID: u16 = 0x42;
+    let hp = merit_index_of_wire_id(HP_WIRE_ID);
+    let mp = merit_index_of_wire_id(MP_WIRE_ID);
+    let wire = |index: u16, next: u8, count: u8| MeritWire { index, next, count };
+
+    let mut state = SessionState::default();
+    assert!(state.apply_event(&AgentEvent::MeritsListed {
+        entries: vec![wire(HP_WIRE_ID, 3, 1), wire(MP_WIRE_ID, 1, 0)],
+    }));
+    assert_eq!(
+        state.merit_entries.get(&hp),
+        Some(&MeritEntry { next: 3, count: 1 })
+    );
+    assert_eq!(state.merit_entries.len(), 2);
+    assert!(
+        !state.apply_event(&AgentEvent::MeritsListed {
+            entries: vec![wire(HP_WIRE_ID, 3, 1)],
+        }),
+        "the same entry again changes nothing"
+    );
+
+    assert!(state.apply_event(&AgentEvent::MeritsListed {
+        entries: vec![wire(HP_WIRE_ID, 4, 2)],
+    }));
+    assert_eq!(state.merit_entries[&hp], MeritEntry { next: 4, count: 2 });
+
+    assert!(state.apply_event(&AgentEvent::MeritsListed {
+        entries: vec![wire(MP_WIRE_ID | MERIT_WIRE_DELETE_BIT, 9, 9)],
+    }));
+    assert!(!state.merit_entries.contains_key(&mp), "an odd id deletes");
+    assert!(!state.apply_event(&AgentEvent::MeritsListed {
+        entries: vec![wire(MP_WIRE_ID | MERIT_WIRE_DELETE_BIT, 0, 0)],
+    }));
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(snap.merit_entries, state.merit_entries);
+}
+
+/// s2c 0x08D stores level and next by type id, skips an empty first word or a job past 23, and
+/// marks the job point data received even when it stores nothing; the 0x063 JobPoints record
+/// replaces the last one.
+#[test]
+fn job_point_entries_and_record_fold() {
+    use crate::state::JobPointWire;
+    use kuluu_snapshot::{JobPointType, JobPointsJob, JobPointsRecord, JOB_POINT_JOBS};
+    const RDM: u16 = 5;
+    let wire = |job_no: u16, index: u8, next: u16, level: u8| JobPointWire {
+        index,
+        job_no,
+        next,
+        level,
+    };
+    let rdm_type = RDM * ffxi_proto::decode::JobPointWireEntry::TYPES_PER_JOB + 2;
+
+    let mut state = SessionState::default();
+    assert!(state.apply_event(&AgentEvent::JobPointsListed {
+        entries: vec![wire(0, 0, 7, 7)],
+    }));
+    assert!(
+        state.job_points_received,
+        "an all-empty packet still counts"
+    );
+    assert!(state.job_point_types.is_empty());
+
+    let past_last_job = u16::try_from(JOB_POINT_JOBS).unwrap();
+    assert!(state.apply_event(&AgentEvent::JobPointsListed {
+        entries: vec![wire(RDM, 2, 300, 4), wire(past_last_job, 1, 1, 1)],
+    }));
+    assert_eq!(
+        state.job_point_types.get(&rdm_type),
+        Some(&JobPointType {
+            level: 4,
+            next: 300
+        })
+    );
+    assert_eq!(state.job_point_types.len(), 1, "job 24 is skipped");
+    assert!(!state.apply_event(&AgentEvent::JobPointsListed {
+        entries: vec![wire(RDM, 2, 300, 4)],
+    }));
+
+    let mut record = JobPointsRecord {
+        access: 1,
+        ..Default::default()
+    };
+    record.jobs[usize::from(RDM)] = JobPointsJob {
+        capacity_points: 100,
+        current_jp: 12,
+        total_jp_spent: 40,
+    };
+    assert!(state.apply_event(&AgentEvent::JobPointsRecordUpdated { record }));
+    assert!(!state.apply_event(&AgentEvent::JobPointsRecordUpdated { record }));
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(snap.job_points, Some(record));
+    assert!(snap.job_points_received);
+    assert_eq!(snap.job_point_types, state.job_point_types);
+}
+
+/// The 0x061 main job level crosses into the snapshot for the merit and job point gates.
+#[test]
+fn char_stats_carry_the_main_job_level_to_the_snapshot() {
+    let mut state = SessionState::default();
+    state.apply_event(&AgentEvent::CharStatsUpdated {
+        stats: CharStatsRaw {
+            mjob_lv: 96,
+            ..Default::default()
+        },
+    });
+    let stats = crate::wire_translate::state_to_snapshot(&state).stats;
+    assert_eq!(stats.map(|s| s.mjob_lv), Some(96));
+}
+
+/// The 0x061 Unity fields and main job cross into the snapshot's stat block unchanged.
+#[test]
+fn char_stats_carry_unity_fields_and_main_job_to_the_snapshot() {
+    let mut state = SessionState::default();
+    state.apply_event(&AgentEvent::CharStatsUpdated {
+        stats: CharStatsRaw {
+            mjob_no: 23,
+            unity_faction: 4,
+            unity_points: 12_345,
+            unity_points1: 6,
+            unity_points2: 9,
+            ..Default::default()
+        },
+    });
+    let stats = crate::wire_translate::state_to_snapshot(&state)
+        .stats
+        .expect("stats");
+    assert_eq!(
+        (
+            stats.mjob_no,
+            stats.unity_faction,
+            stats.unity_points,
+            stats.unity_points1,
+            stats.unity_points2
+        ),
+        (23, 4, 12_345, 6, 9)
     );
 }

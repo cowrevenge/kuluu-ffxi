@@ -113,6 +113,9 @@ struct SelfMogState {
     /// `myroom`: a MYROOM login with the `MYROOM_NONE` sentinel model still
     /// spawns at the forced origin and must skip the zoneline seed repair.
     in_myroom: bool,
+    /// The last 0x00A's `LoginState` is any Mog House state
+    /// ([`decode::ServerLoginMyroom::login_in_mog_house`]), which the arrangement gates read.
+    login_in_mog_house: bool,
     mh_2f_unlocked: Option<bool>,
     job_info: Option<crate::state::JobInfoState>,
     /// Per-container capacities from the last 0x01C ITEM_MAX, indexed by LSB
@@ -131,10 +134,6 @@ struct SelfMogState {
     /// before accepting another arrangement request. Every accepted change is also emitted as an
     /// [`AgentEvent::MyroomModeChanged`] so the folded SessionState mirrors it.
     layout_mode: u8,
-    /// Mog House shelf seats `(container, slot)` with a furniture request outstanding — retail's busy
-    /// predicate (`.text FFXiMain.dll retail-2026-09 0x1D5FE0`) answers while any such operation is
-    /// unacknowledged, and each seat's own s2c 0x020 ITEM_ATTR record is the acknowledgement.
-    pending_furniture_edits: Vec<(u8, u8)>,
 }
 
 /// The open NPC shop window. The shop has no close packet (research/XiPackets
@@ -1109,6 +1108,9 @@ fn handle_sub_packet(
                 mog.in_myroom = login.myroom.is_some_and(|m| {
                     m.login_state == decode::ServerLoginMyroom::LOGIN_STATE_MYROOM
                 });
+                mog.login_in_mog_house = login
+                    .myroom
+                    .is_some_and(|m| decode::ServerLoginMyroom::login_in_mog_house(m.login_state));
                 // A fresh myroom cluster always starts with the door shut: retail's open byte is
                 // game-state-only and LSB resets it on zoning/floor change
                 // (vendor/server/src/map/packets/c2s/0x0cb_myroom_is.cpp).
@@ -1123,8 +1125,14 @@ fn handle_sub_packet(
                 mog.mog_zone_flag = login.myroom.is_some_and(|m| m.mog_zone_flag != 0);
                 // A zone-in rebuilds retail's myroom manager wholesale, mode word included: arrangement
                 // never carries across a zone, and neither do unacknowledged furniture edits.
-                mog.layout_mode = crate::myroom_layout::MODE_NORMAL;
-                mog.pending_furniture_edits.clear();
+                let left_mode =
+                    std::mem::replace(&mut mog.layout_mode, crate::myroom_layout::MODE_NORMAL);
+                if left_mode != crate::myroom_layout::MODE_NORMAL {
+                    let _ = event_tx.send(AgentEvent::MyroomModeChanged {
+                        previous: left_mode,
+                        next: crate::myroom_layout::MODE_NORMAL,
+                    });
+                }
                 if let Some(ev) = login.zone_in_event {
                     tracing::info!(
                         event_id = ev.event_para,
@@ -1156,6 +1164,11 @@ fn handle_sub_packet(
                     to: login.zone_no,
                     myroom: mog.myroom,
                     mog_zone_flag: mog.mog_zone_flag,
+                });
+
+                let _ = event_tx.send(AgentEvent::LoginStateSynced {
+                    login_state: login.myroom.map_or(0, |m| m.login_state),
+                    is_monstrosity: login.is_monstrosity,
                 });
 
                 if let Some(v) = login.voyage {
@@ -1867,6 +1880,12 @@ fn handle_sub_packet(
                         su_lv: cs.su_lv,
                         equip_slot_block: cs.equip_slot_block,
                         master_level_unlocked: cs.master_level_unlocked,
+                        mjob_no: cs.mjob_no,
+                        unity_faction: cs.unity_faction,
+                        unity_points: cs.unity_points,
+                        unity_points1: cs.unity_points1,
+                        unity_points2: cs.unity_points2,
+                        mjob_lv: cs.mjob_lv,
                     },
                 });
             }
@@ -1962,6 +1981,20 @@ fn handle_sub_packet(
                 if let Some(merits) = decode_miscdata_merits(sub.data) {
                     let _ = event_tx.send(AgentEvent::MeritsUpdated { merits });
                 }
+            } else if let Some(unity) = decode::MiscdataUnity::decode(sub.data) {
+                if let Ok(chunk) = unity.inspect_err(|e| warn_decode_err(sub.opcode, e)) {
+                    let _ = event_tx.send(AgentEvent::UnityRankingChunk {
+                        result_set: chunk.result_set,
+                        data_type: chunk.data_type,
+                        concord_values: chunk.concord_values,
+                    });
+                }
+            } else if let Some(record) = decode::MiscdataJobPoints::decode(sub.data) {
+                if let Ok(record) = record.inspect_err(|e| warn_decode_err(sub.opcode, e)) {
+                    let _ = event_tx.send(AgentEvent::JobPointsRecordUpdated {
+                        record: job_points_record(&record),
+                    });
+                }
             } else if let Some((icons, expiries)) = decode_miscdata_status_icons(sub.data) {
                 let _ = event_tx.send(AgentEvent::StatusIconsUpdated { icons, expiries });
             }
@@ -1980,6 +2013,63 @@ fn handle_sub_packet(
         s2c::ABIL_RECAST => {
             let recasts = decode_abil_recast(sub.data);
             let _ = event_tx.send(AgentEvent::AbilityRecastsUpdated { recasts });
+        }
+        s2c::ALTER_EGO_POINTS => {
+            if let Ok(packet) = decode::AlterEgoPoints::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let _ = event_tx.send(AgentEvent::AlterEgoPointsUpdated {
+                    points: kuluu_snapshot::AlterEgoPoints {
+                        points: packet.points,
+                        upgrades: packet.upgrades,
+                        costs: packet.costs,
+                    },
+                });
+            }
+        }
+        s2c::MERIT => {
+            if let Ok(list) =
+                decode::MeritList::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let entries = list
+                    .entries
+                    .iter()
+                    .map(|e| crate::state::MeritWire {
+                        index: e.index,
+                        next: e.next,
+                        count: e.count,
+                    })
+                    .collect();
+                let _ = event_tx.send(AgentEvent::MeritsListed { entries });
+            }
+        }
+        s2c::JOB_POINTS => {
+            if let Ok(list) = decode::JobPointList::decode(sub.data)
+                .inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let entries = list
+                    .entries
+                    .iter()
+                    .map(|e| crate::state::JobPointWire {
+                        index: e.index,
+                        job_no: e.job_no,
+                        next: e.next,
+                        level: e.level,
+                    })
+                    .collect();
+                let _ = event_tx.send(AgentEvent::JobPointsListed { entries });
+            }
+        }
+        s2c::UNITY => {
+            if let Ok(quest) =
+                decode::UnityQuest::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let _ = event_tx.send(AgentEvent::UnityQuestUpdated {
+                    sparks: quest.sparks,
+                    deeds: quest.deeds,
+                    plaudits: quest.plaudits,
+                });
+            }
         }
         // Wide-scan (tracking): the server frames a list with 0x0F6 ListStart, a
         // run of 0x0F4 entries, then 0x0F6 ListEnd; 0x0F5 streams the tracked
@@ -2527,15 +2617,6 @@ fn handle_sub_packet(
                         server_ts: 0,
                     },
                 });
-                // This record is also the acknowledgement an outstanding furniture edit waits for:
-                // LSB answers a layout or bankin request with the ITEM_ATTR of that very shelf slot
-                // (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp), and retail's busy
-                // predicate clears along with it.
-                crate::myroom_layout::clear_pending_edit(
-                    &mut mog.pending_furniture_edits,
-                    a.category,
-                    a.index,
-                );
                 let ci = a.charge_info();
                 let _ = event_tx.send(AgentEvent::InventoryUpdated {
                     container: a.category,
@@ -4841,11 +4922,6 @@ async fn keepalive_loop(
                             row,
                             rotation,
                         };
-                        crate::myroom_layout::note_pending_edit(
-                            &mut mog.pending_furniture_edits,
-                            container,
-                            slot,
-                        );
                         let payload = build_subpacket_myroom_layout(sub_seq, &layout);
                         send_myroom_request(
                             map,
@@ -4874,11 +4950,6 @@ async fn keepalive_loop(
                         slot,
                         container,
                     }) => {
-                        crate::myroom_layout::note_pending_edit(
-                            &mut mog.pending_furniture_edits,
-                            container,
-                            slot,
-                        );
                         let payload = build_subpacket_myroom_bankin(sub_seq, item_no, slot, container);
                         send_myroom_request(
                             map,
@@ -4983,23 +5054,19 @@ async fn keepalive_loop(
                         .await;
                     }
                     Some(AgentCommand::MyroomMode { mode }) => {
-                        // The mode switch's own refusal chain, run synchronously so a refused request
-                        // never reaches the wire: busy first (retail message code 5), then already-
-                        // arranging / door open (both retail's error bell — kuluu has no sound bus for
-                        // it yet, so they log only), then availability. Leaving layout mode for normal
-                        // play owes the all-zero c2s 0x0FA before anything else (`.text FFXiMain.dll
-                        // retail-2026-09 0x1D3505` tail-calls `.text 0xF0C80`).
-                        let gates = crate::myroom_layout::ArrangeGates {
-                            current_mode: mog.layout_mode,
-                            manager_busy: !mog.pending_furniture_edits.is_empty(),
-                            door_open: mog.myroom.is_some_and(|room| room.door_open),
-                            already_arranging: mog.layout_mode
-                                == crate::myroom_layout::MODE_LAYOUT,
-                            home_view_available: mog.myroom.is_some(),
-                        };
-                        // The object-array view (`placed`) lives with the inventory fold, not here; an
-                        // unknown room fails closed exactly like a missing item DAT does retail-side —
-                        // no selection and no `rmlo1` claim either way.
+                        // The refusal chain runs here too, so a refused request never reaches the
+                        // wire; the client already printed or buzzed its signal. Leaving layout mode
+                        // for normal play owes the all-zero c2s 0x0FA.
+                        let house = mog.myroom.map(|room| crate::myroom_layout::HouseView {
+                            map_number: room.model,
+                            sub_map: room.sub_map,
+                            door_open: room.door_open,
+                        });
+                        let gates = crate::myroom_layout::ArrangeGates::for_house(
+                            mog.layout_mode,
+                            house,
+                            mog.login_in_mog_house,
+                        );
                         match crate::myroom_layout::plan_arrange(
                             crate::myroom_layout::ArrangeRequest::from_slash(mode),
                             &gates,
@@ -5032,10 +5099,6 @@ async fn keepalive_loop(
                                 });
                             }
                             Err(refusal) => {
-                                // The refusal itself is the behavior: no mode change, no packet. The
-                                // signal law (bell vs message code 5/6) lives in [`crate::
-                                // myroom_layout::RefusalSignal`]; wiring the bell sound and digging the
-                                // two message strings belongs to the arrange-editor HUD pass.
                                 tracing::debug!(
                                     ?refusal,
                                     signal = ?refusal.signal(),
@@ -5125,6 +5188,123 @@ async fn keepalive_loop(
                                 .await
                             {
                                 tracing::warn!(error = %e, mode, "currency request send failed");
+                            }
+                        }
+                    }
+                    // c2s 0x116 / 0x117 are refused while an event is open
+                    // (`.blockedBy({BlockedState::InEvent})`, vendor/server/src/map/packets/c2s/
+                    // 0x116_unity_menu.cpp, 0x117_unity_quest.cpp): skip them then, so the folded
+                    // request marks stay set for the next window open.
+                    Some(AgentCommand::RequestUnityRanking { result_set }) => {
+                        if in_event(&dialog_session, &pending_event_end) {
+                            tracing::debug!(result_set, "skipping unity ranking request in event");
+                        } else {
+                            let payload =
+                                build_subpacket_unity_menu(sub_seq, u32::from(result_set));
+                            sub_seq = sub_seq.wrapping_add(1);
+                            match map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    let _ = event_tx
+                                        .send(AgentEvent::UnityRankingRequested { result_set });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, result_set, "unity menu send failed");
+                                }
+                            }
+                        }
+                    }
+                    Some(AgentCommand::RequestUnityQuest) => {
+                        if in_event(&dialog_session, &pending_event_end) {
+                            tracing::debug!("skipping unity quest request in event");
+                        } else {
+                            let payload = build_subpacket_unity_quest(sub_seq);
+                            sub_seq = sub_seq.wrapping_add(1);
+                            match map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    let _ = event_tx.send(AgentEvent::UnityQuestRequested);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "unity quest send failed");
+                                }
+                            }
+                        }
+                    }
+                    Some(AgentCommand::SetUnityChat { mode }) => {
+                        let payload = build_subpacket_unity_toggle(sub_seq, mode);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, mode, "unity toggle send failed");
+                        }
+                    }
+                    Some(AgentCommand::RequestAlterEgoPoints) => {
+                        let payload = build_subpacket_alter_ego_points_request(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "alter ego points request send failed");
+                        }
+                    }
+                    // LSB refuses c2s 0x0C1 in an event or an abnormal status
+                    // (vendor/server/src/map/packets/c2s/0x0c1_alter_ego_points.cpp validate).
+                    Some(AgentCommand::UpgradeAlterEgo { upgrade_id }) => {
+                        if in_event(&dialog_session, &pending_event_end) {
+                            tracing::debug!(upgrade_id, "skipping alter ego upgrade in event");
+                        } else {
+                            let payload = build_subpacket_alter_ego_points(sub_seq, upgrade_id);
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, upgrade_id, "alter ego upgrade send failed");
+                            }
+                        }
+                    }
+                    // LSB refuses c2s 0x0BE, 0x0BF and 0x0C0 in an event
+                    // (`.blockedBy({BlockedState::InEvent})`, vendor/server/src/map/packets/c2s/
+                    // 0x0be_merits.cpp, 0x0bf_job_points_spend.cpp, 0x0c0_job_points_req.cpp).
+                    Some(
+                        command @ (AgentCommand::SetMeritMode { .. }
+                        | AgentCommand::EditMerit { .. }
+                        | AgentCommand::SpendJobPoint { .. }
+                        | AgentCommand::RequestJobPoints),
+                    ) => {
+                        if in_event(&dialog_session, &pending_event_end) {
+                            tracing::debug!(?command, "skipping merit / job point send in event");
+                        } else if let Some(payload) = merit_command_payload(&command, sub_seq) {
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, ?command, "merit / job point send failed");
                             }
                         }
                     }
@@ -7928,6 +8108,17 @@ fn decode_miscdata_merits(data: &[u8]) -> Option<kuluu_snapshot::MisdataMerits> 
         merit_mode_enabled: bits >> 15 != 0,
         max_merit_points: data[8],
     })
+}
+
+fn job_points_record(record: &decode::MiscdataJobPoints) -> kuluu_snapshot::JobPointsRecord {
+    kuluu_snapshot::JobPointsRecord {
+        access: record.access,
+        jobs: record.jobs.map(|job| kuluu_snapshot::JobPointsJob {
+            capacity_points: job.capacity_points,
+            current_jp: job.current_jp,
+            total_jp_spent: job.total_jp_spent,
+        }),
+    }
 }
 
 fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {

@@ -139,6 +139,9 @@ pub fn status_entry_count() -> usize {
 /// `.text 0x148EB1`, both `cmp al,0x63`).
 pub const MASTER_LEVEL_JOB_CAP: u8 = 99;
 
+/// Bit 0 of the s2c 0x063 JobPoints record's `access` byte opens the Job Points row.
+pub const JOB_POINTS_ACCESS_BIT: u8 = 1;
+
 /// Key item that unlocks the Alter Ego Points row (id 13): retail tests it in the
 /// same branch as the level-99 check (`FFXiMain.dll retail-2026-09 RVA 0x148CD2`,
 /// `push 0xD21` feeding the key-item test helper `.text 0x97E80`).
@@ -181,18 +184,20 @@ pub fn status_row_enabled(kind: StatusEntryKind, snap: &kuluu_snapshot::SceneSna
         // 0x485829 mask 0x20 = bit 13 of the stored flag word (vault main_menu.md §59
         // addendum 36; bead kuluu-o9qt7.43).
         StatusEntryKind::MeritPoints => snap.merits.is_some_and(|m| m.can_use_merit_mode),
-        // Job Points (id 8): retail's chain (.text FFXiMain.dll retail-2026-09 `.text
-        // 0x148EA3`) needs .data 0x485824 bit **2** — and an image-wide scan of every writer
-        // to that byte (all five AL-stores + the one or-mem site: FFXiMain.dll retail-2026-09
-        // `.text 0x992AB`/`.text 0x99348`/`.text 0x993B4`/`.text 0x9968E`/`.text
-        // 0x996F0` plus `or [addr],0x20` at `.text 0x993CC`) never sets it, and the region is
-        // virtual-size-only .data (zero-initialised) — so on retail-2026-09 this row stays
-        // grey for every character no matter the level [V-neg setter]. The former
-        // level-only half-gate wrongly enabled it at 99 (§59 addendum 36 correction).
-        StatusEntryKind::JobPoints => false,
-        // Alter Ego Points (id 13): level 99 *and* key item [`ALTER_EGO_POINTS_KEY_ITEM`].
+        // Job Points (id 8): an s2c 0x063 JobPoints record with bit 0 of `access` set and a
+        // main job (s2c 0x061 `mjob_lv`) at level 99
+        // (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+        StatusEntryKind::JobPoints => {
+            snap.job_points
+                .is_some_and(|record| record.access & JOB_POINTS_ACCESS_BIT != 0)
+                && snap.stats.map_or(0, |stats| stats.mjob_lv) >= MASTER_LEVEL_JOB_CAP
+        }
+        // Alter Ego Points (id 13): the Status data is ready (an s2c 0x119 arrived), level 99
+        // and key item [`ALTER_EGO_POINTS_KEY_ITEM`]
+        // (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
         StatusEntryKind::FacetCategories => {
-            main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
+            snap.status_data_ready
+                && main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
                 && snap.key_items.contains(&ALTER_EGO_POINTS_KEY_ITEM)
         }
         _ => true,
@@ -221,12 +226,24 @@ fn main_job_level(snap: &kuluu_snapshot::SceneSnapshot) -> u8 {
 }
 
 const PANEL_WIDTH_PX: f32 = 280.0;
+const LEVEL_BOX_WIDTH_PX: f32 = 150.0;
 
-/// Left-column host for the persona panel and its `level` box, at the spot the
-/// menu flow opens them (vault main_menu.md §59 addendum 10): opening Status
-/// code-moves persona to design **(16,16)** (mode-1 move; record frame
-/// `(16,48)`) and draws `level` right under it — both display-only while
-/// statcom2 holds the keys.
+/// Main menu Status code-moves `persona` to (16, 16)
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
+pub const PERSONA_STATUS_LEFT: f32 = 16.0;
+pub const PERSONA_STATUS_TOP: f32 = 16.0;
+
+/// Status code-moves `joblevel` to (130, 48), off its record frame
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
+pub const JOBLEVEL_WINDOW: &str = "joblevel";
+pub const JOBLEVEL_STATUS_LEFT: f32 = 130.0;
+pub const JOBLEVEL_STATUS_TOP: f32 = 48.0;
+
+/// The `level` window opens with Status at its own record frame.
+pub const STATUS_LEVEL_WINDOW: &str = "level";
+
+/// Full-screen host for the persona panel and its `level` box: persona sits at its Status
+/// spot, and the box stacks under it until the `level` record places it.
 #[derive(Component)]
 pub struct StatusLeftStack;
 
@@ -281,13 +298,21 @@ pub fn spawn_status_panel(mut commands: Commands) {
             StatusLeftStack,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(16.0),
-                left: Val::Px(16.0),
+                top: Val::ZERO,
+                left: Val::ZERO,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                padding: UiRect {
+                    left: Val::Px(PERSONA_STATUS_LEFT),
+                    top: Val::Px(PERSONA_STATUS_TOP),
+                    ..default()
+                },
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
                 display: Display::None,
                 ..default()
             },
+            bevy::picking::Pickable::IGNORE,
         ))
         .id();
     let panel = commands
@@ -310,7 +335,7 @@ pub fn spawn_status_panel(mut commands: Commands) {
         s.spawn((
             StatusLevelBox,
             Node {
-                width: Val::Px(150.0),
+                width: Val::Px(LEVEL_BOX_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
@@ -370,6 +395,32 @@ pub fn level_box_lines(snap: &kuluu_snapshot::SceneSnapshot) -> String {
             format!("Level {lv}\nEXP {}\nNEXTLevel {}", s.exp_now, s.exp_next)
         }
         _ => format!("Level {lv}"),
+    }
+}
+
+/// The `level` box sits at its own record frame while the install supplies one
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md); without it
+/// the box stays stacked under persona.
+pub fn update_status_level_box(
+    config_rows: Res<crate::hud::menu::ConfigDatRows>,
+    mut level_box_q: Query<&mut Node, With<StatusLevelBox>>,
+) {
+    let frame = config_rows.record_frame(STATUS_LEVEL_WINDOW);
+    for mut node in level_box_q.iter_mut() {
+        let mut want = node.clone();
+        match &frame {
+            Some(frame) => crate::hud::menu::place_at_record_frame(&mut want, frame),
+            None => {
+                want.position_type = PositionType::Relative;
+                want.left = Val::Auto;
+                want.top = Val::Auto;
+                want.right = Val::Auto;
+                want.bottom = Val::Auto;
+                want.margin = UiRect::ZERO;
+                want.width = Val::Px(LEVEL_BOX_WIDTH_PX);
+            }
+        }
+        node.set_if_neq(want);
     }
 }
 
@@ -637,30 +688,13 @@ pub fn status_detail_lines(
         StatusEntryKind::Currencies2 => {
             currency_detail_rows(crate::hud::currency_law::CurrencyMode::Two, snap, currency_labels_2)
         }
-        StatusEntryKind::Unity => vec!["(unity campaign data not received yet)".to_string()],
+        // Rows 11, 7, 8 and 13 open the Unity, merit, job point and alter ego point windows
+        // instead of a readout.
+        StatusEntryKind::Unity
+        | StatusEntryKind::MeritPoints
+        | StatusEntryKind::JobPoints
+        | StatusEntryKind::FacetCategories => Vec::new(),
         StatusEntryKind::PlayTime => vec![play_time_chat_line(snap)],
-        // Merit Points detail: live from the s2c 0x063 record once received (LSB ships it —
-        // vendor/server/src/map/packets/s2c/0x063_miscdata_merits.h; bead kuluu-o9qt7.43).
-        StatusEntryKind::MeritPoints => match snap.merits {
-            Some(m) => vec![
-                format!("Limit points: {}", m.limit_points),
-                format!(
-                    "Merit points: {} (max {})",
-                    m.merit_points, m.max_merit_points
-                ),
-                if m.can_use_merit_mode {
-                    "Merit mode: available".to_string()
-                } else {
-                    "Merit mode: not available (needs level 75 and the Limit Breaker key item)"
-                        .to_string()
-                },
-            ],
-            None => vec!["(awaiting s2c 0x063 merits record)".to_string()],
-        },
-        StatusEntryKind::JobPoints => vec!["(job-point category not received yet)".to_string()],
-        StatusEntryKind::FacetCategories => {
-            vec!["(facet-point categories have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()]
-        }
     }
 }
 
@@ -877,6 +911,64 @@ mod tests {
         // No entities: the system returns early, but the queries are already
         // registered — a B0001 conflict panics inside this same call.
         app.update();
+    }
+
+    /// The `level` box sits at its own record frame once the install supplies one and stays
+    /// stacked under persona without it; persona keeps its Status spot either way.
+    #[test]
+    fn level_box_sits_at_its_record_frame_or_stacks_under_persona() {
+        use bevy::app::App;
+        let mut app = App::new();
+        app.init_resource::<crate::hud::menu::ConfigDatRows>();
+        app.add_systems(bevy::app::Startup, spawn_status_panel);
+        app.add_systems(bevy::app::Update, update_status_level_box);
+        app.update();
+
+        let level_box = |app: &mut App| -> Node {
+            app.world_mut()
+                .query_filtered::<&Node, With<StatusLevelBox>>()
+                .single(app.world())
+                .expect("one level box")
+                .clone()
+        };
+        let stacked = level_box(&mut app);
+        assert_eq!(
+            stacked.position_type,
+            PositionType::Relative,
+            "in flow under persona"
+        );
+        assert_eq!(stacked.width, Val::Px(LEVEL_BOX_WIDTH_PX));
+        let host = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusLeftStack>>()
+            .single(app.world())
+            .expect("one Status host")
+            .clone();
+        assert_eq!(
+            (host.padding.left, host.padding.top),
+            (Val::Px(PERSONA_STATUS_LEFT), Val::Px(PERSONA_STATUS_TOP)),
+            "persona keeps its Status spot"
+        );
+
+        {
+            let mut rows = app
+                .world_mut()
+                .resource_mut::<crate::hud::menu::ConfigDatRows>();
+            rows.frames
+                .insert(STATUS_LEVEL_WINDOW.into(), (16, 210, 112));
+            rows.frame_extents.insert(
+                STATUS_LEVEL_WINDOW.into(),
+                (40, crate::hud::menu::FRAME_ANCHOR_NONE),
+            );
+        }
+        app.update();
+        let placed = level_box(&mut app);
+        assert_eq!(placed.position_type, PositionType::Absolute);
+        assert_eq!(
+            (placed.left, placed.top, placed.width),
+            (Val::Px(16.0), Val::Px(210.0), Val::Px(112.0)),
+            "the record frame places it"
+        );
     }
 
     /// The `level` box under the persona panel answers from s2c 0x061 EXP
@@ -1132,9 +1224,8 @@ mod tests {
     }
 
     /// The three level-99 rows follow their own gates: mastery flag for Master
-    /// Levels, the Alter Ego key item for Facet Categories — and Job Points stays grey at
-    /// every level, because retail's flag-bit precondition has no setter in this client
-    /// build (§59 addendum 36 [V-neg]; bead kuluu-o9qt7.43 corrected the old half-gate).
+    /// Levels, the Alter Ego key item for Facet Categories, and a JobPoints record for Job
+    /// Points (`job_points_row_needs_access_and_level_99`).
     #[test]
     fn status_level_99_rows_gate_on_their_own_conditions() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
@@ -1180,17 +1271,29 @@ mod tests {
         assert!(status_row_enabled(StatusEntryKind::MasterLevels, &{
             gated.clone()
         }));
-        // Job Points stays grey even at 99: retail requires the never-set flag bit first
-        // (.text FFXiMain.dll retail-2026-09 `0x148EA3` chain — no writer exists; kuluu must
-        // not let the level alone lift it).
-        assert!(!status_row_enabled(StatusEntryKind::JobPoints, &gated));
+        assert!(
+            !status_row_enabled(StatusEntryKind::JobPoints, &gated),
+            "no s2c 0x063 JobPoints record"
+        );
         assert!(!status_row_enabled(
             StatusEntryKind::FacetCategories,
             &gated
         ));
 
         gated.key_items.push(ALTER_EGO_POINTS_KEY_ITEM);
+        assert!(
+            !status_row_enabled(StatusEntryKind::FacetCategories, &gated),
+            "no s2c 0x119 yet: the Status data is not ready"
+        );
+        gated.status_data_ready = true;
         assert!(status_row_enabled(StatusEntryKind::FacetCategories, &gated));
+        assert!(
+            status_row_enabled(
+                StatusEntryKind::Unity,
+                &kuluu_snapshot::SceneSnapshot::default()
+            ),
+            "row 11 is never disabled"
+        );
     }
 
     /// Merit Points (id 7): the row lifts exactly when an s2c 0x063 Merits record has arrived
@@ -1212,19 +1315,49 @@ mod tests {
             max_merit_points: 98,
         });
         assert!(!status_row_enabled(StatusEntryKind::MeritPoints, &snap));
-        let lines = status_detail_lines(
-            STATUS_ENTRIES
-                .iter()
-                .position(|e| e.kind == StatusEntryKind::MeritPoints)
-                .unwrap(),
-            &snap,
-            &[],
-            &[],
-        );
-        assert_eq!(lines[0], "Limit points: 12", "live from the record");
 
         snap.merits.as_mut().unwrap().can_use_merit_mode = true;
         assert!(status_row_enabled(StatusEntryKind::MeritPoints, &snap));
+    }
+
+    /// Job Points (id 8) lifts once an s2c 0x063 JobPoints record has bit 0 of `access` set and
+    /// s2c 0x061 reports a level-99 main job
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    #[test]
+    fn job_points_row_needs_access_and_level_99() {
+        let mut snap = kuluu_snapshot::SceneSnapshot {
+            stats: Some(kuluu_snapshot::CharStats {
+                mjob_lv: MASTER_LEVEL_JOB_CAP,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!status_row_enabled(StatusEntryKind::JobPoints, &snap));
+        snap.job_points = Some(kuluu_snapshot::JobPointsRecord::default());
+        assert!(
+            !status_row_enabled(StatusEntryKind::JobPoints, &snap),
+            "access bit 0 clear"
+        );
+        snap.job_points = Some(kuluu_snapshot::JobPointsRecord {
+            access: JOB_POINTS_ACCESS_BIT,
+            ..Default::default()
+        });
+        assert!(status_row_enabled(StatusEntryKind::JobPoints, &snap));
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            mjob_lv: MASTER_LEVEL_JOB_CAP - 1,
+            ..Default::default()
+        });
+        assert!(!status_row_enabled(StatusEntryKind::JobPoints, &snap));
+    }
+
+    /// Rows 7 and 8 open their windows, so they keep no readout of their own.
+    #[test]
+    fn merit_and_job_point_rows_have_no_readout() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        for kind in [StatusEntryKind::MeritPoints, StatusEntryKind::JobPoints] {
+            let entry = STATUS_ENTRIES.iter().position(|e| e.kind == kind).unwrap();
+            assert!(status_detail_lines(entry, &snap, &[], &[]).is_empty());
+        }
     }
 
     /// Bead kuluu-o9qt7.35: the two Currencies windows draw straight out of the raw s2c block,

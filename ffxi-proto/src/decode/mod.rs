@@ -65,6 +65,10 @@ mod assist;
 pub use assist::*;
 mod pending;
 pub use pending::*;
+mod unity;
+pub use unity::*;
+mod merits;
+pub use merits::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

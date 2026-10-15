@@ -10,6 +10,10 @@ use bevy::prelude::*;
 /// the other pop-up windows (target-action / quick-action at 20, trade at 25).
 pub const WINDOW_Z: i32 = 20;
 
+/// The chat stack draws under every other HUD window, so a menu that reaches the log covers it
+/// instead of moving it.
+pub const CHAT_STACK_Z: i32 = -1;
+
 /// Retail stacks the self, target, and party panels in one right-hand column, so
 /// their width, inset, and gap are a shared contract, not independent tunings.
 /// `hud::panel_column` owns the stacking; panels never position themselves

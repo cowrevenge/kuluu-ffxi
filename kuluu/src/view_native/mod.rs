@@ -828,6 +828,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         )
             .chain()
             .after(kuluu_render::chase_camera_system)
+            // A window docks in the frame it opens, not one frame later at its record y.
+            .before(kuluu_render::hud::dock::dock_windows_system)
             .run_if(in_state(AppPhase::InGame)),
     );
 
@@ -854,6 +856,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         input::reset_interaction_flags_on_zone_change.run_if(in_state(AppPhase::InGame)),
+    );
+    app.add_systems(
+        Update,
+        (
+            text_input::unity_chat_send_system,
+            text_input::arrange_request_send_system,
+        )
+            .after(text_input::text_input_system)
+            .run_if(in_state(AppPhase::InGame)),
     );
 
     app.add_systems(

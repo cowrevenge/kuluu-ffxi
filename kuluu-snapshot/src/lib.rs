@@ -1157,7 +1157,8 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub currencies_2: Option<Vec<u8>>,
 
-    /// Which Mog House arrangement mode the client has entered. Client-side state, never wire data:
+    /// Which Mog House arrangement mode the client has entered ([`MYROOM_MODE_NORMAL`],
+    /// [`MYROOM_MODE_LAYOUT`], ...). Client-side state, never wire data:
     /// retail keeps it in its myroom manager's own word (+0x1C), read back at `.text FFXiMain.dll
     /// retail-2026-09 0x1D34FA`. 0 = normal play, 1 = layout (`/layout`), 2 = gardening (`/garden`),
     /// 3 = flowerpot item pick, 4 = select one piece; anything else is rejected before dispatch.
@@ -1172,6 +1173,126 @@ pub struct SceneSnapshot {
     /// `.text 0x148E88`). Trailing on purpose.
     #[serde(default)]
     pub merits: Option<MisdataMerits>,
+
+    /// The Unity ranking tables (s2c 0x063 type 7) and the s2c 0x110 request mark
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    #[serde(default)]
+    pub unity: UnityState,
+
+    /// The last s2c 0x08E alter ego points block; `None` until one arrives this session.
+    #[serde(default)]
+    pub alter_ego_points: Option<AlterEgoPoints>,
+
+    /// An s2c 0x119 has arrived this session, which readies the Status data the Unity and alter
+    /// ego point windows wait for.
+    #[serde(default)]
+    pub status_data_ready: bool,
+
+    /// s2c 0x00A `LoginState` at the last zone-in (LSB `SAVE_LOGIN_STATE`,
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h).
+    #[serde(default)]
+    pub login_state: u32,
+
+    /// s2c 0x00A `IsMonstrosity` was nonzero at the last zone-in.
+    #[serde(default)]
+    pub login_is_monstrosity: bool,
+
+    /// The merits s2c 0x08C stored, keyed by merit index (the wire id halved)
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    #[serde(default)]
+    pub merit_entries: std::collections::BTreeMap<u16, MeritEntry>,
+
+    /// Job point type state from s2c 0x08D, keyed by type id (`job * 32 + slot`).
+    #[serde(default)]
+    pub job_point_types: std::collections::BTreeMap<u16, JobPointType>,
+
+    /// An s2c 0x08D has been processed this session.
+    #[serde(default)]
+    pub job_points_received: bool,
+
+    /// The last s2c 0x063 JobPoints record; `None` until one arrives.
+    #[serde(default)]
+    pub job_points: Option<JobPointsRecord>,
+}
+
+/// One merit s2c 0x08C stored: the cost of its next upgrade and its current upgrade count
+/// (vendor/server/src/map/packets/s2c/0x08c_merit.h `merit_t`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeritEntry {
+    pub next: u8,
+    pub count: u8,
+}
+
+/// One job point type's level and next cost from s2c 0x08D
+/// (vendor/server/src/map/packets/s2c/0x08d_job_points.h `jobpoint_t`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPointType {
+    pub level: u8,
+    pub next: u16,
+}
+
+/// [`SceneSnapshot::myroom_mode`] in normal play and in layout mode (`/layout`).
+pub const MYROOM_MODE_NORMAL: u8 = 0;
+pub const MYROOM_MODE_LAYOUT: u8 = 1;
+
+/// Jobs one s2c 0x063 JobPoints record reports, indexed by job
+/// (vendor/server/src/map/packets/s2c/0x063_miscdata_job_points.h `jobs[24]`).
+pub const JOB_POINT_JOBS: usize = 24;
+
+/// One job's capacity points, unspent and spent job points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPointsJob {
+    pub capacity_points: u16,
+    pub current_jp: u16,
+    pub total_jp_spent: u16,
+}
+
+/// One s2c 0x063 JobPoints record: the access byte and every job's totals
+/// (vendor/server/src/map/packets/s2c/0x063_miscdata_job_points.h).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPointsRecord {
+    pub access: u8,
+    pub jobs: [JobPointsJob; JOB_POINT_JOBS],
+}
+
+/// Upgrade slots of an alter ego points block, indexed by upgrade id
+/// (vendor/server/src/map/packets/s2c/0x08e_alter_ego_points.h `Upgrades[32]` / `Costs[32]`).
+pub const ALTER_EGO_UPGRADE_SLOTS: usize = 32;
+
+/// One s2c 0x08E alter ego points block: the balance and, by upgrade id, each upgrade's current
+/// level and next cost (vendor/server/src/map/packets/s2c/0x08e_alter_ego_points.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlterEgoPoints {
+    pub points: u16,
+    pub upgrades: [u8; ALTER_EGO_UPGRADE_SLOTS],
+    pub costs: [u16; ALTER_EGO_UPGRADE_SLOTS],
+}
+
+/// The Unity Concords one ranking result set reports
+/// (vendor/server/src/map/packets/s2c/0x063_miscdata_unity.h `members[11]` / `points[11]`).
+pub const UNITY_CONCORDS: usize = 11;
+
+/// The two ranking result sets, LSB `UNITY_RESULTSET` 0 and 1.
+pub const UNITY_RESULT_SETS: usize = 2;
+
+/// One Unity ranking result set as LSB lays it out: Concord u (1..=11) at index u - 1.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnityRankingSet {
+    /// Chunk 1, LSB `members[11]`.
+    pub members: [u32; UNITY_CONCORDS],
+    /// Chunk 2, LSB `points[11]`.
+    pub points: [u32; UNITY_CONCORDS],
+    /// The set's last chunk arrived since the last c2s 0x116 for it.
+    pub complete: bool,
+}
+
+/// Unity ranking data plus the c2s 0x117 request mark
+/// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnityState {
+    pub rankings: [UnityRankingSet; UNITY_RESULT_SETS],
+    /// An s2c 0x110 arrived since the last c2s 0x117.
+    pub quest_armed: bool,
 }
 
 /// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
@@ -1744,6 +1865,24 @@ pub struct CharStats {
     /// `.text 0xFD350` reads the stored dword; intersection test at `.text 0x132111`).
     #[serde(default)]
     pub equip_slot_block: u32,
+    /// `mjob_no` from s2c 0x061 — main job 23 (MON) refuses the alter ego point upgrades
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    #[serde(default)]
+    pub mjob_no: u8,
+    /// `unity_info.Faction` / `unity_info.Points` and `unity_points1` / `unity_points2` from
+    /// s2c 0x061 (vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS).
+    #[serde(default)]
+    pub unity_faction: u8,
+    #[serde(default)]
+    pub unity_points: u32,
+    #[serde(default)]
+    pub unity_points1: u16,
+    #[serde(default)]
+    pub unity_points2: u16,
+    /// `mjob_lv` from s2c 0x061, the main job level the merit and job point windows gate on
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    #[serde(default)]
+    pub mjob_lv: u8,
 }
 
 /// Mirror of `kuluu`'s browsed-bazaar model (s2c 0x105 rows keyed by the
@@ -2761,6 +2900,15 @@ mod tests {
             // "nothing received yet", exactly like a fresh zone-in.
             char_skills: None,
             merits: None,
+            unity: UnityState::default(),
+            alter_ego_points: None,
+            status_data_ready: false,
+            login_state: 0,
+            login_is_monstrosity: false,
+            merit_entries: Default::default(),
+            job_point_types: Default::default(),
+            job_points_received: false,
+            job_points: None,
             party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
@@ -3465,6 +3613,15 @@ mod tests {
             "currencies_1",
             "currencies_2",
             "myroom_mode",
+            "unity",
+            "alter_ego_points",
+            "status_data_ready",
+            "login_state",
+            "login_is_monstrosity",
+            "merit_entries",
+            "job_point_types",
+            "job_points_received",
+            "job_points",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3474,8 +3631,11 @@ mod tests {
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved. §59 addendum 31 appends
     // myroom_mode (u8) as exactly one more zero byte at the tail. §59 addendum 36 appends
-    // merits (`Option<MisdataMerits>`) as exactly one more `None` tag byte.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // merits (`Option<MisdataMerits>`) as exactly one more `None` tag byte. The Unity / alter ego
+    // point fields append 51 zero bytes: `unity` (two sets of 11 + 11 varint zeros and a flag, then
+    // the quest flag), the `alter_ego_points` `None` tag, and three scalar zeros. The merit and job
+    // point fields append four zero bytes: two empty map lengths, a flag and a `None` tag.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

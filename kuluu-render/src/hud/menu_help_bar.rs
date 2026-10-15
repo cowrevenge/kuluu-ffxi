@@ -234,6 +234,16 @@ fn entry_help(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> String {
             menu::EmoteSortState::Off => "Select an emote.".to_string(),
         },
         MenuKind::Status => "Select a category.".to_string(),
+        // .agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md, "Unity
+        // leader variant": DAT text, empty until the catalog loads.
+        MenuKind::UnityLeaders => dynamic.unity_fp.leader_help.clone().unwrap_or_default(),
+        // .agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md:
+        // `sortyn` shows the raise or lower help line from DAT, empty until the catalog loads.
+        MenuKind::Merit(crate::hud::merit_windows::MeritWindow::SortConfirm { raise, .. }) => {
+            dynamic.merit.sort_help[usize::from(!raise)]
+                .clone()
+                .unwrap_or_default()
+        }
         _ => "Select an option.".to_string(),
     }
 }
@@ -335,6 +345,13 @@ pub fn update_menu_help_bar(
     let (content, is_menu) = match &*mode {
         InputMode::Menu(stack) => (
             stack.active_level().map(|l| {
+                if let MenuKind::Arrange(window) = l.kind {
+                    return BarContent {
+                        title: dynamic.arrange.help_title(),
+                        counter: String::new(),
+                        hint: dynamic.arrange.window_help(window),
+                    };
+                }
                 let option = (l.kind == MenuKind::Items)
                     .then(|| item_focus.sort_selection())
                     .flatten();
@@ -369,6 +386,16 @@ pub fn update_menu_help_bar(
                 hint: crate::hud::check_view::job_ribbon(
                     scene.snapshot.check.as_ref().filter(|c| c.target_id == id),
                 ),
+            }),
+            false,
+        ),
+        // .agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B1: layout mode's
+        // help bar title and help are DAT text, empty until the catalogs load.
+        InputMode::Arrange => (
+            Some(BarContent {
+                title: dynamic.arrange.help_title(),
+                counter: String::new(),
+                hint: dynamic.arrange.help_text(),
             }),
             false,
         ),
@@ -638,5 +665,18 @@ mod tests {
             entry_help(MenuKind::EmoteList, 0, &dynamic),
             "Select an emote."
         );
+    }
+
+    #[test]
+    fn unity_leader_rows_share_the_dat_help_line() {
+        let mut dynamic = DynamicMenu::default();
+        assert_eq!(entry_help(MenuKind::UnityLeaders, 0, &dynamic), "");
+        dynamic.unity_fp.leader_help = Some("leader help".to_string());
+        for cursor in [0, crate::hud::unity_fp::layout::LEADER_ROWS - 1] {
+            assert_eq!(
+                entry_help(MenuKind::UnityLeaders, cursor, &dynamic),
+                "leader help"
+            );
+        }
     }
 }

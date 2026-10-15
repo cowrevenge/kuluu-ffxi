@@ -1,13 +1,16 @@
 use bevy::prelude::*;
+use bevy::ui::ComputedNode;
 
 use crate::graphics_settings::{
     config_rows, dlss_config_rows, graphics_rows, GraphicsField, GraphicsSection, GraphicsSettings,
     MenuRow, CONFIG_SECTIONS, DLSS_CONFIG_SECTIONS, GRAPHICS_SECTIONS,
 };
+use crate::hud::gettext::GetText;
 use crate::hud::style::{self, theme};
-#[cfg(test)]
-use crate::input_mode::MenuStack;
-use crate::input_mode::{InputMode, MenuKind};
+use crate::input_mode::{
+    CursorMemory, InputMode, LastItemRow, MenuKind, MenuLevel, MenuStack, OpenCursor,
+    TargetActionState, WindowCursor,
+};
 
 pub const ROOT_LOG_OUT: &str = "Log Out";
 pub const ROOT_SHUT_DOWN: &str = "Shut Down";
@@ -31,6 +34,8 @@ pub const ROOT_REGION_INFO: &str = "Region Info";
 pub const ROOT_MAGIC_LIST: &str = "Magic List";
 /// Page-2 row 5 — the socialme item's caption is `Set Bazaar` (same pin).
 pub const ROOT_SET_BAZAAR: &str = "Set Bazaar";
+/// Page 1's Map row, whose Mog House variant is `myroom`.
+pub const ROOT_MAP: &str = "Map";
 /// Page-2 row 6 — the caption id resolves to the literal `MacroPalette`; the
 /// earlier kuluu string `Edit Macros` was invented and exists nowhere in the
 /// catalog (same pin).
@@ -67,7 +72,7 @@ const ROOT_ENTRIES: &[&str] = &[
     "Search",
     "Linkshell",
     "Region Info",
-    "Map",
+    ROOT_MAP,
     // Page 2 (`socialme`), display order: Missions, Quests, Key Items, View
     // House, Set Bazaar, MacroPalette, Config, Help Desk, Current Time,
     // Communication, Shut Down, Log Out.
@@ -575,6 +580,49 @@ pub enum DynamicMenuAction {
     AbisortwSelect {
         mode: u8,
     },
+
+    /// A `ut_menu` row: DAT item 1 opens the Unity chat panel, 2 the ranking chooser, 3 the
+    /// leader list (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    UnityMenuItem {
+        item: u8,
+    },
+    /// A Unity chat panel row choosing the c2s 0x118 mode it stands for.
+    UnityChatMode {
+        mode: u8,
+    },
+    /// A ranking chooser row opening the ranking list of `result_set`.
+    UnityRankingSet {
+        result_set: u8,
+    },
+    /// A ranking list row; its select does nothing.
+    UnityRankingRow {
+        concord: u8,
+    },
+    /// A Unity leader list row, `concord` 0 standing for the player's own.
+    UnityLeaderRow {
+        concord: u8,
+    },
+    /// An `fp_cat` category row.
+    AlterEgoCategory {
+        category: u16,
+    },
+    /// An `fp_cat2` upgrade row with the level cap its DAT record gives.
+    AlterEgoUpgrade {
+        upgrade: u16,
+        cap: u8,
+    },
+    /// The `merityn` answer to an alter ego upgrade prompt.
+    AlterEgoConfirmAnswer {
+        yes: bool,
+    },
+
+    /// A merit or job point window row
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    Merit(crate::hud::merit_windows::MeritAction),
+
+    /// An arrange editor window row
+    /// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md).
+    Arrange(crate::myroom_arrange::ArrangeAction),
 }
 
 impl DynamicMenuAction {
@@ -656,9 +704,37 @@ pub enum EmoteSortState {
     AwaitSecond(u8),
 }
 
+/// A UI sound the input layer asks for; the audio side plays it from the system SE table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiSound {
+    Confirm,
+    Buzzer,
+    Cursor,
+    /// Retail UI sound 0001, which the merit record names as the page toggle.
+    PageToggle,
+    /// The cancel sound of an Esc a window's handler takes without closing.
+    Cancel,
+}
+
 #[derive(bevy::prelude::Resource, Debug, Clone, Default)]
 pub struct DynamicMenu {
+    /// UI sounds queued this frame, drained by the audio side.
+    pub ui_sounds: Vec<UiSound>,
+    /// Windows a window's own logic closed this update (a select's answer, an upkeep). Their sound
+    /// is whatever that logic queued, so the menu-depth observer adds no cancel sound for them.
+    pub closed_by_logic: bool,
+    /// State the Unity and alter ego point windows keep while they are open.
+    pub unity_fp: crate::hud::unity_fp::UnityFpWindows,
+    /// State the merit and job point windows keep.
+    pub merit: crate::hud::merit_windows::MeritWindows,
+    /// The Mog House arrange editor and its windows.
+    pub arrange: crate::myroom_arrange::ArrangeEditor,
     pub rows: Vec<DynamicMenuRow>,
+    /// The top window [`Self::rows`] were built for.
+    pub rows_kind: Option<MenuKind>,
+    /// The rows of every dynamic window open under the top one, by kind, so a window that
+    /// stays on screen under a newer one keeps listing its own rows.
+    pub stacked_rows: Vec<(MenuKind, Vec<DynamicMenuRow>)>,
     /// The remodel confirm question, copied from the DAT table-12 catalog by
     /// [`refresh_dynamic_menu_rows`] (GetText id [`ROOMLIST_CONFIRM_PROMPT_ID`]; bead
     /// kuluu-o9qt7.13.5.2). `None` while that catalog has not loaded or holds no such string.
@@ -723,6 +799,8 @@ pub struct DynamicMenu {
     /// subtraction at RVA 0x1A7D05 (vault main_menu.md §59 addendum 16; bead
     /// kuluu-o9qt7.20.1.4). `None` = never announced, like retail's zeroed BSS.
     pub conf_bf_stamp: Option<std::time::Instant>,
+    /// Where each remembered window's cursor last closed this session; every menu opens with it.
+    pub window_cursors: CursorMemory,
 }
 
 impl DynamicMenu {
@@ -781,6 +859,12 @@ const EQUIPMENT_ENTRIES: &[&str] = &[
     "Main", "Sub", "Ranged", "Ammo", "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist",
     "L.Ear", "R.Ear", "L.Ring", "R.Ring", "Back",
 ];
+
+/// Rows of [`STATUS_LABELS`] (display order) for Status ids 11, 7, 8 and 13.
+const STATUS_ROW_UNITY: usize = 8;
+const STATUS_ROW_MERIT_POINTS: usize = 10;
+const STATUS_ROW_JOB_POINTS: usize = 11;
+const STATUS_ROW_ALTER_EGO_POINTS: usize = 12;
 
 const STATUS_LABELS: &[&str] = &[
     "Profile",
@@ -1164,7 +1248,15 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
             | MenuKind::StatusDetail { .. }
             // kuluu's live key map (bead kuluu-o9qt7.26.1) — the store is the rows.
             | MenuKind::Controls
-    )
+            | MenuKind::Arrange(_)
+    ) || draws_itself(kind)
+}
+
+/// The Unity, alter ego point, merit and job point windows draw themselves
+/// (`unity_fp_view`), each at its own record frame.
+pub fn draws_itself(kind: MenuKind) -> bool {
+    crate::hud::unity_fp::is_unity_fp_window(kind)
+        || crate::hud::merit_windows::is_merit_window(kind)
 }
 
 pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) -> usize {
@@ -1182,7 +1274,9 @@ pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) 
 pub fn list_page_rows(kind: MenuKind) -> usize {
     match kind {
         MenuKind::Items | MenuKind::UsableItems => crate::hud::item_screen::ITEM_LIST_ROWS,
-        _ => DYNAMIC_VISIBLE_ROWS,
+        _ => crate::hud::unity_fp::unity_fp_page_rows(kind)
+            .or_else(|| crate::hud::merit_windows::visible_list_rows(kind))
+            .unwrap_or(DYNAMIC_VISIBLE_ROWS),
     }
 }
 
@@ -1420,6 +1514,20 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         MenuKind::BazaarStalls => &[],
         MenuKind::QuestList => &[],
         MenuKind::QuestDetail { .. } => &[],
+        // The Unity and alter ego point windows list DAT-labelled rows
+        // (`unity_fp::unity_fp_rows`).
+        MenuKind::UnityMenu
+        | MenuKind::UnityChat
+        | MenuKind::UnityRankingChooser
+        | MenuKind::UnityRanking { .. }
+        | MenuKind::UnityLeaders
+        | MenuKind::AlterEgoCategories
+        | MenuKind::AlterEgoUpgrades { .. }
+        | MenuKind::AlterEgoConfirm { .. } => &[],
+        // `merit_windows::merit_rows_for`.
+        MenuKind::Merit(_) => &[],
+        // `myroom_arrange::ArrangeEditor::rows`.
+        MenuKind::Arrange(_) => &[],
     }
 }
 
@@ -1536,6 +1644,22 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::AbilitySort { .. } => "",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
+        // These windows draw their own DAT text; kuluu-only surfaces name them after the Status
+        // row that opens them.
+        MenuKind::UnityMenu
+        | MenuKind::UnityChat
+        | MenuKind::UnityRankingChooser
+        | MenuKind::UnityRanking { .. }
+        | MenuKind::UnityLeaders => STATUS_LABELS[STATUS_ROW_UNITY],
+        MenuKind::AlterEgoCategories
+        | MenuKind::AlterEgoUpgrades { .. }
+        | MenuKind::AlterEgoConfirm { .. } => STATUS_LABELS[STATUS_ROW_ALTER_EGO_POINTS],
+        MenuKind::Merit(window) if window.is_merit_chain() => {
+            STATUS_LABELS[STATUS_ROW_MERIT_POINTS]
+        }
+        MenuKind::Merit(_) => STATUS_LABELS[STATUS_ROW_JOB_POINTS],
+        // The arrange windows' captions are their DAT items; the bar keeps layout mode's title.
+        MenuKind::Arrange(_) => "",
     }
 }
 
@@ -1864,10 +1988,17 @@ pub struct ConfigDatRows {
     /// 1,2,3,4,10,5,6,11,12,7,8,9,13 (vault main_menu.md §59 addendum 14). The arm stays
     /// attached to its own row, so only the finished row list is reordered.
     pub row_ys: std::collections::BTreeMap<String, Vec<i16>>,
+    /// Each root's row DAT item ids in the same file order as [`Self::by_root`], for the windows
+    /// whose rows are their record's items.
+    pub item_ids: std::collections::BTreeMap<String, Vec<i16>>,
+    /// Each root's record item count.
+    pub item_counts: std::collections::BTreeMap<String, u8>,
     /// Every menu record's own frame (x, y, width in the 512×448 design space;
     /// anchor law vault main_menu.md §7/§16) — window placement IS DAT data
     /// (companion_windows law: each window sits at its record's rect).
     pub frames: std::collections::BTreeMap<String, (i16, i16, i16)>,
+    /// Each record frame's height and anchor byte, keyed like [`Self::frames`].
+    pub frame_extents: std::collections::BTreeMap<String, (i16, u8)>,
     /// The myroom door row's two visible captions: closed at
     /// [`ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_CLOSED_ID`] and open at
     /// `.._OPEN_ID`, both from the caption catalog (index 0 = shut, 1 = open). Retail rewrites the
@@ -1905,6 +2036,79 @@ impl ConfigDatRows {
             .get(name)
             .map(|&(x, y, w)| (f32::from(x), f32::from(y), f32::from(w.max(1))))
     }
+
+    pub fn record_frame(&self, name: &str) -> Option<RecordFrame> {
+        let (x, y, width) = self.window_frame(name)?;
+        let extent = self.frame_extents.get(name);
+        Some(RecordFrame {
+            x,
+            y,
+            width,
+            height: extent.map(|&(height, _)| f32::from(height)),
+            anchor: extent.map_or(FRAME_ANCHOR_NONE, |&(_, anchor)| anchor),
+        })
+    }
+}
+
+/// The menu design space every window record frame is measured in.
+pub const MENU_DESIGN_WIDTH: f32 = 512.0;
+pub const MENU_DESIGN_HEIGHT: f32 = 448.0;
+
+/// Record frame anchor bits: right edge adds `screen width - 512` to x, bottom edge adds
+/// `screen height - 448` to y (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
+pub const FRAME_ANCHOR_NONE: u8 = 0;
+pub const FRAME_ANCHOR_RIGHT_EDGE: u8 = 1;
+pub const FRAME_ANCHOR_BOTTOM_EDGE: u8 = 2;
+
+/// One DAT window record's frame in the menu design space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordFrame {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    /// `None` when only the position and width are known.
+    pub height: Option<f32>,
+    pub anchor: u8,
+}
+
+impl RecordFrame {
+    /// A window sitting on an older window's whole rectangle hides it
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md). Frames
+    /// pinned to different screen edges only meet at one screen size, and an unknown height
+    /// covers nothing.
+    pub fn covers(&self, older: &RecordFrame) -> bool {
+        let (Some(height), Some(older_height)) = (self.height, older.height) else {
+            return false;
+        };
+        self.anchor == older.anchor
+            && self.x <= older.x
+            && self.y <= older.y
+            && self.x + self.width >= older.x + older.width
+            && self.y + height >= older.y + older_height
+    }
+}
+
+/// Puts a window node at its record frame. An anchored axis starts at 100% of the screen and
+/// a margin of `x - 512` (or `y - 448`) brings it back, which is the record's
+/// `x + screen width - 512` without knowing the screen size; kuluu sizes rows by content, so
+/// only the width comes from the record.
+pub fn place_at_record_frame(node: &mut Node, frame: &RecordFrame) {
+    let right_edge = frame.anchor & FRAME_ANCHOR_RIGHT_EDGE != 0;
+    let bottom_edge = frame.anchor & FRAME_ANCHOR_BOTTOM_EDGE != 0;
+    node.position_type = PositionType::Absolute;
+    (node.left, node.margin.left) = if right_edge {
+        (Val::Percent(100.0), Val::Px(frame.x - MENU_DESIGN_WIDTH))
+    } else {
+        (Val::Px(frame.x), Val::ZERO)
+    };
+    (node.top, node.margin.top) = if bottom_edge {
+        (Val::Percent(100.0), Val::Px(frame.y - MENU_DESIGN_HEIGHT))
+    } else {
+        (Val::Px(frame.y), Val::ZERO)
+    };
+    node.right = Val::Auto;
+    node.bottom = Val::Auto;
+    node.width = Val::Px(frame.width);
 }
 
 impl ConfigDatRows {
@@ -1918,7 +2122,7 @@ impl ConfigDatRows {
         };
         let catalog: Option<ffxi_dat::dmsg::DmsgTable> = (|| {
             let loc = root
-                .resolve(ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_11_FILE_ID)
+                .resolve(ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_14_FILE_ID)
                 .ok()?;
             let bytes = std::fs::read(loc.path_under(root)).ok()?;
             ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
@@ -1940,14 +2144,18 @@ impl ConfigDatRows {
         // same catalog; chrome blocks carry no string and are dropped.
         let mut by_root = std::collections::BTreeMap::new();
         let mut row_ys = std::collections::BTreeMap::new();
+        let mut item_ids = std::collections::BTreeMap::new();
+        let mut item_counts = std::collections::BTreeMap::new();
         for name in config_window_names() {
             if let Some(window) = windows.get(name) {
                 let mut rows: Vec<(u32, String)> = Vec::new();
                 let mut ys: Vec<i16> = Vec::new();
+                let mut ids: Vec<i16> = Vec::new();
                 for item in window.live_items() {
                     let Some(id) = item.text_a_id.or(item.text_b_id) else {
                         continue;
                     };
+                    ids.push(item.id);
                     let label = usize::try_from(id)
                         .ok()
                         .and_then(|i| catalog.as_ref().and_then(|c| c.text(i).map(str::to_string)));
@@ -2009,17 +2217,24 @@ impl ConfigDatRows {
                 }
                 by_root.insert(window.root.clone(), rows);
                 row_ys.insert(window.root.clone(), ys);
+                item_ids.insert(window.root.clone(), ids);
+                item_counts.insert(window.root.clone(), window.item_count);
             }
         }
         self.by_root = by_root;
         self.row_ys = row_ys;
+        self.item_ids = item_ids;
+        self.item_counts = item_counts;
         let mut frames = std::collections::BTreeMap::new();
+        let mut frame_extents = std::collections::BTreeMap::new();
         for (name, window) in &windows {
             if let Some(frame) = &window.frame {
                 frames.insert(name.clone(), (frame.x, frame.y, frame.width));
+                frame_extents.insert(name.clone(), (frame.height, frame.anchor));
             }
         }
         self.frames = frames;
+        self.frame_extents = frame_extents;
         // …and the door row's two captions, which live in this same catalog (id pair above).
         let mut captions_pair: [Option<String>; 2] = [None, None];
         for (slot, id) in [
@@ -2088,6 +2303,37 @@ impl ConfigDatRows {
     fn rows_for(&self, window: &str) -> &[(u32, String)] {
         self.by_root.get(window).map_or(&[], Vec::as_slice)
     }
+
+    /// Which drawn row a window's last DAT item is; `None` until the records load.
+    pub fn last_item_row(&self, window: &str) -> Option<LastItemRow> {
+        if !self.loaded {
+            return None;
+        }
+        let (Some(ids), Some(&count)) = (self.item_ids.get(window), self.item_counts.get(window))
+        else {
+            return Some(LastItemRow::Undrawn);
+        };
+        let Some(file_row) = ids.iter().position(|&id| id == i16::from(count)) else {
+            return Some(LastItemRow::Undrawn);
+        };
+        let order = display_order(self.row_ys.get(window), self.rows_for(window).len());
+        Some(LastItemRow::Row(
+            order
+                .iter()
+                .position(|&row| row == file_row)
+                .unwrap_or(file_row),
+        ))
+    }
+}
+
+/// A window's rows in draw order: by item-block `y`, file order breaking ties; file order when the
+/// geometry list does not match the rows.
+fn display_order(ys: Option<&Vec<i16>>, len: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    if let Some(ys) = ys.filter(|ys| ys.len() == len) {
+        order.sort_by_key(|&index| (ys[index], index));
+    }
+    order
 }
 
 /// The retail selector windows' row captions, read from their DAT records at
@@ -2990,8 +3236,8 @@ pub const CONFIG_OPTION_FILTER_CONSOLE_FLAGS: u32 = 0x92;
 pub struct FilterListRow {
     /// Bit index inside [`CONFIG_OPTION_FILTER_CONSOLE_FLAGS`] (`descriptor[0]`).
     pub bit: u8,
-    /// Row caption: catalog table 11 string id (`descriptor+2`, resolved through
-    /// [`CAPTION_CATALOG_TABLE_11_FILE_ID`](ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_11_FILE_ID)).
+    /// Row caption: catalog table 0x0E string id (`descriptor+2`, resolved through
+    /// [`CAPTION_CATALOG_TABLE_14_FILE_ID`](ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_14_FILE_ID)).
     pub caption_id: u32,
 }
 
@@ -3112,6 +3358,11 @@ pub const CONFIG_OPTION_FURNISHING_CAMERA_COLLISION: u32 = 6;
 /// 0x193850`. Keywords are `type1`/`type2` (pair table .data 0x357AA0), values **0**/**1**
 /// in that order — not on/off (§59 addendum 35; bead kuluu-o9qt7.41).
 pub const CONFIG_OPTION_LAYOUT_CONTROL_TYPE: u32 = 0xC1;
+/// [`CONFIG_OPTION_LAYOUT_CONTROL_TYPE`]'s values: `type1` reverses arrange floor steps while the
+/// camera eye's z is at or past the focus's, `type2` never does
+/// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B6).
+pub const LAYOUT_CONTROL_TYPE1: i32 = 0;
+pub const LAYOUT_CONTROL_TYPE2: i32 = 1;
 /// `/statusparty`'s party-member-status-icons option — slash id **0x86**, handler .text
 /// FFXiMain.dll retail-2026-09 `.text 0x7EAE0`; pair table .data 0x357AAC = {off,on} writes **0**/**1**
 /// (NOT inverted: 1 = enabled), and its query path normalizes the stored dword to a bool and rewrites it
@@ -3961,14 +4212,7 @@ fn reorder_rows_by_record_y(
     table: &ConfigDatRows,
     rows: Vec<DynamicMenuRow>,
 ) -> Vec<DynamicMenuRow> {
-    let Some(ys) = table.row_ys.get(window) else {
-        return rows;
-    };
-    if ys.len() != rows.len() {
-        return rows;
-    }
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by_key(|&index| (ys[index], index));
+    let order = display_order(table.row_ys.get(window), rows.len());
     if order
         .iter()
         .enumerate()
@@ -4151,6 +4395,7 @@ pub fn menu_row_disabled(
         MenuKind::HomeView => {
             snap.myroom.is_some_and(|room| room.door_open) && home_row_gated_by_door(index)
         }
+        MenuKind::Arrange(window) => window.row_disabled(index),
         _ => false,
     }
 }
@@ -4350,6 +4595,28 @@ pub struct CompanionRow {
     pub slot: usize,
 }
 
+/// One framed window of the pool that keeps the open levels under the focused one on screen at
+/// their own record frames. Its rows lack Button, like the mirror's.
+#[derive(Component)]
+pub struct MenuStackWindow {
+    pub slot: usize,
+}
+
+#[derive(Component)]
+pub struct MenuStackWindowTitle {
+    pub window: usize,
+}
+
+#[derive(Component)]
+pub struct MenuStackWindowRow {
+    pub window: usize,
+    pub slot: usize,
+}
+
+/// More record windows than any menu chain keeps open under the focused one; past it the
+/// oldest stay open undrawn.
+pub const MAX_STACKED_WINDOWS: usize = 8;
+
 #[derive(Message, Debug, Clone, Copy)]
 pub struct MenuRowActivated {
     pub slot: usize,
@@ -4362,8 +4629,15 @@ pub const MENU_PANE_WIDTH: f32 = 220.0;
 /// Screen-space right anchor of the selector column (retail record x=384 in a
 /// 512-wide design, i.e. flush right with a small margin).
 const MENU_RIGHT_EDGE: f32 = 8.0;
+/// Top of the selector column: the selector records (menuwind, statcom2, configwi) sit at y=48.
+const MENU_COLUMN_TOP: f32 = 48.0;
 /// Any window whose record sits left of this design x draws as a side window.
 const LEFT_HALF_MAX_X: f32 = 256.0;
+
+#[cfg(test)]
+fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
+    frames.window_frame(record_window_name(kind)?)
+}
 
 /// Second-window law (bead kuluu-o9qt7.30): every menu window that owns a DAT record draws
 /// at strictly its own record frame. The Status flow first proved it, then the whole Config
@@ -4374,7 +4648,7 @@ const LEFT_HALF_MAX_X: f32 = 256.0;
 /// record name below is that window's own placement data, never an invented placeholder.
 /// Kinds with no owned record (or one sitting on the selector side) fall through to
 /// kuluu's default column.
-fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32, f32, f32)> {
+pub fn record_window_name(kind: MenuKind) -> Option<&'static str> {
     let name = match kind {
         MenuKind::RetailConfig => "configwi",
         MenuKind::RetailConfigPage(page) => RETAIL_CONFIG_PAGE_WINDOWS
@@ -4402,8 +4676,8 @@ fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32
         // draw is always from its own record (vault main_menu.md §59 addendum 18 corrected).
         MenuKind::Search => "scresult",
         MenuKind::FriendList => "friend",
-        MenuKind::HomeView => "myroom",
-        MenuKind::JobChange => "jobchang",
+        MenuKind::HomeView => MYROOM_WINDOW,
+        MenuKind::JobChange => JOBCHANG_WINDOW,
         // The roomlist draws at its own record frame (16,208,w366) — companion law
         // (vault main_menu.md §59 addendum 20; bead kuluu-o9qt7.13.5).
         MenuKind::RoomList => ROOMLIST_DAT_WINDOW,
@@ -4413,12 +4687,376 @@ fn companion_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<(f32
         // block N draws at `mcr{N}edit`'s own frame.
         MenuKind::MacroEditor { block: 0, .. } => "mcr1edit",
         MenuKind::MacroEditor { block: 1, .. } => "mcr2edit",
+        kind if crate::hud::unity_fp::is_unity_fp_window(kind) => {
+            return crate::hud::unity_fp::unity_fp_window_name(kind);
+        }
+        MenuKind::Merit(window) => window.record_name(),
+        MenuKind::Arrange(window) => window.record_name(),
         _ => return None,
     };
     if name.is_empty() {
         return None;
     }
-    frames.window_frame(name)
+    Some(name)
+}
+
+/// kuluu's one Root level stands for both main menu page windows.
+pub const MAIN_MENU_WINDOW: &str = "menuwind";
+pub const STATUS_SELECTOR_WINDOW: &str = "statcom2";
+pub const MAGIC_LIST_WINDOW: &str = "magic";
+pub const ABILITY_LIST_WINDOW: &str = "ability";
+pub const MOUNT_LIST_WINDOW: &str = "mount";
+pub const EMOTE_LIST_WINDOW: &str = "emote";
+/// The Mog House menu.
+pub const MYROOM_WINDOW: &str = "myroom";
+/// Mog House Change Jobs.
+pub const JOBCHANG_WINDOW: &str = "jobchang";
+
+/// The registry window kuluu draws for a menu level, where kuluu's window is one retail window.
+/// kuluu-only menus and levels that stand for several retail windows have none.
+pub fn registry_window(kind: MenuKind) -> Option<&'static str> {
+    if let Some(name) = record_window_name(kind) {
+        return Some(name);
+    }
+    Some(match kind {
+        MenuKind::Root => MAIN_MENU_WINDOW,
+        MenuKind::Status => STATUS_SELECTOR_WINDOW,
+        MenuKind::StatusDetail { entry } => {
+            return STATUS_DETAIL_WINDOW_NAMES
+                .get(usize::from(entry))
+                .copied()
+                .flatten();
+        }
+        MenuKind::KeyItems => "evitem",
+        MenuKind::UsableItems => "iuse",
+        MenuKind::Items => crate::myroom_arrange::INVENTOR_WINDOW,
+        MenuKind::Equipment => "equip",
+        MenuKind::AutomatonEquip => "pupequip",
+        MenuKind::MpCustomize => "mp_mncst",
+        MenuKind::MagicGroups => "mgcmenu",
+        MenuKind::MagicGroup(_) => MAGIC_LIST_WINDOW,
+        MenuKind::AbilitiesGroups => "abimenu",
+        MenuKind::AbilitiesGroup(group)
+            if crate::hud::action_model::AbilityGroup::ALL.get(usize::from(group))
+                == Some(&crate::hud::action_model::AbilityGroup::Mount) =>
+        {
+            MOUNT_LIST_WINDOW
+        }
+        MenuKind::AbilitiesGroup(_) => ABILITY_LIST_WINDOW,
+        MenuKind::AbilitySort { .. } => "abisortw",
+        MenuKind::EmoteList => EMOTE_LIST_WINDOW,
+        MenuKind::RegionInfo { .. } => "region",
+        MenuKind::MissionList => "missionm",
+        MenuKind::BazaarStalls => "bazaar",
+        MenuKind::MacrosPalette => "mcrmenu",
+        MenuKind::MacroSelect => "mcrselec",
+        MenuKind::HelpDeskPanel => "faqsub",
+        MenuKind::SynthLauncher => "cmbmenu",
+        MenuKind::Communication => "commenu",
+        MenuKind::PowerPrompt { .. }
+        | MenuKind::KeyAssignResetPrompt
+        | MenuKind::RoomListConfirm { .. } => crate::myroom_arrange::COMYN_WINDOW,
+        _ => return None,
+    })
+}
+
+/// The cursor-at-open rule of each registry window kuluu draws
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md, "Cursor at
+/// open"). Display-only windows never take the keys and have none.
+pub fn cursor_rule(window: &str) -> Option<OpenCursor> {
+    use crate::hud::unity_fp::{
+        AREALIST_WINDOW, FP_CAT2_WINDOW, FP_CAT_WINDOW, MERITYN_WINDOW, QUEST00_WINDOW,
+        QUEST01_WINDOW, UT_MENU_WINDOW,
+    };
+    use crate::myroom_arrange::{COMYN_WINDOW, INVENTOR_WINDOW};
+    const FIRST_ITEM: &[&str] = &[
+        "evitem",
+        "iuse",
+        INVENTOR_WINDOW,
+        "trade",
+        "scresult",
+        "link5",
+        "miss00",
+        QUEST00_WINDOW,
+        QUEST01_WINDOW,
+        AREALIST_WINDOW,
+        FP_CAT_WINDOW,
+        FP_CAT2_WINDOW,
+        MERITYN_WINDOW,
+        COMYN_WINDOW,
+        "confyn",
+        "textcol1",
+        "conf11l",
+        "conf11s",
+        "friend",
+        ROOMLIST_DAT_WINDOW,
+        "cmbhlst",
+    ];
+    const REMEMBERED: &[&str] = &[
+        MAIN_MENU_WINDOW,
+        STATUS_SELECTOR_WINDOW,
+        "mgcmenu",
+        MAGIC_LIST_WINDOW,
+        "abimenu",
+        ABILITY_LIST_WINDOW,
+        MOUNT_LIST_WINDOW,
+        "abisortw",
+        EMOTE_LIST_WINDOW,
+        "equip",
+        "pupequip",
+        "mp_mncst",
+        "region",
+        "missionm",
+        "bazaar",
+        "mcrmenu",
+        "mcrselec",
+        "mcr1edit",
+        "mcr2edit",
+        RETAIL_CONFIG_HUB_WINDOW,
+        "conf5win",
+        "conf5w1",
+        "conf5w2",
+        "k1assign",
+        "k2assign",
+        "textcol2",
+        "textcol3",
+        "faqsub",
+        UT_MENU_WINDOW,
+        MYROOM_WINDOW,
+        JOBCHANG_WINDOW,
+        "cmbmenu",
+        "commenu",
+    ];
+    if FIRST_ITEM.contains(&window) {
+        Some(OpenCursor::FirstItem)
+    } else if REMEMBERED.contains(&window) || RETAIL_CONFIG_PAGE_WINDOWS.contains(&window) {
+        Some(OpenCursor::Remembered)
+    } else {
+        None
+    }
+}
+
+/// The window a level is and the rule it opens its cursor by. The merit and arrange windows keep
+/// the cursor laws their own records give them.
+pub fn window_cursor(kind: MenuKind) -> Option<WindowCursor> {
+    if matches!(kind, MenuKind::Merit(_) | MenuKind::Arrange(_)) {
+        return None;
+    }
+    let window = registry_window(kind)?;
+    Some(WindowCursor {
+        window,
+        rule: cursor_rule(window)?,
+    })
+}
+
+/// How many rows a window not built from live data lists; `None` for a built one.
+pub fn fixed_item_count(kind: MenuKind) -> Option<usize> {
+    (!is_dynamic(kind)).then(|| static_entries(kind).len())
+}
+
+/// The main menu page that is kuluu's own, not one of the two retail page windows.
+const KULUU_ROOT_PAGE: usize = ROOT_PAGE_COUNT - 1;
+
+/// What a remembered window leaves in the memory as it closes: `None` leaves the memory alone,
+/// which is the main menu closing on kuluu's own page; a window closing on its unselectable item
+/// remembers nothing.
+pub fn remembered_close_cursor(level: &MenuLevel) -> Option<Option<usize>> {
+    if level.kind == MenuKind::Root && root_page_index(level.cursor) == KULUU_ROOT_PAGE {
+        return None;
+    }
+    Some((!level.cursor_locked()).then_some(level.cursor))
+}
+
+/// The registry windows that make their last DAT item unselectable when created
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md, "Last item
+/// unselectable at creation").
+pub const LAST_ITEM_UNSELECTABLE_WINDOWS: &[&str] = &[
+    "statcom", "statcom2", "ut_menu", "mgcmenu", "abimenu", "abiselec", "mp_abisc", "iuse",
+    "prty1", "prty2", "prty3", "prty4", "prty5", "prty5us", "prty5fr", "prty5de", "prty7", "prty8",
+    "link1", "link2", "link3", "link4", "link7", "link8", "link9", "link10", "link13", "searchma",
+    "scoption", "acoption", "scsibori", "searchjo", "searchle", "searchna", "searchra", "comgenre",
+    "sccompar", "sccomite", "sccomls", "commenu", "flistmai", "mes1rcv", "mes2frnd", "blkmain",
+    "map0", "mapv2", "mapv3", "mapscan", "auc1", "auc2", "auc3", "auc4", "aucweapo", "aucammo",
+    "aucarmor", "aucmagic", "aucmater", "aucfood", "aucmeals", "aucitem", "wepsort", "armsort",
+    "mcrmenu", "mcrselec", "mcrselop", "mcres20", "mcresmn", "configwi", "conf5m", "conf11m",
+    "conf11l", "sortyn", "bluesibo", "statpup",
+];
+
+/// Whether a level is one of those windows whose rows kuluu builds from the window's own record,
+/// so the record can say which row the last item is; for the others the record does not
+/// establish the DAT item count.
+pub fn locks_last_item(kind: MenuKind) -> bool {
+    matches!(
+        kind,
+        MenuKind::Status
+            | MenuKind::UnityMenu
+            | MenuKind::RetailConfig
+            | MenuKind::RetailConfigPage(_)
+            | MenuKind::RetailConfigSub(_)
+    ) && registry_window(kind)
+        .is_some_and(|window| LAST_ITEM_UNSELECTABLE_WINDOWS.contains(&window))
+}
+
+/// Which row a window's last DAT item is, read from its own record; `None` while the record has
+/// not loaded. The Status selector's last item is a trailing dummy block, not a row. Windows whose
+/// rows kuluu does not build from their records stay unresolved.
+pub fn last_item_row(
+    kind: MenuKind,
+    config_rows: &ConfigDatRows,
+    unity: &crate::hud::unity_fp::UnityFpDat,
+) -> Option<LastItemRow> {
+    match kind {
+        MenuKind::Status => Some(LastItemRow::Undrawn),
+        MenuKind::UnityMenu => unity.menu_last_item_row(),
+        MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
+            config_rows.last_item_row(registry_window(kind)?)
+        }
+        _ => None,
+    }
+}
+
+/// The frame a kind draws at when its record sits left of the selector column. Selector
+/// records (x=384, pinned to the right edge) draw in kuluu's selector column instead.
+fn side_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFrame> {
+    let frame = frames.record_frame(record_window_name(kind)?)?;
+    (frame.x < LEFT_HALF_MAX_X).then_some(frame)
+}
+
+/// A window that docks keeps its record x wherever its record sits
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+fn docked_record_frame(kind: MenuKind, frames: &ConfigDatRows) -> Option<RecordFrame> {
+    let window = registry_window(kind)?;
+    crate::hud::dock::registry_dock_slot(window)?;
+    frames.record_frame(window)
+}
+
+/// Where the dock law put a level's window, once its registry window docks and has been placed.
+pub fn dock_placement(
+    kind: MenuKind,
+    board: &crate::hud::dock::DockBoard,
+) -> Option<crate::hud::dock::DockPlacement> {
+    let window = registry_window(kind)?;
+    crate::hud::dock::registry_dock_slot(window)?;
+    board.placement(window)
+}
+
+/// statcom2 sits exactly over the main menu's page 1 and configwi over its page 2, so either one
+/// hides the main menu under it.
+fn covers_main_menu(kind: MenuKind) -> bool {
+    matches!(kind, MenuKind::Status | MenuKind::RetailConfig)
+}
+
+/// Where one open window of the menu stack draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuWindowSeat {
+    /// At its own left-side record frame.
+    Record(RecordFrame),
+    /// Kuluu's selector column on the right edge.
+    Column,
+    /// Left of the selector column, where kuluu keeps a focused selector's opener framed.
+    BesideColumn,
+}
+
+/// Every window an open menu stack draws as (stack index, seat), oldest first with the focused
+/// window last.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MenuStackLayout {
+    pub windows: Vec<(usize, MenuWindowSeat)>,
+}
+
+impl MenuStackLayout {
+    pub fn focused(&self) -> Option<(usize, MenuWindowSeat)> {
+        self.windows.last().copied()
+    }
+
+    /// The window under the focused one drawn in or beside the selector column.
+    pub fn column_window(&self) -> Option<(usize, MenuWindowSeat)> {
+        let (_, below) = self.windows.split_last()?;
+        below
+            .iter()
+            .copied()
+            .find(|(_, seat)| !matches!(seat, MenuWindowSeat::Record(_)))
+    }
+
+    /// The windows under the focused one drawn at their own record frames, oldest first.
+    pub fn record_windows(&self) -> Vec<(usize, RecordFrame)> {
+        let below = self
+            .windows
+            .split_last()
+            .map_or(&[][..], |(_, below)| below);
+        below
+            .iter()
+            .filter_map(|&(index, seat)| match seat {
+                MenuWindowSeat::Record(frame) => Some((index, frame)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Every open window stays on screen at its own record frame, oldest first and newest on top,
+/// and a window sitting on an older one's whole rectangle hides it
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md). A docked window
+/// sits at its record frame wherever that lies; any other window
+/// without a left-side record keeps kuluu's selector column: focused, it draws there with its
+/// opener framed beside it; under a focused record window, the newest such window holds the
+/// column. statcom2 and configwi cover the main menu, so nothing sits beside Status or the Config
+/// hub.
+pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStackLayout {
+    let levels = &stack.levels;
+    // Status details draw in their own window beside persona (`update_status_detail_window`),
+    // and the windows that draw themselves do so in `unity_fp_view`.
+    let Some(focused) = levels
+        .iter()
+        .rposition(|level| {
+            !matches!(level.kind, MenuKind::StatusDetail { .. }) && !draws_itself(level.kind)
+        })
+        .or_else(|| levels.len().checked_sub(1))
+    else {
+        return MenuStackLayout::default();
+    };
+    let side = |index: usize| {
+        side_record_frame(levels[index].kind, frames)
+            .or_else(|| docked_record_frame(levels[index].kind, frames))
+    };
+    let focused_frame = side(focused);
+    let records: Vec<(usize, RecordFrame)> = (0..focused)
+        .filter_map(|index| side(index).map(|frame| (index, frame)))
+        .collect();
+    let mut windows: Vec<(usize, MenuWindowSeat)> = records
+        .iter()
+        .enumerate()
+        .filter(|&(at, (_, frame))| {
+            !records[at + 1..]
+                .iter()
+                .map(|(_, newer)| newer)
+                .chain(focused_frame.as_ref())
+                .any(|newer| newer.covers(frame))
+        })
+        .map(|(_, &(index, frame))| (index, MenuWindowSeat::Record(frame)))
+        .collect();
+    let column = if covers_main_menu(levels[focused].kind) {
+        None
+    } else if focused_frame.is_some() {
+        (0..focused)
+            .rev()
+            .find(|&index| side(index).is_none())
+            .map(|index| (index, MenuWindowSeat::Column))
+    } else {
+        focused
+            .checked_sub(1)
+            .filter(|&index| side(index).is_none())
+            .map(|index| (index, MenuWindowSeat::BesideColumn))
+    };
+    if let Some(window) = column.filter(|&(index, _)| !renders_bespoke_screen(levels[index].kind)) {
+        windows.push(window);
+        windows.sort_by_key(|&(index, _)| index);
+    }
+    windows.push((
+        focused,
+        focused_frame.map_or(MenuWindowSeat::Column, MenuWindowSeat::Record),
+    ));
+    MenuStackLayout { windows }
 }
 
 /// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
@@ -4470,7 +5108,43 @@ pub fn spawn_main_menu(mut commands: Commands) {
         ))
         .with_children(|root| {
             spawn_companion_frame(root);
+            for slot in 0..MAX_STACKED_WINDOWS {
+                spawn_stacked_window(root, slot);
+            }
             spawn_pane_column(root);
+        });
+}
+
+fn spawn_stacked_window(parent: &mut ChildSpawnerCommands, slot: usize) {
+    let (mut node, bg, border) = style::window_frame();
+    node.position_type = PositionType::Absolute;
+    node.display = Display::None;
+    parent
+        .spawn((MenuStackWindow { slot }, node, bg, border))
+        .with_children(|w| {
+            w.spawn((
+                MenuStackWindowTitle { window: slot },
+                Text::new(""),
+                text_nowrap(),
+                style::text_font(14.0),
+                TextColor(theme::TITLE),
+            ));
+            for row in 0..DYNAMIC_VISIBLE_ROWS {
+                w.spawn((
+                    MenuStackWindowRow {
+                        window: slot,
+                        slot: row,
+                    },
+                    Node {
+                        display: Display::None,
+                        ..default()
+                    },
+                    Text::new(""),
+                    text_nowrap(),
+                    style::text_font(14.0),
+                    TextColor(theme::TEXT),
+                ));
+            }
         });
 }
 
@@ -4479,7 +5153,7 @@ pub fn spawn_main_menu(mut commands: Commands) {
 fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
-    node.top = Val::Px(48.0);
+    node.top = Val::Px(MENU_COLUMN_TOP);
     node.right = Val::Px(MENU_RIGHT_EDGE + MENU_PANE_WIDTH);
     node.width = Val::Px(MENU_PANE_WIDTH);
     node.display = Display::None;
@@ -4515,7 +5189,7 @@ fn spawn_companion_frame(parent: &mut ChildSpawnerCommands) {
 fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
-    node.top = Val::Px(48.0);
+    node.top = Val::Px(MENU_COLUMN_TOP);
     node.right = Val::Px(MENU_RIGHT_EDGE);
     node.width = Val::Px(MENU_PANE_WIDTH);
     parent
@@ -5225,6 +5899,8 @@ pub fn refresh_dynamic_menu_rows(
     mut equip_records: ResMut<EquipRecords>,
     bindings: Res<crate::keybinds::Bindings>,
     mut dynamic: ResMut<DynamicMenu>,
+    mut unity_fp_dat: ResMut<crate::hud::unity_fp::UnityFpDat>,
+    mut merit_dat: ResMut<crate::hud::merit_windows::MeritDat>,
 ) {
     // The remodel prompt's question is DAT text, so it rides in with every refresh (bead
     // kuluu-o9qt7.13.5.2) rather than being typed into the client.
@@ -5256,10 +5932,65 @@ pub fn refresh_dynamic_menu_rows(
             .emote_sort_prompts
             .clone_from(&config_rows.emote_sort_prompts);
     }
-    let active_kind = match &*mode {
-        InputMode::Menu(stack) => stack.current().map(|l| l.kind),
+    let stack = match &*mode {
+        InputMode::Menu(stack) => Some(stack),
         _ => None,
     };
+
+    // The Unity and alter ego point windows read their own records and tables, loaded the
+    // first time one opens; their per-window state follows the stack every frame one is up
+    // and once more when the last one closes.
+    let unity_fp_open = stack.is_some_and(|stack| {
+        stack
+            .levels
+            .iter()
+            .any(|level| crate::hud::unity_fp::is_unity_fp_window(level.kind))
+    });
+    if unity_fp_open {
+        unity_fp_dat.ensure_loaded(dat_for_captions);
+        let texts = &unity_fp_dat.texts;
+        let message = texts
+            .get_text(
+                crate::hud::gettext::GETTEXT_TABLE_CLIENT_MESSAGES,
+                crate::hud::unity_fp::NOT_ALLOWED_MESSAGE_ID,
+            )
+            .map(str::to_string);
+        if dynamic.unity_fp.not_allowed_message != message {
+            dynamic.unity_fp.not_allowed_message = message;
+        }
+        let leader_help = texts
+            .get_text(
+                crate::hud::gettext::GETTEXT_TABLE_CAPTIONS,
+                crate::hud::unity_fp::LEADER_HELP_ID,
+            )
+            .map(str::to_string);
+        if dynamic.unity_fp.leader_help != leader_help {
+            dynamic.unity_fp.leader_help = leader_help;
+        }
+    }
+    if unity_fp_open || dynamic.unity_fp != crate::hud::unity_fp::UnityFpWindows::default() {
+        crate::hud::unity_fp::sync_unity_fp_windows(&mut dynamic, stack, &scene.snapshot);
+    }
+
+    let merit_open = stack.is_some_and(|stack| {
+        stack
+            .levels
+            .iter()
+            .any(|level| crate::hud::merit_windows::is_merit_window(level.kind))
+    });
+    if merit_open {
+        merit_dat.ensure_loaded(dat_for_captions);
+        refresh_merit_dat_text(&mut dynamic, &merit_dat.texts);
+    }
+    let merit_state_open = dynamic.merit.categories.is_some() || dynamic.merit.job_page.is_some();
+    if merit_open || merit_state_open || !dynamic.merit.list_starts.is_empty() {
+        crate::hud::merit_windows::sync_merit_windows(
+            &mut dynamic,
+            stack,
+            &scene.snapshot,
+            &merit_dat,
+        );
+    }
 
     // The equip gate needs item records whatever window is open, so the DATs resolve once here
     // rather than per arm.
@@ -5272,14 +6003,243 @@ pub fn refresh_dynamic_menu_rows(
             .clone_from(&selector_captions.labels);
     }
 
-    let Some(kind) = active_kind.filter(|k| is_dynamic(*k)) else {
+    let snap = &scene.snapshot;
+    let stacked_rows: Vec<(MenuKind, Vec<DynamicMenuRow>)> = stack
+        .and_then(|stack| stack.levels.split_last())
+        .map(|(_, below)| {
+            below
+                .iter()
+                .filter(|level| is_dynamic(level.kind))
+                .map(|level| {
+                    let rows = dynamic_rows_for(
+                        level,
+                        snap,
+                        &sort,
+                        &active_bag,
+                        &dat_root,
+                        &mut school_table,
+                        &mut config_rows,
+                        &equip_records,
+                        &bindings,
+                        &dynamic,
+                        &unity_fp_dat,
+                        &merit_dat,
+                    );
+                    (level.kind, rows)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if dynamic.stacked_rows != stacked_rows {
+        dynamic.stacked_rows = stacked_rows;
+    }
+    let top = stack.and_then(MenuStack::current);
+    let rows_kind = top.map(|level| level.kind);
+    if dynamic.rows_kind != rows_kind {
+        dynamic.rows_kind = rows_kind;
+    }
+    let Some(level) = top.filter(|level| is_dynamic(level.kind)) else {
         if !dynamic.rows.is_empty() {
             dynamic.rows.clear();
         }
         return;
     };
-    let snap = &scene.snapshot;
+    let rows = dynamic_rows_for(
+        level,
+        snap,
+        &sort,
+        &active_bag,
+        &dat_root,
+        &mut school_table,
+        &mut config_rows,
+        &equip_records,
+        &bindings,
+        &dynamic,
+        &unity_fp_dat,
+        &merit_dat,
+    );
+    if rows != dynamic.rows {
+        dynamic.rows = rows;
+    }
+}
+
+/// The menu stack an input mode keeps open, through a sub-target cursor waiting to return to it.
+pub fn live_menu(mode: &InputMode) -> Option<&MenuStack> {
+    match mode {
+        InputMode::Menu(stack) => Some(stack),
+        InputMode::SubTarget(state) => live_menu(&state.return_to),
+        _ => None,
+    }
+}
+
+/// The Command menu an input mode keeps open, through a sub-target cursor waiting to return to it.
+pub fn live_command_menu(mode: &InputMode) -> Option<&TargetActionState> {
+    match mode {
+        InputMode::TargetAction(state) => Some(state),
+        InputMode::SubTarget(state) => live_command_menu(&state.return_to),
+        _ => None,
+    }
+}
+
+/// What [`persist_window_cursors`] saw open last frame.
+#[derive(Default)]
+pub struct WindowsSeenOpen {
+    menu: Option<MenuStack>,
+    command_menu: Option<TargetActionState>,
+}
+
+/// Keeps the session's window cursor memory: an open menu's records join it every frame, and
+/// when the menu or the Command menu goes away, every window still open closes into it
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+pub fn persist_window_cursors(
+    mode: Res<InputMode>,
+    mut dynamic: ResMut<DynamicMenu>,
+    mut seen: Local<WindowsSeenOpen>,
+) {
+    if !mode.is_changed() {
+        return;
+    }
+    match live_menu(&mode) {
+        Some(stack) => {
+            if !dynamic.window_cursors.holds(&stack.cursor_memory) {
+                dynamic.window_cursors.absorb(&stack.cursor_memory);
+            }
+            seen.menu = Some(stack.clone());
+        }
+        None => {
+            if let Some(mut closed) = seen.menu.take() {
+                closed.close_all();
+                dynamic.window_cursors.absorb(&closed.cursor_memory);
+            }
+        }
+    }
+    match live_command_menu(&mode) {
+        Some(state) => seen.command_menu = Some(state.clone()),
+        None => {
+            if let Some(closed) = seen.command_menu.take() {
+                closed.record_pickers(&mut dynamic.window_cursors);
+            }
+        }
+    }
+}
+
+/// The number of rows built for an open window: the top one's in `rows`, the others' in
+/// `stacked_rows`. `None` until the rows refresh has built them for that window.
+fn built_row_count(dynamic: &DynamicMenu, kind: MenuKind, top: bool) -> Option<usize> {
+    if top {
+        return (dynamic.rows_kind == Some(kind)).then_some(dynamic.rows.len());
+    }
+    dynamic
+        .stacked_rows
+        .iter()
+        .find(|(open, _)| *open == kind)
+        .map(|(_, rows)| rows.len())
+}
+
+/// Finishes what a window's creation could not know yet: a remembered cursor comes back inside
+/// the rows the window got (part of its open-time placement), and the record tells which row is
+/// the last item made unselectable. A window opened since the rows were last built waits for its
+/// own rows.
+pub fn settle_opened_windows(
+    mut mode: ResMut<InputMode>,
+    dynamic: Res<DynamicMenu>,
+    config_rows: Res<ConfigDatRows>,
+    unity: Res<crate::hud::unity_fp::UnityFpDat>,
+) {
+    let InputMode::Menu(stack) = &*mode else {
+        return;
+    };
+    let resolved: Vec<Option<LastItemRow>> = stack
+        .levels
+        .iter()
+        .map(|level| {
+            level
+                .last_item_lock
+                .filter(|lock| lock.row == LastItemRow::Unresolved)
+                .and_then(|_| last_item_row(level.kind, &config_rows, &unity))
+        })
+        .collect();
+    let top = stack.levels.len().saturating_sub(1);
+    let bounds: Vec<Option<usize>> = stack
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(index, level)| {
+            level
+                .clamp_pending
+                .then(|| built_row_count(&dynamic, level.kind, index == top))
+                .flatten()
+        })
+        .collect();
+    let pending = bounds.iter().any(Option::is_some) || resolved.iter().any(Option::is_some);
+    if !pending {
+        return;
+    }
+    let InputMode::Menu(stack) = &mut *mode else {
+        return;
+    };
+    for (index, level) in stack.levels.iter_mut().enumerate() {
+        if let Some(rows) = bounds[index] {
+            level.cursor = level.cursor.min(rows.saturating_sub(1));
+            level.clamp_pending = false;
+            if let Some(lock) = level.last_item_lock.as_mut() {
+                lock.open_cursor = level.cursor;
+            }
+        }
+        if let (Some(lock), Some(row)) = (level.last_item_lock.as_mut(), resolved[index]) {
+            lock.row = row;
+        }
+    }
+}
+
+/// Copies the DAT lines the merit windows' input path prints and the help bar shows.
+fn refresh_merit_dat_text(dynamic: &mut DynamicMenu, texts: &crate::hud::gettext::GetTextTables) {
+    use crate::hud::gettext::{GETTEXT_TABLE_CAPTIONS, GETTEXT_TABLE_CLIENT_MESSAGES};
+    use crate::hud::merit_windows as mw;
+    let line = |table: u8, id: u16| texts.get_text(table, id).map(str::to_string);
+    let not_in_mog_house = line(
+        GETTEXT_TABLE_CLIENT_MESSAGES,
+        crate::hud::unity_fp::NOT_ALLOWED_MESSAGE_ID,
+    );
+    let mode_refused = line(GETTEXT_TABLE_CLIENT_MESSAGES, mw::MODE_REFUSED_MESSAGE_ID);
+    let sort_help = [
+        line(GETTEXT_TABLE_CAPTIONS, mw::SORT_HELP_RAISE_ID),
+        line(GETTEXT_TABLE_CAPTIONS, mw::SORT_HELP_LOWER_ID),
+    ];
+    if dynamic.merit.not_in_mog_house_message != not_in_mog_house {
+        dynamic.merit.not_in_mog_house_message = not_in_mog_house;
+    }
+    if dynamic.merit.mode_refused_message != mode_refused {
+        dynamic.merit.mode_refused_message = mode_refused;
+    }
+    if dynamic.merit.sort_help != sort_help {
+        dynamic.merit.sort_help = sort_help;
+    }
+}
+
+fn dynamic_rows_for(
+    level: &MenuLevel,
+    snap: &kuluu_snapshot::SceneSnapshot,
+    sort: &crate::hud::item_detail::SortOptions,
+    active_bag: &crate::hud::item_screen::ItemScreenContainer,
+    dat_root: &Option<Res<crate::dat_root::SharedDatRoot>>,
+    school_table: &mut MagicSchoolTable,
+    config_rows: &mut ConfigDatRows,
+    equip_records: &EquipRecords,
+    bindings: &crate::keybinds::Bindings,
+    dynamic: &DynamicMenu,
+    unity_fp_dat: &crate::hud::unity_fp::UnityFpDat,
+    merit_dat: &crate::hud::merit_windows::MeritDat,
+) -> Vec<DynamicMenuRow> {
+    let kind = level.kind;
     let rows: Vec<DynamicMenuRow> = match kind {
+        kind if crate::hud::unity_fp::is_unity_fp_window(kind) => {
+            crate::hud::unity_fp::unity_fp_rows(level, unity_fp_dat, &dynamic.unity_fp)
+        }
+        MenuKind::Merit(_) => {
+            crate::hud::merit_windows::merit_rows_for(level, merit_dat, &dynamic.merit, snap)
+        }
+        MenuKind::Arrange(window) => dynamic.arrange.rows(window),
         MenuKind::Magic => spell_rows(&snap.spells_known),
         MenuKind::MagicGroup(school) => {
             school_table.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
@@ -5323,7 +6283,7 @@ pub fn refresh_dynamic_menu_rows(
         // roomlist's five DAT-synthesised rows (bead kuluu-o9qt7.13.5).
         MenuKind::RoomList => {
             config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
-            roomlist_rows(&config_rows)
+            roomlist_rows(config_rows)
         }
         // The long-form/line-editor family for one keytop (§34: mcrbedit/
         // mcr1edit/mcr2edit/mcrledit collapse to this drill [I-shape]).
@@ -5348,7 +6308,7 @@ pub fn refresh_dynamic_menu_rows(
             };
             config_window_rows(
                 window,
-                &config_rows,
+                config_rows,
                 &dynamic.config_option_values,
                 dynamic.option_edit,
                 &dynamic.config_window_choices,
@@ -5405,10 +6365,10 @@ pub fn refresh_dynamic_menu_rows(
             index,
             item_no,
         } => item_action_rows(snap, container, index, item_no),
-        MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot, Some(&equip_records)),
+        MenuKind::EquipSlot(equip_slot) => equip_slot_rows(snap, equip_slot, Some(equip_records)),
         // The live key map (bead kuluu-o9qt7.26.1): rows are the store itself plus
         // the trailing preset commands, so any remap shows without a restart.
-        MenuKind::Controls => controls_rows(&bindings),
+        MenuKind::Controls => controls_rows(bindings),
         _ => Vec::new(),
     };
 
@@ -5418,10 +6378,7 @@ pub fn refresh_dynamic_menu_rows(
     // draws it inside the list). Edit-mode keys route to the buffer before the
     // cursor ever moves, so the echoed row never needs own semantics.
     if let MenuKind::MacroEditor { .. } = kind {
-        if let Some(buf) = match &*mode {
-            InputMode::Menu(stack) => stack.current().and_then(|l| l.macro_line_edit.as_ref()),
-            _ => None,
-        } {
+        if let Some(buf) = level.macro_line_edit.as_ref() {
             rows.push(DynamicMenuRow {
                 tint: None,
                 label: format!("{} > {}_", MACRO_ROW_ADD_LINE, buf.text),
@@ -5432,9 +6389,7 @@ pub fn refresh_dynamic_menu_rows(
         }
     }
     order_dynamic_rows(kind, sort.auto, &mut rows);
-    if rows != dynamic.rows {
-        dynamic.rows = rows;
-    }
+    rows
 }
 
 /// One row per slot of `container`, labelled with the bare item name (the item
@@ -5486,7 +6441,10 @@ fn order_dynamic_rows(kind: MenuKind, auto_sort: bool, rows: &mut [DynamicMenuRo
         // tables together (whether retail sections match the tables is an
         // open question, bead kuluu-h7x retail_unknowns). Emotes keep the
         // scraped-table (id) order.
-        MenuKind::ItemAction { .. } | MenuKind::KeyItems | MenuKind::EmoteList => {}
+        MenuKind::ItemAction { .. }
+        | MenuKind::KeyItems
+        | MenuKind::EmoteList
+        | MenuKind::Arrange(_) => {}
         _ => rows.sort_by(|a, b| a.label.cmp(&b.label)),
     }
 }
@@ -5715,6 +6673,9 @@ pub enum MenuRowTint {
     /// ARGB 0x80509050 — this id already stands in a scanned equip slot
     /// (`.text FFXiMain.dll retail-2026-09 0x1DE173`); beats the lime.
     SameKindEquipped,
+    /// A furniture list row for a piece placed on this floor
+    /// ([`ffxi_dat::furniture_arrange::LIST_PLACED_TINT`]).
+    FurniturePlaced,
 }
 
 /// The slots `.text FFXiMain.dll retail-2026-09 0x131FA0` walks when looking for an already-
@@ -6197,6 +7158,7 @@ pub fn update_main_menu(
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
     config_rows: Res<ConfigDatRows>,
+    dock: Option<Res<crate::hud::dock::DockBoard>>,
     mut menu_q: Query<
         &mut Node,
         (
@@ -6207,7 +7169,7 @@ pub fn update_main_menu(
         ),
     >,
     mut pane_q: Query<
-        &mut Node,
+        (&mut Node, &mut ZIndex, &ComputedNode),
         (
             With<MainMenuPane>,
             Without<MainMenuRow>,
@@ -6231,7 +7193,7 @@ pub fn update_main_menu(
     >,
     mut title_q: Query<(&MainMenuTitle, Option<&CompanionTitle>, &mut Text)>,
     mut comp_frame_q: Query<
-        &mut Node,
+        (&mut Node, &mut ZIndex, &ComputedNode),
         (
             With<MainMenuCompanionFrame>,
             Without<MainMenuRow>,
@@ -6242,6 +7204,19 @@ pub fn update_main_menu(
 ) {
     let Ok(mut node) = menu_q.single_mut() else {
         return;
+    };
+    let dock = dock.as_deref();
+    let dock_y = |want: &mut Node, kind: MenuKind, computed: &ComputedNode| {
+        if let Some((board, placement)) =
+            dock.and_then(|board| Some((board, dock_placement(kind, board)?)))
+        {
+            crate::hud::dock::place_docked(
+                want,
+                placement,
+                crate::hud::dock::drawn_height(computed),
+                board.surface_height,
+            );
+        }
     };
 
     let hide = |node: &mut Node| {
@@ -6271,73 +7246,32 @@ pub fn update_main_menu(
         node.display = Display::Flex;
     }
     let want_width = pane_width_for(top_kind);
-    // Second-window law (vault main_menu.md §59 addendum 10/11 and addendum 17):
-    // a left-half companion draws at its own record rect while the parent list
-    // stays visible in the selector column; right-column kinds keep kuluu's seat.
-    let place =
-        companion_record_frame(top_kind, &config_rows).filter(|(x, _, _)| *x < LEFT_HALF_MAX_X);
-    for mut pane_node in pane_q.iter_mut() {
-        if let Some((x, y, w)) = place {
-            if pane_node.left != Val::Px(x) {
-                pane_node.left = Val::Px(x);
-            }
-            if pane_node.top != Val::Px(y) {
-                pane_node.top = Val::Px(y);
-            }
-            if !matches!(pane_node.right, Val::Auto) {
-                pane_node.right = Val::Auto;
-            }
-            if pane_node.width != Val::Px(w) {
-                pane_node.width = Val::Px(w);
-            }
-        } else {
-            if !matches!(pane_node.left, Val::Auto) {
-                pane_node.left = Val::Auto;
-            }
-            if pane_node.top != Val::Px(48.0) {
-                pane_node.top = Val::Px(48.0);
-            }
-            if pane_node.right != Val::Px(MENU_RIGHT_EDGE) {
-                pane_node.right = Val::Px(MENU_RIGHT_EDGE);
-            }
-            if pane_node.width != Val::Px(want_width) {
-                pane_node.width = Val::Px(want_width);
-            }
+    let layout = menu_stack_layout(stack, &config_rows);
+    let Some((view_index, view_seat)) = layout.focused() else {
+        hide(&mut node);
+        return;
+    };
+    for (mut pane_node, mut z_index, computed) in pane_q.iter_mut() {
+        let mut want = pane_node.clone();
+        match view_seat {
+            MenuWindowSeat::Record(frame) => place_at_record_frame(&mut want, &frame),
+            _ => place_in_column(&mut want, MENU_RIGHT_EDGE, want_width),
         }
+        dock_y(&mut want, stack.levels[view_index].kind, computed);
+        pane_node.set_if_neq(want);
+        z_index.set_if_neq(stack_z_index(view_index));
     }
 
-    // A Status detail window is display-only and opens BESIDE the persona
-    // panel, not in this column (vault main_menu.md §59 addendum 10: every
-    // statcom2 detail record sits at x=130,y=48): the right column keeps
-    // showing the list under it. `update_status_detail_window` draws the readout.
-    let view_index = stack
-        .levels
-        .iter()
-        .rposition(|l| !matches!(l.kind, MenuKind::StatusDetail { .. }))
-        .unwrap_or(stack.levels.len().saturating_sub(1));
-    let view = stack.levels.get(view_index).map(|l| PaneView {
-        kind: l.kind,
-        cursor: l.cursor,
-    });
-
-    // The selector stays on screen under its companion (vault main_menu.md §59
-    // handler-opened windows are siblings - FFXiMain.dll retail-2026-09
-    // OpenMenu RVA 0x15E350 keeps the selector open). v1 mirrors only the
-    // level directly under focus; deeper retail stacks keep more windows open
-    // and land as follow-on beads. statcom2 is the exception: its record frame
-    // `(384,48,w112,h218)` covers menuwind's `(384,48,w112,h202)` exactly (§59
-    // addendum 10), so retail shows only the list — mirror hidden.
-    let parent_view = if matches!(view.as_ref().map(|v| v.kind), Some(MenuKind::Status)) {
-        None
-    } else {
-        view_index.checked_sub(1).and_then(move |i| {
-            stack.levels.get(i).map(|l| PaneView {
-                kind: l.kind,
-                cursor: l.cursor,
-            })
+    let level_view = |index: usize| {
+        stack.levels.get(index).map(|l| PaneView {
+            kind: l.kind,
+            cursor: l.cursor,
         })
     };
-    let parent_view = parent_view.filter(|p| !renders_bespoke_screen(p.kind));
+    let view = level_view(view_index);
+    let column_window = layout.column_window();
+    let parent_view = column_window.and_then(|(index, _)| level_view(index));
+    let parent_rows = parent_view.map_or(&[][..], |p| stacked_rows_for(p.kind, &dynamic));
 
     for (_, comp, mut text) in title_q.iter_mut() {
         let want = if comp.is_some() {
@@ -6364,7 +7298,7 @@ pub fn update_main_menu(
     let window = visible_window(view.kind, total);
     // Mirror-side totals for the selector frame.
     let parent_total = parent_view
-        .map(|p| entry_count(p.kind, &dynamic, settings.dlss_supported))
+        .map(|p| rows_entry_count(p.kind, parent_rows, settings.dlss_supported))
         .unwrap_or(0);
     let parent_window = parent_view
         .map(|p| visible_window(p.kind, parent_total))
@@ -6388,7 +7322,7 @@ pub fn update_main_menu(
                 row_node.display = Display::Flex;
             }
             let label: &str = if is_dynamic(parent.kind) {
-                entry_label(parent.kind, row.slot, &dynamic)
+                rows_entry_label(parent.kind, row.slot, parent_rows, &dynamic)
             } else {
                 entries_for(parent.kind, settings.dlss_supported)
                     .get(row.slot)
@@ -6461,21 +7395,7 @@ pub fn update_main_menu(
         } else {
             None
         };
-        let base_color = if gated {
-            theme::TEXT_DISABLED
-        } else {
-            match tint {
-                Some(MenuRowTint::SameKindEquipped) => theme::TEXT_EQUIP_SAME_KIND,
-                Some(MenuRowTint::WearableNow) => theme::TEXT_EQUIP_OK,
-                None => {
-                    if is_cursor {
-                        theme::CURSOR
-                    } else {
-                        theme::TEXT
-                    }
-                }
-            }
-        };
+        let base_color = menu_row_color(gated, tint, is_cursor);
         let (want, want_color, want_bg) = if is_cursor {
             (format!("> {body}"), base_color, Color::NONE)
         } else {
@@ -6492,35 +7412,204 @@ pub fn update_main_menu(
         }
     }
 
-    let Some(parent) = parent_view else {
-        for mut frame in comp_frame_q.iter_mut() {
+    let (Some(parent), Some((parent_index, parent_seat))) = (parent_view, column_window) else {
+        for (mut frame, _, _) in comp_frame_q.iter_mut() {
             hide(&mut frame);
         }
         return;
     };
     let mirror_width = pane_width_for(parent.kind);
-    // The mirror keeps its seat: beside the selector column when that column
-    // still owns its right anchor, and IN the right-anchor seat itself once the
-    // focused window has moved left (retail draws the parent list there).
-    for mut frame in comp_frame_q.iter_mut() {
-        if place.is_some() {
-            if frame.right != Val::Px(MENU_RIGHT_EDGE) {
-                frame.right = Val::Px(MENU_RIGHT_EDGE);
+    let right = match parent_seat {
+        MenuWindowSeat::BesideColumn => MENU_RIGHT_EDGE + mirror_width,
+        _ => MENU_RIGHT_EDGE,
+    };
+    for (mut frame, mut z_index, computed) in comp_frame_q.iter_mut() {
+        let mut want = frame.clone();
+        place_in_column(&mut want, right, mirror_width);
+        dock_y(&mut want, parent.kind, computed);
+        want.display = Display::Flex;
+        frame.set_if_neq(want);
+        z_index.set_if_neq(stack_z_index(parent_index));
+    }
+}
+
+/// Puts a window node in kuluu's selector column, `right` px in from the right screen edge.
+fn place_in_column(node: &mut Node, right: f32, width: f32) {
+    node.left = Val::Auto;
+    node.top = Val::Px(MENU_COLUMN_TOP);
+    node.right = Val::Px(right);
+    node.bottom = Val::Auto;
+    node.margin = UiRect::ZERO;
+    node.width = Val::Px(width);
+}
+
+/// Open windows share one draw priority, so the newer one draws on top.
+fn stack_z_index(stack_index: usize) -> ZIndex {
+    ZIndex(i32::try_from(stack_index).unwrap_or(i32::MAX))
+}
+
+/// The rows a dynamic window open under the top one lists.
+fn stacked_rows_for(kind: MenuKind, dynamic: &DynamicMenu) -> &[DynamicMenuRow] {
+    dynamic
+        .stacked_rows
+        .iter()
+        .find(|(open, _)| *open == kind)
+        .map_or(&[], |(_, rows)| rows.as_slice())
+}
+
+/// [`entry_count`] over a given window's rows.
+fn rows_entry_count(kind: MenuKind, rows: &[DynamicMenuRow], dlss_supported: bool) -> usize {
+    if is_dynamic(kind) {
+        rows.len().max(1)
+    } else {
+        entries_for(kind, dlss_supported).len()
+    }
+}
+
+/// [`entry_label`] over a given window's rows.
+fn rows_entry_label<'a>(
+    kind: MenuKind,
+    idx: usize,
+    rows: &'a [DynamicMenuRow],
+    dynamic: &'a DynamicMenu,
+) -> &'a str {
+    if !is_dynamic(kind) {
+        return entry_label(kind, idx, dynamic);
+    }
+    match rows.get(idx) {
+        Some(row) => &row.label,
+        None if rows.is_empty() => empty_dynamic_hint(kind),
+        None => "<unknown>",
+    }
+}
+
+/// A row's text colour: grey when the client will not answer it, then the builder's tint, then
+/// cursor gold on the focused window's cursor row.
+fn menu_row_color(gated: bool, tint: Option<MenuRowTint>, lit_cursor: bool) -> Color {
+    if gated {
+        return theme::TEXT_DISABLED;
+    }
+    match tint {
+        Some(MenuRowTint::SameKindEquipped) => theme::TEXT_EQUIP_SAME_KIND,
+        Some(MenuRowTint::WearableNow) => theme::TEXT_EQUIP_OK,
+        Some(MenuRowTint::FurniturePlaced) => {
+            let [r, g, b, a] = ffxi_dat::furniture_arrange::LIST_PLACED_TINT;
+            crate::hud::unity_fp::retail_text_color(crate::hud::unity_fp::retail_argb(a, r, g, b))
+        }
+        None if lit_cursor => theme::CURSOR,
+        None => theme::TEXT,
+    }
+}
+
+/// Draws the open windows under the focused one that sit at their own record frames, each with
+/// its own rows and cursor, newer ones on top
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
+#[allow(clippy::type_complexity)]
+pub fn update_menu_stack_windows(
+    mode: Res<InputMode>,
+    settings: Res<GraphicsSettings>,
+    scene: Res<crate::snapshot::SceneState>,
+    dynamic: Res<DynamicMenu>,
+    config_rows: Res<ConfigDatRows>,
+    dock: Option<Res<crate::hud::dock::DockBoard>>,
+    mut window_q: Query<(&MenuStackWindow, &mut Node, &mut ZIndex, &ComputedNode)>,
+    mut title_q: Query<(&MenuStackWindowTitle, &mut Text), Without<MenuStackWindowRow>>,
+    mut row_q: Query<
+        (&MenuStackWindowRow, &mut Node, &mut Text, &mut TextColor),
+        Without<MenuStackWindow>,
+    >,
+) {
+    struct Shown<'a> {
+        stack_index: usize,
+        frame: RecordFrame,
+        level: &'a MenuLevel,
+        rows: &'a [DynamicMenuRow],
+        total: usize,
+        start: usize,
+        visible: usize,
+    }
+    let shown: Vec<Shown> = match &*mode {
+        InputMode::Menu(stack) => {
+            let records = menu_stack_layout(stack, &config_rows).record_windows();
+            let newest = &records[records.len().saturating_sub(MAX_STACKED_WINDOWS)..];
+            newest
+                .iter()
+                .filter_map(|&(stack_index, frame)| {
+                    let level = stack.levels.get(stack_index)?;
+                    let rows = stacked_rows_for(level.kind, &dynamic);
+                    let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
+                    let (total, start) = viewport_over(level.kind, level.cursor, count);
+                    Some(Shown {
+                        stack_index,
+                        frame,
+                        level,
+                        rows,
+                        total,
+                        start,
+                        visible: visible_window(level.kind, total),
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
+    for (window, mut node, mut z_index, computed) in window_q.iter_mut() {
+        let mut want = node.clone();
+        match shown.get(window.slot) {
+            Some(open) => {
+                place_at_record_frame(&mut want, &open.frame);
+                if let Some((board, placement)) = dock
+                    .as_deref()
+                    .and_then(|board| Some((board, dock_placement(open.level.kind, board)?)))
+                {
+                    crate::hud::dock::place_docked(
+                        &mut want,
+                        placement,
+                        crate::hud::dock::drawn_height(computed),
+                        board.surface_height,
+                    );
+                }
+                want.display = Display::Flex;
+                z_index.set_if_neq(stack_z_index(open.stack_index));
             }
-        } else {
-            let seat = MENU_RIGHT_EDGE + mirror_width;
-            if frame.right != Val::Px(seat) {
-                frame.right = Val::Px(seat);
+            None => want.display = Display::None,
+        }
+        node.set_if_neq(want);
+    }
+    for (title, mut text) in title_q.iter_mut() {
+        let want = shown
+            .get(title.window)
+            .map_or("", |open| menu_title(open.level.kind));
+        if **text != *want {
+            **text = want.to_string();
+        }
+    }
+    for (row, mut node, mut text, mut color) in row_q.iter_mut() {
+        let Some(open) = shown.get(row.window) else {
+            continue;
+        };
+        let idx = open.start + row.slot;
+        if row.slot >= open.visible || idx >= open.total {
+            if node.display != Display::None {
+                node.display = Display::None;
             }
+            continue;
         }
-        if frame.top != Val::Px(48.0) {
-            frame.top = Val::Px(48.0);
+        if node.display != Display::Flex {
+            node.display = Display::Flex;
         }
-        if frame.width != Val::Px(mirror_width) {
-            frame.width = Val::Px(mirror_width);
+        let kind = open.level.kind;
+        let label = rows_entry_label(kind, idx, open.rows, &dynamic);
+        let want = format!("{}{label}", style::cursor_prefix(open.level.cursor == idx));
+        if **text != want {
+            **text = want;
         }
-        if frame.display != Display::Flex {
-            frame.display = Display::Flex;
+        let gated = menu_row_disabled(kind, idx, &scene.snapshot);
+        let tint = open.rows.get(idx).and_then(|r| r.tint);
+        let want_color = menu_row_color(gated, tint, false);
+        if color.0 != want_color {
+            color.0 = want_color;
         }
     }
 }
@@ -6549,7 +7638,7 @@ pub struct StatusDetailLine {
 /// no window (§2 id 9).
 pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
     Some("profile"),
-    Some("joblevel"),
+    Some(crate::hud::status_panel::JOBLEVEL_WINDOW),
     Some("masterle"),
     Some("btlskill"),
     Some("mgcskill"),
@@ -6604,10 +7693,16 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
         });
 }
 
+/// Where Status puts a detail window instead of its record frame.
+fn status_code_move(window: &str) -> Option<(f32, f32)> {
+    use crate::hud::status_panel::{JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP, JOBLEVEL_WINDOW};
+    (window == JOBLEVEL_WINDOW).then_some((JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP))
+}
+
 /// Places and fills the left-side windows of the Status flow from DAT frames:
 /// the persona panel takes `persona`'s record width (fallback keeps kuluu's own
 /// width when no install is present), and the detail window sits at its record
-/// rect beside it. Also hides everything once the flow closes.
+/// rect beside it, or where Status code-moves it. Also hides everything once the flow closes.
 #[allow(clippy::type_complexity)]
 pub fn update_status_detail_window(
     mode: Res<InputMode>,
@@ -6679,9 +7774,12 @@ pub fn update_status_detail_window(
         .copied()
         .flatten()
         .unwrap_or("profile");
-    if let Some((x, y, w)) = config_rows.window_frame(name) {
+    let frame = config_rows.window_frame(name);
+    if let Some((x, y)) = status_code_move(name).or(frame.map(|(x, y, _)| (x, y))) {
         node.left = Val::Px(x);
         node.top = Val::Px(y);
+    }
+    if let Some((_, _, w)) = frame {
         node.width = Val::Px(w);
     }
     if node.display != Display::Flex {
@@ -6738,12 +7836,15 @@ fn resolve_viewport(
     dynamic: &DynamicMenu,
     dlss_supported: bool,
 ) -> (usize, usize) {
+    viewport_over(kind, cursor, entry_count(kind, dynamic, dlss_supported))
+}
+
+fn viewport_over(kind: MenuKind, cursor: usize, total: usize) -> (usize, usize) {
     if kind == MenuKind::Root {
         // Show only the page the cursor is on: rows [start, end).
         let (start, end) = root_page_bounds(cursor);
         return (end, start);
     }
-    let total = entry_count(kind, dynamic, dlss_supported);
     if total <= DYNAMIC_VISIBLE_ROWS {
         return (total, 0);
     }
@@ -6769,6 +7870,11 @@ pub fn menu_mouse_hover_system(
         return;
     };
     let kind = stack.levels[level_idx].kind;
+    // These windows draw their own rows (`unity_fp_view`); the pane's rows belong to the window
+    // beneath them.
+    if draws_itself(kind) {
+        return;
+    }
     for (interaction, row) in &rows {
         if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
             continue;
@@ -6778,7 +7884,7 @@ pub fn menu_mouse_hover_system(
             resolve_viewport(kind, cursor, &dynamic, settings.dlss_supported);
         let window = visible_window(kind, total);
         let list_idx = viewport_start + row.slot;
-        if list_idx >= total || row.slot >= window {
+        if list_idx >= total || row.slot >= window || stack.levels[level_idx].row_locked(list_idx) {
             continue;
         }
         if stack.levels[level_idx].cursor != list_idx {
@@ -6801,6 +7907,9 @@ pub fn menu_mouse_click_system(
         return;
     };
     let kind = level.kind;
+    if draws_itself(kind) {
+        return;
+    }
     for (interaction, row) in &rows {
         if *interaction != Interaction::Pressed {
             continue;
@@ -6809,7 +7918,7 @@ pub fn menu_mouse_click_system(
             resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
         let window = visible_window(kind, total);
         let list_idx = viewport_start + row.slot;
-        if list_idx < total && row.slot < window {
+        if list_idx < total && row.slot < window && !level.row_locked(list_idx) {
             out.write(MenuRowActivated { slot: list_idx });
         }
     }
@@ -7803,21 +8912,449 @@ mod tests {
         }
     }
 
-    /// The selector-window law: opening the retail Config hub over the Command
-    /// menu leaves that menu framed on screen beside it.
+    /// configwi sits over the main menu's page 2 the way statcom2 sits over page 1: the Config
+    /// hub draws in the Command spot with nothing mirrored beside it, and a window that does not
+    /// cover the main menu still leaves it framed beside its own.
     #[test]
-    fn opened_windows_keep_their_selector_framed() {
+    fn the_config_hub_covers_the_command_spot_without_a_mirror() {
         let mut app = root_menu_app(0);
         let mut stack = MenuStack::root();
         stack.push(MenuKind::RetailConfig);
         app.insert_resource(InputMode::Menu(stack));
         app.update();
+        let (visible, _, _) = companion_frame_visible(&mut app);
+        assert!(!visible, "configwi covers the main menu");
+        assert_eq!(title_text(&mut app), menu_title(MenuKind::RetailConfig));
+
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Graphics);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
         let (visible, title, rows) = companion_frame_visible(&mut app);
-        assert!(visible, "the Command menu stays framed under its companion");
-        assert_eq!(title, "Commands");
+        assert!(visible, "the Command menu stays framed beside it");
+        assert_eq!(title, menu_title(MenuKind::Root));
         assert!(
             !rows.is_empty(),
             "the mirrored selector still lists its page"
+        );
+    }
+
+    fn stack_app(stack: MenuStack, frames: &[(&str, (i16, i16, i16, i16), u8)]) -> App {
+        let mut app = root_menu_app(0);
+        app.add_systems(Update, update_menu_stack_windows);
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.loaded = true;
+            for &(name, (x, y, width, height), anchor) in frames {
+                rows.frames.insert(name.into(), (x, y, width));
+                rows.frame_extents.insert(name.into(), (height, anchor));
+            }
+        }
+        app.insert_resource(InputMode::Menu(stack));
+        app
+    }
+
+    fn display_row(label: &str) -> DynamicMenuRow {
+        DynamicMenuRow {
+            tint: None,
+            label: label.into(),
+            action: DynamicMenuAction::DisplayInfo,
+        }
+    }
+
+    struct DrawnWindow {
+        title: String,
+        rows: Vec<String>,
+        node: Node,
+        z: i32,
+    }
+
+    /// The stacked record windows on screen, oldest first.
+    fn drawn_stack_windows(app: &mut App) -> Vec<DrawnWindow> {
+        let windows: Vec<(usize, Node, i32)> = app
+            .world_mut()
+            .query::<(&MenuStackWindow, &Node, &ZIndex)>()
+            .iter(app.world())
+            .filter(|(_, node, _)| node.display != Display::None)
+            .map(|(window, node, z)| (window.slot, node.clone(), z.0))
+            .collect();
+        let titles: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&MenuStackWindowTitle, &Text)>()
+            .iter(app.world())
+            .map(|(title, text)| (title.window, text.0.clone()))
+            .collect();
+        let mut rows: Vec<(usize, usize, String)> = app
+            .world_mut()
+            .query::<(&MenuStackWindowRow, &Text, &Node)>()
+            .iter(app.world())
+            .filter(|(_, _, node)| node.display != Display::None)
+            .map(|(row, text, _)| (row.window, row.slot, text.0.clone()))
+            .collect();
+        rows.sort();
+        let mut drawn: Vec<DrawnWindow> = windows
+            .into_iter()
+            .map(|(slot, node, z)| DrawnWindow {
+                title: titles
+                    .iter()
+                    .find(|(window, _)| *window == slot)
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_default(),
+                rows: rows
+                    .iter()
+                    .filter(|(window, _, _)| *window == slot)
+                    .map(|(_, _, text)| text.clone())
+                    .collect(),
+                node,
+                z,
+            })
+            .collect();
+        drawn.sort_by_key(|window| window.z);
+        drawn
+    }
+
+    fn drawn_pane(app: &mut App) -> (Node, i32) {
+        app.world_mut()
+            .query::<(&MainMenuPane, &Node, &ZIndex)>()
+            .iter(app.world())
+            .map(|(_, node, z)| (node.clone(), z.0))
+            .next()
+            .expect("pane exists")
+    }
+
+    fn drawn_mirror(app: &mut App) -> Option<(Node, i32)> {
+        app.world_mut()
+            .query::<(&MainMenuCompanionFrame, &Node, &ZIndex)>()
+            .iter(app.world())
+            .find(|(_, node, _)| node.display != Display::None)
+            .map(|(_, node, z)| (node.clone(), z.0))
+    }
+
+    fn frame_rect(node: &Node) -> (Val, Val, Val) {
+        (node.left, node.top, node.width)
+    }
+
+    /// Two record windows stay on screen together: the quest list keeps its own frame, rows and
+    /// cursor under the detail it opened, the main menu keeps the selector column, and each
+    /// newer window draws over the older ones.
+    #[test]
+    fn two_open_record_windows_draw_at_their_own_frames_newest_on_top() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList);
+        stack.current_mut().unwrap().cursor = 1;
+        stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
+        let mut app = stack_app(
+            stack,
+            &[
+                ("quest00", (16, 48, 366, 200), FRAME_ANCHOR_NONE),
+                ("quest01", (40, 120, 300, 150), FRAME_ANCHOR_NONE),
+            ],
+        );
+        app.world_mut().resource_mut::<DynamicMenu>().stacked_rows = vec![(
+            MenuKind::QuestList,
+            vec![display_row("Quest A"), display_row("Quest B")],
+        )];
+        app.update();
+
+        let (pane, pane_z) = drawn_pane(&mut app);
+        assert_eq!(
+            frame_rect(&pane),
+            (Val::Px(40.0), Val::Px(120.0), Val::Px(300.0)),
+            "the detail sits at its own frame"
+        );
+        let stacked = drawn_stack_windows(&mut app);
+        assert_eq!(stacked.len(), 1, "the list it opened from stays drawn");
+        let list = &stacked[0];
+        assert_eq!(
+            frame_rect(&list.node),
+            (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0)),
+            "the list keeps its own frame, not the right seat"
+        );
+        assert_eq!(list.title, menu_title(MenuKind::QuestList));
+        assert_eq!(list.rows, vec!["  Quest A", "> Quest B"]);
+        let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the main menu stays open");
+        assert_eq!(mirror.right, Val::Px(MENU_RIGHT_EDGE));
+        let (_, title, _) = companion_frame_visible(&mut app);
+        assert_eq!(title, menu_title(MenuKind::Root));
+        assert!(
+            mirror_z < list.z && list.z < pane_z,
+            "oldest first, newest on top: {mirror_z} {} {pane_z}",
+            list.z
+        );
+    }
+
+    /// The Config hub, a page and the window the page opened all stay on screen: the hub keeps
+    /// the selector column with its own rows, and the page and its window each sit at their own
+    /// frame, oldest first.
+    #[test]
+    fn three_open_config_windows_stay_drawn_oldest_first() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.push(MenuKind::RetailConfigPage(3));
+        stack.push(MenuKind::RetailConfigSub(0));
+        let mut app = stack_app(
+            stack,
+            &[
+                (
+                    RETAIL_CONFIG_HUB_WINDOW,
+                    (384, 48, 112, 218),
+                    FRAME_ANCHOR_RIGHT_EDGE,
+                ),
+                (
+                    RETAIL_CONFIG_PAGE_WINDOWS[3],
+                    (16, 48, 366, 296),
+                    FRAME_ANCHOR_NONE,
+                ),
+                (
+                    RETAIL_CONFIG_SUB_WINDOWS[0],
+                    (40, 200, 300, 120),
+                    FRAME_ANCHOR_NONE,
+                ),
+            ],
+        );
+        {
+            let mut dynamic = app.world_mut().resource_mut::<DynamicMenu>();
+            dynamic.stacked_rows = vec![
+                (
+                    MenuKind::RetailConfig,
+                    vec![display_row("Hub A"), display_row("Hub B")],
+                ),
+                (MenuKind::RetailConfigPage(3), vec![display_row("Page A")]),
+            ];
+            dynamic.rows = vec![display_row("Sub A")];
+        }
+        app.update();
+
+        let (pane, pane_z) = drawn_pane(&mut app);
+        assert_eq!(
+            frame_rect(&pane),
+            (Val::Px(40.0), Val::Px(200.0), Val::Px(300.0))
+        );
+        let stacked = drawn_stack_windows(&mut app);
+        assert_eq!(stacked.len(), 1, "the page stays drawn under its window");
+        assert_eq!(
+            frame_rect(&stacked[0].node),
+            (Val::Px(16.0), Val::Px(48.0), Val::Px(366.0))
+        );
+        assert_eq!(stacked[0].title, menu_title(MenuKind::RetailConfigPage(3)));
+        assert_eq!(stacked[0].rows, vec!["> Page A"]);
+        let (mirror, mirror_z) = drawn_mirror(&mut app).expect("the hub stays visible");
+        assert_eq!(
+            mirror.right,
+            Val::Px(MENU_RIGHT_EDGE),
+            "the hub keeps the selector column"
+        );
+        let (_, title, rows) = companion_frame_visible(&mut app);
+        assert_eq!(title, menu_title(MenuKind::RetailConfig));
+        assert_eq!(
+            rows,
+            vec!["> Hub A", "  Hub B"],
+            "the hub lists its own rows, not the focused window's"
+        );
+        assert!(mirror_z < stacked[0].z && stacked[0].z < pane_z);
+    }
+
+    /// A newer window on an older window's whole record rectangle hides it; with no known
+    /// height, nothing is hidden.
+    #[test]
+    fn a_window_on_an_older_windows_whole_rect_hides_it() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList);
+        stack.push(MenuKind::QuestDetail { log: 1, id: 7 });
+        let mut app = stack_app(
+            stack.clone(),
+            &[
+                ("quest00", (16, 48, 366, 200), FRAME_ANCHOR_NONE),
+                ("quest01", (16, 48, 366, 210), FRAME_ANCHOR_NONE),
+            ],
+        );
+        app.update();
+        assert!(
+            drawn_stack_windows(&mut app).is_empty(),
+            "quest01 covers quest00 whole"
+        );
+
+        let mut unknown = ConfigDatRows::default();
+        unknown.frames.insert("quest00".into(), (16, 48, 366));
+        unknown.frames.insert("quest01".into(), (16, 48, 366));
+        assert_eq!(
+            menu_stack_layout(&stack, &unknown)
+                .record_windows()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "an unknown height covers nothing"
+        );
+    }
+
+    /// A record window whose child keeps kuluu's column stays at its own frame instead of being
+    /// mirrored beside the column.
+    #[test]
+    fn record_parent_of_a_column_window_stays_at_its_own_frame() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Trade);
+        stack.push(MenuKind::TradePick { trade_index: 0 });
+        let mut app = stack_app(stack, &[("trade", (16, 48, 182, 200), FRAME_ANCHOR_NONE)]);
+        app.update();
+
+        let (pane, _) = drawn_pane(&mut app);
+        assert_eq!(
+            pane.right,
+            Val::Px(MENU_RIGHT_EDGE),
+            "the pick list keeps the column"
+        );
+        let stacked = drawn_stack_windows(&mut app);
+        assert_eq!(stacked.len(), 1);
+        assert_eq!(
+            frame_rect(&stacked[0].node),
+            (Val::Px(16.0), Val::Px(48.0), Val::Px(182.0))
+        );
+        assert_eq!(stacked[0].title, menu_title(MenuKind::Trade));
+        assert!(
+            drawn_mirror(&mut app).is_none(),
+            "nothing is mirrored beside it"
+        );
+    }
+
+    /// Windows with no side record keep the seats kuluu gave them: the focused one in the
+    /// column with its opener beside it, and Status and the Config hub alone because statcom2 and
+    /// configwi cover the main menu.
+    #[test]
+    fn windows_without_a_side_record_keep_their_column_seats() {
+        let frames = ConfigDatRows::default();
+        let mut graphics = MenuStack::root();
+        graphics.push(MenuKind::Graphics);
+        assert_eq!(
+            menu_stack_layout(&graphics, &frames).windows,
+            vec![
+                (0, MenuWindowSeat::BesideColumn),
+                (1, MenuWindowSeat::Column)
+            ]
+        );
+        let mut magic = MenuStack::root();
+        magic.push(MenuKind::MagicGroups);
+        magic.push(MenuKind::MagicGroup(0));
+        assert_eq!(
+            menu_stack_layout(&magic, &frames).windows,
+            vec![
+                (1, MenuWindowSeat::BesideColumn),
+                (2, MenuWindowSeat::Column)
+            ],
+            "only the opener sits beside the column"
+        );
+        let mut status = MenuStack::root();
+        status.push(MenuKind::Status);
+        status.push(MenuKind::StatusDetail { entry: 0 });
+        assert_eq!(
+            menu_stack_layout(&status, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)]
+        );
+        let mut config = MenuStack::root();
+        config.push(MenuKind::RetailConfig);
+        assert_eq!(
+            menu_stack_layout(&config, &frames).windows,
+            vec![(1, MenuWindowSeat::Column)]
+        );
+    }
+
+    /// The anchor byte pins a frame to the screen edge it names: x and y gain
+    /// `screen - 512` / `screen - 448`, spelled as 100% plus a margin of `x - 512` / `y - 448`.
+    #[test]
+    fn record_frames_pin_to_the_screen_edges_their_anchor_names() {
+        let placed = |anchor: u8| {
+            let mut node = Node::default();
+            place_at_record_frame(
+                &mut node,
+                &RecordFrame {
+                    x: 384.0,
+                    y: 400.0,
+                    width: 112.0,
+                    height: Some(30.0),
+                    anchor,
+                },
+            );
+            node
+        };
+        let none = placed(FRAME_ANCHOR_NONE);
+        assert_eq!(
+            (none.left, none.margin.left, none.top, none.margin.top),
+            (Val::Px(384.0), Val::ZERO, Val::Px(400.0), Val::ZERO)
+        );
+        let right = placed(FRAME_ANCHOR_RIGHT_EDGE);
+        assert_eq!(
+            (right.left, right.margin.left, right.top, right.margin.top),
+            (
+                Val::Percent(100.0),
+                Val::Px(384.0 - MENU_DESIGN_WIDTH),
+                Val::Px(400.0),
+                Val::ZERO
+            )
+        );
+        let bottom = placed(FRAME_ANCHOR_BOTTOM_EDGE);
+        assert_eq!(
+            (bottom.left, bottom.top, bottom.margin.top),
+            (
+                Val::Px(384.0),
+                Val::Percent(100.0),
+                Val::Px(400.0 - MENU_DESIGN_HEIGHT)
+            )
+        );
+        let both = placed(FRAME_ANCHOR_RIGHT_EDGE | FRAME_ANCHOR_BOTTOM_EDGE);
+        assert_eq!(
+            (both.left, both.top),
+            (Val::Percent(100.0), Val::Percent(100.0))
+        );
+        for node in [none, right, bottom, both] {
+            assert_eq!(node.position_type, PositionType::Absolute);
+            assert_eq!((node.right, node.bottom), (Val::Auto, Val::Auto));
+            assert_eq!(node.width, Val::Px(112.0));
+        }
+    }
+
+    /// Every dynamic window under the top one keeps its own rows; the top's stay in `rows`.
+    #[test]
+    fn rows_refresh_for_every_open_dynamic_window() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<crate::hud::item_detail::SortOptions>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<MagicSchoolTable>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<CommandSelectorCaptions>()
+            .init_resource::<EquipRecords>()
+            .init_resource::<crate::keybinds::Bindings>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .init_resource::<crate::hud::merit_windows::MeritDat>()
+            .init_resource::<DynamicMenu>();
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.loaded = true;
+            rows.by_root
+                .insert(RETAIL_CONFIG_HUB_WINDOW.into(), vec![(1, "Hub row".into())]);
+            rows.by_root.insert(
+                RETAIL_CONFIG_PAGE_WINDOWS[0].into(),
+                vec![(2, "Page row".into())],
+            );
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.push(MenuKind::RetailConfigPage(0));
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Update, refresh_dynamic_menu_rows);
+        app.update();
+
+        let dynamic = app.world().resource::<DynamicMenu>();
+        let labels = |rows: &[DynamicMenuRow]| -> Vec<String> {
+            rows.iter().map(|row| row.label.clone()).collect()
+        };
+        assert!(labels(&dynamic.rows).iter().any(|l| l.contains("Page row")));
+        let hub = labels(stacked_rows_for(MenuKind::RetailConfig, dynamic));
+        assert!(hub.iter().any(|l| l.contains("Hub row")), "{hub:?}");
+        assert!(!hub.iter().any(|l| l.contains("Page row")), "{hub:?}");
+        assert!(
+            stacked_rows_for(MenuKind::RetailConfigPage(0), dynamic).is_empty(),
+            "the top window's rows live in `rows`"
         );
     }
 
@@ -12062,6 +13599,636 @@ mod tests {
                 .unwrap_or(&0),
             1,
             "the normalized bool is stored back at the merge point"
+        );
+    }
+
+    fn cursor_memory_app(mode: InputMode) -> App {
+        let mut app = App::new();
+        app.insert_resource(mode)
+            .init_resource::<DynamicMenu>()
+            .add_systems(Update, persist_window_cursors);
+        app
+    }
+
+    /// Windows still open when the whole menu goes away close into the session memory, and the
+    /// next menu opens with it
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn the_memory_outlives_the_menu_for_the_session() {
+        let mut stack = MenuStack::root();
+        stack.levels[0].cursor = 3;
+        stack.push(MenuKind::MagicGroups);
+        stack.current_mut().unwrap().cursor = 4;
+        let mut app = cursor_memory_app(InputMode::Menu(stack));
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::World;
+        app.update();
+
+        let memory = app.world().resource::<DynamicMenu>().window_cursors.clone();
+        let magic = registry_window(MenuKind::MagicGroups).unwrap();
+        assert_eq!(memory.recall(magic), Some(4));
+        assert_eq!(memory.recall(MAIN_MENU_WINDOW), Some(3));
+        let reopened = MenuStack::open_main_menu(&memory);
+        assert_eq!(reopened.levels[0].cursor, 3);
+    }
+
+    /// A menu waiting behind a sub-target cursor is still open; the Command menu's pickers close
+    /// into the memory with it.
+    #[test]
+    fn a_sub_target_cursor_keeps_its_menu_open_and_pickers_close_with_the_command_menu() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MagicGroups);
+        stack.current_mut().unwrap().cursor = 2;
+        let waiting = InputMode::SubTarget(crate::input_mode::SubTargetState::open(
+            crate::input_mode::SubTargetAction::Ranged,
+            0,
+            InputMode::Menu(stack),
+        ));
+        let mut app = cursor_memory_app(waiting);
+        app.update();
+        let magic = registry_window(MenuKind::MagicGroups).unwrap();
+        assert_eq!(
+            app.world()
+                .resource::<DynamicMenu>()
+                .window_cursors
+                .recall(magic),
+            None,
+            "the menu has not closed"
+        );
+
+        let mut command = TargetActionState::open(Default::default());
+        command.chat_mode_idx = 1;
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::TargetAction(command);
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::World;
+        app.update();
+        let memory = &app.world().resource::<DynamicMenu>().window_cursors;
+        assert_eq!(memory.recall(magic), Some(2));
+        assert_eq!(memory.recall(crate::input_mode::CHATCTRL_WINDOW), Some(1));
+    }
+
+    /// A remembered cursor that opened past a built window's rows comes back to its last row;
+    /// an empty window parks it on item 1.
+    #[test]
+    fn a_remembered_cursor_waits_for_its_rows_then_settles_inside_them() {
+        let list = registry_window(MenuKind::MagicGroup(1)).unwrap();
+        let mut memory = CursorMemory::default();
+        memory.record(list, Some(9));
+        let mut stack = MenuStack::open_main_menu(&memory);
+        stack.push(MenuKind::MagicGroups);
+        stack.push(MenuKind::MagicGroup(1));
+        let rows: Vec<DynamicMenuRow> = (0..3)
+            .map(|spell_id| DynamicMenuRow {
+                label: String::new(),
+                action: DynamicMenuAction::CastSpell { spell_id },
+                tint: None,
+            })
+            .collect();
+        let rows_kind = Some(MenuKind::MagicGroup(1));
+        let mut app = App::new();
+        app.insert_resource(InputMode::Menu(stack.clone()))
+            .insert_resource(DynamicMenu {
+                rows: rows.clone(),
+                rows_kind,
+                ..Default::default()
+            })
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .add_systems(Update, settle_opened_windows);
+        app.update();
+        let InputMode::Menu(settled) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        let top = settled.current().unwrap();
+        assert_eq!(top.cursor, rows.len() - 1);
+        assert!(!top.clamp_pending);
+
+        app.insert_resource(InputMode::Menu(stack))
+            .insert_resource(DynamicMenu {
+                rows_kind,
+                ..Default::default()
+            });
+        app.update();
+        let InputMode::Menu(settled) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        assert_eq!(settled.current().unwrap().cursor, 0);
+    }
+
+    /// A window the input opens after this frame's rows were built keeps its remembered cursor
+    /// until rows built for that window bound it, whatever order the systems run in.
+    #[test]
+    fn a_remembered_cursor_is_not_bounded_by_the_previous_windows_rows() {
+        const REMEMBERED: usize = 5;
+        fn open_emotes(mut mode: ResMut<InputMode>) {
+            if let InputMode::Menu(stack) = &mut *mode {
+                if stack
+                    .current()
+                    .is_some_and(|level| level.kind == MenuKind::Root)
+                {
+                    stack.push(MenuKind::EmoteList);
+                }
+            }
+        }
+        let mut memory = CursorMemory::default();
+        memory.record(
+            registry_window(MenuKind::EmoteList).unwrap(),
+            Some(REMEMBERED),
+        );
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<crate::hud::item_detail::SortOptions>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<MagicSchoolTable>()
+            .init_resource::<ConfigDatRows>()
+            .init_resource::<CommandSelectorCaptions>()
+            .init_resource::<EquipRecords>()
+            .init_resource::<crate::keybinds::Bindings>()
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .init_resource::<crate::hud::merit_windows::MeritDat>()
+            .init_resource::<DynamicMenu>()
+            .insert_resource(InputMode::Menu(MenuStack::open_main_menu(&memory)))
+            .add_systems(
+                Update,
+                (
+                    refresh_dynamic_menu_rows,
+                    open_emotes,
+                    settle_opened_windows,
+                )
+                    .chain(),
+            );
+        app.update();
+        app.update();
+        let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        let top = stack.current().unwrap();
+        assert_eq!(top.kind, MenuKind::EmoteList);
+        assert!(app.world().resource::<DynamicMenu>().rows.len() > REMEMBERED);
+        assert_eq!(top.cursor, REMEMBERED);
+        assert!(!top.clamp_pending);
+    }
+
+    /// The rule belongs to the window name: windows kuluu shares between kinds share one rule and
+    /// one memory, display-only and kuluu-only windows have none, and the merit and arrange windows
+    /// keep their own records' laws.
+    #[test]
+    fn cursor_rules_follow_the_window_name() {
+        for (kind, rule) in [
+            (MenuKind::Root, OpenCursor::Remembered),
+            (MenuKind::Status, OpenCursor::Remembered),
+            (MenuKind::QuestList, OpenCursor::FirstItem),
+            (MenuKind::UnityChat, OpenCursor::FirstItem),
+            (MenuKind::UnityMenu, OpenCursor::Remembered),
+            (MenuKind::RetailConfig, OpenCursor::Remembered),
+            (
+                MenuKind::RetailConfigSub(CONFIG_SUB_CONFYN),
+                OpenCursor::FirstItem,
+            ),
+            (
+                MenuKind::PowerPrompt { shut_down: false },
+                OpenCursor::FirstItem,
+            ),
+            (MenuKind::RoomList, OpenCursor::FirstItem),
+            (MenuKind::HomeView, OpenCursor::Remembered),
+            (MenuKind::EmoteList, OpenCursor::Remembered),
+        ] {
+            assert_eq!(window_cursor(kind).map(|w| w.rule), Some(rule), "{kind:?}");
+        }
+        assert_eq!(
+            registry_window(MenuKind::MagicGroup(1)),
+            registry_window(MenuKind::MagicGroup(2)),
+            "every school lists in the one `magic` window"
+        );
+        for kind in [
+            MenuKind::Controls,
+            MenuKind::Debug,
+            MenuKind::Magic,
+            MenuKind::StatusDetail { entry: 0 },
+            MenuKind::Merit(crate::hud::merit_windows::MeritWindow::Menu),
+        ] {
+            assert_eq!(window_cursor(kind), None, "{kind:?}");
+        }
+    }
+
+    fn three_rows() -> Vec<DynamicMenuRow> {
+        ["one", "two", "three"].map(display_row).to_vec()
+    }
+
+    fn hub_records(item_count: u8) -> ConfigDatRows {
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        let hub = RETAIL_CONFIG_HUB_WINDOW.to_string();
+        table
+            .by_root
+            .insert(hub.clone(), (0..3).map(|id| (id, String::new())).collect());
+        table.item_ids.insert(hub.clone(), vec![1, 2, 3]);
+        table.item_counts.insert(hub.clone(), item_count);
+        table.row_ys.insert(hub, vec![10, 30, 20]);
+        table
+    }
+
+    /// The unselectable item is the one whose DAT item id equals the record's item count, at
+    /// whatever row it draws; a trailing block that is not a drawn row locks nothing
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn the_record_names_the_unselectable_row() {
+        const ITEMS: u8 = 3;
+        assert_eq!(
+            hub_records(ITEMS).last_item_row(RETAIL_CONFIG_HUB_WINDOW),
+            Some(LastItemRow::Row(1)),
+            "item 3 draws second, by its block y"
+        );
+        assert_eq!(
+            hub_records(ITEMS + 1).last_item_row(RETAIL_CONFIG_HUB_WINDOW),
+            Some(LastItemRow::Undrawn)
+        );
+        assert_eq!(
+            ConfigDatRows::default().last_item_row(RETAIL_CONFIG_HUB_WINDOW),
+            None,
+            "unread until the records load"
+        );
+    }
+
+    #[test]
+    fn opened_windows_learn_their_unselectable_row_and_status_locks_none() {
+        const ITEMS: u8 = 3;
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        let mut app = App::new();
+        app.insert_resource(InputMode::Menu(stack))
+            .insert_resource(DynamicMenu {
+                rows: three_rows(),
+                ..Default::default()
+            })
+            .insert_resource(hub_records(ITEMS))
+            .init_resource::<crate::hud::unity_fp::UnityFpDat>()
+            .add_systems(Update, settle_opened_windows);
+        app.update();
+        let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        assert!(stack.current().unwrap().row_locked(1));
+
+        let mut status = MenuStack::root();
+        status.push(MenuKind::Status);
+        app.insert_resource(InputMode::Menu(status));
+        app.update();
+        let InputMode::Menu(status) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        let level = status.current().unwrap();
+        assert!(
+            level.last_item_lock.is_some(),
+            "statcom2 is in the record's table"
+        );
+        assert!(
+            (0..STATUS_LABELS.len()).all(|row| !level.row_locked(row)),
+            "its last item is the trailing dummy block, no drawn row"
+        );
+    }
+
+    fn locked_hub(row: usize) -> MenuStack {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.current_mut().unwrap().last_item_lock = Some(crate::input_mode::LastItemLock {
+            open_cursor: 0,
+            row: LastItemRow::Row(row),
+        });
+        stack
+    }
+
+    /// The pointer neither moves the cursor onto the unselectable item nor selects it.
+    #[test]
+    fn the_pointer_ignores_the_unselectable_item() {
+        const LOCKED: usize = 2;
+        let mut app = App::new();
+        app.insert_resource(InputMode::Menu(locked_hub(LOCKED)))
+            .init_resource::<GraphicsSettings>()
+            .insert_resource(DynamicMenu {
+                rows: three_rows(),
+                ..Default::default()
+            })
+            .add_message::<MenuRowActivated>()
+            .add_systems(Update, (menu_mouse_hover_system, menu_mouse_click_system));
+        let row = app
+            .world_mut()
+            .spawn((MainMenuRow { slot: LOCKED }, Interaction::Pressed))
+            .id();
+        app.update();
+        let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        assert_eq!(stack.current().unwrap().cursor, 0);
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<MenuRowActivated>>()
+            .drain()
+            .next()
+            .is_none());
+
+        app.world_mut()
+            .entity_mut(row)
+            .insert(MainMenuRow { slot: 1 });
+        app.world_mut().entity_mut(row).insert(Interaction::Hovered);
+        app.update();
+        let InputMode::Menu(stack) = app.world().resource::<InputMode>() else {
+            panic!("menu");
+        };
+        assert_eq!(
+            stack.current().unwrap().cursor,
+            1,
+            "any other row still answers"
+        );
+    }
+
+    /// The unselectable item draws in the normal colour, not greyed.
+    #[test]
+    fn the_unselectable_item_draws_in_the_normal_colour() {
+        const LOCKED: usize = 2;
+        let mut app = root_menu_app(0);
+        app.insert_resource(InputMode::Menu(locked_hub(LOCKED)));
+        app.world_mut().resource_mut::<DynamicMenu>().rows = three_rows();
+        app.update();
+        let color = app
+            .world_mut()
+            .query_filtered::<(&MainMenuRow, &TextColor), Without<CompanionRow>>()
+            .iter(app.world())
+            .find(|(row, _)| row.slot == LOCKED)
+            .map(|(_, color)| color.0)
+            .expect("the row is drawn");
+        assert_eq!(color, theme::TEXT);
+    }
+
+    const DOCK_SURFACE_WIDTH: u32 = 1000;
+    const DOCK_SURFACE_HEIGHT: u32 = 720;
+    const LOG_TOP: f32 = 500.0;
+    const LOG_HEIGHT: f32 = 160.0;
+    const LOG_WIDTH: f32 = 480.0;
+    const IN_ZONE: u16 = 1;
+
+    /// `stack` drawn in a zone on a `DOCK_SURFACE_HEIGHT`-tall screen with the dock law running
+    /// against a chat log whose top edge is at `LOG_TOP`.
+    fn dock_app(stack: MenuStack, frames: &[(&str, (i16, i16, i16, i16), u8)]) -> (App, Entity) {
+        let mut app = stack_app(stack, frames);
+        app.init_resource::<crate::hud::dock::DockBoard>()
+            .add_systems(
+                Update,
+                crate::hud::dock::dock_windows_system
+                    .before(update_main_menu)
+                    .before(update_menu_stack_windows),
+            );
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .zone_id = Some(IN_ZONE);
+        app.world_mut().spawn((
+            Window {
+                resolution: bevy::window::WindowResolution::new(
+                    DOCK_SURFACE_WIDTH,
+                    DOCK_SURFACE_HEIGHT,
+                ),
+                ..default()
+            },
+            bevy::window::PrimaryWindow,
+        ));
+        let log = app
+            .world_mut()
+            .spawn((crate::hud::chat_panel::ChatPanelGroup, Node::default()))
+            .id();
+        move_log(&mut app, log, LOG_TOP);
+        (app, log)
+    }
+
+    fn move_log(app: &mut App, log: Entity, top: f32) {
+        app.world_mut().entity_mut(log).insert((
+            ComputedNode {
+                size: Vec2::new(LOG_WIDTH, LOG_HEIGHT),
+                inverse_scale_factor: 1.0,
+                ..default()
+            },
+            bevy::ui::UiGlobalTransform::from_xy(0.0, top + LOG_HEIGHT / 2.0),
+        ));
+    }
+
+    /// The node offset that puts a window's bottom edge 2 above a log whose top edge is at
+    /// `log_top`.
+    fn docked_bottom(log_top: f32) -> Val {
+        Val::Px(DOCK_SURFACE_HEIGHT as f32 - (log_top - crate::hud::dock::DOCK_GAP))
+    }
+
+    /// A docked window keeps its record x, a right-half record included, and hangs 2 above the
+    /// chat log's top edge. It follows that edge, and stays where it is while the log is hidden
+    /// and after it is gone.
+    #[test]
+    fn a_docked_window_keeps_its_record_x_and_follows_the_chat_logs_top_edge() {
+        const EMOTE_X: i16 = 400;
+        const LOG_RAISE: f32 = 40.0;
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::EmoteList);
+        let (mut app, log) = dock_app(
+            stack,
+            &[(
+                EMOTE_LIST_WINDOW,
+                (EMOTE_X, 120, 100, 200),
+                FRAME_ANCHOR_NONE,
+            )],
+        );
+        app.update();
+        let (pane, _) = drawn_pane(&mut app);
+        assert!(f32::from(EMOTE_X) >= LEFT_HALF_MAX_X);
+        assert_eq!(
+            (pane.left, pane.margin.left, pane.right),
+            (Val::Px(f32::from(EMOTE_X)), Val::ZERO, Val::Auto)
+        );
+        assert_eq!((pane.top, pane.bottom), (Val::Auto, docked_bottom(LOG_TOP)));
+
+        move_log(&mut app, log, LOG_TOP - LOG_RAISE);
+        app.update();
+        assert_eq!(
+            drawn_pane(&mut app).0.bottom,
+            docked_bottom(LOG_TOP - LOG_RAISE)
+        );
+
+        app.world_mut().get_mut::<Node>(log).unwrap().display = Display::None;
+        app.update();
+        assert_eq!(
+            drawn_pane(&mut app).0.bottom,
+            docked_bottom(LOG_TOP - LOG_RAISE),
+            "a hidden log leaves it in place"
+        );
+
+        app.world_mut().entity_mut(log).despawn();
+        app.update();
+        assert_eq!(
+            drawn_pane(&mut app).0.bottom,
+            docked_bottom(LOG_TOP - LOG_RAISE),
+            "a closed log leaves it in place"
+        );
+    }
+
+    /// A docked window too tall for the room above the log sits at the dock floor.
+    #[test]
+    fn a_tall_docked_window_stops_at_the_dock_floor() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::EmoteList);
+        let (mut app, _) = dock_app(
+            stack,
+            &[(EMOTE_LIST_WINDOW, (16, 120, 100, 200), FRAME_ANCHOR_NONE)],
+        );
+        let pane = app
+            .world_mut()
+            .query_filtered::<Entity, With<MainMenuPane>>()
+            .single(app.world())
+            .expect("one pane");
+        app.world_mut().entity_mut(pane).insert(ComputedNode {
+            size: Vec2::new(MENU_PANE_WIDTH, LOG_TOP),
+            inverse_scale_factor: 1.0,
+            ..default()
+        });
+        app.update();
+        let (pane, _) = drawn_pane(&mut app);
+        assert_eq!(
+            (pane.top, pane.bottom),
+            (Val::Px(crate::hud::dock::DOCK_MIN_TOP), Val::Auto)
+        );
+    }
+
+    /// Two open windows in the log slot share one bottom line above the log, each at its own
+    /// record x: the Mog House menu under Change Jobs.
+    #[test]
+    fn windows_in_one_slot_share_the_line_above_the_log() {
+        const MYROOM_X: i16 = 16;
+        const JOBCHANG_X: i16 = 150;
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::HomeView);
+        stack.push(MenuKind::JobChange);
+        let (mut app, _) = dock_app(
+            stack,
+            &[
+                (MYROOM_WINDOW, (MYROOM_X, 100, 120, 150), FRAME_ANCHOR_NONE),
+                (
+                    JOBCHANG_WINDOW,
+                    (JOBCHANG_X, 60, 200, 100),
+                    FRAME_ANCHOR_NONE,
+                ),
+            ],
+        );
+        app.update();
+        let (pane, _) = drawn_pane(&mut app);
+        assert_eq!(
+            (pane.left, pane.bottom),
+            (Val::Px(f32::from(JOBCHANG_X)), docked_bottom(LOG_TOP))
+        );
+        let stacked = drawn_stack_windows(&mut app);
+        assert_eq!(stacked.len(), 1, "the Mog House menu stays drawn");
+        assert_eq!(
+            (stacked[0].node.left, stacked[0].node.bottom),
+            (Val::Px(f32::from(MYROOM_X)), docked_bottom(LOG_TOP))
+        );
+    }
+
+    /// A window the record does not dock keeps its record frame beside a chat log, and a docking
+    /// window with no log to dock against opens at its record frame.
+    #[test]
+    fn undocked_windows_and_windows_without_an_anchor_keep_their_record_frames() {
+        const QUEST_Y: i16 = 48;
+        const EMOTE_Y: i16 = 120;
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList);
+        let (mut app, log) = dock_app(
+            stack,
+            &[
+                (
+                    crate::hud::unity_fp::QUEST00_WINDOW,
+                    (16, QUEST_Y, 366, 200),
+                    FRAME_ANCHOR_NONE,
+                ),
+                (
+                    EMOTE_LIST_WINDOW,
+                    (16, EMOTE_Y, 100, 200),
+                    FRAME_ANCHOR_NONE,
+                ),
+            ],
+        );
+        app.update();
+        let (pane, _) = drawn_pane(&mut app);
+        assert_eq!(
+            (pane.top, pane.bottom),
+            (Val::Px(f32::from(QUEST_Y)), Val::Auto)
+        );
+
+        app.world_mut().entity_mut(log).despawn();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::EmoteList);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        let (pane, _) = drawn_pane(&mut app);
+        assert_eq!(
+            (pane.top, pane.bottom),
+            (Val::Px(f32::from(EMOTE_Y)), Val::Auto)
+        );
+    }
+
+    /// Status code-moves `joblevel` to (130, 48) whatever its record says, keeping the record
+    /// width; the other details sit at their record frames.
+    #[test]
+    fn joblevel_opened_from_status_sits_at_its_code_move() {
+        use crate::hud::status_panel::{
+            JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP, JOBLEVEL_WINDOW,
+        };
+        const JOBLEVEL_FRAME: (i16, i16, i16) = (200, 100, 180);
+        const PROFILE_FRAME: (i16, i16, i16) = (150, 60, 240);
+        const PROFILE_ENTRY: u8 = 0;
+        let entry_of = |window: &str| {
+            STATUS_DETAIL_WINDOW_NAMES
+                .iter()
+                .position(|name| *name == Some(window))
+                .and_then(|entry| u8::try_from(entry).ok())
+                .expect("a Status detail")
+        };
+        let profile_window =
+            STATUS_DETAIL_WINDOW_NAMES[usize::from(PROFILE_ENTRY)].expect("profile is a window");
+        let mut app = App::new();
+        app.init_resource::<ConfigDatRows>()
+            .init_resource::<DynamicMenu>()
+            .add_systems(Startup, spawn_status_detail_window)
+            .add_systems(Update, update_status_detail_window);
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.frames.insert(JOBLEVEL_WINDOW.into(), JOBLEVEL_FRAME);
+            rows.frames.insert(profile_window.into(), PROFILE_FRAME);
+        }
+        let detail = |app: &mut App, entry: u8| -> (Val, Val, Val) {
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::Status);
+            stack.push(MenuKind::StatusDetail { entry });
+            app.insert_resource(InputMode::Menu(stack));
+            app.update();
+            let node = app
+                .world_mut()
+                .query_filtered::<&Node, With<StatusDetailWindow>>()
+                .single(app.world())
+                .expect("the detail window");
+            (node.left, node.top, node.width)
+        };
+        assert_eq!(
+            detail(&mut app, entry_of(JOBLEVEL_WINDOW)),
+            (
+                Val::Px(JOBLEVEL_STATUS_LEFT),
+                Val::Px(JOBLEVEL_STATUS_TOP),
+                Val::Px(f32::from(JOBLEVEL_FRAME.2))
+            )
+        );
+        assert_eq!(
+            detail(&mut app, PROFILE_ENTRY),
+            (
+                Val::Px(f32::from(PROFILE_FRAME.0)),
+                Val::Px(f32::from(PROFILE_FRAME.1)),
+                Val::Px(f32::from(PROFILE_FRAME.2))
+            )
         );
     }
 }

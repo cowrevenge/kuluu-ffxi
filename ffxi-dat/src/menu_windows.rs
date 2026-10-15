@@ -41,12 +41,12 @@ pub const LEGACY_UI_DAT_FILE_ID: u32 = 1;
 /// newer generation wins for any root it carries.
 pub const NAMED_ROOT_UI_DAT_FILE_ID: u32 = UI_SHEET_FILE_ID;
 
-/// Catalog table 11 (`ROM/165/75.DAT`, EN, `parse_d_msg` n=1099 — the GetText
+/// GetText table 0x0E (`ROM/165/75.DAT`, EN, `parse_d_msg` n=1099 — the GetText
 /// table behind every `windowpsNNN` caption, vault main_menu.md §43). Menu
 /// item `textA` ids resolve here too (selector help lines; content-verified
 /// row by row on retail-2026-09 against the handler semantics of FFXiMain.dll
 /// retail-2026-09 RVA 0x148D00, vault main_menu.md §59).
-pub const CAPTION_CATALOG_TABLE_11_FILE_ID: u32 = 55651;
+pub const CAPTION_CATALOG_TABLE_14_FILE_ID: u32 = 55651;
 
 /// The short-caption catalog (`ROM/165/76.DAT`, EN, `parse_d_msg` n=201 —
 /// menu item `textB` ids decode exactly the Command-menu row labels there,
@@ -69,10 +69,16 @@ pub const GETTEXT_TABLE_12_CATALOG_FILE_ID: u32 = 55653;
 /// (`real_table9_chat_message_catalog_carries_the_option_toggle_lines`).
 pub const GETTEXT_TABLE_9_CATALOG_FILE_ID: u32 = 55648;
 
+/// GetText **table 7**, the client-message catalog the alter ego point and merit refusals print
+/// from: a d_msg file on the same English language row as table 9
+/// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md, "String
+/// and graphic sources").
+pub const GETTEXT_TABLE_7_CATALOG_FILE_ID: u32 = 55646;
+
 /// The myroom door row's caption pair, fetched by the window's update slot as
 /// GetText **table 0x0E** — closed when the door byte is zero (FFXiMain.dll retail-2026-09
 /// `.text 0x145439`) and open otherwise (`.text 0x145357`). Table 0x0E is
-/// [`CAPTION_CATALOG_TABLE_11_FILE_ID`]; the row's own DAT caption token stays -1.
+/// [`CAPTION_CATALOG_TABLE_14_FILE_ID`]; the row's own DAT caption token stays -1.
 pub const MOGHOUSE_DOOR_CAPTION_CLOSED_ID: usize = 666;
 pub const MOGHOUSE_DOOR_CAPTION_OPEN_ID: usize = 667;
 /// …and its help-line pair, GetText **table 0x0D** = [`CAPTION_SHORT_CATALOG_FILE_ID`], closed
@@ -141,7 +147,7 @@ pub struct ItemBlock {
     pub left: Option<i16>,
     /// The item's two UI-string ids, stored as ASCII decimals inside the
     /// block (loader FFXiMain.dll retail-2026-09 RVA 0x11B6B0; field table of
-    /// vault brief §7). `text_a_id` indexes [`CAPTION_CATALOG_TABLE_11_FILE_ID`]
+    /// vault brief §7). `text_a_id` indexes [`CAPTION_CATALOG_TABLE_14_FILE_ID`]
     /// (descriptions — the only text statcom2 carries), `text_b_id` indexes
     /// [`CAPTION_SHORT_CATALOG_FILE_ID`] (short row captions; menuwind/socialme
     /// carry these, statcom2 stores -1). `-1` or empty → `None`.
@@ -842,7 +848,7 @@ mod tests {
     /// string ids resolved through the two catalogs (GetText wrapper FFXiMain.dll
     /// retail-2026-09 RVA 0x152EF0; vault main_menu.md §59): menuwind/socialme
     /// items wear short captions from [`CAPTION_SHORT_CATALOG_FILE_ID`] and
-    /// help descriptions from [`CAPTION_CATALOG_TABLE_11_FILE_ID`], read in
+    /// help descriptions from [`CAPTION_CATALOG_TABLE_14_FILE_ID`], read in
     /// DISPLAY (y) order — which puts Synthesis at page-1 row 5 exactly as the
     /// pair-table law of vault §4 says, straight out of block coordinates.
     #[test]
@@ -857,7 +863,7 @@ mod tests {
             ffxi_msg_table(&bytes)
         };
         let caption_texts = captions(CAPTION_SHORT_CATALOG_FILE_ID);
-        let desc_texts = captions(CAPTION_CATALOG_TABLE_11_FILE_ID);
+        let desc_texts = captions(CAPTION_CATALOG_TABLE_14_FILE_ID);
 
         // Chrome blocks (menuwind ids 13-15 at x=-16/x=113 and the blocked
         // trailing row) carry neither string field; live rows always do.
@@ -966,7 +972,7 @@ mod tests {
         );
         assert_eq!(windows["configwi"].live_items().len(), 13);
         let loc = root
-            .resolve(CAPTION_CATALOG_TABLE_11_FILE_ID)
+            .resolve(CAPTION_CATALOG_TABLE_14_FILE_ID)
             .expect("catalog");
         let table = crate::dmsg::DmsgTable::parse(&std::fs::read(loc.path_under(&root)).unwrap())
             .expect("d_msg");
@@ -1309,7 +1315,7 @@ mod tests {
             let bytes = std::fs::read(loc.path_under(&root)).expect("catalog bytes");
             crate::dmsg::DmsgTable::parse(&bytes).expect("d_msg catalog")
         };
-        let captions = catalog(CAPTION_CATALOG_TABLE_11_FILE_ID);
+        let captions = catalog(CAPTION_CATALOG_TABLE_14_FILE_ID);
         assert_eq!(
             captions.text(MOGHOUSE_DOOR_CAPTION_CLOSED_ID),
             Some("Open your Mog House to party and alliance members.")

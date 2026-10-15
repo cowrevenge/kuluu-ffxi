@@ -109,6 +109,17 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
         // titles come from their own sheet, not a menu title token; vault
         // main_menu.md §59).
         kuluu_render::MenuKind::StatusDetail { .. } => "Status".into(),
+        // The Unity and alter ego point windows echo the Status row that opens them.
+        kind @ (kuluu_render::MenuKind::UnityMenu
+        | kuluu_render::MenuKind::UnityChat
+        | kuluu_render::MenuKind::UnityRankingChooser
+        | kuluu_render::MenuKind::UnityRanking { .. }
+        | kuluu_render::MenuKind::UnityLeaders
+        | kuluu_render::MenuKind::AlterEgoCategories
+        | kuluu_render::MenuKind::AlterEgoUpgrades { .. }
+        | kuluu_render::MenuKind::AlterEgoConfirm { .. }
+        | kuluu_render::MenuKind::Merit(_)
+        | kuluu_render::MenuKind::Arrange(_)) => kuluu_render::hud::menu::menu_title(kind).into(),
         // commenu Friend List widget (vault main_menu.md §37).
         kuluu_render::MenuKind::FriendList => "Friend List".into(),
         // Equipment-row variants (vault main_menu.md §39): pupequip
@@ -170,6 +181,58 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
     }
 }
 
+/// Why `/layout` would be refused right now: the session's own refusal chain over the snapshot's
+/// view of the house (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B1).
+pub(super) fn layout_refusal(
+    snap: &kuluu_snapshot::SceneSnapshot,
+) -> Option<kuluu_session::myroom_layout::Refusal> {
+    use kuluu_session::myroom_layout as layout;
+    let house = snap.myroom.map(|room| layout::HouseView {
+        map_number: room.model,
+        sub_map: room.sub_map,
+        door_open: room.door_open,
+    });
+    let gates = layout::ArrangeGates::for_house(
+        snap.myroom_mode,
+        house,
+        ffxi_proto::decode::ServerLoginMyroom::login_in_mog_house(snap.login_state),
+    );
+    layout::plan_arrange(
+        layout::ArrangeRequest::from_slash(layout::MODE_LAYOUT),
+        &gates,
+        None,
+    )
+    .err()
+}
+
+/// `/layout`, typed or run by the myroom Layout row, refuses on the client: it prints the client
+/// message or plays the buzzer and nothing goes to the session (which runs the same chain before the
+/// wire). Returns whether `command` was a refused `/layout`.
+pub(super) fn layout_refused(
+    command: &AgentCommand,
+    scene_state: &mut SceneState,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
+) -> bool {
+    use kuluu_session::myroom_layout::{RefusalSignal, MODE_LAYOUT};
+    if !matches!(command, AgentCommand::MyroomMode { mode } if *mode == MODE_LAYOUT) {
+        return false;
+    }
+    let Some(refusal) = layout_refusal(&scene_state.snapshot) else {
+        return false;
+    };
+    match refusal.signal() {
+        RefusalSignal::Buzzer => dynamic
+            .ui_sounds
+            .push(kuluu_render::hud::menu::UiSound::Buzzer),
+        RefusalSignal::Message(id) => {
+            let line = dynamic.arrange.texts.client_message(id);
+            push_system_chat_line(scene_state, line);
+        }
+        RefusalSignal::Silent => {}
+    }
+    true
+}
+
 /// The single text-command runner for the Commands-menu rows (bead kuluu-o9qt7.28): a row's
 /// literal goes through `parse_slash` — the one classifier/alias layer typed input uses
 /// (FFXiMain.dll retail-2026-09 RVA 0x80DC0, vault main_menu.md §12) — and the outcome is
@@ -179,7 +242,8 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
 ///
 /// The subset covers every outcome the three row literals can produce (Current Time →
 /// `SetVanaClock`, Key Items/Quests → `OpenMenu`), plus `Command(s)` pass-through and
-/// `SystemMessage`. Two typed-only apply effects are intentionally absent here: the heal/rest
+/// `SystemMessage`; the myroom Layout row's `/layout` refuses here as typed ([`layout_refused`]).
+/// Two typed-only apply effects are intentionally absent here: the heal/rest
 /// stance mirror and the enhanced shutdown-counter writer, both driven by `/logout`-family rows
 /// that answer through PowerPrompt instead of this seam.
 pub(super) fn apply_menu_text_command(
@@ -192,6 +256,7 @@ pub(super) fn apply_menu_text_command(
     cmd_tx: &Sender<AgentCommand>,
     self_pos: kuluu_snapshot::Vec3,
     target_id: Option<u32>,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
 ) {
     let battle_target = match scene_state.snapshot.current_goal {
         Some(kuluu_snapshot::ReactorGoal::Engaged { target_id, .. }) => Some(target_id),
@@ -225,6 +290,9 @@ pub(super) fn apply_menu_text_command(
             }
         }
         SlashOutcome::Command(command) => {
+            if layout_refused(&command, scene_state, dynamic) {
+                return;
+            }
             if let Some(toast) = reqlogout_ack_text(&command) {
                 push_system_chat_line(scene_state, toast.into());
             }
@@ -280,6 +348,9 @@ pub(super) fn apply_slash_outcome(
     let _ = session_event_tx;
     match outcome {
         SlashOutcome::Command(cmd) => {
+            if layout_refused(&cmd, scene_state, dynamic_menu) {
+                return;
+            }
             if let Some(toast) = reqlogout_ack_text(&cmd) {
                 push_system_chat_line(scene_state, toast.into());
             }
@@ -426,6 +497,7 @@ pub(super) fn apply_slash_outcome(
                 slot: kuluu_render::dat_mzb::ZONE_SLOT_MAIN,
                 sub_area_link: 0,
                 voyage_backdrop: false,
+                static_model: None,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),
@@ -1487,5 +1559,91 @@ mod reqlogout_ack_tests {
             text: "hi".into(),
         };
         assert!(reqlogout_ack_text(&other).is_none());
+    }
+}
+
+#[cfg(test)]
+mod layout_refusal_tests {
+    use super::*;
+    use ffxi_proto::decode::ServerLoginMyroom as Login;
+    use kuluu_render::hud::menu::{DynamicMenu, UiSound};
+    use kuluu_session::myroom_layout::{
+        Refusal, MESSAGE_NOT_ARRANGEABLE, MODE_GARDEN, MODE_LAYOUT, MODE_NORMAL,
+    };
+
+    fn upstairs(door_open: bool) -> SceneState {
+        let mut scene = SceneState::default();
+        scene.snapshot.login_state = Login::LOGIN_STATE_POLEXIT_MYROOM;
+        scene.snapshot.myroom = Some(kuluu_snapshot::MyRoom {
+            model: 0,
+            sub_map: Login::SUB_MAP_2F,
+            door_open,
+        });
+        scene
+    }
+
+    fn layout() -> AgentCommand {
+        AgentCommand::MyroomMode { mode: MODE_LAYOUT }
+    }
+
+    #[test]
+    fn layout_goes_through_upstairs_with_the_door_shut() {
+        let mut scene = upstairs(false);
+        let mut dynamic = DynamicMenu::default();
+        assert_eq!(layout_refusal(&scene.snapshot), None);
+        assert!(!layout_refused(&layout(), &mut scene, &mut dynamic));
+        assert!(scene.local_toasts.is_empty() && dynamic.ui_sounds.is_empty());
+    }
+
+    #[test]
+    fn an_open_door_or_layout_mode_already_on_buzzes() {
+        let mut scene = upstairs(true);
+        let mut dynamic = DynamicMenu::default();
+        assert_eq!(layout_refusal(&scene.snapshot), Some(Refusal::DoorOpen));
+        assert!(layout_refused(&layout(), &mut scene, &mut dynamic));
+        assert_eq!(dynamic.ui_sounds, vec![UiSound::Buzzer]);
+        assert!(scene.local_toasts.is_empty());
+
+        let mut scene = upstairs(false);
+        scene.snapshot.myroom_mode = MODE_LAYOUT;
+        assert_eq!(
+            layout_refusal(&scene.snapshot),
+            Some(Refusal::AlreadyArranging)
+        );
+    }
+
+    #[test]
+    fn outside_a_house_layout_prints_the_not_arrangeable_message() {
+        let mut scene = SceneState::default();
+        let mut dynamic = DynamicMenu::default();
+        assert_eq!(
+            layout_refusal(&scene.snapshot),
+            Some(Refusal::NotArrangeable)
+        );
+        assert!(layout_refused(&layout(), &mut scene, &mut dynamic));
+        let printed: Vec<&str> = scene
+            .local_toasts
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(
+            printed,
+            vec![dynamic
+                .arrange
+                .texts
+                .client_message(MESSAGE_NOT_ARRANGEABLE)]
+        );
+        assert!(dynamic.ui_sounds.is_empty());
+    }
+
+    #[test]
+    fn only_entering_layout_mode_runs_the_client_refusals() {
+        let mut scene = SceneState::default();
+        let mut dynamic = DynamicMenu::default();
+        for mode in [MODE_NORMAL, MODE_GARDEN] {
+            let command = AgentCommand::MyroomMode { mode };
+            assert!(!layout_refused(&command, &mut scene, &mut dynamic));
+        }
+        assert!(scene.local_toasts.is_empty());
     }
 }

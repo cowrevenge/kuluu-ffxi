@@ -250,6 +250,54 @@ pub mod c2s {
     // One synthesis attempt: crystal item id + its bag slot, then up to 8
     // ingredient (id, bag-slot) pairs in the recipe row's own order ([`crate::synth`]).
     pub const COMBINE_ASK: u16 = 0x096;
+
+    // GP_CLI_COMMAND_ALTER_EGO_POINTS, vendor/server/src/map/packets/c2s/0x0c1_alter_ego_points.h:
+    // CategoryIndex u16 + padding u16, spending alter ego points on one upgrade id.
+    pub const ALTER_EGO_POINTS: u16 = 0x0C1;
+
+    // GP_CLI_COMMAND_UNITY_MENU, vendor/server/src/map/packets/c2s/0x116_unity_menu.h: Kind u32,
+    // the ranking result set (0 or 1).
+    pub const UNITY_MENU: u16 = 0x116;
+
+    // GP_CLI_COMMAND_UNITY_QUEST, vendor/server/src/map/packets/c2s/0x117_unity_quest.h: Kind u32,
+    // which LSB requires to be 0.
+    pub const UNITY_QUEST: u16 = 0x117;
+
+    // GP_CLI_COMMAND_UNITY_TOGGLE, vendor/server/src/map/packets/c2s/0x118_unity_toggle.h: Mode u8
+    // (GP_CLI_COMMAND_UNITY_TOGGLE_MODE Inactive 0 / Active 1) + 3 padding bytes.
+    // Direction sibling of s2c CURRENCIES_2 at 0x118.
+    pub const UNITY_TOGGLE: u16 = 0x118;
+
+    // GP_CLI_COMMAND_MERITS, vendor/server/src/map/packets/c2s/0x0be_merits.h: Kind u8, Param1 u8,
+    // Param2 u16, Param3 u32 ([`super::merits_wire`] names Kind and Param1).
+    pub const MERITS: u16 = 0x0BE;
+
+    // GP_CLI_COMMAND_JOB_POINTS_SPEND, vendor/server/src/map/packets/c2s/0x0bf_job_points_spend.h:
+    // Index u16 (the job point type id) + padding00 u16.
+    pub const JOB_POINTS_SPEND: u16 = 0x0BF;
+
+    // GP_CLI_COMMAND_JOB_POINTS_REQ, vendor/server/src/map/packets/c2s/0x0c0_job_points_req.h:
+    // header only; LSB answers with s2c 0x08D once the character holds JOB_BREAKER.
+    pub const JOB_POINTS_REQ: u16 = 0x0C0;
+}
+
+// vendor/server/src/map/packets/c2s/0x0be_merits.h GP_CLI_COMMAND_MERITS_KIND / _PARAM1.
+pub mod merits_wire {
+    include!(concat!(env!("OUT_DIR"), "/merits_wire.rs"));
+}
+
+/// Client opcodes the retail client sends that LSB's `PacketC2S` enum does not name
+/// (vendor/server/src/map/enums/packet_c2s.h), so build.rs has no upstream id to check them against.
+pub mod c2s_unnamed {
+    /// The header-only alter ego points request
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md); LSB has no
+    /// handler for it.
+    pub const ALTER_EGO_POINTS_REQUEST: u16 = 0x0C2;
+}
+
+/// vendor/server/src/map/packets/c2s/0x118_unity_toggle.h GP_CLI_COMMAND_UNITY_TOGGLE_MODE.
+pub mod unity_toggle_mode {
+    include!(concat!(env!("OUT_DIR"), "/unity_toggle_mode.rs"));
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -671,6 +719,22 @@ pub mod s2c {
 
     pub const MISCDATA: u16 = 0x063;
 
+    // GP_SERV_PACKET_ALTER_EGO_POINTS, vendor/server/src/map/packets/s2c/0x08e_alter_ego_points.h.
+    // The alter ego point balance with each upgrade's level and cost ([`crate::decode::AlterEgoPoints`]).
+    pub const ALTER_EGO_POINTS: u16 = 0x08E;
+
+    // GP_SERV_COMMAND_UNITY, vendor/server/src/map/packets/s2c/0x110_unity.h
+    // ([`crate::decode::UnityQuest`]). Direction sibling of c2s FISHING_2 at 0x110.
+    pub const UNITY: u16 = 0x110;
+
+    // GP_SERV_COMMAND_MERIT, vendor/server/src/map/packets/s2c/0x08c_merit.h
+    // ([`crate::decode::MeritList`]).
+    pub const MERIT: u16 = 0x08C;
+
+    // GP_SERV_COMMAND_JOB_POINTS, vendor/server/src/map/packets/s2c/0x08d_job_points.h
+    // ([`crate::decode::JobPointList`]).
+    pub const JOB_POINTS: u16 = 0x08D;
+
     pub const SYSTEMMES: u16 = 0x053;
 
     // GP_SERV_COMMAND_EVENTUCOFF, vendor/server/src/map/packets/s2c/0x052_eventucoff.h.
@@ -825,6 +889,67 @@ pub mod s2c {
 
 #[cfg(test)]
 mod tests {
+    /// The Unity / alter ego point opcodes are LSB's own enum entries, and 0x0C2 is the one
+    /// the record names with no LSB entry at all.
+    #[test]
+    fn unity_and_alter_ego_opcodes_match_lsb_packet_enums() {
+        use crate::packet_names::{c2s_name, s2c_name};
+        assert_eq!(s2c_name(super::s2c::UNITY), Some("UNITY"));
+        assert!(
+            s2c_name(super::s2c::ALTER_EGO_POINTS).is_some_and(|n| n.ends_with("ALTER_EGO_POINTS"))
+        );
+        assert_eq!(
+            c2s_name(super::c2s::ALTER_EGO_POINTS),
+            Some("ALTER_EGO_POINTS")
+        );
+        assert_eq!(c2s_name(super::c2s_unnamed::ALTER_EGO_POINTS_REQUEST), None);
+        assert_eq!(c2s_name(super::c2s::UNITY_MENU), Some("UNITY_MENU"));
+        assert_eq!(c2s_name(super::c2s::UNITY_QUEST), Some("UNITY_QUEST"));
+        assert_eq!(c2s_name(super::c2s::UNITY_TOGGLE), Some("UNITY_TOGGLE"));
+    }
+
+    #[test]
+    fn merit_and_job_point_opcodes_match_lsb_packet_enums() {
+        use crate::packet_names::{c2s_name, s2c_name};
+        assert_eq!(s2c_name(super::s2c::MERIT), Some("MERIT"));
+        assert_eq!(s2c_name(super::s2c::JOB_POINTS), Some("JOB_POINTS"));
+        assert_eq!(c2s_name(super::c2s::MERITS), Some("MERITS"));
+        assert_eq!(
+            c2s_name(super::c2s::JOB_POINTS_SPEND),
+            Some("JOB_POINTS_SPEND")
+        );
+        assert_eq!(c2s_name(super::c2s::JOB_POINTS_REQ), Some("JOB_POINTS_REQ"));
+    }
+
+    /// The record's c2s 0x0BE bodies: ChangeMode is Kind 2 with Param1 0 (EXP) or 1 (Limit
+    /// Points), EditMode is Kind 3 with Param1 1 (raise) or 0 (lower)
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md). The
+    /// scraped LSB enums agree.
+    #[test]
+    fn merits_kind_and_param1_match_the_record() {
+        use super::merits_wire::{kind, param1};
+        const RECORD_PINNED_CHANGE_MODE: u8 = 2;
+        const RECORD_PINNED_EDIT_MODE: u8 = 3;
+        const RECORD_PINNED_LOWER_OR_EXP: u8 = 0;
+        const RECORD_PINNED_RAISE_OR_LIMIT: u8 = 1;
+        assert_eq!(kind::CHANGE_MODE, RECORD_PINNED_CHANGE_MODE);
+        assert_eq!(kind::EDIT_MODE, RECORD_PINNED_EDIT_MODE);
+        assert_eq!(param1::LOWER, RECORD_PINNED_LOWER_OR_EXP);
+        assert_eq!(param1::RAISE, RECORD_PINNED_RAISE_OR_LIMIT);
+    }
+
+    /// The record's c2s 0x118 Mode: the Unity chat panel's item 1 sends 1 (on), item 2 sends 0
+    /// (off) (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md). The
+    /// scraped LSB enum agrees.
+    #[test]
+    fn unity_toggle_modes_match_the_record() {
+        use super::unity_toggle_mode::{ACTIVE, INACTIVE};
+        const RECORD_PINNED_ACTIVE: u8 = 1;
+        const RECORD_PINNED_INACTIVE: u8 = 0;
+        assert_eq!(ACTIVE, RECORD_PINNED_ACTIVE);
+        assert_eq!(INACTIVE, RECORD_PINNED_INACTIVE);
+    }
+
     #[test]
     fn pinned_emote_ids_match_scraped_table() {
         use super::emote;

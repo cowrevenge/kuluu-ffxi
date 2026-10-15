@@ -1,6 +1,7 @@
 use super::map_screen::handle_map_key;
 use super::slash_apply::{apply_keybind_update, apply_menu_text_command};
 use super::*;
+use kuluu_render::input_mode::ConfirmDefault;
 
 #[derive(Debug, Clone, PartialEq)]
 enum MenuDispatch {
@@ -305,16 +306,194 @@ fn open_statcom_detail(stack: &mut MenuStack, cursor: usize) {
         return;
     }
     let detail = MenuKind::StatusDetail { entry: entry_idx };
-    if let Some(top) = stack.levels.last_mut() {
+    if let Some(top) = stack.levels.last() {
         if let MenuKind::StatusDetail { entry: prev } = top.kind {
             if usize::from(prev) == usize::from(entry_idx) {
                 return; // re-selecting the same row is a no-op (§2 step 3)
             }
-            top.kind = detail; // switch: prior display-only detail closes first
-            return;
+            stack.pop();
         }
     }
     stack.push(detail);
+}
+
+/// Status rows 11 and 13 open the Unity and alter ego point windows
+/// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md), rows 7 and 8
+/// the merit and job point windows
+/// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md); every
+/// other row opens its detail window.
+fn open_status_row(
+    stack: &mut MenuStack,
+    cursor: usize,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+    dynamic: &mut kuluu_render::hud::menu::DynamicMenu,
+) {
+    use kuluu_render::hud::merit_windows;
+    use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
+    use kuluu_render::hud::unity_fp;
+    let outcome = match STATUS_ENTRIES.get(cursor).map(|e| e.kind) {
+        Some(StatusEntryKind::Unity) => unity_fp::open_unity_menu(stack, &mut scene_state.snapshot),
+        Some(StatusEntryKind::FacetCategories) => {
+            unity_fp::open_alter_ego_categories(stack, &mut scene_state.snapshot)
+        }
+        Some(StatusEntryKind::MeritPoints) => {
+            let outcome = merit_windows::open_merit_menu(stack, dynamic, &scene_state.snapshot);
+            apply_merit_outcome(outcome, scene_state, cmd_tx);
+            return;
+        }
+        Some(StatusEntryKind::JobPoints) => {
+            let outcome = merit_windows::open_job_point_jobs(stack, &scene_state.snapshot);
+            apply_merit_outcome(outcome, scene_state, cmd_tx);
+            return;
+        }
+        _ => {
+            open_statcom_detail(stack, cursor);
+            return;
+        }
+    };
+    apply_unity_fp_outcome(outcome, scene_state, cmd_tx);
+}
+
+/// Sends what a merit or job point window asked for and prints its client messages.
+fn apply_merit_outcome(
+    outcome: kuluu_render::hud::merit_windows::MeritOutcome,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+) {
+    for request in outcome.requests {
+        if let Err(e) = cmd_tx.try_send(merit_command(request)) {
+            push_system_chat_line(scene_state, format!("[menu] request dropped: {e}"));
+        }
+    }
+    for line in outcome.chat_lines {
+        push_system_chat_line(scene_state, line);
+    }
+}
+
+fn merit_command(request: kuluu_render::hud::merit_windows::MeritRequest) -> AgentCommand {
+    use kuluu_render::hud::merit_windows::MeritRequest as R;
+    match request {
+        R::SetMode { limit_points } => AgentCommand::SetMeritMode { limit_points },
+        R::Edit { index, raise } => AgentCommand::EditMerit { index, raise },
+        R::SpendJobPoint { type_id } => AgentCommand::SpendJobPoint { type_id },
+        R::RequestJobPoints => AgentCommand::RequestJobPoints,
+    }
+}
+
+/// Sends what a Unity / alter ego point window asked for and prints its client messages.
+fn apply_unity_fp_outcome(
+    outcome: kuluu_render::hud::unity_fp::UnityFpOutcome,
+    scene_state: &mut SceneState,
+    cmd_tx: &Sender<AgentCommand>,
+) {
+    for request in outcome.requests {
+        if let Err(e) = cmd_tx.try_send(unity_fp_command(request)) {
+            push_system_chat_line(scene_state, format!("[menu] request dropped: {e}"));
+        }
+    }
+    for line in outcome.chat_lines {
+        push_system_chat_line(scene_state, line);
+    }
+}
+
+fn unity_fp_command(request: kuluu_render::hud::unity_fp::UnityFpRequest) -> AgentCommand {
+    use kuluu_render::hud::unity_fp::UnityFpRequest as R;
+    match request {
+        R::UnityRanking(result_set) => AgentCommand::RequestUnityRanking { result_set },
+        R::UnityQuest => AgentCommand::RequestUnityQuest,
+        R::UnityChat(mode) => AgentCommand::SetUnityChat { mode },
+        R::AlterEgoPoints => AgentCommand::RequestAlterEgoPoints,
+        R::UpgradeAlterEgo(upgrade_id) => AgentCommand::UpgradeAlterEgo { upgrade_id },
+    }
+}
+
+/// Sends the Unity chat panel's throttled mode changes and, once per zone-in, the stored mode
+/// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md). The client option
+/// store lives for the session, so until the panel stores a mode there is none to send.
+pub fn unity_chat_send_system(
+    time: Res<Time>,
+    cmd_tx: Res<crate::view_native::input::CommandTx>,
+    scene_state: Res<SceneState>,
+    mut dynamic: ResMut<kuluu_render::hud::menu::DynamicMenu>,
+    mut last_zone_generation: Local<Option<u64>>,
+) {
+    use kuluu_render::hud::unity_fp::UNITY_CHAT_OPTION;
+    if dynamic.unity_fp.chat.is_some() {
+        let seconds = time.delta_secs();
+        if let Some(mode) = dynamic
+            .unity_fp
+            .chat
+            .as_mut()
+            .and_then(|chat| chat.advance(seconds))
+        {
+            let _ = cmd_tx.0.try_send(AgentCommand::SetUnityChat { mode });
+        }
+    }
+    let snap = &scene_state.snapshot;
+    if snap.zone_id.is_some() && *last_zone_generation != Some(snap.zone_generation) {
+        *last_zone_generation = Some(snap.zone_generation);
+        if let Some(&stored) = dynamic.config_option_values.get(&UNITY_CHAT_OPTION) {
+            let _ = cmd_tx.0.try_send(AgentCommand::SetUnityChat {
+                mode: u8::from(stored != 0),
+            });
+        }
+    }
+}
+
+/// Sends what the arrange editor asked for, in order: c2s 0x0FA for each piece placed, c2s 0x0FB for
+/// each piece put away, and the return to normal play
+/// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B8).
+pub fn arrange_request_send_system(
+    cmd_tx: Res<crate::view_native::input::CommandTx>,
+    mut scene_state: ResMut<SceneState>,
+    mut dynamic: ResMut<kuluu_render::hud::menu::DynamicMenu>,
+) {
+    if dynamic.arrange.requests.is_empty() {
+        return;
+    }
+    for request in std::mem::take(&mut dynamic.arrange.requests) {
+        if let Err(e) = cmd_tx.0.try_send(arrange_command(request)) {
+            push_system_chat_line(&mut scene_state, format!("[layout] request dropped: {e}"));
+        }
+    }
+}
+
+fn arrange_command(request: kuluu_render::myroom_arrange::ArrangeRequest) -> AgentCommand {
+    use kuluu_render::myroom_arrange::ArrangeRequest as R;
+    match request {
+        R::Layout {
+            item_no,
+            slot,
+            container,
+            floor,
+            col,
+            level,
+            row,
+            rot,
+        } => AgentCommand::MyroomLayout {
+            item_no,
+            slot,
+            container,
+            floor,
+            col,
+            level,
+            row,
+            rotation: rot,
+        },
+        R::Bankin {
+            item_no,
+            slot,
+            container,
+        } => AgentCommand::MyroomBankin {
+            item_no,
+            slot,
+            container,
+        },
+        R::Leave => AgentCommand::MyroomMode {
+            mode: kuluu_session::myroom_layout::MODE_NORMAL,
+        },
+    }
 }
 
 /// While a DISPLAY-ONLY statcom2 companion tops the stack, it must not hold
@@ -420,12 +599,39 @@ pub(super) fn confirm_menu_at_cursor(
                     // (never-polled) Send future enqueues nothing.
                     let _ = cmd_tx.try_send(AgentCommand::RequestCurrencies { mode });
                 }
-                open_statcom_detail(stack, cursor);
+                open_status_row(stack, cursor, scene_state, cmd_tx, dynamic);
             }
             // Guard failed: the row is grey, so the select is inert.
             _ => {}
         }
         return None;
+    }
+    if kuluu_render::hud::unity_fp::is_unity_fp_window(kind) {
+        let action = kuluu_render::hud::menu::entry_action(kind, cursor, dynamic);
+        let outcome = kuluu_render::hud::unity_fp::select_unity_fp_row(
+            kind,
+            action,
+            stack,
+            dynamic,
+            &mut scene_state.snapshot,
+        );
+        apply_unity_fp_outcome(outcome, scene_state, cmd_tx);
+        return None;
+    }
+    if let MenuKind::Merit(window) = kind {
+        let action = kuluu_render::hud::menu::entry_action(kind, cursor, dynamic);
+        let outcome = kuluu_render::hud::merit_windows::select_merit_row(
+            window,
+            action,
+            stack,
+            dynamic,
+            &scene_state.snapshot,
+        );
+        apply_merit_outcome(outcome, scene_state, cmd_tx);
+        return None;
+    }
+    if let MenuKind::Arrange(_) = kind {
+        return kuluu_render::myroom_arrange::select_arrange_row(stack, dynamic);
     }
     if matches!(
         kind,
@@ -664,10 +870,7 @@ pub(super) fn confirm_menu_at_cursor(
             // main_menu.md §59 addenda 7–8). The prompt opens on No, like every other
             // retail confirm.
             if matches!(action, A::OpenKeyAssignResetPrompt) {
-                stack.push(MenuKind::KeyAssignResetPrompt);
-                if let Some(level) = stack.current_mut() {
-                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
-                }
+                stack.open_confirm(MenuKind::KeyAssignResetPrompt, ConfirmDefault::No);
                 return None;
             }
             // A roomlist style row raises its Yes/No prompt on the spot and sends
@@ -691,10 +894,7 @@ pub(super) fn confirm_menu_at_cursor(
                 if gated {
                     return None;
                 }
-                stack.push(MenuKind::RoomListConfirm { style });
-                if let Some(level) = stack.current_mut() {
-                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
-                }
+                stack.open_confirm(MenuKind::RoomListConfirm { style }, ConfirmDefault::No);
                 return None;
             }
             // A radio row of a law'd config page writes its record through the
@@ -1194,6 +1394,7 @@ pub(super) fn confirm_menu_at_cursor(
                 cmd_tx,
                 self_pos,
                 target_id,
+                dynamic,
             );
             // Mirrors the Debug toggles: the menu stays open (provisional
             // pending retail capture, bead kuluu-y5hq retail_unknowns).
@@ -1210,11 +1411,14 @@ pub(super) fn confirm_menu_at_cursor(
                 cmd_tx,
                 self_pos,
                 target_id,
+                dynamic,
             );
             // The retail arms (FFXiMain.dll retail-2026-09 RVA 0x145541 and
             // 0x14554A) close myroom by name after the runner returns; kuluu
             // pops this window's level to do the same (vault §53).
-            stack.pop();
+            if !stack.pop() {
+                return Some(InputMode::World);
+            }
             None
         }
         MenuDispatch::BrowseBag { container } => {
@@ -1327,10 +1531,7 @@ pub(super) fn confirm_menu_at_cursor(
             // The power prompts open with the cursor on No, like every other
             // retail confirm.
             if matches!(submenu, MenuKind::PowerPrompt { .. }) {
-                stack.push(submenu);
-                if let Some(level) = stack.current_mut() {
-                    level.cursor = kuluu_render::hud::menu::DROP_CONFIRM_DEFAULT;
-                }
+                stack.open_confirm(submenu, ConfirmDefault::No);
                 return None;
             }
             // The Map screen opens on its command submenu; the wide-scan request
@@ -1755,6 +1956,14 @@ pub(super) fn handle_menu_key(
     if stack.take_absorb_open_minus() && key_code == KeyCode::Minus {
         return None;
     }
+    // .agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md: a window
+    // whose cursor rests on its unselectable last item ignores every key, Esc included.
+    if stack
+        .current()
+        .is_some_and(kuluu_render::input_mode::MenuLevel::cursor_locked)
+    {
+        return None;
+    }
 
     // The Map screen is a bespoke full-screen surface (full-screen map + a
     // top-right command submenu drilling into Markers/Wide Scan/Change Map),
@@ -1850,7 +2059,7 @@ pub(super) fn handle_menu_key(
                     if let Some(mode) = currency_request_mode_for(entry_kind) {
                         let _ = cmd_tx.try_send(AgentCommand::RequestCurrencies { mode });
                     }
-                    open_statcom_detail(stack, sel_cursor);
+                    open_status_row(stack, sel_cursor, scene_state, cmd_tx, dynamic);
                 }
                 // Guard failed: the row is grey, so the select is inert.
                 _ => {}
@@ -1914,11 +2123,11 @@ pub(super) fn handle_menu_key(
             let down = bindings.matches_logical(Action::NavDown, key);
             dynamic.option_edit = None;
             if let Some(level) = stack.current_mut() {
-                level.cursor = kuluu_render::hud::list_view::step_cursor(
+                level.step_cursor_to(kuluu_render::hud::list_view::step_cursor(
                     level.cursor,
                     dynamic.rows.len(),
                     down,
-                );
+                ));
             }
             return None;
         } else if bindings.matches_logical(Action::NavConfirm, key)
@@ -2134,6 +2343,25 @@ pub(super) fn handle_menu_key(
         }
     }
 
+    // Left/Right toggle `jbpcat`'s page
+    // (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    if (bindings.matches_logical(Action::NavLeft, key)
+        || bindings.matches_logical(Action::NavRight, key))
+        && kuluu_render::hud::merit_windows::toggle_job_page(stack, dynamic)
+    {
+        return None;
+    }
+
+    // The ranking list's Left/Right switch result sets once both are complete
+    // (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    if matches!(kind, MenuKind::UnityRanking { .. })
+        && (bindings.matches_logical(Action::NavLeft, key)
+            || bindings.matches_logical(Action::NavRight, key))
+        && kuluu_render::hud::unity_fp::switch_ranking_set(stack, dynamic, &scene_state.snapshot)
+    {
+        return None;
+    }
+
     // Retail pages every other vertical list menu (the action-ring Usable list,
     // Magic/Abilities/Key Items/Emotes, the equip-slot picker) with Left/Right,
     // one visible page per press, clamped at the ends. Items handled its own
@@ -2150,8 +2378,12 @@ pub(super) fn handle_menu_key(
         if let Some(forward) = page {
             let rows = kuluu_render::hud::menu::list_page_rows(kind);
             let level = stack.current_mut()?;
-            level.cursor =
-                kuluu_render::hud::menu::page_cursor(level.cursor, entry_count, rows, forward);
+            level.step_cursor_to(kuluu_render::hud::menu::page_cursor(
+                level.cursor,
+                entry_count,
+                rows,
+                forward,
+            ));
             return None;
         }
     }
@@ -2163,16 +2395,24 @@ pub(super) fn handle_menu_key(
         } else {
             cursor - 1
         };
-        level.cursor =
-            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, up, false);
+        level.step_cursor_to(kuluu_render::hud::menu::settle_cursor(
+            kind,
+            graphics.dlss_supported,
+            up,
+            false,
+        ));
         return None;
     }
     if bindings.matches_logical(Action::NavDown, key) {
         let level = stack.current_mut()?;
         let next = cursor + 1;
         let down = if next >= entry_count { 0 } else { next };
-        level.cursor =
-            kuluu_render::hud::menu::settle_cursor(kind, graphics.dlss_supported, down, true);
+        level.step_cursor_to(kuluu_render::hud::menu::settle_cursor(
+            kind,
+            graphics.dlss_supported,
+            down,
+            true,
+        ));
         return None;
     }
     if bindings.matches_logical(Action::NavConfirm, key) {
@@ -2215,6 +2455,12 @@ pub(super) fn handle_menu_key(
         {
             dynamic.emote_sort_state = kuluu_render::hud::menu::EmoteSortState::Off;
             return None;
+        }
+        if kuluu_render::hud::merit_windows::cancel_merit_window(stack, dynamic) {
+            return None;
+        }
+        if let Some(next) = kuluu_render::myroom_arrange::cancel_arrange_window(stack, dynamic) {
+            return next;
         }
         // Cancel pops one level; from Root it closes back to the world. Closing the
         // emote list cascades over its `abisortw` companion — retail's close handler
@@ -2583,6 +2829,90 @@ mod menu_key_tests {
                 kind: ReqLogoutKind::LogoutToggle,
             }
         );
+    }
+
+    /// Direction keys never move the cursor onto a window's unselectable last item, and a
+    /// window whose cursor rests on it ignores every key, Esc included
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn keys_skip_the_unselectable_item_and_a_cursor_resting_on_it_ignores_them() {
+        use kuluu_render::input_mode::{LastItemLock, LastItemRow};
+        const LAST: usize = 2;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.dynamic.rows = (0..=LAST)
+            .map(|_| kuluu_render::hud::menu::DynamicMenuRow {
+                label: String::new(),
+                action: kuluu_render::hud::menu::DynamicMenuAction::DisplayInfo,
+                tint: None,
+            })
+            .collect();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.current_mut().unwrap().last_item_lock = Some(LastItemLock {
+            open_cursor: 0,
+            row: LastItemRow::Row(LAST),
+        });
+        let mut press = |key: Key, code: KeyCode, stack: &mut MenuStack| {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&key, code, stack, markers)
+        };
+        let cursor = |stack: &MenuStack| stack.current().unwrap().cursor;
+
+        press(Key::ArrowDown, KeyCode::ArrowDown, &mut stack);
+        assert_eq!(cursor(&stack), 1);
+        press(Key::ArrowDown, KeyCode::ArrowDown, &mut stack);
+        assert_eq!(cursor(&stack), 1, "Down onto the last item stays put");
+        press(Key::ArrowUp, KeyCode::ArrowUp, &mut stack);
+        press(Key::ArrowUp, KeyCode::ArrowUp, &mut stack);
+        assert_eq!(cursor(&stack), 0, "Up's wrap onto the last item stays put");
+
+        stack.current_mut().unwrap().cursor = LAST;
+        press(Key::ArrowUp, KeyCode::ArrowUp, &mut stack);
+        assert_eq!(cursor(&stack), LAST);
+        assert!(press(Key::Escape, KeyCode::Escape, &mut stack).is_none());
+        assert_eq!(
+            stack.current().map(|level| level.kind),
+            Some(MenuKind::RetailConfig),
+            "Esc does not close it either"
+        );
+    }
+
+    /// Shut Down and a Remodel style row raise the shared `comyn` confirm on No, as Log Out does
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn shut_down_and_remodel_confirms_open_on_no() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.current_mut().unwrap().cursor = kuluu_render::hud::menu::root_entries()
+            .iter()
+            .position(|e| *e == kuluu_render::hud::menu::ROOT_SHUT_DOWN)
+            .unwrap();
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        let level = stack.current().expect("prompt pushed");
+        assert!(matches!(
+            level.kind,
+            MenuKind::PowerPrompt { shut_down: true }
+        ));
+        assert_eq!(level.cursor, ConfirmDefault::No.row());
+
+        const STYLE: u16 = 615;
+        harness.dynamic.rows = vec![kuluu_render::hud::menu::DynamicMenuRow {
+            label: String::new(),
+            action: kuluu_render::hud::menu::DynamicMenuAction::MogHouseRemodelSelect {
+                style: STYLE,
+            },
+            tint: None,
+        }];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RoomList);
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        let level = stack.current().expect("prompt pushed");
+        assert_eq!(level.kind, MenuKind::RoomListConfirm { style: STYLE });
+        assert_eq!(level.cursor, ConfirmDefault::No.row());
     }
 
     fn menu_root_log_out_index() -> usize {
@@ -4052,6 +4382,422 @@ mod menu_key_tests {
             "row B — the second pick — is selected"
         );
     }
+
+    fn status_row_of(kind: kuluu_render::hud::status_panel::StatusEntryKind) -> usize {
+        kuluu_render::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == kind)
+            .expect("status row")
+    }
+
+    fn drain_commands(harness: &mut Harness) -> Vec<AgentCommand> {
+        std::iter::from_fn(|| harness._cmd_rx.try_recv().ok()).collect()
+    }
+
+    /// Status row id 11 opens `ut_menu` over the selector, asking for every ranking set whose
+    /// table completed (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md);
+    /// the row is never disabled, and with a display-only detail up the detail closes first.
+    #[test]
+    fn unity_row_opens_ut_menu_and_requests_completed_sets() {
+        use kuluu_render::hud::status_panel::StatusEntryKind;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        harness.scene_state.snapshot.unity.rankings[1].complete = true;
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = 0;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(matches!(
+            stack.current().unwrap().kind,
+            MenuKind::StatusDetail { entry: 0 }
+        ));
+        stack.levels[1].cursor = status_row_of(StatusEntryKind::Unity);
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.levels.iter().map(|l| l.kind).collect::<Vec<_>>(),
+            vec![MenuKind::Root, MenuKind::Status, MenuKind::UnityMenu]
+        );
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::RequestUnityRanking { result_set: 1 }]
+        );
+    }
+
+    /// Status row id 13 opens `fp_cat` once its gate holds, asking for the alter ego point data
+    /// while none has arrived; Esc closes it back to the selector.
+    #[test]
+    fn alter_ego_row_opens_fp_cat_and_requests_points_without_data() {
+        use kuluu_render::hud::status_panel::{
+            StatusEntryKind, ALTER_EGO_POINTS_KEY_ITEM, MASTER_LEVEL_JOB_CAP,
+        };
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let snap = &mut harness.scene_state.snapshot;
+        snap.status_data_ready = true;
+        snap.self_char_id = Some(7);
+        snap.party.push(kuluu_snapshot::PartyMember {
+            id: 7,
+            act_index: 1,
+            name: None,
+            hp: 1,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 0,
+            zone_no: 1,
+            main_job: 1,
+            main_job_lv: MASTER_LEVEL_JOB_CAP,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            in_mog_house: true,
+            party_no: 0,
+        });
+        snap.key_items.push(ALTER_EGO_POINTS_KEY_ITEM);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = status_row_of(StatusEntryKind::FacetCategories);
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().kind, MenuKind::AlterEgoCategories);
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::RequestAlterEgoPoints]
+        );
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Status);
+    }
+
+    /// The `merityn` Yes on an affordable upgrade in the Mog House sends c2s 0x0C1; selecting the
+    /// row outside the Mog House prints the table 7 refusal and queues the buzzer instead.
+    #[test]
+    fn upgrade_confirm_sends_and_refusal_prints_and_buzzes() {
+        use kuluu_render::hud::menu::{DynamicMenuAction, DynamicMenuRow, UiSound};
+        const MP: u16 = 9;
+        const CAP: u8 = 50;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut points = kuluu_snapshot::AlterEgoPoints {
+            points: 10,
+            upgrades: [0; kuluu_snapshot::ALTER_EGO_UPGRADE_SLOTS],
+            costs: [0; kuluu_snapshot::ALTER_EGO_UPGRADE_SLOTS],
+        };
+        points.costs[usize::from(MP)] = 2;
+        harness.scene_state.snapshot.alter_ego_points = Some(points);
+        harness.scene_state.snapshot.login_state =
+            ffxi_proto::decode::ServerLoginMyroom::LOGIN_STATE_GAME;
+        harness.dynamic.unity_fp.not_allowed_message = Some("refused".into());
+        harness.dynamic.rows = vec![DynamicMenuRow {
+            label: "MP".into(),
+            action: DynamicMenuAction::AlterEgoUpgrade {
+                upgrade: MP,
+                cap: CAP,
+            },
+            tint: None,
+        }];
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::AlterEgoCategories);
+        stack.push(MenuKind::AlterEgoUpgrades { category: 1 });
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            harness
+                .scene_state
+                .local_toasts
+                .last()
+                .map(|l| l.text.as_str()),
+            Some("refused")
+        );
+        assert_eq!(harness.dynamic.ui_sounds, vec![UiSound::Buzzer]);
+        assert_eq!(stack.levels.len(), 3, "nothing opens");
+
+        harness.scene_state.snapshot.login_state =
+            ffxi_proto::decode::ServerLoginMyroom::LOGIN_STATE_MYROOM;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().map(|l| (l.kind, l.cursor)),
+            Some((MenuKind::AlterEgoConfirm { upgrade: MP }, 1)),
+            "the prompt opens on No"
+        );
+        harness.dynamic.rows = vec![
+            DynamicMenuRow {
+                label: String::new(),
+                action: DynamicMenuAction::AlterEgoConfirmAnswer { yes: true },
+                tint: None,
+            },
+            DynamicMenuRow {
+                label: String::new(),
+                action: DynamicMenuAction::AlterEgoConfirmAnswer { yes: false },
+                tint: None,
+            },
+        ];
+        harness.key(
+            &Key::ArrowUp,
+            KeyCode::ArrowUp,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::UpgradeAlterEgo { upgrade_id: MP }]
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::AlterEgoUpgrades { category: 1 }
+        );
+    }
+
+    fn merit_item(item: u8, enabled: bool) -> kuluu_render::hud::menu::DynamicMenuRow {
+        kuluu_render::hud::menu::DynamicMenuRow {
+            label: String::new(),
+            action: kuluu_render::hud::menu::DynamicMenuAction::Merit(
+                kuluu_render::hud::merit_windows::MeritAction::Item { item, enabled },
+            ),
+            tint: None,
+        }
+    }
+
+    /// Status row id 7 opens `merit1` once its record gate holds; row id 8 opens `merit2ca` and
+    /// asks for the job point data while none has arrived
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    #[test]
+    fn status_rows_7_and_8_open_the_merit_and_job_point_windows() {
+        use kuluu_render::hud::merit_windows::MeritWindow;
+        use kuluu_render::hud::status_panel::{
+            StatusEntryKind, JOB_POINTS_ACCESS_BIT, MASTER_LEVEL_JOB_CAP,
+        };
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let snap = &mut harness.scene_state.snapshot;
+        snap.merits = Some(kuluu_snapshot::MisdataMerits {
+            limit_points: 0,
+            merit_points: 0,
+            blu_bonus: 0,
+            can_use_merit_mode: true,
+            xp_capped_or_merit_mode: false,
+            merit_mode_enabled: false,
+            max_merit_points: 0,
+        });
+        snap.job_points = Some(kuluu_snapshot::JobPointsRecord {
+            access: JOB_POINTS_ACCESS_BIT,
+            ..Default::default()
+        });
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            mjob_lv: MASTER_LEVEL_JOB_CAP,
+            ..Default::default()
+        });
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = status_row_of(StatusEntryKind::MeritPoints);
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::Menu)
+        );
+        assert!(drain_commands(&mut harness).is_empty());
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Status);
+
+        stack.levels[1].cursor = status_row_of(StatusEntryKind::JobPoints);
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::Jobs)
+        );
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::RequestJobPoints]
+        );
+    }
+
+    /// `merit2`'s enabled item sends c2s 0x0BE ChangeMode; `merityn` takes Esc as a buzzer only,
+    /// and its Yes sends EditMode.
+    #[test]
+    fn merit_mode_and_confirm_answer_through_the_keys() {
+        use kuluu_render::hud::menu::UiSound;
+        use kuluu_render::hud::merit_windows::{
+            MeritWindow, MERIT2_ITEM_EXP, MERIT2_ITEM_LIMIT_POINTS,
+        };
+        use kuluu_render::hud::unity_fp::{CONFIRM_ITEM_NO, CONFIRM_ITEM_YES};
+        const MERIT_INDEX: u16 = 0x20;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::Merit(MeritWindow::Menu));
+        stack.push(MenuKind::Merit(MeritWindow::Mode));
+        harness.dynamic.rows = vec![
+            merit_item(MERIT2_ITEM_EXP, false),
+            merit_item(MERIT2_ITEM_LIMIT_POINTS, true),
+        ];
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(
+            drain_commands(&mut harness).is_empty(),
+            "item 1 is disabled"
+        );
+        harness.key(
+            &Key::ArrowDown,
+            KeyCode::ArrowDown,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::SetMeritMode { limit_points: true }]
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::Mode),
+            "merit2 stays open"
+        );
+
+        let confirm = MenuKind::Merit(MeritWindow::Confirm {
+            index: MERIT_INDEX,
+            raise: true,
+        });
+        stack.push(confirm);
+        harness.dynamic.rows = vec![
+            merit_item(CONFIRM_ITEM_YES, true),
+            merit_item(CONFIRM_ITEM_NO, true),
+        ];
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            confirm,
+            "Esc does not answer"
+        );
+        assert_eq!(harness.dynamic.ui_sounds, vec![UiSound::Buzzer]);
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            drain_commands(&mut harness),
+            vec![AgentCommand::EditMerit {
+                index: MERIT_INDEX,
+                raise: true
+            }]
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::Mode)
+        );
+    }
+
+    /// Left and Right flip `jbpcat` between its Job Points and Gifts pages with the page toggle
+    /// sound instead of paging the list.
+    #[test]
+    fn left_right_toggle_the_job_point_page() {
+        use kuluu_render::hud::menu::UiSound;
+        use kuluu_render::hud::merit_windows::MeritWindow;
+        const WAR: u8 = 1;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Merit(MeritWindow::Jobs));
+        stack.push(MenuKind::Merit(MeritWindow::JobCategories {
+            job: WAR,
+            gifts: false,
+        }));
+        harness.key(
+            &Key::ArrowRight,
+            KeyCode::ArrowRight,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::JobCategories {
+                job: WAR,
+                gifts: true
+            })
+        );
+        harness.key(
+            &Key::ArrowLeft,
+            KeyCode::ArrowLeft,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Merit(MeritWindow::JobCategories {
+                job: WAR,
+                gifts: false
+            })
+        );
+        assert_eq!(
+            harness.dynamic.ui_sounds,
+            vec![UiSound::PageToggle, UiSound::PageToggle]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4514,6 +5260,19 @@ mod menu_dispatch_tests {
             .position(|e| *e == label)
             .expect("home-view row");
         stack.current_mut().unwrap().cursor = row;
+    }
+
+    /// myroom reopened alone after layout mode closes on a text-command row as its handler closes it
+    /// by name, with no main menu under it to fall back to.
+    #[test]
+    fn a_lone_myroom_closes_on_a_text_command_row() {
+        let mut stack = MenuStack::default();
+        stack_home_view_with_cursor(&mut stack, "Gardening");
+        let mut scene_state = SceneState::default();
+        let (cmd_tx, _rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+        let next = confirm_row(&mut stack, &mut scene_state, &cmd_tx, &mut item_bag);
+        assert!(matches!(next, Some(InputMode::World)), "{next:?}");
     }
 
     /// Confirm-time law: the Storage row (id1's `menu    storage` arm, holder
@@ -5354,6 +6113,7 @@ mod menu_dispatch_tests {
             cmd_tx,
             kuluu_snapshot::Vec3::default(),
             None,
+            &mut kuluu_render::hud::menu::DynamicMenu::default(),
         );
     }
 
@@ -6276,5 +7036,100 @@ mod menu_dispatch_tests {
             stack.current().unwrap().kind,
             MenuKind::RetailConfigPage(10)
         ));
+    }
+}
+
+#[cfg(test)]
+mod unity_chat_send_tests {
+    use super::*;
+    use kuluu_render::hud::menu::DynamicMenu;
+    use kuluu_render::hud::unity_fp::{UnityChatToggle, UNITY_CHAT_OPTION};
+
+    /// Zone-in sends the stored Unity chat mode once per zone; the open chat panel's change goes
+    /// out on the next retail frame.
+    #[test]
+    fn zone_in_sends_the_stored_mode_and_the_panel_sends_its_change() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut app = App::new();
+        app.insert_resource(crate::view_native::input::CommandTx(tx))
+            .init_resource::<Time>()
+            .init_resource::<SceneState>()
+            .init_resource::<DynamicMenu>()
+            .add_systems(Update, unity_chat_send_system);
+        app.update();
+        assert!(rx.try_recv().is_err(), "no zone yet");
+
+        {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(230);
+            scene.snapshot.zone_generation = 1;
+        }
+        app.world_mut()
+            .resource_mut::<DynamicMenu>()
+            .config_option_values
+            .insert(UNITY_CHAT_OPTION, 1);
+        app.update();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(AgentCommand::SetUnityChat {
+                mode: ffxi_proto::map::unity_toggle_mode::ACTIVE
+            })
+        );
+        app.update();
+        assert!(rx.try_recv().is_err(), "once per zone-in");
+
+        let mut chat = UnityChatToggle::open(1);
+        chat.mode = ffxi_proto::map::unity_toggle_mode::INACTIVE;
+        app.world_mut().resource_mut::<DynamicMenu>().unity_fp.chat = Some(chat);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(
+                1.0 / kuluu_render::scheduler_runtime::RETAIL_FPS,
+            ));
+        app.update();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(AgentCommand::SetUnityChat {
+                mode: ffxi_proto::map::unity_toggle_mode::INACTIVE
+            })
+        );
+    }
+
+    /// The client option store lives for the session, so after a launch the Unity chat mode is
+    /// unknown until the panel stores one: zone-in sends nothing rather than turning chat off.
+    #[test]
+    fn zone_in_sends_nothing_while_the_mode_is_unknown() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut app = App::new();
+        app.insert_resource(crate::view_native::input::CommandTx(tx))
+            .init_resource::<Time>()
+            .init_resource::<SceneState>()
+            .init_resource::<DynamicMenu>()
+            .add_systems(Update, unity_chat_send_system);
+        let zone_in = |app: &mut App, generation: u64| {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(230);
+            scene.snapshot.zone_generation = generation;
+        };
+        zone_in(&mut app, 1);
+        app.update();
+        assert!(rx.try_recv().is_err(), "nothing stored, nothing sent");
+
+        app.world_mut()
+            .resource_mut::<DynamicMenu>()
+            .config_option_values
+            .insert(
+                UNITY_CHAT_OPTION,
+                i32::from(ffxi_proto::map::unity_toggle_mode::INACTIVE),
+            );
+        zone_in(&mut app, 2);
+        app.update();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(AgentCommand::SetUnityChat {
+                mode: ffxi_proto::map::unity_toggle_mode::INACTIVE
+            }),
+            "a stored mode goes out at the next zone-in"
+        );
     }
 }

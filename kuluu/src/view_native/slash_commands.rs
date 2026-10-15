@@ -2393,12 +2393,12 @@ fn parse_layoutctrl(rest: &str) -> SlashOutcome {
     match rest.trim() {
         "type1" => SlashOutcome::ConfigSet {
             store_id: key,
-            value: 0,
+            value: kuluu_render::hud::menu::LAYOUT_CONTROL_TYPE1,
             message_id: LAYOUT_SET_TYPE1,
         },
         "type2" => SlashOutcome::ConfigSet {
             store_id: key,
-            value: 1,
+            value: kuluu_render::hud::menu::LAYOUT_CONTROL_TYPE2,
             message_id: LAYOUT_SET_TYPE2,
         },
         _ => SlashOutcome::ConfigQuery {

@@ -703,8 +703,8 @@ fn push_param(out: &mut String, bytes: &[u8], i: &mut usize, name: &str) {
 // `windowpsNNN` caption (vault main_menu.md §43).
 // ---------------------------------------------------------------------------
 
-/// Catalog-format string DAT — the layout of the GetText catalogs (e.g. table 11,
-/// file id [`crate::menu_windows::CAPTION_CATALOG_TABLE_11_FILE_ID`], n=1099 measured on
+/// Catalog-format string DAT — the layout of the GetText catalogs (e.g. table 0x0E,
+/// file id [`crate::menu_windows::CAPTION_CATALOG_TABLE_14_FILE_ID`], n=1099 measured on
 /// retail-2026-09, vault main_menu.md §43). Not a DialogTable: the file opens with the
 /// plain ASCII banner `d_msg`, carries six header words at +0x14,
 /// and one XOR-0xFF-obscured region covering an offset table (optional) plus entry
@@ -805,6 +805,16 @@ impl DmsgTable {
     pub fn text(&self, index: usize) -> Option<&str> {
         self.strings.get(index).map(String::as_str)
     }
+}
+
+/// In a catalog that pairs its strings by id, entry `2n` names id `n`.
+pub fn paired_name_entry(id: u16) -> usize {
+    2 * usize::from(id)
+}
+
+/// In a catalog that pairs its strings by id, entry `2n + 1` describes id `n`.
+pub fn paired_description_entry(id: u16) -> usize {
+    paired_name_entry(id) + 1
 }
 
 /// Entry block law (vault semantic_resolver.py): u32 count (0 = empty entry),

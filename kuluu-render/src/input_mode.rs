@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use bevy::prelude::Resource;
 
@@ -48,6 +48,11 @@ pub enum InputMode {
     /// `hud::shop::ShopScreenState`; the shop itself has no close packet, so
     /// cancelling out of this mode is what ends it.
     Shop,
+
+    /// Mog House layout mode with no arrange window up: the arrange key actions go to the editor
+    /// (`myroom_arrange`), never to menus, chat or movement
+    /// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B2).
+    Arrange,
 }
 
 /// The action pending behind a sub-target cursor.
@@ -356,6 +361,38 @@ pub enum MenuKind {
     StatusDetail {
         entry: u8,
     },
+    /// `ut_menu`, opened by Status row id 11
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md); its
+    /// display-only `ut_point` readout stays up with it.
+    UnityMenu,
+    /// `quest00` as the Unity chat panel (`ut_menu` item 1).
+    UnityChat,
+    /// `quest00` as the Unity ranking chooser (`ut_menu` item 2).
+    UnityRankingChooser,
+    /// `quest01` listing one Unity ranking result set.
+    UnityRanking {
+        result_set: u8,
+    },
+    /// `arealist` as the Unity leader list (`ut_menu` item 3).
+    UnityLeaders,
+    /// `fp_cat`, opened by Status row id 13, with its `fp_info` and `bluehelp` companions.
+    AlterEgoCategories,
+    /// `fp_cat2`: the upgrades of one alter ego point category id.
+    AlterEgoUpgrades {
+        category: u16,
+    },
+    /// `merityn` confirming one alter ego upgrade id.
+    AlterEgoConfirm {
+        upgrade: u16,
+    },
+    /// A merit or job point window: the `merit1` chain from Status row id 7 and the `merit2ca`
+    /// chain from row id 8
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    Merit(crate::hud::merit_windows::MeritWindow),
+    /// A Mog House arrange editor window: `rmlo1`/`rmlo2`/`rmlo4`, the `bankmenu` shelf picker, the
+    /// `inventor` furniture list or a `comyn` put-away question
+    /// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B4).
+    Arrange(crate::myroom_arrange::ArrangeWindow),
     /// The commenu Friend List widget's window; rows arrive with a local friend
     /// store in `.23.1` — LSB ships only black-list c2s 0x03c, no friends list
     /// (vault main_menu.md §37).
@@ -529,7 +566,151 @@ pub struct MenuLevel {
     /// mcrledit law), the working buffer lives on this level — scoping cancel
     /// and commit to the window that opened it.
     pub macro_line_edit: Option<MacroLineBuffer>,
+    /// The remembered cursor this window opened on still waits for its rows, which bound it.
+    pub clamp_pending: bool,
+    /// Set when the window was created with its last DAT item unselectable.
+    pub last_item_lock: Option<LastItemLock>,
 }
+
+impl MenuLevel {
+    pub fn new(kind: MenuKind, cursor: usize) -> Self {
+        Self {
+            kind,
+            cursor,
+            macro_line_edit: None,
+            clamp_pending: false,
+            last_item_lock: None,
+        }
+    }
+
+    /// Whether `row` is the window's unselectable last item.
+    pub fn row_locked(&self, row: usize) -> bool {
+        self.last_item_lock.and_then(LastItemLock::locked_row) == Some(row)
+    }
+
+    /// The cursor rests on the unselectable item, so the window ignores every key.
+    pub fn cursor_locked(&self) -> bool {
+        self.row_locked(self.cursor)
+    }
+
+    /// A direction key's move: onto the unselectable item, the cursor stays where it is.
+    pub fn step_cursor_to(&mut self, row: usize) {
+        if !self.row_locked(row) {
+            self.cursor = row;
+        }
+    }
+}
+
+/// Which row a window's last DAT item is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastItemRow {
+    /// The window's record has not been read yet.
+    Unresolved,
+    Row(usize),
+    /// The last DAT item is not one of the rows kuluu draws.
+    Undrawn,
+}
+
+/// A window created with its last DAT item unselectable
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md, "Last item
+/// unselectable at creation"). Keys and the pointer cannot take it and it draws in the normal
+/// colour; when the open-time cursor placement lands on it, it is an ordinary item instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastItemLock {
+    /// The row the open-time cursor placement chose.
+    pub open_cursor: usize,
+    pub row: LastItemRow,
+}
+
+impl LastItemLock {
+    /// The row that stays unselectable, once the record has told which it is.
+    pub fn locked_row(self) -> Option<usize> {
+        match self.row {
+            LastItemRow::Row(row) if row != self.open_cursor => Some(row),
+            _ => None,
+        }
+    }
+}
+
+/// Where a window puts its cursor each time it is opened, an open of a window that is already
+/// open included (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCursor {
+    /// DAT item id 1.
+    FirstItem,
+    /// The item that held the cursor when the window last closed; item 1 when nothing is
+    /// remembered.
+    Remembered,
+}
+
+/// The registry window a menu level draws and its cursor-at-open rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowCursor {
+    pub window: &'static str,
+    pub rule: OpenCursor,
+}
+
+/// Each remembered window's cursor as it last closed, for the session. A window that closed with
+/// nothing to remember holds `None`, so one menu's records can be laid over another's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorMemory {
+    closed: BTreeMap<&'static str, Option<usize>>,
+}
+
+impl CursorMemory {
+    pub fn recall(&self, window: &str) -> Option<usize> {
+        self.closed.get(window).copied().flatten()
+    }
+
+    pub fn record(&mut self, window: &'static str, cursor: Option<usize>) {
+        self.closed.insert(window, cursor);
+    }
+
+    /// Takes every record `newer` holds.
+    pub fn absorb(&mut self, newer: &CursorMemory) {
+        for (&window, &cursor) in &newer.closed {
+            self.closed.insert(window, cursor);
+        }
+    }
+
+    /// Whether every record `newer` holds is already here.
+    pub fn holds(&self, newer: &CursorMemory) -> bool {
+        newer
+            .closed
+            .iter()
+            .all(|(window, cursor)| self.closed.get(window) == Some(cursor))
+    }
+}
+
+/// The answer the shared Yes/No confirm routine moves the cursor to once its window has opened:
+/// item 2 (No) unless the prompt asks for Yes
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmDefault {
+    Yes,
+    No,
+}
+
+/// Rows of a shared Yes/No confirm: item 1 answers Yes, item 2 No.
+pub const CONFIRM_YES_ROW: usize = 0;
+pub const CONFIRM_NO_ROW: usize = 1;
+
+impl ConfirmDefault {
+    pub const fn row(self) -> usize {
+        match self {
+            Self::Yes => CONFIRM_YES_ROW,
+            Self::No => CONFIRM_NO_ROW,
+        }
+    }
+
+    pub const fn is_yes(self) -> bool {
+        matches!(self, Self::Yes)
+    }
+}
+
+/// The Command menu's chat mode and ability category pickers.
+pub const CHATCTRL_WINDOW: &str = "chatctrl";
+pub const ABISELEC_WINDOW: &str = "abiselec";
 
 /// One in-progress edit of a macro slot's command line (`line_no` `None` = an
 /// appended new line). Enter commits the whole set through
@@ -565,18 +746,92 @@ pub struct MenuStack {
     /// menu's `-` page-flip on the same frame. This absorbs exactly that opening
     /// press so the Commands menu lands on page 1, not page 2 (kuluu-bi1s.2).
     pub absorb_open_minus: bool,
+    /// The session's window cursor memory as this menu knows it: what it was opened with plus
+    /// every window that closed since.
+    pub cursor_memory: CursorMemory,
 }
 
 impl MenuStack {
     pub fn root() -> Self {
         Self {
-            levels: vec![MenuLevel {
-                kind: MenuKind::Root,
-                cursor: 0,
-                macro_line_edit: None,
-            }],
+            levels: vec![MenuLevel::new(MenuKind::Root, 0)],
             active_pane: Pane::Right,
             absorb_open_minus: true,
+            cursor_memory: CursorMemory::default(),
+        }
+    }
+
+    /// The main menu, opened with the session's window memory.
+    pub fn open_main_menu(memory: &CursorMemory) -> Self {
+        let mut stack = Self::root();
+        stack.cursor_memory = memory.clone();
+        stack.levels.clear();
+        stack.open_level(MenuKind::Root);
+        stack
+    }
+
+    /// A menu built before the session's memory was at hand takes it, and its top window opens
+    /// again on it.
+    pub fn adopt_memory(&mut self, memory: &CursorMemory) {
+        let own = std::mem::replace(&mut self.cursor_memory, memory.clone());
+        self.cursor_memory.absorb(&own);
+        if let Some(kind) = self.current().map(|level| level.kind) {
+            self.push(kind);
+        }
+    }
+
+    /// Where `kind`'s cursor goes as it opens, and whether its rows must still bound it.
+    fn open_cursor(&self, kind: MenuKind) -> (usize, bool) {
+        let Some(window) = crate::hud::menu::window_cursor(kind) else {
+            return (0, false);
+        };
+        let remembered = match window.rule {
+            OpenCursor::FirstItem => None,
+            OpenCursor::Remembered => self.cursor_memory.recall(window.window),
+        };
+        let Some(cursor) = remembered else {
+            return (0, false);
+        };
+        match crate::hud::menu::fixed_item_count(kind) {
+            Some(count) => (cursor.min(count.saturating_sub(1)), false),
+            None => (cursor, true),
+        }
+    }
+
+    fn open_level(&mut self, kind: MenuKind) {
+        let (cursor, clamp_pending) = self.open_cursor(kind);
+        let mut level = MenuLevel::new(kind, cursor);
+        level.clamp_pending = clamp_pending;
+        level.last_item_lock = crate::hud::menu::locks_last_item(kind).then_some(LastItemLock {
+            open_cursor: cursor,
+            row: LastItemRow::Unresolved,
+        });
+        self.levels.push(level);
+    }
+
+    /// A window that closes leaves its cursor in the memory when its rule remembers one.
+    fn record_close(&mut self, level: &MenuLevel) {
+        let Some(window) = crate::hud::menu::window_cursor(level.kind) else {
+            return;
+        };
+        if window.rule != OpenCursor::Remembered {
+            return;
+        }
+        if let Some(cursor) = crate::hud::menu::remembered_close_cursor(level) {
+            self.cursor_memory.record(window.window, cursor);
+        }
+    }
+
+    fn close_top(&mut self) {
+        if let Some(level) = self.levels.pop() {
+            self.record_close(&level);
+        }
+    }
+
+    /// Every open window closes, newest first, as the whole menu goes away.
+    pub fn close_all(&mut self) {
+        while !self.levels.is_empty() {
+            self.close_top();
         }
     }
 
@@ -599,24 +854,38 @@ impl MenuStack {
     /// (FFXiMain.dll retail-2026-09 RVA 0x15E350), so a second Commands press on
     /// Linkshell, Missions or Quests focuses the window that is already there instead
     /// of stacking another copy. Re-binding makes it the focused level again, which in
-    /// this stack model means anything opened above it comes down.
+    /// this stack model means anything opened above it comes down. The cursor follows the
+    /// window's open rule each time, a re-bound window included; kuluu-only menus keep theirs.
     pub fn push(&mut self, kind: MenuKind) {
         if let Some(existing) = self.levels.iter().position(|level| level.kind == kind) {
-            self.levels.truncate(existing + 1);
+            while self.levels.len() > existing + 1 {
+                self.close_top();
+            }
+            if crate::hud::menu::window_cursor(kind).is_some() {
+                let (cursor, clamp_pending) = self.open_cursor(kind);
+                let level = &mut self.levels[existing];
+                level.cursor = cursor;
+                level.clamp_pending = clamp_pending;
+            }
             self.active_pane = Pane::Right;
             return;
         }
-        self.levels.push(MenuLevel {
-            kind,
-            cursor: 0,
-            macro_line_edit: None,
-        });
+        self.open_level(kind);
         self.active_pane = Pane::Right;
+    }
+
+    /// The shared Yes/No confirm: its window opens by its own rule, then the cursor moves to the
+    /// answer the prompt asks for.
+    pub fn open_confirm(&mut self, kind: MenuKind, default: ConfirmDefault) {
+        self.push(kind);
+        if let Some(level) = self.current_mut() {
+            level.cursor = default.row();
+        }
     }
 
     pub fn pop(&mut self) -> bool {
         if self.levels.len() > 1 {
-            self.levels.pop();
+            self.close_top();
             self.active_pane = Pane::Right;
             true
         } else {
@@ -736,6 +1005,29 @@ impl TargetActionState {
             dismount_confirm: false,
         }
     }
+
+    /// The chat mode and ability category pickers open where they last closed, inside the
+    /// choices they offer now.
+    pub fn recall_pickers(
+        &mut self,
+        memory: &CursorMemory,
+        chat_modes: usize,
+        ability_groups: usize,
+    ) {
+        let recall = |window: &str, count: usize| {
+            memory
+                .recall(window)
+                .map_or(0, |cursor| cursor.min(count.saturating_sub(1)))
+        };
+        self.chat_mode_idx = recall(CHATCTRL_WINDOW, chat_modes);
+        self.abilities_group_idx = recall(ABISELEC_WINDOW, ability_groups);
+    }
+
+    /// The pickers close with the Command menu and leave their cursors behind.
+    pub fn record_pickers(&self, memory: &mut CursorMemory) {
+        memory.record(CHATCTRL_WINDOW, Some(self.chat_mode_idx));
+        memory.record(ABISELEC_WINDOW, Some(self.abilities_group_idx));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -846,6 +1138,242 @@ mod tests {
                 .skip(1)
                 .any(|level| level.kind == MenuKind::Graphics),
             "the window opened above it came down with the re-bind"
+        );
+    }
+
+    fn cursor_of(stack: &MenuStack) -> usize {
+        stack.current().expect("an open window").cursor
+    }
+
+    /// An item-1 window puts the cursor on item 1 at every open, an open of the window that is
+    /// already open included
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn item_one_windows_open_on_item_one_every_time() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::QuestList);
+        stack.current_mut().unwrap().cursor = 3;
+        stack.pop();
+        stack.push(MenuKind::QuestList);
+        assert_eq!(cursor_of(&stack), 0, "reopened on item 1");
+        stack.current_mut().unwrap().cursor = 2;
+        stack.push(MenuKind::QuestList);
+        assert_eq!(cursor_of(&stack), 0, "an open while open lands on item 1");
+    }
+
+    #[test]
+    fn remembered_windows_reopen_where_they_last_closed() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MagicGroups);
+        assert_eq!(cursor_of(&stack), 0, "nothing remembered yet: item 1");
+        stack.current_mut().unwrap().cursor = 5;
+        stack.pop();
+        stack.push(MenuKind::MagicGroups);
+        assert_eq!(cursor_of(&stack), 5);
+        stack.current_mut().unwrap().cursor = 2;
+        stack.push(MenuKind::MagicGroups);
+        assert_eq!(
+            cursor_of(&stack),
+            5,
+            "an open while open jumps to the remembered item, not the current one"
+        );
+    }
+
+    /// Windows opened above a window that opens again close, and remember as they go.
+    #[test]
+    fn windows_closed_by_a_reopen_below_them_remember_their_cursor() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Communication);
+        stack.push(MenuKind::MagicGroups);
+        stack.current_mut().unwrap().cursor = 6;
+        stack.push(MenuKind::Communication);
+        stack.push(MenuKind::MagicGroups);
+        assert_eq!(cursor_of(&stack), 6);
+    }
+
+    #[test]
+    fn a_remembered_cursor_is_clamped_to_the_item_count() {
+        let window = crate::hud::menu::registry_window(MenuKind::MagicGroups).unwrap();
+        let count = crate::hud::menu::fixed_item_count(MenuKind::MagicGroups).unwrap();
+        let mut memory = CursorMemory::default();
+        memory.record(window, Some(count + 5));
+        let mut stack = MenuStack::open_main_menu(&memory);
+        stack.push(MenuKind::MagicGroups);
+        assert_eq!(cursor_of(&stack), count - 1);
+        assert!(!stack.current().unwrap().clamp_pending);
+
+        let list = crate::hud::menu::registry_window(MenuKind::MagicGroup(1)).unwrap();
+        memory.record(list, Some(count + 5));
+        let mut stack = MenuStack::open_main_menu(&memory);
+        stack.push(MenuKind::MagicGroup(1));
+        let level = stack.current().unwrap();
+        assert_eq!(
+            level.cursor,
+            count + 5,
+            "a built list bounds it once its rows exist"
+        );
+        assert!(level.clamp_pending);
+    }
+
+    /// kuluu's one Root level stands for both retail main menu pages: it reopens where it last
+    /// closed on either, and closing on kuluu's own third page leaves that memory alone.
+    #[test]
+    fn the_main_menu_opens_where_it_last_closed_on_a_retail_page() {
+        let page_two = crate::hud::menu::root_next_page_cursor(0);
+        let page_three = crate::hud::menu::root_next_page_cursor(page_two);
+        let mut stack = MenuStack::root();
+        stack.levels[0].cursor = page_two + 1;
+        stack.close_all();
+        let mut reopened = MenuStack::open_main_menu(&stack.cursor_memory);
+        assert_eq!(cursor_of(&reopened), page_two + 1);
+
+        reopened.levels[0].cursor = page_three;
+        reopened.close_all();
+        let again = MenuStack::open_main_menu(&reopened.cursor_memory);
+        assert_eq!(cursor_of(&again), page_two + 1);
+    }
+
+    /// A menu built before the memory was at hand reopens its top window on it, and keeps what it
+    /// recorded itself.
+    #[test]
+    fn a_menu_built_without_the_memory_adopts_it() {
+        let window = crate::hud::menu::registry_window(MenuKind::HomeView).unwrap();
+        let mut memory = CursorMemory::default();
+        memory.record(window, Some(4));
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::MagicGroups);
+        stack.current_mut().unwrap().cursor = 3;
+        stack.pop();
+        stack.push(MenuKind::HomeView);
+        assert_eq!(cursor_of(&stack), 0);
+        stack.adopt_memory(&memory);
+        assert_eq!(cursor_of(&stack), 4);
+        let magic = crate::hud::menu::registry_window(MenuKind::MagicGroups).unwrap();
+        assert_eq!(stack.cursor_memory.recall(magic), Some(3));
+    }
+
+    fn lock(open_cursor: usize, row: usize) -> Option<LastItemLock> {
+        Some(LastItemLock {
+            open_cursor,
+            row: LastItemRow::Row(row),
+        })
+    }
+
+    /// The last item a window made unselectable at creation refuses a direction key's move onto
+    /// it; every other row still takes the cursor
+    /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md).
+    #[test]
+    fn the_unselectable_last_item_refuses_the_cursor() {
+        let mut level = MenuLevel::new(MenuKind::RetailConfig, 0);
+        level.last_item_lock = lock(0, 3);
+        level.step_cursor_to(3);
+        assert_eq!(
+            level.cursor, 0,
+            "the move onto it leaves the cursor where it was"
+        );
+        level.step_cursor_to(2);
+        assert_eq!(level.cursor, 2);
+        assert!(level.row_locked(3) && !level.row_locked(2));
+        assert!(!level.cursor_locked());
+    }
+
+    /// When the open-time cursor placement lands on the last item it is an ordinary item; a
+    /// cursor put on it afterwards rests on an unselectable item.
+    #[test]
+    fn an_open_that_lands_on_the_last_item_makes_it_ordinary() {
+        let mut level = MenuLevel::new(MenuKind::RetailConfig, 3);
+        level.last_item_lock = lock(3, 3);
+        assert!(!level.row_locked(3));
+        assert!(!level.cursor_locked());
+        level.step_cursor_to(1);
+        level.step_cursor_to(3);
+        assert_eq!(level.cursor, 3, "an ordinary item takes the cursor back");
+
+        let mut placed = MenuLevel::new(MenuKind::RetailConfig, 0);
+        placed.last_item_lock = lock(0, 3);
+        placed.cursor = 3;
+        assert!(placed.cursor_locked());
+    }
+
+    /// The lock comes with the window's creation, not with an open of the window already open,
+    /// and only for windows the record lists.
+    #[test]
+    fn only_creation_locks_the_last_item() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        assert_eq!(
+            stack.current().unwrap().last_item_lock,
+            Some(LastItemLock {
+                open_cursor: 0,
+                row: LastItemRow::Unresolved,
+            })
+        );
+        stack.current_mut().unwrap().last_item_lock = None;
+        stack.push(MenuKind::RetailConfig);
+        assert_eq!(stack.current().unwrap().last_item_lock, None);
+        stack.push(MenuKind::QuestList);
+        assert_eq!(stack.current().unwrap().last_item_lock, None);
+    }
+
+    #[test]
+    fn a_window_closing_on_its_unselectable_item_remembers_nothing() {
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfig);
+        stack.current_mut().unwrap().cursor = 2;
+        stack.pop();
+        stack.push(MenuKind::RetailConfig);
+        assert_eq!(cursor_of(&stack), 2);
+        {
+            let level = stack.current_mut().unwrap();
+            level.last_item_lock = lock(2, 4);
+            level.cursor = 4;
+        }
+        stack.pop();
+        stack.push(MenuKind::RetailConfig);
+        assert_eq!(cursor_of(&stack), 0, "nothing remembered: item 1");
+    }
+
+    /// The shared confirm opens its window by the window's rule, then moves to the answer the
+    /// prompt asks for: No unless it asks for Yes.
+    #[test]
+    fn shared_confirms_open_on_the_answer_the_prompt_asks_for() {
+        let mut stack = MenuStack::root();
+        stack.open_confirm(
+            MenuKind::PowerPrompt { shut_down: false },
+            ConfirmDefault::No,
+        );
+        assert_eq!(cursor_of(&stack), CONFIRM_NO_ROW);
+        stack.pop();
+        stack.open_confirm(
+            MenuKind::PowerPrompt { shut_down: false },
+            ConfirmDefault::Yes,
+        );
+        assert_eq!(cursor_of(&stack), CONFIRM_YES_ROW);
+    }
+
+    #[test]
+    fn command_menu_pickers_reopen_where_they_closed() {
+        const CHAT_MODES: usize = 4;
+        const GROUPS: usize = 5;
+        let mut state = TargetActionState::open(Default::default());
+        state.chat_mode_idx = 2;
+        state.abilities_group_idx = 3;
+        let mut memory = CursorMemory::default();
+        state.record_pickers(&mut memory);
+        let mut reopened = TargetActionState::open(Default::default());
+        reopened.recall_pickers(&memory, CHAT_MODES, GROUPS);
+        assert_eq!(reopened.chat_mode_idx, 2);
+        assert_eq!(reopened.abilities_group_idx, 3);
+        assert_eq!(
+            reopened.cursor, 0,
+            "the Command menu itself opens on item 1"
+        );
+
+        reopened.recall_pickers(&memory, 1, 1);
+        assert_eq!(
+            (reopened.chat_mode_idx, reopened.abilities_group_idx),
+            (0, 0),
+            "clamped to the choices on offer"
         );
     }
 

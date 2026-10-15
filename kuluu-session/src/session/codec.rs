@@ -154,6 +154,138 @@ pub fn build_subpacket_currencies(sync: u16, mode_two: bool) -> Vec<u8> {
     build_subpacket_header(opcode, 1, sync).to_vec()
 }
 
+/// Every Unity / alter ego point send but the bare 0x0C2 request is one 8-byte packet: header
+/// plus one 4-byte body word (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+const UNITY_FP_PACKET_WORDS: u16 = 2;
+const UNITY_FP_PACKET_LEN: usize = 8;
+const UNITY_FP_BODY: usize = 4;
+
+// c2s 0x116 GP_CLI_COMMAND_UNITY_MENU: Kind u32, the ranking result set 0 or 1
+// (vendor/server/src/map/packets/c2s/0x116_unity_menu.h; the validator ranges it 0..=1).
+pub fn build_subpacket_unity_menu(sync: u16, kind: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; UNITY_FP_PACKET_LEN];
+    buf[..UNITY_FP_BODY].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::UNITY_MENU,
+        UNITY_FP_PACKET_WORDS,
+        sync,
+    ));
+    buf[UNITY_FP_BODY..].copy_from_slice(&kind.to_le_bytes());
+    buf
+}
+
+// c2s 0x117 GP_CLI_COMMAND_UNITY_QUEST: Kind u32, which LSB's validator requires to be 0
+// (vendor/server/src/map/packets/c2s/0x117_unity_quest.cpp).
+pub fn build_subpacket_unity_quest(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; UNITY_FP_PACKET_LEN];
+    buf[..UNITY_FP_BODY].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::UNITY_QUEST,
+        UNITY_FP_PACKET_WORDS,
+        sync,
+    ));
+    buf
+}
+
+// c2s 0x118 GP_CLI_COMMAND_UNITY_TOGGLE: Mode u8 + padding00[3]
+// (vendor/server/src/map/packets/c2s/0x118_unity_toggle.h).
+pub fn build_subpacket_unity_toggle(sync: u16, mode: u8) -> Vec<u8> {
+    let mut buf = vec![0u8; UNITY_FP_PACKET_LEN];
+    buf[..UNITY_FP_BODY].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::UNITY_TOGGLE,
+        UNITY_FP_PACKET_WORDS,
+        sync,
+    ));
+    buf[UNITY_FP_BODY] = mode;
+    buf
+}
+
+// c2s 0x0C1 GP_CLI_COMMAND_ALTER_EGO_POINTS: CategoryIndex u16 + padding00 u16
+// (vendor/server/src/map/packets/c2s/0x0c1_alter_ego_points.h).
+pub fn build_subpacket_alter_ego_points(sync: u16, category_index: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; UNITY_FP_PACKET_LEN];
+    buf[..UNITY_FP_BODY].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::ALTER_EGO_POINTS,
+        UNITY_FP_PACKET_WORDS,
+        sync,
+    ));
+    buf[UNITY_FP_BODY..UNITY_FP_BODY + 2].copy_from_slice(&category_index.to_le_bytes());
+    buf
+}
+
+// c2s 0x0C2: the bare 4-byte header the record names as the alter ego points request
+// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md); LSB has no
+// handler for it.
+pub fn build_subpacket_alter_ego_points_request(sync: u16) -> Vec<u8> {
+    build_subpacket_header(
+        ffxi_proto::map::c2s_unnamed::ALTER_EGO_POINTS_REQUEST,
+        1,
+        sync,
+    )
+    .to_vec()
+}
+
+const MERITS_PACKET_WORDS: u16 = 3;
+const MERITS_PACKET_LEN: usize = 12;
+const MERITS_KIND_AT: usize = 4;
+const MERITS_PARAM1_AT: usize = 5;
+const MERITS_PARAM2_AT: usize = 6;
+
+// c2s 0x0BE GP_CLI_COMMAND_MERITS: Kind u8, Param1 u8, Param2 u16, Param3 u32
+// (vendor/server/src/map/packets/c2s/0x0be_merits.h). The merit windows always send Param3 0
+// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+pub fn build_subpacket_merits(sync: u16, kind: u8, param1: u8, param2: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; MERITS_PACKET_LEN];
+    buf[..MERITS_KIND_AT].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MERITS,
+        MERITS_PACKET_WORDS,
+        sync,
+    ));
+    buf[MERITS_KIND_AT] = kind;
+    buf[MERITS_PARAM1_AT] = param1;
+    buf[MERITS_PARAM2_AT..MERITS_PARAM2_AT + 2].copy_from_slice(&param2.to_le_bytes());
+    buf
+}
+
+// c2s 0x0BF GP_CLI_COMMAND_JOB_POINTS_SPEND: Index u16 (the job point type id) + padding00 u16
+// (vendor/server/src/map/packets/c2s/0x0bf_job_points_spend.h).
+pub fn build_subpacket_job_points_spend(sync: u16, type_id: u16) -> Vec<u8> {
+    const PACKET_WORDS: u16 = 2;
+    const PACKET_LEN: usize = 8;
+    const INDEX_AT: usize = 4;
+    let mut buf = vec![0u8; PACKET_LEN];
+    buf[..INDEX_AT].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::JOB_POINTS_SPEND,
+        PACKET_WORDS,
+        sync,
+    ));
+    buf[INDEX_AT..INDEX_AT + 2].copy_from_slice(&type_id.to_le_bytes());
+    buf
+}
+
+// c2s 0x0C0 GP_CLI_COMMAND_JOB_POINTS_REQ: the bare header
+// (vendor/server/src/map/packets/c2s/0x0c0_job_points_req.h).
+pub fn build_subpacket_job_points_req(sync: u16) -> Vec<u8> {
+    build_subpacket_header(ffxi_proto::map::c2s::JOB_POINTS_REQ, 1, sync).to_vec()
+}
+
+/// The packet a merit or job point window command sends: ChangeMode {2, 0 EXP or 1 Limit
+/// Points, 0, 0}, EditMode {3, 1 raise or 0 lower, merit index, 0}, a job point spend or the job
+/// point request (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+pub fn merit_command_payload(command: &AgentCommand, sync: u16) -> Option<Vec<u8>> {
+    use ffxi_proto::map::merits_wire::{kind, param1};
+    let raise_or = |raise: bool| if raise { param1::RAISE } else { param1::LOWER };
+    Some(match *command {
+        AgentCommand::SetMeritMode { limit_points } => {
+            build_subpacket_merits(sync, kind::CHANGE_MODE, raise_or(limit_points), 0)
+        }
+        AgentCommand::EditMerit { index, raise } => {
+            build_subpacket_merits(sync, kind::EDIT_MODE, raise_or(raise), index)
+        }
+        AgentCommand::SpendJobPoint { type_id } => build_subpacket_job_points_spend(sync, type_id),
+        AgentCommand::RequestJobPoints => build_subpacket_job_points_req(sync),
+        _ => return None,
+    })
+}
+
 // c2s 0x0F4 GP_CLI_COMMAND_TRACKING_LIST: uint32 SendFlg (must be 1). Requests
 // the wide-scan list; the server frames the reply with 0x0F6 ListStart/ListEnd.
 // vendor/server/src/map/packets/c2s/0x0f4_tracking_list.h.

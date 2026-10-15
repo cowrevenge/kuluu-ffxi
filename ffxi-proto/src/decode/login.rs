@@ -18,6 +18,10 @@ pub struct ServerLoginMyroom {
 impl ServerLoginMyroom {
     pub const LOGIN_STATE_MYROOM: u32 = 1;
     pub const LOGIN_STATE_GAME: u32 = 2;
+    /// SAVE_LOGIN_STATE_JOBEXIT / _POLEXIT_MYROOM
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h SAVE_LOGIN_STATE).
+    pub const LOGIN_STATE_JOBEXIT: u32 = 4;
+    pub const LOGIN_STATE_POLEXIT_MYROOM: u32 = 5;
 
     /// MyroomMapNumber sentinel "not in a Mog House" (0x00a_login.cpp non-MH branch).
     pub(crate) const MYROOM_NONE: u16 = 0x01FF;
@@ -66,6 +70,16 @@ impl ServerLoginMyroom {
             && self.map_number != Self::MYROOM_NONE
             && self.map_number != Self::MYROOM_FERETORY)
             .then_some(self.map_number)
+    }
+
+    /// Whether a `LoginState` puts the character in a Mog House: a Mog House login, or a return to
+    /// one after a job change or a PlayOnline exit
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h SAVE_LOGIN_STATE).
+    pub const fn login_in_mog_house(login_state: u32) -> bool {
+        matches!(
+            login_state,
+            Self::LOGIN_STATE_MYROOM | Self::LOGIN_STATE_JOBEXIT | Self::LOGIN_STATE_POLEXIT_MYROOM
+        )
     }
 }
 
@@ -126,6 +140,10 @@ pub struct ServerLogin {
     /// receives until the next change — which on a Vana'diel schedule can be a
     /// long wait.
     pub weather: Option<ZoneInWeather>,
+
+    /// `IsMonstrosity` nonzero: LSB sets it while the character plays Monstrosity
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN).
+    pub is_monstrosity: bool,
 }
 
 /// Weather in force at zone-in, from the 0x00A weather block.
@@ -261,6 +279,10 @@ impl ServerLogin {
     /// index the body (FFXiMain.dll retail-2026-09 `.text 0xFB3EE`).
     pub const PLAY_TIME_OFFSET: usize = 0x9C;
 
+    /// `IsMonstrosity` (u16), just before `LoginState`:
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN IsMonstrosity.
+    pub const IS_MONSTROSITY_OFFSET: usize = 0x7A;
+
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
@@ -348,6 +370,9 @@ impl ServerLogin {
                 offset_time: u32_at(Self::WEATHER_OFFSET_TIME_OFFSET),
             }
         });
+        let is_monstrosity = body
+            .get(Self::IS_MONSTROSITY_OFFSET..Self::IS_MONSTROSITY_OFFSET + 2)
+            .is_some_and(|w| u16::from_le_bytes([w[0], w[1]]) != 0);
         Ok(Self {
             voyage: ZoneInVoyage::decode(body),
             unique_no: pos_head.unique_no,
@@ -363,6 +388,7 @@ impl ServerLogin {
             dead_counter,
             play_time,
             weather,
+            is_monstrosity,
         })
     }
 
@@ -457,6 +483,11 @@ pin_s2c_offset!(
     "GP_SERV_COMMAND_LOGIN.PlayTime"
 );
 pin_s2c_offset!(
+    ServerLogin::IS_MONSTROSITY_OFFSET,
+    lsb::IS_MONSTROSITY,
+    "GP_SERV_COMMAND_LOGIN.IsMonstrosity"
+);
+pin_s2c_offset!(
     ServerLoginMyroom::LOGIN_STATE_OFFSET,
     lsb::LOGIN_STATE,
     "GP_SERV_COMMAND_LOGIN.LoginState"
@@ -524,6 +555,21 @@ mod server_login_tests {
         assert_eq!(l.unique_no, 0x0123_4567);
         assert_eq!(l.act_index, 0x00FF);
         assert_eq!(l.zone_no, 230);
+        assert!(
+            !l.is_monstrosity,
+            "a short body carries no Monstrosity word"
+        );
+    }
+
+    /// LSB writes `IsMonstrosity = 0x1F` for a Monstrosity character; any nonzero word counts.
+    #[test]
+    fn server_login_reads_is_monstrosity_word() {
+        const LSB_MONSTROSITY_WORD: u16 = 0x1F;
+        let mut buf = vec![0u8; 0x100];
+        assert!(!ServerLogin::decode(&buf).unwrap().is_monstrosity);
+        buf[ServerLogin::IS_MONSTROSITY_OFFSET..ServerLogin::IS_MONSTROSITY_OFFSET + 2]
+            .copy_from_slice(&LSB_MONSTROSITY_WORD.to_le_bytes());
+        assert!(ServerLogin::decode(&buf).unwrap().is_monstrosity);
     }
 
     #[test]
@@ -806,6 +852,23 @@ mod server_login_tests {
         assert_eq!(ServerLoginMyroom::MYROOM_NONE, 0x01FF);
         assert_eq!(ServerLoginMyroom::SUB_MAP_2F, 0x02);
         assert_eq!(ServerLoginMyroom::MYROOM_FERETORY, 0x02D9);
+    }
+
+    #[test]
+    fn every_mog_house_login_state_counts_as_in_the_house() {
+        for state in [
+            ServerLoginMyroom::LOGIN_STATE_MYROOM,
+            ServerLoginMyroom::LOGIN_STATE_JOBEXIT,
+            ServerLoginMyroom::LOGIN_STATE_POLEXIT_MYROOM,
+        ] {
+            assert!(
+                ServerLoginMyroom::login_in_mog_house(state),
+                "LoginState {state}"
+            );
+        }
+        assert!(!ServerLoginMyroom::login_in_mog_house(
+            ServerLoginMyroom::LOGIN_STATE_GAME
+        ));
     }
 
     #[test]

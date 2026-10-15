@@ -114,6 +114,15 @@ fn sub_packet_events_with_names(
     body: &[u8],
     names: &ffxi_dat::autotranslate_names::InstalledNames,
 ) -> Vec<AgentEvent> {
+    sub_packet_events_with_mog(opcode, body, names, &mut SelfMogState::default())
+}
+
+fn sub_packet_events_with_mog(
+    opcode: u16,
+    body: &[u8],
+    names: &ffxi_dat::autotranslate_names::InstalledNames,
+    mog: &mut SelfMogState,
+) -> Vec<AgentEvent> {
     let (tx, mut rx) = broadcast::channel(64);
     handle_sub_packet(
         &framing::SubPacket {
@@ -142,7 +151,7 @@ fn sub_packet_events_with_names(
         &mut MesBasicResolver::new(None),
         &mut treasure::TreasurePool::default(),
         &mut false,
-        &mut SelfMogState::default(),
+        mog,
         &mut ShopSession::default(),
         None,
     );
@@ -151,6 +160,33 @@ fn sub_packet_events_with_names(
         out.push(ev);
     }
     out
+}
+
+/// A zone-in drops any arrangement mode, and the fold has to hear it: otherwise the snapshot keeps
+/// reporting layout mode in the next zone.
+#[test]
+fn a_zone_in_that_drops_layout_mode_mirrors_the_change() {
+    use crate::myroom_layout::{MODE_LAYOUT, MODE_NORMAL};
+    use ffxi_proto::decode::ServerLogin;
+    let body = vec![0u8; ServerLogin::PLAY_TIME_OFFSET + 4];
+    let names = ffxi_dat::autotranslate_names::InstalledNames::default();
+    let mut mog = SelfMogState {
+        layout_mode: MODE_LAYOUT,
+        ..SelfMogState::default()
+    };
+    let events = sub_packet_events_with_mog(ffxi_proto::map::s2c::LOGIN, &body, &names, &mut mog);
+    assert_eq!(mog.layout_mode, MODE_NORMAL);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::MyroomModeChanged {
+            previous: MODE_LAYOUT,
+            next: MODE_NORMAL
+        }
+    )));
+    let events = sub_packet_events_with_mog(ffxi_proto::map::s2c::LOGIN, &body, &names, &mut mog);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::MyroomModeChanged { .. })));
 }
 
 #[test]
@@ -5693,4 +5729,296 @@ fn battle2_knockbacks_are_none_without_a_level() {
     w.write(0, 1);
     w.write(0, 1);
     assert!(super::decode_battle2_knockbacks(&w.into_bytes()).is_none());
+}
+
+/// One built Unity / alter ego point c2s: (opcode, body bytes after the 4-byte header).
+fn unity_fp_c2s(buf: &[u8]) -> (u16, &[u8]) {
+    let word = u16::from_le_bytes([buf[0], buf[1]]);
+    assert_eq!(
+        framing::subpacket_size_bytes(word),
+        buf.len(),
+        "the header's size words cover the whole packet"
+    );
+    assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x4321, "sync");
+    (
+        word & framing::SUBPACKET_OPCODE_MASK,
+        &buf[framing::SUBPACKET_WORD_BYTES..],
+    )
+}
+
+/// The record's packet bodies and sizes: 0x116 / 0x117 / 0x118 / 0x0C1 are 8 bytes, 0x0C2 is the
+/// bare 4-byte header (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md),
+/// each laid out as its LSB `GP_CLI_PACKET` (vendor/server/src/map/packets/c2s/0x116_unity_menu.h,
+/// 0x117_unity_quest.h, 0x118_unity_toggle.h, 0x0c1_alter_ego_points.h).
+#[test]
+fn unity_and_alter_ego_point_requests_build_the_lsb_bodies() {
+    use ffxi_proto::map::{c2s, c2s_unnamed, unity_toggle_mode};
+    const SYNC: u16 = 0x4321;
+    const HP_UPGRADE: u16 = 8;
+
+    let menu = build_subpacket_unity_menu(SYNC, 1);
+    assert_eq!(menu.len(), 8);
+    assert_eq!(
+        unity_fp_c2s(&menu),
+        (c2s::UNITY_MENU, &1u32.to_le_bytes()[..])
+    );
+
+    let quest = build_subpacket_unity_quest(SYNC);
+    assert_eq!(quest.len(), 8);
+    assert_eq!(unity_fp_c2s(&quest), (c2s::UNITY_QUEST, &[0u8; 4][..]));
+
+    let toggle = build_subpacket_unity_toggle(SYNC, unity_toggle_mode::ACTIVE);
+    assert_eq!(toggle.len(), 8);
+    assert_eq!(
+        unity_fp_c2s(&toggle),
+        (c2s::UNITY_TOGGLE, &[unity_toggle_mode::ACTIVE, 0, 0, 0][..])
+    );
+
+    let spend = build_subpacket_alter_ego_points(SYNC, HP_UPGRADE);
+    assert_eq!(spend.len(), 8);
+    assert_eq!(
+        unity_fp_c2s(&spend),
+        (c2s::ALTER_EGO_POINTS, &[8u8, 0, 0, 0][..])
+    );
+
+    let request = build_subpacket_alter_ego_points_request(SYNC);
+    assert_eq!(request.len(), framing::SUBPACKET_WORD_BYTES);
+    assert_eq!(
+        unity_fp_c2s(&request),
+        (c2s_unnamed::ALTER_EGO_POINTS_REQUEST, &[][..])
+    );
+}
+
+#[test]
+fn alter_ego_points_and_unity_quest_packets_become_events() {
+    use ffxi_proto::decode::{AlterEgoPoints, UnityQuest};
+    use ffxi_proto::map::s2c;
+    const HP_UPGRADE: usize = 8;
+
+    let mut body = vec![0u8; ffxi_proto::s2c_layout::alter_ego_points::SIZE];
+    body[..2].copy_from_slice(&300u16.to_le_bytes());
+    body[ffxi_proto::s2c_layout::alter_ego_points::UPGRADES + HP_UPGRADE] = 4;
+    let events = sub_packet_events(s2c::ALTER_EGO_POINTS, &body);
+    let decoded = AlterEgoPoints::decode(&body).unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::AlterEgoPointsUpdated { points }]
+            if points.points == 300
+                && points.upgrades == decoded.upgrades
+                && points.costs == decoded.costs
+    ));
+
+    let mut quest = vec![0u8; ffxi_proto::s2c_layout::unity::SIZE];
+    quest[..4].copy_from_slice(&77u32.to_le_bytes());
+    let events = sub_packet_events(s2c::UNITY, &quest);
+    let decoded = UnityQuest::decode(&quest).unwrap();
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::UnityQuestUpdated { sparks, .. }] if *sparks == decoded.sparks
+    ));
+}
+
+/// A type-7 MISCDATA record routes to the Unity fold, decoded by LSB's MEMBERS layout; the
+/// status-icon and merits arms never see it.
+#[test]
+fn miscdata_unity_chunks_become_ranking_events() {
+    use ffxi_proto::decode::{MiscdataUnity, MISCDATA_TYPE_UNITY, UNITY_CONCORD_COUNT};
+    use ffxi_proto::s2c_layout::miscdata_unity_members as lsb;
+    let mut body = vec![0u8; lsb::SIZE];
+    body[..2].copy_from_slice(&MISCDATA_TYPE_UNITY.to_le_bytes());
+    body[lsb::RESULT_SET] = 1;
+    body[lsb::DATA_TYPE] = MiscdataUnity::DATA_TYPE_MEMBERS;
+    for concord in 0..UNITY_CONCORD_COUNT {
+        let o = lsb::MEMBERS + 4 * concord;
+        body[o..o + 4].copy_from_slice(&(concord as u32 + 100).to_le_bytes());
+    }
+    let events = sub_packet_events(ffxi_proto::map::s2c::MISCDATA, &body);
+    let [AgentEvent::UnityRankingChunk {
+        result_set,
+        data_type,
+        concord_values,
+    }] = events.as_slice()
+    else {
+        panic!("one Unity chunk event, got {events:?}");
+    };
+    assert_eq!(
+        (*result_set, *data_type),
+        (1, MiscdataUnity::DATA_TYPE_MEMBERS)
+    );
+    assert_eq!(concord_values[0], 100, "Concord 1 = LSB members[0]");
+    assert_eq!(concord_values[UNITY_CONCORD_COUNT - 1], 110);
+}
+
+/// Zone-in hands the folded state the raw `LoginState` and `IsMonstrosity` the alter ego point
+/// refusal reads, right after the `ZoneChanged` that opens the zone.
+#[test]
+fn login_emits_login_state_after_zone_changed() {
+    use ffxi_proto::decode::{ServerLogin, ServerLoginMyroom};
+    const LSB_MONSTROSITY_WORD: u16 = 0x1F;
+    const JOBEXIT: u32 = 4;
+    let mut body = vec![0u8; ffxi_proto::s2c_layout::login::SIZE];
+    body[ffxi_proto::s2c_layout::login::LOGIN_STATE
+        ..ffxi_proto::s2c_layout::login::LOGIN_STATE + 4]
+        .copy_from_slice(&JOBEXIT.to_le_bytes());
+    body[ServerLogin::IS_MONSTROSITY_OFFSET..ServerLogin::IS_MONSTROSITY_OFFSET + 2]
+        .copy_from_slice(&LSB_MONSTROSITY_WORD.to_le_bytes());
+    assert_ne!(JOBEXIT, ServerLoginMyroom::LOGIN_STATE_MYROOM);
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+    let zone = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ZoneChanged { .. }))
+        .expect("zone change");
+    let synced = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::LoginStateSynced {
+                    login_state: JOBEXIT,
+                    is_monstrosity: true
+                }
+            )
+        })
+        .expect("login state synced");
+    assert!(synced > zone, "after ZoneChanged");
+}
+
+/// The record's c2s bodies: 0x0BE is 12 bytes {Kind, Param1, Param2 u16, Param3 0} with
+/// ChangeMode {2, 0 EXP / 1 Limit Points, 0} and EditMode {3, 1 raise / 0 lower, merit index};
+/// 0x0BF is 8 bytes {Index = type id, padding 0}; 0x0C0 is the bare header
+/// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md), each laid
+/// out as its LSB `GP_CLI_PACKET` (vendor/server/src/map/packets/c2s/0x0be_merits.h,
+/// 0x0bf_job_points_spend.h, 0x0c0_job_points_req.h).
+#[test]
+fn merit_and_job_point_commands_build_the_record_bodies() {
+    use ffxi_proto::map::c2s;
+    use ffxi_proto::map::merits_wire::{kind, param1};
+    const SYNC: u16 = 0x4321;
+    const MERIT_INDEX: u16 = 0x0123;
+    const TYPE_ID: u16 = 0x00A2;
+    let payload = |command: AgentCommand| merit_command_payload(&command, SYNC).expect("merit");
+    let [index_lo, index_hi] = MERIT_INDEX.to_le_bytes();
+
+    let cases = [
+        (
+            AgentCommand::SetMeritMode {
+                limit_points: false,
+            },
+            [kind::CHANGE_MODE, param1::LOWER, 0, 0],
+        ),
+        (
+            AgentCommand::SetMeritMode { limit_points: true },
+            [kind::CHANGE_MODE, param1::RAISE, 0, 0],
+        ),
+        (
+            AgentCommand::EditMerit {
+                index: MERIT_INDEX,
+                raise: true,
+            },
+            [kind::EDIT_MODE, param1::RAISE, index_lo, index_hi],
+        ),
+        (
+            AgentCommand::EditMerit {
+                index: MERIT_INDEX,
+                raise: false,
+            },
+            [kind::EDIT_MODE, param1::LOWER, index_lo, index_hi],
+        ),
+    ];
+    for (command, head) in cases {
+        let buf = payload(command.clone());
+        let (opcode, body) = unity_fp_c2s(&buf);
+        assert_eq!(opcode, c2s::MERITS, "{command:?}");
+        assert_eq!(&body[..4], &head[..], "{command:?}");
+        assert_eq!(&body[4..], &[0u8; 4][..], "Param3 is 0");
+    }
+
+    let spend = payload(AgentCommand::SpendJobPoint { type_id: TYPE_ID });
+    assert_eq!(spend.len(), 8);
+    let [type_lo, type_hi] = TYPE_ID.to_le_bytes();
+    assert_eq!(
+        unity_fp_c2s(&spend),
+        (c2s::JOB_POINTS_SPEND, &[type_lo, type_hi, 0, 0][..])
+    );
+
+    let request = payload(AgentCommand::RequestJobPoints);
+    assert_eq!(request.len(), framing::SUBPACKET_WORD_BYTES);
+    assert_eq!(unity_fp_c2s(&request), (c2s::JOB_POINTS_REQ, &[][..]));
+
+    assert!(merit_command_payload(&AgentCommand::RequestUnityQuest, SYNC).is_none());
+}
+
+/// s2c 0x08C, 0x08D and the 0x063 JobPoints record reach the folds as sent, laid out by LSB.
+#[test]
+fn merit_and_job_point_packets_become_events() {
+    use crate::state::{JobPointWire, MeritWire};
+    use ffxi_proto::decode::{MeritList, MISCDATA_TYPE_JOB_POINTS};
+    use ffxi_proto::map::s2c;
+    use ffxi_proto::s2c_layout::{
+        job_points as points_lsb, merit_entry as merit_lsb, miscdata_job_points as record_lsb,
+    };
+    const DELETED_WIRE_ID: u16 = 0x41;
+    const RDM: u16 = 5;
+    const TYPE_SLOT: u16 = 2;
+    const LEVEL: u16 = 4;
+    const NEXT: u16 = 300;
+
+    let mut merits = vec![0u8; MeritList::MERITS_OFFSET + 2 * merit_lsb::SIZE];
+    merits[MeritList::MERIT_COUNT_OFFSET..MeritList::MERIT_COUNT_OFFSET + 2]
+        .copy_from_slice(&1u16.to_le_bytes());
+    let first = MeritList::MERITS_OFFSET;
+    merits[first + merit_lsb::INDEX..first + merit_lsb::INDEX + 2]
+        .copy_from_slice(&DELETED_WIRE_ID.to_le_bytes());
+    merits[first + merit_lsb::NEXT] = 2;
+    merits[first + merit_lsb::COUNT] = 1;
+    let events = sub_packet_events(s2c::MERIT, &merits);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::MeritsListed { entries }] if entries == &[MeritWire {
+                index: DELETED_WIRE_ID,
+                next: 2,
+                count: 1,
+            }]
+        ),
+        "{events:?}"
+    );
+
+    let mut points = vec![0u8; points_lsb::SIZE];
+    let first_word = (RDM << points_lsb::POINTS_JOB_NO_SHIFT) | TYPE_SLOT;
+    let second_word = (LEVEL << points_lsb::POINTS_LEVEL_SHIFT) | NEXT;
+    points[points_lsb::POINTS_JOB_NO..points_lsb::POINTS_JOB_NO + 2]
+        .copy_from_slice(&first_word.to_le_bytes());
+    points[points_lsb::POINTS_LEVEL..points_lsb::POINTS_LEVEL + 2]
+        .copy_from_slice(&second_word.to_le_bytes());
+    let events = sub_packet_events(s2c::JOB_POINTS, &points);
+    let [AgentEvent::JobPointsListed { entries }] = events.as_slice() else {
+        panic!("one job point event, got {events:?}");
+    };
+    assert_eq!(entries.len(), points_lsb::POINTS_COUNT);
+    assert_eq!(
+        entries[0],
+        JobPointWire {
+            index: TYPE_SLOT as u8,
+            job_no: RDM,
+            next: NEXT,
+            level: LEVEL as u8,
+        }
+    );
+
+    let mut record = vec![0u8; record_lsb::SIZE];
+    record[record_lsb::TYPE..record_lsb::TYPE + 2]
+        .copy_from_slice(&MISCDATA_TYPE_JOB_POINTS.to_le_bytes());
+    record[record_lsb::ACCESS] = 1;
+    let rdm_jp = record_lsb::JOBS_CURRENT_JP + usize::from(RDM) * record_lsb::JOBS_STRIDE;
+    record[rdm_jp..rdm_jp + 2].copy_from_slice(&12u16.to_le_bytes());
+    let events = sub_packet_events(s2c::MISCDATA, &record);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::JobPointsRecordUpdated { record }]
+                if record.access == 1 && record.jobs[usize::from(RDM)].current_jp == 12
+        ),
+        "{events:?}"
+    );
 }

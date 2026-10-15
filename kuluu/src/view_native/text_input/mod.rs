@@ -6,6 +6,7 @@ use bevy::window::{PresentMode, PrimaryWindow};
 use kuluu_render::dat_mmb::LoadMmbRequest;
 use kuluu_render::dat_mzb::LoadMzbRequest;
 use kuluu_render::hud::chat_panel::{ActiveChatTab, ChatScroll};
+use kuluu_render::input_mode::CursorMemory;
 use kuluu_render::{
     Action, Bindings, ChatBuffer, ChatHistory, DialogCursor, InputMode, MenuKind, MenuStack,
     QuickActionState, SceneState, Target,
@@ -38,6 +39,7 @@ pub use shop::{shop_mode_sync_system, shop_mouse_activate_system};
 mod map_screen;
 
 mod menu;
+pub use menu::{arrange_request_send_system, unity_chat_send_system};
 use menu::{confirm_menu_at_cursor, handle_menu_key};
 
 mod slash_apply;
@@ -308,14 +310,32 @@ pub(crate) fn text_input_system(
 
     let pad_synth: Vec<KeyboardInput> = events.pad.read().map(|e| e.0.clone()).collect();
     for ev in events.keyboard.read().chain(pad_synth.iter()) {
-        if ev.state != ButtonState::Pressed {
+        let event_holds_keys = cutscene_mode.active && scene_state.snapshot.dialog.is_some();
+        if let Some(key) = kuluu_render::myroom_arrange::arrange_key_of(ev.key_code) {
+            let phase = kuluu_render::myroom_arrange::KeyPhase::of(
+                ev.state == ButtonState::Pressed,
+                ev.repeat,
+            );
+            let editor_takes = !event_holds_keys && matches!(*mode, InputMode::Arrange);
+            if let ArrangeKeyRoute::Taken(next) =
+                route_arrange_key(key, phase, editor_takes, &mut dynamic_menu)
+            {
+                if let Some(next) = next {
+                    *mode = next;
+                }
+                continue;
+            }
+        }
+        if ev.state != ButtonState::Pressed
+            || (!event_holds_keys && matches!(*mode, InputMode::Arrange))
+        {
             continue;
         }
         // CS input lock: while a VM-driven event frame is up, retail's DEFCAMERA has taken the
         // camera and disabled menu drawing (research/XiEvents/OpCodes/0x0046.md), so every key
         // routes through the dialog handler — Enter advances the event even with the map open in
         // Menu(Map) mode, and ESC respects cancel_armed instead of closing whatever window is up.
-        if cutscene_mode.active && scene_state.snapshot.dialog.is_some() {
+        if event_holds_keys {
             let next = match &mut *mode {
                 InputMode::Dialog(cursor) => handle_dialog_key(
                     &ev.logical_key,
@@ -324,6 +344,7 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &cmd_tx.0,
                     &mut slash_writers.item_screen_container,
+                    &dynamic_menu.window_cursors,
                 ),
                 _ => {
                     let mut cursor = DialogCursor::default();
@@ -334,6 +355,7 @@ pub(crate) fn text_input_system(
                         &mut scene_state,
                         &cmd_tx.0,
                         &mut slash_writers.item_screen_container,
+                        &dynamic_menu.window_cursors,
                     )
                 }
             };
@@ -421,6 +443,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.trade_state,
                     &mut slash_writers.lock_on,
                     slash_writers.graphics.magic_flat_list,
+                    &dynamic_menu.window_cursors,
                 ) {
                     *mode = next;
                 }
@@ -499,6 +522,7 @@ pub(crate) fn text_input_system(
                     &cmd_tx.0,
                     slash_writers.graphics.magic_flat_list,
                     slash_writers.graphics.abilities_flat_list,
+                    &dynamic_menu.window_cursors,
                 ) {
                     *mode = next;
                 }
@@ -511,6 +535,7 @@ pub(crate) fn text_input_system(
                     &mut scene_state,
                     &cmd_tx.0,
                     &mut slash_writers.item_screen_container,
+                    &dynamic_menu.window_cursors,
                 ) {
                     *mode = next;
                 }
@@ -551,6 +576,7 @@ pub(crate) fn text_input_system(
                     &mut slash_writers.lock_on,
                     slash_writers.graphics.reselect_unequip,
                     slash_writers.graphics.magic_flat_list,
+                    &dynamic_menu.window_cursors,
                 ) {
                     *mode = next;
                 }
@@ -624,6 +650,8 @@ pub(crate) fn text_input_system(
                     *mode = next;
                 }
             }
+            // Layout mode answers only its own keys (`route_arrange_key`).
+            InputMode::Arrange => {}
         }
     }
 
@@ -663,6 +691,35 @@ pub(crate) fn text_input_system(
             &mut draw_distance,
         );
     }
+}
+
+/// Where an arrange key event went.
+#[derive(Debug)]
+enum ArrangeKeyRoute {
+    /// The editor took it; `Some` is the input mode it switches to.
+    Taken(Option<InputMode>),
+    /// The editor only noted what is held; the event goes on to the mode's own handler.
+    PassedOn,
+}
+
+/// In layout mode an arrange key goes to the editor and nowhere else; in any other mode the editor
+/// only follows what is held
+/// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B2).
+fn route_arrange_key(
+    key: kuluu_render::myroom_arrange::ArrangeKey,
+    phase: kuluu_render::myroom_arrange::KeyPhase,
+    editor_takes: bool,
+    dynamic_menu: &mut kuluu_render::hud::menu::DynamicMenu,
+) -> ArrangeKeyRoute {
+    if !editor_takes {
+        dynamic_menu.arrange.track(key, phase);
+        return ArrangeKeyRoute::PassedOn;
+    }
+    ArrangeKeyRoute::Taken(kuluu_render::myroom_arrange::arrange_key(
+        dynamic_menu,
+        key,
+        phase,
+    ))
 }
 
 fn death_menu_response_command(
@@ -708,6 +765,97 @@ mod death_menu_tests {
                 target_index: 0,
                 kind: ActionKind::TractorMenu { accept: false },
             }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod arrange_route_tests {
+    use super::*;
+    use kuluu_render::hud::menu::DynamicMenu;
+    use kuluu_render::myroom_arrange::{
+        ArrangeFrame, ArrangeKey, ArrangeRequest, DrawnPiece, HouseKey, KeyPhase, PieceInfo,
+    };
+
+    fn layout_frame(drawn: Vec<DrawnPiece>) -> ArrangeFrame {
+        ArrangeFrame {
+            house: Some(HouseKey {
+                zone_generation: 1,
+                floor: ffxi_dat::furniture::FLOOR_2F,
+                map_number: 0,
+            }),
+            arrangeable: true,
+            myroom_mode: kuluu_snapshot::MYROOM_MODE_LAYOUT,
+            drawn,
+            ..ArrangeFrame::default()
+        }
+    }
+
+    fn chair() -> DrawnPiece {
+        let pose = ffxi_dat::furniture::FurniturePose::default();
+        DrawnPiece {
+            seat: ffxi_dat::furniture::seat_index(ffxi_proto::map::container::LOC_MOGSAFE, 1),
+            info: PieceInfo {
+                container: ffxi_proto::map::container::LOC_MOGSAFE,
+                slot: 1,
+                item_no: 1,
+                kind: ffxi_dat::furniture::KIND_FURNISHING,
+                planted: false,
+                storage: 0,
+                recorded: Some(pose),
+            },
+            property: ffxi_dat::furniture::FurnitureProperty {
+                flags: 0,
+                model: 0,
+                width: 1,
+                depth: 1,
+                height: 0,
+            },
+            pose,
+        }
+    }
+
+    fn route(dynamic: &mut DynamicMenu, key: ArrangeKey, editor_takes: bool) -> ArrangeKeyRoute {
+        route_arrange_key(key, KeyPhase::Press, editor_takes, dynamic)
+    }
+
+    /// Outside layout mode an arrange key goes on to the mode's own handler; in it the editor takes it
+    /// and nothing else sees it.
+    #[test]
+    fn arrange_keys_reach_the_editor_only_in_layout_mode() {
+        let mut dynamic = DynamicMenu::default();
+        let entered = dynamic.arrange.update(&layout_frame(vec![chair()]));
+        assert!(matches!(entered, Some(InputMode::Arrange)), "{entered:?}");
+
+        assert!(matches!(
+            route(&mut dynamic, ArrangeKey::Cancel, false),
+            ArrangeKeyRoute::PassedOn
+        ));
+        assert!(dynamic.arrange.requests.is_empty() && dynamic.ui_sounds.is_empty());
+
+        assert!(matches!(
+            route(&mut dynamic, ArrangeKey::Cancel, true),
+            ArrangeKeyRoute::Taken(Some(InputMode::Menu(_)))
+        ));
+        assert_eq!(dynamic.arrange.requests, vec![ArrangeRequest::Leave]);
+        assert!(!dynamic.arrange.active(), "keys go back to normal play");
+    }
+
+    /// A modifier pressed in layout mode and released while another mode held the keys does not
+    /// leave the editor muted.
+    #[test]
+    fn a_modifier_released_elsewhere_is_not_left_held() {
+        let mut dynamic = DynamicMenu::default();
+        dynamic.arrange.update(&layout_frame(vec![chair()]));
+        route(&mut dynamic, ArrangeKey::Ctrl, true);
+        assert!(matches!(
+            route(&mut dynamic, ArrangeKey::Confirm, true),
+            ArrangeKeyRoute::Taken(None)
+        ));
+        route_arrange_key(ArrangeKey::Ctrl, KeyPhase::Release, false, &mut dynamic);
+        assert!(matches!(
+            route(&mut dynamic, ArrangeKey::Confirm, true),
+            ArrangeKeyRoute::Taken(Some(InputMode::Menu(_)))
         ));
     }
 }
@@ -1018,7 +1166,7 @@ fn apply_chat_action(
 
                 let mode_override = match &outcome {
                     SlashOutcome::OpenMenu(kind) => {
-                        let mut stack = MenuStack::root();
+                        let mut stack = MenuStack::open_main_menu(&dynamic_menu.window_cursors);
                         stack.push(*kind);
                         Some(InputMode::Menu(stack))
                     }
@@ -1239,6 +1387,19 @@ fn sub_target_action_for(
         | A::ControlsPreset(_)
         | A::ControlsReset
         | A::DisplayInfo => None,
+        // The Unity, alter ego point, merit, job point and arrange windows answer at the confirm
+        // seam (`unity_fp::select_unity_fp_row`, `merit_windows::select_merit_row`,
+        // `myroom_arrange::select_arrange_row`); none targets anything.
+        A::UnityMenuItem { .. }
+        | A::UnityChatMode { .. }
+        | A::UnityRankingSet { .. }
+        | A::UnityRankingRow { .. }
+        | A::UnityLeaderRow { .. }
+        | A::AlterEgoCategory { .. }
+        | A::AlterEgoUpgrade { .. }
+        | A::AlterEgoConfirmAnswer { .. }
+        | A::Merit(_)
+        | A::Arrange(_) => None,
     }
 }
 
@@ -1593,6 +1754,18 @@ fn dispatch_dynamic_menu_action(
         // The inert readout rows of the Status detail windows dispatch nothing
         // whatsoever (bead kuluu-0oy7b; FFXiMain.dll retail-2026-09 RVA 0x148D00).
         A::DisplayInfo => return,
+        // Consumed at the confirm seam by `unity_fp::select_unity_fp_row`,
+        // `merit_windows::select_merit_row` and `myroom_arrange::select_arrange_row`.
+        A::UnityMenuItem { .. }
+        | A::UnityChatMode { .. }
+        | A::UnityRankingSet { .. }
+        | A::UnityRankingRow { .. }
+        | A::UnityLeaderRow { .. }
+        | A::AlterEgoCategory { .. }
+        | A::AlterEgoUpgrade { .. }
+        | A::AlterEgoConfirmAnswer { .. }
+        | A::Merit(_)
+        | A::Arrange(_) => return,
         // Roomlist remodel selects are consumed by their own confirm dialog in
         // confirm_menu_at_cursor and never reach this target dispatch (bead
         // kuluu-o9qt7.13.5; vault main_menu.md §59 addendum 20/21).
@@ -2022,9 +2195,10 @@ fn mog_menu_storage_choice(d: &kuluu_snapshot::DialogState, choice: u32) -> Opti
 fn open_items_on_bag(
     container: u8,
     item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
+    window_cursors: &CursorMemory,
 ) -> InputMode {
     item_bag.0 = container;
-    let mut stack = MenuStack::root();
+    let mut stack = MenuStack::open_main_menu(window_cursors);
     stack.push(MenuKind::Items);
     InputMode::Menu(stack)
 }
@@ -2037,6 +2211,7 @@ fn confirm_quick_action_at_cursor(
     cmd_tx: &Sender<AgentCommand>,
     magic_flat_list: bool,
     flat_abilities: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     let label = kuluu_render::hud::quick_action::entry_label(state.has_target, state.cursor);
     let target_ent = target_id.and_then(|id| entities.iter().find(|e| e.id == id));
@@ -2056,7 +2231,7 @@ fn confirm_quick_action_at_cursor(
             Some(InputMode::World)
         }
         QuickActionDispatch::OpenMenu(kind) => {
-            let mut stack = MenuStack::root();
+            let mut stack = MenuStack::open_main_menu(window_cursors);
             stack.push(kind);
             Some(InputMode::Menu(stack))
         }
@@ -2141,7 +2316,11 @@ pub fn mouse_nav_dispatch_system(
             }
             cursor.cursor = ev.choice;
             if let Some(container) = confirm_dialog_choice(ev.choice, &mut scene_state, &cmd_tx.0) {
-                *mode = open_items_on_bag(container, &mut menu_writers.item_screen_container);
+                *mode = open_items_on_bag(
+                    container,
+                    &mut menu_writers.item_screen_container,
+                    &dynamic_menu.window_cursors,
+                );
             }
         }
     }
@@ -2161,6 +2340,7 @@ pub fn mouse_nav_dispatch_system(
                 &cmd_tx.0,
                 menu_writers.graphics.magic_flat_list,
                 menu_writers.graphics.abilities_flat_list,
+                &dynamic_menu.window_cursors,
             ) {
                 *mode = next;
             }
@@ -2197,6 +2377,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut trade_state,
                 &mut lock_on,
                 menu_writers.graphics.magic_flat_list,
+                &dynamic_menu.window_cursors,
             ) {
                 *mode = next;
             }
@@ -2238,6 +2419,7 @@ fn handle_dialog_key(
     scene_state: &mut SceneState,
     cmd_tx: &Sender<AgentCommand>,
     item_bag: &mut kuluu_render::hud::item_screen::ItemScreenContainer,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     // Free-text frame (delivery-box recipient prompt): edit a line buffer and
     // answer with TextInput; characters must not fall through to nav bindings.
@@ -2325,7 +2507,7 @@ fn handle_dialog_key(
         if let Some(container) =
             confirm_dialog_choice(cursor.cursor.min(max_index), scene_state, cmd_tx)
         {
-            return Some(open_items_on_bag(container, item_bag));
+            return Some(open_items_on_bag(container, item_bag, window_cursors));
         }
         return None;
     }
@@ -2524,6 +2706,7 @@ fn handle_quick_action_key(
     cmd_tx: &Sender<AgentCommand>,
     magic_flat_list: bool,
     flat_abilities: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     let entry_count = kuluu_render::hud::quick_action::entry_count(state.has_target);
     if bindings.matches_logical(Action::NavUp, key) {
@@ -2548,6 +2731,7 @@ fn handle_quick_action_key(
             cmd_tx,
             magic_flat_list,
             flat_abilities,
+            window_cursors,
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
@@ -3102,7 +3286,8 @@ mod dialog_esc_gate_tests {
             &mut cursor,
             &mut scene_state,
             &cmd_tx,
-            &mut item_bag
+            &mut item_bag,
+            &Default::default()
         )
         .is_none());
 
@@ -3134,7 +3319,8 @@ mod dialog_esc_gate_tests {
             &mut cursor,
             &mut scene_state,
             &cmd_tx,
-            &mut item_bag
+            &mut item_bag,
+            &Default::default()
         )
         .is_none());
 

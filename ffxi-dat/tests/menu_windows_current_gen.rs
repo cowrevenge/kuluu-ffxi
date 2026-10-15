@@ -3,12 +3,12 @@
 //! each named-root window through VTABLE/FTABLE with its exact `windowpsNNN`
 //! row ids, fall back to the legacy DAT for roots the newer generation lacks,
 //! and keep the newest generation winning where a root exists in both. The
-//! captions must then read out of catalog table 11 (the `d_msg` container).
+//! captions must then read out of catalog table 0x0E (the `d_msg` container).
 //! Self-skips without an install.
 
 use ffxi_dat::archive::open_test_install;
 use ffxi_dat::dmsg::DmsgTable;
-use ffxi_dat::menu_windows::{windows_from_root, CAPTION_CATALOG_TABLE_11_FILE_ID};
+use ffxi_dat::menu_windows::{windows_from_root, CAPTION_CATALOG_TABLE_14_FILE_ID};
 
 /// Named-root generation (ROM/119/51.DAT) rows in file order, measured.
 /// Repeated ids are real repeated records (§57): conf7 shows 219 and 222
@@ -100,14 +100,14 @@ fn the_newer_generation_wins_shared_roots() {
 }
 
 #[test]
-fn caption_ids_read_real_strings_from_catalog_table_11() {
+fn caption_ids_read_real_strings_from_catalog_table_14() {
     let Some(root) = open_test_install() else {
         eprintln!("SKIP: no FFXI install");
         return;
     };
-    let loc = root.resolve(CAPTION_CATALOG_TABLE_11_FILE_ID).unwrap();
+    let loc = root.resolve(CAPTION_CATALOG_TABLE_14_FILE_ID).unwrap();
     let bytes = std::fs::read(loc.path_under(&root)).unwrap();
-    let catalog = DmsgTable::parse(&bytes).expect("table 11 parses as a d_msg catalog");
+    let catalog = DmsgTable::parse(&bytes).expect("table 0x0E parses as a d_msg catalog");
     assert_eq!(catalog.len(), 1099, "§43 measured entry count");
     // §43 law, measured text on retail-2026-09: the first conf3win row is
     // caption 165.

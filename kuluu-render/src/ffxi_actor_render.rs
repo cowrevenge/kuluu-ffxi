@@ -1786,6 +1786,15 @@ impl FfxiRenderActor {
         self.current_clip = None;
     }
 
+    /// The motion family this actor plays wherever it would stand idle; `None` keeps its own idle.
+    pub fn set_idle_family(&mut self, family: Option<DatId>) {
+        self.event_idle = family;
+    }
+
+    pub fn idle_family(&self) -> Option<DatId> {
+        self.event_idle
+    }
+
     /// A scheduler Motion stage's action is in flight on this model.
     pub fn has_action(&self) -> bool {
         self.action.is_some()
@@ -6178,7 +6187,9 @@ pub fn tick_live_ffxi_actors(
             }
             let snap = index.by_id.get(&world_id);
 
-            if zone_changed || (!is_self && snap.is_none()) {
+            if zone_changed
+                || (!is_self && snap.is_none() && !crate::scene::is_furniture_actor_id(world_id))
+            {
                 reset_actor_pose_state(
                     &mut actor,
                     elapsed_frames,

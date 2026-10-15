@@ -940,6 +940,10 @@ pub struct SystemSfxTable {
     pub ui_command_ok: Option<u32>,
 
     pub ui_command_err: Option<u32>,
+
+    /// Retail UI sound 0001, the page toggle
+    /// (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    pub ui_page_toggle: Option<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -1022,10 +1026,15 @@ pub enum InputModeKind {
     QuickAction,
     Dialog,
     PassiveCursor,
+    /// Layout mode and its windows, whose sounds the arrange editor queues itself.
+    Arrange,
 }
 
 impl InputModeKind {
     fn of(mode: &crate::InputMode) -> Self {
+        if crate::myroom_arrange::arranging(mode) {
+            return Self::Arrange;
+        }
         match mode {
             crate::InputMode::World => Self::World,
             crate::InputMode::Chat(_) => Self::Chat,
@@ -1041,6 +1050,7 @@ impl InputModeKind {
             | crate::InputMode::Auction
             | crate::InputMode::Shop => Self::Menu,
             crate::InputMode::PassiveCursor(_) => Self::PassiveCursor,
+            crate::InputMode::Arrange => Self::Arrange,
         }
     }
 }
@@ -1048,10 +1058,18 @@ impl InputModeKind {
 pub fn observe_ui_mode_transitions(
     mode: Res<crate::InputMode>,
     table: Res<SystemSfxTable>,
+    dynamic: Option<ResMut<crate::hud::menu::DynamicMenu>>,
     mut writer: MessageWriter<SfxEvent>,
     mut prev_kind: Local<InputModeKind>,
     mut prev_menu_depth: Local<usize>,
 ) {
+    let mut closed_by_logic = false;
+    if let Some(mut dynamic) = dynamic {
+        if dynamic.closed_by_logic {
+            dynamic.closed_by_logic = false;
+            closed_by_logic = true;
+        }
+    }
     let new_kind = InputModeKind::of(&mode);
     let new_menu_depth = match &*mode {
         crate::InputMode::Menu(stack) => stack.levels.len(),
@@ -1060,6 +1078,7 @@ pub fn observe_ui_mode_transitions(
 
     if new_kind != *prev_kind {
         let id = match (*prev_kind, new_kind) {
+            (InputModeKind::Arrange, _) | (_, InputModeKind::Arrange) => None,
             (_, InputModeKind::Chat) => table.ui_chat_open,
 
             (InputModeKind::Chat, _) => table.ui_chat_cancel,
@@ -1076,6 +1095,8 @@ pub fn observe_ui_mode_transitions(
     } else if new_kind == InputModeKind::Menu && new_menu_depth != *prev_menu_depth {
         let id = if new_menu_depth > *prev_menu_depth {
             table.ui_menu_confirm
+        } else if closed_by_logic {
+            None
         } else {
             table.ui_menu_cancel
         };
@@ -1084,6 +1105,33 @@ pub fn observe_ui_mode_transitions(
         }
     }
     *prev_menu_depth = new_menu_depth;
+}
+
+/// Plays the UI sounds the menu input queued this frame through the system SE table.
+pub fn play_menu_ui_sounds(
+    dynamic: Option<ResMut<crate::hud::menu::DynamicMenu>>,
+    table: Res<SystemSfxTable>,
+    mut writer: MessageWriter<SfxEvent>,
+) {
+    use crate::hud::menu::UiSound;
+    let Some(mut dynamic) = dynamic else {
+        return;
+    };
+    if dynamic.ui_sounds.is_empty() {
+        return;
+    }
+    for sound in std::mem::take(&mut dynamic.ui_sounds) {
+        let se_id = match sound {
+            UiSound::Confirm => table.ui_menu_confirm,
+            UiSound::Buzzer => table.ui_command_err,
+            UiSound::Cursor => table.ui_menu_move,
+            UiSound::PageToggle => table.ui_page_toggle,
+            UiSound::Cancel => table.ui_menu_cancel,
+        };
+        if let Some(se_id) = se_id {
+            writer.write(SfxEvent::new(se_id));
+        }
+    }
 }
 
 pub const WEATHER_FADE_SECS: f32 = 1.0;
@@ -1274,6 +1322,7 @@ impl Plugin for AudioPlugin {
                     fire_system_sfx_events,
                     fire_combat_sfx_events,
                     observe_ui_mode_transitions,
+                    play_menu_ui_sounds,
                     // The launcher backdrop mirrors its flythrough zone into SceneState, so
                     // ZoneWeather is fully loaded at character select; without an in-game
                     // gate the backdrop zone's wind loop plays over the character list.
@@ -1928,6 +1977,175 @@ mod tests {
         assert_eq!(sfx_messages[0], 7001);
         assert_eq!(sfx_messages[1], 7002);
         assert_eq!(sfx_messages[2], 7003);
+    }
+
+    const CONFIRM_SE: u32 = 21;
+    const CANCEL_SE: u32 = 22;
+    const SILENT: [u32; 0] = [];
+
+    fn menu_sound_app(stack: crate::input_mode::MenuStack, upkeep: bool) -> App {
+        let mut app = App::new();
+        app.add_message::<SfxEvent>()
+            .init_resource::<Time>()
+            .insert_resource(SystemSfxTable {
+                ui_menu_confirm: Some(CONFIRM_SE),
+                ui_menu_cancel: Some(CANCEL_SE),
+                ..Default::default()
+            })
+            .init_resource::<crate::hud::menu::DynamicMenu>()
+            .insert_resource(crate::InputMode::Menu(stack))
+            .add_systems(
+                Update,
+                (observe_ui_mode_transitions, play_menu_ui_sounds).chain(),
+            );
+        if upkeep {
+            app.add_systems(
+                Update,
+                crate::hud::merit_windows::merit_window_upkeep.after(play_menu_ui_sounds),
+            );
+        }
+        app.update();
+        played(&mut app);
+        app
+    }
+
+    fn played(app: &mut App) -> Vec<u32> {
+        app.world_mut()
+            .resource_mut::<Messages<SfxEvent>>()
+            .drain()
+            .map(|ev| ev.se_id)
+            .collect()
+    }
+
+    fn act(
+        app: &mut App,
+        act: impl FnOnce(&mut crate::input_mode::MenuStack, &mut crate::hud::menu::DynamicMenu),
+    ) {
+        app.world_mut()
+            .resource_scope(|world, mut dynamic: Mut<crate::hud::menu::DynamicMenu>| {
+                let mut mode = world.resource_mut::<crate::InputMode>();
+                let crate::InputMode::Menu(stack) = &mut *mode else {
+                    panic!("a menu is open");
+                };
+                act(stack, &mut dynamic);
+            });
+        app.update();
+    }
+
+    fn stack_of(kinds: &[crate::input_mode::MenuKind]) -> crate::input_mode::MenuStack {
+        let mut stack = crate::input_mode::MenuStack::root();
+        for &kind in kinds {
+            stack.push(kind);
+        }
+        stack
+    }
+
+    /// One sound per action: windows a window's own logic closes play only what that logic
+    /// queued, and the cancel sound is left to a close nobody sounded, like Esc's.
+    #[test]
+    fn a_close_made_by_window_logic_plays_only_its_own_sound() {
+        use crate::hud::menu::DynamicMenuAction as A;
+        use crate::hud::merit_windows::{select_merit_row, MeritAction, MeritWindow};
+        use crate::hud::unity_fp::{select_unity_fp_row, CONFIRM_ITEM_YES};
+        use crate::input_mode::MenuKind;
+        let mut snap = SceneSnapshot::default();
+
+        let mut app = menu_sound_app(
+            stack_of(&[MenuKind::UnityMenu, MenuKind::UnityLeaders]),
+            false,
+        );
+        act(&mut app, |stack, dynamic| {
+            select_unity_fp_row(
+                MenuKind::UnityLeaders,
+                Some(A::UnityLeaderRow { concord: 0 }),
+                stack,
+                dynamic,
+                &mut snap,
+            );
+        });
+        assert_eq!(played(&mut app), [CONFIRM_SE], "the leader row's confirm");
+        act(&mut app, |stack, _| {
+            stack.pop();
+        });
+        assert_eq!(played(&mut app), [CANCEL_SE], "an Esc close");
+
+        let upgrade = MenuKind::AlterEgoConfirm { upgrade: 1 };
+        for yes in [true, false] {
+            let mut app = menu_sound_app(
+                stack_of(&[
+                    MenuKind::AlterEgoCategories,
+                    MenuKind::AlterEgoUpgrades { category: 1 },
+                    upgrade,
+                ]),
+                false,
+            );
+            act(&mut app, |stack, dynamic| {
+                select_unity_fp_row(
+                    upgrade,
+                    Some(A::AlterEgoConfirmAnswer { yes }),
+                    stack,
+                    dynamic,
+                    &mut snap,
+                );
+            });
+            assert_eq!(played(&mut app), SILENT, "alter ego answer {yes}");
+        }
+
+        let raise_lower = MeritWindow::RaiseLower { index: 1 };
+        let job_page = MeritWindow::JobCategories {
+            job: 1,
+            gifts: false,
+        };
+        for (opener, prompt) in [
+            (
+                raise_lower,
+                MeritWindow::SortConfirm {
+                    index: 1,
+                    raise: true,
+                },
+            ),
+            (
+                raise_lower,
+                MeritWindow::Confirm {
+                    index: 1,
+                    raise: true,
+                },
+            ),
+            (
+                job_page,
+                MeritWindow::JobPointConfirm { job: 1, type_id: 1 },
+            ),
+        ] {
+            let mut app = menu_sound_app(
+                stack_of(&[MenuKind::Merit(opener), MenuKind::Merit(prompt)]),
+                false,
+            );
+            act(&mut app, |stack, dynamic| {
+                select_merit_row(
+                    prompt,
+                    Some(A::Merit(MeritAction::Item {
+                        item: CONFIRM_ITEM_YES,
+                        enabled: true,
+                    })),
+                    stack,
+                    dynamic,
+                    &snap,
+                );
+            });
+            assert_eq!(played(&mut app), SILENT, "{prompt:?} Yes");
+        }
+
+        let mut app = menu_sound_app(crate::input_mode::MenuStack::root(), true);
+        act(&mut app, |stack, _| {
+            stack.push(MenuKind::Merit(raise_lower));
+            stack.push(MenuKind::Merit(MeritWindow::SortConfirm {
+                index: 1,
+                raise: true,
+            }));
+        });
+        assert_eq!(played(&mut app), [CONFIRM_SE], "the windows open");
+        app.update();
+        assert_eq!(played(&mut app), SILENT, "merit3 closes by its upkeep");
     }
 
     #[test]

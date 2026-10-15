@@ -416,6 +416,21 @@ pub struct CharStatsRaw {
     /// stored to game state `+0x40DF0` at `.text 0xF0982`; refusal at `.text 0x132111`).
     #[serde(default)]
     pub equip_slot_block: u32,
+    /// CLISTATUS `mjob_no` and the Unity fields `unity_info.Faction` / `unity_info.Points` /
+    /// `unity_points1` / `unity_points2` (vendor/server/src/map/packets/s2c/0x061_clistatus.h).
+    #[serde(default)]
+    pub mjob_no: u8,
+    #[serde(default)]
+    pub unity_faction: u8,
+    #[serde(default)]
+    pub unity_points: u32,
+    #[serde(default)]
+    pub unity_points1: u16,
+    #[serde(default)]
+    pub unity_points2: u16,
+    /// CLISTATUS `mjob_lv`.
+    #[serde(default)]
+    pub mjob_lv: u8,
 }
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
@@ -582,6 +597,38 @@ pub struct SessionState {
     /// .data 0x485826/0x48582A + flag bit1, dispatcher `.text 0x99270`).
     #[serde(default)]
     pub merits: Option<kuluu_snapshot::MisdataMerits>,
+
+    /// The Unity ranking tables (s2c 0x063 type 7) and the s2c 0x110 request mark
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    #[serde(default)]
+    pub unity: kuluu_snapshot::UnityState,
+
+    /// The last s2c 0x08E alter ego points block; `None` until one arrives this session.
+    #[serde(default)]
+    pub alter_ego_points: Option<kuluu_snapshot::AlterEgoPoints>,
+
+    /// An s2c 0x119 has arrived this session (the Status data is ready); never cleared.
+    #[serde(default)]
+    pub status_data_ready: bool,
+
+    /// s2c 0x00A `LoginState` and `IsMonstrosity` at the last zone-in
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h).
+    #[serde(default)]
+    pub login_state: u32,
+    #[serde(default)]
+    pub login_is_monstrosity: bool,
+
+    /// The merits s2c 0x08C stored, keyed by merit index, the job point type state s2c 0x08D
+    /// stored by type id, whether any s2c 0x08D arrived this session, and the last s2c 0x063
+    /// JobPoints record (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+    #[serde(default)]
+    pub merit_entries: std::collections::BTreeMap<u16, kuluu_snapshot::MeritEntry>,
+    #[serde(default)]
+    pub job_point_types: std::collections::BTreeMap<u16, kuluu_snapshot::JobPointType>,
+    #[serde(default)]
+    pub job_points_received: bool,
+    #[serde(default)]
+    pub job_points: Option<kuluu_snapshot::JobPointsRecord>,
 
     /// Server-offered alternative to returning home while dead (s2c 0x0F9,
     /// vendor/server/src/map/packets/s2c/0x0f9_res.cpp).
@@ -2851,8 +2898,11 @@ impl SessionState {
                 changed
             }
             AgentEvent::AbilityRecastsUpdated { recasts } => {
-                let changed = self.ability_recasts != *recasts;
+                // Any s2c 0x119 readies the Status data for the session
+                // (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+                let changed = self.ability_recasts != *recasts || !self.status_data_ready;
                 self.ability_recasts = recasts.clone();
+                self.status_data_ready = true;
                 changed
             }
             AgentEvent::JobInfoUpdated { info } => {
@@ -2928,6 +2978,54 @@ impl SessionState {
                 // `.text 0x99290`).
                 let changed = self.merits != Some(*merits);
                 self.merits = Some(*merits);
+                changed
+            }
+            AgentEvent::AlterEgoPointsUpdated { points } => {
+                let changed = self.alter_ego_points != Some(*points);
+                self.alter_ego_points = Some(*points);
+                changed
+            }
+            AgentEvent::UnityRankingChunk {
+                result_set,
+                data_type,
+                concord_values,
+            } => fold_unity_ranking_chunk(&mut self.unity, *result_set, *data_type, concord_values),
+            AgentEvent::UnityRankingRequested { result_set } => {
+                let Some(set) = self
+                    .unity
+                    .rankings
+                    .get_mut(unity_result_set_index(*result_set))
+                else {
+                    return false;
+                };
+                std::mem::replace(&mut set.complete, false)
+            }
+            AgentEvent::UnityQuestUpdated { .. } => {
+                !std::mem::replace(&mut self.unity.quest_armed, true)
+            }
+            AgentEvent::UnityQuestRequested => {
+                std::mem::replace(&mut self.unity.quest_armed, false)
+            }
+            AgentEvent::LoginStateSynced {
+                login_state,
+                is_monstrosity,
+            } => {
+                let changed = self.login_state != *login_state
+                    || self.login_is_monstrosity != *is_monstrosity;
+                self.login_state = *login_state;
+                self.login_is_monstrosity = *is_monstrosity;
+                changed
+            }
+            AgentEvent::MeritsListed { entries } => {
+                fold_merit_entries(&mut self.merit_entries, entries)
+            }
+            AgentEvent::JobPointsListed { entries } => {
+                let stored = fold_job_point_entries(&mut self.job_point_types, entries);
+                !std::mem::replace(&mut self.job_points_received, true) || stored
+            }
+            AgentEvent::JobPointsRecordUpdated { record } => {
+                let changed = self.job_points != Some(*record);
+                self.job_points = Some(*record);
                 changed
             }
             AgentEvent::DeathMenuUpdated { offer } => {
@@ -3286,6 +3384,120 @@ fn apply_trade_slot(
     slots[idx] = offer;
     true
 }
+
+/// Any nonzero `resultSet` is result set 1
+/// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+pub fn unity_result_set_index(result_set: u8) -> usize {
+    usize::from(result_set != 0)
+}
+
+/// One s2c 0x08C `merit_t` as sent (vendor/server/src/map/packets/s2c/0x08c_merit.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeritWire {
+    pub index: u16,
+    pub next: u8,
+    pub count: u8,
+}
+
+/// One s2c 0x08D `jobpoint_t` as sent (vendor/server/src/map/packets/s2c/0x08d_job_points.h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobPointWire {
+    pub index: u8,
+    pub job_no: u16,
+    pub next: u16,
+    pub level: u8,
+}
+
+/// The s2c 0x08C wire id bit that turns an entry into a delete; the wire id halved is the merit
+/// index (.agents/skills/retail-observe/references/2026-10-15-merit-and-job-point-windows.md).
+pub const MERIT_WIRE_DELETE_BIT: u16 = 1;
+const MERIT_WIRE_INDEX_SHIFT: u32 = 1;
+
+/// The merit index of an s2c 0x08C wire id.
+pub fn merit_index_of_wire_id(wire_id: u16) -> u16 {
+    wire_id >> MERIT_WIRE_INDEX_SHIFT
+}
+
+/// Stores s2c 0x08C entries by merit index: an entry whose wire id has bit 0 set deletes its
+/// merit, any other inserts or replaces it.
+pub fn fold_merit_entries(
+    store: &mut std::collections::BTreeMap<u16, kuluu_snapshot::MeritEntry>,
+    entries: &[MeritWire],
+) -> bool {
+    let mut changed = false;
+    for entry in entries {
+        let index = merit_index_of_wire_id(entry.index);
+        if entry.index & MERIT_WIRE_DELETE_BIT != 0 {
+            changed |= store.remove(&index).is_some();
+            continue;
+        }
+        let stored = kuluu_snapshot::MeritEntry {
+            next: entry.next,
+            count: entry.count,
+        };
+        changed |= store.insert(index, stored) != Some(stored);
+    }
+    changed
+}
+
+/// Stores s2c 0x08D entries by type id (`job_no * 32 + index`), skipping an entry whose first
+/// u16 is 0 or whose job is past the JobPoints record's jobs.
+pub fn fold_job_point_entries(
+    store: &mut std::collections::BTreeMap<u16, kuluu_snapshot::JobPointType>,
+    entries: &[JobPointWire],
+) -> bool {
+    let mut changed = false;
+    for entry in entries {
+        let type_id = entry.job_no * ffxi_proto::decode::JobPointWireEntry::TYPES_PER_JOB
+            + u16::from(entry.index);
+        if type_id == 0 || usize::from(entry.job_no) >= kuluu_snapshot::JOB_POINT_JOBS {
+            continue;
+        }
+        let stored = kuluu_snapshot::JobPointType {
+            level: entry.level,
+            next: entry.next,
+        };
+        changed |= store.insert(type_id, stored) != Some(stored);
+    }
+    changed
+}
+
+const _: () = assert!(
+    kuluu_snapshot::JOB_POINT_JOBS == ffxi_proto::decode::MiscdataJobPoints::JOBS,
+    "the snapshot's JobPoints jobs follow the decoder's"
+);
+
+/// Stores one s2c 0x063 Unity chunk into its result set: chunk 1 carries the members, chunk 2
+/// the points, and the last chunk completes the set
+/// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+pub fn fold_unity_ranking_chunk(
+    unity: &mut kuluu_snapshot::UnityState,
+    result_set: u8,
+    data_type: u8,
+    concord_values: &[u32; kuluu_snapshot::UNITY_CONCORDS],
+) -> bool {
+    use ffxi_proto::decode::MiscdataUnity;
+    let Some(set) = unity.rankings.get_mut(unity_result_set_index(result_set)) else {
+        return false;
+    };
+    let before = *set;
+    match data_type {
+        MiscdataUnity::DATA_TYPE_MEMBERS => set.members = *concord_values,
+        MiscdataUnity::DATA_TYPE_POINTS => set.points = *concord_values,
+        MiscdataUnity::LAST_CHUNK => set.complete = true,
+        _ => {}
+    }
+    *set != before
+}
+
+const _: () = assert!(
+    kuluu_snapshot::UNITY_CONCORDS == ffxi_proto::decode::UNITY_CONCORD_COUNT,
+    "the snapshot's Concord count follows the decoder's"
+);
+const _: () = assert!(
+    kuluu_snapshot::ALTER_EGO_UPGRADE_SLOTS == ffxi_proto::decode::AlterEgoPoints::UPGRADE_SLOTS,
+    "the snapshot's alter ego upgrade slots follow the decoder's"
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -3737,6 +3949,63 @@ pub enum AgentEvent {
         merits: kuluu_snapshot::MisdataMerits,
     },
 
+    /// s2c 0x08E alter ego points: balance, upgrade levels and costs
+    /// (vendor/server/src/map/packets/s2c/0x08e_alter_ego_points.h).
+    AlterEgoPointsUpdated {
+        points: kuluu_snapshot::AlterEgoPoints,
+    },
+
+    /// One s2c 0x063 MISCDATA Unity chunk, decoded by LSB's layout
+    /// (vendor/server/src/map/packets/s2c/0x063_miscdata_unity.h): `concord_values` holds
+    /// `members[11]` / `points[11]` for chunks 1 / 2 and zeros otherwise.
+    UnityRankingChunk {
+        result_set: u8,
+        data_type: u8,
+        concord_values: [u32; kuluu_snapshot::UNITY_CONCORDS],
+    },
+
+    /// A c2s 0x116 went out for `result_set`, clearing that set's complete mark
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    UnityRankingRequested {
+        result_set: u8,
+    },
+
+    /// s2c 0x110 GP_SERV_COMMAND_UNITY (vendor/server/src/map/packets/s2c/0x110_unity.h); it arms
+    /// the next c2s 0x117.
+    UnityQuestUpdated {
+        sparks: u32,
+        deeds: u16,
+        plaudits: u16,
+    },
+
+    /// A c2s 0x117 went out, clearing the s2c 0x110 mark.
+    UnityQuestRequested,
+
+    /// s2c 0x00A `LoginState` / `IsMonstrosity`, emitted after the zone-in's `ZoneChanged`
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h).
+    LoginStateSynced {
+        login_state: u32,
+        is_monstrosity: bool,
+    },
+
+    /// s2c 0x08C GP_SERV_COMMAND_MERIT: its counted entries as sent
+    /// (vendor/server/src/map/packets/s2c/0x08c_merit.h).
+    MeritsListed {
+        entries: Vec<MeritWire>,
+    },
+
+    /// s2c 0x08D GP_SERV_COMMAND_JOB_POINTS: all 64 entries as sent
+    /// (vendor/server/src/map/packets/s2c/0x08d_job_points.h).
+    JobPointsListed {
+        entries: Vec<JobPointWire>,
+    },
+
+    /// One s2c 0x063 MISCDATA JobPoints record
+    /// (vendor/server/src/map/packets/s2c/0x063_miscdata_job_points.h).
+    JobPointsRecordUpdated {
+        record: kuluu_snapshot::JobPointsRecord,
+    },
+
     /// s2c 0x113/0x118 currency reports (bead kuluu-o9qt7.35), raw body as received — the
     /// mode selects which report family (`kuluu_render::hud::currency_law::CurrencyMode`) and
     /// each arrival replaces its block wholesale, mirroring retail's one-shot reply handler
@@ -3998,9 +4267,10 @@ pub enum AgentEvent {
     },
 
     /// The client's Mog House arrangement mode changed — emitted by the session actor after its own
-    /// gate chain accepted an [`AgentCommand::MyroomMode`], never by a packet (retail keeps the mode in
-    /// the myroom manager alone; no wire carries it — FFXiMain.dll retail-2026-09 `.text 0x1D34FA`).
-    /// Values are the `MODE_*` constants of [`crate::myroom_layout`](crate::myroom_layout).
+    /// gate chain accepted an [`AgentCommand::MyroomMode`], and when a zone-in drops a mode that was
+    /// in force (retail keeps the mode in the myroom manager alone; no wire carries it —
+    /// FFXiMain.dll retail-2026-09 `.text 0x1D34FA`). Values are the `MODE_*` constants of
+    /// [`crate::myroom_layout`](crate::myroom_layout).
     MyroomModeChanged {
         previous: u8,
         next: u8,
@@ -4391,6 +4661,58 @@ pub enum AgentCommand {
     RequestCurrencies {
         mode: u8,
     },
+
+    /// c2s 0x116 GP_CLI_COMMAND_UNITY_MENU `Kind = result_set`
+    /// (vendor/server/src/map/packets/c2s/0x116_unity_menu.h); LSB answers with s2c 0x110 and both
+    /// ranking sets. The `ut_menu` window sends it once per set whose table completed since the
+    /// last request (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    RequestUnityRanking {
+        result_set: u8,
+    },
+
+    /// c2s 0x117 GP_CLI_COMMAND_UNITY_QUEST `Kind = 0`
+    /// (vendor/server/src/map/packets/c2s/0x117_unity_quest.h), sent when a ranking list opens
+    /// after an s2c 0x110.
+    RequestUnityQuest,
+
+    /// c2s 0x118 GP_CLI_COMMAND_UNITY_TOGGLE `Mode`
+    /// (vendor/server/src/map/packets/c2s/0x118_unity_toggle.h): 1 joins Unity chat, 0 leaves it.
+    SetUnityChat {
+        mode: u8,
+    },
+
+    /// The header-only c2s 0x0C2 alter ego points request, sent when the alter ego point windows
+    /// open before any s2c 0x08E (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md).
+    RequestAlterEgoPoints,
+
+    /// c2s 0x0C1 GP_CLI_COMMAND_ALTER_EGO_POINTS `CategoryIndex = upgrade_id`
+    /// (vendor/server/src/map/packets/c2s/0x0c1_alter_ego_points.h).
+    UpgradeAlterEgo {
+        upgrade_id: u16,
+    },
+
+    /// c2s 0x0BE GP_CLI_COMMAND_MERITS ChangeMode (vendor/server/src/map/packets/c2s/0x0be_merits.h):
+    /// `limit_points` false asks for EXP mode, true for Limit Points mode.
+    SetMeritMode {
+        limit_points: bool,
+    },
+
+    /// c2s 0x0BE GP_CLI_COMMAND_MERITS EditMode: raise (`raise`) or lower merit `index` (the wire
+    /// id halved).
+    EditMerit {
+        index: u16,
+        raise: bool,
+    },
+
+    /// c2s 0x0BF GP_CLI_COMMAND_JOB_POINTS_SPEND on job point type `type_id`
+    /// (vendor/server/src/map/packets/c2s/0x0bf_job_points_spend.h).
+    SpendJobPoint {
+        type_id: u16,
+    },
+
+    /// The header-only c2s 0x0C0 GP_CLI_COMMAND_JOB_POINTS_REQ
+    /// (vendor/server/src/map/packets/c2s/0x0c0_job_points_req.h).
+    RequestJobPoints,
 
     /// Cast lots on a treasure-pool slot — c2s 0x041 TROPHY_ENTRY. The server
     /// rolls the value, so there is nothing to send but the slot.

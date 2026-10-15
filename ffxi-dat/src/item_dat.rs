@@ -83,6 +83,11 @@ const ITEM_TYPE_OFFSET: usize = ITEM_STACK_OFFSET + 2;
 /// layout places it at this plus `ItemBlockLayout::header_shift`.
 const ITEM_EQUIPMENT_TAIL_OFFSET: usize = 0x0E;
 
+/// A furnishing, flowerpot or mannequin carries its element (u16) where the
+/// equipment tail starts, then its storage slot count (i32)
+/// (vendor/POLUtils/PlayOnline.FFXI/Things/Item.cs `StorageSlots_`).
+const ITEM_FURNISHING_STORAGE_OFFSET: usize = ITEM_EQUIPMENT_TAIL_OFFSET + 2;
+
 /// Where the string-table probe starts: the first offset past the common
 /// header on either layout.
 const STRING_TABLE_PROBE_START: usize = 0x10;
@@ -149,6 +154,9 @@ pub struct ItemStatic {
     pub recast_base: u32,
 
     pub item_type: u8,
+
+    /// The Storage slots a placed furnishing, flowerpot or mannequin adds; 0 for every other item.
+    pub storage_slots: u32,
 
     pub icon: Option<GraphicImage>,
 }
@@ -222,6 +230,16 @@ fn decode_item_static(block: &[u8], layout: ItemBlockLayout) -> Option<ItemStati
             (0, 0, 0, 0, 0, 0, 0)
         };
 
+    let item_type = item_type.min(u8::MAX as u16) as u8;
+    let storage_slots = if crate::furniture::is_furniture_kind(item_type) {
+        let off = ITEM_FURNISHING_STORAGE_OFFSET + layout.header_shift();
+        block
+            .get(off..off + 4)
+            .map_or(0, |b| u32::try_from(read_i32_le(b)).unwrap_or(0))
+    } else {
+        0
+    };
+
     let strings = read_item_strings(block).unwrap_or_default();
     let icon = decode_icon(block);
 
@@ -238,7 +256,8 @@ fn decode_item_static(block: &[u8], layout: ItemBlockLayout) -> Option<ItemStati
         flags,
         max_charges,
         recast_base,
-        item_type: item_type.min(u8::MAX as u16) as u8,
+        item_type,
+        storage_slots,
         icon,
     })
 }
@@ -557,6 +576,11 @@ fn read_u32_le(b: &[u8]) -> u32 {
 }
 
 #[inline]
+fn read_i32_le(b: &[u8]) -> i32 {
+    i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+#[inline]
 fn read_u16_le(b: &[u8]) -> u16 {
     u16::from_le_bytes([b[0], b[1]])
 }
@@ -564,6 +588,35 @@ fn read_u16_le(b: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BLOCK_LEN: usize = 0x300;
+    const GENERAL_ITEM_ID: u32 = 0x0100;
+    const STORAGE: i32 = 7;
+
+    #[test]
+    fn furniture_kinds_read_their_storage_slots_after_the_element_word() {
+        for layout in [ItemBlockLayout::Legacy, ItemBlockLayout::Retail2026] {
+            let block = |kind: u16| {
+                let mut block = vec![0u8; BLOCK_LEN];
+                block[..4].copy_from_slice(&GENERAL_ITEM_ID.to_le_bytes());
+                let type_at = ITEM_TYPE_OFFSET + layout.header_shift();
+                block[type_at..type_at + 2].copy_from_slice(&kind.to_le_bytes());
+                let at = ITEM_FURNISHING_STORAGE_OFFSET + layout.header_shift();
+                block[at..at + 4].copy_from_slice(&STORAGE.to_le_bytes());
+                block
+            };
+            let furnishing = u16::from(crate::furniture::KIND_MANNEQUIN);
+            let item = decode_item_static(&block(furnishing), layout).unwrap();
+            assert_eq!(item.storage_slots, STORAGE as u32, "{}", layout.name());
+            let other = u16::from(crate::furniture::KIND_FURNISHING - 1);
+            assert_eq!(
+                decode_item_static(&block(other), layout)
+                    .unwrap()
+                    .storage_slots,
+                0
+            );
+        }
+    }
 
     /// Gated on a retail install: the superior-level requirement lives at record **+0x18** — the low
     /// byte of the dword right after the job mask (FFXiMain.dll retail-2026-09 `.text 0x132050` walks

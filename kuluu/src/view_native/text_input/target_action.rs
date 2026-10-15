@@ -19,6 +19,7 @@ pub(super) fn handle_world_key(
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
     magic_flat_list: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
         return Some(InputMode::Chat(ChatBuffer::empty()));
@@ -61,6 +62,7 @@ pub(super) fn handle_world_key(
                         trade_state,
                         lock_on,
                         magic_flat_list,
+                        window_cursors,
                     )
                 }
             }
@@ -83,6 +85,7 @@ pub(super) fn handle_world_key(
                 trade_state,
                 lock_on,
                 magic_flat_list,
+                window_cursors,
             ),
         };
     }
@@ -108,6 +111,7 @@ fn open_target_action_menu(
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
     magic_flat_list: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -125,6 +129,11 @@ fn open_target_action_menu(
         return None;
     }
     let mut state = kuluu_render::input_mode::TargetActionState::open(ctx);
+    state.recall_pickers(
+        window_cursors,
+        target_action_modes(&entries, action_model::TargetActionId::Chat),
+        action_model::AbilityGroup::ALL.len(),
+    );
     if action_model::sole_auto_confirm_entry(&entries).is_some() {
         return confirm_target_action_at_cursor(
             &mut state,
@@ -137,6 +146,7 @@ fn open_target_action_menu(
             trade_state,
             lock_on,
             magic_flat_list,
+            window_cursors,
         );
     }
     Some(InputMode::TargetAction(state))
@@ -157,6 +167,7 @@ pub(super) fn handle_target_action_key(
     lock_on: &mut kuluu_render::LockOn,
     reselect_unequip_enabled: bool,
     magic_flat_list: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::{ActionEntryKind, TargetActionId};
     use kuluu_render::input_mode::SubAction;
@@ -257,6 +268,7 @@ pub(super) fn handle_target_action_key(
             trade_state,
             lock_on,
             magic_flat_list,
+            window_cursors,
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
@@ -279,6 +291,7 @@ pub(super) fn confirm_target_action_at_cursor(
     trade_state: &mut kuluu_render::hud::trade::TradeState,
     lock_on: &mut kuluu_render::LockOn,
     magic_flat_list: bool,
+    window_cursors: &CursorMemory,
 ) -> Option<InputMode> {
     use kuluu_render::hud::action_model::TargetActionId;
 
@@ -346,8 +359,10 @@ pub(super) fn confirm_target_action_at_cursor(
         ))),
         // Retail's Magic entry goes through the mgcmenu picker; the flat list is the
         // off-by-default kuluu convenience (vault main_menu.md §21).
-        TargetActionId::Magic if magic_flat_list => Some(open_submenu(MenuKind::Magic)),
-        TargetActionId::Magic => Some(open_submenu(MenuKind::MagicGroups)),
+        TargetActionId::Magic if magic_flat_list => {
+            Some(open_submenu(MenuKind::Magic, window_cursors))
+        }
+        TargetActionId::Magic => Some(open_submenu(MenuKind::MagicGroups, window_cursors)),
         TargetActionId::Abilities => {
             use kuluu_render::hud::action_model::AbilityGroup;
             use kuluu_render::input_mode::{SubAction, SubActionStack};
@@ -355,7 +370,7 @@ pub(super) fn confirm_target_action_at_cursor(
             state.sub = Some(SubActionStack::with(SubAction::AbilitiesGroup(group)));
             None
         }
-        TargetActionId::Items => Some(open_submenu(MenuKind::UsableItems)),
+        TargetActionId::Items => Some(open_submenu(MenuKind::UsableItems, window_cursors)),
         TargetActionId::Check => {
             use kuluu_render::hud::action_model::TargetKindLite;
             match target_ent {
@@ -582,10 +597,27 @@ fn handle_abilities_group_key(
     None
 }
 
-fn open_submenu(kind: MenuKind) -> InputMode {
-    let mut stack = MenuStack::root();
+fn open_submenu(kind: MenuKind, window_cursors: &CursorMemory) -> InputMode {
+    let mut stack = MenuStack::open_main_menu(window_cursors);
     stack.push(kind);
     InputMode::Menu(stack)
+}
+
+/// How many choices a Command menu row's picker offers.
+fn target_action_modes(
+    entries: &[kuluu_render::hud::action_model::ActionEntry],
+    id: kuluu_render::hud::action_model::TargetActionId,
+) -> usize {
+    entries
+        .iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| match &entry.kind {
+            kuluu_render::hud::action_model::ActionEntryKind::Select { modes, .. } => {
+                Some(modes.len())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -619,6 +651,7 @@ mod mounted_tests {
             &mut Default::default(),
             &mut Default::default(),
             false,
+            &Default::default(),
         )
         .is_none());
         assert!(state.dismount_confirm);

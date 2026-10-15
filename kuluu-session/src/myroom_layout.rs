@@ -14,13 +14,13 @@
 //! `.text 0x1D33AB`, which is why [`FIRST_INVALID_MODE`] exists as a constant rather than an inline 5.
 
 use crate::myroom_furniture::{
-    self as furniture, furniture_index, is_selectable_slot, PlacedFurniture, CONTAINER_MOGSAFE,
+    furniture_index, is_selectable_slot, PlacedFurniture, CONTAINER_MOGSAFE,
 };
 
 /// Normal play: nothing is being arranged.
-pub const MODE_NORMAL: u8 = 0;
+pub const MODE_NORMAL: u8 = kuluu_snapshot::MYROOM_MODE_NORMAL;
 /// Layout mode — furniture can be picked up, moved and stored (`/layout`).
-pub const MODE_LAYOUT: u8 = 1;
+pub const MODE_LAYOUT: u8 = kuluu_snapshot::MYROOM_MODE_LAYOUT;
 /// Gardening mode (`/garden`); retail may hand this to a confirmation step first (`.text 0x1D36BC`).
 pub const MODE_GARDEN: u8 = 2;
 /// Flowerpot mode: the next thing the player picks is a seed or feed item, so the switch opens the
@@ -83,63 +83,97 @@ pub const WINDOW_REOPENED_ON_EXIT: &str = "menu    myroom  ";
 /// operand `.data 0x37EC94`) — there is no object to select, so retail shows this instead.
 pub const WINDOW_NO_FURNITURE: &str = "menu    rmlo1   ";
 
-/// What a caller has to know about the room before it may change mode. Every field names one of the DLL's
-/// own refusal predicates; kuluu fills them from state it already keeps.
+/// Client message ids (GetText table 7) the `/layout` refusals print
+/// (.agents/skills/retail-observe/references/2026-10-15-mog-house-arrange.md B1).
+pub const MESSAGE_UNTRACED_067_068_STATE: u16 = 188;
+pub const MESSAGE_NOT_ARRANGEABLE: u16 = 5;
+pub const MESSAGE_NOT_IN_MOG_HOUSE: u16 = 6;
+
+/// What a caller has to know about the room before `/layout` may enter a mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArrangeGates {
-    /// The mode currently in force (retail: myroom manager +0x1C).
+    /// The mode currently in force.
     pub current_mode: u8,
-    /// A Mog House operation is still outstanding — retail's `call .text 0x1D5FE0` on the myroom
-    /// manager, which answers while a layout/bankin request has not been acknowledged yet.
-    pub manager_busy: bool,
-    /// The house door is open to visitors — `.text 0xF96E0`, whose law already drives the Mog House menu
-    /// (vault main_menu.md §59 addendum 24). `/layout` refuses this one with the error bell.
+    /// A nonzero state value delivered by s2c 0x067/0x068 refuses with message 188. The record did not
+    /// trace which field, so kuluu has no source for it and callers pass false.
+    pub untraced_067_068_state: bool,
+    /// The house can be arranged: 2F, or 1F of a home-nation house, while in a Mog House
+    /// ([`ffxi_dat::furniture::house_is_arrangeable`]). The same predicate hides furniture.
+    pub arrangeable: bool,
+    /// The house door is open to visitors.
     pub door_open: bool,
-    /// Already arranging something (`/layout` tests its own layout-window state byte at `+0x16`, `.text
-    /// 0x7E73B`) — also the error-bell case.
+    /// Already arranging.
     pub already_arranging: bool,
-    /// The player is in their own Mog House and able to arrange it (`.text 0x97B40`, the same predicate
-    /// that gates the Mog House menu's Layout/Remodel rows).
-    pub home_view_available: bool,
+    /// In a Mog House at all.
+    pub in_mog_house: bool,
 }
 
-/// Why a mode request produced nothing at all. Each variant records the signal retail emits, because two
-/// of these are audible refusals (the error bell) and two are chat messages with an id.
+/// The house a gate test looks at: s2c 0x00A `MyroomMapNumber` and `MyroomSubMapNumber`, and the
+/// door byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HouseView {
+    pub map_number: u16,
+    pub sub_map: u8,
+    pub door_open: bool,
+}
+
+impl ArrangeGates {
+    /// The gates of the house the character stands in; `house` is `None` outside a Mog House and
+    /// `login_in_mog_house` is whether s2c 0x00A `LoginState` puts the character in one.
+    pub fn for_house(current_mode: u8, house: Option<HouseView>, login_in_mog_house: bool) -> Self {
+        Self {
+            current_mode,
+            untraced_067_068_state: false,
+            arrangeable: house.is_some_and(|house| {
+                ffxi_dat::furniture::house_is_arrangeable(
+                    ffxi_dat::furniture::floor_of_sub_map(house.sub_map),
+                    house.map_number,
+                    login_in_mog_house,
+                )
+            }),
+            door_open: house.is_some_and(|house| house.door_open),
+            already_arranging: current_mode == MODE_LAYOUT,
+            in_mog_house: house.is_some(),
+        }
+    }
+}
+
+/// Why a mode request produced nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// `mode >= FIRST_INVALID_MODE`: rejected before dispatch, no signal at all.
     ModeOutOfRange,
-    /// `home_view_available` was false — retail posts message code 6 through `.text 0x129D90`.
-    NotInOwnMogHouse,
-    /// `manager_busy` — retail posts message code 5 through `.text 0x129D90`.
-    ManagerBusy,
-    /// `door_open` — retail rings the error bell (`.text 0x37C50`) and says nothing.
+    /// [`ArrangeGates::untraced_067_068_state`]: message 188.
+    Untraced067068State,
+    /// [`ArrangeGates::arrangeable`] was false: message 5.
+    NotArrangeable,
+    /// The door is open: the error buzzer.
     DoorOpen,
-    /// `already_arranging` — also the error bell, from `.text 0x7E754`.
+    /// Already arranging: the error buzzer.
     AlreadyArranging,
+    /// Not in a Mog House: message 6.
+    NotInMogHouse,
 }
 
 impl Refusal {
-    /// The audible/text signal a refusal carries: `Some(true)` for the error bell (`.text FFXiMain.dll
-    /// retail-2026-09 0x37C50`), `Some(false)` with the message code for the two chat refusals, and None
-    /// where retail fails silently.
+    /// The signal a refusal carries.
     pub fn signal(self) -> RefusalSignal {
         match self {
             Refusal::DoorOpen | Refusal::AlreadyArranging => RefusalSignal::Buzzer,
-            Refusal::ManagerBusy => RefusalSignal::Message(5),
-            Refusal::NotInOwnMogHouse => RefusalSignal::Message(6),
+            Refusal::Untraced067068State => RefusalSignal::Message(MESSAGE_UNTRACED_067_068_STATE),
+            Refusal::NotArrangeable => RefusalSignal::Message(MESSAGE_NOT_ARRANGEABLE),
+            Refusal::NotInMogHouse => RefusalSignal::Message(MESSAGE_NOT_IN_MOG_HOUSE),
             Refusal::ModeOutOfRange => RefusalSignal::Silent,
         }
     }
 }
 
-/// What the client does when a request is refused. The two message codes are the operands of
-/// `.text FFXiMain.dll retail-2026-09 0x129D90`, which both slash handlers tail-call before returning.
+/// What the client does when a request is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalSignal {
-    /// The error bell — the same sound a disabled menu row makes (`.text FFXiMain.dll retail-2026-09 0x37C50`).
+    /// The error buzzer.
     Buzzer,
-    /// A short status message carrying this code.
+    /// A client message (GetText table 7) with this id.
     Message(u16),
     /// Nothing at all is said or played.
     Silent,
@@ -193,12 +227,12 @@ pub struct ArrangeTransition {
     pub opens_no_furniture_window: bool,
 }
 
-/// Run the refusal chain in retail's order and, if it survives, describe the transition. The chain order
-/// is `/layout`'s (`.text FFXiMain.dll retail-2026-09 0x7E630`, gate tests in instruction order): busy
-/// manager first (message 5), then door/already-arranging (both the bell), then home-view availability
-/// (message 6) — followed by the mode switch's own range checks, which are silent.
+/// Run the refusal chain and, if it survives, describe the transition. Entering a mode runs
+/// `/layout`'s refusals in the record's order: message 188, then the arrangeable house (message 5),
+/// then already arranging or the door open (the buzzer), then not in a Mog House (message 6); the
+/// mode switch then only range-checks the mode. Returning to normal play is never refused.
 /// `placed` is the caller's view of what stands in the room (the derived furniture table), or `None`
-/// when it cannot be known — which happens without an item DAT to ask about kinds.
+/// when it cannot be known.
 pub fn plan_arrange(
     request: ArrangeRequest,
     gates: &ArrangeGates,
@@ -207,26 +241,24 @@ pub fn plan_arrange(
     if request.mode >= FIRST_INVALID_MODE {
         return Err(Refusal::ModeOutOfRange);
     }
-    // `/layout` reaches the manager-busy predicate before either bell (`.text 0x7E714`, whose refusal is
-    // the message-5 tail-call at `.text 0x7E723`).
-    if gates.manager_busy {
-        return Err(Refusal::ManagerBusy);
-    }
-    // The two audible refusals, tested back to back at `.text 0x7E73B`..`.text 0x7E75F`.
-    if gates.already_arranging {
-        return Err(Refusal::AlreadyArranging);
-    }
-    if gates.door_open {
-        return Err(Refusal::DoorOpen);
-    }
-    if !gates.home_view_available {
-        return Err(Refusal::NotInOwnMogHouse);
-    }
-    // A request for the mode already in force changes nothing; retail's own re-dispatch collapses an
-    // unusable request to mode 0 (`.text 0x1D3423`..`.text 0x1D3433`) rather than re-entering it.
     let entering = request.mode != MODE_NORMAL;
-    // Only the two modes that act on a piece select one: layout (`.text 0x1D3652`) and
-    // select-one-piece (`.text 0x1D3743`).
+    if entering {
+        if gates.untraced_067_068_state {
+            return Err(Refusal::Untraced067068State);
+        }
+        if !gates.arrangeable {
+            return Err(Refusal::NotArrangeable);
+        }
+        if gates.already_arranging {
+            return Err(Refusal::AlreadyArranging);
+        }
+        if gates.door_open {
+            return Err(Refusal::DoorOpen);
+        }
+        if !gates.in_mog_house {
+            return Err(Refusal::NotInMogHouse);
+        }
+    }
     let selects = matches!(request.mode, MODE_LAYOUT | MODE_PICK_ONE);
     let selected = if selects {
         placed.and_then(|p| select_furniture(p, request.slot, request.container))
@@ -307,23 +339,6 @@ pub fn first_furniture(objects: &[PlacedFurniture]) -> Option<SelectedFurniture>
     objects.first().map(SelectedFurniture::from_object)
 }
 
-/// Record a Mog House shelf seat with a furniture request outstanding, which is what holds the
-/// [`ArrangeGates::manager_busy`] gate. Retail's busy predicate (`.text FFXiMain.dll retail-2026-09
-/// 0x1D5FE0`) counts exactly these unacknowledged operations; LSB answers a layout or bankin request with
-/// the ITEM_ATTR of that very shelf slot (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp), and
-/// that echo is what [`clear_pending_edit`] removes.
-pub fn note_pending_edit(pending: &mut Vec<(u8, u8)>, container: u8, slot: u8) {
-    if furniture::is_mog_house_shelf(container) && !pending.contains(&(container, slot)) {
-        pending.push((container, slot));
-    }
-}
-
-/// The echo beat: an s2c 0x020 record for this seat releases the busy gate it was holding.
-pub fn clear_pending_edit(pending: &mut Vec<(u8, u8)>, container: u8, slot: u8) {
-    pending
-        .retain(|(edit_container, edit_slot)| *edit_container != container || *edit_slot != slot);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,10 +352,11 @@ mod tests {
     fn gates(current_mode: u8) -> ArrangeGates {
         ArrangeGates {
             current_mode,
-            manager_busy: false,
+            untraced_067_068_state: false,
+            arrangeable: true,
             door_open: false,
             already_arranging: false,
-            home_view_available: true,
+            in_mog_house: true,
         }
     }
 
@@ -370,36 +386,77 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_chain_is_busy_then_bells_then_availability() {
-        // Manager busy wins over every other gate and carries message 5.
+    fn the_layout_refusals_run_in_the_record_order() {
+        let refused = |g: &ArrangeGates| {
+            plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), g, None).unwrap_err()
+        };
         let mut g = gates(MODE_NORMAL);
-        g.manager_busy = true;
+        g.untraced_067_068_state = true;
+        g.arrangeable = false;
         g.door_open = true;
-        g.home_view_available = false;
+        g.in_mog_house = false;
+        assert_eq!(refused(&g), Refusal::Untraced067068State);
         assert_eq!(
-            plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &g, None).unwrap_err(),
-            Refusal::ManagerBusy
+            refused(&g).signal(),
+            RefusalSignal::Message(MESSAGE_UNTRACED_067_068_STATE)
         );
-        // Between the two bells, the already-arranging test comes first (`.text 0x7E73B` before `.text
-        // 0x7E742`) and both are audible.
-        let mut g = gates(MODE_NORMAL);
+        g.untraced_067_068_state = false;
+        assert_eq!(refused(&g), Refusal::NotArrangeable);
+        assert_eq!(
+            refused(&g).signal(),
+            RefusalSignal::Message(MESSAGE_NOT_ARRANGEABLE)
+        );
+        g.arrangeable = true;
+        g.already_arranging = true;
+        assert_eq!(refused(&g), Refusal::AlreadyArranging);
+        g.already_arranging = false;
+        assert_eq!(refused(&g), Refusal::DoorOpen);
+        assert_eq!(refused(&g).signal(), RefusalSignal::Buzzer);
+        g.door_open = false;
+        assert_eq!(refused(&g), Refusal::NotInMogHouse);
+        assert_eq!(
+            refused(&g).signal(),
+            RefusalSignal::Message(MESSAGE_NOT_IN_MOG_HOUSE)
+        );
+    }
+
+    #[test]
+    fn leaving_is_never_refused() {
+        let mut g = gates(MODE_LAYOUT);
+        g.arrangeable = false;
         g.door_open = true;
         g.already_arranging = true;
-        assert_eq!(
-            plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &g, None).unwrap_err(),
-            Refusal::AlreadyArranging
-        );
-        let mut g = gates(MODE_NORMAL);
-        g.door_open = true;
-        let err = plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &g, None).unwrap_err();
-        assert_eq!(err, Refusal::DoorOpen);
-        assert_eq!(err.signal(), RefusalSignal::Buzzer);
-        // Availability is the last gate, with message 6.
-        let mut g = gates(MODE_NORMAL);
-        g.home_view_available = false;
-        let err = plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &g, None).unwrap_err();
-        assert_eq!(err, Refusal::NotInOwnMogHouse);
-        assert_eq!(err.signal(), RefusalSignal::Message(6));
+        g.in_mog_house = false;
+        let t = plan_arrange(ArrangeRequest::from_slash(MODE_NORMAL), &g, None).unwrap();
+        assert_eq!((t.previous, t.next), (MODE_LAYOUT, MODE_NORMAL));
+        assert!(t.announces_layout_end);
+    }
+
+    #[test]
+    fn house_gates_use_the_arrangeable_predicate() {
+        use ffxi_dat::furniture::{HOME_NATION_HOUSES, SAN_DORIA_HOME_HOUSE};
+        let upstairs = HouseView {
+            map_number: 0,
+            sub_map: ffxi_proto::decode::ServerLoginMyroom::SUB_MAP_2F,
+            door_open: false,
+        };
+        let g = ArrangeGates::for_house(MODE_NORMAL, Some(upstairs), true);
+        assert!(g.arrangeable && g.in_mog_house && !g.door_open && !g.already_arranging);
+        let rent_a_room = HouseView {
+            map_number: *HOME_NATION_HOUSES.end() + 1,
+            sub_map: 0,
+            door_open: true,
+        };
+        let g = ArrangeGates::for_house(MODE_LAYOUT, Some(rent_a_room), true);
+        assert!(!g.arrangeable && g.door_open && g.already_arranging);
+        let home = HouseView {
+            map_number: SAN_DORIA_HOME_HOUSE,
+            ..rent_a_room
+        };
+        assert!(ArrangeGates::for_house(MODE_NORMAL, Some(home), true).arrangeable);
+        assert!(!ArrangeGates::for_house(MODE_NORMAL, Some(home), false).arrangeable);
+        let outside = ArrangeGates::for_house(MODE_NORMAL, None, false);
+        assert!(!outside.arrangeable && !outside.in_mog_house);
     }
 
     #[test]
@@ -530,37 +587,6 @@ mod tests {
         .unwrap();
         assert_eq!(t.selected, None);
         assert!(!t.opens_no_furniture_window);
-    }
-
-    #[test]
-    fn pending_edits_hold_the_busy_gate_until_their_seat_echoes() {
-        let mut pending = Vec::new();
-        note_pending_edit(&mut pending, CONTAINER_MOGSAFE, 7);
-        note_pending_edit(&mut pending, CONTAINER_MOGSAFE2, 9);
-        // A second request for the same seat does not double-count the outstanding operation.
-        note_pending_edit(&mut pending, CONTAINER_MOGSAFE, 7);
-        assert_eq!(pending.len(), 2);
-        // Shelves outside the two Mog House containers are not furniture edits at all.
-        note_pending_edit(&mut pending, 0, 1);
-        assert_eq!(pending.len(), 2);
-
-        clear_pending_edit(&mut pending, CONTAINER_MOGSAFE2, 9);
-        let busy = !pending.is_empty();
-        let gates = ArrangeGates {
-            current_mode: MODE_NORMAL,
-            manager_busy: busy,
-            door_open: false,
-            already_arranging: false,
-            home_view_available: true,
-        };
-        assert!(plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &gates, None).is_err());
-
-        clear_pending_edit(&mut pending, CONTAINER_MOGSAFE, 7);
-        let gates = ArrangeGates {
-            manager_busy: !pending.is_empty(),
-            ..gates
-        };
-        assert!(plan_arrange(ArrangeRequest::from_slash(MODE_LAYOUT), &gates, None).is_ok());
     }
 
     #[test]

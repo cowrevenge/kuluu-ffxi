@@ -169,6 +169,15 @@ pub struct CliStatus {
     /// *and* the main job is level 99 (FFXiMain.dll retail-2026-09 `.text 0x148B20`,
     /// `cmp al,0x63` + `test byte ptr […],1`).
     pub master_level_unlocked: bool,
+    /// `unity_info.Faction`: the character's Unity Concord, 0 for none
+    /// (vendor/server/src/map/packets/s2c/0x061_clistatus.h unityinfo_t).
+    pub unity_faction: u8,
+    /// `unity_info.Points`: the 17-bit Unity accolades total LSB fills from `unity_accolades`.
+    pub unity_points: u32,
+    /// `unity_points1` / `unity_points2`: LSB's current and previous week accolades / 1000
+    /// (vendor/server/src/map/packets/s2c/0x061_clistatus.cpp).
+    pub unity_points1: u16,
+    pub unity_points2: u16,
 }
 
 impl CliStatus {
@@ -202,6 +211,14 @@ impl CliStatus {
     pub(crate) const EQUIP_SLOT_BLOCK_OFFSET: usize = 0x5C;
     /// MASTER_LEVEL_UNLOCK_BIT — bit 0 of `mastery_info.flags`.
     pub(crate) const MASTER_LEVEL_UNLOCK_BIT: u8 = 1;
+    // vendor/server/src/map/packets/s2c/0x061_clistatus.h unityinfo_t bitfield word
+    pub(crate) const UNITY_INFO_OFFSET: usize = 0x54;
+    pub(crate) const UNITY_FACTION_SHIFT: u32 = 0;
+    pub(crate) const UNITY_FACTION_MASK: u32 = 0x1F;
+    pub(crate) const UNITY_POINTS_SHIFT: u32 = 10;
+    pub(crate) const UNITY_POINTS_MASK: u32 = 0x1_FFFF;
+    pub(crate) const UNITY_POINTS1_OFFSET: usize = 0x58;
+    pub(crate) const UNITY_POINTS2_OFFSET: usize = 0x5A;
     const NEEDED: usize = Self::MASTERY_INFO_FLAGS_OFFSET + 1;
 
     /// STR, DEX, VIT, AGI, INT, MND, CHR.
@@ -226,6 +243,7 @@ impl CliStatus {
         for (i, e) in def_elem.iter_mut().enumerate() {
             *e = rdi16(Self::DEF_ELEM_OFFSET + i * 2);
         }
+        let unity_info = rd32(Self::UNITY_INFO_OFFSET);
         Ok(Self {
             hp_max: rd32(Self::HP_MAX_OFFSET),
             mp_max: rd32(Self::MP_MAX_OFFSET),
@@ -246,9 +264,43 @@ impl CliStatus {
             master_level_unlocked: body[Self::MASTERY_INFO_FLAGS_OFFSET]
                 & Self::MASTER_LEVEL_UNLOCK_BIT
                 != 0,
+            unity_faction: ((unity_info >> Self::UNITY_FACTION_SHIFT) & Self::UNITY_FACTION_MASK)
+                as u8,
+            unity_points: (unity_info >> Self::UNITY_POINTS_SHIFT) & Self::UNITY_POINTS_MASK,
+            unity_points1: rd16(Self::UNITY_POINTS1_OFFSET),
+            unity_points2: rd16(Self::UNITY_POINTS2_OFFSET),
         })
     }
 }
+
+pin_s2c_offset!(
+    CliStatus::UNITY_INFO_OFFSET,
+    crate::s2c_layout::clistatus::STATUSDATA_UNITY_INFO,
+    "CLISTATUS.unity_info"
+);
+pin_s2c_offset!(
+    CliStatus::UNITY_POINTS1_OFFSET,
+    crate::s2c_layout::clistatus::STATUSDATA_UNITY_POINTS1,
+    "CLISTATUS.unity_points1"
+);
+pin_s2c_offset!(
+    CliStatus::UNITY_POINTS2_OFFSET,
+    crate::s2c_layout::clistatus::STATUSDATA_UNITY_POINTS2,
+    "CLISTATUS.unity_points2"
+);
+const _: () = {
+    use crate::s2c_layout::clistatus as lsb;
+    assert!(
+        CliStatus::UNITY_FACTION_SHIFT == lsb::STATUSDATA_UNITY_INFO_FACTION_SHIFT
+            && CliStatus::UNITY_FACTION_MASK == lsb::STATUSDATA_UNITY_INFO_FACTION_MASK,
+        "LSB moved unityinfo_t.Faction: the decoder bits are stale"
+    );
+    assert!(
+        CliStatus::UNITY_POINTS_SHIFT == lsb::STATUSDATA_UNITY_INFO_POINTS_SHIFT
+            && CliStatus::UNITY_POINTS_MASK == lsb::STATUSDATA_UNITY_INFO_POINTS_MASK,
+        "LSB moved unityinfo_t.Points: the decoder bits are stale"
+    );
+};
 
 /// One visible skill row after the encoding is applied: a level, and whether the
 /// word says it is capped at the character's ceiling.
@@ -581,6 +633,31 @@ mod cli_status_tests {
             CliStatus::decode(&buf[..CliStatus::NEEDED - 1]).is_err(),
             "truncation rejected"
         );
+    }
+
+    /// The Unity fields the `ut_point` readout and the Unity panel draw
+    /// (.agents/skills/retail-observe/references/2026-10-15-unity-and-fp-windows.md): Faction is
+    /// the low 5 bits of `unity_info`, Points the 17 bits from bit 10.
+    #[test]
+    fn clistatus_reads_unity_info_bitfield_and_weekly_points() {
+        const FACTION: u32 = 7;
+        const RANK: u32 = 3;
+        const ACCOLADES: u32 = 0x1_2345;
+        const UNUSED_HIGH_BITS: u32 = 0x1F << 27;
+        let word =
+            FACTION | (RANK << 5) | (ACCOLADES << CliStatus::UNITY_POINTS_SHIFT) | UNUSED_HIGH_BITS;
+        let mut buf = vec![0u8; CliStatus::NEEDED];
+        buf[CliStatus::UNITY_INFO_OFFSET..CliStatus::UNITY_INFO_OFFSET + 4]
+            .copy_from_slice(&word.to_le_bytes());
+        buf[CliStatus::UNITY_POINTS1_OFFSET..CliStatus::UNITY_POINTS1_OFFSET + 2]
+            .copy_from_slice(&42u16.to_le_bytes());
+        buf[CliStatus::UNITY_POINTS2_OFFSET..CliStatus::UNITY_POINTS2_OFFSET + 2]
+            .copy_from_slice(&17u16.to_le_bytes());
+        let cs = CliStatus::decode(&buf).expect("decodes");
+        assert_eq!(u32::from(cs.unity_faction), FACTION);
+        assert_eq!(cs.unity_points, ACCOLADES);
+        assert_eq!(cs.unity_points1, 42);
+        assert_eq!(cs.unity_points2, 17);
     }
 }
 

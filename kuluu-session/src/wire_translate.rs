@@ -170,6 +170,15 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // FFXiMain.dll retail-2026-09 `.text 0x2297C0` (vault §59 addendum 27).
         currencies_1: s.currencies_1.clone(),
         currencies_2: s.currencies_2.clone(),
+        unity: s.unity,
+        alter_ego_points: s.alter_ego_points,
+        status_data_ready: s.status_data_ready,
+        login_state: s.login_state,
+        login_is_monstrosity: s.login_is_monstrosity,
+        merit_entries: s.merit_entries.clone(),
+        job_point_types: s.job_point_types.clone(),
+        job_points_received: s.job_points_received,
+        job_points: s.job_points,
     }
 }
 
@@ -357,6 +366,12 @@ fn char_stats_to_wire(c: crate::state::CharStatsRaw) -> wire::CharStats {
         su_lv: c.su_lv,
         equip_slot_block: c.equip_slot_block,
         master_level_unlocked: c.master_level_unlocked,
+        mjob_no: c.mjob_no,
+        unity_faction: c.unity_faction,
+        unity_points: c.unity_points,
+        unity_points1: c.unity_points1,
+        unity_points2: c.unity_points2,
+        mjob_lv: c.mjob_lv,
     }
 }
 

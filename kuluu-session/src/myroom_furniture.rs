@@ -42,40 +42,40 @@ use serde::{Deserialize, Serialize};
 
 /// Mog House storage shelf. FFXiMain.dll retail-2026-09 pushes 1 to the per-container furniture scan
 /// at `.text 0x1D2AFC`; LSB calls it `LOC_MOGSAFE` (vendor/server/src/map/item_container.h).
-pub const CONTAINER_MOGSAFE: u8 = 1;
+pub const CONTAINER_MOGSAFE: u8 = ffxi_proto::map::container::LOC_MOGSAFE;
 
 /// The second Mog House shelf, pushed at `.text 0x1D2B03`; LSB's `LOC_MOGSAFE2`. It occupies the
 /// back half of the object array.
-pub const CONTAINER_MOGSAFE2: u8 = 9;
+pub const CONTAINER_MOGSAFE2: u8 = ffxi_proto::map::container::LOC_MOGSAFE2;
 
 /// First slot the scan accepts (a slot byte of 0 fails at FFXiMain.dll retail-2026-09
 /// `.text 0x1D2B90`, matching LSB's loop start).
-pub const FIRST_FURNITURE_SLOT: u8 = 1;
+pub const FIRST_FURNITURE_SLOT: u8 = ffxi_dat::furniture::FIRST_SHELF_SLOT;
 
 /// Last slot the scan accepts: it rejects a slot byte `>= 0x51` at FFXiMain.dll retail-2026-09
 /// `.text 0x1D2B98`.
-pub const LAST_FURNITURE_SLOT: u8 = 80;
+pub const LAST_FURNITURE_SLOT: u8 = ffxi_dat::furniture::LAST_SHELF_SLOT;
 
 /// Object-array seats per container, from the `* 81` in FFXiMain.dll retail-2026-09 `.text 0x1D3A01`.
-pub const FURNITURE_SLOTS_PER_CONTAINER: usize = 81;
+pub const FURNITURE_SLOTS_PER_CONTAINER: usize = ffxi_dat::furniture::SEATS_PER_SHELF;
 
 /// `extdata[1] & INSTALLED_BIT`: the item is placed in the room rather than stored on the shelf
 /// (FFXiMain.dll retail-2026-09 `.text 0x1D2C4B`; LSB's `Exdata::Furniture::Installed`).
-pub const FURNITURE_INSTALLED_BIT: u8 = 0x40;
+pub const FURNITURE_INSTALLED_BIT: u8 = ffxi_dat::furniture::ATTR_INSTALLED_BIT;
 
 /// `extdata[1] & LAYER_MASK`: which floor of the Mog House the object stands on. Both sides agree on
 /// those bits — LSB sets them from its own layout request's floor flag and calls bit 0
 /// `On2ndFloor` (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp
 /// `C2SPOrPacketImpl... MyroomFloorFlg`), FFXiMain.dll retail-2026-09 masks the same two bits at
 /// `.text 0x1D2C59`.
-pub const FURNITURE_LAYER_MASK: u8 = 0b11;
+pub const FURNITURE_LAYER_MASK: u8 = ffxi_dat::furniture::ATTR_LAYER_MASK;
 
 /// DAT kind accepted by the scan's first compare (FFXiMain.dll retail-2026-09 `.text 0x1D2C3C`).
-pub const FURNITURE_KIND_PLAIN: u8 = 10;
+pub const FURNITURE_KIND_PLAIN: u8 = ffxi_dat::furniture::KIND_FURNISHING;
 /// Flowerpots, reached by subtracting twice at `.text 0x1D2C41`.
-pub const FURNITURE_KIND_FLOWERPOT: u8 = 12;
+pub const FURNITURE_KIND_FLOWERPOT: u8 = ffxi_dat::furniture::KIND_FLOWERPOT;
 /// Mannequins (`.text 0x1D2C46`).
-pub const FURNITURE_KIND_MANNEQUIN: u8 = 14;
+pub const FURNITURE_KIND_MANNEQUIN: u8 = ffxi_dat::furniture::KIND_MANNEQUIN;
 
 /// The two containers the retail rebuild walks.
 pub fn is_mog_house_shelf(container: u8) -> bool {
@@ -92,10 +92,7 @@ pub fn is_selectable_slot(slot: u8) -> bool {
 
 /// The DAT kinds that count as furniture (the three-way compare at `.text 0x1D2C3C`).
 pub fn is_furniture_kind(kind: u8) -> bool {
-    matches!(
-        kind,
-        FURNITURE_KIND_PLAIN | FURNITURE_KIND_FLOWERPOT | FURNITURE_KIND_MANNEQUIN
-    )
+    ffxi_dat::furniture::is_furniture_kind(kind)
 }
 
 /// The floor the layer test compares against. Retail keeps it in a game-state word (`+0x40D82`,
@@ -104,7 +101,7 @@ pub fn is_furniture_kind(kind: u8) -> bool {
 /// second-floor Mog House interior (vendor/server/src/map/packets/s2c/0x00a_login.cpp), so an
 /// upstairs character sees floor 1 and their downstairs furniture leaves the table.
 pub fn current_furniture_floor(sub_map_number: u8) -> u8 {
-    (sub_map_number >> 1) & FURNITURE_LAYER_MASK
+    ffxi_dat::furniture::floor_of_sub_map(sub_map_number)
 }
 
 /// Where an item id's DAT kind comes from, so the law can be applied without copying item records
@@ -218,27 +215,23 @@ pub fn describe_object(
     item_no: u16,
     extdata: &[u8; 24],
 ) -> PlacedFurniture {
+    let attr = ffxi_dat::furniture::FurnitureAttr::decode(extdata);
     PlacedFurniture {
         index: furniture_index(container, slot),
         container,
         slot,
         item_no,
-        layer: extdata[1] & FURNITURE_LAYER_MASK,
-        col: extdata[6] as i8,
-        level: extdata[7] as i8,
-        row: extdata[8] as i8,
-        rotation: extdata[9] as i8,
+        layer: attr.layer,
+        col: attr.pose.col,
+        level: attr.pose.level,
+        row: attr.pose.row,
+        rotation: attr.pose.rot,
     }
 }
 
 /// Object-array seat of a Mog House shelf slot.
 pub fn furniture_index(container: u8, slot: u8) -> usize {
-    let base = if container == CONTAINER_MOGSAFE2 {
-        FURNITURE_SLOTS_PER_CONTAINER
-    } else {
-        0
-    };
-    base + slot as usize
+    ffxi_dat::furniture::seat_index(container, slot)
 }
 
 /// Rebuild the object table from shelf records, sorted by index so a rebuild is stable. `records`

@@ -38,6 +38,8 @@ pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
 pub mod quick_action;
+// Reads the region map DATs through `crate::minimap` (wasm-gated), like `map_screen`.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod region_map;
 pub mod stair_debug;
 // (roster mockup deleted — real party/self HUD is party_frame.rs)
@@ -276,6 +278,7 @@ impl Plugin for HudPlugin {
 
         app.init_resource::<status_ribbon::StatusIconCache>();
         app.init_resource::<status_ribbon::StatusIconDatRoot>();
+        #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<region_map::ViewedRegionMap>();
 
         app.init_resource::<item_dat_root::ItemDatRoot>();

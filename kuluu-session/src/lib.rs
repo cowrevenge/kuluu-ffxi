@@ -20,6 +20,7 @@ pub mod lobby_client;
 pub mod lobby_wire;
 pub mod macro_store;
 pub mod map_client;
+pub mod myroom_furniture;
 pub mod net_health;
 pub mod pol_inhouse;
 pub mod reactor;

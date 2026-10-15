@@ -1111,6 +1111,7 @@ mod tests {
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,
             ready: None,
+            extdata: None,
         }
     }
 

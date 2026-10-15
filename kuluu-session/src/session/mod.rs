@@ -2471,6 +2471,8 @@ fn handle_sub_packet(
                             next_use_vana_ts: None,
                             use_delay_end_vana_ts: None,
                             ready: None,
+
+                            extdata: None,
                         },
                     },
                 });
@@ -2512,6 +2514,9 @@ fn handle_sub_packet(
                             next_use_vana_ts: ci.map(|c| c.next_use_vana_ts),
                             use_delay_end_vana_ts: ci.map(|c| c.use_delay_end_vana_ts),
                             ready: ci.map(|c| c.ready),
+                            // Retail keeps the whole Attr on the record because several subsystems
+                            // read different parts of it (FFXiMain.dll retail-2026-09 `.text 0xEC630`).
+                            extdata: Some(a.extdata),
                         },
                     },
                 });

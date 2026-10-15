@@ -1851,6 +1851,15 @@ pub struct InventoryItem {
     /// `GP_SERV_COMMAND_ITEM_ATTR` ready flag; `None` for non-charged items.
     #[serde(default)]
     pub ready: Option<bool>,
+
+    /// The record's whole 24-byte Attr, verbatim as s2c 0x020 carried it, or `None` when no Attr
+    /// record has been seen for the slot. Kept raw rather than pre-chewed because the bytes answer
+    /// several unrelated questions and only the consumer knows which one it is asking: charge/recast
+    /// fields above, and the Mog House furniture layer/pose that the two Mog House shelves use
+    /// (vendor/server/src/map/items/exdata/furniture.h; FFXiMain.dll retail-2026-09 keeps them on the
+    /// record at `.text 0xEC630` and reads pose straight out of them at `.text 0x1CCFD1`).
+    #[serde(default)]
+    pub extdata: Option<[u8; 24]>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]

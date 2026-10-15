@@ -1413,6 +1413,14 @@ pub struct ItemSlot {
     pub use_delay_end_vana_ts: Option<u32>,
     #[serde(default)]
     pub ready: Option<bool>,
+
+    /// The record's 24-byte Attr, verbatim as s2c 0x020 carried it — retail keeps the whole thing on
+    /// its inventory record (the record is 44 bytes with Attr at `+0x10`, FFXiMain.dll retail-2026-09
+    /// `.text 0xEC630`) because several unrelated subsystems read different parts of it: charged
+    /// items above, and the Mog House furniture layer/pose bytes
+    /// (see [`crate::myroom_furniture`]). `None` when no Attr record has been seen for this slot yet.
+    #[serde(default)]
+    pub extdata: Option<[u8; 24]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2479,15 +2487,24 @@ impl SessionState {
                             // equip delay (vendor/server/src/map/utils/charutils.cpp
                             // SendInventory); a same-id update without charge
                             // info keeps the timers it cannot restate.
-                            let keep_charges = slot.charges_remaining.is_none()
+                            // The same rule covers the raw Attr: retail's furniture law reads layer
+                            // and pose straight out of it (FFXiMain.dll retail-2026-09 `.text 0x1CCFD1`),
+                            // so dropping it on an ITEM_LIST re-fold would empty the object table.
+                            let kept_extdata =
+                                slot.extdata.is_none() && existing.item_no == slot.item_no;
+                            let kept_charges = slot.charges_remaining.is_none()
                                 && existing.item_no == slot.item_no;
-                            let kept = keep_charges.then_some((
+                            let kept = kept_charges.then_some((
                                 existing.charges_remaining,
                                 existing.next_use_vana_ts,
                                 existing.use_delay_end_vana_ts,
                                 existing.ready,
                             ));
+                            let previous_extdata = existing.extdata;
                             *existing = slot.clone();
+                            if kept_extdata {
+                                existing.extdata = previous_extdata;
+                            }
                             if let Some((charges, next_use, delay_end, ready)) = kept {
                                 existing.charges_remaining = charges;
                                 existing.next_use_vana_ts = next_use;

@@ -425,6 +425,8 @@ mod tests {
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,
             ready: None,
+
+            extdata: None,
         });
         s.inventory.containers.insert(0, inv0);
         s.equipment[0] = Some(EquippedRef {

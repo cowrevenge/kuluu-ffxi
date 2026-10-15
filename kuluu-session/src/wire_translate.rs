@@ -302,6 +302,7 @@ fn project_containers(s: &SessionState) -> Vec<wire::ContainerView> {
                     next_use_vana_ts: slot.next_use_vana_ts,
                     use_delay_end_vana_ts: slot.use_delay_end_vana_ts,
                     ready: slot.ready,
+                    extdata: slot.extdata,
                 })
                 .collect(),
         })
@@ -1210,6 +1211,8 @@ mod tests {
                     next_use_vana_ts: None,
                     use_delay_end_vana_ts: (id == 0 && i == 0).then_some(12_345),
                     ready: (id == 0 && i == 0).then_some(false),
+
+                    extdata: None,
                 })
                 .collect();
             s.inventory
@@ -1700,6 +1703,8 @@ mod tests {
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,
             ready: None,
+
+            extdata: None,
         });
         s.inventory.containers.insert(0, inv0);
 

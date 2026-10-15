@@ -1557,6 +1557,8 @@ fn inventory_fold_slot_changed_inserts_then_updates_then_removes() {
         next_use_vana_ts: None,
         use_delay_end_vana_ts: None,
         ready: None,
+
+        extdata: None,
     };
 
     s.apply_event(&AgentEvent::InventoryUpdated {
@@ -1598,6 +1600,8 @@ fn inventory_fold_item_list_after_item_attr_keeps_charge_state() {
         next_use_vana_ts: Some(1_000),
         use_delay_end_vana_ts: Some(5_030),
         ready: Some(false),
+
+        extdata: None,
     };
     s.apply_event(&AgentEvent::InventoryUpdated {
         container: 0,
@@ -1664,6 +1668,8 @@ fn inventory_fold_no_select_covers_a_use_until_its_recast_lands() {
         next_use_vana_ts: Some(0),
         use_delay_end_vana_ts: Some(0),
         ready: Some(true),
+
+        extdata: None,
     };
     let fold = |s: &mut SessionState, slot: ItemSlot| {
         s.apply_event(&AgentEvent::InventoryUpdated {
@@ -1743,6 +1749,8 @@ fn inventory_fold_quantity_changed_updates_existing_slot_only() {
                 next_use_vana_ts: None,
                 use_delay_end_vana_ts: None,
                 ready: None,
+
+                extdata: None,
             },
         },
     });
@@ -3311,4 +3319,184 @@ fn legacy_clock_hold_event_uses_hour_only_defaults() {
             }
         }
     ));
+}
+
+/// The raw Attr is part of the record, and it survives a fold that restates no Attr — but only for
+/// the item it was stamped with.
+#[test]
+fn item_attr_stamps_the_raw_attr_and_a_bare_fold_keeps_it_for_the_same_item() {
+    // FFXiMain.dll retail-2026-09 `.text 0xEC630` copies the whole 24-byte Attr into the inventory
+    // record, and the Mog House furniture law reads its layer/pose bytes out of that copy
+    // (`.text 0x1CCFD1`). A later s2c 0x01F-shaped fold carries no Attr at all; losing it here would
+    // empty the room.
+    let attr = [
+        0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x02, 0x06, 0x03, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+    ];
+    let mut s = SessionState::default();
+
+    let placed = ItemSlot {
+        index: 7,
+        item_no: 100,
+        quantity: 1,
+        locked: false,
+        unselectable: false,
+        price: 0,
+        charges_remaining: None,
+        next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
+        extdata: Some(attr),
+    };
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: crate::myroom_furniture::CONTAINER_MOGSAFE,
+        update: InventoryUpdate::SlotChanged { slot: placed },
+    });
+    let shelf = crate::myroom_furniture::CONTAINER_MOGSAFE;
+    assert_eq!(
+        s.inventory.containers[&shelf].slots[0].extdata,
+        Some(attr),
+        "the Attr arrives verbatim on the record"
+    );
+
+    // Same item, no Attr restated: kept.
+    let mut bare = ItemSlot {
+        index: 7,
+        item_no: 100,
+        quantity: 1,
+        locked: true,
+        unselectable: false,
+        price: 0,
+        charges_remaining: None,
+        next_use_vana_ts: None,
+        use_delay_end_vana_ts: None,
+        ready: None,
+        extdata: None,
+    };
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: shelf,
+        update: InventoryUpdate::SlotChanged { slot: bare.clone() },
+    });
+    let slots = &s.inventory.containers[&shelf].slots;
+    assert_eq!(slots.len(), 1);
+    assert!(slots[0].locked, "the fold's own fields still apply");
+    assert_eq!(slots[0].extdata, Some(attr));
+
+    // Another item in the same seat: its Attr is unknown until s2c 0x020 says otherwise — a stale
+    // pose from the previous occupant would place furniture the server never put there.
+    bare.item_no = 4112;
+    bare.locked = false;
+    s.apply_event(&AgentEvent::InventoryUpdated {
+        container: shelf,
+        update: InventoryUpdate::SlotChanged { slot: bare },
+    });
+    let slots = &s.inventory.containers[&shelf].slots;
+    assert_eq!(slots[0].item_no, 4112);
+    assert_eq!(slots[0].extdata, None);
+}
+
+/// The law applied to the state's two Mog House shelves: what a player placed, and only what they
+/// placed on the floor they are standing on.
+#[test]
+fn mog_house_shelf_records_rebuild_the_furniture_table() {
+    use crate::myroom_furniture::{
+        furniture_index, rebuild_furniture_objects, StaticItemKinds, CONTAINER_MOGSAFE2,
+    };
+    let installed = |layer: u8, x: i8| {
+        let mut e = [0u8; 24];
+        e[1] = layer | 0x40;
+        e[6] = x as u8;
+        e
+    };
+    let mut s = SessionState::default();
+    for (container, slot, item_no, extdata) in [
+        (
+            crate::myroom_furniture::CONTAINER_MOGSAFE,
+            3u8,
+            100u16,
+            installed(0, 5),
+        ),
+        // Same shelf, other floor: exists but is not drawn from here.
+        (
+            crate::myroom_furniture::CONTAINER_MOGSAFE,
+            4u8,
+            100u16,
+            installed(1, 6),
+        ),
+        // Stored on the shelf rather than placed in the room.
+        (
+            crate::myroom_furniture::CONTAINER_MOGSAFE,
+            5u8,
+            200u16,
+            [0u8; 24],
+        ),
+        // A flowerpot on the second shelf.
+        (CONTAINER_MOGSAFE2, 2u8, 300u16, installed(0, -7)),
+    ] {
+        s.apply_event(&AgentEvent::InventoryUpdated {
+            container,
+            update: InventoryUpdate::SlotChanged {
+                slot: ItemSlot {
+                    index: slot,
+                    item_no,
+                    quantity: 1,
+                    locked: false,
+                    unselectable: false,
+                    price: 0,
+                    charges_remaining: None,
+                    next_use_vana_ts: None,
+                    use_delay_end_vana_ts: None,
+                    ready: None,
+                    extdata: Some(extdata),
+                },
+            },
+        });
+    }
+
+    let kinds = StaticItemKinds(vec![(100, 10), (200, 10), (300, 12)]);
+    let shelf_records = |s: &SessionState| {
+        s.inventory
+            .containers
+            .iter()
+            .filter(|(id, _)| crate::myroom_furniture::is_mog_house_shelf(**id))
+            .flat_map(|(id, c)| {
+                c.slots
+                    .iter()
+                    .map(move |slot| (*id, slot.index, slot.item_no, slot.extdata))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let downstairs = rebuild_furniture_objects(shelf_records(&s), 0, &kinds);
+    assert_eq!(
+        downstairs
+            .iter()
+            .map(|o| (o.container, o.slot, o.item_no, o.x))
+            .collect::<Vec<_>>(),
+        vec![
+            (crate::myroom_furniture::CONTAINER_MOGSAFE, 3, 100, 5),
+            (CONTAINER_MOGSAFE2, 2, 300, -7),
+        ],
+    );
+    assert_eq!(downstairs[1].index, furniture_index(CONTAINER_MOGSAFE2, 2));
+
+    // Standing upstairs flips which records survive; the login packet's sub-map byte is what moved.
+    s.myroom = Some(MyRoomInfo {
+        model: 0x1FF,
+        sub_map: 2,
+        exit_bit: 0,
+        door_open: false,
+    });
+    let upstairs_floor = crate::myroom_furniture::current_furniture_floor(
+        s.myroom.map(|m| m.sub_map).unwrap_or_default(),
+    );
+    assert_eq!(upstairs_floor, 1);
+    let upstairs = rebuild_furniture_objects(shelf_records(&s), upstairs_floor, &kinds);
+    assert_eq!(
+        upstairs
+            .iter()
+            .map(|o| (o.container, o.slot))
+            .collect::<Vec<_>>(),
+        vec![(crate::myroom_furniture::CONTAINER_MOGSAFE, 4)],
+    );
 }

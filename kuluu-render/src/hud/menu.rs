@@ -7751,6 +7751,7 @@ mod tests {
                         next_use_vana_ts: None,
                         use_delay_end_vana_ts: None,
                         ready: None,
+                        extdata: None,
                     })
                     .collect(),
             };
@@ -8726,6 +8727,7 @@ mod tests {
                     next_use_vana_ts: None,
                     use_delay_end_vana_ts: None,
                     ready: None,
+                    extdata: None,
                 }],
             }],
             ..Default::default()
@@ -8817,6 +8819,7 @@ mod tests {
             next_use_vana_ts: None,
             use_delay_end_vana_ts: None,
             ready: None,
+            extdata: None,
         };
         let mut member = war_party_member(7);
         member.main_job = main_job;
@@ -9322,6 +9325,7 @@ mod tests {
                         next_use_vana_ts: None,
                         use_delay_end_vana_ts: None,
                         ready: None,
+                        extdata: None,
                     },
                     kuluu_snapshot::InventoryItem {
                         container: 0,
@@ -9334,6 +9338,7 @@ mod tests {
                         next_use_vana_ts: None,
                         use_delay_end_vana_ts: None,
                         ready: None,
+                        extdata: None,
                     },
                 ],
             }],
@@ -9376,6 +9381,7 @@ mod tests {
                         next_use_vana_ts: None,
                         use_delay_end_vana_ts: None,
                         ready: None,
+                        extdata: None,
                     })
                     .collect(),
             }],

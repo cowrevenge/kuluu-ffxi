@@ -10,6 +10,7 @@ pub mod auth_client;
 pub mod config_dir;
 pub mod debug_control;
 pub mod delivery_box;
+pub mod emote_store;
 pub mod event_dialog;
 pub mod fishing;
 pub mod goal_store;

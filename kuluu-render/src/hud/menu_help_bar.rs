@@ -214,7 +214,25 @@ fn entry_help(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> String {
         // renders nothing until that catalog loads instead of being typed into the client (.text
         // FFXiMain.dll retail-2026-09 0x1D6B85; bead kuluu-o9qt7.13.5.2).
         MenuKind::RoomListConfirm { .. } => dynamic.roomlist_prompt.clone().unwrap_or_default(),
-        MenuKind::EmoteList => "Select an emote.".to_string(),
+        // While the swap state word is pending, retail replaces this whole help line
+        // with the DAT table-0x0E prompts (ids 931/932 through the caption catalog;
+        // FFXiMain.dll retail-2026-09 `.text 0x225FA2`; bead kuluu-o9qt7.34) — so does
+        // kuluu, reading the strings [`DynamicMenu`] copied from the DAT.
+        MenuKind::EmoteList => match dynamic.emote_sort_state {
+            menu::EmoteSortState::AwaitFirst => dynamic
+                .emote_sort_prompts
+                .first()
+                .cloned()
+                .flatten()
+                .unwrap_or_default(),
+            menu::EmoteSortState::AwaitSecond(_) => dynamic
+                .emote_sort_prompts
+                .get(1)
+                .cloned()
+                .flatten()
+                .unwrap_or_default(),
+            menu::EmoteSortState::Off => "Select an emote.".to_string(),
+        },
         MenuKind::Status => "Select a category.".to_string(),
         _ => "Select an option.".to_string(),
     }
@@ -596,5 +614,27 @@ mod tests {
         assert_eq!(buff_bar_content(&snap, 9).unwrap().hint, "Protect");
         let empty = SceneSnapshot::default();
         assert!(buff_bar_content(&empty, 0).is_none());
+    }
+
+    /// Help-line replacement law (bead kuluu-o9qt7.34): while the emote window's swap
+    /// state word is pending, retail swaps this line for its DAT prompts — and back when
+    /// settled (.text FFXiMain.dll retail-2026-09 0x225FA2; cancel arm 0x225E34).
+    #[test]
+    fn emote_list_help_line_follows_the_swap_state() {
+        let mut dynamic = DynamicMenu::default();
+        assert_eq!(
+            entry_help(MenuKind::EmoteList, 0, &dynamic),
+            "Select an emote."
+        );
+        dynamic.emote_sort_prompts = [Some("P1".to_string()), Some("P2".to_string())];
+        dynamic.emote_sort_state = menu::EmoteSortState::AwaitFirst;
+        assert_eq!(entry_help(MenuKind::EmoteList, 0, &dynamic), "P1");
+        dynamic.emote_sort_state = menu::EmoteSortState::AwaitSecond(6);
+        assert_eq!(entry_help(MenuKind::EmoteList, 3, &dynamic), "P2");
+        dynamic.emote_sort_state = menu::EmoteSortState::Off;
+        assert_eq!(
+            entry_help(MenuKind::EmoteList, 0, &dynamic),
+            "Select an emote."
+        );
     }
 }

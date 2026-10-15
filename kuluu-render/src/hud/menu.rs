@@ -562,6 +562,14 @@ pub enum DynamicMenuAction {
 
     /// …and the reset command, answering through the same seam as `/keybinds reset`.
     ControlsReset,
+
+    /// The `abisortw` companion window's select item (mode 1 emote / 2 mount — its handler
+    /// answers only this one, gated on the item arg, and sets the paired list window's swap
+    /// state word: `[emote+0x6C]=1`, FFXiMain.dll retail-2026-09 `.text 0x223CF0` id-5 arm →
+    /// `.text 0x223DC3`; bead kuluu-o9qt7.34). Client-local: never a wire action.
+    AbisortwSelect {
+        mode: u8,
+    },
 }
 
 impl DynamicMenuAction {
@@ -630,6 +638,19 @@ pub fn key_item_row_label(id: u16, seen: bool) -> String {
     }
 }
 
+/// The emote window's two-step swap state — retail's `[emote+0x6C]` word: 0 Off, 1 await-first
+/// pick, 2 await-second pick (the picked id rides where retail keeps its pending cursor
+/// `[emote+0x70]`). Set by the `abisortw` select arm (.text FFXiMain.dll retail-2026-09
+/// `0x223DC3`), cleared by the fill law (`0x225960` resets it on every refill) and by the
+/// cancel arm (`0x225E34`; bead kuluu-o9qt7.34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmoteSortState {
+    #[default]
+    Off,
+    AwaitFirst,
+    AwaitSecond(u8),
+}
+
 #[derive(bevy::prelude::Resource, Debug, Clone, Default)]
 pub struct DynamicMenu {
     pub rows: Vec<DynamicMenuRow>,
@@ -641,6 +662,15 @@ pub struct DynamicMenu {
     /// [`refresh_dynamic_menu_rows`] from [`ConfigDatRows::home_door_captions`]. `None` until that
     /// catalog loads, in which case the static [`HOME_ROW_OPEN_MOG_HOUSE`] copy shows instead.
     pub home_door_caption: Option<String>,
+    /// Copies of the `abisortw` mode captions / emote swap prompts held by
+    /// [`ConfigDatRows`] (same law as [`Self::home_door_caption`]; bead kuluu-o9qt7.34).
+    pub abisortw_captions: [Option<String>; 3],
+    pub emote_sort_prompts: [Option<String>; 2],
+    /// The emote window's two-step swap state — retail's `[emote+0x6C]` word (Off=0,
+    /// "select first"=1, "select second"=2 with the picked id riding where retail keeps its
+    /// pending cursor `[+0x70]`; FFXiMain.dll retail-2026-09 `.text 0x223DC3` set arm,
+    /// `.text 0x225E34` cancel arm; bead kuluu-o9qt7.34).
+    pub emote_sort_state: EmoteSortState,
     /// Page-1/2 Command-menu selector captions read live from the DAT window
     /// records and short-caption catalog (`menuwind` then `socialme`, display
     /// order). While non-empty, [`entry_label`] prefers it over the static
@@ -1287,6 +1317,10 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
         // the add/clear actions below).
         MenuKind::MacroEditor { .. } => &[],
         MenuKind::EmoteList => &[],
+        // `abisortw` has no DAT window record at all [V-negative] and never renders
+        // as a focused level in kuluu (its select rides the list's chain row), so it
+        // owns no static entries (bead kuluu-o9qt7.34).
+        MenuKind::AbilitySort { .. } => &[],
         MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
         MenuKind::Map => &[],
@@ -1433,6 +1467,10 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         // title law).
         MenuKind::MacroEditor { .. } => "Macros",
         MenuKind::EmoteList => "Emote List",
+        // No invented copy: `abisortw` has no DAT title (no window record at all
+        // [V-negative]) and never shows as a focused level in kuluu; its only text is
+        // the mode caption read from table 0x0E (bead kuluu-o9qt7.34).
+        MenuKind::AbilitySort { .. } => "",
         MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
     }
@@ -1765,6 +1803,16 @@ pub struct ConfigDatRows {
     /// to the dialog service (.text FFXiMain.dll retail-2026-09 0x1D6B85 fetches it just before
     /// calling helper 0x210E30; vault main_menu.md §59 addendum 21). `None` until the DAT loads.
     pub roomlist_prompt: Option<String>,
+    /// The `abisortw` window's mode captions, read from GetText **table-0x0E** ids
+    /// [`ABISORTW_CAPTION_MODE_EMOTE_ID`] / [`ABISORTW_CAPTION_MODE_MOUNT_ID`], indexed by the
+    /// handler's mode word `[this+0x14]`: index 0 (ability) stays `None` because its drawer arm
+    /// draws no caption there (FFXiMain.dll retail-2026-09 `.text 0x223E10`; bead kuluu-o9qt7.34).
+    pub abisortw_captions: [Option<String>; 3],
+    /// The emote window's two swap prompts, read from GetText **table-0x0E** ids
+    /// [`EMOTE_SORT_PROMPT_FIRST_ID`] / [`EMOTE_SORT_PROMPT_SECOND_ID`]: retail swaps the whole
+    /// handler family while its state word `[emote+0x6C]` is 1/2 and replaces the help line with
+    /// these strings (.text FFXiMain.dll retail-2026-09 `.text 0x225FA2`; bead kuluu-o9qt7.34).
+    pub emote_sort_prompts: [Option<String>; 2],
 }
 
 impl ConfigDatRows {
@@ -1912,6 +1960,28 @@ impl ConfigDatRows {
                     .as_ref()
                     .and_then(|c| c.text(i).map(str::to_string))
             });
+        // …and the `abisortw`/emote family's strings, all four from this same table-0x0E
+        // catalog the caption pass reads (FFXiMain.dll retail-2026-09 `.text 0x223E10`).
+        let mut abisortw_captions: [Option<String>; 3] = [None, None, None];
+        for (mode, id) in [
+            (1usize, ABISORTW_CAPTION_MODE_EMOTE_ID),
+            (2usize, ABISORTW_CAPTION_MODE_MOUNT_ID),
+        ] {
+            abisortw_captions[mode] = catalog
+                .as_ref()
+                .and_then(|c| c.text(id).map(str::to_string));
+        }
+        self.abisortw_captions = abisortw_captions;
+        let mut emote_sort_prompts: [Option<String>; 2] = [None, None];
+        for (slot, id) in [
+            (0usize, EMOTE_SORT_PROMPT_FIRST_ID),
+            (1usize, EMOTE_SORT_PROMPT_SECOND_ID),
+        ] {
+            emote_sort_prompts[slot] = catalog
+                .as_ref()
+                .and_then(|c| c.text(id).map(str::to_string));
+        }
+        self.emote_sort_prompts = emote_sort_prompts;
         self.loaded = true;
     }
 
@@ -3893,6 +3963,17 @@ pub const ROOMLIST_DAT_WINDOW: &str = "roomlist";
 /// 450 = "No changes" — then 0x1be..0x1c1.)
 const ROOMLIST_ROW_CAPTION_IDS: [u32; 5] = [450, 446, 447, 448, 449];
 
+/// GetText **table-0x0E** ids for the `abisortw`/emote family, fetched per mode/state by retail's
+/// caption pass (`.text FFXiMain.dll retail-2026-09 0x223E10`) and help-line swap
+/// (`.text 0x225FA2`; bead kuluu-o9qt7.34). The strings live in the DAT catalog — read, never
+/// transcribed.
+pub const ABISORTW_CAPTION_MODE_EMOTE_ID: usize = 927;
+pub const ABISORTW_CAPTION_MODE_MOUNT_ID: usize = 997;
+/// State-word prompts for the emote window's two-step swap (`[emote+0x6C]` 1/2, handler-family
+/// bodies `.text FFXiMain.dll retail-2026-09 0x225EC0` / `0x225E00`).
+pub const EMOTE_SORT_PROMPT_FIRST_ID: usize = 931;
+pub const EMOTE_SORT_PROMPT_SECOND_ID: usize = 932;
+
 /// The confirm question the remodel prompt shows, from the same GetText table 12 that supplies the
 /// row captions. The row callback fetches it right before opening the dialog (.text FFXiMain.dll
 /// retail-2026-09 0x1D6B85 → dialog service RVA 0x210E30; vault main_menu.md §59 addendum 21); the
@@ -5014,6 +5095,18 @@ pub fn refresh_dynamic_menu_rows(
     if dynamic.home_door_caption != wanted_door_caption {
         dynamic.home_door_caption = wanted_door_caption;
     }
+    // The `abisortw` caption and the two swap prompts ride in the same way (bead
+    // kuluu-o9qt7.34): DAT text, copied while unchanged rows keep their borrow.
+    if dynamic.abisortw_captions != config_rows.abisortw_captions {
+        dynamic
+            .abisortw_captions
+            .clone_from(&config_rows.abisortw_captions);
+    }
+    if dynamic.emote_sort_prompts != config_rows.emote_sort_prompts {
+        dynamic
+            .emote_sort_prompts
+            .clone_from(&config_rows.emote_sort_prompts);
+    }
     let active_kind = match &*mode {
         InputMode::Menu(stack) => stack.current().map(|l| l.kind),
         _ => None,
@@ -5134,7 +5227,20 @@ pub fn refresh_dynamic_menu_rows(
         MenuKind::Abilities => ability_flat_rows(snap),
         MenuKind::Items => inventory_rows(snap, active_bag.0, sort.auto),
         MenuKind::KeyItems => key_item_rows(snap),
-        MenuKind::EmoteList => emote_rows(snap),
+        // The retail opener `.text 0x225460` always opens the `abisortw` companion **first**,
+        // so the captioned list lands on top and takes the keys (bead kuluu-o9qt7.34); kuluu
+        // carries no live cross-pane focus, so the companion's single select item rides as the
+        // chain row at the tail of the focused list — its label is the mode-1 DAT caption,
+        // read never transcribed ([I] reading of retail's unfound focus-switch, recorded on
+        // the bead).
+        MenuKind::EmoteList => {
+            let mut rows = emote_rows(snap);
+            append_abisortw_chain_row(
+                &mut rows,
+                dynamic.abisortw_captions.get(1).and_then(|c| c.as_deref()),
+            );
+            rows
+        }
         MenuKind::UsableItems => usable_item_rows(snap),
         MenuKind::ItemAction {
             container,
@@ -5426,10 +5532,86 @@ pub fn key_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow
         .collect()
 }
 
-/// One row per canned emote from the scraped LSB table (id order): label +
-/// "/command" column. HELM-only ids are server-initiated and skipped; the Job
-/// row appears only when the 0x11A bitfield unlocks the current main job's
-/// gesture (bit = job id - 1).
+/// The fill-order law of retail's `emote` list (bead kuluu-o9qt7.34): the stored
+/// arrangement comes first in its stored order (ids the client no longer knows drop),
+/// and every default id the store omits keeps its default place behind the arranged
+/// ones — the same shape as retail's fill, which reads one whole user blob at open
+/// (FFXiMain.dll retail-2026-09 `.text 0x2259C6`) rather than patching rows.
+/// `default_ids` is the full id table (hidden ids included — they stay in the order).
+pub fn merge_emote_order(default_ids: &[u8], stored: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(default_ids.len());
+    for &id in stored {
+        if default_ids.contains(&id) && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    for &id in default_ids {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// The swap helper's guard law (.text FFXiMain.dll retail-2026-09 `0x2258D0`): same slot,
+/// either index out of range (a missing id here), or equal row ids — all no-ops; otherwise the
+/// two positions exchange and true is returned (the caller then refills, bead kuluu-o9qt7.34).
+pub fn swap_emote_order(order: &mut [u8], first: u8, second: u8) -> bool {
+    if first == second {
+        return false;
+    }
+    let Some(a) = order.iter().position(|&id| id == first) else {
+        return false;
+    };
+    let Some(b) = order.iter().position(|&id| id == second) else {
+        return false;
+    };
+    if a == b {
+        return false;
+    }
+    order.swap(a, b);
+    true
+}
+
+/// The committed shape of one swap: merge the player's stored order over the full id
+/// table, then run the guard-law swap (FFXiMain.dll retail-2026-09 `.text 0x2258D0`).
+/// `None` when the guards no-op it — same slot, or an id missing from the list — so the
+/// caller keeps the pending state exactly as retail does (bead kuluu-o9qt7.34).
+pub fn committed_emote_swap(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    first: u8,
+    second: u8,
+) -> Option<Vec<u8>> {
+    let defaults: Vec<u8> = ffxi_vocab::emote_names::EMOTES
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    let mut order = merge_emote_order(&defaults, &snap.emote_order);
+    if swap_emote_order(&mut order, first, second) {
+        Some(order)
+    } else {
+        None
+    }
+}
+
+/// Append the `abisortw` chain row (the focused list's tail; [I] reading of retail's
+/// two-window pair — see the refresh arm) when its mode-1 caption has loaded from DAT;
+/// with no install the list simply carries no sort entry (bead kuluu-o9qt7.34).
+pub fn append_abisortw_chain_row(rows: &mut Vec<DynamicMenuRow>, caption: Option<&str>) {
+    if let Some(caption) = caption {
+        rows.push(DynamicMenuRow {
+            label: caption.to_string(),
+            action: DynamicMenuAction::AbisortwSelect { mode: 1 },
+        });
+    }
+}
+
+/// One row per canned emote from the scraped LSB table: label + "/command" column.
+/// HELM-only ids are server-initiated and skipped; the Job row appears only when the
+/// 0x11A bitfield unlocks the current main job's gesture (bit = job id - 1). Display
+/// order follows [`merge_emote_order`] over the player's stored arrangement — retail's
+/// fill reads its user blob whole at open (FFXiMain.dll retail-2026-09 `.text 0x2259C6`;
+/// bead kuluu-o9qt7.34) — so a committed swap re-orders the rows on the next refresh.
 pub fn emote_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
     use ffxi_proto::map::emote;
     let main_job = snap
@@ -5437,17 +5619,25 @@ pub fn emote_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenuRow> {
         .and_then(|id| snap.party.iter().find(|m| m.id == id))
         .map(|m| m.main_job)
         .unwrap_or(0);
-    ffxi_vocab::emote_names::EMOTES
+    let defaults: Vec<u8> = ffxi_vocab::emote_names::EMOTES
         .iter()
-        .filter(|&&(id, _)| !emote::HELM_ONLY.contains(&id))
-        .filter(|&&(id, _)| {
+        .map(|&(id, _)| id)
+        .collect();
+    merge_emote_order(&defaults, &snap.emote_order)
+        .into_iter()
+        .filter(|&id| !emote::HELM_ONLY.contains(&id))
+        .filter(|&id| {
             id != emote::JOB
                 || snap
                     .emote_jobs
                     .is_some_and(|bits| ffxi_proto::decode::EmoteList::job_bit_set(bits, main_job))
         })
-        .map(|&(id, name)| DynamicMenuRow {
-            label: format!("{name} (/{})", emote_command_word(id)),
+        .map(|id| DynamicMenuRow {
+            label: format!(
+                "{} (/{})",
+                ffxi_vocab::emote_names::lookup(id).unwrap_or("?"),
+                emote_command_word(id)
+            ),
             action: DynamicMenuAction::Emote { emote_id: id },
         })
         .collect()
@@ -10595,6 +10785,148 @@ mod tests {
     /// rows are never ids (FFXiMain.dll retail-2026-09 `.text 0x145460` switch). Its two DAT
     /// captions pair shut=index 0 / open=index 1, exactly as the handler fetches them at `.text
     /// 0x145439` (shut) and `.text 0x145357` (open).
+    /// The `abisortw`/emote family's four strings load through the ConfigDatRows
+    /// reader (bead kuluu-o9qt7.34): captions from the mode-dispatched pass (.text
+    /// FFXiMain.dll retail-2026-09 0x223E10), prompts from the help-line swap
+    /// (`.text 0x225FA2`). The expected values below are regression pins of the installed
+    /// DAT — the code never carries them.
+    #[test]
+    fn abisortw_family_strings_load_from_the_caption_catalog() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let mut rows = ConfigDatRows::default();
+        rows.ensure_loaded(Some(&root));
+        assert!(rows.loaded, "install-gated test must reach the catalog");
+        assert_eq!(
+            rows.abisortw_captions[0], None,
+            "mode ability draws no caption (.text 0x223E10 arm)"
+        );
+        assert_eq!(
+            rows.abisortw_captions[1].as_deref(),
+            Some("Manually rearrange emotes."),
+            "table-0x0E id {ABISORTW_CAPTION_MODE_EMOTE_ID}"
+        );
+        assert_eq!(
+            rows.abisortw_captions[2].as_deref(),
+            Some("Rearrange your mounts."),
+            "table-0x0E id {ABISORTW_CAPTION_MODE_MOUNT_ID}"
+        );
+        assert_eq!(
+            rows.emote_sort_prompts[0].as_deref(),
+            Some("Select emote to move."),
+            "table-0x0E id {EMOTE_SORT_PROMPT_FIRST_ID}"
+        );
+        assert_eq!(
+            rows.emote_sort_prompts[1].as_deref(),
+            Some("Select emote to switch with the first."),
+            "table-0x0E id {EMOTE_SORT_PROMPT_SECOND_ID}"
+        );
+    }
+
+    /// Fill law (bead kuluu-o9qt7.34): stored order leads in its own order, unknown ids
+    /// drop, and every default the store omits keeps its default place behind — one whole
+    /// blob read at open (.text FFXiMain.dll retail-2026-09 0x2259C6), never row patches.
+    #[test]
+    fn merge_emote_order_puts_stored_first_and_keeps_the_rest() {
+        let defaults = [1u8, 2, 3, 4];
+        let never_arranged: &[u8] = &[];
+        assert_eq!(
+            merge_emote_order(&defaults, never_arranged),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            merge_emote_order(&defaults, &[4, 9, 2]),
+            vec![4, 2, 1, 3],
+            "stored 4 and 2 lead; unknown 9 drops; the rest keep default order behind"
+        );
+    }
+
+    /// The swap helper's guards (.text FFXiMain.dll retail-2026-09 0x2258D0): same slot,
+    /// missing id, or equal row ids no-op; a real pair exchanges (bead kuluu-o9qt7.34).
+    #[test]
+    fn swap_emote_order_guards_match_the_helper() {
+        let mut order = vec![6u8, 4, 12, 3];
+        assert!(swap_emote_order(&mut order, 6, 12));
+        assert_eq!(order, vec![12, 4, 6, 3]);
+        assert!(
+            !swap_emote_order(&mut order, 4, 4),
+            "same id is the equal-rows guard"
+        );
+        assert!(
+            !swap_emote_order(&mut order, 4, 99),
+            "a missing id is the out-of-range guard"
+        );
+        assert_eq!(order, vec![12, 4, 6, 3], "guard arms touch nothing");
+    }
+
+    /// The committed blob keeps hidden ids (they live in retail's user file too): a swap
+    /// over an empty store returns the full default table with just those two exchanged.
+    #[test]
+    fn committed_emote_swap_returns_the_full_blob_with_two_rows_moved() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        let defaults: Vec<u8> = ffxi_vocab::emote_names::EMOTES
+            .iter()
+            .map(|&(id, _)| id)
+            .collect();
+        let swapped = committed_emote_swap(&snap, 2, 10).expect("both ids are real emotes");
+        assert_eq!(swapped.len(), defaults.len(), "hidden ids stay in the blob");
+        let a0 = defaults.iter().position(|&id| id == 2).unwrap();
+        let b0 = defaults.iter().position(|&id| id == 10).unwrap();
+        assert_eq!(swapped[a0], 10);
+        assert_eq!(swapped[b0], 2);
+        let mut untouched: Vec<usize> = (0..defaults.len())
+            .filter(|&i| swapped[i] != defaults[i])
+            .collect();
+        untouched.sort_unstable();
+        assert_eq!(untouched, vec![a0, b0], "only the two picked rows move");
+
+        assert_eq!(committed_emote_swap(&snap, 2, 2), None, "equal-rows guard");
+        assert_eq!(
+            committed_emote_swap(&snap, 2, u8::MAX),
+            None,
+            "missing-id guard (and no real emote is id {})",
+            u8::MAX
+        );
+    }
+
+    /// The list re-orders with the stored blob without any restart (bead kuluu-o9qt7.34):
+    /// a committed swap's fold lands on the next [`emote_rows`] read.
+    #[test]
+    fn emote_rows_follow_the_stored_display_order() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        let base = emote_rows(&snap);
+        assert!(base.len() >= 2, "the canned table has at least two rows");
+        let moved_id = match base[1].action {
+            DynamicMenuAction::Emote { emote_id } => emote_id,
+            other => panic!("expected an emote row, got {other:?}"),
+        };
+        snap.emote_order.push(moved_id);
+        let reordered = emote_rows(&snap);
+        assert_eq!(reordered.len(), base.len());
+        assert!(
+            matches!(reordered[0].action, DynamicMenuAction::Emote { emote_id } if emote_id == moved_id),
+            "the stored id leads the list after one swap commit"
+        );
+    }
+
+    /// The chain row exists only while its DAT caption has loaded (bead kuluu-o9qt7.34):
+    /// a machine without an install gets no sort entry at all, never invented copy.
+    #[test]
+    fn abisortw_chain_row_rides_only_with_its_caption() {
+        let mut rows = vec![DynamicMenuRow {
+            label: "Wave (/wave)".to_string(),
+            action: DynamicMenuAction::Emote { emote_id: 6 },
+        }];
+        append_abisortw_chain_row(&mut rows, None);
+        assert_eq!(rows.len(), 1, "no caption — no chain row");
+        append_abisortw_chain_row(&mut rows, Some("Manually rearrange emotes."));
+        assert_eq!(rows.len(), 2);
+        let tail = &rows[1];
+        assert_eq!(tail.label, "Manually rearrange emotes.");
+        assert_eq!(tail.action, DynamicMenuAction::AbisortwSelect { mode: 1 });
+    }
+
     #[test]
     fn home_door_row_index_and_caption_pair_follow_the_handler() {
         assert_eq!(home_door_row_index(), 5);

@@ -503,6 +503,16 @@ pub enum MenuKind {
     /// scraped LSB emote table, Job gated on the s2c 0x11A bits.
     EmoteList,
 
+    /// The `abisortw` companion window retail opens **below** each rearrange-
+    /// driven list — mode 0 ability (unused here), 1 emote, 2 mount — matching
+    /// its handler's mode word `[this+0x14]` (FFXiMain.dll retail-2026-09
+    /// `.text 0x223CF0`; registry record 256 flags 0x00080002). It carries the
+    /// DAT caption (table 0x0E ids 927/997) and drives the list window's
+    /// swap-state law (`[emote+0x6C]`, `.text 0x225EC0`/`.text 0x225E00`).
+    AbilitySort {
+        mode: u8,
+    },
+
     /// Full-screen Map screen rendered by `hud::map_screen`: a full-screen map
     /// with a top-right command submenu (Markers / Wide Scan / Change Map). The
     /// stack only carries this level; the submode + cursor live in the bespoke

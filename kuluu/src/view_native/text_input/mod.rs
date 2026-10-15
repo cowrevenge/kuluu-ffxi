@@ -1160,6 +1160,9 @@ fn sub_target_action_for(
         A::MoveItem { .. } => None,
         // Party window rows answer with a packet or are inert; no sub-target step.
         A::AcceptPartyInvite | A::DeclinePartyInvite | A::PartyMemberRow { .. } => None,
+        // The `abisortw` chain row answers locally (swap state word only, FFXiMain.dll
+        // retail-2026-09 `.text 0x223CF0`; bead kuluu-o9qt7.34) — never targets.
+        A::AbisortwSelect { .. } => None,
         // Automaton slot rows are inert display until §39's equip flow lands;
         // no sub-target step (vault main_menu.md §39). Macro slot rows likewise
         // — the macro-use seam is open-map on bead .19.1 (vault §41).
@@ -1831,7 +1834,11 @@ fn dispatch_dynamic_menu_action(
         // effect is the local key store; bead kuluu-o9qt7.26.1).
         | A::OpenKeyAssignResetPrompt
         | A::ControlsPreset(_)
-        | A::ControlsReset => return,
+        | A::ControlsReset
+        // The `abisortw` chain row answers at the confirm seam — it only flips the
+        // emote window's swap state word (FFXiMain.dll retail-2026-09 `.text 0x223CF0`
+        // id-5 arm; bead kuluu-o9qt7.34), never a wire event.
+        | A::AbisortwSelect { .. } => return,
         // The `searchma` Run row (select id 1 — query-object method 0x20EE70 in
         // FFXiMain.dll's handler law): fire a TCP_SEARCH with no filter entries,
         // which LSB defaults to "everyone" (_HandleSearchRequest); the merged

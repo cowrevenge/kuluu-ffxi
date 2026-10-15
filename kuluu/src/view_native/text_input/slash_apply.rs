@@ -84,6 +84,10 @@ pub(super) fn menu_open_label(kind: MenuKind) -> std::borrow::Cow<'static, str> 
 
         kuluu_render::MenuKind::Communication => "Communication".into(),
         kuluu_render::MenuKind::EmoteList => "Emote List".into(),
+        // Echoes the retail window name (`menu    abisortw`, registry 256): no DAT title
+        // exists [V-negative] and kuluu never opens it as a focused level on its own —
+        // it rides below an EmoteList push (bead kuluu-o9qt7.34).
+        kuluu_render::MenuKind::AbilitySort { .. } => "abisortw".into(),
         // Page-1 row 10's window (vault main_menu.md §27): retail opens `menu    link5`,
         // which is the same surface a `/menu linkshell` style entry reaches here.
         kuluu_render::MenuKind::Linkshell => "Link Shell".into(),

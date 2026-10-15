@@ -1132,6 +1132,16 @@ pub struct SceneSnapshot {
     /// `ffxi_proto::decode::CharSkillLevels`). `None` until a zone-in carries one.
     #[serde(default)]
     pub char_skills: Option<CharSkills>,
+
+    /// The player's own emote display order (bead kuluu-o9qt7.34): the retail `emote`
+    /// window is a **user-arranged list** — its fill reads a per-user blob at open
+    /// (FFXiMain.dll retail-2026-09 `.text 0x2259C6` through the user-file helper family),
+    /// and `abisortw`'s select drives the swap law in `hud::menu::rearrange_emote_order`.
+    /// Entries are emote ids, most-preferred first; unknown ids drop and every id the
+    /// store omits keeps its default place behind the arranged ones. Empty = never
+    /// arranged (trailing additive field).
+    #[serde(default)]
+    pub emote_order: Vec<u8>,
 }
 
 /// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
@@ -2671,6 +2681,9 @@ mod tests {
 
     fn sample_snapshot() -> SceneSnapshot {
         SceneSnapshot {
+            // Never arranged: the sample keeps the emote display order (bead
+            // kuluu-o9qt7.34) in its untouched, default-list state.
+            emote_order: Vec::new(),
             // No 0x062 block in the sample: the Status skill rows read as
             // "nothing received yet", exactly like a fresh zone-in.
             char_skills: None,
@@ -3371,6 +3384,7 @@ mod tests {
             "config_confdata",
             "jobs",
             "char_skills",
+            "emote_order",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3379,7 +3393,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

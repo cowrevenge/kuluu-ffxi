@@ -4912,6 +4912,8 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             // No macro store in these fixtures (bead kuluu-o9qt7.19.2).
             None,
             "",
+            // …and no emote-order store either (bead kuluu-o9qt7.34).
+            None,
             None,
         ),
     )
@@ -5067,6 +5069,8 @@ async fn enterzone_in_gameok_reply() {
             // No macro store in these fixtures (bead kuluu-o9qt7.19.2).
             None,
             "",
+            // …and no emote-order store either (bead kuluu-o9qt7.34).
+            None,
             None,
         ),
     )

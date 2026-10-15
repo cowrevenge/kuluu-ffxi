@@ -2550,6 +2550,26 @@ fn macros_loaded_replaces_wholesale() {
     assert_eq!(state.macros, second);
 }
 
+/// The emote display order folds wholesale too (bead kuluu-o9qt7.34): retail's
+/// fill law re-reads the whole blob at open (FFXiMain.dll retail-2026-09
+/// `.text 0x225960` resets state words), so a later load must replace — never
+/// merge — what kuluu folded before.
+#[test]
+fn emote_order_loaded_replaces_wholesale() {
+    let mut state = SessionState::default();
+    assert_eq!(
+        state.emote_order,
+        Vec::<u8>::new(),
+        "never-arranged default"
+    );
+    assert!(state.apply_event(&AgentEvent::EmoteOrderLoaded {
+        ids: vec![6, 4, 12]
+    }));
+    assert_eq!(state.emote_order, vec![6, 4, 12]);
+    assert!(state.apply_event(&AgentEvent::EmoteOrderLoaded { ids: vec![9] }));
+    assert_eq!(state.emote_order, vec![9]);
+}
+
 /// AgentCommand is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -2577,6 +2597,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MogHouseDoorSelect { .. } => (),
         AgentCommand::MogHouseRemodel { .. } => (),
         AgentCommand::CommitMacros { .. } => (),
+        AgentCommand::CommitEmoteOrder { .. } => (),
         AgentCommand::TreasureLot { .. } => (),
         AgentCommand::TreasurePass { .. } => (),
         AgentCommand::MarkKeyItemsSeen { .. } => (),
@@ -2974,6 +2995,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MonstrosityUpdated { .. } => (),
         AgentEvent::Connected { .. } => (),
         AgentEvent::MacrosLoaded { .. } => (),
+        AgentEvent::EmoteOrderLoaded { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),
         AgentEvent::SubAreaSynced { .. } => (),

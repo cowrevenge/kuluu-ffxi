@@ -457,6 +457,70 @@ pub(super) fn confirm_menu_at_cursor(
                 apply_keybind_update(update, bindings, keybinds_state, scene_state);
                 return None;
             }
+            // The `abisortw` chain row (bead kuluu-o9qt7.34): retail's handler answers
+            // only this one select, writing the paired list's state word `[emote+0x6C]=1`
+            // unconditionally — even mid-arrangement it just re-writes 1, dropping any
+            // half-picked pair (FFXiMain.dll retail-2026-09 `.text 0x223CF0` id-5 arm →
+            // `.text 0x223DC3`). Both windows stay up.
+            if matches!(action, A::AbisortwSelect { .. }) {
+                dynamic.emote_sort_state = kuluu_render::hud::menu::EmoteSortState::AwaitFirst;
+                return None;
+            }
+            // While the swap state is pending, an emote-row press belongs to the FSM —
+            // retail swaps the whole handler family at `[emote+0x6C]` (`.text 0x225EC0`
+            // awaits the first pick, `.text 0x225E00` the second), and firing a canned
+            // emote is not an arm of either. Off restores today's fire path unchanged.
+            if let A::Emote { emote_id } = action {
+                use kuluu_render::hud::menu::EmoteSortState as ES;
+                match dynamic.emote_sort_state {
+                    ES::Off => {}
+                    ES::AwaitFirst => {
+                        // The pick lands where retail keeps `[emote+0x70]` — the pending
+                        // id — and the list waits for its partner.
+                        dynamic.emote_sort_state = ES::AwaitSecond(emote_id);
+                        return None;
+                    }
+                    ES::AwaitSecond(first) => {
+                        // The guard law (`.text 0x2258D0`): equal row ids or a missing id
+                        // no-op without touching rows, state or store — retail stays put.
+                        if let Some(order) = kuluu_render::hud::menu::committed_emote_swap(
+                            &scene_state.snapshot,
+                            first,
+                            emote_id,
+                        ) {
+                            // Persist the blob (client-local; CommitEmoteOrder rewrites
+                            // `emote_order.json` and folds it back), then retail's own
+                            // tail: refill (.text 0x2256F0) with the state reset by fill
+                            // law (.text 0x225960) and select row B — the second pick.
+                            if let Err(e) = cmd_tx
+                                .try_send(AgentCommand::CommitEmoteOrder { ids: order.clone() })
+                            {
+                                push_system_chat_line(
+                                    scene_state,
+                                    format!("[menu] emote-order commit dropped: {e}"),
+                                );
+                            }
+                            scene_state.snapshot.emote_order = order;
+                            let mut rows =
+                                kuluu_render::hud::menu::emote_rows(&scene_state.snapshot);
+                            kuluu_render::hud::menu::append_abisortw_chain_row(
+                                &mut rows,
+                                dynamic.abisortw_captions.get(1).and_then(|c| c.as_deref()),
+                            );
+                            if let Some(pos) = rows.iter().position(|row| {
+                                matches!(row.action, A::Emote { emote_id: id } if id == emote_id)
+                            }) {
+                                if let Some(level) = stack.current_mut() {
+                                    level.cursor = pos;
+                                }
+                            }
+                            dynamic.rows = rows;
+                            dynamic.emote_sort_state = ES::Off;
+                        }
+                        return None;
+                    }
+                }
+            }
             if let A::OpenItemAction {
                 container,
                 index,
@@ -1230,6 +1294,14 @@ pub(super) fn confirm_menu_at_cursor(
             // opens (c2s 0x119 → s2c 0x11A gates the Job row).
             if submenu == MenuKind::EmoteList {
                 let _ = cmd_tx.try_send(AgentCommand::RequestEmoteList);
+                // …and open the `abisortw` companion **first**, as retail's opener
+                // `.text 0x225460` always does (bead kuluu-o9qt7.34): its re-bind pulls
+                // any stale list down through stack dedupe, and the fresh push that
+                // follows rebuilds it — retail's fill resets the swap state word and the
+                // pending cursor on every one of those ([emote+0x6C]/[+0x70],
+                // `.text 0x225960`), so kuluu clears its mirror here too.
+                stack.push(MenuKind::AbilitySort { mode: 1 });
+                dynamic.emote_sort_state = kuluu_render::hud::menu::EmoteSortState::Off;
             }
             // The power prompts open with the cursor on No, like every other
             // retail confirm.
@@ -2110,10 +2182,31 @@ pub(super) fn handle_menu_key(
         // code — FFXiMain.dll retail-2026-09 RVA 0x148BB0 — closes persona,
         // whose close closes level; vault main_menu.md §59). Kuluu mirrors the
         // cascade by popping one stack level per Esc.
-        // Cancel pops one level; from Root it closes back to the world.
+        // The emote swap's cancel arm fires before any close (bead kuluu-o9qt7.34):
+        // while `[emote+0x6C]` is pending, Esc resets the state word and clears the
+        // prompt line — the window stays open; only a settled list closes
+        // (FFXiMain.dll retail-2026-09 `.text 0x225E34`).
+        if kind == MenuKind::EmoteList
+            && dynamic.emote_sort_state != kuluu_render::hud::menu::EmoteSortState::Off
+        {
+            dynamic.emote_sort_state = kuluu_render::hud::menu::EmoteSortState::Off;
+            return None;
+        }
+        // Cancel pops one level; from Root it closes back to the world. Closing the
+        // emote list cascades over its `abisortw` companion — retail's close handler
+        // closes abisortw unconditionally (.text 0x225A88, via CloseMenu 0x15E910) —
+        // so kuluu pops the companion level straight behind it.
+        let cascade_companion = kind == MenuKind::EmoteList;
         return if !stack.pop() {
             Some(InputMode::World)
         } else {
+            if cascade_companion
+                && stack
+                    .current()
+                    .is_some_and(|l| matches!(l.kind, MenuKind::AbilitySort { .. }))
+            {
+                stack.pop();
+            }
             None
         };
     }
@@ -3666,6 +3759,186 @@ mod menu_key_tests {
         assert_eq!(
             harness.dynamic.config_option_values.get(&0x3Cu32),
             Some(&49)
+        );
+    }
+
+    #[test]
+    fn emote_list_opens_the_abisortw_pair_below_it() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Communication);
+        stack.current_mut().unwrap().cursor = 1; // COMM_EMOTE_LIST
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        let kinds: Vec<MenuKind> = stack.levels.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                MenuKind::Root,
+                MenuKind::Communication,
+                MenuKind::AbilitySort { mode: 1 },
+                MenuKind::EmoteList,
+            ],
+            "companion opens first, the captioned list takes focus on top"
+        );
+    }
+
+    /// Esc law for the pair (bead kuluu-o9qt7.34): with a swap pending, Esc answers the
+    /// emote window's cancel arm — state resets, nothing closes (.text FFXiMain.dll
+    /// retail-2026-09 `0x225E34`); once settled, closing the list cascades over the
+    /// companion (`.text 0x225A88`) so one Esc brings both windows down.
+    #[test]
+    fn emote_list_esc_cancels_pending_swap_then_cascades_the_companion() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::AbilitySort { mode: 1 });
+        stack.push(MenuKind::EmoteList);
+
+        harness.dynamic.emote_sort_state = kuluu_render::hud::menu::EmoteSortState::AwaitFirst;
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            harness.dynamic.emote_sort_state,
+            kuluu_render::hud::menu::EmoteSortState::Off,
+            "the cancel arm resets the state word"
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::EmoteList,
+            "…and keeps both windows up"
+        );
+
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            stack.current().unwrap().kind,
+            MenuKind::Root,
+            "a settled close takes the companion with it"
+        );
+    }
+
+    /// The swap FSM end to end (bead kuluu-o9qt7.34): chain row → AwaitFirst; first pick
+    /// → AwaitSecond(id); second pick commits the full blob through CommitEmoteOrder, and
+    /// retail's tail runs in place — refill with state reset (.text FFXiMain.dll
+    /// retail-2026-09 0x2256F0/0x225960) and row B selected.
+    #[test]
+    fn emote_swap_fsm_commits_the_blob_and_refills() {
+        use kuluu_render::hud::menu::{
+            append_abisortw_chain_row, emote_rows, DynamicMenuAction, EmoteSortState,
+        };
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::AbilitySort { mode: 1 });
+        stack.push(MenuKind::EmoteList);
+
+        let mut rows = emote_rows(&harness.scene_state.snapshot);
+        assert!(
+            rows.len() >= 2,
+            "the canned table has at least two visible rows"
+        );
+        append_abisortw_chain_row(&mut rows, Some("Rearrange"));
+        let chain_cursor = rows.len() - 1;
+        harness.dynamic.rows = rows;
+
+        // Chain row select arms the FSM — list stays up, no wire.
+        stack.current_mut().unwrap().cursor = chain_cursor;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(harness.dynamic.emote_sort_state, EmoteSortState::AwaitFirst);
+        assert_eq!(stack.current().unwrap().kind, MenuKind::EmoteList);
+
+        // First pick (row 0) lands in the pending word; still no wire.
+        let first_id = match harness.dynamic.rows[0].action {
+            DynamicMenuAction::Emote { emote_id } => emote_id,
+            other => panic!("row 0 must be an emote, got {other:?}"),
+        };
+        stack.current_mut().unwrap().cursor = 0;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            harness.dynamic.emote_sort_state,
+            EmoteSortState::AwaitSecond(first_id)
+        );
+        assert!(
+            harness._cmd_rx.try_recv().is_err(),
+            "pending picks send nothing"
+        );
+
+        // Second pick (row 1) commits; the guard pair would be covered by the pure
+        // law tests — here the happy path only.
+        let second_id = match harness.dynamic.rows[1].action {
+            DynamicMenuAction::Emote { emote_id } => emote_id,
+            other => panic!("row 1 must be an emote, got {other:?}"),
+        };
+        stack.current_mut().unwrap().cursor = 1;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        let committed = match harness._cmd_rx.try_recv() {
+            Ok(AgentCommand::CommitEmoteOrder { ids }) => ids,
+            other => panic!("second pick must commit CommitEmoteOrder, got {other:?}"),
+        };
+        // Positions come from the untouched fill order (empty store = default table):
+        // after the swap those two slots hold each other's pick, nothing else moves.
+        let defaults: Vec<u8> = ffxi_vocab::emote_names::EMOTES
+            .iter()
+            .map(|&(id, _)| id)
+            .collect();
+        let a = defaults
+            .iter()
+            .position(|&id| id == first_id)
+            .expect("first pick is a real emote row");
+        let b = defaults
+            .iter()
+            .position(|&id| id == second_id)
+            .expect("second pick is a real emote row");
+        assert_eq!(
+            committed.len(),
+            defaults.len(),
+            "the whole blob round-trips"
+        );
+        assert_eq!(committed[a], second_id);
+        assert_eq!(committed[b], first_id);
+
+        // Refill law: rows rebuilt from the new blob, state Off, row B selected.
+        assert_eq!(harness.dynamic.emote_sort_state, EmoteSortState::Off);
+        assert!(
+            matches!(
+                harness.dynamic.rows.first().unwrap().action,
+                DynamicMenuAction::Emote { emote_id } if emote_id == second_id
+            ),
+            "the stored pair leads the refilled list"
+        );
+        assert_eq!(
+            stack.current().unwrap().cursor,
+            0,
+            "row B — the second pick — is selected"
         );
     }
 }

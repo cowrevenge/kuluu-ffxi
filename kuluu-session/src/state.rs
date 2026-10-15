@@ -622,6 +622,14 @@ pub struct SessionState {
     #[serde(default)]
     pub macros: Vec<kuluu_snapshot::MacroSlot>,
 
+    /// The player's arranged emote display order (bead kuluu-o9qt7.34) — the
+    /// client-local `emote_order.json` blob for this character, loaded at world
+    /// entry and rewritten by the swap law when `abisortw` drives it. Never on
+    /// the wire (LSB ships no emote-order packet [V-negative]); retail reads its
+    /// own user file at fill time FFXiMain.dll retail-2026-09 `.text 0x2259C6`.
+    #[serde(default)]
+    pub emote_order: Vec<u8>,
+
     /// The four SAVE_CONF bitfield bytes from the newest s2c 0x0B4 CONFIG
     /// (vendor/server/src/common/mmo.h; vault main_menu.md §42). LSB echoes a
     /// fresh copy after every c2s CONFIG, so optimistic kuluu toggles reconcile
@@ -1782,6 +1790,12 @@ impl SessionState {
             // the only way they enter folded state.
             AgentEvent::MacrosLoaded { slots } => {
                 self.macros = slots.clone();
+                true
+            }
+            // The emote display order enters the same way (bead kuluu-o9qt7.34):
+            // loaded at world entry or echoed after a commit, wholesale.
+            AgentEvent::EmoteOrderLoaded { ids } => {
+                self.emote_order = ids.clone();
                 true
             }
             AgentEvent::StageChanged { stage } => {
@@ -3985,6 +3999,12 @@ pub enum AgentEvent {
     MacrosLoaded {
         slots: Vec<kuluu_snapshot::MacroSlot>,
     },
+
+    /// Wholesale replacement of this character's emote display order (bead
+    /// kuluu-o9qt7.34) — world entry load or commit echo; never a wire origin.
+    EmoteOrderLoaded {
+        ids: Vec<u8>,
+    },
 }
 
 pub const GROUND_CORRECTION_XY_EPSILON_YALMS: f32 = 0.05;
@@ -4169,6 +4189,14 @@ pub enum AgentCommand {
     /// per-user files, vault main_menu.md §41/§53).
     CommitMacros {
         slots: Vec<kuluu_snapshot::MacroSlot>,
+    },
+
+    /// Rewrite the character's emote display order as a whole: persisted to the
+    /// client-local store and folded into state together, exactly like
+    /// `CommitMacros` (bead kuluu-o9qt7.34; retail's user-file law from
+    /// FFXiMain.dll retail-2026-09 `.text 0x2259C6`, no wire).
+    CommitEmoteOrder {
+        ids: Vec<u8>,
     },
 
     /// Cast lots on a treasure-pool slot — c2s 0x041 TROPHY_ENTRY. The server

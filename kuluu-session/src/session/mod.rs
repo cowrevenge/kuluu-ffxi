@@ -339,6 +339,33 @@ pub async fn run(
         }
     }
 
+    // The emote display order is the same client-local user-file law (bead
+    // kuluu-o9qt7.34): retail's `emote` fill reads its own blob at open
+    // (FFXiMain.dll retail-2026-09 `.text 0x2259C6`) and no packet carries it
+    // [V-negative], so world entry re-reads the store file exactly like macros.
+    let emote_store = match crate::emote_store::EmoteStore::default_path() {
+        Ok(path) => Some(crate::emote_store::EmoteStore::new(path)),
+        Err(e) => {
+            tracing::warn!(error = %e, "no config dir for the client-local emote store");
+            None
+        }
+    };
+    if let Some(store) = &emote_store {
+        match store.load() {
+            Ok(persisted) => {
+                let ids = persisted.order_for(char_name_for_bootstrap);
+                if !ids.is_empty() {
+                    let _ = event_tx.send(AgentEvent::EmoteOrderLoaded { ids });
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %store.path().display(),
+                "emote store unreadable — starting with the default emote order"
+            ),
+        }
+    }
+
     let mut current_seed = key3;
     let mut iteration: u32 = 0;
 
@@ -373,6 +400,7 @@ pub async fn run(
             &event_tx,
             macro_store.as_ref(),
             &macro_char_key,
+            emote_store.as_ref(),
             spell_table.clone(),
         )
         .await?;
@@ -435,6 +463,9 @@ async fn run_map_session(
     // the command pump, which commits edits without ever touching the wire.
     macro_store: Option<&crate::macro_store::MacroStore>,
     macro_char_key: &str,
+    // Client-local emote display order store (bead kuluu-o9qt7.34) — carried
+    // down the same way, committed without ever touching the wire.
+    emote_store: Option<&crate::emote_store::EmoteStore>,
     spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>>,
 ) -> Result<MapOutcome> {
     map.send_bootstrap(bootstrap).await?;
@@ -729,6 +760,7 @@ async fn run_map_session(
         event_tx.clone(),
         macro_store.cloned(),
         macro_char_key.to_string(),
+        emote_store.cloned(),
         cfg.user_driven_events,
         name_cache,
         target_cache,
@@ -2923,6 +2955,9 @@ async fn keepalive_loop(
     // kuluu-o9qt7.19.2); one cheap clone per map connection.
     macro_store: Option<crate::macro_store::MacroStore>,
     macro_char_key: String,
+    // Client-local emote store (bead kuluu-o9qt7.34); its key is derived from
+    // `character_name` with the same lowercasing law as the macro store.
+    emote_store: Option<crate::emote_store::EmoteStore>,
     user_driven_events: bool,
     mut name_cache: std::collections::HashMap<u32, String>,
     mut target_cache: std::collections::HashMap<u16, u32>,
@@ -4738,6 +4773,36 @@ async fn keepalive_loop(
                                     );
                                 }
                                 let _ = event_tx.send(AgentEvent::MacrosLoaded { slots: normalized });
+                            }
+                        }
+                    }
+                    Some(AgentCommand::CommitEmoteOrder { ids }) => {
+                        // The emote order is client-local like macros — retail
+                        // rewrites its user blob at swap time and never sends it
+                        // (FFXiMain.dll retail-2026-09 `.text 0x2259C6` fill law,
+                        // no wire [V-negative]): rewrite this character's entry,
+                        // then fold so runtime and file agree by construction.
+                        match &emote_store {
+                            None => tracing::warn!("CommitEmoteOrder dropped: no store path"),
+                            Some(store) => {
+                                let mut persisted = store.load().unwrap_or_else(|e| {
+                                    tracing::warn!(error = %e, "emote store unreadable for commit — rewriting from scratch");
+                                    crate::emote_store::PersistedEmoteOrder::default()
+                                });
+                                persisted
+                                    .by_character
+                                    .insert(
+                                        crate::emote_store::PersistedEmoteOrder::key(&character_name),
+                                        ids.clone(),
+                                    );
+                                if let Err(e) = store.save(&persisted) {
+                                    tracing::warn!(
+                                        error = %e,
+                                        path = %store.path().display(),
+                                        "emote-order commit not persisted (runtime still updated)"
+                                    );
+                                }
+                                let _ = event_tx.send(AgentEvent::EmoteOrderLoaded { ids });
                             }
                         }
                     }

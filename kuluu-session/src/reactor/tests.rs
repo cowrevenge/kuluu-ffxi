@@ -1758,6 +1758,8 @@ fn inv_slot(container: u8, index: u8, item_no: u16) -> AgentEvent {
                 next_use_vana_ts: None,
                 use_delay_end_vana_ts: None,
                 ready: None,
+
+                extdata: None,
             },
         },
     }

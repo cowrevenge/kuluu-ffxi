@@ -798,6 +798,147 @@ fn myroom_is_packet_layout_matches_lsb_struct() {
     assert_eq!(&door[4..8], &[1, 0, 0, 0], "door select = Open,0,Unk1 LE");
 }
 
+/// Pins the whole Mog House furniture/plant family, c2s 0x0FA..0x0FF. Two authorities have to agree on
+/// every byte here: LSB's structs (vendor/server/src/map/packets/c2s/0x0{fa,fb,fc,fd,fe,ff}_myroom_*.h)
+/// and the byte writes of retail's seven sender helpers (.text FFXiMain.dll retail-2026-09 0xF0CC0
+/// Layout, 0xF0C80 all-zero Layout, 0xF0D40 Bankin, 0xF0DA0 PlantAdd, 0xF0E10 PlantCheck, 0xF0E70
+/// PlantCrop, 0xF0ED0 PlantStop), each of which commits through FC4D0 with the sizes asserted below.
+#[test]
+fn myroom_layout_and_plant_packets_match_lsb_structs() {
+    let layout = codec::MyroomLayoutRequest {
+        item_no: 0x1234,
+        slot: 7,
+        container: crate::myroom_furniture::CONTAINER_MOGSAFE2,
+        floor: 1,
+        col: -3,
+        level: 9,
+        row: -20,
+        rotation: -2,
+    };
+
+    // c2s 0x0FA — the only one of the family with a pose, and the widest at 0x10 bytes.
+    let buf = build_subpacket_myroom_layout(0xF00D, &layout);
+    assert_eq!(
+        buf.len(),
+        16,
+        "4 hdr + item/index/category/floor/x/y/z/v + 3 pad"
+    );
+    let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_LAYOUT,
+        "opcode MYROOM_LAYOUT"
+    );
+    assert_eq!(id_and_size >> 9, 3, "size_words = 12 body bytes / 4");
+    assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xF00D, "sync");
+    assert_eq!(
+        u16::from_le_bytes([buf[4], buf[5]]),
+        0x1234,
+        "MyroomItemNo LE"
+    );
+    assert_eq!(buf[6], 7, "MyroomItemIndex");
+    assert_eq!(buf[7], 9, "MyroomCategory (LOC_MOGSAFE2)");
+    assert_eq!(buf[8], 1, "MyroomFloorFlg");
+    assert_eq!(
+        [buf[9], buf[10], buf[11], buf[12]],
+        [(-3i8) as u8, 9, (-20i8) as u8, (-2i8) as u8],
+        "x/y/z/v keep the signed bytes the Attr carried"
+    );
+    assert_eq!(&buf[13..16], &[0, 0, 0], "padding00");
+
+    // The closing variant: same opcode and size, nothing but zeros below the header (.text 0xF0C80),
+    // which is exactly what LSB's `MyroomItemNo == 0` branch keys on.
+    let done = build_subpacket_myroom_layout_done(0x00AA);
+    assert_eq!(done.len(), 16, "same 0x10-byte packet");
+    assert_eq!(
+        u16::from_le_bytes([done[0], done[1]]) & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_LAYOUT,
+        "the layout-finished beat reuses opcode 0x0FA"
+    );
+    assert_eq!(&done[4..], &[0u8; 12], "every field zeroed");
+
+    // c2s 0x0FB / 0x0FD / 0x0FF are the same 8-byte address triple.
+    for (opcode, buf) in [
+        (
+            ffxi_proto::map::c2s::MYROOM_BANKIN,
+            build_subpacket_myroom_bankin(1, 0xBEEF, 3, 1),
+        ),
+        (
+            ffxi_proto::map::c2s::MYROOM_PLANT_CHECK,
+            build_subpacket_myroom_plant_check(1, 0xBEEF, 3, 1),
+        ),
+        (
+            ffxi_proto::map::c2s::MYROOM_PLANT_STOP,
+            build_subpacket_myroom_plant_stop(1, 0xBEEF, 3, 1),
+        ),
+    ] {
+        assert_eq!(
+            buf.len(),
+            8,
+            "opcode {opcode:#x} is header + item/index/category"
+        );
+        let word = u16::from_le_bytes([buf[0], buf[1]]);
+        assert_eq!(
+            word & framing::SUBPACKET_OPCODE_MASK,
+            opcode,
+            "opcode {opcode:#x}"
+        );
+        assert_eq!(word >> 9, 2, "size_words for {opcode:#x}");
+        assert_eq!(
+            u16::from_le_bytes([buf[4], buf[5]]),
+            0xBEEF,
+            "{opcode:#x} item id LE"
+        );
+        assert_eq!((buf[6], buf[7]), (3, 1), "{opcode:#x} index then category");
+    }
+
+    // c2s 0x0FC — two ids as words first, then the four address bytes.
+    let add = build_subpacket_myroom_plant_add(1, 0x1111, 0x2222, 4, 5, 9, 0);
+    assert_eq!(
+        add.len(),
+        12,
+        "header + two ids + index/index + category/category"
+    );
+    assert_eq!(
+        u16::from_le_bytes([add[0], add[1]]) & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_PLANT_ADD
+    );
+    assert_eq!(
+        u16::from_le_bytes([add[4], add[5]]),
+        0x1111,
+        "MyroomPlantItemNo"
+    );
+    assert_eq!(
+        u16::from_le_bytes([add[6], add[7]]),
+        0x2222,
+        "MyroomAddItemNo"
+    );
+    assert_eq!((add[8], add[9]), (4, 5), "plant index then add index");
+    assert_eq!(
+        (add[10], add[11]),
+        (9, 0),
+        "plant category then add category"
+    );
+
+    // c2s 0x0FE — the address triple plus CancellFlg at +8; retail passes 1 only on the cancel path.
+    for (cancel, want) in [(false, 0u8), (true, 1)] {
+        let crop = build_subpacket_myroom_plant_crop(1, 0x3333, 6, 9, cancel);
+        assert_eq!(crop.len(), 12, "header + triple + flag + pad");
+        assert_eq!(
+            u16::from_le_bytes([crop[0], crop[1]]) & framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::MYROOM_PLANT_CROP
+        );
+        assert_eq!(
+            u16::from_le_bytes([crop[4], crop[5]]),
+            0x3333,
+            "MyroomPlantItemNo"
+        );
+        assert_eq!((crop[6], crop[7]), (6, 9), "index then category");
+        assert_eq!(crop[8], want, "CancellFlg");
+        assert_eq!(&crop[9..12], &[0, 0, 0], "padding00");
+    }
+}
+
 /// Pins the c2s 0x05D GP_CLI_COMMAND_MOTION layout
 /// (vendor/server/src/map/packets/c2s/0x05d_motion.h): Mode at byte 11,
 /// BEFORE Param — the s2c 0x05A layout puts Mode after Param, so a

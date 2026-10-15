@@ -4229,6 +4229,80 @@ pub enum AgentCommand {
         style: u16,
     },
 
+    /// One furniture placement/move inside a Mog House: c2s 0x0FA MYROOM_LAYOUT, built by sender
+    /// helper FFXiMain.dll retail-2026-09 `.text 0xF0CC0` (see [`crate::session::codec::
+    /// MyroomLayoutRequest`] for what each byte means and for the ranges LSB validates). Nothing is
+    /// updated optimistically: a placement that survives validation comes straight back as s2c 0x020
+    /// ITEM_ATTR, which is the only thing kuluu treats as furniture state
+    /// ([`crate::myroom_furniture`]; the client's own handler for the 0x0FA echo at `.text 0xF0C70` is
+    /// `mov al, 1; ret`).
+    MyroomLayout {
+        item_no: u16,
+        slot: u8,
+        container: u8,
+        floor: u8,
+        col: i8,
+        level: i8,
+        row: i8,
+        rotation: i8,
+    },
+
+    /// The closing beat of layout mode: the same 0x0FA packet with every field zero
+    /// (FFXiMain.dll retail-2026-09 `.text 0xF0C80`), sent when leaving layout mode for normal mode so
+    /// LSB re-runs `UpdateMoghancement` (vendor/server/src/map/packets/c2s/
+    /// 0x0fa_myroom_layout.cpp, `if (this->MyroomItemNo == 0)`).
+    MyroomLayoutDone,
+
+    /// Take one placed piece back onto the Mog House shelf: c2s 0x0FB MYROOM_BANKIN, sender helper
+    /// FFXiMain.dll retail-2026-09 `.text 0xF0D40`. What else goes with it is server law, not a guess:
+    /// LSB clears Installed and the whole pose, empties a flowerpot it was holding
+    /// (`CItemFlowerpot::cleanPot`) and unlocks a mannequin's outfit — each of those arrivals is its own
+    /// ITEM_ATTR/ITEM_LIST record, so kuluu assumes nothing locally (the client likewise only queues the
+    /// request; when it removes a surface it marks whatever sat on it dirty too,
+    /// `.text 0x1CE0F0`). vendor/server/src/map/packets/c2s/0x0fb_myroom_bankin.cpp.
+    MyroomBankin {
+        item_no: u16,
+        slot: u8,
+        container: u8,
+    },
+
+    /// Sow a seed / feed a plant: c2s 0x0FC MYROOM_PLANT_ADD, sender helper FFXiMain.dll retail-2026-09
+    /// `.text 0xF0DA0` (vendor/server/src/map/packets/c2s/0x0fc_myroom_plant_add.h).
+    MyroomPlantAdd {
+        plant_item_no: u16,
+        add_item_no: u16,
+        plant_slot: u8,
+        add_slot: u8,
+        plant_container: u8,
+        add_container: u8,
+    },
+
+    /// Examine a growing plant: c2s 0x0FD MYROOM_PLANT_CHECK, sender helper FFXiMain.dll retail-2026-09
+    /// `.text 0xF0E10`.
+    MyroomPlantCheck {
+        plant_item_no: u16,
+        plant_slot: u8,
+        plant_container: u8,
+    },
+
+    /// Harvest a plant. `cancel = true` is the header's `CancellFlg = 1`, which retail sends when the
+    /// player backs out of the harvest prompt (call site FFXiMain.dll retail-2026-09 `.text 0x206951`);
+    /// a real harvest passes 0 (`.text 0x2069B1`).
+    MyroomPlantCrop {
+        plant_item_no: u16,
+        plant_slot: u8,
+        plant_container: u8,
+        cancel: bool,
+    },
+
+    /// Stop drying/harvesting a plant: c2s 0x0FF MYROOM_PLANT_STOP, sender helper FFXiMain.dll
+    /// retail-2026-09 `.text 0xF0ED0`.
+    MyroomPlantStop {
+        plant_item_no: u16,
+        plant_slot: u8,
+        plant_container: u8,
+    },
+
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers
     /// (vendor/server/src/map/packets/s2c/0x02e_openmogmenu.h).
     OpenMogMenu,

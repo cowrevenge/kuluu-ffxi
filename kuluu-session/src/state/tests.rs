@@ -2604,6 +2604,14 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         // kuluu-o9qt7.13.5/.6).
         AgentCommand::MogHouseDoorSelect { .. } => (),
         AgentCommand::MogHouseRemodel { .. } => (),
+        // The Mog House furniture/plant request family, c2s 0x0FA..0x0FF (bead kuluu-o9qt7.38).
+        AgentCommand::MyroomLayout { .. } => (),
+        AgentCommand::MyroomLayoutDone { .. } => (),
+        AgentCommand::MyroomBankin { .. } => (),
+        AgentCommand::MyroomPlantAdd { .. } => (),
+        AgentCommand::MyroomPlantCheck { .. } => (),
+        AgentCommand::MyroomPlantCrop { .. } => (),
+        AgentCommand::MyroomPlantStop { .. } => (),
         AgentCommand::CommitMacros { .. } => (),
         AgentCommand::CommitEmoteOrder { .. } => (),
         // Header-only currency report requests (bead kuluu-o9qt7.35).
@@ -3402,10 +3410,12 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
     use crate::myroom_furniture::{
         furniture_index, rebuild_furniture_objects, StaticItemKinds, CONTAINER_MOGSAFE2,
     };
-    let installed = |layer: u8, x: i8| {
+    let installed = |layer: u8, col: i8, level: i8, row: i8| {
         let mut e = [0u8; 24];
         e[1] = layer | 0x40;
-        e[6] = x as u8;
+        e[6] = col as u8;
+        e[7] = level as u8;
+        e[8] = row as u8;
         e
     };
     let mut s = SessionState::default();
@@ -3414,14 +3424,14 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
             crate::myroom_furniture::CONTAINER_MOGSAFE,
             3u8,
             100u16,
-            installed(0, 5),
+            installed(0, 5, 2, -9),
         ),
         // Same shelf, other floor: exists but is not drawn from here.
         (
             crate::myroom_furniture::CONTAINER_MOGSAFE,
             4u8,
             100u16,
-            installed(1, 6),
+            installed(1, 6, 0, 0),
         ),
         // Stored on the shelf rather than placed in the room.
         (
@@ -3431,7 +3441,7 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
             [0u8; 24],
         ),
         // A flowerpot on the second shelf.
-        (CONTAINER_MOGSAFE2, 2u8, 300u16, installed(0, -7)),
+        (CONTAINER_MOGSAFE2, 2u8, 300u16, installed(0, -7, 1, 4)),
     ] {
         s.apply_event(&AgentEvent::InventoryUpdated {
             container,
@@ -3471,7 +3481,7 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
     assert_eq!(
         downstairs
             .iter()
-            .map(|o| (o.container, o.slot, o.item_no, o.x))
+            .map(|o| (o.container, o.slot, o.item_no, o.col))
             .collect::<Vec<_>>(),
         vec![
             (crate::myroom_furniture::CONTAINER_MOGSAFE, 3, 100, 5),
@@ -3479,6 +3489,14 @@ fn mog_house_shelf_records_rebuild_the_furniture_table() {
         ],
     );
     assert_eq!(downstairs[1].index, furniture_index(CONTAINER_MOGSAFE2, 2));
+
+    // The other two pose bytes ride along untouched: byte 7 is LSB's stacking level and byte 8 its
+    // row (vendor/server/src/map/items/item_furnishing.cpp getLevel/getRow).
+    assert_eq!(
+        (downstairs[0].level, downstairs[0].row),
+        (2, -9),
+        "shelf records keep Attr bytes 7 and 8 verbatim"
+    );
 
     // Standing upstairs flips which records survive; the login packet's sub-map byte is what moved.
     s.myroom = Some(MyRoomInfo {

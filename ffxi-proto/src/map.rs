@@ -101,6 +101,36 @@ pub mod c2s {
     // build.rs checks every u16 const below for opcode drift.
     pub const MYROOM_IS: u16 = 0x0CB;
 
+    // The Mog House layout/planting family. Every one of them is built by a dedicated helper in
+    // FFXiMain.dll retail-2026-09 (`.text 0xF0CC0` Layout, `.text 0xF0C80` the all-zero closing
+    // variant, `.text 0xF0D40` Bankin, `.text 0xF0DA0` PlantAdd, `.text 0xF0E10` PlantCheck,
+    // `.text 0xF0E70` PlantCrop, `.text 0xF0ED0` PlantStop); the field tables below come from LSB's
+    // own packet structs. Vault main_menu.md §59 addendum 30.
+
+    /// GP_CLI_COMMAND_MYROOM_LAYOUT — place/move one piece of furniture, or (all-zero) announce that
+    /// layout mode ended (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.h).
+    pub const MYROOM_LAYOUT: u16 = 0x0FA;
+
+    /// GP_CLI_COMMAND_MYROOM_BANKIN — take a placed piece back into the Mog House shelf
+    /// (vendor/server/src/map/packets/c2s/0x0fb_myroom_bankin.h).
+    pub const MYROOM_BANKIN: u16 = 0x0FB;
+
+    /// GP_CLI_COMMAND_MYROOM_PLANT_ADD — sow a seed or feed a plant
+    /// (vendor/server/src/map/packets/c2s/0x0fc_myroom_plant_add.h).
+    pub const MYROOM_PLANT_ADD: u16 = 0x0FC;
+
+    /// GP_CLI_COMMAND_MYROOM_PLANT_CHECK — examine a plant
+    /// (vendor/server/src/map/packets/c2s/0x0fd_myroom_plant_check.h).
+    pub const MYROOM_PLANT_CHECK: u16 = 0x0FD;
+
+    /// GP_CLI_COMMAND_MYROOM_PLANT_CROP — harvest a plant
+    /// (vendor/server/src/map/packets/c2s/0x0fe_myroom_plant_crop.h).
+    pub const MYROOM_PLANT_CROP: u16 = 0x0FE;
+
+    /// GP_CLI_COMMAND_MYROOM_PLANT_STOP — stop drying/harvesting a plant
+    /// (vendor/server/src/map/packets/c2s/0x0ff_myroom_plant_stop.h).
+    pub const MYROOM_PLANT_STOP: u16 = 0x0FF;
+
     // GP_CLI_COMMAND_ITEM_STACK, vendor/server/src/map/packets/c2s/0x03a_item_stack.h.
     // "Sort" for a container: the server consolidates same-id partial stacks.
     // Payload is a single u32 Category = container id (LOC_INVENTORY = 0).

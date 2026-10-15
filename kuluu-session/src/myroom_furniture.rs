@@ -30,8 +30,13 @@
 //! `slot + (container == 9 ? 81 : 0)` — visible in the create path's arithmetic
 //! (`.text 0x1D3A01`). Each object's pose is copied out of Attr without conversion (`.text 0x1CCFD1`):
 //! layer `extdata[1] & 3`, then signed bytes `extdata[6]`, `extdata[7]`, `extdata[8]`, rotation
-//! `extdata[9]`. LSB names those four bytes `X`, `Z`, `Y`, `Rotation` — Z before Y, *not* X/Y/Z
-//! (vendor/server/src/map/items/exdata/furniture.h).
+//! `extdata[9]`. LSB declares those four bytes `X`, `Z`, `Y`, `Rotation` — Z before Y, *not* X/Y/Z
+//! (vendor/server/src/map/items/exdata/furniture.h) — but its own furniture accessors say what the
+//! three pose bytes mean: `getCol()` reads `X`, `getLevel()` reads `Z`, `getRow()` reads `Y`
+//! (vendor/server/src/map/items/item_furnishing.cpp), and the layout request it answers with feeds
+//! those same three positions in that order (`setCol(this->x)`, `setLevel(this->y)`, `setRow(this->z)`
+//! in vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp). This module therefore names them
+//! `col`, `level` and `row` so nothing downstream has to re-derive the letter mapping.
 
 use serde::{Deserialize, Serialize};
 
@@ -133,12 +138,14 @@ pub struct PlacedFurniture {
     pub item_no: u16,
     /// `extdata[1] & 3`, already matched against [`current_furniture_floor`].
     pub layer: u8,
-    /// `extdata[6]` as the signed byte retail stores it (LSB `Exdata::Furniture::X`).
-    pub x: i8,
-    /// `extdata[7]` — LSB's *Z*, deliberately not Y.
-    pub z: i8,
-    /// `extdata[8]` (LSB `Exdata::Furniture::Y`).
-    pub y: i8,
+    /// `extdata[6]` as the signed byte retail stores it — LSB `Exdata::Furniture::X`, which its
+    /// furniture accessors call the column (`getCol()`/`setCol()`).
+    pub col: i8,
+    /// `extdata[7]` (LSB's `Z`, and what `getLevel()`/`setLevel()` expose): how far above the floor
+    /// the object sits. LSB's validator keeps it in 0..=25.
+    pub level: i8,
+    /// `extdata[8]` (LSB's `Y`, from `getRow()`/`setRow()`).
+    pub row: i8,
     /// `extdata[9]`.
     pub rotation: i8,
 }
@@ -209,9 +216,9 @@ pub fn describe_object(
         slot,
         item_no,
         layer: extdata[1] & FURNITURE_LAYER_MASK,
-        x: extdata[6] as i8,
-        z: extdata[7] as i8,
-        y: extdata[8] as i8,
+        col: extdata[6] as i8,
+        level: extdata[7] as i8,
+        row: extdata[8] as i8,
         rotation: extdata[9] as i8,
     }
 }
@@ -269,7 +276,7 @@ mod tests {
         ])
     }
 
-    fn attr(layer: u8, installed: bool, x: i8, z: i8, y: i8, rot: i8) -> [u8; 24] {
+    fn attr(layer: u8, installed: bool, col: i8, level: i8, row: i8, rot: i8) -> [u8; 24] {
         let mut e = [0u8; 24];
         e[1] = (layer & FURNITURE_LAYER_MASK)
             | if installed {
@@ -277,9 +284,9 @@ mod tests {
             } else {
                 0
             };
-        e[6] = x as u8;
-        e[7] = z as u8;
-        e[8] = y as u8;
+        e[6] = col as u8;
+        e[7] = level as u8;
+        e[8] = row as u8;
         e[9] = rot as u8;
         e
     }
@@ -350,9 +357,9 @@ mod tests {
         assert_eq!(one.index, 7);
         assert_eq!(two.index, FURNITURE_SLOTS_PER_CONTAINER + 7);
 
-        // Pose: the signed bytes in the DAT's own X,Z,Y order.
+        // Pose: the signed bytes, in the DAT's own byte order = LSB's Col/Level/Row accessors.
         for o in [one, two] {
-            assert_eq!((o.x, o.z, o.y, o.rotation), (3, -4, 5, -6));
+            assert_eq!((o.col, o.level, o.row, o.rotation), (3, -4, 5, -6));
             assert_eq!(o.layer, 0);
         }
     }

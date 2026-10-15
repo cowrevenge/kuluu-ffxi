@@ -29,11 +29,13 @@ pub use codec::{
     build_subpacket_camp, build_subpacket_currencies, build_subpacket_emote_list_req,
     build_subpacket_equip_inspect, build_subpacket_equip_set, build_subpacket_fishing,
     build_subpacket_item_move, build_subpacket_item_stack, build_subpacket_item_use,
-    build_subpacket_motion, build_subpacket_myroom_is, build_subpacket_myroom_job,
-    build_subpacket_pbx, build_subpacket_reqlogout, build_subpacket_reqsubmapnum,
-    build_subpacket_shop_buy, build_subpacket_shop_sell_req, build_subpacket_shop_sell_set,
-    build_subpacket_tracking_end, build_subpacket_tracking_list, build_subpacket_tracking_start,
-    log_action_sent,
+    build_subpacket_motion, build_subpacket_myroom_bankin, build_subpacket_myroom_is,
+    build_subpacket_myroom_job, build_subpacket_myroom_layout, build_subpacket_myroom_layout_done,
+    build_subpacket_myroom_plant_add, build_subpacket_myroom_plant_check,
+    build_subpacket_myroom_plant_crop, build_subpacket_myroom_plant_stop, build_subpacket_pbx,
+    build_subpacket_reqlogout, build_subpacket_reqsubmapnum, build_subpacket_shop_buy,
+    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
+    build_subpacket_tracking_list, build_subpacket_tracking_start, log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -4779,6 +4781,162 @@ async fn keepalive_loop(
                         )
                         .await;
                     }
+                    Some(
+                        AgentCommand::MyroomLayout {
+                            item_no,
+                            slot,
+                            container,
+                            floor,
+                            col,
+                            level,
+                            row,
+                            rotation,
+                        },
+                    ) => {
+                        // No optimistic pose write: the placement's truth is the ITEM_ATTR that LSB
+                        // pushes back for the same record, and kuluu reads furniture state from that
+                        // Attr alone (crate::myroom_furniture).
+                        let layout = codec::MyroomLayoutRequest {
+                            item_no,
+                            slot,
+                            container,
+                            floor,
+                            col,
+                            level,
+                            row,
+                            rotation,
+                        };
+                        let payload = build_subpacket_myroom_layout(sub_seq, &layout);
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_LAYOUT",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomLayoutDone) => {
+                        let payload = build_subpacket_myroom_layout_done(sub_seq);
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_LAYOUT(end)",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomBankin {
+                        item_no,
+                        slot,
+                        container,
+                    }) => {
+                        let payload = build_subpacket_myroom_bankin(sub_seq, item_no, slot, container);
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_BANKIN",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomPlantAdd {
+                        plant_item_no,
+                        add_item_no,
+                        plant_slot,
+                        add_slot,
+                        plant_container,
+                        add_container,
+                    }) => {
+                        let payload = build_subpacket_myroom_plant_add(
+                            sub_seq,
+                            plant_item_no,
+                            add_item_no,
+                            plant_slot,
+                            add_slot,
+                            plant_container,
+                            add_container,
+                        );
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_PLANT_ADD",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomPlantCheck {
+                        plant_item_no,
+                        plant_slot,
+                        plant_container,
+                    }) => {
+                        let payload = build_subpacket_myroom_plant_check(
+                            sub_seq,
+                            plant_item_no,
+                            plant_slot,
+                            plant_container,
+                        );
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_PLANT_CHECK",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomPlantCrop {
+                        plant_item_no,
+                        plant_slot,
+                        plant_container,
+                        cancel,
+                    }) => {
+                        let payload = build_subpacket_myroom_plant_crop(
+                            sub_seq,
+                            plant_item_no,
+                            plant_slot,
+                            plant_container,
+                            cancel,
+                        );
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_PLANT_CROP",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
+                    Some(AgentCommand::MyroomPlantStop {
+                        plant_item_no,
+                        plant_slot,
+                        plant_container,
+                    }) => {
+                        let payload = build_subpacket_myroom_plant_stop(
+                            sub_seq,
+                            plant_item_no,
+                            plant_slot,
+                            plant_container,
+                        );
+                        send_myroom_request(
+                            map,
+                            payload,
+                            "MYROOM_PLANT_STOP",
+                            &mut sub_seq,
+                            server_last_seq,
+                            &event_tx,
+                        )
+                        .await;
+                    }
                     Some(AgentCommand::CommitMacros { slots }) => {
                         // Macros are client-local (vault main_menu.md §41 [V-
                         // negative wire]): no packet here — normalize under the
@@ -8196,6 +8354,31 @@ async fn send_myroom_job(
         tracing::warn!(error = %e, "myroom_job send failed");
         let _ = event_tx.send(AgentEvent::Error {
             message: format!("ChangeJob send: {e}"),
+        });
+    }
+}
+
+/// One outbound Mog House furniture/plant request (c2s 0x0FA..0x0FF): send it as its own sub-packet
+/// and report a wire failure like every other sender does. Retail emits these one at a time from the
+/// layout flush (`.text FFXiMain.dll retail-2026-09 0x1CE7A0` clears each object's dirty byte only
+/// after its helper returns success), so kuluu never batches two into one datagram deliberately.
+async fn send_myroom_request(
+    map: &mut MapClient,
+    payload: Vec<u8>,
+    label: &'static str,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) {
+    tracing::info!(label, bytes = payload.len(), "sending myroom request");
+    *sub_seq = sub_seq.wrapping_add(1);
+    if let Err(e) = map
+        .send_encrypted(&payload, datagram_header_id(*sub_seq), server_last_seq)
+        .await
+    {
+        tracing::warn!(error = %e, label, "myroom request send failed");
+        let _ = event_tx.send(AgentEvent::Error {
+            message: format!("{label} send: {e}"),
         });
     }
 }

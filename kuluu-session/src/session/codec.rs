@@ -687,6 +687,183 @@ pub fn build_subpacket_myroom_is(sync: u16, kind: u8, param1: u8, param2: u16) -
     buf
 }
 
+// The Mog House layout/planting family, c2s 0x0FA..0x0FF. Retail builds each one through its own
+// helper in FFXiMain.dll retail-2026-09 — Layout `.text 0xF0CC0`, the all-zero closing variant
+// `.text 0xF0C80`, Bankin `.text 0xF0D40`, PlantAdd `.text 0xF0DA0`, PlantCheck `.text 0xF0E10`,
+// PlantCrop `.text 0xF0E70`, PlantStop `.text 0xF0ED0` — and every helper is the same shape: allocate
+// with FC3C0(opcode, …), write the fields, commit through FC4D0 with the byte count that matches the
+// LSB struct below. The flush that calls them walks one furniture object's dirty bytes (Layout flag
+// obj+0x2C then Bankin flag obj+0x2D) at `.text 0x1CE7A0`. Byte offsets in those writes are identical
+// to LSB's `GP_CLI_COMMAND_MYROOM_*` structs, so these builders write the same bytes the client does.
+//
+/// Layout request payload: the shelf address of one item plus the pose retail sends with it. Retail
+/// fills this from its furniture object (`col`←obj+0x14, level←obj+0x18… see the flush at
+/// `.text 0x1CE7B0`, which passes obj+0x14/+0x18/+0x1C as the three position bytes and obj+0x20 as the
+/// rotation); kuluu fills it from [`crate::myroom_furniture::PlacedFurniture`], whose fields carry LSB's
+/// own names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MyroomLayoutRequest {
+    pub item_no: u16,
+    /// `MyroomItemIndex`: the shelf slot the item sits in.
+    pub slot: u8,
+    /// `MyroomCategory`: LOC_MOGSAFE or LOC_MOGSAFE2.
+    pub container: u8,
+    /// `MyroomFloorFlg` — LSB validates it in 0..=1, which is bit 0 of the layer bits kuluu keeps.
+    pub floor: u8,
+    /// Packet `x`, i.e. Attr byte 6 (LSB's Col).
+    pub col: i8,
+    /// Packet `y` — LSB validates it in 0..=25 and calls it the stacking elevation (Attr byte 7).
+    pub level: i8,
+    /// Packet `z`, Attr byte 8 (LSB's Row).
+    pub row: i8,
+    /// Rotation `v`: LSB validates it in 0..=3 (Attr byte 9).
+    pub rotation: i8,
+}
+
+pub fn build_subpacket_myroom_layout(sync: u16, layout: &MyroomLayoutRequest) -> Vec<u8> {
+    let mut buf = vec![0u8; 16];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_LAYOUT,
+        3,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&layout.item_no.to_le_bytes());
+    buf[6] = layout.slot;
+    buf[7] = layout.container;
+    buf[8] = layout.floor;
+    buf[9] = layout.col as u8;
+    buf[10] = layout.level as u8;
+    buf[11] = layout.row as u8;
+    buf[12] = layout.rotation as u8;
+    // The struct's three trailing pad bytes stay zero: every retail field is written above.
+    buf
+}
+
+/// The all-zero form of the same packet (FFXiMain.dll retail-2026-09 `.text 0xF0C80`: allocate, write
+/// zeros into +4..+0xC, commit 0x10). Retail sends it once when layout mode ends rather than entering
+/// it; LSB reads `MyroomItemNo == 0` as exactly that and refreshes the Mog House enhancements instead
+/// of placing anything (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp process).
+pub fn build_subpacket_myroom_layout_done(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 16];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_LAYOUT,
+        3,
+        sync,
+    ));
+    buf
+}
+
+/// c2s 0x0FB GP_CLI_COMMAND_MYROOM_BANKIN — take a placed piece back off the room floor
+/// (vendor/server/src/map/packets/c2s/0x0fb_myroom_bankin.h; helper FFXiMain.dll retail-2026-09
+/// `.text 0xF0D40`, which writes +4 item number, +6 index and +7 category then commits 8 bytes).
+pub fn build_subpacket_myroom_bankin(sync: u16, item_no: u16, slot: u8, container: u8) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_BANKIN,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&item_no.to_le_bytes());
+    buf[6] = slot;
+    buf[7] = container;
+    buf
+}
+
+/// c2s 0x0FC GP_CLI_COMMAND_MYROOM_PLANT_ADD — sow a seed into a pot or feed a growing plant
+/// (vendor/server/src/map/packets/c2s/0x0fc_myroom_plant_add.h; helper FFXiMain.dll retail-2026-09
+/// `.text 0xF0DA0` commits 12 bytes: +4/+6 the two item numbers, +8/+9 their slots, +A/+B their
+/// containers).
+pub fn build_subpacket_myroom_plant_add(
+    sync: u16,
+    plant_item_no: u16,
+    add_item_no: u16,
+    plant_slot: u8,
+    add_slot: u8,
+    plant_container: u8,
+    add_container: u8,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 12];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_PLANT_ADD,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&plant_item_no.to_le_bytes());
+    buf[6..8].copy_from_slice(&add_item_no.to_le_bytes());
+    buf[8] = plant_slot;
+    buf[9] = add_slot;
+    buf[10] = plant_container;
+    buf[11] = add_container;
+    buf
+}
+
+/// c2s 0x0FD GP_CLI_COMMAND_MYROOM_PLANT_CHECK — examine a growing plant so the server reports its
+/// state (vendor/server/src/map/packets/c2s/0x0fd_myroom_plant_check.h; helper FFXiMain.dll
+/// retail-2026-09 `.text 0xF0E10`).
+pub fn build_subpacket_myroom_plant_check(
+    sync: u16,
+    plant_item_no: u16,
+    plant_slot: u8,
+    plant_container: u8,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_PLANT_CHECK,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&plant_item_no.to_le_bytes());
+    buf[6] = plant_slot;
+    buf[7] = plant_container;
+    buf
+}
+
+/// c2s 0x0FE GP_CLI_COMMAND_MYROOM_PLANT_CROP — harvest. `cancel` is the header's `CancellFlg`: retail
+/// passes 1 when the player backs out of the harvest prompt (call site FFXiMain.dll retail-2026-09
+/// `.text 0x206951`) and 0 on the real harvest (`.text 0x2069B1`); the helper is `.text 0xF0E70` and
+/// commits 12 bytes with the flag at +8
+/// (vendor/server/src/map/packets/c2s/0x0fe_myroom_plant_crop.h).
+pub fn build_subpacket_myroom_plant_crop(
+    sync: u16,
+    plant_item_no: u16,
+    plant_slot: u8,
+    plant_container: u8,
+    cancel: bool,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 12];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_PLANT_CROP,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&plant_item_no.to_le_bytes());
+    buf[6] = plant_slot;
+    buf[7] = plant_container;
+    buf[8] = u8::from(cancel);
+    buf
+}
+
+/// c2s 0x0FF GP_CLI_COMMAND_MYROOM_PLANT_STOP — stop drying/harvesting a plant
+/// (vendor/server/src/map/packets/c2s/0x0ff_myroom_plant_stop.h; helper FFXiMain.dll retail-2026-09
+/// `.text 0xF0ED0`).
+pub fn build_subpacket_myroom_plant_stop(
+    sync: u16,
+    plant_item_no: u16,
+    plant_slot: u8,
+    plant_container: u8,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::MYROOM_PLANT_STOP,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&plant_item_no.to_le_bytes());
+    buf[6] = plant_slot;
+    buf[7] = plant_container;
+    buf
+}
+
 // c2s 0x0F2 GP_CLI_COMMAND_SUBMAPCHANGE: State u16 @4, SubMapNumber u16 @6
 // (vendor/server/src/map/packets/c2s/0x0f2_submapchange.h). Sent on every
 // sub-area latch change so `PChar->loc.boundary` — and the next relog's

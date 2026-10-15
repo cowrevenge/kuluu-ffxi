@@ -2612,6 +2612,8 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MyroomPlantCheck { .. } => (),
         AgentCommand::MyroomPlantCrop { .. } => (),
         AgentCommand::MyroomPlantStop { .. } => (),
+        // The arrangement mode request the session actor gates and applies (bead kuluu-o9qt7.39).
+        AgentCommand::MyroomMode { .. } => (),
         AgentCommand::CommitMacros { .. } => (),
         AgentCommand::CommitEmoteOrder { .. } => (),
         // Header-only currency report requests (bead kuluu-o9qt7.35).
@@ -2865,6 +2867,27 @@ fn linkshell_slot_events_fold_the_pair_and_ignore_unknown_slots() {
         linkshell_slot: 3,
         category: 0,
         item_index: 9,
+    }));
+}
+
+#[test]
+fn myroom_mode_changes_fold_from_the_actor_mirror() {
+    // The arrangement mode has no wire (retail keeps it in the myroom manager's own word), so the
+    // session actor's accepted transitions are the only thing that may move this field (bead
+    // kuluu-o9qt7.39; FFXiMain.dll retail-2026-09 `.text 0x1D34FA`).
+    let mut state = SessionState::default();
+    assert_eq!(state.myroom_mode, crate::myroom_layout::MODE_NORMAL);
+
+    assert!(state.apply_event(&AgentEvent::MyroomModeChanged {
+        previous: crate::myroom_layout::MODE_NORMAL,
+        next: crate::myroom_layout::MODE_LAYOUT,
+    }));
+    assert_eq!(state.myroom_mode, crate::myroom_layout::MODE_LAYOUT);
+
+    // A replayed change reports no mutation.
+    assert!(!state.apply_event(&AgentEvent::MyroomModeChanged {
+        previous: crate::myroom_layout::MODE_NORMAL,
+        next: crate::myroom_layout::MODE_LAYOUT,
     }));
 }
 
@@ -3138,6 +3161,8 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MapOpen { .. } => (),
         AgentEvent::MapMarkerPlaced { .. } => (),
         AgentEvent::MapClosed => (),
+        // The actor-mirrored arrangement mode (bead kuluu-o9qt7.39).
+        AgentEvent::MyroomModeChanged { .. } => (),
     }
 }
 

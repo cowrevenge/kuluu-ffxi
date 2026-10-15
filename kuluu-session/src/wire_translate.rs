@@ -112,6 +112,8 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
             door_open: m.door_open,
         }),
 
+        myroom_mode: s.myroom_mode,
+
         mh_2f_unlocked: s.mh_2f_unlocked,
 
         emote_jobs: s.emote_jobs,

@@ -82,6 +82,14 @@ pub fn is_mog_house_shelf(container: u8) -> bool {
     container == CONTAINER_MOGSAFE || container == CONTAINER_MOGSAFE2
 }
 
+/// Whether a slot byte can name a seat at all when something is *selected* (as opposed to ingested):
+/// the mode switch only rejects `slot >= 0x51` here (FFXiMain.dll retail-2026-09 `.text 0x1D3656`, and
+/// again for select-one-piece mode at `.text 0x1D374A`), so slot 0 passes this test even though the
+/// record-driven rebuild never places anything in it.
+pub fn is_selectable_slot(slot: u8) -> bool {
+    slot <= LAST_FURNITURE_SLOT
+}
+
 /// The DAT kinds that count as furniture (the three-way compare at `.text 0x1D2C3C`).
 pub fn is_furniture_kind(kind: u8) -> bool {
     matches!(

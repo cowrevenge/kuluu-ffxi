@@ -1156,6 +1156,13 @@ pub struct SceneSnapshot {
     /// [`Self::currencies_1`], answered under c2s 0x115 (`.text 0xFD550`).
     #[serde(default)]
     pub currencies_2: Option<Vec<u8>>,
+
+    /// Which Mog House arrangement mode the client has entered. Client-side state, never wire data:
+    /// retail keeps it in its myroom manager's own word (+0x1C), read back at `.text FFXiMain.dll
+    /// retail-2026-09 0x1D34FA`. 0 = normal play, 1 = layout (`/layout`), 2 = gardening (`/garden`),
+    /// 3 = flowerpot item pick, 4 = select one piece; anything else is rejected before dispatch.
+    #[serde(default)]
+    pub myroom_mode: u8,
 }
 
 /// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
@@ -2819,6 +2826,8 @@ mod tests {
                 sub_map: 0,
                 door_open: false,
             }),
+            // Nothing being arranged in the sample (bead kuluu-o9qt7.39).
+            myroom_mode: 0,
             mh_2f_unlocked: None,
             sub_area: None,
             voyage: None,
@@ -3412,6 +3421,7 @@ mod tests {
             "emote_order",
             "currencies_1",
             "currencies_2",
+            "myroom_mode",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3419,8 +3429,9 @@ mod tests {
 
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
-    // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // the bytes its default encodes to; no earlier field moved. §59 addendum 31 appends
+    // myroom_mode (u8) as exactly one more zero byte at the tail.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

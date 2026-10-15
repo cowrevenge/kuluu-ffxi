@@ -712,6 +712,14 @@ pub struct SessionState {
     #[serde(default)]
     pub myroom: Option<MyRoomInfo>,
 
+    /// Which Mog House arrangement mode this client is in — the analogue of the myroom manager's own mode
+    /// word (+0x1C) that the retail mode switch reads back (FFXiMain.dll retail-2026-09 `.text 0x1D34FA`).
+    /// Values are the `MODE_*` constants of [`crate::myroom_layout`]; 0 means nothing is being arranged.
+    /// The session actor owns the decision and mirrors every accepted change through
+    /// [`AgentEvent::MyroomModeChanged`], so this fold copy cannot drift from it.
+    #[serde(default)]
+    pub myroom_mode: u8,
+
     /// `SubMapNumber` the server reported in 0x00A LOGIN
     /// (`PChar->loc.boundary`): which sub-area interior the character is
     /// standing in on arrival. Cleared by a zone change, so it only ever
@@ -3094,6 +3102,13 @@ impl SessionState {
                 }
                 changed
             }
+            AgentEvent::MyroomModeChanged { previous: _, next } => {
+                if self.myroom_mode == *next {
+                    return false;
+                }
+                self.myroom_mode = *next;
+                true
+            }
             AgentEvent::SynthCompleted { outcome } => {
                 // Each answer replaces the last whole (s2c 0x06F is one-shot feedback).
                 let changed = self.synth_result.as_ref() != Some(outcome);
@@ -3955,6 +3970,15 @@ pub enum AgentEvent {
         item_index: u8,
     },
 
+    /// The client's Mog House arrangement mode changed — emitted by the session actor after its own
+    /// gate chain accepted an [`AgentCommand::MyroomMode`], never by a packet (retail keeps the mode in
+    /// the myroom manager alone; no wire carries it — FFXiMain.dll retail-2026-09 `.text 0x1D34FA`).
+    /// Values are the `MODE_*` constants of [`crate::myroom_layout`](crate::myroom_layout).
+    MyroomModeChanged {
+        previous: u8,
+        next: u8,
+    },
+
     /// s2c 0x06F GP_SERV_COMMAND_COMBINE_ANS: the answer to our last synthesis
     /// ask replaces whatever we held (vault main_menu.md §28).
     SynthCompleted {
@@ -4301,6 +4325,15 @@ pub enum AgentCommand {
         plant_item_no: u16,
         plant_slot: u8,
         plant_container: u8,
+    },
+
+    /// Enter or leave one of the Mog House arrangement modes: the mode switch FFXiMain.dll retail-2026-09
+    /// `.text 0x1D3380(mode, slot, container)` with no particular piece asked for (retail spells that as a
+    /// slot of -1 at `.text 0x7E78D`/`.text 0x7E999`). 0 returns to normal play, 1 is `/layout`, 2 is
+    /// `/garden`; the refusal law, the windows it closes and the wire beat it may owe all come from
+    /// [`crate::myroom_layout`] [V].
+    MyroomMode {
+        mode: u8,
     },
 
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers

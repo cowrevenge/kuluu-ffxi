@@ -105,7 +105,7 @@ pub enum CharSelection {
 
 /// Self Mog House / job state the send loop needs synchronously for the local
 /// menus (the folded `SessionState` lives in another task).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct SelfMogState {
     myroom: Option<crate::state::MyRoomInfo>,
     mog_zone_flag: bool,
@@ -125,6 +125,16 @@ struct SelfMogState {
     /// 0x055; the c2s 0x064 mark-seen reply must carry the table's full
     /// updated LookItemFlag bitset.
     key_item_tables: [KeyItemTableFlags; decode::ScenarioItem::TABLE_COUNT],
+    /// The arrangement mode this client is in — kuluu's analogue of the myroom manager's own mode word
+    /// (+0x1C), which FFXiMain.dll retail-2026-09 reads back at `.text 0x1D34FA`. Values are the `MODE_*`
+    /// constants of [`crate::myroom_layout`]; kept here because the send path must test it synchronously
+    /// before accepting another arrangement request. Every accepted change is also emitted as an
+    /// [`AgentEvent::MyroomModeChanged`] so the folded SessionState mirrors it.
+    layout_mode: u8,
+    /// Mog House shelf seats `(container, slot)` with a furniture request outstanding — retail's busy
+    /// predicate (`.text FFXiMain.dll retail-2026-09 0x1D5FE0`) answers while any such operation is
+    /// unacknowledged, and each seat's own s2c 0x020 ITEM_ATTR record is the acknowledgement.
+    pending_furniture_edits: Vec<(u8, u8)>,
 }
 
 /// The open NPC shop window. The shop has no close packet (research/XiPackets
@@ -1111,6 +1121,10 @@ fn handle_sub_packet(
                     })
                 });
                 mog.mog_zone_flag = login.myroom.is_some_and(|m| m.mog_zone_flag != 0);
+                // A zone-in rebuilds retail's myroom manager wholesale, mode word included: arrangement
+                // never carries across a zone, and neither do unacknowledged furniture edits.
+                mog.layout_mode = crate::myroom_layout::MODE_NORMAL;
+                mog.pending_furniture_edits.clear();
                 if let Some(ev) = login.zone_in_event {
                     tracing::info!(
                         event_id = ev.event_para,
@@ -2501,6 +2515,15 @@ fn handle_sub_packet(
                         server_ts: 0,
                     },
                 });
+                // This record is also the acknowledgement an outstanding furniture edit waits for:
+                // LSB answers a layout or bankin request with the ITEM_ATTR of that very shelf slot
+                // (vendor/server/src/map/packets/c2s/0x0fa_myroom_layout.cpp), and retail's busy
+                // predicate clears along with it.
+                crate::myroom_layout::clear_pending_edit(
+                    &mut mog.pending_furniture_edits,
+                    a.category,
+                    a.index,
+                );
                 let ci = a.charge_info();
                 let _ = event_tx.send(AgentEvent::InventoryUpdated {
                     container: a.category,
@@ -4806,6 +4829,11 @@ async fn keepalive_loop(
                             row,
                             rotation,
                         };
+                        crate::myroom_layout::note_pending_edit(
+                            &mut mog.pending_furniture_edits,
+                            container,
+                            slot,
+                        );
                         let payload = build_subpacket_myroom_layout(sub_seq, &layout);
                         send_myroom_request(
                             map,
@@ -4834,6 +4862,11 @@ async fn keepalive_loop(
                         slot,
                         container,
                     }) => {
+                        crate::myroom_layout::note_pending_edit(
+                            &mut mog.pending_furniture_edits,
+                            container,
+                            slot,
+                        );
                         let payload = build_subpacket_myroom_bankin(sub_seq, item_no, slot, container);
                         send_myroom_request(
                             map,
@@ -4936,6 +4969,68 @@ async fn keepalive_loop(
                             &event_tx,
                         )
                         .await;
+                    }
+                    Some(AgentCommand::MyroomMode { mode }) => {
+                        // The mode switch's own refusal chain, run synchronously so a refused request
+                        // never reaches the wire: busy first (retail message code 5), then already-
+                        // arranging / door open (both retail's error bell — kuluu has no sound bus for
+                        // it yet, so they log only), then availability. Leaving layout mode for normal
+                        // play owes the all-zero c2s 0x0FA before anything else (`.text FFXiMain.dll
+                        // retail-2026-09 0x1D3505` tail-calls `.text 0xF0C80`).
+                        let gates = crate::myroom_layout::ArrangeGates {
+                            current_mode: mog.layout_mode,
+                            manager_busy: !mog.pending_furniture_edits.is_empty(),
+                            door_open: mog.myroom.is_some_and(|room| room.door_open),
+                            already_arranging: mog.layout_mode
+                                == crate::myroom_layout::MODE_LAYOUT,
+                            home_view_available: mog.myroom.is_some(),
+                        };
+                        // The object-array view (`placed`) lives with the inventory fold, not here; an
+                        // unknown room fails closed exactly like a missing item DAT does retail-side —
+                        // no selection and no `rmlo1` claim either way.
+                        match crate::myroom_layout::plan_arrange(
+                            crate::myroom_layout::ArrangeRequest::from_slash(mode),
+                            &gates,
+                            None,
+                        ) {
+                            Ok(transition) => {
+                                if transition.announces_layout_end {
+                                    let payload = build_subpacket_myroom_layout_done(sub_seq);
+                                    send_myroom_request(
+                                        map,
+                                        payload,
+                                        "MYROOM_LAYOUT(end)",
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        &event_tx,
+                                    )
+                                    .await;
+                                }
+                                mog.layout_mode = transition.next;
+                                tracing::debug!(
+                                    previous = transition.previous,
+                                    next = transition.next,
+                                    closes = transition.closes.len(),
+                                    reopens_myroom = transition.reopens_myroom,
+                                    "myroom arrangement mode changed"
+                                );
+                                let _ = event_tx.send(AgentEvent::MyroomModeChanged {
+                                    previous: transition.previous,
+                                    next: transition.next,
+                                });
+                            }
+                            Err(refusal) => {
+                                // The refusal itself is the behavior: no mode change, no packet. The
+                                // signal law (bell vs message code 5/6) lives in [`crate::
+                                // myroom_layout::RefusalSignal`]; wiring the bell sound and digging the
+                                // two message strings belongs to the arrange-editor HUD pass.
+                                tracing::debug!(
+                                    ?refusal,
+                                    signal = ?refusal.signal(),
+                                    "myroom arrangement request refused"
+                                );
+                            }
+                        }
                     }
                     Some(AgentCommand::CommitMacros { slots }) => {
                         // Macros are client-local (vault main_menu.md §41 [V-

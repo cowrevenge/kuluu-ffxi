@@ -708,6 +708,42 @@ const COMMANDS: &[(&str, &[Command])] = &[
                     }
                 },
             },
+            // The Mog House arrangement entries: /layout is slash id 0x7F (handler FFXiMain.dll
+            // retail-2026-09 `.text 0x7E630`) and /garden id 0x83 (`.text 0x7E8D0`); both run their gate
+            // chain and end in the same mode switch `.text 0x1D3380`, pushing `(mode, -1,
+            // LOC_MOGSAFE)` at `.text 0x7E78B`/`.text 0x7E999`. The refusal law (door/busy/house) and
+            // the mode machine itself live in kuluu-session's `myroom_layout` (vault main_menu.md §59
+            // addendum 31), so both commands always go to the actor.
+            Command {
+                names: &["layout"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "arrange your Mog House furniture",
+                handler: |c| {
+                    if c.rest.is_empty() {
+                        SlashOutcome::Command(AgentCommand::MyroomMode {
+                            mode: kuluu_session::myroom_layout::MODE_LAYOUT,
+                        })
+                    } else {
+                        unknown_command(c.cmd)
+                    }
+                },
+            },
+            Command {
+                names: &["garden"],
+                set: CommandSet::Retail,
+                usage: "",
+                summary: "tend your Mog House garden",
+                handler: |c| {
+                    if c.rest.is_empty() {
+                        SlashOutcome::Command(AgentCommand::MyroomMode {
+                            mode: kuluu_session::myroom_layout::MODE_GARDEN,
+                        })
+                    } else {
+                        unknown_command(c.cmd)
+                    }
+                },
+            },
             // Retail's page-2 Key Items row runs this literal (FFXiMain.dll
             // retail-2026-09 RVA 0x14E855, .data 0x371B40); the client registry
             // knows /keyitem = id 0x4C and LSB has no server handler for it —
@@ -3385,6 +3421,8 @@ mod tests {
             (&["shutdown"], 0x0044),
             (&["clock"], 0x003f),
             (&["map"], 0x004f),
+            (&["layout"], 0x007f),
+            (&["garden"], 0x0083),
             (&["keyitem"], 0x004c),
             (&["quest"], 0x004d),
             (&["bank"], 0x006c),
@@ -3433,6 +3471,22 @@ mod tests {
             None,
         )
     }
+    /// /layout (slash id 0x7F) and /garden (id 0x83) hand their mode straight to the session's
+    /// arrangement machine — no client-local shortcut (`kuluu_session::myroom_layout`).
+    #[test]
+    fn layout_and_garden_dispatch_arrangement_modes() {
+        for (line, want_mode) in [
+            ("/layout", kuluu_session::myroom_layout::MODE_LAYOUT),
+            ("/garden", kuluu_session::myroom_layout::MODE_GARDEN),
+        ] {
+            let outcome = parse_slash_t(line, &[], origin(), None, None);
+            assert!(
+                matches!(&outcome, SlashOutcome::Command(AgentCommand::MyroomMode { mode }) if *mode == want_mode),
+                "{line}: {outcome:?}"
+            );
+        }
+    }
+
     #[test]
     fn targetnpc_cycles_non_pc_forward() {
         let entities = vec![

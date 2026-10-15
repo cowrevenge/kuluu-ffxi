@@ -38,6 +38,7 @@ pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
 pub mod quick_action;
+pub mod region_map;
 pub mod stair_debug;
 // (roster mockup deleted — real party/self HUD is party_frame.rs)
 pub mod party_frame;
@@ -275,6 +276,7 @@ impl Plugin for HudPlugin {
 
         app.init_resource::<status_ribbon::StatusIconCache>();
         app.init_resource::<status_ribbon::StatusIconDatRoot>();
+        app.init_resource::<region_map::ViewedRegionMap>();
 
         app.init_resource::<item_dat_root::ItemDatRoot>();
         app.init_resource::<item_dat_root::ItemIconCache>();
@@ -452,6 +454,7 @@ impl Plugin for HudPlugin {
                 map_screen::update_map_widescan_dots.after(map_screen::update_map_view),
                 map_screen::update_map_placed_markers,
                 map_screen::update_map_panel,
+                region_map::update_region_map,
             ),
         );
         app.add_systems(Update, apply_dev_hud_visibility);
@@ -596,7 +599,10 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     );
     // Depends on `crate::minimap` (wasm-gated).
     #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(schedule, map_screen::spawn_map_screen);
+    app.add_systems(
+        schedule,
+        (map_screen::spawn_map_screen, region_map::spawn_region_map),
+    );
 }
 
 #[cfg(test)]

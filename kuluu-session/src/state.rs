@@ -577,6 +577,12 @@ pub struct SessionState {
     #[serde(default)]
     pub char_skills: Option<kuluu_snapshot::CharSkills>,
 
+    /// The newest s2c 0x063 MISCDATA **Merits** record — gates the Status Merit Points row and
+    /// feeds its readout (bead kuluu-o9qt7.43; retail's store law at FFXiMain.dll retail-2026-09
+    /// .data 0x485826/0x48582A + flag bit1, dispatcher `.text 0x99270`).
+    #[serde(default)]
+    pub merits: Option<kuluu_snapshot::MisdataMerits>,
+
     /// Server-offered alternative to returning home while dead (s2c 0x0F9,
     /// vendor/server/src/map/packets/s2c/0x0f9_res.cpp).
     /// `None` is the ordinary home-point-only menu.
@@ -2916,6 +2922,14 @@ impl SessionState {
                 self.char_skills = Some(*skills);
                 changed
             }
+            AgentEvent::MeritsUpdated { merits } => {
+                // Each MISCDATA Merits record replaces the last, mirroring retail's dispatcher
+                // storing over 0x485826/0x48582A on every arrival (FFXiMain.dll retail-2026-09
+                // `.text 0x99290`).
+                let changed = self.merits != Some(*merits);
+                self.merits = Some(*merits);
+                changed
+            }
             AgentEvent::DeathMenuUpdated { offer } => {
                 let changed = self.death_menu_offer != *offer;
                 self.death_menu_offer = *offer;
@@ -3713,6 +3727,14 @@ pub enum AgentEvent {
     /// three rows: FFXiMain.dll retail-2026-09 `.text 0x148B50` opens them disabled).
     CharSkillsUpdated {
         skills: kuluu_snapshot::CharSkills,
+    },
+
+    /// s2c 0x063 GP_SERV_COMMAND_MISCDATA subtype **Merits** (bead kuluu-o9qt7.43): gates and
+    /// fills the Status window's Merit Points row — retail stores its two dwords at .data
+    /// FFXiMain.dll retail-2026-09 0x485826/0x48582A and raises the received flag (.text
+    /// dispatcher `0x99270`, case arm `.text 0x99290`; vault main_menu.md §59 addendum 36).
+    MeritsUpdated {
+        merits: kuluu_snapshot::MisdataMerits,
     },
 
     /// s2c 0x113/0x118 currency reports (bead kuluu-o9qt7.35), raw body as received — the

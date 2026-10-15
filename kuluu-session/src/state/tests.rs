@@ -2754,6 +2754,32 @@ fn char_skills_update_folds_onto_state_and_snapshot() {
     assert_eq!(projected.command_recast, block.command_recast);
 }
 
+/// s2c 0x063 MISCDATA Merits folds replace one another and ride the snapshot (bead
+/// kuluu-o9qt7.43) — retail's dispatcher re-stores 0x485826/0x48582A on every arrival
+/// (.text FFXiMain.dll retail-2026-09 `0x99290`).
+#[test]
+fn merits_record_folds_replace_and_project() {
+    let mut state = SessionState::default();
+    assert!(state.merits.is_none());
+    let m = kuluu_snapshot::MisdataMerits {
+        limit_points: 7,
+        merit_points: 4,
+        blu_bonus: 1,
+        can_use_merit_mode: true,
+        xp_capped_or_merit_mode: false,
+        merit_mode_enabled: true,
+        max_merit_points: 56,
+    };
+    assert!(state.apply_event(&AgentEvent::MeritsUpdated { merits: m }));
+    assert_eq!(state.merits, Some(m));
+    assert!(
+        !state.apply_event(&AgentEvent::MeritsUpdated { merits: m }),
+        "an identical record is not a snapshot change"
+    );
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(snap.merits, Some(m));
+}
+
 #[test]
 fn death_menu_offer_is_durable_and_clears_on_revive_or_zone_change() {
     use ffxi_proto::decode::DeathMenuOffer;
@@ -3119,6 +3145,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::DeathTimerUpdated { .. } => (),
         AgentEvent::PlayTimeSynced { .. } => (),
         AgentEvent::CharSkillsUpdated { .. } => (),
+        AgentEvent::MeritsUpdated { .. } => (),
         AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),

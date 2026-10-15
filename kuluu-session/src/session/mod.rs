@@ -1951,7 +1951,18 @@ fn handle_sub_packet(
             }
         }
         s2c::MISCDATA => {
-            if let Some((icons, expiries)) = decode_miscdata_status_icons(sub.data) {
+            // 0x063 subtypes dispatch on the record-type word at body+0 — retail's client runs
+            // the same switch (dispatcher .text FFXiMain.dll retail-2026-09 `0x99270`, jump
+            // table over subtype−2; vault main_menu.md §59 addendum 36).
+            let is_merits = sub
+                .data
+                .get(..2)
+                .is_some_and(|b| u16::from_le_bytes([b[0], b[1]]) == MISCDATA_SUBTYPE_MERITS);
+            if is_merits {
+                if let Some(merits) = decode_miscdata_merits(sub.data) {
+                    let _ = event_tx.send(AgentEvent::MeritsUpdated { merits });
+                }
+            } else if let Some((icons, expiries)) = decode_miscdata_status_icons(sub.data) {
                 let _ = event_tx.send(AgentEvent::StatusIconsUpdated { icons, expiries });
             }
         }
@@ -7881,6 +7892,42 @@ fn status_icon_expiry_unix(timestamp: u32, now_unix: u64) -> u32 {
         return 0;
     }
     (now_unix + remaining as u64) as u32
+}
+
+/// s2c 0x063 MISCDATA subtype Merits = **2** (`GP_SERV_COMMAND_MISCDATA_TYPE::Merits`,
+/// vendor/server/src/map/packets/s2c/0x063_miscdata.h); retail's dispatcher case arm
+/// .text FFXiMain.dll retail-2026-09 `0x99290` stores the two dwords and raises flag bit 1.
+const MISCDATA_SUBTYPE_MERITS: u16 = 0x0002;
+
+/// Decode one MISCDATA Merits record — LSB `GP_SERV_COMMAND_MISCDATA::MERITS`
+/// (vendor/server/src/map/packets/s2c/0x063_miscdata_merits.h): body {type u16, unknown06
+/// u16, limitPoints u16, bit-word u16 {merit points bits 0..6, BLU bonus bits 7..12,
+/// can-use-merit-mode bit 13, xp-capped-or-merit-mode bit 14, merit-mode-enabled bit 15},
+/// maxMeritPoints u8}. Retail copies body dwords +4/+8 straight to its store
+/// (.text FFXiMain.dll retail-2026-09 `0x99290` — [0x485826]/[0x48582A]), where the Status
+/// Merit Points gate reads limitPoints + byte 0x485829 bit-mask 0x20 = can-use-merit-mode
+/// (gate body `.text 0x148E88`; bead kuluu-o9qt7.43).
+fn decode_miscdata_merits(data: &[u8]) -> Option<kuluu_snapshot::MisdataMerits> {
+    const BODY_MIN: usize = 9;
+    if data.len() < BODY_MIN
+        || !matches!(
+            u16::from_le_bytes([data[0], data[1]]),
+            MISCDATA_SUBTYPE_MERITS
+        )
+    {
+        return None;
+    }
+    let limit_points = u16::from_le_bytes([data[4], data[5]]);
+    let bits = u16::from_le_bytes([data[6], data[7]]);
+    Some(kuluu_snapshot::MisdataMerits {
+        limit_points,
+        merit_points: (bits & 0x7F) as u8,
+        blu_bonus: ((bits >> 7) & 0x3F) as u8,
+        can_use_merit_mode: bits & (1 << 13) != 0,
+        xp_capped_or_merit_mode: bits & (1 << 14) != 0,
+        merit_mode_enabled: bits >> 15 != 0,
+        max_merit_points: data[8],
+    })
 }
 
 fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {

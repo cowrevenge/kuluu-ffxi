@@ -3962,6 +3962,44 @@ fn miscdata_status_icons_truncated_returns_none() {
     assert!(decode_miscdata_status_icons(&data).is_none());
 }
 
+/// s2c 0x063 MISCDATA Merits wire law (bead kuluu-o9qt7.43), pinned against LSB
+/// `GP_SERV_COMMAND_MISCDATA::MERITS` (vendor/server/src/map/packets/s2c/0x063_miscdata_merits.h):
+/// body {type u16=2, unknown u16, limitPoints u16, word {points 7b, blu 6b,
+/// can-use 1b@13, xp-capped 1b@14, mode-enabled 1b@15}, maxMeritPoints u8}.
+#[test]
+fn miscdata_merits_decodes_the_lsb_record_and_rejects_other_kinds() {
+    let mut data = vec![0u8; 9];
+    data[0..2].copy_from_slice(&0x0002u16.to_le_bytes());
+    data[4..6].copy_from_slice(&12u16.to_le_bytes()); // limitPoints
+    data[6..8].copy_from_slice(&0xFFFFu16.to_le_bytes()); // every flag at max
+    data[8] = 98; // maxMeritPoints
+    let m = decode_miscdata_merits(&data).expect("merits record");
+    assert_eq!(
+        m,
+        kuluu_snapshot::MisdataMerits {
+            limit_points: 12,
+            merit_points: 0x7F,
+            blu_bonus: 0x3F,
+            can_use_merit_mode: true,
+            xp_capped_or_merit_mode: true,
+            merit_mode_enabled: true,
+            max_merit_points: 98,
+        }
+    );
+
+    // Only bit 13 lifts can-use; neighbours must not bleed into it.
+    data[6..8].copy_from_slice(&(1u16 << 14).to_le_bytes());
+    let m = decode_miscdata_merits(&data).expect("merits record");
+    assert!(!m.can_use_merit_mode, "bit 14 is the xp-capped neighbour");
+    assert!(m.xp_capped_or_merit_mode);
+
+    // Wrong subtype and truncation drop the record — retail's dispatcher only routes
+    // subtype==2 into this store (FFXiMain.dll retail-2026-09 `.text 0x99270`).
+    data[0] = 5;
+    assert!(decode_miscdata_merits(&data).is_none());
+    assert!(decode_miscdata_merits(&data[..8]).is_none());
+}
+
 #[test]
 fn shop_list_decodes_rows_and_skips_zero_padding() {
     let mut data = vec![0u8; 4 + 12 * 3];

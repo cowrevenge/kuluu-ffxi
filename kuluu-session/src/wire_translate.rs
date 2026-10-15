@@ -160,6 +160,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // own family's encoding (FFXiMain.dll retail-2026-09 RVA 0x148564 for
         // combat/magic, RVA 0x1488A0 for craft).
         char_skills: s.char_skills,
+        merits: s.merits,
         // The emote display order is client-local like the macro store — retail reads
         // its own user blob at fill time (FFXiMain.dll retail-2026-09 `.text 0x2259C6`),
         // and LSB ships no emote-order packet [V-negative], so it rides the snapshot.

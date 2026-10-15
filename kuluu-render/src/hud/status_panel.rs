@@ -174,14 +174,22 @@ pub fn status_row_enabled(kind: StatusEntryKind, snap: &kuluu_snapshot::SceneSna
             main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
                 && snap.stats.is_some_and(|s| s.master_level_unlocked)
         }
-        // Merit Points (id 7): retail tests a client-side merit flag whose packet
-        // source is still unmapped, so there is nothing here that can lift it — grey,
-        // exactly as the row sits for any character without that flag.
-        StatusEntryKind::MeritPoints => false,
-        // Job Points (id 8): retail requires its category flag *and* a level-99 main
-        // job (`.text 0x148EB1`); kuluu can decide the half it has data for, so the row
-        // stays grey below 99 instead of offering an empty screen.
-        StatusEntryKind::JobPoints => main_job_level(snap) >= MASTER_LEVEL_JOB_CAP,
+        // Merit Points (id 7): enabled exactly when a s2c 0x063 Merits record has been
+        // received AND its can-use-merit-mode bit is set — retail's gate body (.text
+        // FFXiMain.dll retail-2026-09 `0x148E88`) tests the received flag at .data 0x485824
+        // bit 1 (raised only by the dispatcher case arm `.text 0x99290`) and then byte
+        // 0x485829 mask 0x20 = bit 13 of the stored flag word (vault main_menu.md §59
+        // addendum 36; bead kuluu-o9qt7.43).
+        StatusEntryKind::MeritPoints => snap.merits.is_some_and(|m| m.can_use_merit_mode),
+        // Job Points (id 8): retail's chain (.text FFXiMain.dll retail-2026-09 `.text
+        // 0x148EA3`) needs .data 0x485824 bit **2** — and an image-wide scan of every writer
+        // to that byte (all five AL-stores + the one or-mem site: FFXiMain.dll retail-2026-09
+        // `.text 0x992AB`/`.text 0x99348`/`.text 0x993B4`/`.text 0x9968E`/`.text
+        // 0x996F0` plus `or [addr],0x20` at `.text 0x993CC`) never sets it, and the region is
+        // virtual-size-only .data (zero-initialised) — so on retail-2026-09 this row stays
+        // grey for every character no matter the level [V-neg setter]. The former
+        // level-only half-gate wrongly enabled it at 99 (§59 addendum 36 correction).
+        StatusEntryKind::JobPoints => false,
         // Alter Ego Points (id 13): level 99 *and* key item [`ALTER_EGO_POINTS_KEY_ITEM`].
         StatusEntryKind::FacetCategories => {
             main_job_level(snap) >= MASTER_LEVEL_JOB_CAP
@@ -631,7 +639,24 @@ pub fn status_detail_lines(
         }
         StatusEntryKind::Unity => vec!["(unity campaign data not received yet)".to_string()],
         StatusEntryKind::PlayTime => vec![play_time_chat_line(snap)],
-        StatusEntryKind::MeritPoints => vec!["(merit points have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()],
+        // Merit Points detail: live from the s2c 0x063 record once received (LSB ships it —
+        // vendor/server/src/map/packets/s2c/0x063_miscdata_merits.h; bead kuluu-o9qt7.43).
+        StatusEntryKind::MeritPoints => match snap.merits {
+            Some(m) => vec![
+                format!("Limit points: {}", m.limit_points),
+                format!(
+                    "Merit points: {} (max {})",
+                    m.merit_points, m.max_merit_points
+                ),
+                if m.can_use_merit_mode {
+                    "Merit mode: available".to_string()
+                } else {
+                    "Merit mode: not available (needs level 75 and the Limit Breaker key item)"
+                        .to_string()
+                },
+            ],
+            None => vec!["(awaiting s2c 0x063 merits record)".to_string()],
+        },
         StatusEntryKind::JobPoints => vec!["(job-point category not received yet)".to_string()],
         StatusEntryKind::FacetCategories => {
             vec!["(facet-point categories have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()]
@@ -1107,8 +1132,9 @@ mod tests {
     }
 
     /// The three level-99 rows follow their own gates: mastery flag for Master
-    /// Levels, the Alter Ego key item for Facet Categories, and Job Points needs the
-    /// level half kuluu can actually see.
+    /// Levels, the Alter Ego key item for Facet Categories — and Job Points stays grey at
+    /// every level, because retail's flag-bit precondition has no setter in this client
+    /// build (§59 addendum 36 [V-neg]; bead kuluu-o9qt7.43 corrected the old half-gate).
     #[test]
     fn status_level_99_rows_gate_on_their_own_conditions() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
@@ -1154,7 +1180,10 @@ mod tests {
         assert!(status_row_enabled(StatusEntryKind::MasterLevels, &{
             gated.clone()
         }));
-        assert!(status_row_enabled(StatusEntryKind::JobPoints, &gated));
+        // Job Points stays grey even at 99: retail requires the never-set flag bit first
+        // (.text FFXiMain.dll retail-2026-09 `0x148EA3` chain — no writer exists; kuluu must
+        // not let the level alone lift it).
+        assert!(!status_row_enabled(StatusEntryKind::JobPoints, &gated));
         assert!(!status_row_enabled(
             StatusEntryKind::FacetCategories,
             &gated
@@ -1162,6 +1191,40 @@ mod tests {
 
         gated.key_items.push(ALTER_EGO_POINTS_KEY_ITEM);
         assert!(status_row_enabled(StatusEntryKind::FacetCategories, &gated));
+    }
+
+    /// Merit Points (id 7): the row lifts exactly when an s2c 0x063 Merits record has arrived
+    /// AND its can-use-merit-mode bit is set — retail's two-step gate (.text FFXiMain.dll
+    /// retail-2026-09 `0x148E88`: received flag, then stored word bit 13); the detail window
+    /// draws live numbers from that record, never a canned line (bead kuluu-o9qt7.43).
+    #[test]
+    fn merit_points_row_lifts_only_with_a_can_use_merits_record() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert!(!status_row_enabled(StatusEntryKind::MeritPoints, &snap));
+        // A record that says “not available” keeps the row grey despite being present.
+        snap.merits = Some(kuluu_snapshot::MisdataMerits {
+            limit_points: 12,
+            merit_points: 3,
+            blu_bonus: 0,
+            can_use_merit_mode: false,
+            xp_capped_or_merit_mode: true,
+            merit_mode_enabled: false,
+            max_merit_points: 98,
+        });
+        assert!(!status_row_enabled(StatusEntryKind::MeritPoints, &snap));
+        let lines = status_detail_lines(
+            STATUS_ENTRIES
+                .iter()
+                .position(|e| e.kind == StatusEntryKind::MeritPoints)
+                .unwrap(),
+            &snap,
+            &[],
+            &[],
+        );
+        assert_eq!(lines[0], "Limit points: 12", "live from the record");
+
+        snap.merits.as_mut().unwrap().can_use_merit_mode = true;
+        assert!(status_row_enabled(StatusEntryKind::MeritPoints, &snap));
     }
 
     /// Bead kuluu-o9qt7.35: the two Currencies windows draw straight out of the raw s2c block,

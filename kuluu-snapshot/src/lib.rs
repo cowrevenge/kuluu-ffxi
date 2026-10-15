@@ -1163,6 +1163,15 @@ pub struct SceneSnapshot {
     /// 3 = flowerpot item pick, 4 = select one piece; anything else is rejected before dispatch.
     #[serde(default)]
     pub myroom_mode: u8,
+
+    /// s2c 0x063 GP_SERV_COMMAND_MISCDATA subtype **Merits** (0x02) — the Status window's
+    /// Merit Points row gate and readout source (bead kuluu-o9qt7.43; vault main_menu.md
+    /// §59 addendum 36). `None` until that record arrives; retail enables row id 7 exactly when
+    /// one has been received AND its `can_use_merit_mode` bit is set (the client stores the pair
+    /// at .data FFXiMain.dll retail-2026-09 0x485824 bit1 + 0x485829 & 0x20, gate body
+    /// `.text 0x148E88`). Trailing on purpose.
+    #[serde(default)]
+    pub merits: Option<MisdataMerits>,
 }
 
 /// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
@@ -1177,6 +1186,33 @@ pub struct CharSkills {
     /// as a fixed-length sequence.
     #[serde(with = "skill_words")]
     pub skills: [u16; CharSkills::SKILL_COUNT],
+}
+
+/// One s2c 0x063 MISCDATA **Merits** record (bead kuluu-o9qt7.43). LSB defines it as
+/// `GP_SERV_COMMAND_MISCDATA::MERITS` (vendor/server/src/map/packets/s2c/0x063_miscdata_merits.h):
+/// limitPoints u16, then a bit-word {merit points 7 bits, BLU bonus 6 bits,
+/// can-use-merit-mode, xp-capped-or-merit-mode, merit-mode-enabled}, then maxMeritPoints u8.
+/// Retail's client copies the two dwords to .data FFXiMain.dll retail-2026-09
+/// **0x485826**/**0x48582A** (dispatcher `.text 0x99270`, case subtype 0x02 at `.text 0x99290`)
+/// and flags receipt by OR-ing bit 1 into **0x485824**; the Status Merit Points gate
+/// (.text `.text 0x148E88`) then tests that flag plus `can_use_merit_mode`
+/// (bit 13 of the word = mask 0x20 of byte 0x485829 — vault main_menu.md §59 addendum 36).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MisdataMerits {
+    /// Merit (limit) points available to spend.
+    pub limit_points: u16,
+    /// Unspent merit points, 0..=127 per the 7-bit field.
+    pub merit_points: u8,
+    /// BLU spell-point bonus, 0..=63 per the 6-bit field.
+    pub blu_bonus: u8,
+    /// Level >= 75 and holds the Limit Breaker key item — retail's gate for row id 7.
+    pub can_use_merit_mode: bool,
+    /// XP is capped or merit mode is on.
+    pub xp_capped_or_merit_mode: bool,
+    /// Merit mode enabled and current job eligible.
+    pub merit_mode_enabled: bool,
+    /// Maximum merit points for the character.
+    pub max_merit_points: u8,
 }
 
 /// Fixed-length (de)serialisation for the 64-word `skill_base`: serde's built-in
@@ -2724,6 +2760,7 @@ mod tests {
             // No 0x062 block in the sample: the Status skill rows read as
             // "nothing received yet", exactly like a fresh zone-in.
             char_skills: None,
+            merits: None,
             party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
@@ -3423,6 +3460,7 @@ mod tests {
             "config_confdata",
             "jobs",
             "char_skills",
+            "merits",
             "emote_order",
             "currencies_1",
             "currencies_2",
@@ -3435,8 +3473,9 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved. §59 addendum 31 appends
-    // myroom_mode (u8) as exactly one more zero byte at the tail.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // myroom_mode (u8) as exactly one more zero byte at the tail. §59 addendum 36 appends
+    // merits (`Option<MisdataMerits>`) as exactly one more `None` tag byte.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

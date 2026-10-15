@@ -162,6 +162,11 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         // its own user blob at fill time (FFXiMain.dll retail-2026-09 `.text 0x2259C6`),
         // and LSB ships no emote-order packet [V-negative], so it rides the snapshot.
         emote_order: s.emote_order.clone(),
+        // The currency reports ride through RAW (bead kuluu-o9qt7.35): each Currencies window
+        // applies its own getter table at draw time, mirroring the client's fill helper
+        // FFXiMain.dll retail-2026-09 `.text 0x2297C0` (vault §59 addendum 27).
+        currencies_1: s.currencies_1.clone(),
+        currencies_2: s.currencies_2.clone(),
     }
 }
 

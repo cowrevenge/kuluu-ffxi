@@ -2598,6 +2598,8 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MogHouseRemodel { .. } => (),
         AgentCommand::CommitMacros { .. } => (),
         AgentCommand::CommitEmoteOrder { .. } => (),
+        // Header-only currency report requests (bead kuluu-o9qt7.35).
+        AgentCommand::RequestCurrencies { .. } => (),
         AgentCommand::TreasureLot { .. } => (),
         AgentCommand::TreasurePass { .. } => (),
         AgentCommand::MarkKeyItemsSeen { .. } => (),
@@ -2996,6 +2998,8 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::Connected { .. } => (),
         AgentEvent::MacrosLoaded { .. } => (),
         AgentEvent::EmoteOrderLoaded { .. } => (),
+        // Raw currency report folds (bead kuluu-o9qt7.35).
+        AgentEvent::CurrenciesLoaded { .. } => (),
         AgentEvent::StageChanged { .. } => (),
         AgentEvent::ZoneChanged { .. } => (),
         AgentEvent::SubAreaSynced { .. } => (),

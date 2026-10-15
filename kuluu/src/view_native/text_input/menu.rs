@@ -276,6 +276,22 @@ const EQUIP_SLOT_INDEX_MAX: u8 = (kuluu_render::equip_slot::EquipmentIndex::ALL.
 /// as this detail level's own rows; retail keeps persona + level + detail on
 /// screen together, and kuluu derives those panels' visibility from the stack
 /// (status_flow_open), so no separate overlay flag exists anymore.
+/// The currency-request seam (bead kuluu-o9qt7.35): a Currencies-family select fires its
+/// header-only report request on **every** select — the retail opener runs first and caches
+/// nothing (FFXiMain.dll retail-2026-09 `.text 0xFD520`/`.text 0xFD550`; one-shot replies s2c
+/// 0x113/0x118), even when the window itself dedupes open. Other rows request nothing.
+fn currency_request_mode_for(
+    entry_kind: kuluu_render::hud::status_panel::StatusEntryKind,
+) -> Option<u8> {
+    use kuluu_render::hud::currency_law::CurrencyMode;
+    use kuluu_render::hud::status_panel::StatusEntryKind as K;
+    match entry_kind {
+        K::Currencies => Some(CurrencyMode::One.as_wire()),
+        K::Currencies2 => Some(CurrencyMode::Two.as_wire()),
+        _ => None,
+    }
+}
+
 fn open_statcom_detail(stack: &mut MenuStack, cursor: usize) {
     use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
     let Some(entry_idx) = STATUS_ENTRIES.get(cursor).map(|_| cursor as u8) else {
@@ -399,6 +415,11 @@ pub(super) fn confirm_menu_at_cursor(
                     &scene_state.snapshot,
                 ) =>
             {
+                if let Some(mode) = currency_request_mode_for(entry_kind) {
+                    // `try_send`, never async `send`: this seam is synchronous — a dropped
+                    // (never-polled) Send future enqueues nothing.
+                    let _ = cmd_tx.try_send(AgentCommand::RequestCurrencies { mode });
+                }
                 open_statcom_detail(stack, cursor);
             }
             // Guard failed: the row is grey, so the select is inert.
@@ -1826,6 +1847,9 @@ pub(super) fn handle_menu_key(
                         &scene_state.snapshot,
                     ) =>
                 {
+                    if let Some(mode) = currency_request_mode_for(entry_kind) {
+                        let _ = cmd_tx.try_send(AgentCommand::RequestCurrencies { mode });
+                    }
                     open_statcom_detail(stack, sel_cursor);
                 }
                 // Guard failed: the row is grey, so the select is inert.
@@ -3315,6 +3339,92 @@ mod menu_key_tests {
             stack.levels.last().unwrap().kind,
             MenuKind::StatusDetail { entry: 1 }
         ));
+    }
+
+    /// Bead kuluu-o9qt7.35 seam law: selecting a Currencies row queues exactly one
+    /// header-only report request (`AgentCommand::RequestCurrencies`), and **every** select sends —
+    /// the retail opener runs ahead of the window dedupe and caches nothing (FFXiMain.dll
+    /// retail-2026-09 `.text 0xFD520`, mode discriminant from `CurrencyMode::as_wire`). Non-
+    /// currency rows request nothing at all.
+    #[test]
+    fn currencies_row_select_queues_exactly_one_report_request_per_press() {
+        use kuluu_render::hud::status_panel::{StatusEntryKind, STATUS_ENTRIES};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        let cur_idx = STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == StatusEntryKind::Currencies)
+            .unwrap();
+        stack.push(MenuKind::Status);
+        stack.levels[1].cursor = cur_idx;
+
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            harness._cmd_rx.try_recv(),
+            Ok(AgentCommand::RequestCurrencies { mode: 0 }),
+            "one select queues exactly one report-1 request"
+        );
+        assert!(matches!(
+            stack.levels.last().unwrap().kind,
+            MenuKind::StatusDetail { entry } if usize::from(entry) == cur_idx
+        ));
+
+        // The report window is NOT one of the six display-only details (it answers its own
+        // commands), so it holds the keys while up — a second Enter belongs to that window,
+        // not the selector, and must not double-send.
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(
+            harness._cmd_rx.try_recv().is_err(),
+            "the detail's own Enter requests nothing extra"
+        );
+
+        // Esc closes the report (one level), focus back on the selector with its cursor still
+        // on Currencies; selecting again requests again — retail caches nothing, replies are
+        // one-shot (FFXiMain.dll retail-2026-09 `.text 0x99620` clears after each reply).
+        harness.key(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().map(|l| l.kind), Some(MenuKind::Status));
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(
+            harness._cmd_rx.try_recv(),
+            Ok(AgentCommand::RequestCurrencies { mode: 0 }),
+            "the re-select still requests"
+        );
+
+        // A plain row (Job Levels, no report family) queues nothing.
+        let mut stack2 = MenuStack::root();
+        stack2.push(MenuKind::Status);
+        stack2.levels[1].cursor = 1;
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack2,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert!(
+            harness._cmd_rx.try_recv().is_err(),
+            "a non-currency row requests nothing"
+        );
     }
 
     /// Switch half of the select law (close-details helper FFXiMain.dll

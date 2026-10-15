@@ -538,7 +538,15 @@ fn attr_value(stats: &kuluu_snapshot::CharStats, attr_index: usize) -> Option<u1
 /// ([`crate::hud::menu::DynamicMenuAction::DisplayInfo`]); the windows carry no
 /// commands (statcom2's detail table maps ids to OPEN actions only, FFXiMain.dll
 /// retail-2026-09 RVA 0x148D00).
-pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapshot) -> Vec<String> {
+/// `currency_labels_1`/`currency_labels_2` are the two Currencies lists' table-12 label
+/// columns — slot-aligned with `currency_law::CurrencyMode::rows()`; empty before the DAT
+/// catalog loads, in which case each row falls back to its text id like the other loaders do.
+pub fn status_detail_lines(
+    entry_idx: usize,
+    snap: &kuluu_snapshot::SceneSnapshot,
+    currency_labels_1: &[Option<String>],
+    currency_labels_2: &[Option<String>],
+) -> Vec<String> {
     let Some(entry) = STATUS_ENTRIES.get(entry_idx) else {
         return vec!["(no such status row)".to_string()];
     };
@@ -610,8 +618,16 @@ pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapsho
             .into_iter()
             .map(|row| row.text)
             .collect(),
-        StatusEntryKind::Currencies | StatusEntryKind::Currencies2 => {
-            vec!["(event-item currency list not received yet)".to_string()]
+        // The two Currencies lists read the raw s2c report through the client's own getter
+        // law — one descriptor row each, label from GetText table 12, value from the packet
+        // (FFXiMain.dll retail-2026-09 fill `.text 0x2297C0`, draw `.text 0x229F80`; vault §59
+        // addendum 27; bead kuluu-o9qt7.35). With no report yet the window is empty, matching
+        // retail's evitem opening request-in-flight with nothing drawn until the reply lands.
+        StatusEntryKind::Currencies => {
+            currency_detail_rows(crate::hud::currency_law::CurrencyMode::One, snap, currency_labels_1)
+        }
+        StatusEntryKind::Currencies2 => {
+            currency_detail_rows(crate::hud::currency_law::CurrencyMode::Two, snap, currency_labels_2)
         }
         StatusEntryKind::Unity => vec!["(unity campaign data not received yet)".to_string()],
         StatusEntryKind::PlayTime => vec![play_time_chat_line(snap)],
@@ -621,6 +637,42 @@ pub fn status_detail_lines(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapsho
             vec!["(facet-point categories have no wire source in LSB yet — the window opens empty like retail's with nothing to show)".to_string()]
         }
     }
+}
+
+/// One Currencies list, straight from the folded raw report: `(label) value` per descriptor
+/// in DISPLAY order (descriptor law + getters in [`crate::hud::currency_law`]). No report yet
+/// → no rows at all: retail's evitem opens with an outstanding request and draws nothing until
+/// the s2c reply's one-shot callback fills it (`.text 0x99640`/`.text 0x99660`).
+pub fn currency_detail_rows(
+    mode: crate::hud::currency_law::CurrencyMode,
+    snap: &kuluu_snapshot::SceneSnapshot,
+    labels: &[Option<String>],
+) -> Vec<String> {
+    let Some(body) = (match mode {
+        crate::hud::currency_law::CurrencyMode::One => snap.currencies_1.as_deref(),
+        crate::hud::currency_law::CurrencyMode::Two => snap.currencies_2.as_deref(),
+    }) else {
+        return Vec::new();
+    };
+    mode.rows()
+        .iter()
+        .enumerate()
+        .map(|(slot, &(id, _label_id))| {
+            // Labels are slot-aligned (the loader walks the same descriptor array), so an
+            // unloaded catalog shows em-dashes rather than transcribed strings — DAT-first.
+            let label = labels
+                .get(slot)
+                .and_then(|s| s.as_deref())
+                .unwrap_or("\u{2014}")
+                .to_string();
+            match crate::hud::currency_law::currency_value(mode, id, body) {
+                Some(value) => format!("{label} {value}"),
+                // The packet stopped short of this field — retail would read past the block,
+                // kuluu shows no value rather than invented bytes.
+                None => format!("{label} \u{2014}"),
+            }
+        })
+        .collect()
 }
 
 /// Which family of the 0x062 table a Status skill window shows. Combat and magic
@@ -1110,5 +1162,50 @@ mod tests {
 
         gated.key_items.push(ALTER_EGO_POINTS_KEY_ITEM);
         assert!(status_row_enabled(StatusEntryKind::FacetCategories, &gated));
+    }
+
+    /// Bead kuluu-o9qt7.35: the two Currencies windows draw straight out of the raw s2c block,
+    /// one row per descriptor, label slot-aligned from the table-12 loader. Values follow the
+    /// client's getter law — first conquest dword (packet +4) is list row 1 in mode 1.
+    #[test]
+    fn currency_lists_draw_raw_report_rows_in_descriptor_order() {
+        use crate::hud::currency_law::CurrencyMode;
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        assert!(
+            currency_detail_rows(CurrencyMode::One, &snap, &[]).is_empty(),
+            "no report yet → the list stays empty (retail fills it in its one-shot reply callback)"
+        );
+
+        let mut body = vec![0u8; 0xF6];
+        // First conquest point dwords at packet +4/+8/+C (mode-1 kind 0).
+        body[0x0..0x4].copy_from_slice(&7_777i32.to_le_bytes());
+        snap.currencies_1 = Some(body.clone());
+        let labels: Vec<Option<String>> = (CurrencyMode::One.rows())
+            .iter()
+            .map(|_| Some("CP".to_string()))
+            .collect();
+        let rows = currency_detail_rows(CurrencyMode::One, &snap, &labels);
+        assert_eq!(rows.len(), 99, "one row per descriptor");
+        assert_eq!(&rows[0], "CP 7777");
+
+        // Unloaded catalog → placeholder labels, never transcribed strings (DAT-first).
+        let unlabeled = currency_detail_rows(CurrencyMode::One, &snap, &[]);
+        assert_ne!(&unlabeled[0], "CP 7777");
+        assert!(unlabeled[0].contains("7777"), "the value still draws");
+
+        // Mode routing: statcom2 display row for item id 6 (Currencies) reads report 1; the
+        // id-10 row reads report 2 — different blocks must not cross-contaminate.
+        let mut body2 = vec![0u8; 0x9C];
+        body2[0..4].copy_from_slice(&5i32.to_le_bytes()); // mode-2 kind 0 dword (packet +4)
+        snap.currencies_2 = Some(body2);
+        let entry_of =
+            |want: StatusEntryKind| STATUS_ENTRIES.iter().position(|e| e.kind == want).unwrap();
+        let cur1 = status_detail_lines(entry_of(StatusEntryKind::Currencies), &snap, &labels, &[]);
+        assert_eq!(cur1.len(), 99);
+        assert!(&cur1[0].contains("7777"));
+        let cur2 = status_detail_lines(entry_of(StatusEntryKind::Currencies2), &snap, &[], &labels);
+        assert_eq!(cur2.len(), 97, "report 2 has its own descriptor count");
+        assert!(&cur2[0].contains('5'), "bayld slot reads report 2");
+        assert!(!&cur2[0].contains("7777"), "blocks never cross modes");
     }
 }

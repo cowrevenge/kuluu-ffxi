@@ -140,6 +140,20 @@ pub fn build_subpacket_emote_list_req(sync: u16) -> Vec<u8> {
     build_subpacket_header(ffxi_proto::map::c2s::EMOTE_LIST, 1, sync).to_vec()
 }
 
+// c2s 0x10F/0x115 GP_CLI_COMMAND_CURRENCIES_1/_2 — header only: the C++ structs are bare
+// `GP_CLI_PACKET(...)` with no fields (vendor/server/src/map/packets/c2s/0x10f_currencies_1.h,
+// 0x115_currencies_2.h), and retail builds them exactly so before committing one per
+// Currencies-window open, caching nothing between opens (FFXiMain.dll retail-2026-09
+// `.text 0xFD520`/`.text 0xFD550`; bead kuluu-o9qt7.35).
+pub fn build_subpacket_currencies(sync: u16, mode_two: bool) -> Vec<u8> {
+    let opcode = if mode_two {
+        ffxi_proto::map::c2s::CURRENCIES_2
+    } else {
+        ffxi_proto::map::c2s::CURRENCIES_1
+    };
+    build_subpacket_header(opcode, 1, sync).to_vec()
+}
+
 // c2s 0x0F4 GP_CLI_COMMAND_TRACKING_LIST: uint32 SendFlg (must be 1). Requests
 // the wide-scan list; the server frames the reply with 0x0F6 ListStart/ListEnd.
 // vendor/server/src/map/packets/c2s/0x0f4_tracking_list.h.

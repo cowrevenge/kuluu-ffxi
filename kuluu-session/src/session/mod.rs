@@ -26,13 +26,14 @@ pub use codec::{
     build_subpacket_auc_info, build_subpacket_auc_lot_cancel, build_subpacket_auc_lot_check,
     build_subpacket_auc_lot_in, build_subpacket_auc_work_check, build_subpacket_bazaar_buy,
     build_subpacket_bazaar_exit, build_subpacket_bazaar_list, build_subpacket_buffcancel,
-    build_subpacket_camp, build_subpacket_emote_list_req, build_subpacket_equip_inspect,
-    build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_item_move,
-    build_subpacket_item_stack, build_subpacket_item_use, build_subpacket_motion,
-    build_subpacket_myroom_is, build_subpacket_myroom_job, build_subpacket_pbx,
-    build_subpacket_reqlogout, build_subpacket_reqsubmapnum, build_subpacket_shop_buy,
-    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
-    build_subpacket_tracking_list, build_subpacket_tracking_start, log_action_sent,
+    build_subpacket_camp, build_subpacket_currencies, build_subpacket_emote_list_req,
+    build_subpacket_equip_inspect, build_subpacket_equip_set, build_subpacket_fishing,
+    build_subpacket_item_move, build_subpacket_item_stack, build_subpacket_item_use,
+    build_subpacket_motion, build_subpacket_myroom_is, build_subpacket_myroom_job,
+    build_subpacket_pbx, build_subpacket_reqlogout, build_subpacket_reqsubmapnum,
+    build_subpacket_shop_buy, build_subpacket_shop_sell_req, build_subpacket_shop_sell_set,
+    build_subpacket_tracking_end, build_subpacket_tracking_list, build_subpacket_tracking_start,
+    log_action_sent,
 };
 
 struct NpcNameResolver {
@@ -1865,6 +1866,34 @@ fn handle_sub_packet(
                         command_recast: skills.command_recast,
                         skills: skills.skills,
                     },
+                });
+            }
+        }
+        // The Currencies reports fold as raw blocks (bead kuluu-o9qt7.35): the DLL keeps them
+        // undecoded too, and its one-shot reply handlers (.text 0x99640/.text 0x99660) replace
+        // each stored report wholesale — exactly what `CurrenciesLoaded` folds into.
+        op @ (s2c::CURRENCIES_1 | s2c::CURRENCIES_2) => {
+            // Minimum body lengths are what the client's own widest getters consume — mode-1
+            // reads reach word +0xF8 (body 0xF6), mode-2 dword +0x9C (body 0x9C); LSB sends
+            // both blocks longer still. A truncated datagram never folds (same law as the
+            // neighbouring 0x062 gate).
+            const MODE1_MIN_BODY: usize = 0xF6;
+            const MODE2_MIN_BODY: usize = 0x9C;
+            let mode = u8::from(op == s2c::CURRENCIES_2);
+            let min_body = if mode == 1 {
+                MODE2_MIN_BODY
+            } else {
+                MODE1_MIN_BODY
+            };
+            if sub.data.len() < min_body {
+                warn_decode_err(
+                    sub.opcode,
+                    anyhow!("currency report truncated: {} < {min_body}", sub.data.len()),
+                );
+            } else {
+                let _ = event_tx.send(AgentEvent::CurrenciesLoaded {
+                    mode,
+                    body: sub.data.to_vec(),
                 });
             }
         }
@@ -4803,6 +4832,29 @@ async fn keepalive_loop(
                                     );
                                 }
                                 let _ = event_tx.send(AgentEvent::EmoteOrderLoaded { ids });
+                            }
+                        }
+                    }
+                    Some(AgentCommand::RequestCurrencies { mode }) => {
+                        // LSB rejects both report requests while an event is open
+                        // (`.blockedBy({BlockedState::InEvent})`, vendor/server/src/map/packets/
+                        // c2s/0x10f_currencies_1.cpp) — skip the press instead of burning a seq
+                        // slot on a silent drop; the retail window simply shows the next report
+                        // when re-opened after the event (nothing is cached either way).
+                        if in_event(&dialog_session, &pending_event_end) {
+                            tracing::debug!(mode, "skipping currency request while in event");
+                        } else {
+                            let payload = build_subpacket_currencies(sub_seq, mode == 1);
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, mode, "currency request send failed");
                             }
                         }
                     }

@@ -22,6 +22,14 @@ pub mod c2s {
     // zone-in/login: LSB pushes no 0x0DD/0x0DF to players without a party.
     pub const CLISTATUS: u16 = 0x061;
 
+    // GP_CLI_COMMAND_CURRENCIES_1 / _2, vendor/server/src/map/packets/c2s/
+    // 0x10f_currencies_1.h + 0x115_currencies_2.h: header-only requests (`GP_CLI_PACKET`
+    // with no fields) for the two Currencies lists; LSB answers each with its s2c
+    // CURRENCIES reply below (FFXiMain.dll retail-2026-09 `.text 0xFD520`/`.text 0xFD550`,
+    // vault main_menu.md §59 addendum 27). Direction siblings of s2c FISH at 0x115.
+    pub const CURRENCIES_1: u16 = 0x10F;
+    pub const CURRENCIES_2: u16 = 0x115;
+
     pub const GAMEOK: u16 = 0x00C;
     pub const NETEND: u16 = 0x00D;
     pub const ZONE_TRANSITION: u16 = 0x011;
@@ -532,6 +540,14 @@ pub mod s2c {
     // GP_SERV_COMMAND_FISH, vendor/server/src/map/enums/packet_s2c.h. Sent to start
     // the fishing mini-game with the hooked fish's stats.
     pub const FISH: u16 = 0x115;
+
+    // GP_SERV_COMMAND_CURRENCIES_1 / _2, vendor/server/src/map/packets/s2c/
+    // 0x113_currencies_1.h + 0x118_currencies_2.h: the currency reports answering the
+    // header-only c2s requests above. Kuluu keeps them RAW — the client-side getter law
+    // (`kuluu_render::hud::currency_law`) reads fields out of the block directly, exactly
+    // as the DLL does; field layout cross-check is in vault main_menu.md §59 addendum 27.
+    pub const CURRENCIES_1: u16 = 0x113;
+    pub const CURRENCIES_2: u16 = 0x118;
 
     pub const CHAT: u16 = 0x017;
 

@@ -1142,6 +1142,20 @@ pub struct SceneSnapshot {
     /// arranged (trailing additive field).
     #[serde(default)]
     pub emote_order: Vec<u8>,
+
+    /// The raw body of the last s2c 0x113 `GP_SERV_COMMAND_CURRENCIES_1` report (bead
+    /// kuluu-o9qt7.35). Kept RAW on purpose: each list row reads through the client's own
+    /// getter table (`kuluu_render::hud::currency_law`, FFXiMain.dll retail-2026-09 fill helper
+    /// `.text 0x2297C0`; vault main_menu.md §59 addendum 27), so decoding into typed fields
+    /// here would fork that law. `None` until a report lands — and nothing is cached: every
+    /// Currencies-window open re-requests (`.text 0xFD520`).
+    #[serde(default)]
+    pub currencies_1: Option<Vec<u8>>,
+
+    /// The raw body of the last s2c 0x118 `GP_SERV_COMMAND_CURRENCIES_2` report — same law as
+    /// [`Self::currencies_1`], answered under c2s 0x115 (`.text 0xFD550`).
+    #[serde(default)]
+    pub currencies_2: Option<Vec<u8>>,
 }
 
 /// The raw 0x062 block: `CommandRecast[31]` then `skill_base[64]`
@@ -2684,6 +2698,8 @@ mod tests {
             // Never arranged: the sample keeps the emote display order (bead
             // kuluu-o9qt7.34) in its untouched, default-list state.
             emote_order: Vec::new(),
+            currencies_1: None,
+            currencies_2: None,
             // No 0x062 block in the sample: the Status skill rows read as
             // "nothing received yet", exactly like a fresh zone-in.
             char_skills: None,
@@ -3385,6 +3401,8 @@ mod tests {
             "jobs",
             "char_skills",
             "emote_order",
+            "currencies_1",
+            "currencies_2",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3393,7 +3411,7 @@ mod tests {
     // Re-pinned for each trailing additive field since §25-era party_invite/trade
     // (then search, then linkshells, then missions (Option tag + u32 + Vec length)): every append is exactly
     // the bytes its default encodes to; no earlier field moved.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

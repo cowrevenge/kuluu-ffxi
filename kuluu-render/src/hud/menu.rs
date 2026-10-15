@@ -1813,6 +1813,13 @@ pub struct ConfigDatRows {
     /// handler family while its state word `[emote+0x6C]` is 1/2 and replaces the help line with
     /// these strings (.text FFXiMain.dll retail-2026-09 `.text 0x225FA2`; bead kuluu-o9qt7.34).
     pub emote_sort_prompts: [Option<String>; 2],
+    /// The two Currencies windows' row labels, read from GetText **table 12** — the SAME catalog
+    /// as [`Self::roomlist_prompt`] above. Index-aligned with
+    /// [`crate::hud::currency_law::CurrencyMode::rows`] (99/97 descriptors; each slot's label id
+    /// is the low half of the client descriptor dword, draw code `.text 0x229FA7`; vault §59
+    /// addendum 27). Empty until load. Bead kuluu-o9qt7.35.
+    pub currency_labels_1: Vec<Option<String>>,
+    pub currency_labels_2: Vec<Option<String>>,
 }
 
 impl ConfigDatRows {
@@ -1982,6 +1989,22 @@ impl ConfigDatRows {
                 .and_then(|c| c.text(id).map(str::to_string));
         }
         self.emote_sort_prompts = emote_sort_prompts;
+        // The Currencies lists' labels come from this same table-12 catalog, one string per
+        // descriptor slot in display order (bead kuluu-o9qt7.35; the ids themselves are client
+        // `.rdata` law — `currency_law::MODE1_ROWS`/`MODE2_ROWS`).
+        let load_currency_labels =
+            |mode: crate::hud::currency_law::CurrencyMode| -> Vec<Option<String>> {
+                mode.rows()
+                    .iter()
+                    .map(|&(_id, label_id)| {
+                        style_catalog
+                            .as_ref()
+                            .and_then(|c| c.text(usize::from(label_id)).map(str::to_string))
+                    })
+                    .collect()
+            };
+        self.currency_labels_1 = load_currency_labels(crate::hud::currency_law::CurrencyMode::One);
+        self.currency_labels_2 = load_currency_labels(crate::hud::currency_law::CurrencyMode::Two);
         self.loaded = true;
     }
 
@@ -5208,15 +5231,23 @@ pub fn refresh_dynamic_menu_rows(
         MenuKind::TradePick { trade_index } => trade_pick_rows(snap, trade_index),
         // The Status detail windows (bead kuluu-0oy7b): every line is live
         // snapshot data or a grounded empty readout; selecting stays inert per
-        // the retail dispatch law (FFXiMain.dll retail-2026-09 RVA 0x148D00).
+        // the retail dispatch law (FFXiMain.dll retail-2026-09 RVA 0x148D00). The two
+        // Currencies lists additionally need the table-12 label catalog loaded (§59 add.
+        // 27, bead kuluu-o9qt7.35) — same DAT record roomlist's confirm question reads.
         MenuKind::StatusDetail { entry } => {
-            crate::hud::status_panel::status_detail_lines(usize::from(entry), snap)
-                .into_iter()
-                .map(|label| DynamicMenuRow {
-                    label,
-                    action: DynamicMenuAction::DisplayInfo,
-                })
-                .collect()
+            config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+            crate::hud::status_panel::status_detail_lines(
+                usize::from(entry),
+                snap,
+                &config_rows.currency_labels_1,
+                &config_rows.currency_labels_2,
+            )
+            .into_iter()
+            .map(|label| DynamicMenuRow {
+                label,
+                action: DynamicMenuAction::DisplayInfo,
+            })
+            .collect()
         }
         // abimenu category list (vault main_menu.md §23): the same group rows
         // kuluu's target-action groups already build.

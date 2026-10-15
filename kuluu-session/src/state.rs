@@ -630,6 +630,16 @@ pub struct SessionState {
     #[serde(default)]
     pub emote_order: Vec<u8>,
 
+    /// Raw bodies of the last s2c 0x113/0x118 currency reports (bead kuluu-o9qt7.35) — kept
+    /// undecoded so the client getter law in `kuluu_render::hud::currency_law` reads them the
+    /// way FFXiMain.dll does (vault main_menu.md §59 addendum 27). Nothing is cached beyond
+    /// these: every Currencies-window open re-sends the header-only c2s request, and each
+    /// reply replaces its block wholesale (`.text 0x99640`/`.text 0x99660` one-shot fold).
+    #[serde(default)]
+    pub currencies_1: Option<Vec<u8>>,
+    #[serde(default)]
+    pub currencies_2: Option<Vec<u8>>,
+
     /// The four SAVE_CONF bitfield bytes from the newest s2c 0x0B4 CONFIG
     /// (vendor/server/src/common/mmo.h; vault main_menu.md §42). LSB echoes a
     /// fresh copy after every c2s CONFIG, so optimistic kuluu toggles reconcile
@@ -2857,6 +2867,20 @@ impl SessionState {
                 });
                 changed
             }
+            AgentEvent::CurrenciesLoaded { mode, body } => {
+                // Wire discriminants: 0 = report 1 (s2c 0x113), 1 = report 2 (s2c 0x118) —
+                // the typed view lives in `CurrencyMode::from_wire` on the render side. Each
+                // arrival replaces its block wholesale; an unknown discriminant drops the
+                // packet like any unexpected reply would (the request path never sends one).
+                let slot = match mode {
+                    0 => &mut self.currencies_1,
+                    1 => &mut self.currencies_2,
+                    _ => return false,
+                };
+                let changed = slot.as_deref() != Some(body.as_slice());
+                *slot = Some(body.clone());
+                changed
+            }
             AgentEvent::CharSkillsUpdated { skills } => {
                 let changed = self.char_skills != Some(*skills);
                 self.char_skills = Some(*skills);
@@ -3654,6 +3678,15 @@ pub enum AgentEvent {
         skills: kuluu_snapshot::CharSkills,
     },
 
+    /// s2c 0x113/0x118 currency reports (bead kuluu-o9qt7.35), raw body as received — the
+    /// mode selects which report family (`kuluu_render::hud::currency_law::CurrencyMode`) and
+    /// each arrival replaces its block wholesale, mirroring retail's one-shot reply handler
+    /// (FFXiMain.dll retail-2026-09 `.text 0x99640`/`.text 0x99660`).
+    CurrenciesLoaded {
+        mode: u8,
+        body: Vec<u8>,
+    },
+
     /// s2c 0x0F9 `GP_SERV_COMMAND_RES`
     /// (vendor/server/src/map/packets/s2c/0x0f9_res.cpp): `None` restores the
     /// default home-point-only menu; `Some` offers Raise/Reraise or Tractor.
@@ -4197,6 +4230,15 @@ pub enum AgentCommand {
     /// FFXiMain.dll retail-2026-09 `.text 0x2259C6`, no wire).
     CommitEmoteOrder {
         ids: Vec<u8>,
+    },
+
+    /// Send the header-only currency report request for one Currencies window — c2s 0x10F or
+    /// 0x115 by `mode` wire discriminant (0/1, `CurrencyMode::as_wire`; answers arrive as s2c
+    /// 0x113/0x118). Retail issues one per window open and caches nothing (FFXiMain.dll
+    /// retail-2026-09 `.text 0xFD520`/`.text 0xFD550`; vendor/server/src/map/packets/c2s/
+    /// 0x10f_currencies_1.cpp answers straight back — bead kuluu-o9qt7.35).
+    RequestCurrencies {
+        mode: u8,
     },
 
     /// Cast lots on a treasure-pool slot — c2s 0x041 TROPHY_ENTRY. The server

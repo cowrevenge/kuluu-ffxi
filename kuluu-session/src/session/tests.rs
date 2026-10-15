@@ -500,6 +500,87 @@ fn clistatus2_folds_the_whole_skill_block() {
     );
 }
 
+/// s2c 0x113/0x118 currency reports fold as RAW blocks with the mode discriminant picking the
+/// family (one-shot reply law, FFXiMain.dll retail-2026-09 `.text 0x99640`/`.text 0x99660`; bead
+/// kuluu-o9qt7.35) — bytes through unchanged so the render-side getter table reads them like the
+/// client does.
+#[test]
+fn currency_reports_fold_raw_wholesale_per_mode() {
+    use ffxi_proto::map::s2c;
+
+    let mut body1 = vec![0u8; 0xF6];
+    body1[0x0..0x4].copy_from_slice(&7_777i32.to_le_bytes()); // packet +4: first conquest dword
+    let events = sub_packet_events(s2c::CURRENCIES_1, &body1);
+    let folded = events.iter().find_map(|e| match e {
+        AgentEvent::CurrenciesLoaded { mode, body } => Some((*mode, body.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        folded,
+        Some((0u8, body1.clone())),
+        "report 1 folds raw with mode 0"
+    );
+
+    let body2 = vec![0xA5u8; 0x9C];
+    let events = sub_packet_events(s2c::CURRENCIES_2, &body2);
+    assert!(
+        matches!(
+            events.iter().find_map(|e| match e {
+                AgentEvent::CurrenciesLoaded { mode, body } => Some((*mode, body.len())),
+                _ => None,
+            }),
+            Some((1, len)) if len == 0x9C
+        ),
+        "report 2 folds raw with mode 1"
+    );
+
+    // A truncated report never folds (neighbouring-0x062 law): a partial block would render as
+    // invented currency values.
+    let short = vec![0u8; 0xF5];
+    assert!(
+        !sub_packet_events(s2c::CURRENCIES_1, &short)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::CurrenciesLoaded { .. })),
+        "a truncated report must not fold"
+    );
+
+    // The fold replaces its block wholesale (second arrival overwrites the first).
+    let mut s = crate::state::SessionState::default();
+    assert!(s.apply_event(&AgentEvent::CurrenciesLoaded {
+        mode: 0,
+        body: body1.clone(),
+    }));
+    let other = vec![0x5Au8; 0xF6];
+    assert!(s.apply_event(&AgentEvent::CurrenciesLoaded {
+        mode: 0,
+        body: other.clone(),
+    }));
+    assert_eq!(s.currencies_1.as_deref(), Some(other.as_slice()));
+    // Same-bytes arrival reports "unchanged" rather than dirtying the snapshot twice.
+    assert!(!s.apply_event(&AgentEvent::CurrenciesLoaded {
+        mode: 0,
+        body: other,
+    }));
+}
+
+/// c2s 0x10F/0x115 currency requests are header-only (4 bytes, 1 word) exactly like the emote-
+/// list request — LSB's structs declare no fields and retail commits bare headers per window open
+/// (FFXiMain.dll retail-2026-09 `.text 0xFD520`/`.text 0xFD550`; bead kuluu-o9qt7.35).
+#[test]
+fn currency_requests_are_header_only() {
+    for (mode_two, want_id) in [
+        (false, ffxi_proto::map::c2s::CURRENCIES_1),
+        (true, ffxi_proto::map::c2s::CURRENCIES_2),
+    ] {
+        let buf = build_subpacket_currencies(0x1234, mode_two);
+        assert_eq!(buf.len(), 4);
+        let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
+        assert_eq!(id_and_size & framing::SUBPACKET_OPCODE_MASK, want_id);
+        assert_eq!(id_and_size >> 9, 1, "size_words");
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
+    }
+}
+
 /// A 0x051 body whose GrapIDTbl does not decode must go through
 /// [`warn_decode_err`] like every sibling arm — dropped silently, a wrong
 /// body-offset assumption looks exactly like "self kept the launcher seed"

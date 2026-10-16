@@ -4260,11 +4260,14 @@ pub fn config_window_rows(
                         }
                     }
                     None if window == "conf5m" => match position {
-                        0 => DynamicMenuAction::OpenRetailConfigSub { sub: 2 },
+                        // Handler FFXiMain.dll retail-2026-09 RVA 0x199240 switches the select id
+                        // through a `dec eax / je` chain: id 1 arms .text 0x199282 pushing
+                        // `menu    conf5win`, id 2 arms .text 0x19926C (`conf5w1`), and id 3 falls
+                        // through to .text 0x199256 (`conf5w2`) — shared settings first, matching
+                        // the DAT captions; an earlier §47 reading had the ends swapped.
+                        0 => DynamicMenuAction::OpenRetailConfigSub { sub: 0 },
                         1 => DynamicMenuAction::OpenRetailConfigSub { sub: 1 },
-                        // Third and later widgets answer the arm §47 records as opening
-                        // `conf5win`; its duplicate caption widget is still its own record.
-                        _ => DynamicMenuAction::OpenRetailConfigSub { sub: 0 },
+                        _ => DynamicMenuAction::OpenRetailConfigSub { sub: 2 },
                     },
                     None => DynamicMenuAction::ConfigOptionRow {
                         option_id: *option_id,
@@ -12075,7 +12078,9 @@ mod tests {
                 other => panic!("launcher row lost its drill: {other:?}"),
             })
             .collect();
-        assert_eq!(subs, vec![2u8, 1, 0]);
+        // The handler's `dec/je` chain arms id 1 → conf5win (sub 0, the shared-settings page),
+        // id 2 → conf5w1 and id 3 → conf5w2 (.text FFXiMain.dll retail-2026-09 RVA 0x19924D..).
+        assert_eq!(subs, vec![0u8, 1, 2]);
 
         let page = config_window_rows(
             "conf7",

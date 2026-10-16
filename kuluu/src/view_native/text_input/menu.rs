@@ -5638,12 +5638,12 @@ mod menu_dispatch_tests {
         );
     }
 
-    /// `conf5m`'s select law (handler FFXiMain.dll retail-2026-09 RVA 0x199240,
-    /// arms 0x199264/0x19927A; vault main_menu.md §47): its first widget name-opens
-    /// `conf5w2` (sub 2), the second `conf5w1`, and a third falls to the arm recorded as opening `conf5win`
-    /// (sub 0). A leaf option row answers with the standard line WITHOUT closing
-    /// its window — retail's leaf selects carry no window event, and the value writes ride on
-    /// c2s SAVE_CONF owned by bead kuluu-o9qt7.20.1.
+    /// `conf5m`'s select law (handler FFXiMain.dll retail-2026-09 RVA 0x199240, arms
+    /// .text 0x199264/0x19927A/0x199290): its first widget name-opens `conf5win` (sub 0,
+    /// the shared-settings page), the second `conf5w1`, and the third falls through to
+    /// `conf5w2`. A leaf option row answers with the standard line WITHOUT closing
+    /// its window — retail's leaf selects carry no window event, and their store writes
+    /// are plain option-store latches.
     #[test]
     fn config_launcher_and_option_rows_follow_their_arms() {
         use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows, DynamicMenu};
@@ -5669,7 +5669,7 @@ mod menu_dispatch_tests {
             ),
             ..DynamicMenu::default()
         };
-        for (cursor, sub) in [(0usize, 2u8), (1, 1), (2, 0)] {
+        for (cursor, sub) in [(0usize, 0u8), (1, 1), (2, 2)] {
             let mut stack = MenuStack::root();
             stack.push(MenuKind::RetailConfigPage(3));
             stack.current_mut().unwrap().cursor = cursor;

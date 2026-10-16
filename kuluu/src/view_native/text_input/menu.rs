@@ -2089,29 +2089,74 @@ pub(super) fn handle_menu_key(
     // 0x197874/0x19788C of conf2win handler RVA 0x197470 (vault main_menu.md
     // §59 addendum 2). A pin only lives on its own window — any other top kind
     // drops it.
-    let slider_page = matches!(top_kind, MenuKind::RetailConfigPage(page)
-        if kuluu_render::hud::menu::RETAIL_CONFIG_PAGE_WINDOWS
+    // The same pin law carries to the Config sub-windows that own steppers — the two
+    // individual log-window editors, whose per-store step/cross-clamp extras the guards
+    // below read from the shared law helpers (vault main_menu.md §59 addendum 46).
+    let slider_page = match top_kind {
+        MenuKind::RetailConfigPage(page) => kuluu_render::hud::menu::RETAIL_CONFIG_PAGE_WINDOWS
             .get(usize::from(page))
-            .is_some_and(|w| kuluu_render::hud::menu::config_page_supports_slider_pin(w)));
+            .is_some_and(|w| kuluu_render::hud::menu::config_page_supports_slider_pin(w)),
+        MenuKind::RetailConfigSub(sub) => kuluu_render::hud::menu::RETAIL_CONFIG_SUB_WINDOWS
+            .get(usize::from(sub))
+            .is_some_and(|w| kuluu_render::hud::menu::config_page_supports_slider_pin(w)),
+        _ => false,
+    };
     if !slider_page {
         dynamic.option_edit = None;
     } else if let Some((store_id, value)) = dynamic.option_edit {
+        let step = kuluu_render::hud::menu::config_slider_step(store_id);
         if bindings.matches_logical(Action::NavLeft, key) {
             // `conf3win`'s step arms also carry a floor (`cmp eax,0x19/jle`,
             // FFXiMain.dll retail-2026-09 RVA .text 0x19ABDB), so the decrement
-            // guard is per-store rather than always zero.
-            if value > kuluu_render::hud::menu::config_slider_min(store_id) {
-                dynamic
-                    .config_option_values
-                    .insert(store_id, i32::from(value) - 1);
-                dynamic.option_edit = Some((store_id, value - 1));
+            // guard is per-store rather than always zero. The log-window width arm
+            // steps by 10 and clamps after subtracting (.text 0x199A4B/0x199A55), so
+            // the same clamp-after-arithmetic shape covers every stepper.
+            let floor = i32::from(kuluu_render::hud::menu::config_slider_min(store_id));
+            if i32::from(value) > floor {
+                let next = (i32::from(value) - step).max(floor);
+                dynamic.config_option_values.insert(store_id, next);
+                let next = next as u8;
+                dynamic.option_edit = Some((store_id, next));
+                // The max-lines decrement arm re-reads the min-lines store and lowers
+                // it to the new maximum when it exceeds it (.text 0x199AEF..0x199B15).
+                if let Some((max_store, min_store)) =
+                    kuluu_render::hud::menu::config_log_lines_pair(store_id)
+                {
+                    if store_id == max_store
+                        && dynamic
+                            .config_option_values
+                            .get(&min_store)
+                            .is_some_and(|min_value| *min_value > i32::from(next))
+                    {
+                        dynamic
+                            .config_option_values
+                            .insert(min_store, i32::from(next));
+                    }
+                }
             }
         } else if bindings.matches_logical(Action::NavRight, key) {
-            if value < kuluu_render::hud::menu::config_slider_max(store_id) {
-                dynamic
-                    .config_option_values
-                    .insert(store_id, i32::from(value) + 1);
-                dynamic.option_edit = Some((store_id, value + 1));
+            let ceiling = i32::from(kuluu_render::hud::menu::config_slider_max(store_id));
+            if i32::from(value) < ceiling {
+                let next = (i32::from(value) + step).min(ceiling);
+                dynamic.config_option_values.insert(store_id, next);
+                let next = next as u8;
+                dynamic.option_edit = Some((store_id, next));
+                // The min-lines increment arm raises max-lines to the new minimum
+                // when it crosses it (.text 0x199BBF..0x199BE8).
+                if let Some((max_store, min_store)) =
+                    kuluu_render::hud::menu::config_log_lines_pair(store_id)
+                {
+                    if store_id == min_store
+                        && dynamic
+                            .config_option_values
+                            .get(&max_store)
+                            .is_some_and(|max_value| *max_value < i32::from(next))
+                    {
+                        dynamic
+                            .config_option_values
+                            .insert(max_store, i32::from(next));
+                    }
+                }
             }
         } else if bindings.matches_logical(Action::NavUp, key)
             || bindings.matches_logical(Action::NavDown, key)
@@ -4200,6 +4245,116 @@ mod menu_key_tests {
         assert_eq!(
             harness.dynamic.config_option_values.get(&0x3Cu32),
             Some(&49)
+        );
+    }
+
+    /// The individual log-window editors (`conf5w1`/`conf5w2`, drilled by `conf5m`
+    /// ids 2/3) run the shared stepper law plus their per-store extras (vault
+    /// main_menu.md §59 addendum 46): column width steps by ten and clamps after the
+    /// arithmetic (`add eax,-0xa` fix-up at FFXiMain.dll retail-2026-09 .text
+    /// 0x199A4B/0x199A55), the interval lives between store values 3 and 30 (guards on
+    /// its raw field, ±3 shifted), and a line-count pair stays ordered across stores —
+    /// lowering max pulls min down (.text 0x199AEF..0x199B15) and raising min lifts max
+    /// back up (.text 0x199BBF..0x199BE8).
+    #[test]
+    fn log_window_steppers_step_by_ten_and_keep_line_counts_ordered() {
+        use kuluu_render::hud::menu::{config_window_rows, ConfigDatRows};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut table = ConfigDatRows {
+            loaded: true,
+            ..Default::default()
+        };
+        table.by_root.insert(
+            "conf5w1".to_string(),
+            (0..6u32).map(|i| (800 + i, format!("logrow{i}"))).collect(),
+        );
+        harness.dynamic.rows = config_window_rows(
+            "conf5w1",
+            &table,
+            &std::collections::BTreeMap::new(),
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::RetailConfigSub(1));
+
+        // Column width (row 5, cursor 4) pins at its boot value and steps by ten.
+        stack.current_mut().unwrap().cursor = 4;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x9Cu32, 100u8)),
+            "the width row pins at boot 100 (constructor field +0x28)"
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x9C, 100)),
+            "ceiling swallows Right"
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x9C, 90)),
+            "width steps by ten"
+        );
+
+        // Five down the ladder another Left lands on the clamp point, not below it.
+        harness.dynamic.option_edit = Some((0x9C, 5));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0x9C, 0)));
+        assert_eq!(harness.dynamic.config_option_values.get(&0x9Cu32), Some(&0));
+
+        // Interval (row 6, cursor 5): boot 8, store floors at 3 and ceilings at 30.
+        harness.dynamic.option_edit = Some((0x11u32, 4u8));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0x11, 3)));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(
+            harness.dynamic.option_edit,
+            Some((0x11, 3)),
+            "raw floor is store value 3"
+        );
+        harness.dynamic.option_edit = Some((0x11, 29));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0x11, 30)));
+
+        // Max-lines (row 3, cursor 2) with the pair inverted {max 6, min 7}: stepping
+        // down clamps min to the new maximum. Drop the interval pin first so Enter
+        // arms this row instead of saving-and-leaving the old pin.
+        harness.dynamic.option_edit = None;
+        harness.dynamic.config_option_values.insert(0xFu32, 6);
+        harness.dynamic.config_option_values.insert(0x10u32, 7);
+        stack.current_mut().unwrap().cursor = 2;
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0xFu32, 6u8)));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowLeft, KeyCode::ArrowLeft, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0xF, 5)));
+        assert_eq!(
+            harness.dynamic.config_option_values.get(&0x10u32),
+            Some(&5),
+            "min-lines is dragged down to the new maximum"
+        );
+
+        // Min-lines (row 4) stepping above its max drags the maximum back up.
+        harness.dynamic.option_edit = Some((0x10u32, 6u8));
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowRight, KeyCode::ArrowRight, &mut stack, markers);
+        assert_eq!(harness.dynamic.option_edit, Some((0x10, 7)));
+        assert_eq!(
+            harness.dynamic.config_option_values.get(&0xFu32),
+            Some(&7),
+            "max-lines is raised to the new minimum"
         );
     }
 

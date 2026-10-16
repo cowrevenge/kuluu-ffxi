@@ -3004,6 +3004,8 @@ pub fn config_page_arms(window: &str) -> Option<&'static [ConfigRowArm]> {
         "conf3win" => Some(&CONF3WIN_ROW_ARMS),
         "conf6win" => Some(&CONF6WIN_ROW_ARMS),
         "conf4" => Some(&CONF4_ROW_ARMS),
+        "conf5w1" => Some(&LOG_WINDOW_ONE_ROW_ARMS),
+        "conf5w2" => Some(&LOG_WINDOW_TWO_ROW_ARMS),
         "conf7" => Some(&CONF7_ROW_ARMS),
         "conf13wi" => Some(CONF13WI_RADIO_ARMS),
         "conf12wi" => Some(CONF12WI_RADIO_ARMS),
@@ -3162,6 +3164,91 @@ pub const CONFIG_STORE_EDGE_ROTATE: u32 = 0x8F;
 /// kuluu enforces the behind-camera constraint yet, so nothing reads this store.
 pub const CONFIG_STORE_CAMERA_BEHIND_LOCK: u32 = 0x91;
 
+/// The store family behind an individual chat-log window — the pair of windows
+/// `conf5m` ids 2/3 drill ("Adjust individual window settings.", DAT record
+/// `conf5m`; vault main_menu.md §59 addendum 46). Both windows run one shared select
+/// handler (.text FFXiMain.dll retail-2026-09 RVA 0x199850, vtables .rdata 0x336D70 and
+/// .rdata 0x336DC0) over identical DAT row sets; each class maps its own numeric text-slot
+/// ids onto its store set through the label table at .rva 0x379ED0, but window one's stores
+/// are exactly the handler's literal label immediates while window two's class shifts every
+/// write to the second set. `conf5win`'s shared-settings stores (0xB4/0xB5) stay separate.
+pub const CONFIG_STORE_LOG_WINDOW_ONE_AUTO_SIZE: u32 = 0xE;
+/// [`CONFIG_STORE_LOG_WINDOW_ONE_AUTO_SIZE`]'s max-lines stepper — entry arm seeds the edit
+/// scratch from object field +0x3c (.text 0x1998C8), boot value 8.
+pub const CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES: u32 = 0xF;
+/// The min-lines stepper (scratch from +0x40, .text 0x1998F0, boot 0).
+pub const CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES: u32 = 0x10;
+/// The adjustment-interval stepper — scratch is a raw field at +0x24 shown as raw+3
+/// (commit adds the offset at .text 0x1999AE), so the store holds the visible value.
+pub const CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL: u32 = 0x11;
+/// The column-width stepper (scratch from +0x28, boot 100).
+pub const CONFIG_STORE_LOG_WINDOW_ONE_WIDTH: u32 = 0x9C;
+
+/// Window two's twin set — the shared handler's literal labels are translated through the
+/// label table before reaching the store wrapper.
+pub const CONFIG_STORE_LOG_WINDOW_TWO_AUTO_SIZE: u32 = 0xB6;
+/// [`CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES`]'s window-two counterpart (store 0xB7).
+pub const CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES: u32 = 0xB7;
+/// Window two's min-lines stepper (store 0xB8).
+pub const CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES: u32 = 0xB8;
+/// Window two's interval stepper (store 0xC6).
+pub const CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL: u32 = 0xC6;
+/// Window two's column-width stepper (store 0xC5, not 0x9C — the label table shifts it too).
+pub const CONFIG_STORE_LOG_WINDOW_TWO_WIDTH: u32 = 0xC5;
+
+/// The six rows of an individual log-window page in DAT file order (= select id − 1): ids
+/// 1/2 write the auto-size radio straight through (arms push 0 at .text FFXiMain.dll
+/// retail-2026-09 RVA 0x1998AA and 1 at 0x1998BB; **0 = "Automatically adjust log window's
+/// size"**, 1 = fixed); ids 3–6 are stepper rows whose entry arms (.text 0x1998C8/.text
+/// 0x1998F0/.text 0x199918/.text 0x199940) only set the edit flag and seed the scratch from
+/// the field — nothing is written until a step (vault main_menu.md §59 addendum 46).
+const LOG_WINDOW_ONE_ROW_ARMS: [ConfigRowArm; 6] = [
+    ConfigRowArm::Radio {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_AUTO_SIZE,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_AUTO_SIZE,
+        value: 1,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_WIDTH,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL,
+    },
+];
+
+/// [`LOG_WINDOW_ONE_ROW_ARMS`]'s window-two twin (`conf5w2`, stores 0xB6–0xC6).
+const LOG_WINDOW_TWO_ROW_ARMS: [ConfigRowArm; 6] = [
+    ConfigRowArm::Radio {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_AUTO_SIZE,
+        value: 0,
+    },
+    ConfigRowArm::Radio {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_AUTO_SIZE,
+        value: 1,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_WIDTH,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL,
+    },
+];
+
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:
 /// rows 1–2 the radio pair on store 7 (values 0/1); rows 3/4 slider-edit rows
@@ -3230,6 +3317,12 @@ pub fn config_slider_boot_default(store_id: u32) -> u8 {
         // the §58 init region, .text call site FFXiMain.dll retail-2026-09 RVA
         // 0x1942D9: default and max both 0x32 = 50, floor 0x19 = 25).
         0x3C => 50,
+        // The individual log-window steppers boot from the shared constructor's field
+        // defaults (.text FFXiMain.dll retail-2026-09 RVA 0x199710: interval raw 5 at +0x24 —
+        // shown as raw+3, store value 8; width 100 at +0x28; max lines 8 at +0x3c).
+        CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL | CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL => 8,
+        CONFIG_STORE_LOG_WINDOW_ONE_WIDTH | CONFIG_STORE_LOG_WINDOW_TWO_WIDTH => 100,
+        CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES | CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES => 8,
         _ => 0,
     }
 }
@@ -3241,6 +3334,13 @@ pub fn config_slider_boot_default(store_id: u32) -> u8 {
 pub fn config_slider_min(store_id: u32) -> u8 {
     match store_id {
         0x3C => 25,
+        // The log-window max-lines decrement runs only while the value is above 4
+        // (`cmp eax,4; jle` at FFXiMain.dll retail-2026-09 .text 0x199ADC), so its floor is
+        // 4. The interval guards sit on the raw field (decrement only while raw > 0 —
+        // `test eax,eax; jle` at .text 0x199D0), and the store holds raw+3, giving a store
+        // floor of 3.
+        CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES | CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES => 4,
+        CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL | CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL => 3,
         _ => 0,
     }
 }
@@ -3257,12 +3357,59 @@ pub fn config_slider_max(store_id: u32) -> u8 {
         // `conf3win`'s increment arm only steps strictly below 0x32
         // (`cmp eax, 0x32; jge` at FFXiMain.dll retail-2026-09 RVA .text 0x19ABF7).
         0x3C => 50,
+        // Both log-window line-count steppers cap at 20 (`cmp eax,0x14; jge` at the family
+        // arms .text FFXiMain.dll retail-2026-09 0x199B27/0x199BAC); the interval increment
+        // caps raw below 27 (`cmp eax,0x1b; jge` at .text 0x199DA), so its store ceiling is
+        // 30.
+        CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES
+        | CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES
+        | CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES
+        | CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES => 20,
+        CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL | CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL => 30,
         _ => CONFIG_SLIDER_MAX,
     }
 }
 
-/// True when the Config page's own arm table contains a slider row - only those
-/// windows keep a pin alive (conf2win and conf6win today).
+/// Per-store step of a law'd slider: every stepper family member moves by 1 except the
+/// log-window column-width rows, whose arms add/subtract 10 and clamp **after** the
+/// arithmetic (`add eax,0xa` with an above-0x64 fix-up at FFXiMain.dll retail-2026-09
+/// .text 0x199A66/0x199A71 and `add eax,-0xa` clamped to 0 at 0x199A4B; vault main_menu.md
+/// §59 addendum 46) — so a width pin sitting at 95 steps to its ceiling, not past it.
+/// All four log-window steppers increment on Right and decrement on Left: in each row's
+/// jump table (.rva FFXiMain.dll retail-2026-09 0x199C28/0x199C40/0x199C58/0x199C70) entry
+/// 3 is the increment arm (interval .text 0x199D7, width .text 0x199A5E, max lines
+/// .text 0x199B24, min lines .text 0x199BA9) and entry 4 the decrement, each committing
+/// the store through the label accessor on every press.
+pub fn config_slider_step(store_id: u32) -> i32 {
+    match store_id {
+        CONFIG_STORE_LOG_WINDOW_ONE_WIDTH | CONFIG_STORE_LOG_WINDOW_TWO_WIDTH => 10,
+        _ => 1,
+    }
+}
+
+/// The log-window line-count cross-clamp pair. Retail's max-lines decrement arm re-reads both
+/// stores after its own write and lowers min-lines to the new maximum when it exceeds it
+/// (getter pair .text FFXiMain.dll retail-2026-09 RVA 0x199AEF/0x199AF8, conditional setter at
+/// 0x199B07..0x199B15); the min-lines increment arm raises max-lines to the new minimum
+/// (0x199BBF..0x199BE8). Returns `(max store, min store)` for either member of a window's
+/// pair so a stepper can mirror both clamps.
+pub fn config_log_lines_pair(store_id: u32) -> Option<(u32, u32)> {
+    match store_id {
+        CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES | CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES => Some((
+            CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES,
+            CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES,
+        )),
+        CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES | CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES => Some((
+            CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES,
+            CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES,
+        )),
+        _ => None,
+    }
+}
+
+/// True when the Config window's own arm table contains a slider row - only those
+/// windows keep a pin alive: the volume/level pages and the two individual
+/// log-window editors (`conf5w1`/`conf5w2`).
 pub fn config_page_supports_slider_pin(window: &str) -> bool {
     config_page_arms(window).is_some_and(|arms| {
         arms.iter()
@@ -12127,6 +12274,113 @@ mod tests {
         // Arms 0..3 are (0xB4,1) (0xB4,2) — the marker sits on row 1 alone.
         assert_eq!(rows[1].label, "\u{bb} opt1");
         assert!(!rows[0].label.starts_with('\u{bb}'));
+    }
+
+    /// Both individual log-window editors (`conf5w1`/`conf5w2`) carry the same six
+    /// rows their DAT records share, armed by the shared select handler (.text
+    /// FFXiMain.dll retail-2026-09 RVA 0x199850): the auto-size radio pair (values 0/1,
+    /// pushes at .text 0x1998AA/0x1998BB) then four stepper rows — max lines, min
+    /// lines, column width, interval — each labelled with its boot-or-stored value.
+    /// Pins the per-store floor/ceiling/boot/step law and the cross-clamp pair map
+    /// (vault main_menu.md §59 addendum 46).
+    #[test]
+    fn log_window_editor_rows_follow_their_shared_handler_arms() {
+        for (window, auto_size, max_lines, min_lines, width, interval) in [
+            (
+                "conf5w1",
+                CONFIG_STORE_LOG_WINDOW_ONE_AUTO_SIZE,
+                CONFIG_STORE_LOG_WINDOW_ONE_MAX_LINES,
+                CONFIG_STORE_LOG_WINDOW_ONE_MIN_LINES,
+                CONFIG_STORE_LOG_WINDOW_ONE_WIDTH,
+                CONFIG_STORE_LOG_WINDOW_ONE_INTERVAL,
+            ),
+            (
+                "conf5w2",
+                CONFIG_STORE_LOG_WINDOW_TWO_AUTO_SIZE,
+                CONFIG_STORE_LOG_WINDOW_TWO_MAX_LINES,
+                CONFIG_STORE_LOG_WINDOW_TWO_MIN_LINES,
+                CONFIG_STORE_LOG_WINDOW_TWO_WIDTH,
+                CONFIG_STORE_LOG_WINDOW_TWO_INTERVAL,
+            ),
+        ] {
+            let mut table = ConfigDatRows {
+                loaded: true,
+                ..Default::default()
+            };
+            table.by_root.insert(
+                window.to_string(),
+                (0..6u32)
+                    .map(|i| (700 + i, format!("{window}row{i}")))
+                    .collect(),
+            );
+            let rows = config_window_rows(
+                window,
+                &table,
+                &std::collections::BTreeMap::new(),
+                None,
+                &std::collections::BTreeMap::new(),
+            );
+            assert_eq!(rows.len(), 6, "{window} rows");
+            assert!(
+                matches!(rows[0].action, DynamicMenuAction::ConfigOptionSet { store_id: s, value: 0 } if s == auto_size),
+                "{window} radio row 0: {:?}",
+                rows[0].action
+            );
+            assert!(
+                matches!(rows[1].action, DynamicMenuAction::ConfigOptionSet { store_id: s, value: 1 } if s == auto_size),
+                "{window} radio row 1: {:?}",
+                rows[1].action
+            );
+            for (position, store) in [(2, max_lines), (3, min_lines), (4, width), (5, interval)] {
+                assert!(
+                    matches!(rows[position].action, DynamicMenuAction::ConfigSliderEdit { store_id: s } if s == store),
+                    "{window} stepper row {position}: {:?}",
+                    rows[position].action
+                );
+            }
+            // Boot values ride the labels: max 8 (field +0x3c), min 0 (+0x40), width
+            // 100 (+0x28) and interval 8 (raw 5 at +0x24 shown as raw+3).
+            assert_eq!(rows[2].label, format!("{window}row2: 8"));
+            assert_eq!(rows[3].label, format!("{window}row3: 0"));
+            assert_eq!(rows[4].label, format!("{window}row4: 100"));
+            assert_eq!(rows[5].label, format!("{window}row5: 8"));
+
+            let mut values = std::collections::BTreeMap::new();
+            values.insert(auto_size, 1i32);
+            let rows = config_window_rows(
+                window,
+                &table,
+                &values,
+                None,
+                &std::collections::BTreeMap::new(),
+            );
+            assert_eq!(rows[1].label, format!("\u{bb} {window}row1"));
+
+            // Per-store slider law.
+            for store in [max_lines, min_lines] {
+                assert_eq!(config_slider_max(store), 20);
+            }
+            assert_eq!(config_slider_min(max_lines), 4);
+            assert_eq!(config_slider_boot_default(max_lines), 8);
+            assert_eq!(config_slider_min(min_lines), 0);
+            assert_eq!(config_slider_boot_default(min_lines), 0);
+            assert_eq!(config_slider_step(width), 10);
+            assert_eq!(config_slider_boot_default(width), 100);
+            assert_eq!(config_slider_max(width), CONFIG_SLIDER_MAX);
+            assert_eq!(config_slider_min(interval), 3);
+            assert_eq!(config_slider_max(interval), 30);
+            assert_eq!(config_slider_step(interval), 1);
+            assert_eq!(
+                config_log_lines_pair(max_lines),
+                Some((max_lines, min_lines))
+            );
+            assert_eq!(
+                config_log_lines_pair(min_lines),
+                Some((max_lines, min_lines))
+            );
+            assert!(config_log_lines_pair(width).is_none());
+            assert!(config_log_lines_pair(interval).is_none());
+        }
     }
 
     /// Gated on a retail install: `conf5win`'s widget count is exactly the

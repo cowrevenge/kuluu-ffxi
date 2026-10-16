@@ -2871,35 +2871,35 @@ pub const CONF7_ROW_ARMS: [ConfigRowArm; 14] = [
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8C,
+        store_id: CONFIG_STORE_3P_INVERT_Y,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8C,
+        store_id: CONFIG_STORE_3P_INVERT_Y,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8B,
+        store_id: CONFIG_STORE_3P_INVERT_X,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8B,
+        store_id: CONFIG_STORE_3P_INVERT_X,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8E,
+        store_id: CONFIG_STORE_FP_INVERT_Y,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8E,
+        store_id: CONFIG_STORE_FP_INVERT_Y,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8D,
+        store_id: CONFIG_STORE_FP_INVERT_X,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8D,
+        store_id: CONFIG_STORE_FP_INVERT_X,
         value: 1,
     },
 ];
@@ -3111,6 +3111,26 @@ pub const CONFIG_STORE_AUTO_SORT: u32 = 0x9A;
 /// organizing them." / "Sort items by name when organizing them and stacking them when
 /// possible."): arm values are **0 = category** and **1 = name**.
 pub const CONFIG_STORE_SORT_KEY: u32 = 0xCA;
+
+/// The Mouse & Camera page's third-person axis-inversion stores. Each is a pair whose first row
+/// reads "Reset … camera controls to the default setting." (value 0) and second row names the axis
+/// it inverts (value 1): `conf7` rows id 9/10 are the X pair (**0x8B**) and id 7/8 the Y pair
+/// (**0x8C**). Retail applies the flag by negating that aim delta outright: getter .text
+/// FFXiMain.dll retail-2026-09 RVA 0x1EF6C/0x1EF8B, and the `fmul` with −1.0f (.rdata RVA 0x32A3F0)
+/// at .text 0x1EF7C/0x1EF9B in the third-person camera update (func .text 0x1E48A).
+pub const CONFIG_STORE_3P_INVERT_X: u32 = 0x8B;
+
+/// [`CONFIG_STORE_3P_INVERT_X`]'s Y-axis twin (`conf7` rows id 7/8).
+pub const CONFIG_STORE_3P_INVERT_Y: u32 = 0x8C;
+
+/// The first-person pair of the same shape, read by the first-person camera update (func .text
+/// FFXiMain.dll retail-2026-09 RVA 0x20F39) and negated through the same −1.0f at .text 0x20F8B: X
+/// is store **0x8D** (`conf7` rows id 13/14).
+pub const CONFIG_STORE_FP_INVERT_X: u32 = 0x8D;
+
+/// [`CONFIG_STORE_FP_INVERT_X`]'s Y-axis twin (`conf7` rows id 11/12, negated at .text
+/// FFXiMain.dll retail-2026-09 RVA 0x20FAA).
+pub const CONFIG_STORE_FP_INVERT_Y: u32 = 0x8E;
 
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:

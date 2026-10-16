@@ -200,6 +200,7 @@ impl Plugin for MousePlugin {
             // A host adding only this plugin gets both resources its systems use.
             .init_resource::<ViewFov>()
             .init_resource::<WheelZoom>()
+            .init_resource::<RetailCameraInversion>()
             .add_systems(PreUpdate, collect_mouse_system)
             // Retail's wheel never moves the focal itself. The message handler only adds frames
             // owed (RVA 0x25E210); a frame function drains one per frame (RVA 0x25E240 through thunk
@@ -211,9 +212,12 @@ impl Plugin for MousePlugin {
                 wheel_zoom_accumulate_system.after(collect_mouse_system),
             )
             .add_systems(PostUpdate, wheel_zoom_drain_system)
+            .add_systems(Update, sync_camera_inversion_system)
             .add_systems(
                 Update,
-                mouse_camera_system.run_if(crate::cutscene::player_camera_allowed),
+                mouse_camera_system
+                    .run_if(crate::cutscene::player_camera_allowed)
+                    .after(sync_camera_inversion_system),
             );
     }
 }
@@ -345,12 +349,70 @@ pub fn collect_mouse_system(
     }
 }
 
+/// The Mouse & Camera page's four axis-inversion flags. Each flag is one of its radio pairs, and the
+/// store holds 0 for the "reset … to the default setting" row and 1 for the "invert … on the X/Y
+/// axis" row (store ids [`crate::hud::menu::CONFIG_STORE_3P_INVERT_X`] and friends). Retail acts on
+/// a set flag by negating that aim delta with −1.0f (.rdata RVA 0x32A3F0) — third-person from .text
+/// FFXiMain.dll retail-2026-09 RVA 0x1EF7C/0x1EF9B, first person from RVA 0x20F8B/0x20FAA.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RetailCameraInversion {
+    pub third_person_x: bool,
+    pub third_person_y: bool,
+    pub first_person_x: bool,
+    pub first_person_y: bool,
+}
+
+fn inversion_flag(menu: &crate::hud::menu::DynamicMenu, store_id: u32) -> bool {
+    menu.config_option_values
+        .get(&store_id)
+        .is_some_and(|value| *value != 0)
+}
+
+/// Copy the four Mouse & Camera inversion stores into [`RetailCameraInversion`]. A store nobody wrote
+/// reads as not inverted, which is what retail's reset value means.
+pub fn sync_camera_inversion_system(
+    menu: Option<Res<crate::hud::menu::DynamicMenu>>,
+    mut inversion: ResMut<RetailCameraInversion>,
+) {
+    let Some(menu) = menu else { return };
+    if !menu.is_changed() && !inversion.is_added() {
+        return;
+    }
+    let next = RetailCameraInversion {
+        third_person_x: inversion_flag(&menu, crate::hud::menu::CONFIG_STORE_3P_INVERT_X),
+        third_person_y: inversion_flag(&menu, crate::hud::menu::CONFIG_STORE_3P_INVERT_Y),
+        first_person_x: inversion_flag(&menu, crate::hud::menu::CONFIG_STORE_FP_INVERT_X),
+        first_person_y: inversion_flag(&menu, crate::hud::menu::CONFIG_STORE_FP_INVERT_Y),
+    };
+    if next != *inversion {
+        *inversion = next;
+    }
+}
+
+/// Negate the aim axis the page asked to invert. Only the sign changes, so saturation, the orbit-rate
+/// law and the pitch clamps all stay in front of it.
+pub fn apply_camera_inversion(
+    axis: Vec2,
+    mode: CameraMode,
+    inversion: &RetailCameraInversion,
+) -> Vec2 {
+    let (flip_x, flip_y) = match mode {
+        CameraMode::Chase => (inversion.third_person_x, inversion.third_person_y),
+        CameraMode::FirstPerson => (inversion.first_person_x, inversion.first_person_y),
+    };
+    Vec2::new(
+        if flip_x { -axis.x } else { axis.x },
+        if flip_y { -axis.y } else { axis.y },
+    )
+}
+
 pub fn mouse_camera_system(
     pointer: Res<MousePointer>,
     camera_mode: Res<CameraMode>,
     input_mode: Res<InputMode>,
     state: Res<SceneState>,
     move_intent: Option<Res<crate::combat_stance::SelfMoveIntent>>,
+    inversion: Option<Res<RetailCameraInversion>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     mut chase: ResMut<ChaseCamera>,
@@ -376,7 +438,12 @@ pub fn mouse_camera_system(
         if let (Some((Some(anchor), saturation)), Some(cursor), Ok(window)) =
             (drag, pointer.cursor_pos, windows.single())
         {
-            let axis = mouse_drag_aim_axis(cursor, anchor, window.size(), saturation);
+            let inversion = inversion.as_deref().copied().unwrap_or_default();
+            let axis = apply_camera_inversion(
+                mouse_drag_aim_axis(cursor, anchor, window.size(), saturation),
+                mode,
+                &inversion,
+            );
             let rig = match mode {
                 CameraMode::Chase => Some(chase.distance),
                 CameraMode::FirstPerson => None,
@@ -1028,6 +1095,58 @@ mod tests {
         assert_eq!(
             mouse_drag_aim_axis(Vec2::ZERO, Vec2::ZERO, Vec2::ZERO, DRAG_SATURATION_FRACTION),
             Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn an_inverted_page_entry_negates_only_that_rig_and_axis() {
+        let inversion = RetailCameraInversion {
+            third_person_x: true,
+            first_person_y: true,
+            ..RetailCameraInversion::default()
+        };
+        assert_eq!(
+            apply_camera_inversion(Vec2::new(1.0, -2.0), CameraMode::Chase, &inversion),
+            Vec2::new(-1.0, -2.0)
+        );
+        assert_eq!(
+            apply_camera_inversion(Vec2::new(1.0, -2.0), CameraMode::FirstPerson, &inversion),
+            Vec2::new(1.0, 2.0)
+        );
+    }
+
+    /// The Mouse & Camera page writes the store; the live flag follows it — and the pair's reset row
+    /// (value 0) takes the inversion away again.
+    #[test]
+    fn camera_inversion_follows_the_config_stores() {
+        let mut menu = crate::hud::menu::DynamicMenu::default();
+        menu.config_option_values
+            .insert(crate::hud::menu::CONFIG_STORE_3P_INVERT_Y, 1);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(menu)
+            .init_resource::<RetailCameraInversion>()
+            .add_systems(Update, sync_camera_inversion_system);
+        app.update();
+
+        assert_eq!(
+            *app.world().resource::<RetailCameraInversion>(),
+            RetailCameraInversion {
+                third_person_y: true,
+                ..RetailCameraInversion::default()
+            }
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::hud::menu::DynamicMenu>()
+            .config_option_values
+            .insert(crate::hud::menu::CONFIG_STORE_3P_INVERT_Y, 0);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<RetailCameraInversion>(),
+            RetailCameraInversion::default(),
+            "the reset row restores the default"
         );
     }
 }

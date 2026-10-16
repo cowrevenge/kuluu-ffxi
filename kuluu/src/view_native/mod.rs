@@ -738,6 +738,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     });
     app.insert_resource(crate::marker_store::load_or_default());
 
+    // Every Config-page choice lives in one client-side option table, and retail keeps that
+    // table across logout through its `cnf.dat` user file (vault main_menu.md §59 addendum 47).
+    app.insert_resource(crate::config_options_store::load_or_default());
+
     // The room's systems and resources must stay out of a default build entirely: an unregistered
     // plugin is inert, but registering it puts tester state into every session.
     #[cfg(feature = "debug-animation_room")]
@@ -875,6 +879,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     );
 
     app.add_systems(Update, crate::graphics_store::persist_graphics_on_change);
+    app.add_systems(
+        Update,
+        crate::config_options_store::persist_config_options_on_change,
+    );
     app.add_systems(Update, crate::audio_store::persist_audio_on_change);
     app.add_systems(Update, crate::marker_store::sync_markers);
 

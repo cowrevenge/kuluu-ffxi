@@ -3102,6 +3102,16 @@ pub const CONFIG_STORE_SFX_VOLUME: u32 = 9;
 /// "Set the volume of the background music." (arm index 3).
 pub const CONFIG_STORE_BGM_VOLUME: u32 = 0xA;
 
+/// The Gameplay page's battle start-lock pair store (`conf2win` rows id 1/2, DAT help "Automatically
+/// lock on to target at the start of battle." / "Do not automatically lock on to target."): arm
+/// values are **0 = on** (id 1 arm pushes 0 at .text FFXiMain.dll retail-2026-09 RVA 0x1974D2) and
+/// **1 = off** (.text 0x1974E4). A strict argument-position sweep of the store accessor family finds
+/// no reader in the client — the rows are write-only latches, so consumers honour the captions: a
+/// non-zero value disables engage-time target locking. The §58 option-table registration
+/// (descriptor call FFXiMain.dll retail-2026-09 RVA 0x195460 reached from .text 0x193CD7) boots the
+/// store at 0, i.e. locked on.
+pub const CONFIG_STORE_AUTO_LOCK: u32 = 7;
+
 /// The Gameplay page's auto-sort pair store (`conf2win` rows id 8/9, DAT help "Automatically sort
 /// items as they enter your inventory." / "Disable the autosort function, and opt to manually sort
 /// your inventory."): arm values are **1 = on** and **0 = off**.
@@ -3143,11 +3153,11 @@ pub const CONFIG_STORE_FP_INVERT_Y: u32 = 0x8E;
 /// bead kuluu-o9qt7.20.1 part B).
 pub const CONF2WIN_ROW_ARMS: [ConfigRowArm; 11] = [
     ConfigRowArm::Radio {
-        store_id: 7,
+        store_id: CONFIG_STORE_AUTO_LOCK,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 7,
+        store_id: CONFIG_STORE_AUTO_LOCK,
         value: 1,
     },
     ConfigRowArm::Slider {

@@ -272,6 +272,96 @@ impl AudioMuteState {
     }
 }
 
+/// Which retail volume slider scales an audio entity. The Gameplay Config page drives two
+/// separate buses — store 9 (`CONFIG_STORE_SFX_VOLUME`) for sound effects and store 0xA
+/// (`CONFIG_STORE_BGM_VOLUME`) for background music, rows id 3/4 of `conf2win` (arm table
+/// [`crate::hud::menu::CONF2WIN_ROW_ARMS`]).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioBus {
+    Music,
+    Effects,
+}
+
+/// Gain a Config slider's stored percent maps to. The store is a 0..=100 percent (the increment
+/// arm stops at the ceiling — `cmp ecx,0x64` at FFXiMain.dll retail-2026-09 RVA 0x19767F); the
+/// mixer's own curve is untraced, so kuluu maps it linearly.
+pub fn config_volume_scale(percent: i32) -> f32 {
+    (percent.clamp(0, i32::from(crate::hud::menu::CONFIG_SLIDER_MAX))) as f32 / 100.0
+}
+
+/// The live mirror of the two Gameplay sliders, in gain terms. Kept apart from
+/// [`AudioMuteState`] because that one is persisted user state (audio.json) and these follow
+/// the client-side option store instead.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct RetailConfigVolumes {
+    pub music: f32,
+    pub effects: f32,
+}
+
+impl Default for RetailConfigVolumes {
+    fn default() -> Self {
+        // Stores never touched by the menu keep their boot value, which is each slider's ceiling.
+        Self {
+            music: config_volume_scale(i32::from(crate::hud::menu::config_slider_boot_default(
+                crate::hud::menu::CONFIG_STORE_BGM_VOLUME,
+            ))),
+            effects: config_volume_scale(i32::from(crate::hud::menu::config_slider_boot_default(
+                crate::hud::menu::CONFIG_STORE_SFX_VOLUME,
+            ))),
+        }
+    }
+}
+
+/// The percent currently stored for a slider, or its boot value when the menu never wrote it.
+fn slider_percent(menu: &crate::hud::menu::DynamicMenu, store_id: u32) -> i32 {
+    menu.config_option_values
+        .get(&store_id)
+        .copied()
+        .unwrap_or(i32::from(crate::hud::menu::config_slider_boot_default(
+            store_id,
+        )))
+}
+
+/// Copy both volume stores into [`RetailConfigVolumes`] each time the Config store moves, so a
+/// slider step is audible without leaving the menu.
+pub fn sync_config_audio_volumes_system(
+    menu: Option<Res<crate::hud::menu::DynamicMenu>>,
+    mut volumes: ResMut<RetailConfigVolumes>,
+) {
+    let Some(menu) = menu else { return };
+    if !menu.is_changed() && !volumes.is_added() {
+        return;
+    }
+    let next = RetailConfigVolumes {
+        music: config_volume_scale(slider_percent(
+            &menu,
+            crate::hud::menu::CONFIG_STORE_BGM_VOLUME,
+        )),
+        effects: config_volume_scale(slider_percent(
+            &menu,
+            crate::hud::menu::CONFIG_STORE_SFX_VOLUME,
+        )),
+    };
+    if next != *volumes {
+        *volumes = next;
+    }
+}
+
+/// The steady gain of one bus: master × that bus's slider, with the BGM mute hard-overriding
+/// music. (`mute.sfx` gates SE entry points before playback is reached.)
+pub fn bus_gain(bus: AudioBus, mute: &AudioMuteState, volumes: &RetailConfigVolumes) -> f32 {
+    match bus {
+        AudioBus::Music => {
+            if mute.bgm {
+                0.0
+            } else {
+                mute.master * volumes.music
+            }
+        }
+        AudioBus::Effects => mute.master * volumes.effects,
+    }
+}
+
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct BgmPlaybackState {
     pub engaged_solo: bool,
@@ -561,6 +651,7 @@ pub fn apply_bgm_system(
     let entity = commands
         .spawn((
             InGameEntity,
+            AudioBus::Music,
             AudioPlayer(handle),
             PlaybackSettings::ONCE.with_volume(bevy::audio::Volume::Linear(0.0)),
             AudioFade::fade_in(BGM_FADE_SECS),
@@ -844,6 +935,7 @@ pub fn play_sfx_system(
     mut events: MessageReader<SfxEvent>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
+    config_volumes: Res<RetailConfigVolumes>,
     listener_player: Query<&Transform, With<crate::components::IsSelf>>,
     listener_camera: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
     mut cache: ResMut<SfxCache>,
@@ -874,8 +966,9 @@ pub fn play_sfx_system(
         listener_player.iter().next().map(|xf| xf.translation),
         listener_camera.iter().next().map(|xf| xf.translation()),
     );
+    let bus_gain = bus_gain(AudioBus::Effects, &mute, &config_volumes);
     for ev in events.read() {
-        let volume = sfx_mix_volume(ev, listener_pos) * mute.master;
+        let volume = sfx_mix_volume(ev, listener_pos) * bus_gain;
         if volume <= 0.0 {
             continue;
         }
@@ -1226,6 +1319,7 @@ pub fn observe_zone_ambient_bed(
         commands
             .spawn((
                 InGameEntity,
+                AudioBus::Effects,
                 AudioPlayer(handle),
                 PlaybackSettings::ONCE.with_volume(bevy::audio::Volume::Linear(0.0)),
                 AudioFade::fade_in(WEATHER_FADE_SECS),
@@ -1245,18 +1339,27 @@ pub fn observe_zone_ambient_bed(
 pub fn tick_audio_fades(
     time: Res<Time>,
     mute: Res<AudioMuteState>,
-    mut q: Query<(Entity, &mut AudioFade, Option<&mut bevy::audio::AudioSink>)>,
+    config_volumes: Res<RetailConfigVolumes>,
+    mut q: Query<(
+        Entity,
+        &mut AudioFade,
+        Option<&mut bevy::audio::AudioSink>,
+        Option<&AudioBus>,
+    )>,
     mut commands: Commands,
 ) {
-    // BGM fades are the only thing carrying AudioFade today. Master volume (and
-    // the bgm mute) scale the fade curve so a fade-in lands on the user's chosen
-    // level, not a hard 1.0.
-    let master = if mute.bgm { 0.0 } else { mute.master };
+    // A fade lands on its bus level, not a hard 1.0; an untagged carrier follows the music
+    // bus, which is what every AudioFade carrier was before the two sliders split.
     let dt = time.delta_secs();
-    for (entity, mut fade, sink) in q.iter_mut() {
+    for (entity, mut fade, sink, bus) in q.iter_mut() {
+        let scale = bus_gain(
+            bus.copied().unwrap_or(AudioBus::Music),
+            &mute,
+            &config_volumes,
+        );
         fade.t += dt;
         let t = (fade.t / fade.duration).clamp(0.0, 1.0);
-        let vol = (fade.from + (fade.to - fade.from) * t) * master;
+        let vol = (fade.from + (fade.to - fade.from) * t) * scale;
         if let Some(mut s) = sink {
             s.set_volume(bevy::audio::Volume::Linear(vol));
         }
@@ -1270,29 +1373,25 @@ pub fn tick_audio_fades(
     }
 }
 
-/// Live-apply master volume (and bgm mute) to the currently playing BGM sink
-/// when [`AudioMuteState`] changes. The fade tick owns volume while a fade is
-/// active; once the fade component is gone the steady sink is untouched by
-/// anything else, so this is what makes a mid-song volume change audible
-/// immediately instead of only after the next track swap.
-pub fn apply_master_volume_on_change(
+/// Live-apply the master/mute/Config-slider gains to every steady bus-tagged sink. The fade
+/// tick owns volume while an [`AudioFade`] is attached; once it is gone the sink is untouched by
+/// anything else, so this is what makes a volume change audible in the current track or ambient
+/// loop instead of only at the next swap.
+pub fn apply_config_audio_volume_on_change(
     mute: Res<AudioMuteState>,
-    slots: Res<BgmSlots>,
+    config_volumes: Res<RetailConfigVolumes>,
     fades: Query<(), With<AudioFade>>,
-    mut sinks: Query<&mut bevy::audio::AudioSink>,
+    mut sinks: Query<(Entity, &AudioBus, &mut bevy::audio::AudioSink)>,
 ) {
-    if !mute.is_changed() {
+    if !mute.is_changed() && !config_volumes.is_changed() {
         return;
     }
-    let Some(e) = slots.active_entity else {
-        return;
-    };
-    // A fade is mid-flight on this entity — let tick_audio_fades drive it.
-    if fades.get(e).is_ok() {
-        return;
-    }
-    if let Ok(mut sink) = sinks.get_mut(e) {
-        let vol = if mute.bgm { 0.0 } else { mute.master };
+    for (entity, bus, mut sink) in sinks.iter_mut() {
+        // A fade is mid-flight on this entity — let tick_audio_fades drive it.
+        if fades.get(entity).is_ok() {
+            continue;
+        }
+        let vol = bus_gain(*bus, &mute, &config_volumes);
         sink.set_volume(bevy::audio::Volume::Linear(vol));
     }
 }
@@ -1305,6 +1404,7 @@ impl Plugin for AudioPlugin {
         app.init_resource::<BgmSlots>()
             .init_resource::<BgmPlaybackState>()
             .init_resource::<AudioMuteState>()
+            .init_resource::<RetailConfigVolumes>()
             .init_resource::<SeRegistry>()
             .init_resource::<SfxCache>()
             .init_resource::<SystemSfxTable>()
@@ -1315,6 +1415,7 @@ impl Plugin for AudioPlugin {
             .add_systems(
                 Update,
                 (
+                    sync_config_audio_volumes_system,
                     drain_music_events_system,
                     derive_bgm_playback_state,
                     apply_bgm_system,
@@ -1329,7 +1430,7 @@ impl Plugin for AudioPlugin {
                     observe_zone_ambient_bed.run_if(crate::camera::in_game),
                     play_sfx_system,
                     tick_audio_fades,
-                    apply_master_volume_on_change,
+                    apply_config_audio_volume_on_change,
                 )
                     .chain()
                     // The bed reads the environment set `sample_zone_weather` selects, so
@@ -2369,6 +2470,7 @@ mod tests {
                 ..Default::default()
             })
             .init_resource::<AudioMuteState>()
+            .init_resource::<RetailConfigVolumes>()
             .init_resource::<SfxCache>()
             .add_systems(Update, play_sfx_system);
 
@@ -2700,6 +2802,116 @@ mod tests {
         assert!(
             app.world().get::<AudioPlayer<PcmAudio>>(entity).is_some(),
             "the spawned entity should carry an AudioPlayer<PcmAudio> component"
+        );
+    }
+
+    #[test]
+    fn config_volume_scale_clamps_to_the_slider_range() {
+        assert_eq!(config_volume_scale(-5), 0.0);
+        assert_eq!(config_volume_scale(0), 0.0);
+        assert!((config_volume_scale(40) - 0.4).abs() < 1e-6);
+        assert_eq!(config_volume_scale(i32::MAX), 1.0);
+    }
+
+    #[test]
+    fn untouched_sliders_leave_both_buses_at_full_gain() {
+        let volumes = RetailConfigVolumes::default();
+        assert!((volumes.music - 1.0).abs() < 1e-6, "{volumes:?}");
+        assert!((volumes.effects - 1.0).abs() < 1e-6, "{volumes:?}");
+    }
+
+    #[test]
+    fn each_slider_store_drives_only_its_own_bus() {
+        let mut menu = crate::hud::menu::DynamicMenu::default();
+        menu.config_option_values
+            .insert(crate::hud::menu::CONFIG_STORE_BGM_VOLUME, 70);
+        menu.config_option_values.insert(
+            crate::hud::menu::CONFIG_STORE_SFX_VOLUME,
+            i32::from(crate::hud::menu::config_slider_boot_default(
+                crate::hud::menu::CONFIG_STORE_SFX_VOLUME,
+            )),
+        );
+
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins)
+            .insert_resource(menu)
+            .init_resource::<RetailConfigVolumes>()
+            .add_systems(Update, sync_config_audio_volumes_system);
+        app.update();
+
+        let volumes = app.world().resource::<RetailConfigVolumes>();
+        assert!((volumes.music - 0.7).abs() < 1e-6, "{volumes:?}");
+        assert!((volumes.effects - 1.0).abs() < 1e-6, "{volumes:?}");
+    }
+
+    #[test]
+    fn music_mute_overrides_the_slider_and_leaves_effects_alone() {
+        let mute = AudioMuteState {
+            bgm: true,
+            sfx: false,
+            ..Default::default()
+        };
+        let volumes = RetailConfigVolumes {
+            music: 0.5,
+            effects: 0.5,
+        };
+        assert_eq!(bus_gain(AudioBus::Music, &mute, &volumes), 0.0);
+        assert!((bus_gain(AudioBus::Effects, &mute, &volumes) - 0.5).abs() < 1e-6);
+    }
+
+    /// Gated on a retail install: writing the Gameplay slider stores moves what reaches the
+    /// mixer at exactly that percent, and a store at zero keeps the event off the mixer rather
+    /// than spawning it silently.
+    #[test]
+    fn gameplay_volume_sliders_reach_the_mixer() {
+        const REAL_SE_ID: u32 = 1;
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+
+        let mut menu = crate::hud::menu::DynamicMenu::default();
+        menu.config_option_values
+            .insert(crate::hud::menu::CONFIG_STORE_SFX_VOLUME, 40);
+
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<PcmAudio>();
+        app.add_message::<SfxEvent>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .insert_resource(BgmSlots {
+                install_root: Some(root.root().to_path_buf()),
+                ..Default::default()
+            })
+            .init_resource::<AudioMuteState>()
+            .init_resource::<RetailConfigVolumes>()
+            .insert_resource(menu)
+            .init_resource::<SfxCache>()
+            .add_systems(
+                Update,
+                (sync_config_audio_volumes_system, play_sfx_system).chain(),
+            );
+
+        app.world_mut().write_message(SfxEvent::new(REAL_SE_ID));
+        app.update();
+        let at_forty = spawned_sfx_volumes(&mut app);
+        assert_eq!(at_forty.len(), 1);
+        assert!(
+            (at_forty[0] - 0.4).abs() < 1e-6,
+            "an unattached cue at the 40% slider: {at_forty:?}"
+        );
+
+        app.world_mut()
+            .resource_mut::<crate::hud::menu::DynamicMenu>()
+            .config_option_values
+            .insert(crate::hud::menu::CONFIG_STORE_SFX_VOLUME, 0);
+        app.world_mut().write_message(SfxEvent::new(REAL_SE_ID));
+        app.update();
+        assert_eq!(
+            spawned_sfx_volumes(&mut app).len(),
+            at_forty.len(),
+            "the silenced store must not spawn a second cue"
         );
     }
 }

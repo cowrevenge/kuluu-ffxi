@@ -3091,6 +3091,17 @@ pub const FILTER_LIST_FXFILTER_ARMS: [ConfigRowArm; 18] = [
     },
 ];
 
+/// The Gameplay page's sound-effect volume slider store — row id 3, whose DAT help caption
+/// reads "Set the volume of sound effects." (`conf2win` item block 3 in the `con8` record).
+/// Row order equals arm order, so this is arm index 2 (jump table .text FFXiMain.dll
+/// retail-2026-09 RVA 0x197848); pinned install-gated by
+/// `conf2win_volume_slider_rows_pair_with_their_dat_help_captions`.
+pub const CONFIG_STORE_SFX_VOLUME: u32 = 9;
+
+/// The Gameplay page's background-music volume slider store — row id 4, DAT help caption
+/// "Set the volume of the background music." (arm index 3).
+pub const CONFIG_STORE_BGM_VOLUME: u32 = 0xA;
+
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:
 /// rows 1–2 the radio pair on store 7 (values 0/1); rows 3/4 slider-edit rows
@@ -3109,8 +3120,12 @@ pub const CONF2WIN_ROW_ARMS: [ConfigRowArm; 11] = [
         store_id: 7,
         value: 1,
     },
-    ConfigRowArm::Slider { store_id: 9 },
-    ConfigRowArm::Slider { store_id: 0xA },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_SFX_VOLUME,
+    },
+    ConfigRowArm::Slider {
+        store_id: CONFIG_STORE_BGM_VOLUME,
+    },
     ConfigRowArm::Slider { store_id: 0x37 },
     ConfigRowArm::Slider { store_id: 0x38 },
     ConfigRowArm::Slider { store_id: 0x39 },
@@ -8318,6 +8333,46 @@ mod tests {
             captions.labels,
             static_entries(MenuKind::Root)[..24].to_vec()
         );
+    }
+
+    /// Gated on a retail install. Each Gameplay volume row is named by its own DAT help text, so
+    /// the store ids behind slider arms 2/3 cannot swap without this failing (the arm table pairs
+    /// row order with select-id order).
+    #[test]
+    fn conf2win_volume_slider_rows_pair_with_their_dat_help_captions() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let windows = ffxi_dat::menu_windows::windows_from_root(&root).unwrap();
+        let window = windows.get("conf2win").expect("conf2win record");
+        let catalog: ffxi_dat::dmsg::DmsgTable = (|| {
+            let loc = root
+                .resolve(ffxi_dat::menu_windows::CAPTION_CATALOG_TABLE_14_FILE_ID)
+                .ok()?;
+            let bytes = std::fs::read(loc.path_under(&root)).ok()?;
+            ffxi_dat::dmsg::DmsgTable::parse(&bytes).ok()
+        })()
+        .expect("table-14 caption catalog reads");
+        let rows = window.live_items();
+        assert_eq!(rows.len(), CONF2WIN_ROW_ARMS.len());
+        for (index, want) in [(2usize, "sound effect"), (3, "background music")] {
+            assert_eq!(
+                rows[index].id,
+                i16::try_from(index + 1).unwrap(),
+                "row {index} keeps select-id order"
+            );
+            let help = rows[index]
+                .text_a_id
+                .and_then(|id| usize::try_from(id).ok())
+                .and_then(|i| catalog.text(i))
+                .unwrap_or_default()
+                .to_lowercase();
+            assert!(
+                help.contains(want),
+                "item id {} reads {help:?}, expected it to mention {want:?}",
+                rows[index].id
+            );
+        }
     }
 
     fn root_menu_app(cursor: usize) -> App {

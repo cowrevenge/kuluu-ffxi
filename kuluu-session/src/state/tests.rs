@@ -2789,6 +2789,40 @@ fn merits_record_folds_replace_and_project() {
     assert_eq!(snap.merits, Some(m));
 }
 
+/// s2c 0x063 MISCDATA Homepoints folds replace one another and ride the snapshot (bead
+/// kuluu-o9qt7.45) — retail rep-movsds over the whole mask store on every arrival
+/// (.text FFXiMain.dll retail-2026-09 `0x99330`).
+#[test]
+fn homepoints_record_folds_replace_and_project() {
+    let mut state = SessionState::default();
+    assert!(state.homepoints.is_none());
+    let masks = kuluu_snapshot::HomepointMasks {
+        home_point: [1, 2, 4, 8],
+        survival_guide: [0x10, 0x20, 0x40, 0x80],
+        waypoint: [0xFFFF_FFFF, 0, 0, 0],
+        telepoint: 0xDEAD_BEEF,
+        atmos: 0xCAFE_BABE,
+        eschan_portal: 0xF00D_D00D,
+    };
+    assert!(state.apply_event(&AgentEvent::HomepointsUpdated { masks }));
+    assert_eq!(state.homepoints, Some(masks));
+    assert!(
+        !state.apply_event(&AgentEvent::HomepointsUpdated { masks }),
+        "an identical record is not a snapshot change"
+    );
+    let next = kuluu_snapshot::HomepointMasks {
+        telepoint: 1,
+        ..masks
+    };
+    assert!(
+        state.apply_event(&AgentEvent::HomepointsUpdated { masks: next }),
+        "a fresh record replaces the last, not a merge"
+    );
+    assert_eq!(state.homepoints, Some(next));
+    let snap = crate::wire_translate::state_to_snapshot(&state);
+    assert_eq!(snap.homepoints, Some(next));
+}
+
 #[test]
 fn death_menu_offer_is_durable_and_clears_on_revive_or_zone_change() {
     use ffxi_proto::decode::DeathMenuOffer;
@@ -3164,6 +3198,8 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::MeritsListed { .. } => (),
         AgentEvent::JobPointsListed { .. } => (),
         AgentEvent::JobPointsRecordUpdated { .. } => (),
+        // Raw homepoint mask fold (bead kuluu-o9qt7.45).
+        AgentEvent::HomepointsUpdated { .. } => (),
         AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),

@@ -1995,6 +1995,14 @@ fn handle_sub_packet(
                         record: job_points_record(&record),
                     });
                 }
+            } else if let Some(record) = decode::MiscdataHomepoints::decode(sub.data) {
+                // Subtype 6 Homepoints — retail's arm rep-movsds the mask block into .data
+                // FFXiMain.dll retail-2026-09 0x4858C4 and raises its flag (`.text 0x99330`).
+                if let Ok(record) = record.inspect_err(|e| warn_decode_err(sub.opcode, e)) {
+                    let _ = event_tx.send(AgentEvent::HomepointsUpdated {
+                        masks: homepoint_masks(&record),
+                    });
+                }
             } else if let Some((icons, expiries)) = decode_miscdata_status_icons(sub.data) {
                 let _ = event_tx.send(AgentEvent::StatusIconsUpdated { icons, expiries });
             }
@@ -8108,6 +8116,17 @@ fn decode_miscdata_merits(data: &[u8]) -> Option<kuluu_snapshot::MisdataMerits> 
         merit_mode_enabled: bits >> 15 != 0,
         max_merit_points: data[8],
     })
+}
+
+fn homepoint_masks(record: &decode::MiscdataHomepoints) -> kuluu_snapshot::HomepointMasks {
+    kuluu_snapshot::HomepointMasks {
+        home_point: record.home_point,
+        survival_guide: record.survival_guide,
+        waypoint: record.waypoint,
+        telepoint: record.telepoint,
+        atmos: record.atmos,
+        eschan_portal: record.eschan_portal,
+    }
 }
 
 fn job_points_record(record: &decode::MiscdataJobPoints) -> kuluu_snapshot::JobPointsRecord {

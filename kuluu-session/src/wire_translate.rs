@@ -179,6 +179,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         job_point_types: s.job_point_types.clone(),
         job_points_received: s.job_points_received,
         job_points: s.job_points,
+        homepoints: s.homepoints,
     }
 }
 

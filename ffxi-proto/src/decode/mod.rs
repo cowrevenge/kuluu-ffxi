@@ -69,6 +69,8 @@ mod unity;
 pub use unity::*;
 mod merits;
 pub use merits::*;
+mod homepoints;
+pub use homepoints::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

@@ -630,6 +630,12 @@ pub struct SessionState {
     #[serde(default)]
     pub job_points: Option<kuluu_snapshot::JobPointsRecord>,
 
+    /// The last s2c 0x063 MISCDATA subtype Homepoints record — retail stores its 64-byte mask
+    /// block at .data FFXiMain.dll retail-2026-09 0x4858C4 and raises the received flag there
+    /// (dispatcher `.text 0x99270`, arm `.text 0x99330`; vault main_menu.md §59 addendum 37).
+    #[serde(default)]
+    pub homepoints: Option<kuluu_snapshot::HomepointMasks>,
+
     /// Server-offered alternative to returning home while dead (s2c 0x0F9,
     /// vendor/server/src/map/packets/s2c/0x0f9_res.cpp).
     /// `None` is the ordinary home-point-only menu.
@@ -3028,6 +3034,13 @@ impl SessionState {
                 self.job_points = Some(*record);
                 changed
             }
+            AgentEvent::HomepointsUpdated { masks } => {
+                // Each Homepoints record replaces the last: retail's arm rep-movsds over the whole
+                // 64-byte store on every arrival (`.text FFXiMain.dll retail-2026-09 0x99330`).
+                let changed = self.homepoints != Some(*masks);
+                self.homepoints = Some(*masks);
+                changed
+            }
             AgentEvent::DeathMenuUpdated { offer } => {
                 let changed = self.death_menu_offer != *offer;
                 self.death_menu_offer = *offer;
@@ -4004,6 +4017,13 @@ pub enum AgentEvent {
     /// (vendor/server/src/map/packets/s2c/0x063_miscdata_job_points.h).
     JobPointsRecordUpdated {
         record: kuluu_snapshot::JobPointsRecord,
+    },
+
+    /// One s2c 0x063 MISCDATA Homepoints record — the fast-travel access masks (bead
+    /// kuluu-o9qt7.45; retail dispatcher `.text FFXiMain.dll retail-2026-09 0x99270`, arm
+    /// `.text 0x99330`; vault main_menu.md §59 addendum 37).
+    HomepointsUpdated {
+        masks: kuluu_snapshot::HomepointMasks,
     },
 
     /// s2c 0x113/0x118 currency reports (bead kuluu-o9qt7.35), raw body as received — the

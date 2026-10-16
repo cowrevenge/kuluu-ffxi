@@ -6022,3 +6022,31 @@ fn merit_and_job_point_packets_become_events() {
         "{events:?}"
     );
 }
+
+/// s2c 0x063 MISCDATA subtype Homepoints reaches the fold as sent, laid out by LSB
+/// `GP_SERV_COMMAND_MISCDATA::HOMEPOINTS` (vendor/server/src/map/packets/s2c/
+/// 0x063_miscdata_homepoints.h) — bead kuluu-o9qt7.45.
+#[test]
+fn miscdata_homepoints_packet_becomes_masks_event() {
+    use ffxi_proto::decode::MISCDATA_TYPE_HOMEPOINTS;
+    use ffxi_proto::map::s2c;
+    use ffxi_proto::s2c_layout::miscdata_homepoints as lsb;
+
+    let mut record = vec![0u8; lsb::SIZE];
+    record[lsb::TYPE..lsb::TYPE + 2].copy_from_slice(&MISCDATA_TYPE_HOMEPOINTS.to_le_bytes());
+    record[lsb::HOME_POINT..lsb::HOME_POINT + 4].copy_from_slice(&0x0102_0304u32.to_le_bytes());
+    let guide_word = lsb::SURVIVAL_GUIDE + lsb::SURVIVAL_GUIDE_STRIDE;
+    record[guide_word..guide_word + 4].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+    record[lsb::TELEPOINT..lsb::TELEPOINT + 4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+    let events = sub_packet_events(s2c::MISCDATA, &record);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::HomepointsUpdated { masks }]
+                if masks.home_point[0] == 0x0102_0304
+                    && masks.survival_guide[1] == 0x8000_0000
+                    && masks.telepoint == 0xDEAD_BEEF
+        ),
+        "{events:?}"
+    );
+}

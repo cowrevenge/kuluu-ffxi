@@ -128,6 +128,11 @@ const S2C_LAYOUTS: &[(&str, &str, &str)] = &[
         "0x063_miscdata_job_points.h",
         "GP_SERV_COMMAND_MISCDATA::JOB_POINTS::PacketData",
     ),
+    (
+        "miscdata_homepoints",
+        "0x063_miscdata_homepoints.h",
+        "GP_SERV_COMMAND_MISCDATA::HOMEPOINTS::PacketData",
+    ),
 ];
 
 /// Headers that declare a type a layout header uses without including it in the scan:
@@ -136,6 +141,7 @@ const S2C_LAYOUT_PRELUDES: &[(&str, &str)] = &[
     ("miscdata_unity_members", "0x063_miscdata.h"),
     ("miscdata_unity_points", "0x063_miscdata.h"),
     ("miscdata_job_points", "0x063_miscdata.h"),
+    ("miscdata_homepoints", "0x063_miscdata.h"),
 ];
 const PATCH_STAMP_DATE_LEN: usize = 8;
 const SUBKEY_LEN: usize = 4168;

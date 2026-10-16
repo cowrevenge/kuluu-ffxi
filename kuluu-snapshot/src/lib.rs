@@ -1213,6 +1213,14 @@ pub struct SceneSnapshot {
     /// The last s2c 0x063 JobPoints record; `None` until one arrives.
     #[serde(default)]
     pub job_points: Option<JobPointsRecord>,
+
+    /// The last s2c 0x063 GP_SERV_COMMAND_MISCDATA subtype **Homepoints** (0x06) — the
+    /// fast-travel access masks retail copies wholesale into .data FFXiMain.dll retail-2026-09
+    /// 0x4858C4 and reads only through per-field bit-test wrappers gating map icons (bead
+    /// kuluu-o9qt7.45; vault main_menu.md §59 addendum 37). `None` until that record arrives.
+    /// Trailing on purpose.
+    #[serde(default)]
+    pub homepoints: Option<HomepointMasks>,
 }
 
 /// One merit s2c 0x08C stored: the cost of its next upgrade and its current upgrade count
@@ -1253,6 +1261,23 @@ pub struct JobPointsJob {
 pub struct JobPointsRecord {
     pub access: u8,
     pub jobs: [JobPointsJob; JOB_POINT_JOBS],
+}
+
+/// Mask words per array of [`HomepointMasks`] — LSB sizes each at 4
+/// (vendor/server/src/map/packets/s2c/0x063_miscdata_homepoints.h).
+pub const HOMEPOINT_MASK_WORDS: usize = 4;
+
+/// One s2c 0x063 Homepoints record: the fast-travel access masks, bit `i & 31` of word `i >> 5`
+/// per group (vendor/server/src/map/packets/s2c/0x063_miscdata_homepoints.h; retail's wrapper law
+/// `.text FFXiMain.dll retail-2026-09 0x1CBC70`..`0x1CBDB0`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomepointMasks {
+    pub home_point: [u32; HOMEPOINT_MASK_WORDS],
+    pub survival_guide: [u32; HOMEPOINT_MASK_WORDS],
+    pub waypoint: [u32; HOMEPOINT_MASK_WORDS],
+    pub telepoint: u32,
+    pub atmos: u32,
+    pub eschan_portal: u32,
 }
 
 /// Upgrade slots of an alter ego points block, indexed by upgrade id
@@ -2909,6 +2934,16 @@ mod tests {
             job_point_types: Default::default(),
             job_points_received: false,
             job_points: None,
+            // A received Homepoints record, so the sample exercises the mask words in serde and
+            // postcard alike (bead kuluu-o9qt7.45).
+            homepoints: Some(HomepointMasks {
+                home_point: [0x1, 0x2, 0x3, 0x4],
+                survival_guide: [0x10, 0x20, 0x40, 0x80],
+                waypoint: [0xFFFF_FFFF, 0, 0, 0],
+                telepoint: 0xDEAD_BEEF,
+                atmos: 0xCAFE_BABE,
+                eschan_portal: 0xF00D_D00D,
+            }),
             party_invite: None,
             stage: Stage::InZone,
             char_name: Some("Sylvie".into()),
@@ -3622,6 +3657,7 @@ mod tests {
             "job_point_types",
             "job_points_received",
             "job_points",
+            "homepoints",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
@@ -3634,8 +3670,9 @@ mod tests {
     // merits (`Option<MisdataMerits>`) as exactly one more `None` tag byte. The Unity / alter ego
     // point fields append 51 zero bytes: `unity` (two sets of 11 + 11 varint zeros and a flag, then
     // the quest flag), the `alter_ego_points` `None` tag, and three scalar zeros. The merit and job
-    // point fields append four zero bytes: two empty map lengths, a flag and a `None` tag.
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    // point fields append four zero bytes: two empty map lengths, a flag and a `None` tag. §59
+    // addendum 37 appends homepoints (`Option<HomepointMasks>`) as exactly one more `None` tag byte.
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

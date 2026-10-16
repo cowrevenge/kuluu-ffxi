@@ -3102,6 +3102,16 @@ pub const CONFIG_STORE_SFX_VOLUME: u32 = 9;
 /// "Set the volume of the background music." (arm index 3).
 pub const CONFIG_STORE_BGM_VOLUME: u32 = 0xA;
 
+/// The Gameplay page's auto-sort pair store (`conf2win` rows id 8/9, DAT help "Automatically sort
+/// items as they enter your inventory." / "Disable the autosort function, and opt to manually sort
+/// your inventory."): arm values are **1 = on** and **0 = off**.
+pub const CONFIG_STORE_AUTO_SORT: u32 = 0x9A;
+
+/// The Gameplay page's sort-key pair store (rows id 10/11, DAT help "Sort items by category when
+/// organizing them." / "Sort items by name when organizing them and stacking them when
+/// possible."): arm values are **0 = category** and **1 = name**.
+pub const CONFIG_STORE_SORT_KEY: u32 = 0xCA;
+
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:
 /// rows 1–2 the radio pair on store 7 (values 0/1); rows 3/4 slider-edit rows
@@ -3130,19 +3140,19 @@ pub const CONF2WIN_ROW_ARMS: [ConfigRowArm; 11] = [
     ConfigRowArm::Slider { store_id: 0x38 },
     ConfigRowArm::Slider { store_id: 0x39 },
     ConfigRowArm::Radio {
-        store_id: 0x9A,
+        store_id: CONFIG_STORE_AUTO_SORT,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x9A,
+        store_id: CONFIG_STORE_AUTO_SORT,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0xCA,
+        store_id: CONFIG_STORE_SORT_KEY,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0xCA,
+        store_id: CONFIG_STORE_SORT_KEY,
         value: 1,
     },
 ];
@@ -6358,7 +6368,7 @@ fn dynamic_rows_for(
             .map(|g| ability_group_rows(snap, *g))
             .unwrap_or_default(),
         MenuKind::Abilities => ability_flat_rows(snap),
-        MenuKind::Items => inventory_rows(snap, active_bag.0, sort.auto),
+        MenuKind::Items => inventory_rows(snap, active_bag.0, sort),
         MenuKind::KeyItems => key_item_rows(snap),
         // The retail opener `.text 0x225460` always opens the `abisortw` companion **first**,
         // so the captioned list lands on top and takes the keys (bead kuluu-o9qt7.34); kuluu
@@ -6403,18 +6413,18 @@ fn dynamic_rows_for(
             });
         }
     }
-    order_dynamic_rows(kind, sort.auto, &mut rows);
+    order_dynamic_rows(kind, sort, &mut rows);
     rows
 }
 
 /// One row per slot of `container`, labelled with the bare item name (the item
-/// window draws the stack count as an icon badge). Auto-sort orders by item id
-/// (usables, then weapons, then armor by their DAT id ranges); Manual keeps the
-/// raw slot order.
+/// window draws the stack count as an icon badge). Auto-sort orders by category — item id, which
+/// groups usables, then weapons, then armor by their DAT id ranges — or by name, exactly the pair
+/// the Gameplay page offers; Manual keeps the raw slot order.
 pub fn inventory_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     container: u8,
-    auto_sort: bool,
+    sort: &crate::hud::item_detail::SortOptions,
 ) -> Vec<DynamicMenuRow> {
     let mut rows: Vec<DynamicMenuRow> = snap
         .container(container)
@@ -6434,20 +6444,35 @@ pub fn inventory_rows(
             })
         })
         .collect();
-    order_dynamic_rows(MenuKind::Items, auto_sort, &mut rows);
+    order_dynamic_rows(MenuKind::Items, sort, &mut rows);
     rows
 }
 
+/// For callers whose list is id-ordered independently of the player's Config choice.
+const ALWAYS_CATEGORY_SORT: crate::hud::item_detail::SortOptions =
+    crate::hud::item_detail::SortOptions {
+        auto: true,
+        key: crate::hud::item_detail::SortKey::Category,
+    };
+
 /// Order the freshly built rows for one dynamic menu. Retail's Items window
-/// sorts by item id when "Auto" is on (grouping usable items, then weapons,
-/// then armor by their DAT id ranges) and otherwise shows raw inventory-slot
+/// sorts when "Auto" is on, by category (item id — grouping usable items, then weapons,
+/// then armor by their DAT id ranges) or by name, and otherwise shows raw inventory-slot
 /// order. The item context submenu keeps its built order; other dynamic menus
 /// stay alphabetical.
-fn order_dynamic_rows(kind: MenuKind, auto_sort: bool, rows: &mut [DynamicMenuRow]) {
+fn order_dynamic_rows(
+    kind: MenuKind,
+    sort: &crate::hud::item_detail::SortOptions,
+    rows: &mut [DynamicMenuRow],
+) {
+    use crate::hud::item_detail::SortKey;
     match kind {
         MenuKind::Items => {
-            if auto_sort {
-                rows.sort_by_key(item_row_sort_key);
+            if sort.auto {
+                match sort.key {
+                    SortKey::Category => rows.sort_by_key(item_row_sort_key),
+                    SortKey::Name => rows.sort_by(compare_item_rows_by_name),
+                }
             }
         }
         // Retail's Command Menu Items list is always id-sorted.
@@ -6855,6 +6880,25 @@ pub fn emote_command_word(id: u8) -> String {
         .unwrap_or_else(|| format!("emote{id}"))
 }
 
+/// The by-name order the Gameplay page's second arm selects. Only the label is retail's law (the
+/// DAT caption "Sort items by name …"); case-folding and the id tie-break keep kuluu's ordering
+/// total and stable, since no comparator in the traced region shows how retail breaks ties.
+fn compare_item_rows_by_name(a: &DynamicMenuRow, b: &DynamicMenuRow) -> std::cmp::Ordering {
+    let name = |row: &DynamicMenuRow| row.label.to_lowercase();
+    name(a).cmp(&name(b)).then_with(|| {
+        item_row_sort_key(a)
+            .cmp(&item_row_sort_key(b))
+            // Distinct slots of the same stack share both label and id.
+            .then_with(|| match (a.action, b.action) {
+                (
+                    DynamicMenuAction::OpenItemAction { index: left, .. },
+                    DynamicMenuAction::OpenItemAction { index: right, .. },
+                ) => left.cmp(&right),
+                _ => std::cmp::Ordering::Equal,
+            })
+    })
+}
+
 fn item_row_sort_key(row: &DynamicMenuRow) -> u16 {
     match row.action {
         DynamicMenuAction::OpenItemAction { item_no, .. } => item_no,
@@ -6917,7 +6961,8 @@ pub fn usable_item_rows(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<DynamicMenu
             })
         })
         .collect();
-    order_dynamic_rows(MenuKind::UsableItems, true, &mut rows);
+    // The quick-menu list is id-ordered whatever the player picked on the Gameplay page.
+    order_dynamic_rows(MenuKind::UsableItems, &ALWAYS_CATEGORY_SORT, &mut rows);
     rows
 }
 
@@ -9977,7 +10022,7 @@ mod tests {
         assert_eq!(rows[0].action, DynamicMenuAction::KeyItem { id: 1 });
 
         let mut rows = rows;
-        order_dynamic_rows(MenuKind::KeyItems, true, &mut rows);
+        order_dynamic_rows(MenuKind::KeyItems, &ALWAYS_CATEGORY_SORT, &mut rows);
         assert_eq!(
             rows[0].action,
             DynamicMenuAction::KeyItem { id: 1 },
@@ -9988,14 +10033,37 @@ mod tests {
     #[test]
     fn item_rows_sort_by_id_when_auto() {
         let mut rows = conflicting_item_rows();
-        order_dynamic_rows(MenuKind::Items, true, &mut rows);
+        order_dynamic_rows(MenuKind::Items, &ALWAYS_CATEGORY_SORT, &mut rows);
         assert_eq!(labels(&rows), ["Zeta", "Apple"]);
     }
 
     #[test]
-    fn item_rows_keep_slot_order_when_manual() {
+    fn item_rows_sort_by_label_when_the_gameplay_page_picked_name() {
+        use crate::hud::item_detail::{SortKey, SortOptions};
         let mut rows = conflicting_item_rows();
-        order_dynamic_rows(MenuKind::Items, false, &mut rows);
+        order_dynamic_rows(
+            MenuKind::Items,
+            &SortOptions {
+                auto: true,
+                key: SortKey::Name,
+            },
+            &mut rows,
+        );
+        assert_eq!(labels(&rows), ["Apple", "Zeta"]);
+    }
+
+    #[test]
+    fn item_rows_keep_slot_order_when_manual() {
+        use crate::hud::item_detail::SortOptions;
+        let mut rows = conflicting_item_rows();
+        order_dynamic_rows(
+            MenuKind::Items,
+            &SortOptions {
+                auto: false,
+                ..SortOptions::default()
+            },
+            &mut rows,
+        );
         assert_eq!(labels(&rows), ["Apple", "Zeta"]);
     }
 
@@ -10008,7 +10076,7 @@ mod tests {
                 index: 0,
                 item_no: 50,
             },
-            true,
+            &ALWAYS_CATEGORY_SORT,
             &mut rows,
         );
         assert_eq!(labels(&rows), ["Apple", "Zeta"]);
@@ -10018,7 +10086,7 @@ mod tests {
     fn other_dynamic_menus_sort_alphabetically() {
         let mut rows = conflicting_item_rows();
         rows.swap(0, 1); // start Zeta-first so the sort has work to do
-        order_dynamic_rows(MenuKind::Magic, true, &mut rows);
+        order_dynamic_rows(MenuKind::Magic, &ALWAYS_CATEGORY_SORT, &mut rows);
         assert_eq!(labels(&rows), ["Apple", "Zeta"]);
     }
 
@@ -10664,7 +10732,11 @@ mod tests {
     /// ordering step for this kind.
     fn equip_pick_labels(snap: &kuluu_snapshot::SceneSnapshot, equip_slot: u8) -> Vec<String> {
         let mut rows = equip_slot_rows(snap, equip_slot, None);
-        order_dynamic_rows(MenuKind::EquipSlot(equip_slot), true, &mut rows);
+        order_dynamic_rows(
+            MenuKind::EquipSlot(equip_slot),
+            &ALWAYS_CATEGORY_SORT,
+            &mut rows,
+        );
         rows.iter().map(|r| r.label.clone()).collect()
     }
 

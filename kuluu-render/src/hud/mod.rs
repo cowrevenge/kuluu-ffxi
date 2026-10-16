@@ -550,6 +550,11 @@ impl Plugin for HudPlugin {
                 item_screen::item_row_mouse_hover_system,
                 item_screen::item_row_mouse_click_system,
                 item_screen::sort_option_mouse_system,
+                (
+                    item_detail::sync_inventory_sort_options_system,
+                    item_detail::mirror_inventory_sort_options_system,
+                )
+                    .chain(),
                 item_detail::auto_consolidate_inventory_system,
                 item_screen::bag_tab_mouse_system,
                 dialog::dialog_mouse_hover_system,

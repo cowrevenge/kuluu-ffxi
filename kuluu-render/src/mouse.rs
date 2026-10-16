@@ -80,8 +80,12 @@ pub fn camera_height_pitch_rate_rad_per_sec(
     )
 }
 
-/// Same screen-space convention as `mouse_aim_axis`; kuluu drives aim from this while a drag is
-/// engaged, and from `mouse_aim_axis` otherwise (see the mode note there).
+/// Same screen-space convention as `mouse_aim_axis`; kuluu drives aim from this alone — an engaged
+/// drag. The non-drag paths of the mouse manager are law'd but have no consumer yet: parked-cursor
+/// edge pan comes from the block behind store 0x8F (gate FFXiMain.dll retail-2026-09 .text 0x124CC5,
+/// ±1.0f bands hugging the tracked screen rect at .text 0x124CEA..0x124D2A), whose rate/hold
+/// consumption downstream — the latch byte around .text 0x124DA7/0x124DBA and the float timer it
+/// seeds — is still unread.
 pub fn mouse_drag_aim_axis(
     cursor: Vec2,
     anchor: Vec2,
@@ -102,8 +106,9 @@ pub fn mouse_drag_aim_axis(
 /// Y `0x126100`; FFXiMain.dll retail-2026-09), and that handler emits virtual
 /// arrow presses (dispatcher seed 0x125360, actions 0x16..0x19) which the same
 /// integration as the real arrows consumes — no per-pixel radian sensitivity
-/// exists on this path. Returns the saturated `(yaw+, pitch-up+)` aim axis from
-/// `cursor`, a top-left-origin y-down window-relative position in logical pixels
+/// exists on this path, and kuluu has no runtime consumer of it yet (edge pan is unbuilt until the
+/// rate/hold consumption behind that dispatcher is read). Returns the saturated `(yaw+, pitch-up+)`
+/// aim axis from `cursor`, a top-left-origin y-down window-relative position in logical pixels
 /// like `CursorMoved::position`, against the same-unit `window_size`; degenerate
 /// sizes return ZERO.
 /// Which of those two accessors retail uses is decided by the mouse state byte of

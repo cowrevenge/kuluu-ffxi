@@ -2847,27 +2847,27 @@ pub const CONF4_ROW_ARMS: [ConfigRowArm; 9] = [
 /// kuluu-o9qt7.20.1).
 pub const CONF7_ROW_ARMS: [ConfigRowArm; 14] = [
     ConfigRowArm::Radio {
-        store_id: 0x90,
+        store_id: CONFIG_STORE_POINTER_REFERENCE,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x90,
+        store_id: CONFIG_STORE_POINTER_REFERENCE,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8F,
+        store_id: CONFIG_STORE_EDGE_ROTATE,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x8F,
+        store_id: CONFIG_STORE_EDGE_ROTATE,
         value: 1,
     },
     ConfigRowArm::Radio {
-        store_id: 0x91,
+        store_id: CONFIG_STORE_CAMERA_BEHIND_LOCK,
         value: 0,
     },
     ConfigRowArm::Radio {
-        store_id: 0x91,
+        store_id: CONFIG_STORE_CAMERA_BEHIND_LOCK,
         value: 1,
     },
     ConfigRowArm::Radio {
@@ -3141,6 +3141,26 @@ pub const CONFIG_STORE_FP_INVERT_X: u32 = 0x8D;
 /// [`CONFIG_STORE_FP_INVERT_X`]'s Y-axis twin (`conf7` rows id 11/12, negated at .text
 /// FFXiMain.dll retail-2026-09 RVA 0x20FAA).
 pub const CONFIG_STORE_FP_INVERT_Y: u32 = 0x8E;
+
+/// The Mouse & Camera page's point-of-reference pair store (`conf7` rows id 1/2, DAT captions "Use
+/// cursor as point of reference for movement." = 0 / "…your character…" = 1). Its consumer law (the
+/// cursor-anchor capture vs the character-centre anchor, three handlers .text FFXiMain.dll
+/// retail-2026-09 RVA 0x124930..0x124B23) has no kuluu equivalent yet, so nothing reads this store.
+pub const CONFIG_STORE_POINTER_REFERENCE: u32 = 0x90;
+
+/// The Mouse & Camera page's screen-edge rotation switch (`conf7` rows id 3/4): **0 = the camera
+/// rotates when the pointer is parked at a screen edge** ("The camera will rotate when the mouse
+/// pointer is moved to the edge of the screen."), any non-zero value = it does not. The gate reads
+/// it at .text FFXiMain.dll retail-2026-09 RVA 0x124CC5 and jumps the whole edge-axis block when
+/// non-zero; no boot default was found (the store registers table-driven), so an unwritten store is
+/// treated as off here.
+pub const CONFIG_STORE_EDGE_ROTATE: u32 = 0x8F;
+
+/// The Mouse & Camera page's third-person freedom pair store (`conf7` rows id 5/6, DAT captions
+/// "Allows unrestricted movement of the third-person camera." = 0 / "Locks the third-person camera
+/// behind your character." = 1; consumer .text FFXiMain.dll retail-2026-09 RVA 0x1F984). Nothing in
+/// kuluu enforces the behind-camera constraint yet, so nothing reads this store.
+pub const CONFIG_STORE_CAMERA_BEHIND_LOCK: u32 = 0x91;
 
 /// `conf2win`'s eleven select arms — jump table .text 0x197848 (guarded
 /// `dec; cmp eax,0xa`) of handler FFXiMain.dll retail-2026-09 RVA 0x197470:

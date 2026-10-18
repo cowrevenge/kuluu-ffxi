@@ -426,6 +426,7 @@ impl Plugin for HudPlugin {
             (
                 menu::update_menu_stack_windows,
                 status_panel::update_status_level_box,
+                status_panel::update_persona_frame,
                 unity_fp_view::update_unity_fp_windows,
                 merit_windows::merit_window_upkeep,
             )

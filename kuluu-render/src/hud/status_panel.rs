@@ -446,6 +446,13 @@ pub struct PersonaCell {
 #[derive(Component)]
 pub struct StatusCaption;
 
+/// The caption's only mask: one border-row of panel fill behind the glyphs — sized in
+/// `update_persona_frame`. Replaces the word-level background box the owner rejected
+/// 2026-10-19 x3 ("the small status text now has a box around it... wtf"): that rectangle
+/// stuck out beyond the frame and read as a tab. The strip covers just the frame line.
+#[derive(Component)]
+pub struct StatusCaptionMask;
+
 pub const STATUS_CAPTION_TEXT: &str = "Status";
 
 /// The `level` box gauge track: a grey bar growing to every width between its caps, under
@@ -875,7 +882,20 @@ pub fn spawn_status_panel(mut commands: Commands) {
             });
         }
         // The title rides the window's top border; `update_persona_frame` measures and
-        // places it — centered across, and lifted to straddle the frame edge.
+        // places it — centered across, and lifted to straddle the frame edge. The word
+        // itself draws with NO box (owner x3, 2026-10-19): only the thin strip behind it
+        // masks the frame line.
+        p.spawn((
+            StatusCaptionMask,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::ZERO,
+                left: Val::ZERO,
+                height: Val::Px(PERSONA_BORDER_PX),
+                ..default()
+            },
+            BackgroundColor(theme::MAP_BACKING),
+        ));
         p.spawn((
             StatusCaption,
             Node {
@@ -885,9 +905,6 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 padding: UiRect::all(Val::Px(PERSONA_CAPTION_PAD_PX)),
                 ..default()
             },
-            // Opaque mask behind the word so the frame's top edge never crosses it;
-            // matches the panel's solid fill exactly.
-            BackgroundColor(theme::MAP_BACKING),
             Text::new(STATUS_CAPTION_TEXT),
             TextLayout {
                 linebreak: LineBreak::NoWrap,
@@ -1037,14 +1054,33 @@ pub fn update_status_level_box(
 pub fn update_persona_frame(
     config_rows: Res<crate::hud::menu::ConfigDatRows>,
     state: Res<SceneState>,
-    mut panel_q: Query<&mut Node, (With<StatusPanel>, Without<StatusCaption>)>,
+    mut panel_q: Query<
+        &mut Node,
+        (
+            With<StatusPanel>,
+            Without<StatusCaption>,
+            Without<StatusCaptionMask>,
+        ),
+    >,
     mut cell_q: Query<
         (&PersonaCell, &mut TextFont, &mut bevy::text::LineHeight),
         Without<StatusCaption>,
     >,
     mut caption_q: Query<
         (&mut Node, &mut TextFont, &mut bevy::text::LineHeight),
-        (With<StatusCaption>, Without<PersonaCell>),
+        (
+            With<StatusCaption>,
+            Without<PersonaCell>,
+            Without<StatusCaptionMask>,
+        ),
+    >,
+    mut mask_q: Query<
+        &mut Node,
+        (
+            With<StatusCaptionMask>,
+            Without<StatusCaption>,
+            Without<PersonaCell>,
+        ),
     >,
 ) {
     let widest = persona_lines(&state.snapshot)
@@ -1098,6 +1134,21 @@ pub fn update_persona_frame(
         let want_left = Val::Px(caption_left);
         if node.left != want_left {
             node.left = want_left;
+        }
+    }
+    // The strip behind the word: panel fill, one border row tall, wide enough for the
+    // glyphs plus their air — it breaks the frame line where the caption sits (retail's
+    // gap in the top border) and nothing else. No box.
+    let mask_width = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px)
+        + 2.0 * PERSONA_CAPTION_PAD_PX;
+    for mut mask in mask_q.iter_mut() {
+        let want_left = Val::Px(caption_left);
+        if mask.left != want_left {
+            mask.left = want_left;
+        }
+        let want_width = Val::Px(mask_width);
+        if mask.width != want_width {
+            mask.width = want_width;
         }
     }
 }
@@ -1948,20 +1999,36 @@ mod tests {
 
     /// The panel title rides the persona panel, absolutely placed and centered, lifted half
     /// its line height to straddle the frame's top edge (owner ruling 2026-10-18: "Retail
-    /// centers it on the persona window's top border"), masked so no frame line crosses the
-    /// word (owner ruling 2026-10-19).
+    /// centers it on the persona window's top border"). NO box around the word — only a
+    /// one-border-row strip masks the frame line behind it (owner x3, 2026-10-19).
     #[test]
     fn status_caption_straddles_the_panel_top_border() {
         let mut app = persona_app();
         let world = app.world_mut();
-        let mut q =
-            world.query_filtered::<(Entity, &Node, &Text, &BackgroundColor), With<StatusCaption>>();
-        let (caption, node, text, bg) = q.single(world).expect("one caption");
-        assert_eq!(text.as_str(), "Status");
-        assert_eq!(
-            bg.0,
-            theme::MAP_BACKING,
-            "opaque mask matching the solid panel fill"
+        // Owned copies per query, each dropped before the next borrow — several live
+        // World queries over one test would fight for the same mutable world.
+        let (caption, node) = {
+            let mut q = world.query_filtered::<(Entity, &Node), With<StatusCaption>>();
+            let (c, n) = q.single(world).expect("one caption");
+            (c, n.clone())
+        };
+        {
+            let mut t = world.query_filtered::<&Text, With<StatusCaption>>();
+            assert_eq!(t.single(world).expect("caption text").as_str(), "Status");
+        }
+        let caption_bg = world.get::<BackgroundColor>(caption).map(|b| b.0);
+        assert!(
+            caption_bg.is_none() || caption_bg.unwrap().alpha() == 0.0,
+            "the word itself never carries a visible fill — that read as a box (got {caption_bg:?})"
+        );
+        let mask = {
+            let mut mq = world.query_filtered::<&Node, With<StatusCaptionMask>>();
+            mq.single(world).expect("one caption strip").clone()
+        };
+        assert!(
+            matches!(mask.height, Val::Px(h) if (h - PERSONA_BORDER_PX).abs() < 0.01),
+            "the strip is one frame-border row tall: {:?}",
+            mask.height
         );
         assert_eq!(node.position_type, PositionType::Absolute);
         assert!(
@@ -1978,6 +2045,19 @@ mod tests {
             matches!(node.left, Val::Px(l) if (l - want_left).abs() < 0.5),
             "centered on the frame: left {:?}, want {want_left}",
             node.left
+        );
+        // The strip sits exactly under the glyphs — same origin as the caption node and
+        // wide enough for the word plus one pad of air.
+        assert!(
+            matches!(mask.left, Val::Px(l) if (l - want_left).abs() < 0.5),
+            "strip origin on the caption: {:?}",
+            mask.left
+        );
+        let want_mask_w = text_w + 2.0 * PERSONA_CAPTION_PAD_PX;
+        assert!(
+            matches!(mask.width, Val::Px(w) if (w - want_mask_w).abs() < 1.0),
+            "strip covers the glyphs plus air: {:?}",
+            mask.width
         );
         let child_of = world.get::<ChildOf>(caption).expect("caption is parented");
         assert!(

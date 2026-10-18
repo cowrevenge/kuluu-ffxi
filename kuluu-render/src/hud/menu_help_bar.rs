@@ -32,7 +32,9 @@ pub struct MenuHelpPaneSwitch;
 /// The bar's far-left title-box NODE — the "Status" word's framed segment. While any
 /// Status-flow window is open this segment alone hides (owner ruling 2026-10-19,
 /// corrected: "all you need to hide is the far left side of the top command bar" —
-/// the menus themselves stay drawn and clickable).
+/// the menus themselves stay drawn and clickable). Hidden NOT disabled, x3 ruling the
+/// same day: it stops drawing via `Visibility` and keeps its layout slot — `Display::None`
+/// dropped the flex slot and slid every bar segment left ("it still needs to exist").
 #[derive(Component)]
 pub struct MenuHelpTitleBox;
 
@@ -109,6 +111,8 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     align_items: AlignItems::Center,
                     ..default()
                 },
+                // Draw-state only — the node stays in flex so nothing shifts (x3 ruling).
+                Visibility::Visible,
                 BackgroundColor(theme::FRAME_BG),
                 BorderColor::all(theme::FRAME_EDGE),
             ))
@@ -379,7 +383,7 @@ pub fn update_menu_help_bar(
     // Pairwise-disjoint Node queries per the B0001 law.
     mut pane_switch_q: Query<&mut Node, (With<MenuHelpPaneSwitch>, Without<MenuHelpBar>)>,
     mut title_box_q: Query<
-        &mut Node,
+        &mut Visibility,
         (
             With<MenuHelpTitleBox>,
             Without<MenuHelpBar>,
@@ -406,14 +410,14 @@ pub fn update_menu_help_bar(
 
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
-    for mut box_node in title_box_q.iter_mut() {
+    for mut visibility in title_box_q.iter_mut() {
         let want = if status_word_hidden {
-            Display::None
+            Visibility::Hidden
         } else {
-            Display::Flex
+            Visibility::Visible
         };
-        if box_node.display != want {
-            box_node.display = want;
+        if *visibility != want {
+            *visibility = want;
         }
     }
 
@@ -903,17 +907,23 @@ mod tests {
 
         // Owner ruling 2026-10-19 (corrected): not just the word — the whole far-left
         // title-box segment is coded hidden while any status window holds its spot.
-        let box_display = |app: &mut App| {
-            app.world_mut()
-                .query_filtered::<&Node, With<MenuHelpTitleBox>>()
-                .single(app.world())
-                .map(|n| n.display)
-                .unwrap_or(Display::Flex)
-        };
+        // Hidden NOT disabled (owner x3, 2026-10-19): the box stops drawing but keeps
+        // its flex slot — a Display::None here slid every bar segment left.
+        let mut vis_q = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<MenuHelpTitleBox>>();
         assert_eq!(
-            box_display(&mut app),
-            Display::None,
-            "the title-box segment hides with the word"
+            *vis_q.single(app.world()).expect("title box"),
+            Visibility::Hidden,
+            "the title-box segment stops drawing with the word"
+        );
+        let mut disp_q = app
+            .world_mut()
+            .query_filtered::<&Node, With<MenuHelpTitleBox>>();
+        assert_eq!(
+            disp_q.single(app.world()).unwrap().display,
+            Display::Flex,
+            "the box keeps its layout slot while hidden"
         );
 
         let mut with_detail = stack.clone();

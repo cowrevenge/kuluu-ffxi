@@ -18,6 +18,9 @@ Keep each architecture separate. An x86_64 result does not verify an ARM64 artif
 
 Discover Wine with `command -v wine`.
 If the host uses a wrapper, use its configured runner path.
+Run the selected executable with `--version` before using a prefix.
+An executable on PATH can still be incompatible with the host CPU.
+If this prerequisite fails, record the diagnostic before attempting an artifact launch.
 An absolute runner path is host configuration. Do not copy it into shared instructions.
 Use the same runner for Wine, its prefix, and any Wine utilities.
 

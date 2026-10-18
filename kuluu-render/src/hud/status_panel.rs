@@ -563,7 +563,8 @@ pub fn spawn_status_panel(mut commands: Commands) {
                     ..default()
                 },
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
+                // DAT delta between persona's bottom (16+190) and `level`'s record top (208).
+                row_gap: Val::Px(2.0),
                 display: Display::None,
                 ..default()
             },
@@ -604,42 +605,22 @@ pub fn spawn_status_panel(mut commands: Commands) {
             BorderColor::all(theme::FRAME_EDGE),
         ))
         .with_children(|b| {
-            b.spawn((
-                StatusLevelLine(LevelLine::Heading),
-                Text::new("Level —"),
-                style::text_font(13.0),
-                TextColor(theme::TEXT),
-            ));
-            b.spawn((
-                StatusLevelLine(LevelLine::ExpLabel),
+            // One wrapper row per line with the text as its CHILD — Bevy only applies
+            // a node's justify/flex settings to child entities, so value rows need this
+            // shape to set them right.
+            spawn_level_line(b, LevelLine::Heading, "Level —", Node::default());
+            spawn_level_line(
+                b,
+                LevelLine::ExpLabel,
+                "",
                 Node {
                     margin: UiRect::left(Val::Px(LEVEL_EXP_LABEL_INDENT_PX)),
                     ..default()
                 },
-                Text::new(""),
-                style::text_font(13.0),
-                TextColor(theme::TEXT),
-            ));
-            b.spawn((
-                StatusLevelLine(LevelLine::ExpValue),
-                value_row_node(),
-                Text::new(""),
-                style::text_font(13.0),
-                TextColor(theme::TEXT),
-            ));
-            b.spawn((
-                StatusLevelLine(LevelLine::NextLabel),
-                Text::new(""),
-                style::text_font(13.0),
-                TextColor(theme::TEXT),
-            ));
-            b.spawn((
-                StatusLevelLine(LevelLine::NextValue),
-                value_row_node(),
-                Text::new(""),
-                style::text_font(13.0),
-                TextColor(theme::TEXT),
-            ));
+            );
+            spawn_level_line(b, LevelLine::ExpValue, "", value_row_node());
+            spawn_level_line(b, LevelLine::NextLabel, "", Node::default());
+            spawn_level_line(b, LevelLine::NextValue, "", value_row_node());
             // The experience gauge: blue caps hugging a grey track, salmon fill from
             // the left — geometry and colors measured off the retail box [O].
             b.spawn(Node {
@@ -773,6 +754,21 @@ pub fn comma_groups(value: u32) -> String {
     out
 }
 
+/// One `level` box line: wrapper row + text child (`StatusLevelLine`).
+fn spawn_level_line(
+    b: &mut bevy::ecs::relationship::RelatedSpawnerCommands<'_, ChildOf>,
+    line: LevelLine,
+    text: &'static str,
+    node: Node,
+) {
+    b.spawn(node).with_child((
+        StatusLevelLine(line),
+        Text::new(text),
+        style::text_font(13.0),
+        TextColor(theme::TEXT),
+    ));
+}
+
 fn value_row_node() -> Node {
     Node {
         width: Val::Percent(100.0),
@@ -782,32 +778,25 @@ fn value_row_node() -> Node {
     }
 }
 
-/// The `level` box sits at its own record frame while the install supplies one — DAT
-/// says x=16 y=208 w=112 h=88, i.e. flush under persona's Status spot at the same width
-/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md). Without a
-/// record it stays stacked in flow under persona and mirrors that panel's live column width,
-/// which is the retail screenshot law: one aligned column, same x, same w.
+/// The `level` box NEVER leaves the persona column: it stays stacked in flow under the
+/// panel and mirrors that panel's live width — one aligned column, same x, same w, exactly
+/// where the Status words sit (owner ruling 2026-10-18; matches the DAT record law of
+/// x=16 flush at persona's own width, which is why placing it from raw frames independently
+/// only ever misaligns it).
 pub fn update_status_level_box(
-    config_rows: Res<crate::hud::menu::ConfigDatRows>,
     panel_q: Query<&Node, (With<StatusPanel>, Without<StatusLevelBox>)>,
     mut level_box_q: Query<&mut Node, (With<StatusLevelBox>, Without<StatusPanel>)>,
 ) {
-    let frame = config_rows.record_frame(STATUS_LEVEL_WINDOW);
     let column_width = panel_q.single().map(|panel| panel.width).ok();
     for mut node in level_box_q.iter_mut() {
         let mut want = node.clone();
-        match &frame {
-            Some(frame) => crate::hud::menu::place_at_record_frame(&mut want, frame),
-            None => {
-                want.position_type = PositionType::Relative;
-                want.left = Val::Auto;
-                want.top = Val::Auto;
-                want.right = Val::Auto;
-                want.bottom = Val::Auto;
-                want.margin = UiRect::ZERO;
-                want.width = column_width.unwrap_or(Val::Px(PANEL_WIDTH_PX));
-            }
-        }
+        want.position_type = PositionType::Relative;
+        want.left = Val::Auto;
+        want.top = Val::Auto;
+        want.right = Val::Auto;
+        want.bottom = Val::Auto;
+        want.margin = UiRect::ZERO;
+        want.width = column_width.unwrap_or(Val::Px(PANEL_WIDTH_PX));
         node.set_if_neq(want);
     }
 }
@@ -865,14 +854,7 @@ pub fn update_status_panel(
     mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
     // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text/&mut Node query here
     // must exclude every other marker in the system.
-    mut level_line_q: Query<
-        (&StatusLevelLine, &mut Text, &mut Node),
-        (
-            Without<PersonaRow>,
-            Without<StatusExpFill>,
-            Without<StatusLeftStack>,
-        ),
-    >,
+    mut level_line_q: Query<(&StatusLevelLine, &mut Text), Without<PersonaRow>>,
     mut fill_q: Query<
         &mut Node,
         (
@@ -936,23 +918,17 @@ pub fn update_status_panel(
     }
 
     let body = level_box_body(snap);
-    for (line, mut text, mut node) in level_line_q.iter_mut() {
-        let (want, show) = match line.0 {
-            LevelLine::Heading => (body.heading.as_str(), true),
-            LevelLine::ExpLabel => ("EXP", body.exp.is_some()),
-            LevelLine::NextLabel => ("NEXTLevel", body.next_exp.is_some()),
-            LevelLine::ExpValue => (body.exp.as_deref().unwrap_or(""), body.exp.is_some()),
-            LevelLine::NextValue => (
-                body.next_exp.as_deref().unwrap_or(""),
-                body.next_exp.is_some(),
-            ),
+    for (line, mut text) in level_line_q.iter_mut() {
+        // Absent values render as empty lines — retail keeps the box's row rhythm.
+        let want = match line.0 {
+            LevelLine::Heading => body.heading.as_str(),
+            LevelLine::ExpLabel => "EXP",
+            LevelLine::NextLabel => "NEXTLevel",
+            LevelLine::ExpValue => body.exp.as_deref().unwrap_or(""),
+            LevelLine::NextValue => body.next_exp.as_deref().unwrap_or(""),
         };
         if text.as_str() != want {
             **text = want.to_string();
-        }
-        let want_display = if show { Display::Flex } else { Display::None };
-        if node.display != want_display {
-            node.display = want_display;
         }
     }
     for mut fill in fill_q.iter_mut() {
@@ -1631,16 +1607,30 @@ mod tests {
         );
     }
 
-    /// The `level` box sits at its own record frame once the install supplies one and stays
-    /// stacked under persona without it; persona keeps its Status spot either way.
+    /// The `level` box never leaves the persona column even when the install supplies its
+    /// record — placing from raw frames scales independently of the panel and is exactly what
+    /// made kuluu's box wider/offset from Status (owner ruling 2026-10-18: pixel-flush under
+    /// the panel, same x, same width).
     #[test]
-    fn level_box_sits_at_its_record_frame_or_stacks_under_persona() {
+    fn level_box_never_leaves_the_persona_column() {
         use bevy::app::App;
         let mut app = App::new();
         app.init_resource::<crate::hud::menu::ConfigDatRows>();
         app.add_systems(bevy::app::Startup, spawn_status_panel);
         app.add_systems(bevy::app::Update, update_status_level_box);
-        app.update();
+
+        {
+            // The install's real record: (16,208) w=112 h=88 — persona's own column.
+            let mut rows = app
+                .world_mut()
+                .resource_mut::<crate::hud::menu::ConfigDatRows>();
+            rows.frames
+                .insert(STATUS_LEVEL_WINDOW.into(), (16, 208, 112));
+            rows.frame_extents.insert(
+                STATUS_LEVEL_WINDOW.into(),
+                (88, crate::hud::menu::FRAME_ANCHOR_NONE),
+            );
+        }
 
         let level_box = |app: &mut App| -> Node {
             app.world_mut()
@@ -1649,17 +1639,39 @@ mod tests {
                 .expect("one level box")
                 .clone()
         };
+        app.update();
+
         let stacked = level_box(&mut app);
         assert_eq!(
             stacked.position_type,
             PositionType::Relative,
-            "in flow under persona"
+            "stays in flow under persona"
+        );
+        assert_eq!(
+            (stacked.left, stacked.top),
+            (Val::Auto, Val::Auto),
+            "never placed independently"
         );
         assert_eq!(
             stacked.width,
             Val::Px(PANEL_WIDTH_PX),
-            "the fallback mirrors persona's column width"
+            "mirrors the panel column from the first frame"
         );
+
+        // Narrow the persona column — the box follows it, staying one aligned column.
+        {
+            let mut panel_q = app
+                .world_mut()
+                .query_filtered::<&mut Node, With<StatusPanel>>();
+            panel_q.single_mut(app.world_mut()).unwrap().width = Val::Px(112.0);
+        }
+        app.update();
+        assert_eq!(
+            level_box(&mut app).width,
+            Val::Px(112.0),
+            "tracks the persona column width"
+        );
+
         let host = app
             .world_mut()
             .query_filtered::<&Node, With<StatusLeftStack>>()
@@ -1671,26 +1683,8 @@ mod tests {
             (Val::Px(PERSONA_STATUS_LEFT), Val::Px(PERSONA_STATUS_TOP)),
             "persona keeps its Status spot"
         );
-
-        {
-            let mut rows = app
-                .world_mut()
-                .resource_mut::<crate::hud::menu::ConfigDatRows>();
-            rows.frames
-                .insert(STATUS_LEVEL_WINDOW.into(), (16, 210, 112));
-            rows.frame_extents.insert(
-                STATUS_LEVEL_WINDOW.into(),
-                (40, crate::hud::menu::FRAME_ANCHOR_NONE),
-            );
-        }
-        app.update();
-        let placed = level_box(&mut app);
-        assert_eq!(placed.position_type, PositionType::Absolute);
-        assert_eq!(
-            (placed.left, placed.top, placed.width),
-            (Val::Px(16.0), Val::Px(210.0), Val::Px(112.0)),
-            "the record frame places it"
-        );
+        // DAT delta: persona bottom 16+190=206 to the level record top 208.
+        assert_eq!(host.row_gap, Val::Px(2.0));
     }
 
     /// The `level` box under the persona panel answers from s2c 0x061 EXP

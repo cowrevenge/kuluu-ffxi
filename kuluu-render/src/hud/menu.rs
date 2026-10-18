@@ -8197,13 +8197,42 @@ pub fn update_status_detail_window(
     let slots = config_rows.row_xyw.get(window_name).cloned();
     let rows_len = dynamic.rows.len();
     let slot_layout = slots.as_ref().filter(|s| s.len() == rows_len);
-    node.height = match (slot_layout, config_rows.record_frame(window_name)) {
-        (Some(_), Some(frame)) => match frame.height {
-            Some(height) => Val::Px(height),
+    // The three skill windows carry no DAT item blocks at all, so their columns come from
+    // the openers' height law instead: combat (ids 1..31) and magic (ids 32..47) draw TWO
+    // columns with window height = 22 + 14 * ceil(n/2) (FFXiMain.dll retail-2026-09
+    // RVA 0x1483B0), craft (ids 48..62) one column with height = 22 + 14 * n
+    // (RVA 0x148840). Their columns reuse the record family's DAT slot metrics
+    // (`joblevel`/`masterle`: x 8 and 134, y start 19, pitch 14); fill order is
+    // first-half-left there too.
+    let entry_kind = crate::hud::status_panel::STATUS_ENTRIES
+        .get(idx)
+        .map(|entry| entry.kind);
+    let (row_slots, window_height) = if slot_layout.is_some() {
+        let height = match config_rows.record_frame(window_name) {
+            Some(frame) => match frame.height {
+                Some(height) => Val::Px(height),
+                None => Val::Auto,
+            },
             None => Val::Auto,
-        },
-        _ => Val::Auto,
+        };
+        (slots.clone(), height)
+    } else if matches!(
+        entry_kind,
+        Some(crate::hud::status_panel::StatusEntryKind::CombatSkill)
+            | Some(crate::hud::status_panel::StatusEntryKind::MagicSkill)
+    ) {
+        let (layout, height) = skill_window_layout(rows_len, true);
+        (layout, Val::Px(height))
+    } else if matches!(
+        entry_kind,
+        Some(crate::hud::status_panel::StatusEntryKind::CraftSkill)
+    ) {
+        let (layout, height) = skill_window_layout(rows_len, false);
+        (layout, Val::Px(height))
+    } else {
+        (None, Val::Auto)
     };
+    node.height = window_height;
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
@@ -8226,11 +8255,11 @@ pub fn update_status_detail_window(
         if **text != row.label {
             **text = row.label.clone();
         }
-        if let Some(slots) = slot_layout.and_then(|s| s.get(line.slot)) {
+        if let Some(slot) = row_slots.as_ref().and_then(|v| v.get(line.slot)).copied() {
             // Slot coords are record-frame relative; the window's own 1px chrome border is
             // subtracted because Taffy resolves absolute children at the padding edge.
             const CHROME_BORDER_PX: f32 = 1.0;
-            let (x, y, width) = (f32::from(slots.0), f32::from(slots.1), f32::from(slots.2));
+            let (x, y, width) = (f32::from(slot.0), f32::from(slot.1), f32::from(slot.2));
             line_node.position_type = PositionType::Absolute;
             line_node.left = Val::Px(x - CHROME_BORDER_PX);
             line_node.top = Val::Px(y - CHROME_BORDER_PX);
@@ -8241,6 +8270,42 @@ pub fn update_status_detail_window(
         if line_node.display != Display::Flex {
             line_node.display = Display::Flex;
         }
+    }
+}
+
+/// Row slots and box height for the skill detail windows from the openers' law above: two
+/// columns of ceil(n/2) (combat/magic) or one column of n (craft), filling first-half-left,
+/// which is how the record family's DAT item slots fill. Returns `None` slots with no rows so
+/// an empty window keeps its chrome box and 22px height.
+fn skill_window_layout(rows_len: usize, two_columns: bool) -> (Option<Vec<(i16, i16, i16)>>, f32) {
+    const COLUMN_X: [i16; 2] = [8, 134];
+    const ROW_Y0: i16 = 19;
+    const ROW_PITCH: i16 = 14;
+    const COLUMN_W: i16 = 112;
+    if rows_len == 0 {
+        return (None, f32::from(ROW_Y0) + 3.0);
+    }
+    if two_columns {
+        let half = rows_len.div_ceil(2);
+        let slots = (0..rows_len)
+            .map(|i| {
+                let column = usize::from(i >= half);
+                let row = i % half;
+                (COLUMN_X[column], ROW_Y0 + ROW_PITCH * row as i16, COLUMN_W)
+            })
+            .collect();
+        (
+            Some(slots),
+            f32::from(ROW_Y0) + 3.0 + f32::from(ROW_PITCH) * half as f32,
+        )
+    } else {
+        let slots = (0..rows_len)
+            .map(|i| (COLUMN_X[0], ROW_Y0 + ROW_PITCH * i as i16, COLUMN_W))
+            .collect();
+        (
+            Some(slots),
+            f32::from(ROW_Y0) + 3.0 + f32::from(ROW_PITCH) * rows_len as f32,
+        )
     }
 }
 
@@ -9228,6 +9293,81 @@ mod tests {
             (placed[11].1, placed[11].2),
             (Val::Px(133.0), Val::Px(18.0)),
             "the twelfth row starts the second column"
+        );
+    }
+
+    /// The skill windows have no DAT item slots, so their layout comes from the openers'
+    /// height law (see `skill_window_layout`): combat/magic two columns at 22 + 14 *
+    /// ceil(n/2), craft one column at 22 + 14 * n.
+    #[test]
+    fn skill_detail_windows_follow_their_column_and_height_law() {
+        use crate::hud::network_status::NetStatusVisible;
+        use crate::snapshot::SceneState;
+
+        let run = |kind: crate::hud::status_panel::StatusEntryKind, rows: usize| {
+            let mut app = App::new();
+            app.init_resource::<GraphicsSettings>()
+                .init_resource::<crate::hud::HudPanels>()
+                .init_resource::<NetStatusVisible>()
+                .init_resource::<SceneState>()
+                .init_resource::<DynamicMenu>()
+                .init_resource::<ConfigDatRows>();
+            #[cfg(not(target_arch = "wasm32"))]
+            app.init_resource::<crate::audio::AudioMuteState>();
+            let entry = crate::hud::status_panel::STATUS_ENTRIES
+                .iter()
+                .position(|e| e.kind == kind)
+                .expect("status row exists") as u8;
+            {
+                let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+                d.rows = (0..rows)
+                    .map(|i| DynamicMenuRow {
+                        tint: None,
+                        label: format!("skill {i}"),
+                        action: DynamicMenuAction::DisplayInfo,
+                    })
+                    .collect();
+            }
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::Status);
+            stack.push(MenuKind::StatusDetail { entry });
+            app.insert_resource(InputMode::Menu(stack));
+            app.add_systems(Startup, spawn_status_detail_window);
+            app.add_systems(Update, update_status_detail_window);
+            app.update();
+            app.update();
+            let height = {
+                let node = app
+                    .world_mut()
+                    .query_filtered::<&Node, With<StatusDetailWindow>>()
+                    .single(app.world())
+                    .expect("the detail window");
+                node.height
+            };
+            let mut placed: Vec<(usize, Val, Val)> = app
+                .world_mut()
+                .query::<(&StatusDetailLine, &Node)>()
+                .iter(app.world())
+                .filter(|(_, n)| {
+                    n.display != Display::None && n.position_type == PositionType::Absolute
+                })
+                .map(|(line, n)| (line.slot, n.left, n.top))
+                .collect();
+            placed.sort_by_key(|(slot, _, _)| *slot);
+            (height, placed)
+        };
+
+        let (height, placed) = run(crate::hud::status_panel::StatusEntryKind::CombatSkill, 5);
+        assert_eq!(height, Val::Px(64.0), "22 + 14 * ceil(5/2)");
+        assert_eq!(placed.len(), 5);
+        assert_eq!((placed[3].1, placed[3].2), (Val::Px(133.0), Val::Px(18.0)));
+        assert_eq!((placed[2].1, placed[2].2), (Val::Px(7.0), Val::Px(46.0)));
+
+        let (height, placed) = run(crate::hud::status_panel::StatusEntryKind::CraftSkill, 4);
+        assert_eq!(height, Val::Px(78.0), "22 + 14 * 4");
+        assert!(
+            placed.iter().all(|(_, left, _)| *left == Val::Px(7.0)),
+            "craft keeps one column"
         );
     }
 

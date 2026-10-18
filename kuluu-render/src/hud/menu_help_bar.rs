@@ -29,6 +29,10 @@ pub struct MenuHelpHint;
 #[derive(Component)]
 pub struct MenuHelpPaneSwitch;
 
+/// The tiny shield + label that hosts the Status flow inside the command bar's left box.
+#[derive(Component)]
+pub struct StatusShieldWidget;
+
 const PANE_SWITCH_HINT: &str = "- : page";
 
 // Retail's bazaar window titles the bar itself, not the window;
@@ -96,6 +100,61 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     style::text_font(14.0),
                     TextColor(theme::TITLE),
                 ));
+                // Owner ruling 2026-10-18: while the Status flow is open this same box
+                // hosts retail's pennant system — the tiny shield with "STATUS" written on
+                // it — instead of the loose word. Same box, exact spot, no drift.
+                seg.spawn((
+                    StatusShieldWidget,
+                    Node {
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(4.0),
+                        display: Display::None,
+                        ..default()
+                    },
+                ))
+                .with_children(|sh| {
+                    sh.spawn(Node {
+                        width: Val::Px(12.0),
+                        height: Val::Px(17.0),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|g| {
+                        g.spawn((
+                            Node {
+                                width: Val::Px(12.0),
+                                height: Val::Px(11.0),
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.72, 0.77, 0.92)),
+                            BorderColor::all(Color::srgb(0.45, 0.30, 0.68)),
+                        ));
+                        g.spawn((
+                            Node {
+                                width: Val::Px(12.0),
+                                height: Val::Px(2.5),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.78, 0.29, 0.30)),
+                        ));
+                        g.spawn((
+                            Node {
+                                width: Val::Px(5.0),
+                                height: Val::Px(3.5),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.72, 0.77, 0.92)),
+                        ));
+                    });
+                    sh.spawn((
+                        Text::new("STATUS"),
+                        text_nowrap(),
+                        style::text_font(8.0),
+                        TextColor(theme::TITLE),
+                    ));
+                });
             });
             // Counter + help text clip instead of wrapping over the world view.
             p.spawn(Node {
@@ -340,18 +399,47 @@ pub fn update_menu_help_bar(
             Without<MenuHelpCounter>,
         ),
     >,
-    mut pane_switch_q: Query<&mut Node, (With<MenuHelpPaneSwitch>, Without<MenuHelpBar>)>,
+    // Pairwise-disjoint Node queries per the B0001 law.
+    mut pane_switch_q: Query<
+        &mut Node,
+        (
+            With<MenuHelpPaneSwitch>,
+            Without<MenuHelpBar>,
+            Without<StatusShieldWidget>,
+        ),
+    >,
+    mut shield_q: Query<
+        &mut Node,
+        (
+            With<StatusShieldWidget>,
+            Without<MenuHelpBar>,
+            Without<MenuHelpPaneSwitch>,
+        ),
+    >,
     config_rows: Res<menu::ConfigDatRows>,
 ) {
     let Ok(mut node) = bar_q.single_mut() else {
         return;
     };
 
-    // Owner ruling 2026-10-18: while a Status SUB-menu is open the word "Status" is hidden
-    // in the top bar — the detail window owns that corner of the screen. The list itself,
-    // focused, keeps the word.
+    // Owner ruling 2026-10-18 ("that's how the system works"): while the Status FLOW is open —
+    // list or any sub-menu — its word never stands in the top bar; the status windows carry
+    // their own captions there. Other menus keep theirs.
     let status_word_hidden = matches!(&*mode, InputMode::Menu(stack)
-        if stack.current().is_some_and(|lv| matches!(lv.kind, MenuKind::StatusDetail { .. })));
+    if stack.levels.iter().any(|lv| {
+        matches!(lv.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
+    }));
+    // Same ruling: the box shows the shield + tiny STATUS while the flow owns it.
+    for mut shield in shield_q.iter_mut() {
+        let want = if status_word_hidden {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if shield.display != want {
+            shield.display = want;
+        }
+    }
 
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
@@ -793,10 +881,11 @@ mod tests {
         assert_eq!(hint, "third row help");
     }
 
-    /// Owner ruling 2026-10-18: with a Status sub-menu (detail window) open, the word
-    /// "Status" in the top bar is hidden; closing the detail brings it back.
+    /// Owner ruling 2026-10-18 ("that's how the system works"): while ANY part of the Status
+    /// flow is open — its list or a sub-menu — the word "Status" never stands in the top bar;
+    /// other menus keep their words, and leaving the flow restores them.
     #[test]
-    fn status_word_hides_while_a_status_sub_menu_is_open() {
+    fn status_word_hidden_across_the_status_flow() {
         use crate::input_mode::{MenuLevel, MenuStack};
 
         let mut app = App::new();
@@ -824,20 +913,47 @@ mod tests {
                 .clone()
         };
 
+        let shield_shown = |app: &mut App| -> bool {
+            for _ in 0..2 {
+                app.update();
+            }
+            app.world_mut()
+                .query_filtered::<&Node, With<StatusShieldWidget>>()
+                .single(app.world())
+                .unwrap()
+                .display
+                == Display::Flex
+        };
+
+        let mut other = MenuStack::root();
+        other.levels.push(MenuLevel::new(MenuKind::Items, 0));
+        app.insert_resource(InputMode::Menu(other.clone()));
+        assert_eq!(
+            title_of(&mut app),
+            menu::menu_title(MenuKind::Items),
+            "other menus keep their word"
+        );
+        assert!(!shield_shown(&mut app), "no shield outside the flow");
+
         let mut stack = MenuStack::root();
         stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
         app.insert_resource(InputMode::Menu(stack.clone()));
-        assert_eq!(title_of(&mut app), "Status", "the list keeps the word");
+        assert_eq!(title_of(&mut app), "", "the flow itself hides the word");
+        assert!(shield_shown(&mut app), "the shield takes the box");
 
         let mut with_detail = stack.clone();
         with_detail
             .levels
             .push(MenuLevel::new(MenuKind::StatusDetail { entry: 0 }, 0));
         app.insert_resource(InputMode::Menu(with_detail));
-        assert_eq!(title_of(&mut app), "", "sub-menu open hides the word");
+        assert_eq!(title_of(&mut app), "", "sub-menu keeps it hidden");
 
-        app.insert_resource(InputMode::Menu(stack));
-        assert_eq!(title_of(&mut app), "Status", "closed: the word is back");
+        app.insert_resource(InputMode::Menu(other));
+        assert_eq!(
+            title_of(&mut app),
+            menu::menu_title(MenuKind::Items),
+            "flow closed: words work again"
+        );
     }
 
     /// The help line box starts where the title box ends and its bottom is the bar's.

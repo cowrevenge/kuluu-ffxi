@@ -33,6 +33,13 @@ pub struct MenuHelpPaneSwitch;
 #[derive(Component)]
 pub struct StatusShieldWidget;
 
+/// Split part two — the framed segment holding counter, help line and the right-edge labels. (Split parts: owner ruling 2026-10-18.)
+#[derive(Component)]
+pub struct MenuHelpRightPart;
+
+/// The visible gap between the band's two split parts.
+const BAR_SEGMENT_GAP_PX: f32 = 4.0;
+
 const PANE_SWITCH_HINT: &str = "- : page";
 
 // Retail's bazaar window titles the bar itself, not the window;
@@ -63,33 +70,33 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
         .spawn((
             crate::components::InGameEntity,
             MenuHelpBar,
+            // The band paints nothing itself — each split part carries its own frame and fill
+            // (owner ruling 2026-10-18: the LEFT and RIGHT are separate parts).
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(0.0),
                 left: Val::Px(0.0),
                 right: Val::Px(0.0),
                 height: Val::Px(BAR_HEIGHT),
-                border: UiRect::bottom(Val::Px(1.0)),
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Stretch,
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(theme::FRAME_BG),
-            BorderColor::all(theme::FRAME_EDGE),
             GlobalZIndex(style::WINDOW_Z),
         ))
         .with_children(|p| {
-            // Framed title segment (retail draws this as its own box).
+            // Split part one — the title box, framed and filled on its own.
             p.spawn((
                 Node {
                     width: Val::Px(TITLE_BOX_W),
                     flex_shrink: 0.0,
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
-                    border: UiRect::right(Val::Px(1.0)),
+                    border: UiRect::all(Val::Px(1.0)),
                     align_items: AlignItems::Center,
                     ..default()
                 },
+                BackgroundColor(theme::FRAME_BG),
                 BorderColor::all(theme::FRAME_EDGE),
             ))
             .with_children(|seg| {
@@ -156,17 +163,25 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     ));
                 });
             });
-            // Counter + help text clip instead of wrapping over the world view.
-            p.spawn(Node {
-                flex_grow: 1.0,
-                flex_shrink: 1.0,
-                min_width: Val::Px(0.0),
-                overflow: Overflow::clip_x(),
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(10.0),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(2.0)),
-                ..default()
-            })
+            // Split part two — framed and filled on its own, behind a gap; the counter +
+            // help text clip instead of wrapping over the world view.
+            p.spawn((
+                MenuHelpRightPart,
+                Node {
+                    flex_grow: 1.0,
+                    flex_shrink: 1.0,
+                    min_width: Val::Px(0.0),
+                    overflow: Overflow::clip_x(),
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(10.0),
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(2.0)),
+                    margin: UiRect::left(Val::Px(BAR_SEGMENT_GAP_PX)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(theme::FRAME_BG),
+                BorderColor::all(theme::FRAME_EDGE),
+            ))
             .with_children(|mid| {
                 mid.spawn((
                     MenuHelpCounter,
@@ -182,41 +197,45 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     style::text_font(14.0),
                     TextColor(theme::TEXT),
                 ));
-            });
-            // Persistent pane-toggle affordance (retail's two-pane menus map
-            // it to the Minus key); shown only while a menu is open.
-            p.spawn((
-                MenuHelpPaneSwitch,
-                Node {
+                // The right-edge labels ride inside split part two: a spacer pushes them
+                // to its end, keeping "Help" clear of the pinned network S/R panel.
+                mid.spawn(Node {
+                    flex_grow: 1.0,
+                    ..default()
+                });
+                // Persistent pane-toggle affordance (retail's two-pane menus map
+                // it to the Minus key); shown only while a menu is open.
+                mid.spawn((
+                    MenuHelpPaneSwitch,
+                    Node {
+                        flex_shrink: 0.0,
+                        align_items: AlignItems::Center,
+                        margin: UiRect::right(Val::Px(12.0)),
+                        ..default()
+                    },
+                ))
+                .with_children(|seg| {
+                    seg.spawn((
+                        Text::new(PANE_SWITCH_HINT),
+                        text_nowrap(),
+                        style::text_font(12.0),
+                        TextColor(theme::MUTED),
+                    ));
+                });
+                mid.spawn(Node {
                     flex_shrink: 0.0,
                     align_items: AlignItems::Center,
-                    margin: UiRect::right(Val::Px(12.0)),
+                    margin: UiRect::right(Val::Px(crate::hud::network_status::NET_PANEL_W + 8.0)),
                     ..default()
-                },
-            ))
-            .with_children(|seg| {
-                seg.spawn((
-                    Text::new(PANE_SWITCH_HINT),
-                    text_nowrap(),
-                    style::text_font(12.0),
-                    TextColor(theme::MUTED),
-                ));
-            });
-            // "Help" sits just left of the network S/R panel (fixed width,
-            // pinned at top-right), so reserve exactly that much space.
-            p.spawn(Node {
-                flex_shrink: 0.0,
-                align_items: AlignItems::Center,
-                margin: UiRect::right(Val::Px(crate::hud::network_status::NET_PANEL_W + 8.0)),
-                ..default()
-            })
-            .with_children(|seg| {
-                seg.spawn((
-                    Text::new("Help"),
-                    text_nowrap(),
-                    style::text_font(12.0),
-                    TextColor(theme::MUTED),
-                ));
+                })
+                .with_children(|seg| {
+                    seg.spawn((
+                        Text::new("Help"),
+                        text_nowrap(),
+                        style::text_font(12.0),
+                        TextColor(theme::MUTED),
+                    ));
+                });
             });
         });
 }
@@ -977,6 +996,72 @@ mod tests {
         assert_eq!(
             (title_box_width, bar_height),
             (Val::Px(corner.x), Val::Px(corner.y))
+        );
+    }
+
+    /// The band is two framed parts — each with its own border and fill — the title box
+    /// left, the counter/help box right, split by a visible gap (owner ruling 2026-10-18:
+    /// "ensure the LEFT and RIGHT are split parts").
+    #[test]
+    fn command_band_is_two_split_parts() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.run_system_once(spawn_menu_help_bar).unwrap();
+
+        // The band itself paints nothing (bevy seeds every node with a transparent
+        // BackgroundColor, so the check is on alpha), leaving no strip behind the parts.
+        let root_bg = world
+            .query_filtered::<&BackgroundColor, With<MenuHelpBar>>()
+            .single(&world)
+            .expect("one band");
+        assert!(
+            root_bg.0.alpha() == 0.0,
+            "the band root paints nothing: {:?}",
+            root_bg.0
+        );
+
+        let all_edges = |node: &Node| {
+            [
+                node.border.left,
+                node.border.right,
+                node.border.top,
+                node.border.bottom,
+            ]
+        };
+
+        // Left part — the title box frames and fills itself.
+        let left_parent = world
+            .query_filtered::<&ChildOf, With<MenuHelpTitle>>()
+            .single(&world)
+            .unwrap()
+            .parent();
+        let left_node = world.get::<Node>(left_parent).expect("title box node");
+        assert_eq!(
+            all_edges(left_node),
+            [Val::Px(1.0); 4],
+            "the title box frames itself"
+        );
+        assert_eq!(
+            world.get::<BackgroundColor>(left_parent).unwrap().0,
+            theme::FRAME_BG
+        );
+
+        // Right part — framed, filled, grows across the rest of the band behind a gap.
+        let (right_node, right_bg) = world
+            .query_filtered::<(&Node, &BackgroundColor), With<MenuHelpRightPart>>()
+            .single(&world)
+            .expect("the hint box");
+        assert_eq!(
+            all_edges(right_node),
+            [Val::Px(1.0); 4],
+            "hint box frames itself"
+        );
+        assert_eq!(right_bg.0, theme::FRAME_BG);
+        assert!(right_node.flex_grow > 0.0, "takes the rest of the band");
+        assert!(
+            matches!(right_node.margin.left, Val::Px(gap) if gap >= BAR_SEGMENT_GAP_PX),
+            "split by a visible gap: {:?}",
+            right_node.margin.left
         );
     }
 

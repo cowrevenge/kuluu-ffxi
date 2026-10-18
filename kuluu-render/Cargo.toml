@@ -155,6 +155,7 @@ uuid = { version = "1", default-features = false }
 # we delegate to JS's `Date.now()` on wasm targets only.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+web-time = "1"
 
 [dev-dependencies]
 # JSON round-trip test for `GraphicsSettings`. Not in the runtime deps:

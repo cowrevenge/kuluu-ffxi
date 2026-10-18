@@ -1,5 +1,5 @@
+use bevy::platform::time::Instant;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};

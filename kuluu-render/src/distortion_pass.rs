@@ -22,7 +22,7 @@
 //! unsampled view holds the fully processed image in every AA mode. Both passes here touch only
 //! that single-sample surface; nothing samples a multi-sample buffer.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use bevy::asset::{embedded_asset, AssetServer};
 use bevy::core_pipeline::{upscaling::upscaling, Core3d, Core3dSystems};

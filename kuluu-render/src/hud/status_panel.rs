@@ -408,16 +408,19 @@ pub enum PersonaCol {
     Bonus,
 }
 
+/// Draw order across the row. The bonus sits directly after the reserved slash slot —
+/// retail writes `+6` right behind the attribute, and every column keeps a fixed edge so
+/// a row WITH a bonus cannot nudge any number (owner ruling 2026-10-18).
 pub const PERSONA_COLS: [PersonaCol; 5] = [
     PersonaCol::Label,
     PersonaCol::V1,
     PersonaCol::Slash,
-    PersonaCol::V2,
     PersonaCol::Bonus,
+    PersonaCol::V2,
 ];
 
 /// One persona table cell: row `index` at column [`PersonaCol`].
-#[derive(Component)]
+#[derive(Component, Debug)]
 pub struct PersonaCell {
     pub index: usize,
     pub col: PersonaCol,
@@ -427,6 +430,8 @@ pub struct PersonaCell {
 /// "Retail centers it on the persona window's top border").
 #[derive(Component)]
 pub struct StatusCaption;
+
+pub const STATUS_CAPTION_TEXT: &str = "Status";
 
 /// The `level` box gauge track: a grey bar growing to every width between its caps, under
 /// the fill (owner ruling 2026-10-18: "a full-width grey track with a red fill and blue
@@ -809,6 +814,8 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 PersonaRow { index },
                 Node {
                     width: Val::Percent(100.0),
+                    // Rows keep their fitted pitch even when a row's content overflows.
+                    flex_shrink: 0.0,
                     ..default()
                 },
             ))
@@ -831,10 +838,16 @@ pub fn spawn_status_panel(mut commands: Commands) {
                         PersonaCol::V1 => {
                             r.spawn(Node {
                                 width: Val::Percent(PERSONA_VALUE_COL_PCT),
+                                min_width: Val::Percent(PERSONA_VALUE_COL_PCT),
+                                max_width: Val::Percent(PERSONA_VALUE_COL_PCT),
                                 justify_content: JustifyContent::FlexEnd,
+                                flex_shrink: 0.0,
                                 ..default()
                             })
-                            .with_child(cell);
+                            // The implicit Node bevy seeds on a Text spawn carries Taffy's
+                            // shrink-1 default — the very thing that squeezed an INT `+5`
+                            // row (pinned by persona_columns_are_pinned_against_the_bonus_row).
+                            .with_child((persona_cell_node(col), cell));
                         }
                         _ => {
                             r.spawn((persona_cell_node(col), cell));
@@ -843,19 +856,17 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 }
             });
         }
-        // The title rides the window's top border, centered; `update_persona_frame`
-        // lifts it to straddle the frame edge.
+        // The title rides the window's top border; `update_persona_frame` measures and
+        // places it — centered across, and lifted to straddle the frame edge.
         p.spawn((
             StatusCaption,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::ZERO,
                 left: Val::ZERO,
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
                 ..default()
             },
-            Text::new("Status"),
+            Text::new(STATUS_CAPTION_TEXT),
             TextLayout {
                 linebreak: LineBreak::NoWrap,
                 ..default()
@@ -868,15 +879,27 @@ pub fn spawn_status_panel(mut commands: Commands) {
 }
 
 /// The fixed column grid for a persona cell that is a direct row child; the right-set
-/// V1 lives inside its wrapper and takes the wrapper's share.
+/// V1 lives inside its wrapper and takes the wrapper's share. A bonus row must never move
+/// another number's column (owner ruling 2026-10-18), so each sized column pins
+/// min=max=width alongside shrink 0.
 fn persona_cell_node(col: PersonaCol) -> Node {
-    let width = match col {
-        PersonaCol::Label => Val::Percent(PERSONA_LABEL_COL_PCT),
-        PersonaCol::V1 | PersonaCol::Bonus => Val::Auto,
-        PersonaCol::Slash => Val::Percent(PERSONA_SLASH_COL_PCT),
-        PersonaCol::V2 => Val::Percent(PERSONA_MAX_COL_PCT),
+    let sized = |pct: f32| Node {
+        // min=max=width pins the column so no row's content can move it in any direction.
+        width: Val::Percent(pct),
+        min_width: Val::Percent(pct),
+        max_width: Val::Percent(pct),
+        flex_shrink: 0.0,
+        ..default()
     };
-    Node { width, ..default() }
+    match col {
+        PersonaCol::Label => sized(PERSONA_LABEL_COL_PCT),
+        PersonaCol::Slash => sized(PERSONA_SLASH_COL_PCT),
+        PersonaCol::V2 => sized(PERSONA_MAX_COL_PCT),
+        PersonaCol::V1 | PersonaCol::Bonus => Node {
+            flex_shrink: 0.0,
+            ..default()
+        },
+    }
 }
 
 /// The `level` box body as the wire reports it (values from s2c 0x061 — no wire value,
@@ -1031,6 +1054,12 @@ pub fn update_persona_frame(
     let pitch_px = layout
         .line_pitch
         .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
+    // Across: measured centering — a Text component draws at its own origin, so no
+    // container justify can center it (a Percent+justify box left it hugging the edge).
+    let caption_inner = layout.width - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
+    let caption_left = PERSONA_PAD_X_PX
+        + (caption_inner - crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px))
+            / 2.0;
     for (mut node, mut font, mut pitch) in caption_q.iter_mut() {
         let size = bevy::text::FontSize::Px(layout.row_font_px);
         if font.font_size != size {
@@ -1040,6 +1069,10 @@ pub fn update_persona_frame(
         let want_top = Val::Px(-pitch_px / 2.0);
         if node.top != want_top {
             node.top = want_top;
+        }
+        let want_left = Val::Px(caption_left);
+        if node.left != want_left {
+            node.left = want_left;
         }
     }
 }
@@ -1876,17 +1909,65 @@ mod tests {
         let (caption, node, text) = q.single(world).expect("one caption");
         assert_eq!(text.as_str(), "Status");
         assert_eq!(node.position_type, PositionType::Absolute);
-        assert_eq!(node.justify_content, JustifyContent::Center);
         assert!(
             matches!(node.top, Val::Px(top) if top < 0.0),
             "lifted over the frame edge: {:?}",
             node.top
+        );
+        // Across the panel by measurement (no record installed → fallback width): the word's
+        // center sits on the frame column's center.
+        let inner = PANEL_WIDTH_PX - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
+        let text_w = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, PERSONA_ROW_FONT_PX);
+        let want_left = PERSONA_PAD_X_PX + (inner - text_w) / 2.0;
+        assert!(
+            matches!(node.left, Val::Px(l) if (l - want_left).abs() < 0.5),
+            "centered on the frame: left {:?}, want {want_left}",
+            node.left
         );
         let child_of = world.get::<ChildOf>(caption).expect("caption is parented");
         assert!(
             world.get::<StatusPanel>(child_of.parent()).is_some(),
             "the caption rides the persona panel, hiding with it"
         );
+    }
+
+    /// No row's content may move another number's column: every sized persona column pins
+    /// min=max=width, nothing in the table shrinks, and a bonus occupies its own column right
+    /// after the slash slot (owner ruling 2026-10-18 on the `+5` shifting INT).
+    #[test]
+    fn persona_columns_are_pinned_against_the_bonus_row() {
+        let mut app = persona_app();
+        let world = app.world_mut();
+        let mut q = world.query::<(&PersonaCell, &Node)>();
+        assert_eq!(q.iter(world).count(), PERSONA_ROW_COUNT * 5);
+        let mut pinned = 0;
+        for (cell, node) in q.iter(world) {
+            assert_eq!(node.flex_shrink, 0.0, "{cell:?} never shrinks");
+            let want = match cell.col {
+                PersonaCol::Label => Some(PERSONA_LABEL_COL_PCT),
+                PersonaCol::Slash => Some(PERSONA_SLASH_COL_PCT),
+                PersonaCol::V2 => Some(PERSONA_MAX_COL_PCT),
+                PersonaCol::V1 | PersonaCol::Bonus => None,
+            };
+            if let Some(pct) = want {
+                assert_eq!(node.width, Val::Percent(pct));
+                assert_eq!(
+                    (node.min_width, node.max_width),
+                    (Val::Percent(pct), Val::Percent(pct)),
+                    "{:?} column pinned",
+                    cell.col
+                );
+                pinned += 1;
+            }
+        }
+        assert_eq!(pinned, PERSONA_ROW_COUNT * 3);
+        let rows: Vec<f32> = world
+            .query_filtered::<&Node, With<PersonaRow>>()
+            .iter(world)
+            .map(|node| node.flex_shrink)
+            .collect();
+        assert_eq!(rows.len(), PERSONA_ROW_COUNT);
+        assert!(rows.iter().all(|shrink| *shrink == 0.0));
     }
 
     /// The `level` box gauge track grows to fill everything between its blue caps and is grey

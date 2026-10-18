@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::launcher_store::{AuthFlavorKind, ServerProfile};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use kuluu_session::auth_client::{AuthClient, AuthFlavor};
+use kuluu_session::auth_client::AuthClient;
 use kuluu_session::lobby_client::LobbyClient;
 use tokio::runtime::Handle as RtHandle;
 
@@ -33,11 +33,7 @@ use crate::launcher::{Defaults, Selection};
 use super::AppPhase;
 
 pub(crate) fn apply_server_profile(commands: &mut Commands, profile: &ServerProfile) {
-    let flavor = match profile.flavor {
-        AuthFlavorKind::Json => AuthFlavor::Json,
-        AuthFlavorKind::Binary => AuthFlavor::Binary,
-        AuthFlavorKind::PlayOnline => AuthFlavor::PlayOnline,
-    };
+    let flavor = profile.flavor.auth_flavor();
     let auth = Arc::new(AuthClient::with_flavor_and_version(
         profile.host.clone(),
         profile.auth_port,
@@ -378,6 +374,7 @@ pub(crate) struct ServerEditForm {
     #[allow(dead_code)]
     pub focus: ServerEditField,
     pub editing_index: Option<usize>,
+    pub error: String,
 }
 
 impl Default for ServerEditForm {
@@ -413,7 +410,20 @@ impl ServerEditForm {
             show_advanced,
             focus: ServerEditField::default(),
             editing_index: None,
+            error: String::new(),
         }
+    }
+
+    pub fn select_flavor(&mut self, flavor: AuthFlavorKind) {
+        if self.flavor == flavor {
+            return;
+        }
+        self.flavor = flavor;
+        self.xiloader_version = match flavor {
+            AuthFlavorKind::Binary => crate::launcher_store::LEGACY_LSB_XILOADER_VERSION.into(),
+            _ => String::new(),
+        };
+        self.error.clear();
     }
 }
 

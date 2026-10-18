@@ -1322,10 +1322,12 @@ mod tests {
     /// entries over time — client-build skew, not an index-base convention.
     const HORIZONXI_2023_KEYITEM_OBTAINED: usize = 6437;
     const RETAIL_2026_09_KEYITEM_OBTAINED: usize = 6442;
+    const RETAIL_2026_10_KEYITEM_OBTAINED: usize = 6442;
 
     const MEASURED_KEYITEM_OBTAINED_ROWS: &[(&str, usize)] = &[
         ("horizonxi-2023", HORIZONXI_2023_KEYITEM_OBTAINED),
         ("retail-2026-09", RETAIL_2026_09_KEYITEM_OBTAINED),
+        ("retail-2026-10", RETAIL_2026_10_KEYITEM_OBTAINED),
     ];
 
     fn keyitem_obtained_index_for(profile: &str) -> Option<usize> {

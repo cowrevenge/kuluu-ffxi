@@ -225,8 +225,10 @@ fn main_job_level(snap: &kuluu_snapshot::SceneSnapshot) -> u8 {
         .unwrap_or(0)
 }
 
-const PANEL_WIDTH_PX: f32 = 280.0;
-const LEVEL_BOX_WIDTH_PX: f32 = 150.0;
+/// Width of kuluu's own persona panel when the install carries no `persona` record —
+/// also the column width every Status detail window falls back to (owner ruling
+/// 2026-10-18) and the stacked `level` box mirrors until its record places it.
+pub const PANEL_WIDTH_PX: f32 = 280.0;
 const PERSONA_PAD_X_PX: f32 = 10.0;
 const PERSONA_PAD_Y_PX: f32 = 8.0;
 const PERSONA_BORDER_PX: f32 = 1.0;
@@ -285,22 +287,56 @@ pub struct StatusPanel;
 #[derive(Component)]
 pub struct StatusLevelBox;
 
+/// One text row of the `level` box. Retail stacks five lines — Level heading, EXP label,
+/// the EXP value on its own right-set line, NEXTLevel label and its value — above an
+/// experience gauge (`update_status_level_box`, owner retail screenshot law 2026-10-18).
 #[derive(Component)]
-pub struct StatusLevelText;
+pub struct StatusLevelLine(pub LevelLine);
 
-/// While a Status detail whose own record sits in the persona column is focused, the stats
-/// panel is replaced — same spot, hidden behind that window (`status_detail_covers_stats_panel`).
-fn stats_panel_covered(
-    mode: &crate::input_mode::InputMode,
-    rows: &crate::hud::menu::ConfigDatRows,
-) -> bool {
+/// Which `level` box row a [`StatusLevelLine`] carries, in retail display order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LevelLine {
+    Heading,
+    ExpLabel,
+    ExpValue,
+    NextLabel,
+    NextValue,
+}
+
+/// The gauge's salmon fill; its percent width is the wire's `exp_now`/`exp_next` ratio.
+#[derive(Component)]
+pub struct StatusExpFill;
+
+// Gauge geometry measured off the owner's retail screenshot of `menu    level  `
+// (frame x=16 y=208 w=112 h=88): one centered row ≈72px across — two blue end caps
+// around a grey track with a salmon fill over it.
+const LEVEL_GAUGE_CAP_WIDTH_PX: f32 = 3.0;
+const LEVEL_GAUGE_CAP_HEIGHT_PX: f32 = 8.0;
+const LEVEL_GAUGE_TRACK_WIDTH_PX: f32 = 66.0;
+const LEVEL_GAUGE_TRACK_HEIGHT_PX: f32 = 6.0;
+/// The EXP label sits further right than NEXTLevel in the retail box.
+pub const LEVEL_EXP_LABEL_INDENT_PX: f32 = 14.0;
+/// Retail values end short of the column's right edge, over the gauge's tail.
+pub const LEVEL_VALUE_INSET_END_PX: f32 = 16.0;
+
+/// Gauge colors sampled from the owner's retail screenshot [O]: cyan-blue caps, salmon
+/// fill for the earned EXP, grey track remainder (measured rgb(16,151,248),
+/// rgb(237,123,122) and rgb(118,114,125)).
+pub const LEVEL_GAUGE_CAP_COLOR: Color = Color::srgb(0.063, 0.612, 0.973);
+pub const LEVEL_EXP_FILL_COLOR: Color = Color::srgb(0.929, 0.482, 0.478);
+pub const LEVEL_GAUGE_TRACK_COLOR: Color = Color::srgb(0.451, 0.447, 0.494);
+
+/// Owner ruling 2026-10-18 (retail screenshots): every Status detail window lands on the
+/// stats panel's exact spot, so while ANY detail holds focus the persona column — panel and
+/// level box together — is hidden until it closes. Esc returns to the list with the cursor
+/// still on the detail's row.
+fn stats_panel_covered(mode: &crate::input_mode::InputMode) -> bool {
     let crate::input_mode::InputMode::Menu(stack) = mode else {
         return false;
     };
-    stack.current().is_some_and(|l| {
-        matches!(l.kind, crate::input_mode::MenuKind::StatusDetail { entry }
-            if crate::hud::menu::status_detail_covers_stats_panel(rows, usize::from(entry)))
-    })
+    stack
+        .current()
+        .is_some_and(|l| matches!(l.kind, crate::input_mode::MenuKind::StatusDetail { .. }))
 }
 
 /// True while the stack holds statcom2 or one of its detail windows — retail
@@ -557,9 +593,11 @@ pub fn spawn_status_panel(mut commands: Commands) {
         s.spawn((
             StatusLevelBox,
             Node {
-                width: Val::Px(LEVEL_BOX_WIDTH_PX),
+                width: Val::Px(PANEL_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                 border: UiRect::all(Val::Px(1.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(1.0),
                 ..default()
             },
             BackgroundColor(theme::FRAME_BG),
@@ -567,11 +605,80 @@ pub fn spawn_status_panel(mut commands: Commands) {
         ))
         .with_children(|b| {
             b.spawn((
-                StatusLevelText,
+                StatusLevelLine(LevelLine::Heading),
+                Text::new("Level —"),
+                style::text_font(13.0),
+                TextColor(theme::TEXT),
+            ));
+            b.spawn((
+                StatusLevelLine(LevelLine::ExpLabel),
+                Node {
+                    margin: UiRect::left(Val::Px(LEVEL_EXP_LABEL_INDENT_PX)),
+                    ..default()
+                },
                 Text::new(""),
                 style::text_font(13.0),
                 TextColor(theme::TEXT),
             ));
+            b.spawn((
+                StatusLevelLine(LevelLine::ExpValue),
+                value_row_node(),
+                Text::new(""),
+                style::text_font(13.0),
+                TextColor(theme::TEXT),
+            ));
+            b.spawn((
+                StatusLevelLine(LevelLine::NextLabel),
+                Text::new(""),
+                style::text_font(13.0),
+                TextColor(theme::TEXT),
+            ));
+            b.spawn((
+                StatusLevelLine(LevelLine::NextValue),
+                value_row_node(),
+                Text::new(""),
+                style::text_font(13.0),
+                TextColor(theme::TEXT),
+            ));
+            // The experience gauge: blue caps hugging a grey track, salmon fill from
+            // the left — geometry and colors measured off the retail box [O].
+            b.spawn(Node {
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            })
+            .with_children(|g| {
+                g.spawn((
+                    Node {
+                        width: Val::Px(LEVEL_GAUGE_CAP_WIDTH_PX),
+                        height: Val::Px(LEVEL_GAUGE_CAP_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(LEVEL_GAUGE_CAP_COLOR),
+                ));
+                g.spawn(Node {
+                    width: Val::Px(LEVEL_GAUGE_TRACK_WIDTH_PX),
+                    height: Val::Px(LEVEL_GAUGE_TRACK_HEIGHT_PX),
+                    ..default()
+                })
+                .with_child((
+                    StatusExpFill,
+                    Node {
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(LEVEL_EXP_FILL_COLOR),
+                ));
+                g.spawn((
+                    Node {
+                        width: Val::Px(LEVEL_GAUGE_CAP_WIDTH_PX),
+                        height: Val::Px(LEVEL_GAUGE_CAP_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(LEVEL_GAUGE_CAP_COLOR),
+                ));
+            });
         });
     });
     commands.entity(panel).with_children(|p| {
@@ -605,30 +712,88 @@ pub fn spawn_status_panel(mut commands: Commands) {
     });
 }
 
-/// The `level` box body: Level / EXP / NEXTLevel (labels follow the retail
-/// window's on-screen words captured in the owner's screenshot; values from
-/// s2c 0x061 — no wire value, no invented number).
-pub fn level_box_lines(snap: &kuluu_snapshot::SceneSnapshot) -> String {
+/// The `level` box body as the wire reports it (values from s2c 0x061 — no wire value,
+/// no invented number). Retail draws comma-grouped values on their own lines and a
+/// gauge filled by the ratio law: screenshot measured ≈27px of salmon over the ≈66px
+/// track at exp_now=1,304 / exp_next=3,400.
+#[derive(Debug, PartialEq)]
+pub struct LevelBoxBody {
+    pub heading: String,
+    /// Comma-grouped decimal; `None` until the stats block arrives — then retail's
+    /// value lines are empty and the gauge sits at zero.
+    pub exp: Option<String>,
+    pub next_exp: Option<String>,
+    /// Percent width of the salmon fill, clamped to 0..=100.
+    pub fill_percent: f32,
+}
+
+pub fn level_box_body(snap: &kuluu_snapshot::SceneSnapshot) -> LevelBoxBody {
     let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     let Some(lv) = me.map(|m| m.main_job_lv) else {
-        return "Level —".to_string();
+        return LevelBoxBody {
+            heading: "Level —".to_string(),
+            exp: None,
+            next_exp: None,
+            fill_percent: 0.0,
+        };
     };
-    match snap.stats.as_ref() {
-        Some(s) if s.exp_next != 0 => {
-            format!("Level {lv}\nEXP {}\nNEXTLevel {}", s.exp_now, s.exp_next)
-        }
-        _ => format!("Level {lv}"),
+    let Some(stats) = snap.stats.as_ref().filter(|s| s.exp_next != 0) else {
+        return LevelBoxBody {
+            heading: format!("Level {lv}"),
+            exp: None,
+            next_exp: None,
+            fill_percent: 0.0,
+        };
+    };
+    // Non-negative wire values widen without loss; the casts are total after clamping.
+    let now = stats.exp_now.max(0) as u32;
+    let next = stats.exp_next.max(0) as u32;
+    LevelBoxBody {
+        heading: format!("Level {lv}"),
+        exp: Some(comma_groups(now)),
+        next_exp: Some(comma_groups(next)),
+        fill_percent: if next == 0 {
+            0.0
+        } else {
+            ((now.min(next) as f64 / next as f64) * 100.0) as f32
+        },
     }
 }
 
-/// The `level` box sits at its own record frame while the install supplies one
-/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md); without it
-/// the box stays stacked under persona.
+/// `1,304` — the retail box groups thousands; every digit string here is ASCII.
+pub fn comma_groups(value: u32) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.char_indices() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn value_row_node() -> Node {
+    Node {
+        width: Val::Percent(100.0),
+        justify_content: JustifyContent::FlexEnd,
+        padding: UiRect::right(Val::Px(LEVEL_VALUE_INSET_END_PX)),
+        ..default()
+    }
+}
+
+/// The `level` box sits at its own record frame while the install supplies one — DAT
+/// says x=16 y=208 w=112 h=88, i.e. flush under persona's Status spot at the same width
+/// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md). Without a
+/// record it stays stacked in flow under persona and mirrors that panel's live column width,
+/// which is the retail screenshot law: one aligned column, same x, same w.
 pub fn update_status_level_box(
     config_rows: Res<crate::hud::menu::ConfigDatRows>,
-    mut level_box_q: Query<&mut Node, With<StatusLevelBox>>,
+    panel_q: Query<&Node, (With<StatusPanel>, Without<StatusLevelBox>)>,
+    mut level_box_q: Query<&mut Node, (With<StatusLevelBox>, Without<StatusPanel>)>,
 ) {
     let frame = config_rows.record_frame(STATUS_LEVEL_WINDOW);
+    let column_width = panel_q.single().map(|panel| panel.width).ok();
     for mut node in level_box_q.iter_mut() {
         let mut want = node.clone();
         match &frame {
@@ -640,7 +805,7 @@ pub fn update_status_level_box(
                 want.right = Val::Auto;
                 want.bottom = Val::Auto;
                 want.margin = UiRect::ZERO;
-                want.width = Val::Px(LEVEL_BOX_WIDTH_PX);
+                want.width = column_width.unwrap_or(Val::Px(PANEL_WIDTH_PX));
             }
         }
         node.set_if_neq(want);
@@ -697,14 +862,33 @@ pub fn update_persona_frame(
 pub fn update_status_panel(
     mode: Res<crate::input_mode::InputMode>,
     state: Res<SceneState>,
-    config_rows: Res<crate::hud::menu::ConfigDatRows>,
     mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
-    // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text query here
+    // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text/&mut Node query here
     // must exclude every other marker in the system.
-    mut level_text_q: Query<&mut Text, (With<StatusLevelText>, Without<PersonaRow>)>,
+    mut level_line_q: Query<
+        (&StatusLevelLine, &mut Text, &mut Node),
+        (
+            Without<PersonaRow>,
+            Without<StatusExpFill>,
+            Without<StatusLeftStack>,
+        ),
+    >,
+    mut fill_q: Query<
+        &mut Node,
+        (
+            With<StatusExpFill>,
+            Without<PersonaRow>,
+            Without<StatusLevelLine>,
+            Without<StatusLeftStack>,
+        ),
+    >,
     mut row_q: Query<
         (&PersonaRow, &mut Text, &mut Node),
-        (Without<StatusLevelText>, Without<StatusLeftStack>),
+        (
+            Without<StatusLevelLine>,
+            Without<StatusExpFill>,
+            Without<StatusLeftStack>,
+        ),
     >,
     mut bonus_q: Query<(&PersonaBonus, &mut TextSpan, &mut TextColor)>,
 ) {
@@ -714,7 +898,7 @@ pub fn update_status_panel(
     let open = status_flow_open(&mode);
     // A wide detail replaces the panel: retail keeps neither persona nor its level box
     // visible under one.
-    let covered = stats_panel_covered(&mode, &config_rows);
+    let covered = stats_panel_covered(&mode);
     if (!open || covered) && stack_node.display != Display::None {
         stack_node.display = Display::None;
         return;
@@ -751,10 +935,30 @@ pub fn update_status_panel(
         }
     }
 
-    if let Ok(mut text) = level_text_q.single_mut() {
-        let want = level_box_lines(snap);
-        if **text != want {
-            **text = want;
+    let body = level_box_body(snap);
+    for (line, mut text, mut node) in level_line_q.iter_mut() {
+        let (want, show) = match line.0 {
+            LevelLine::Heading => (body.heading.as_str(), true),
+            LevelLine::ExpLabel => ("EXP", body.exp.is_some()),
+            LevelLine::NextLabel => ("NEXTLevel", body.next_exp.is_some()),
+            LevelLine::ExpValue => (body.exp.as_deref().unwrap_or(""), body.exp.is_some()),
+            LevelLine::NextValue => (
+                body.next_exp.as_deref().unwrap_or(""),
+                body.next_exp.is_some(),
+            ),
+        };
+        if text.as_str() != want {
+            **text = want.to_string();
+        }
+        let want_display = if show { Display::Flex } else { Display::None };
+        if node.display != want_display {
+            node.display = want_display;
+        }
+    }
+    for mut fill in fill_q.iter_mut() {
+        let want = Val::Percent(body.fill_percent);
+        if fill.width != want {
+            fill.width = want;
         }
     }
 }
@@ -1376,29 +1580,18 @@ mod tests {
         );
     }
 
-    /// A detail whose record sits in the persona column replaces the stats panel at its own spot:
-    /// while it holds focus both persona and the level box are hidden. Frame values here are the
-    /// ones measured from the install through `dat-menu-window-print` (profile/btlskill x=130,
-    /// evitem x=16 y=48 w=366) — placement stays DAT-driven at runtime.
+    /// Owner ruling 2026-10-18 (retail screenshots): every Status detail lands on the stats
+    /// panel's exact spot and hides that column — persona and level box together — while it
+    /// holds focus; only the list itself leaves the panel showing.
     #[test]
-    fn stats_column_details_replace_the_panel_beside_ones_do_not() {
+    fn any_status_detail_hides_the_stats_panel() {
         use bevy::app::App;
 
-        use crate::hud::menu::{status_detail_covers_stats_panel, ConfigDatRows};
         use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
 
         let display_with = |entry: Option<u8>| -> Display {
             let mut app = App::new();
             app.init_resource::<SceneState>();
-            let mut rows = ConfigDatRows::default();
-            for (name, frame) in [
-                ("profile", (130i16, 48i16, 252i16)),
-                ("btlskill", (130i16, 48i16, 252i16)),
-                ("evitem", (16i16, 48i16, 366i16)),
-            ] {
-                rows.frames.insert(name.to_string(), frame);
-            }
-            app.insert_resource(rows);
             app.add_systems(bevy::app::Startup, spawn_status_panel);
             app.add_systems(bevy::app::Update, update_status_panel);
             let mut stack = MenuStack::root();
@@ -1421,25 +1614,21 @@ mod tests {
         };
 
         assert_eq!(display_with(None), Display::Flex);
-        assert_eq!(display_with(Some(0)), Display::Flex, "profile sits beside");
-        assert_eq!(display_with(Some(3)), Display::Flex, "btlskill sits beside");
+        assert_eq!(
+            display_with(Some(0)),
+            Display::None,
+            "profile covers the stats spot"
+        );
+        assert_eq!(
+            display_with(Some(3)),
+            Display::None,
+            "Combat Skills covers the stats spot"
+        );
         assert_eq!(
             display_with(Some(6)),
             Display::None,
-            "Key Items' evitem record (x=16) replaces the panel spot"
+            "Key Items covers the stats spot"
         );
-
-        let mut rows = ConfigDatRows::default();
-        for (name, frame) in [
-            ("profile", (130i16, 48i16, 252i16)),
-            ("btlskill", (130i16, 48i16, 252i16)),
-            ("evitem", (16i16, 48i16, 366i16)),
-        ] {
-            rows.frames.insert(name.to_string(), frame);
-        }
-        assert!(status_detail_covers_stats_panel(&rows, 6));
-        assert!(!status_detail_covers_stats_panel(&rows, 0));
-        assert!(!status_detail_covers_stats_panel(&rows, 3));
     }
 
     /// The `level` box sits at its own record frame once the install supplies one and stays
@@ -1466,7 +1655,11 @@ mod tests {
             PositionType::Relative,
             "in flow under persona"
         );
-        assert_eq!(stacked.width, Val::Px(LEVEL_BOX_WIDTH_PX));
+        assert_eq!(
+            stacked.width,
+            Val::Px(PANEL_WIDTH_PX),
+            "the fallback mirrors persona's column width"
+        );
         let host = app
             .world_mut()
             .query_filtered::<&Node, With<StatusLeftStack>>()
@@ -1501,12 +1694,19 @@ mod tests {
     }
 
     /// The `level` box under the persona panel answers from s2c 0x061 EXP
-    /// (vault main_menu.md §59 addendum 10 screenshot law): Level / EXP /
-    /// NEXTLevel, no invented values when the stats block is absent.
+    /// (vault main_menu.md §59 addendum 10 + owner retail screenshot law 2026-10-18):
+    /// Level heading, comma-grouped EXP/NEXTLevel values on their own lines, gauge
+    /// filled by the ratio — no invented values when the stats block is absent.
     #[test]
     fn level_box_answers_from_the_wire_exp_pair() {
         let mut snap = kuluu_snapshot::SceneSnapshot::default();
-        assert_eq!(level_box_lines(&snap), "Level —", "no self yet");
+        let body = level_box_body(&snap);
+        assert_eq!(body.heading, "Level —", "no self yet");
+        assert_eq!(
+            (body.exp.as_deref(), body.next_exp.as_deref()),
+            (None, None)
+        );
+        assert_eq!(body.fill_percent, 0.0);
 
         snap.self_char_id = Some(7);
         snap.party.push(kuluu_snapshot::PartyMember {
@@ -1528,14 +1728,87 @@ mod tests {
             in_mog_house: false,
             party_no: 0,
         });
-        assert_eq!(level_box_lines(&snap), "Level 6", "no stats block yet");
+        let body = level_box_body(&snap);
+        assert_eq!(body.heading, "Level 6", "no stats block yet");
+        assert!(body.exp.is_none() && body.next_exp.is_none());
 
         snap.stats = Some(kuluu_snapshot::CharStats {
             exp_now: 806,
             exp_next: 1750,
             ..Default::default()
         });
-        assert_eq!(level_box_lines(&snap), "Level 6\nEXP 806\nNEXTLevel 1750");
+        let body = level_box_body(&snap);
+        assert_eq!(
+            (body.exp.as_deref(), body.next_exp.as_deref()),
+            (Some("806"), Some("1,750")),
+            "comma-grouped like the retail box"
+        );
+        let want_fill = 806.0 / 1750.0 * 100.0;
+        assert!(
+            (body.fill_percent - want_fill).abs() < 0.01,
+            "gauge fills by the wire ratio: {}",
+            body.fill_percent
+        );
+    }
+
+    #[test]
+    fn comma_grouping_matches_the_retail_box() {
+        assert_eq!(comma_groups(0), "0");
+        assert_eq!(comma_groups(999), "999");
+        assert_eq!(comma_groups(1304), "1,304");
+        assert_eq!(comma_groups(i16::MAX as u32), "32,767");
+    }
+
+    /// Gauge law off the retail screenshot: fill ≈ earned/next measured on the pixels
+    /// (≈27px of salmon over the ≈66px track at 1,304/3,400), clamped at both ends.
+    #[test]
+    fn gauge_fill_follows_and_clamps_the_wire_ratio() {
+        let mut snap = kuluu_snapshot::SceneSnapshot {
+            self_char_id: Some(7),
+            ..Default::default()
+        };
+        snap.party.push(kuluu_snapshot::PartyMember {
+            id: 7,
+            act_index: 0x100,
+            name: Some("Cowrevenge".into()),
+            hp: 232,
+            mp: 98,
+            tp: 525,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 104,
+            main_job: 22,
+            main_job_lv: 14,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: true,
+            is_alliance_leader: false,
+            in_mog_house: false,
+            party_no: 0,
+        });
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            exp_now: 1304,
+            exp_next: 3400,
+            ..Default::default()
+        });
+        let body = level_box_body(&snap);
+        assert_eq!(body.exp.as_deref(), Some("1,304"));
+        assert_eq!(body.next_exp.as_deref(), Some("3,400"));
+        assert!((body.fill_percent - 38.35).abs() < 0.02); // screenshot bar ≈ this
+
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            exp_now: 9000,
+            exp_next: 1750,
+            ..Default::default()
+        });
+        assert_eq!(level_box_body(&snap).fill_percent, 100.0, "clamped at full");
+
+        snap.stats = Some(kuluu_snapshot::CharStats {
+            exp_now: -3,
+            exp_next: 1750,
+            ..Default::default()
+        });
+        assert_eq!(level_box_body(&snap).fill_percent, 0.0, "never negative");
     }
 
     #[test]

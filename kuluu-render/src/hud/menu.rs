@@ -5258,8 +5258,9 @@ impl MenuStackLayout {
 /// hub.
 pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStackLayout {
     let levels = &stack.levels;
-    // Status details draw in their own window beside persona (`update_status_detail_window`),
-    // and the windows that draw themselves do so in `unity_fp_view`.
+    // Status details draw in their own window on the stats panel's spot
+    // (`update_status_detail_window`), and the windows that draw themselves do so in
+    // `unity_fp_view`.
     let Some(focused) = levels
         .iter()
         .rposition(|level| {
@@ -7941,20 +7942,6 @@ pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
     Some("fp_cat"),
 ];
 
-/// True while the focused Status detail's own record frame sits in the persona column: retail
-/// opens those windows exactly on top of the stats panel — same spot, and the panel is hidden
-/// behind them for as long as they last (the measured install records read x=16 y=48 w=366 for
-/// evitem/merit2ca/fp_cat). The x=130 family opens beside it instead. Window placement IS DAT
-/// data; nothing here is eyeballed.
-pub fn status_detail_covers_stats_panel(rows: &ConfigDatRows, entry: usize) -> bool {
-    STATUS_DETAIL_WINDOW_NAMES
-        .get(entry)
-        .copied()
-        .flatten()
-        .and_then(|name| rows.window_frame(name))
-        .is_some_and(|(x, _, _)| x == crate::hud::status_panel::PERSONA_STATUS_LEFT)
-}
-
 pub fn spawn_status_detail_window(mut commands: Commands) {
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
@@ -7999,16 +7986,11 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
         });
 }
 
-/// Where Status puts a detail window instead of its record frame.
-fn status_code_move(window: &str) -> Option<(f32, f32)> {
-    use crate::hud::status_panel::{JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP, JOBLEVEL_WINDOW};
-    (window == JOBLEVEL_WINDOW).then_some((JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP))
-}
-
-/// Places and fills the left-side windows of the Status flow from DAT frames:
-/// the persona panel takes `persona`'s record width (fallback keeps kuluu's own
-/// width when no install is present), and the detail window sits at its record
-/// rect beside it, or where Status code-moves it. Also hides everything once the flow closes.
+/// Places and fills the left-side windows of the Status flow: the persona panel takes
+/// `persona`'s record width (fallback keeps kuluu's own width when no install is present),
+/// and every detail window lands on the stats panel's exact spot at that column width —
+/// owner ruling 2026-10-18 from retail screenshots; the panel itself hides underneath
+/// (`stats_panel_covered`). Also hides everything once the flow closes.
 #[allow(clippy::type_complexity)]
 pub fn update_status_detail_window(
     mode: Res<InputMode>,
@@ -8075,20 +8057,13 @@ pub fn update_status_detail_window(
         Ok(node) => node,
         Err(_) => return,
     };
-    let name = STATUS_DETAIL_WINDOW_NAMES
-        .get(idx)
-        .copied()
-        .flatten()
-        .unwrap_or("profile");
-    let frame = config_rows.record_frame(name);
-    if let Some((x, y)) = status_code_move(name).or(frame.map(|f| (f.x, f.y))) {
-        node.left = Val::Px(x);
-        node.top = Val::Px(y);
-    }
-    if let Some(frame) = frame {
-        node.width = Val::Px(frame.width);
-        node.height = frame.height.map_or(Val::Auto, |h| Val::Px(h.max(0.0)));
-    }
+    // Owner ruling 2026-10-18: every Status detail window takes the STATUS panel's exact spot and
+    // hides it — this widget is placed there for all kinds, not at its own record frame.
+    use crate::hud::status_panel::{PANEL_WIDTH_PX, PERSONA_STATUS_LEFT, PERSONA_STATUS_TOP};
+    node.left = Val::Px(PERSONA_STATUS_LEFT);
+    node.top = Val::Px(PERSONA_STATUS_TOP);
+    node.width = Val::Px(persona_w.unwrap_or(PANEL_WIDTH_PX));
+    node.height = Val::Auto;
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
@@ -8821,13 +8796,13 @@ mod tests {
         );
     }
 
-    /// The detail law (vault main_menu.md §59 addendum 10): a statcom2 detail
-    /// opens as its OWN framed window beside the persona panel (record rect,
-    /// fallback `(130,48,w252)` with no install readable) while the right column
-    /// keeps drawing the list under it. Detail rows answer plain — retail's
-    /// display-only windows carry no cursor and never take keys.
+    /// The detail law (owner ruling 2026-10-18 from retail screenshots): a statcom2
+    /// detail opens as its OWN framed window on the stats panel's exact spot
+    /// (`(16,16)`, persona column width — kuluu's own when no install is readable),
+    /// hiding that column while the right column keeps drawing the list. Detail rows
+    /// answer plain — retail's display-only windows carry no cursor and never take keys.
     #[test]
-    fn status_detail_opens_beside_the_list_not_inside_it() {
+    fn status_detail_lands_on_the_stats_spot() {
         use crate::hud::network_status::NetStatusVisible;
         use crate::snapshot::SceneState;
 
@@ -8870,20 +8845,32 @@ mod tests {
         app.update();
         app.update();
 
-        let (mut visible, mut left, mut width) = (false, Val::Auto, Val::Auto);
+        let (mut visible, mut left, mut top, mut width) = (false, Val::Auto, Val::Auto, Val::Auto);
         {
             let mut q = app.world_mut().query::<(&StatusDetailWindow, &Node)>();
             for (_, node) in q.iter(app.world()) {
                 if node.display != Display::None {
                     visible = true;
                     left = node.left;
+                    top = node.top;
                     width = node.width;
                 }
             }
         }
         assert!(visible, "the detail draws as its own framed window");
-        assert_eq!(left, Val::Px(130.0), "beside the persona column");
-        assert_eq!(width, Val::Px(252.0), "profile's record width (fallback)");
+        assert_eq!(
+            (left, top),
+            (
+                Val::Px(crate::hud::status_panel::PERSONA_STATUS_LEFT),
+                Val::Px(crate::hud::status_panel::PERSONA_STATUS_TOP)
+            ),
+            "exactly the STATUS panel's spot"
+        );
+        assert_eq!(
+            width,
+            Val::Px(crate::hud::status_panel::PANEL_WIDTH_PX),
+            "the persona column width (kuluu fallback)"
+        );
 
         let title = app
             .world_mut()
@@ -14655,15 +14642,15 @@ mod tests {
         );
     }
 
-    /// Status code-moves `joblevel` to (130, 48) whatever its record says, keeping the record
-    /// width; the other details sit at their record frames.
+    /// Owner ruling 2026-10-18: every Status detail — joblevel and record frames alike —
+    /// lands on the stats panel's exact spot, at `persona`'s column width (the install
+    /// record when readable).
     #[test]
-    fn joblevel_opened_from_status_sits_at_its_code_move() {
-        use crate::hud::status_panel::{
-            JOBLEVEL_STATUS_LEFT, JOBLEVEL_STATUS_TOP, JOBLEVEL_WINDOW,
-        };
+    fn every_status_detail_lands_on_the_stats_spot() {
+        use crate::hud::status_panel::{JOBLEVEL_WINDOW, PERSONA_STATUS_LEFT, PERSONA_STATUS_TOP};
         const JOBLEVEL_FRAME: (i16, i16, i16) = (200, 100, 180);
         const PROFILE_FRAME: (i16, i16, i16) = (150, 60, 240);
+        const PERSONA_FRAME: (i16, i16, i16) = (16, 48, 112);
         const PROFILE_ENTRY: u8 = 0;
         let entry_of = |window: &str| {
             STATUS_DETAIL_WINDOW_NAMES
@@ -14683,6 +14670,7 @@ mod tests {
             let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
             rows.frames.insert(JOBLEVEL_WINDOW.into(), JOBLEVEL_FRAME);
             rows.frames.insert(profile_window.into(), PROFILE_FRAME);
+            rows.frames.insert("persona".into(), PERSONA_FRAME);
         }
         let detail = |app: &mut App, entry: u8| -> (Val, Val, Val) {
             let mut stack = MenuStack::root();
@@ -14697,21 +14685,12 @@ mod tests {
                 .expect("the detail window");
             (node.left, node.top, node.width)
         };
-        assert_eq!(
-            detail(&mut app, entry_of(JOBLEVEL_WINDOW)),
-            (
-                Val::Px(JOBLEVEL_STATUS_LEFT),
-                Val::Px(JOBLEVEL_STATUS_TOP),
-                Val::Px(f32::from(JOBLEVEL_FRAME.2))
-            )
+        let stats_spot = (
+            Val::Px(PERSONA_STATUS_LEFT),
+            Val::Px(PERSONA_STATUS_TOP),
+            Val::Px(f32::from(PERSONA_FRAME.2)),
         );
-        assert_eq!(
-            detail(&mut app, PROFILE_ENTRY),
-            (
-                Val::Px(f32::from(PROFILE_FRAME.0)),
-                Val::Px(f32::from(PROFILE_FRAME.1)),
-                Val::Px(f32::from(PROFILE_FRAME.2))
-            )
-        );
+        assert_eq!(detail(&mut app, entry_of(JOBLEVEL_WINDOW)), stats_spot);
+        assert_eq!(detail(&mut app, PROFILE_ENTRY), stats_spot);
     }
 }

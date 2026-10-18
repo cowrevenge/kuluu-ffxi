@@ -3807,13 +3807,10 @@ mod menu_key_tests {
             &mut stack,
             world.resource_mut::<MapMarkers>(),
         );
-        // Move the SELECTOR (pass-through keys) and select another row.
-        harness.key(
-            &Key::ArrowDown,
-            KeyCode::ArrowDown,
-            &mut stack,
-            world.resource_mut::<MapMarkers>(),
-        );
+        // Switch: the selection moves to another row — with no list window there is
+        // nothing on screen to arrow through, so the selection position is moved
+        // directly and Enter selects it.
+        stack.levels[1].cursor = 1;
         harness.key(
             &Key::Enter,
             KeyCode::Enter,
@@ -3899,41 +3896,6 @@ mod menu_key_tests {
             stack.levels.last().unwrap().kind,
             MenuKind::StatusDetail { entry } if entry as usize == COMBAT_ROW
         ));
-    }
-
-    /// The focus law (vault main_menu.md §59, statcom2 registry flag 0x1 companions):
-    /// while a display-only detail tops the stack its keys stay on the selector
-    /// — Down moves the selector cursor, never the companion's.
-    #[test]
-    fn display_only_detail_keeps_the_selector_keys() {
-        let mut harness = Harness::new();
-        let mut world = marker_world();
-        let mut stack = MenuStack::root();
-        stack.push(MenuKind::Status);
-        stack.levels[1].cursor = 0;
-
-        // Open Profile (display-only), then navigate: the selector moves.
-        harness.key(
-            &Key::Enter,
-            KeyCode::Enter,
-            &mut stack,
-            world.resource_mut::<MapMarkers>(),
-        );
-        assert!(matches!(
-            stack.levels.last().unwrap().kind,
-            MenuKind::StatusDetail { entry: 0 }
-        ));
-        harness.key(
-            &Key::ArrowDown,
-            KeyCode::ArrowDown,
-            &mut stack,
-            world.resource_mut::<MapMarkers>(),
-        );
-        assert_eq!(stack.levels.len(), 3, "still selector + one companion");
-        assert_eq!(
-            stack.levels[1].cursor, 1,
-            "the selector underneath keeps navigating"
-        );
     }
 
     /// Bead kuluu-o9qt7.29 regression: a Left/Right stepper row must never

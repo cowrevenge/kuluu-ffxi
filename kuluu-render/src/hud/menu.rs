@@ -1425,7 +1425,9 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::Equipment => EQUIPMENT_ENTRIES,
 
-        MenuKind::Status => STATUS_LABELS,
+        // Owner ruling 2026-10-19, x3: the Status selector list is deleted. `statcom2` was kuluu's
+        // own window, never retail's — Status opens persona and its level box and nothing else.
+        MenuKind::Status => &[],
 
         // The detail windows' rows are the live snapshot readout built by
         // refresh_dynamic_menu_rows (vault main_menu.md §59); nothing static stands here.
@@ -4632,9 +4634,6 @@ pub fn menu_row_disabled(
     snap: &kuluu_snapshot::SceneSnapshot,
 ) -> bool {
     match kind {
-        MenuKind::Status => crate::hud::status_panel::STATUS_ENTRIES
-            .get(index)
-            .is_some_and(|entry| !crate::hud::status_panel::status_row_enabled(entry.kind, snap)),
         MenuKind::RoomList => {
             index == ROOMLIST_PATIO_ROW_POSITION && !snap.key_items.contains(&PATIO_BELL_KEY_ITEM)
         }
@@ -4972,9 +4971,11 @@ pub fn registry_window(kind: MenuKind) -> Option<&'static str> {
     if let Some(name) = record_window_name(kind) {
         return Some(name);
     }
+    if kind == MenuKind::Status {
+        return None;
+    }
     Some(match kind {
         MenuKind::Root => MAIN_MENU_WINDOW,
-        MenuKind::Status => STATUS_SELECTOR_WINDOW,
         MenuKind::StatusDetail { entry } => {
             return STATUS_DETAIL_WINDOW_NAMES
                 .get(usize::from(entry))
@@ -5125,15 +5126,15 @@ pub fn remembered_close_cursor(level: &MenuLevel) -> Option<Option<usize>> {
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-docking-and-flags.md, "Last item
 /// unselectable at creation").
 pub const LAST_ITEM_UNSELECTABLE_WINDOWS: &[&str] = &[
-    "statcom", "statcom2", "ut_menu", "mgcmenu", "abimenu", "abiselec", "mp_abisc", "iuse",
-    "prty1", "prty2", "prty3", "prty4", "prty5", "prty5us", "prty5fr", "prty5de", "prty7", "prty8",
-    "link1", "link2", "link3", "link4", "link7", "link8", "link9", "link10", "link13", "searchma",
-    "scoption", "acoption", "scsibori", "searchjo", "searchle", "searchna", "searchra", "comgenre",
-    "sccompar", "sccomite", "sccomls", "commenu", "flistmai", "mes1rcv", "mes2frnd", "blkmain",
-    "map0", "mapv2", "mapv3", "mapscan", "auc1", "auc2", "auc3", "auc4", "aucweapo", "aucammo",
-    "aucarmor", "aucmagic", "aucmater", "aucfood", "aucmeals", "aucitem", "wepsort", "armsort",
-    "mcrmenu", "mcrselec", "mcrselop", "mcres20", "mcresmn", "configwi", "conf5m", "conf11m",
-    "conf11l", "sortyn", "bluesibo", "statpup",
+    "ut_menu", "mgcmenu", "abimenu", "abiselec", "mp_abisc", "iuse", "prty1", "prty2", "prty3",
+    "prty4", "prty5", "prty5us", "prty5fr", "prty5de", "prty7", "prty8", "link1", "link2", "link3",
+    "link4", "link7", "link8", "link9", "link10", "link13", "searchma", "scoption", "acoption",
+    "scsibori", "searchjo", "searchle", "searchna", "searchra", "comgenre", "sccompar", "sccomite",
+    "sccomls", "commenu", "flistmai", "mes1rcv", "mes2frnd", "blkmain", "map0", "mapv2", "mapv3",
+    "mapscan", "auc1", "auc2", "auc3", "auc4", "aucweapo", "aucammo", "aucarmor", "aucmagic",
+    "aucmater", "aucfood", "aucmeals", "aucitem", "wepsort", "armsort", "mcrmenu", "mcrselec",
+    "mcrselop", "mcres20", "mcresmn", "configwi", "conf5m", "conf11m", "conf11l", "sortyn",
+    "bluesibo", "statpup",
 ];
 
 /// Whether a level is one of those windows whose rows kuluu builds from the window's own record,
@@ -5160,7 +5161,6 @@ pub fn last_item_row(
     unity: &crate::hud::unity_fp::UnityFpDat,
 ) -> Option<LastItemRow> {
     match kind {
-        MenuKind::Status => Some(LastItemRow::Undrawn),
         MenuKind::UnityMenu => unity.menu_last_item_row(),
         MenuKind::RetailConfig | MenuKind::RetailConfigPage(_) | MenuKind::RetailConfigSub(_) => {
             config_rows.last_item_row(registry_window(kind)?)
@@ -5194,10 +5194,9 @@ pub fn dock_placement(
     board.placement(window)
 }
 
-/// statcom2 sits exactly over the main menu's page 1 and configwi over its page 2, so either one
-/// hides the main menu under it.
+/// configwi sits over the main menu's page 2, so it hides the main menu under it.
 fn covers_main_menu(kind: MenuKind) -> bool {
-    matches!(kind, MenuKind::Status | MenuKind::RetailConfig)
+    kind == MenuKind::RetailConfig
 }
 
 /// Where one open window of the menu stack draws.
@@ -5254,25 +5253,28 @@ impl MenuStackLayout {
 /// sits at its record frame wherever that lies; any other window
 /// without a left-side record keeps kuluu's selector column: focused, it draws there with its
 /// opener framed beside it; under a focused record window, the newest such window holds the
-/// column. statcom2 and configwi cover the main menu, so nothing sits beside Status or the Config
-/// hub.
+/// column. configwi covers the main menu, so nothing sits beside the Config hub.
 pub fn menu_stack_layout(stack: &MenuStack, frames: &ConfigDatRows) -> MenuStackLayout {
     let levels = &stack.levels;
-    // Status details draw in their own window on the stats panel's spot
-    // (`update_status_detail_window`), and the windows that draw themselves do so in
-    // `unity_fp_view`.
-    let Some(focused) = levels
-        .iter()
-        .rposition(|level| {
-            !matches!(level.kind, MenuKind::StatusDetail { .. }) && !draws_itself(level.kind)
-        })
-        .or_else(|| levels.len().checked_sub(1))
-    else {
+    // Status and its details draw through the stats panel windows
+    // (`spawn_status_panel`, `update_status_detail_window`), the unity/merit windows draw
+    // themselves in `unity_fp_view`; none of them owns a seat here.
+    let draws_nothing = |level: &MenuLevel| {
+        matches!(level.kind, MenuKind::StatusDetail { .. })
+            || level.kind == MenuKind::Status
+            || draws_itself(level.kind)
+    };
+    let Some(focused) = levels.iter().rposition(|level| !draws_nothing(level)) else {
         return MenuStackLayout::default();
     };
+    let seated = |index: usize| index == focused || !draws_nothing(&levels[index]);
     let side = |index: usize| {
-        side_record_frame(levels[index].kind, frames)
-            .or_else(|| docked_record_frame(levels[index].kind, frames))
+        seated(index)
+            .then(|| {
+                side_record_frame(levels[index].kind, frames)
+                    .or_else(|| docked_record_frame(levels[index].kind, frames))
+            })
+            .flatten()
     };
     let focused_frame = side(focused);
     let records: Vec<(usize, RecordFrame)> = (0..focused)
@@ -8940,13 +8942,10 @@ mod tests {
         }
     }
 
-    /// One list drawer only while the Status flow is open: with install-shaped records,
-    /// statcom2's stacked window draws its entries at the Command spot and the covered
-    /// main menu pool draws nothing. No dedicated copy exists any more at all — deleted
-    /// under this ruling ("why is there a 2nd menu UNDER here at all? that menu should
-    /// not exist here").
+    /// The Status flow opens no window of its own: the selector (`statcom2`) is deleted, no pool
+    /// window draws under it, and the Commands page stays on screen beneath the flow.
     #[test]
-    fn status_list_covers_the_command_spot_without_a_mirror() {
+    fn status_flow_opens_no_selector_window_of_its_own() {
         let mut app = root_menu_app(0);
         seed_covered_command_spot(&mut app);
         app.add_systems(Update, update_menu_stack_windows);
@@ -8957,13 +8956,9 @@ mod tests {
             app.update();
         }
         let (visible, _, _) = companion_frame_visible(&mut app);
-        assert!(
-            !visible,
-            "statcom2 covers menuwind's rect; retail shows only the list"
-        );
-        // No Commands label may linger once the flow opens — that stale copy is the
-        // "menu still visible behind Status" ghost (owner ruling 2026-10-19). Whatever
-        // draws carries statcom2's own rows only.
+        assert!(!visible, "no mirror window joins the Status flow");
+        // Owner ruling 2026-10-19: the Status selector window is deleted, so no status-list row
+        // draws while the flow is open; the Commands page under it stays drawn and clickable.
         let stale = visible_rows(&mut app);
         let commands_words: Vec<String> = static_entries(MenuKind::Root)
             .iter()
@@ -8971,19 +8966,23 @@ mod tests {
             .filter(|w| w != "Status")
             .collect();
         assert!(
-            !stale.iter().any(|(_, t)| {
+            stale.iter().any(|(_, t)| {
                 let body = t.trim_start_matches(['>', ' ']);
                 commands_words.iter().any(|w| w == body)
             }),
-            "no Commands row survives the flow opening: {stale:?}"
+            "the Commands page stays drawn through the Status flow: {stale:?}"
         );
-        // Exactly one drawer: the focused list rides the selector (panes), and the stacked
-        // pool — which covers only the OPENERS under it — draws no rows at all here.
+        // The deleted selector keeps its own labels out of the frame too.
+        let status_words: Vec<&str> = crate::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .map(|entry| entry.label)
+            .collect();
         assert!(
-            visible_rows(&mut app).iter().any(|(_, t)| t
-                .trim_start_matches(['>', ' '])
-                .starts_with(crate::hud::status_panel::STATUS_ENTRIES[1].label)),
-            "the one focused list carries statcom2's entries"
+            !stale.iter().any(|(_, t)| {
+                let body = t.trim_start_matches(['>', ' ']);
+                status_words.iter().any(|w| body.starts_with(w))
+            }),
+            "the deleted Status selector draws no row: {stale:?}"
         );
         let pool_rows = app
             .world_mut()
@@ -9090,14 +9089,10 @@ mod tests {
             "live readout, no cursor decoration"
         );
 
-        // The statcom2 list keeps drawing under a detail — job levels and every skill
-        // window sit beside stats AND list (owner screenshots 2026-10-19). Details are
-        // self-drawn windows: the layout's focused level stays Status, so the one selector
-        // drawer carries the list at the Command spot even now — never detail text, and no
-        // second copy.
+        // Nothing of the deleted selector draws under a detail either, and no detail text leaks
+        // into what is left on screen.
         seed_covered_command_spot(&mut app);
         let drawn: Vec<String> = visible_rows(&mut app).into_iter().map(|(_, l)| l).collect();
-        assert!(!drawn.is_empty(), "the list stays up under the detail");
         let status_words = crate::hud::status_panel::STATUS_ENTRIES
             .iter()
             .map(|e| e.label)
@@ -9105,9 +9100,9 @@ mod tests {
         assert!(
             drawn.iter().all(|t| {
                 let body = t.trim_start_matches(['>', ' ']);
-                !body.contains("Cowrevenge") && status_words.iter().any(|w| body.starts_with(w))
+                !body.contains("Cowrevenge") && !status_words.iter().any(|w| body.starts_with(w))
             }),
-            "the list carries only its own entries: {drawn:?}"
+            "neither the deleted list nor detail text draws: {drawn:?}"
         );
         let (mirror, _, _) = companion_frame_visible(&mut app);
         assert!(!mirror, "and no Commands mirror beside it either");
@@ -9259,10 +9254,8 @@ mod tests {
     /// FFXiMain.dll retail-2026-09 RVA 0x1D6B52 tests its style word zero and only
     /// refreshes/blips (.text 0x1D6B10), never arming a send — and every
     /// other row's action carries its Param2 style for the confirm→send chain.
-    /// One law decides dim rows for both gated windows: Status gates per entry kind (the
-    /// `statcom2` open code disables ids 3/4/5/12/13 at .text FFXiMain.dll retail-2026-09
-    /// 0x148B50 and content lifts it), and the roomlist gates only its patio row, on key item
-    /// 3051 (dim word .text 0x1D6A1A; bell-only select .text 0x1D6B63).
+    /// One law decides dim rows: the roomlist gates only its patio row, on key item 3051
+    /// (dim word .text FFXiMain.dll retail-2026-09 0x1D6A1A; bell-only select 0x1D6B63).
     #[test]
     fn disabled_rows_track_their_own_gate() {
         let plain = kuluu_snapshot::SceneSnapshot::default();
@@ -9286,10 +9279,6 @@ mod tests {
             !menu_row_disabled(MenuKind::RoomList, ROOMLIST_PATIO_ROW_POSITION, &with_bell),
             "owning the bell lifts the row"
         );
-
-        // Status keeps its own gate through the same door: Combat Skill (row 3) is dim until
-        // s2c 0x062 brings a visible word.
-        assert!(menu_row_disabled(MenuKind::Status, 3, &plain));
     }
 
     #[test]
@@ -9792,8 +9781,8 @@ mod tests {
     }
 
     /// Windows with no side record keep the seats kuluu gave them: the focused one in the
-    /// column with its opener beside it, and Status and the Config hub alone because statcom2 and
-    /// configwi cover the main menu.
+    /// column with its opener beside it; a Status flow contributes no seat at all, and the
+    /// Config hub stands alone because configwi covers the main menu.
     #[test]
     fn windows_without_a_side_record_keep_their_column_seats() {
         let frames = ConfigDatRows::default();
@@ -9817,12 +9806,13 @@ mod tests {
             ],
             "only the opener sits beside the column"
         );
+        // Status and its detail own no window seat, so only the Commands page is seated.
         let mut status = MenuStack::root();
         status.push(MenuKind::Status);
         status.push(MenuKind::StatusDetail { entry: 0 });
         assert_eq!(
             menu_stack_layout(&status, &frames).windows,
-            vec![(1, MenuWindowSeat::Column)]
+            vec![(0, MenuWindowSeat::Column)]
         );
         let mut config = MenuStack::root();
         config.push(MenuKind::RetailConfig);
@@ -14486,7 +14476,6 @@ mod tests {
     fn cursor_rules_follow_the_window_name() {
         for (kind, rule) in [
             (MenuKind::Root, OpenCursor::Remembered),
-            (MenuKind::Status, OpenCursor::Remembered),
             (MenuKind::QuestList, OpenCursor::FirstItem),
             (MenuKind::UnityChat, OpenCursor::FirstItem),
             (MenuKind::UnityMenu, OpenCursor::Remembered),
@@ -14511,6 +14500,9 @@ mod tests {
             "every school lists in the one `magic` window"
         );
         for kind in [
+            // The Status selector window is deleted: the level owns no registry window and draws
+            // nothing itself — persona and its level box carry the flow.
+            MenuKind::Status,
             MenuKind::Controls,
             MenuKind::Debug,
             MenuKind::Magic,
@@ -14590,14 +14582,9 @@ mod tests {
             panic!("menu");
         };
         let level = status.current().unwrap();
-        assert!(
-            level.last_item_lock.is_some(),
-            "statcom2 is in the record's table"
-        );
-        assert!(
-            (0..STATUS_LABELS.len()).all(|row| !level.row_locked(row)),
-            "its last item is the trailing dummy block, no drawn row"
-        );
+        // The Status selector window is deleted: its level owns no record, so nothing locks.
+        assert!(level.last_item_lock.is_none(), "Status owns no window");
+        assert!((0..STATUS_LABELS.len()).all(|row| !level.row_locked(row)));
     }
 
     fn locked_hub(row: usize) -> MenuStack {

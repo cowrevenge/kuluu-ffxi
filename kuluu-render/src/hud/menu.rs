@@ -7821,11 +7821,23 @@ pub fn update_menu_stack_windows(
     let shown: Vec<Shown> = match &*mode {
         InputMode::Menu(stack) => {
             let records = menu_stack_layout(stack, &config_rows).record_windows();
+            // While the Status flow is open nothing else on the stack may be seen — retail
+            // hides it under statcom2 at the Commands spot (owner ruling 2026-10-19: "that
+            // menu should not be seen... IT will be hidden"), and kuluu now hides it in code.
+            // The stack itself is untouched, so Esc returns to it with its cursor.
+            let status_flow_open = stack.levels.iter().any(|level| {
+                matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
+            });
             let newest = &records[records.len().saturating_sub(MAX_STACKED_WINDOWS)..];
             newest
                 .iter()
                 .filter_map(|&(stack_index, frame)| {
                     let level = stack.levels.get(stack_index)?;
+                    if status_flow_open
+                        && !matches!(level.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
+                    {
+                        return None;
+                    }
                     let rows = stacked_rows_for(level.kind, &dynamic);
                     let count = rows_entry_count(level.kind, rows, settings.dlss_supported);
                     let (total, start) = viewport_over(level.kind, level.cursor, count);

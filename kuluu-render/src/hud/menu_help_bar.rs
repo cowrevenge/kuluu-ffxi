@@ -29,10 +29,6 @@ pub struct MenuHelpHint;
 #[derive(Component)]
 pub struct MenuHelpPaneSwitch;
 
-/// The tiny shield + label that hosts the Status flow inside the command bar's left box.
-#[derive(Component)]
-pub struct StatusShieldWidget;
-
 /// Split part two — the framed segment holding counter, help line and the right-edge labels. (Split parts: owner ruling 2026-10-18.)
 #[derive(Component)]
 pub struct MenuHelpRightPart;
@@ -48,13 +44,22 @@ const BAZAAR_TITLE: &str = "Bazaar";
 const BAZAAR_HINT: &str = "Purchase merchandise.";
 
 pub const BAR_HEIGHT: f32 = 26.0;
+/// The bar's top-left corner is persona's Status spot, so persona opening over it covers the
+/// title box exactly.
+pub const BAR_LEFT: f32 = crate::hud::status_panel::PERSONA_STATUS_LEFT;
+pub const BAR_TOP: f32 = crate::hud::status_panel::PERSONA_STATUS_TOP;
+/// The bar stops short of the network panel instead of running under it.
+const BAR_RIGHT: f32 = crate::hud::network_status::NET_PANEL_W + BAR_SEGMENT_GAP_PX;
 /// Retail frames the active menu title in its own boxed segment, flush left.
-const TITLE_BOX_W: f32 = 118.0;
+/// Owner ruling 2026-10-19: "the 'status' part of command bar needs to be a
+/// little shorter" — exactly `menu    persona`'s record width (112), so the box ends where the
+/// child window placed on it does.
+const TITLE_BOX_W: f32 = 112.0;
 
 /// Bottom-left corner of the help line box, the bar segment right of the title box: windows
 /// that hang under the help line anchor here.
 pub fn help_line_bottom_left() -> Vec2 {
-    Vec2::new(TITLE_BOX_W, BAR_HEIGHT)
+    Vec2::new(BAR_LEFT + TITLE_BOX_W, BAR_TOP + BAR_HEIGHT)
 }
 
 /// Single-line text that truncates instead of wrapping when the bar is narrow.
@@ -74,9 +79,9 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
             // (owner ruling 2026-10-18: the LEFT and RIGHT are separate parts).
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
+                top: Val::Px(BAR_TOP),
+                left: Val::Px(BAR_LEFT),
+                right: Val::Px(BAR_RIGHT),
                 height: Val::Px(BAR_HEIGHT),
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Stretch,
@@ -107,61 +112,6 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                     style::text_font(14.0),
                     TextColor(theme::TITLE),
                 ));
-                // Owner ruling 2026-10-18: while the Status flow is open this same box
-                // hosts retail's pennant system — the tiny shield with "STATUS" written on
-                // it — instead of the loose word. Same box, exact spot, no drift.
-                seg.spawn((
-                    StatusShieldWidget,
-                    Node {
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(4.0),
-                        display: Display::None,
-                        ..default()
-                    },
-                ))
-                .with_children(|sh| {
-                    sh.spawn(Node {
-                        width: Val::Px(12.0),
-                        height: Val::Px(17.0),
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    })
-                    .with_children(|g| {
-                        g.spawn((
-                            Node {
-                                width: Val::Px(12.0),
-                                height: Val::Px(11.0),
-                                border: UiRect::all(Val::Px(1.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.72, 0.77, 0.92)),
-                            BorderColor::all(Color::srgb(0.45, 0.30, 0.68)),
-                        ));
-                        g.spawn((
-                            Node {
-                                width: Val::Px(12.0),
-                                height: Val::Px(2.5),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.78, 0.29, 0.30)),
-                        ));
-                        g.spawn((
-                            Node {
-                                width: Val::Px(5.0),
-                                height: Val::Px(3.5),
-                                ..default()
-                            },
-                            BackgroundColor(Color::srgb(0.72, 0.77, 0.92)),
-                        ));
-                    });
-                    sh.spawn((
-                        Text::new("STATUS"),
-                        text_nowrap(),
-                        style::text_font(8.0),
-                        TextColor(theme::TITLE),
-                    ));
-                });
             });
             // Split part two — framed and filled on its own, behind a gap; the counter +
             // help text clip instead of wrapping over the world view.
@@ -225,7 +175,7 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
                 mid.spawn(Node {
                     flex_shrink: 0.0,
                     align_items: AlignItems::Center,
-                    margin: UiRect::right(Val::Px(crate::hud::network_status::NET_PANEL_W + 8.0)),
+                    margin: UiRect::right(Val::Px(12.0)),
                     ..default()
                 })
                 .with_children(|seg| {
@@ -419,22 +369,7 @@ pub fn update_menu_help_bar(
         ),
     >,
     // Pairwise-disjoint Node queries per the B0001 law.
-    mut pane_switch_q: Query<
-        &mut Node,
-        (
-            With<MenuHelpPaneSwitch>,
-            Without<MenuHelpBar>,
-            Without<StatusShieldWidget>,
-        ),
-    >,
-    mut shield_q: Query<
-        &mut Node,
-        (
-            With<StatusShieldWidget>,
-            Without<MenuHelpBar>,
-            Without<MenuHelpPaneSwitch>,
-        ),
-    >,
+    mut pane_switch_q: Query<&mut Node, (With<MenuHelpPaneSwitch>, Without<MenuHelpBar>)>,
     config_rows: Res<menu::ConfigDatRows>,
 ) {
     let Ok(mut node) = bar_q.single_mut() else {
@@ -448,17 +383,6 @@ pub fn update_menu_help_bar(
     if stack.levels.iter().any(|lv| {
         matches!(lv.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
     }));
-    // Same ruling: the box shows the shield + tiny STATUS while the flow owns it.
-    for mut shield in shield_q.iter_mut() {
-        let want = if status_word_hidden {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        if shield.display != want {
-            shield.display = want;
-        }
-    }
 
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
@@ -932,18 +856,6 @@ mod tests {
                 .clone()
         };
 
-        let shield_shown = |app: &mut App| -> bool {
-            for _ in 0..2 {
-                app.update();
-            }
-            app.world_mut()
-                .query_filtered::<&Node, With<StatusShieldWidget>>()
-                .single(app.world())
-                .unwrap()
-                .display
-                == Display::Flex
-        };
-
         let mut other = MenuStack::root();
         other.levels.push(MenuLevel::new(MenuKind::Items, 0));
         app.insert_resource(InputMode::Menu(other.clone()));
@@ -952,13 +864,11 @@ mod tests {
             menu::menu_title(MenuKind::Items),
             "other menus keep their word"
         );
-        assert!(!shield_shown(&mut app), "no shield outside the flow");
 
         let mut stack = MenuStack::root();
         stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
         app.insert_resource(InputMode::Menu(stack.clone()));
         assert_eq!(title_of(&mut app), "", "the flow itself hides the word");
-        assert!(shield_shown(&mut app), "the shield takes the box");
 
         let mut with_detail = stack.clone();
         with_detail
@@ -975,17 +885,20 @@ mod tests {
         );
     }
 
-    /// The help line box starts where the title box ends and its bottom is the bar's.
+    /// The help line box starts where the title box ends, its bottom is the bar's, and the bar sits at persona's spot.
     #[test]
     fn help_line_corner_matches_the_spawned_bar() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.run_system_once(spawn_menu_help_bar).unwrap();
-        let bar_height = world
+        let bar = world
             .query_filtered::<&Node, With<MenuHelpBar>>()
             .single(&world)
             .unwrap()
-            .height;
+            .clone();
+        let (Val::Px(left), Val::Px(top), Val::Px(height)) = (bar.left, bar.top, bar.height) else {
+            panic!("bar placed in pixels");
+        };
         let title_parent = world
             .query_filtered::<&ChildOf, With<MenuHelpTitle>>()
             .single(&world)
@@ -993,9 +906,15 @@ mod tests {
             .parent();
         let title_box_width = world.get::<Node>(title_parent).unwrap().width;
         let corner = help_line_bottom_left();
+        assert_eq!(title_box_width, Val::Px(corner.x - left));
+        assert_eq!(top + height, corner.y);
         assert_eq!(
-            (title_box_width, bar_height),
-            (Val::Px(corner.x), Val::Px(corner.y))
+            (left, top),
+            (
+                crate::hud::status_panel::PERSONA_STATUS_LEFT,
+                crate::hud::status_panel::PERSONA_STATUS_TOP
+            ),
+            "persona opens exactly over the title box"
         );
     }
 

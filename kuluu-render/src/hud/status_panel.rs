@@ -231,6 +231,10 @@ fn main_job_level(snap: &kuluu_snapshot::SceneSnapshot) -> u8 {
 pub const PANEL_WIDTH_PX: f32 = 280.0;
 const PERSONA_PAD_X_PX: f32 = 10.0;
 const PERSONA_PAD_Y_PX: f32 = 8.0;
+/// Air around the caption glyphs inside their mask box — the box (owner ruling
+/// 2026-10-19: "the 'status' of the child menu has the line through it") is what
+/// hides the frame edge behind the word.
+const PERSONA_CAPTION_PAD_PX: f32 = 3.0;
 const PERSONA_BORDER_PX: f32 = 1.0;
 const PERSONA_ROW_GAP_PX: f32 = 2.0;
 const PERSONA_NAME_FONT_PX: f32 = 14.0;
@@ -864,8 +868,11 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 top: Val::ZERO,
                 left: Val::ZERO,
+                padding: UiRect::all(Val::Px(PERSONA_CAPTION_PAD_PX)),
                 ..default()
             },
+            // Opaque mask behind the word so the frame's top edge never crosses it.
+            BackgroundColor(theme::FRAME_BG),
             Text::new(STATUS_CAPTION_TEXT),
             TextLayout {
                 linebreak: LineBreak::NoWrap,
@@ -1057,9 +1064,12 @@ pub fn update_persona_frame(
     // Across: measured centering — a Text component draws at its own origin, so no
     // container justify can center it (a Percent+justify box left it hugging the edge).
     let caption_inner = layout.width - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
+    // The node carries the mask padding around its glyphs, so the word's origin sits one
+    // pad in from the centered box edge.
     let caption_left = PERSONA_PAD_X_PX
         + (caption_inner - crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px))
-            / 2.0;
+            / 2.0
+        - PERSONA_CAPTION_PAD_PX;
     for (mut node, mut font, mut pitch) in caption_q.iter_mut() {
         let size = bevy::text::FontSize::Px(layout.row_font_px);
         if font.font_size != size {
@@ -1900,14 +1910,17 @@ mod tests {
 
     /// The panel title rides the persona panel, absolutely placed and centered, lifted half
     /// its line height to straddle the frame's top edge (owner ruling 2026-10-18: "Retail
-    /// centers it on the persona window's top border").
+    /// centers it on the persona window's top border"), masked so no frame line crosses the
+    /// word (owner ruling 2026-10-19).
     #[test]
     fn status_caption_straddles_the_panel_top_border() {
         let mut app = persona_app();
         let world = app.world_mut();
-        let mut q = world.query_filtered::<(Entity, &Node, &Text), With<StatusCaption>>();
-        let (caption, node, text) = q.single(world).expect("one caption");
+        let mut q =
+            world.query_filtered::<(Entity, &Node, &Text, &BackgroundColor), With<StatusCaption>>();
+        let (caption, node, text, bg) = q.single(world).expect("one caption");
         assert_eq!(text.as_str(), "Status");
+        assert_eq!(bg.0, theme::FRAME_BG, "opaque mask behind the word");
         assert_eq!(node.position_type, PositionType::Absolute);
         assert!(
             matches!(node.top, Val::Px(top) if top < 0.0),
@@ -1918,7 +1931,7 @@ mod tests {
         // center sits on the frame column's center.
         let inner = PANEL_WIDTH_PX - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
         let text_w = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, PERSONA_ROW_FONT_PX);
-        let want_left = PERSONA_PAD_X_PX + (inner - text_w) / 2.0;
+        let want_left = PERSONA_PAD_X_PX + (inner - text_w) / 2.0 - PERSONA_CAPTION_PAD_PX;
         assert!(
             matches!(node.left, Val::Px(l) if (l - want_left).abs() < 0.5),
             "centered on the frame: left {:?}, want {want_left}",

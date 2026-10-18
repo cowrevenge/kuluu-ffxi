@@ -1115,7 +1115,7 @@ pub fn spawn_auction_screen(mut commands: Commands, mut images: ResMut<Assets<Im
             AuctionScreenRoot,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(crate::hud::menu_help_bar::BAR_HEIGHT + 8.0),
+                top: Val::Px(crate::hud::menu_help_bar::help_line_bottom_left().y + 8.0),
                 left: Val::Px(8.0),
                 right: Val::Px(8.0),
                 bottom: Val::Px(54.0),

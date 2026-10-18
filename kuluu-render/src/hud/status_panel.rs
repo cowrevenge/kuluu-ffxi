@@ -341,17 +341,28 @@ pub const LEVEL_GAUGE_CAP_COLOR: Color = Color::srgb(0.063, 0.612, 0.973);
 pub const LEVEL_EXP_FILL_COLOR: Color = Color::srgb(0.929, 0.482, 0.478);
 pub const LEVEL_GAUGE_TRACK_COLOR: Color = Color::srgb(0.451, 0.447, 0.494);
 
-/// Owner ruling 2026-10-18 (retail screenshots): every Status detail window lands on the
-/// stats panel's exact spot, so while ANY detail holds focus the persona column — panel and
-/// level box together — is hidden until it closes. Esc returns to the list with the cursor
-/// still on the detail's row.
+/// Only the wide left-side details — Currencies/Currencies 2 (`evitem` (16,48,w366)) and
+/// Facet Categories (`fp_cat`, same spot) — replace the stats column. Job Levels, Master
+/// Levels and every skill window sit BESIDE it at `(130,48,w252)` with persona, level box,
+/// their "Status" caption AND the statcom2 list all still visible (DAT records + owner
+/// screenshots 2026-10-19; supersedes the 2026-10-18 all-details rule).
 fn stats_panel_covered(mode: &crate::input_mode::InputMode) -> bool {
     let crate::input_mode::InputMode::Menu(stack) = mode else {
         return false;
     };
-    stack
-        .current()
-        .is_some_and(|l| matches!(l.kind, crate::input_mode::MenuKind::StatusDetail { .. }))
+    stack.current().is_some_and(|l| match l.kind {
+        crate::input_mode::MenuKind::StatusDetail { entry } => {
+            STATUS_ENTRIES.get(usize::from(entry)).is_some_and(|e| {
+                matches!(
+                    e.kind,
+                    StatusEntryKind::Currencies
+                        | StatusEntryKind::Currencies2
+                        | StatusEntryKind::FacetCategories
+                )
+            })
+        }
+        _ => false,
+    })
 }
 
 /// True while the stack holds statcom2 or one of its detail windows — retail
@@ -1998,9 +2009,10 @@ mod tests {
         assert_eq!(bg.0, LEVEL_GAUGE_TRACK_COLOR);
     }
 
-    /// Owner ruling 2026-10-18 (retail screenshots): every Status detail lands on the stats
-    /// panel's exact spot and hides that column — persona and level box together — while it
-    /// holds focus; only the list itself leaves the panel showing.
+    /// Retail law (DAT records + owner screenshots 2026-10-19): side details — Profile,
+    /// Job Levels, Master Levels and every skill window (`(130,48,w252)`) keep the stats
+    /// column showing; only the wide left-side `evitem`/`fp_cat` lists (Currencies 1/2, Facet
+    /// Categories) replace it. Supersedes the 2026-10-18 all-details rule.
     #[test]
     fn any_status_detail_hides_the_stats_panel() {
         use bevy::app::App;
@@ -2032,21 +2044,20 @@ mod tests {
         };
 
         assert_eq!(display_with(None), Display::Flex);
-        assert_eq!(
-            display_with(Some(0)),
-            Display::None,
-            "profile covers the stats spot"
-        );
-        assert_eq!(
-            display_with(Some(3)),
-            Display::None,
-            "Combat Skills covers the stats spot"
-        );
-        assert_eq!(
-            display_with(Some(6)),
-            Display::None,
-            "Key Items covers the stats spot"
-        );
+        for entry in [0u8, 1, 2, 3, 4, 5] {
+            assert_eq!(
+                display_with(Some(entry)),
+                Display::Flex,
+                "side detail {entry} keeps the stats column (retail: persona + Status stay up)"
+            );
+        }
+        for entry in [6u8, 7] {
+            assert_eq!(
+                display_with(Some(entry)),
+                Display::None,
+                "Currencies/Currencies 2 replace the stats column (left-side evitem list)"
+            );
+        }
     }
 
     /// The `level` box never leaves the persona column even when the install supplies its

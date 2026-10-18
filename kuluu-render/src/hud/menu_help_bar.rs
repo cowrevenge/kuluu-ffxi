@@ -53,8 +53,8 @@ const BAR_RIGHT: f32 = crate::hud::network_status::NET_PANEL_W + BAR_SEGMENT_GAP
 /// Retail frames the active menu title in its own boxed segment, flush left.
 /// Owner ruling 2026-10-19: "the 'status' part of command bar needs to be a
 /// little shorter" — exactly `menu    persona`'s record width (112), so the box ends where the
-/// child window placed on it does.
-const TITLE_BOX_W: f32 = 112.0;
+/// child window placed on it does. Shared with the statcom2 window that takes over this spot.
+pub const TITLE_BOX_W: f32 = 112.0;
 
 /// Bottom-left corner of the help line box, the bar segment right of the title box: windows
 /// that hang under the help line anchor here.

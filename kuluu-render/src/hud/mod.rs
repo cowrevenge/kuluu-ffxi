@@ -433,12 +433,16 @@ impl Plugin for HudPlugin {
                 .after(menu::refresh_dynamic_menu_rows),
         );
 
-        // Owner debug 2026-10-19: window forensics sample — runs after every per-window
-        // update so it reports the frame's final visibility, once a second while the
-        // Status flow is open.
+        // Owner ruling 2026-10-19: the dedicated statcom2 window, then the end-of-frame
+        // enforcement + forensics sample — last among the menu systems, so the frame's
+        // final word on visibility is "commands surfaces are coded hidden while Status is
+        // open", however any earlier system left them.
         app.add_systems(
             Update,
-            menu::ui_window_forensics.after(menu::update_menu_stack_windows),
+            (
+                menu::update_status_list_window,
+                menu::ui_window_forensics.after(menu::update_menu_stack_windows),
+            ),
         );
 
         app.add_systems(

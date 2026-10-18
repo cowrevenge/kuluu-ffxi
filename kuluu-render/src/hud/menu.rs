@@ -4867,6 +4867,21 @@ pub struct MenuStackWindowRow {
     pub slot: usize,
 }
 
+/// The `statcom2` list as its OWN window at the Commands spot. Retail draws it exactly
+/// over menuwind's record frame, so while any Status-flow level is open no shared selector
+/// pane may show (owner ruling 2026-10-19: the commands window must be *coded* hidden,
+/// "set that bitch to hidden", not covered or dimmed). The list keeps drawing under a
+/// focused detail — job levels and every skill window sit beside it with stats AND list
+/// still visible (retail screenshots 2026-10-19).
+#[derive(Component)]
+pub struct StatusListWindow;
+
+#[derive(Component)]
+pub struct StatusListRow {
+    /// Index into `STATUS_ENTRIES`; rows are spawned in statcom2's display order.
+    pub slot: usize,
+}
+
 /// More record windows than any menu chain keeps open under the focused one; past it the
 /// oldest stay open undrawn.
 pub const MAX_STACKED_WINDOWS: usize = 8;
@@ -5366,7 +5381,41 @@ pub fn spawn_main_menu(mut commands: Commands) {
             for slot in 0..MAX_STACKED_WINDOWS {
                 spawn_stacked_window(root, slot);
             }
+            spawn_status_list_window(root);
             spawn_pane_column(root);
+        });
+}
+
+/// The `statcom2` list window: the command band's exact spot (the DAT places statcom2 over
+/// menuwind at (384,48,w112)), titled with the word the band carries, one row per entry.
+pub fn spawn_status_list_window(parent: &mut ChildSpawnerCommands) {
+    let (mut node, bg, border) = style::window_frame();
+    node.position_type = PositionType::Absolute;
+    node.left = Val::Px(crate::hud::menu_help_bar::BAR_LEFT);
+    node.top = Val::Px(crate::hud::menu_help_bar::BAR_TOP);
+    node.width = Val::Px(crate::hud::menu_help_bar::TITLE_BOX_W);
+    node.display = Display::None;
+    parent
+        .spawn((StatusListWindow, node, bg, border))
+        .with_children(|w| {
+            w.spawn((
+                StatusListTitle,
+                Text::new(menu_title(MenuKind::Status)),
+                text_nowrap(),
+                style::text_font(14.0),
+                TextColor(theme::TITLE),
+            ));
+            // STATUS_ENTRIES is statcom2's display order row-for-row (the record item ids
+            // run 1,2,12,3,... alongside it), so the row slot IS the entry index.
+            for display_row in 0..crate::hud::status_panel::STATUS_ENTRIES.len() {
+                w.spawn((
+                    StatusListRow { slot: display_row },
+                    Text::new(String::new()),
+                    text_nowrap(),
+                    style::text_font(14.0),
+                    TextColor(theme::TEXT),
+                ));
+            }
         });
 }
 
@@ -7522,6 +7571,20 @@ pub fn update_main_menu(
             return;
         }
     };
+    // Owner ruling 2026-10-19: while the Status flow is open the commands surfaces are
+    // coded hidden here (not by paint), and statcom2 draws exclusively through its own
+    // window (`spawn_status_list_window`) — one owner per surface.
+    if crate::hud::status_panel::status_flow_open(&mode) {
+        hide(&mut node);
+        for (mut pane_node, _, _) in pane_q.iter_mut() {
+            hide(&mut pane_node);
+        }
+        for (_, comp, mut row_node, _, _, _) in row_q.iter_mut() {
+            let _ = comp;
+            hide(&mut row_node);
+        }
+        return;
+    }
     let Some(top_kind) = stack.current().map(|l| l.kind) else {
         hide(&mut node);
         return;
@@ -7538,7 +7601,13 @@ pub fn update_main_menu(
     let want_width = pane_width_for(top_kind);
     let layout = menu_stack_layout(stack, &config_rows);
     let Some((view_index, view_seat)) = layout.focused() else {
+        // No pane seat this frame (e.g. the Status flow replaced the selector): hide the
+        // panes too, or their stale rows keep drawing under whatever covers them — the
+        // "commands menu still visible behind Status" ghost (owner ruling 2026-10-19).
         hide(&mut node);
+        for (mut pane_node, _, _) in pane_q.iter_mut() {
+            hide(&mut pane_node);
+        }
         return;
     };
     for (mut pane_node, mut z_index, computed) in pane_q.iter_mut() {
@@ -7805,7 +7874,32 @@ pub(crate) fn ui_window_forensics(
         &GlobalTransform,
         &ComputedNode,
     )>,
+    menu_surface_q: Query<
+        Entity,
+        Or<(
+            With<MainMenu>,
+            With<MainMenuPane>,
+            With<MainMenuRow>,
+            With<MenuStackWindow>,
+            With<CompanionRow>,
+        )>,
+    >,
+    mut node_q: Query<&mut Node>,
 ) {
+    // End-of-frame enforcement (owner ruling 2026-10-19): while the Status flow is open
+    // every shared menu surface — root, selector panes, stacked windows — is coded away
+    // each frame however any earlier system left it. Only `StatusListWindow` and the
+    // self-drawing status widgets may show.
+    if crate::hud::status_panel::status_flow_open(&mode) {
+        for entity in menu_surface_q.iter() {
+            let Ok(mut node) = node_q.get_mut(entity) else {
+                continue;
+            };
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
+    }
     if !crate::hud::status_panel::status_flow_open(&mode) {
         return;
     }
@@ -8122,12 +8216,29 @@ pub fn update_status_detail_window(
         Ok(node) => node,
         Err(_) => return,
     };
-    // Owner ruling 2026-10-18: every Status detail window takes the STATUS panel's exact spot and
-    // hides it — this widget is placed there for all kinds, not at its own record frame.
-    use crate::hud::status_panel::{PANEL_WIDTH_PX, PERSONA_STATUS_LEFT, PERSONA_STATUS_TOP};
-    node.left = Val::Px(PERSONA_STATUS_LEFT);
-    node.top = Val::Px(PERSONA_STATUS_TOP);
-    node.width = Val::Px(persona_w.unwrap_or(PANEL_WIDTH_PX));
+    // Retail law (DAT records + owner screenshots 2026-10-19): the detail windows sit BESIDE
+    // the stats column at their own record frames — profile/joblevel/masterle and the three
+    // skill windows are `(130,48,w252)`, covering the Status-caption strip so the word is
+    // gone; `evitem` (Currencies/Key Items) and `fp_cat` are wide left-side records that
+    // replace the stats column. Without an install record every detail falls back to the
+    // side-window spot, never on top of the numbers.
+    let window_name = STATUS_DETAIL_WINDOW_NAMES
+        .get(idx)
+        .copied()
+        .flatten()
+        .unwrap_or("profile");
+    if let Some(frame) = config_rows.record_frame(window_name) {
+        node.left = Val::Px(frame.x);
+        node.top = Val::Px(frame.y);
+        node.width = Val::Px(frame.width.max(120.0));
+    } else {
+        const SIDE_X: f32 = 130.0;
+        const SIDE_Y: f32 = 48.0;
+        const SIDE_W: f32 = 252.0;
+        node.left = Val::Px(SIDE_X);
+        node.top = Val::Px(SIDE_Y);
+        node.width = Val::Px(SIDE_W);
+    }
     node.height = Val::Auto;
     if node.display != Display::Flex {
         node.display = Display::Flex;
@@ -8153,6 +8264,71 @@ pub fn update_status_detail_window(
         }
         if line_node.display != Display::Flex {
             line_node.display = Display::Flex;
+        }
+    }
+}
+
+#[derive(Component)]
+pub struct StatusListTitle;
+
+/// Paints the dedicated `statcom2` window while any Status-flow level sits on the stack: rows
+/// from `STATUS_ENTRIES`, cursor row lit like a focused list, and every other menu surface is
+/// coded away (the enforcement pass in `ui_window_forensics`).
+pub fn update_status_list_window(
+    mode: Res<InputMode>,
+    mut window_q: Query<&mut Node, With<StatusListWindow>>,
+    mut row_q: Query<(&StatusListRow, &mut Text, &mut TextColor), Without<StatusListTitle>>,
+) {
+    let stack = match &*mode {
+        InputMode::Menu(stack) => stack,
+        _ => {
+            for mut node in window_q.iter_mut() {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
+            }
+            return;
+        }
+    };
+    let Some(status_at) = stack
+        .levels
+        .iter()
+        .position(|l| matches!(l.kind, MenuKind::Status))
+    else {
+        for mut node in window_q.iter_mut() {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
+        return;
+    };
+    let cursor = stack.levels[status_at].cursor;
+    let detail_of = stack.current().and_then(|l| match l.kind {
+        MenuKind::StatusDetail { entry } => Some(usize::from(entry)),
+        _ => None,
+    });
+    for mut node in window_q.iter_mut() {
+        if node.display != Display::Flex {
+            node.display = Display::Flex;
+        }
+    }
+    for (row, mut text, mut color) in row_q.iter_mut() {
+        let Some(entry) = crate::hud::status_panel::STATUS_ENTRIES.get(row.slot) else {
+            continue;
+        };
+        if **text != entry.label {
+            **text = entry.label.to_string();
+        }
+        // A focused detail marks its own list row (retail keeps the cursor where it is);
+        // while Status itself is on top, the live display-row cursor lights the row.
+        // STATUS_ENTRIES index == display row; the Status level's cursor is a display row.
+        let lit = match detail_of {
+            Some(detail) => detail == row.slot,
+            None => cursor == row.slot,
+        };
+        let want = if lit { theme::CURSOR } else { theme::TEXT };
+        if color.0 != want {
+            color.0 = want;
         }
     }
 }
@@ -8742,6 +8918,19 @@ mod tests {
             .expect("title exists")
     }
 
+    /// The dedicated statcom2 window's drawn rows in DISPLAY order (rows carry
+    /// STATUS_ENTRIES indexes; display runs 1,2,12,3,...).
+    fn status_list_rows(app: &mut App) -> Vec<String> {
+        let mut q = app.world_mut().query::<(&StatusListRow, &Text, &Node)>();
+        let mut rows: Vec<(usize, String)> = q
+            .iter(app.world())
+            .filter(|(_, _, node)| node.display != Display::None)
+            .map(|(row, text, _)| (row.slot, text.0.clone()))
+            .collect();
+        rows.sort_by_key(|(display_row, _)| *display_row);
+        rows.into_iter().map(|(_, t)| t).collect()
+    }
+
     fn visible_rows(app: &mut App) -> Vec<(usize, String)> {
         let mut q = app.world_mut().query::<(&MainMenuRow, &Text, &Node)>();
         let mut rows: Vec<(usize, String)> = q
@@ -8837,13 +9026,46 @@ mod tests {
         assert!(!visible, "no selector to mirror under a depth-1 stack");
     }
 
+    /// Owner ruling 2026-10-19: while ANY Status-flow level is open, every shared menu
+    /// surface (root, selector panes, stacked windows) ends the frame coded hidden —
+    /// however any earlier system left it. No more stale Commands copy behind Status.
+    #[test]
+    fn commands_surfaces_end_hidden_while_status_is_open() {
+        let mut app = root_menu_app(0);
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        app.insert_resource(InputMode::Menu(stack));
+        // Sanity: before the Status frame runs its systems, depth-1 panes still show.
+        assert!(!visible_rows(&mut app).is_empty());
+        app.add_systems(
+            Update,
+            (
+                update_main_menu,
+                update_menu_stack_windows,
+                ui_window_forensics.after(update_menu_stack_windows),
+            ),
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+        assert!(
+            q.iter(app.world()).all(|(_, n)| n.display == Display::None),
+            "every selector pane is coded hidden while the Status flow is open"
+        );
+        let mut root_q = app.world_mut().query_filtered::<&Node, With<MainMenu>>();
+        assert_eq!(root_q.single(app.world()).unwrap().display, Display::None);
+    }
+
     /// The cover law (vault main_menu.md §59 addendum 10): statcom2's record
     /// frame `(384,48,w112,h218)` sits exactly over menuwind's — retail draws
     /// the list ON the Command spot and nothing else beside it. kuluu shows the
-    /// thirteen rows in place, with no mirrored Commands frame next to them.
+    /// thirteen rows on their dedicated window at that spot; no Commands surface
+    /// draws (owner ruling 2026-10-19: coded hidden), with no mirrored frame.
     #[test]
     fn status_list_covers_the_command_spot_without_a_mirror() {
         let mut app = root_menu_app(0);
+        app.add_systems(Update, update_status_list_window);
         let mut stack = MenuStack::root();
         stack.push(MenuKind::Status);
         app.insert_resource(InputMode::Menu(stack));
@@ -8853,11 +9075,28 @@ mod tests {
             !visible,
             "statcom2 covers menuwind's rect; retail shows only the list"
         );
-        let rows = visible_rows(&mut app);
+        // No Commands label may linger once the flow opens — that stale copy is the
+        // "menu still visible behind Status" ghost (owner ruling 2026-10-19). Whatever
+        // draws carries statcom2's own rows only.
+        let stale = visible_rows(&mut app);
+        let commands_words: Vec<String> = static_entries(MenuKind::Root)
+            .iter()
+            .map(|w| w.to_string())
+            .filter(|w| w != "Status")
+            .collect();
+        assert!(
+            !stale.iter().any(|(_, t)| {
+                let body = t.trim_start_matches(['>', ' ']);
+                commands_words.iter().any(|w| w == body)
+            }),
+            "no Commands row survives the flow opening: {stale:?}"
+        );
+        // The list itself is up on its dedicated window at the Command spot.
+        let rows = status_list_rows(&mut app);
         assert_eq!(
             rows.len(),
             crate::hud::status_panel::STATUS_ENTRIES.len(),
-            "the live statcom2 list draws in place"
+            "statcom2's thirteen labels draw in display order"
         );
     }
 
@@ -8923,18 +9162,16 @@ mod tests {
             }
         }
         assert!(visible, "the detail draws as its own framed window");
+        // No install record readable here → the side-window fallback beside stats.
         assert_eq!(
             (left, top),
-            (
-                Val::Px(crate::hud::status_panel::PERSONA_STATUS_LEFT),
-                Val::Px(crate::hud::status_panel::PERSONA_STATUS_TOP)
-            ),
-            "exactly the STATUS panel's spot"
+            (Val::Px(130.0), Val::Px(48.0)),
+            "beside the stats column, over the Status-caption strip"
         );
         assert_eq!(
             width,
-            Val::Px(crate::hud::status_panel::PANEL_WIDTH_PX),
-            "the persona column width (kuluu fallback)"
+            Val::Px(252.0),
+            "the record width for every side detail (kuluu fallback)"
         );
 
         let title = app
@@ -8959,12 +9196,34 @@ mod tests {
             "live readout, no cursor decoration"
         );
 
-        // The right column keeps drawing the statcom2 list, not the detail.
-        let rows = visible_rows(&mut app);
-        assert_eq!(rows.len(), crate::hud::status_panel::STATUS_ENTRIES.len());
+        // The statcom2 list keeps drawing under a detail — job levels and every skill
+        // window sit beside stats AND list (owner screenshots 2026-10-19) — on its own
+        // window, never showing detail text.
+        app.add_systems(Update, update_status_list_window);
+        app.update();
+        let window_flex = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusListWindow>>()
+            .single(app.world())
+            .map(|n| n.display)
+            .unwrap_or(Display::None);
+        assert_eq!(
+            window_flex,
+            Display::Flex,
+            "the list window is up under a detail"
+        );
+        let rows = status_list_rows(&mut app);
+        assert_eq!(
+            rows,
+            crate::hud::status_panel::STATUS_ENTRIES
+                .iter()
+                .map(|e| e.label.to_string())
+                .collect::<Vec<_>>(),
+            "the list stays up under the detail"
+        );
         assert!(
-            !rows.iter().any(|(_, t)| t.contains("Cowrevenge")),
-            "the list column never shows detail text: {rows:?}"
+            !rows.iter().any(|t| t.contains("Cowrevenge")),
+            "the list never shows detail text"
         );
         let (mirror, _, _) = companion_frame_visible(&mut app);
         assert!(!mirror, "and no Commands mirror beside it either");
@@ -14707,12 +14966,13 @@ mod tests {
         );
     }
 
-    /// Owner ruling 2026-10-18: every Status detail — joblevel and record frames alike —
-    /// lands on the stats panel's exact spot, at `persona`'s column width (the install
-    /// record when readable).
+    /// Retail law (DAT records + owner screenshots 2026-10-19): each Status detail draws at
+    /// its OWN record frame — beside the stats column for joblevel/skills (`(130,48,w252)`
+    /// on retail-2026-09), left-side replacing it only for `evitem`/`fp_cat` records. With no
+    /// install record a detail falls back to the side-window spot, never over the numbers.
     #[test]
     fn every_status_detail_lands_on_the_stats_spot() {
-        use crate::hud::status_panel::{JOBLEVEL_WINDOW, PERSONA_STATUS_LEFT, PERSONA_STATUS_TOP};
+        use crate::hud::status_panel::JOBLEVEL_WINDOW;
         const JOBLEVEL_FRAME: (i16, i16, i16) = (200, 100, 180);
         const PROFILE_FRAME: (i16, i16, i16) = (150, 60, 240);
         const PERSONA_FRAME: (i16, i16, i16) = (16, 48, 112);
@@ -14750,12 +15010,21 @@ mod tests {
                 .expect("the detail window");
             (node.left, node.top, node.width)
         };
-        let stats_spot = (
-            Val::Px(PERSONA_STATUS_LEFT),
-            Val::Px(PERSONA_STATUS_TOP),
-            Val::Px(f32::from(PERSONA_FRAME.2)),
+        assert_eq!(
+            detail(&mut app, entry_of(JOBLEVEL_WINDOW)),
+            (
+                Val::Px(200.0),
+                Val::Px(100.0),
+                Val::Px(f32::from(JOBLEVEL_FRAME.2))
+            )
         );
-        assert_eq!(detail(&mut app, entry_of(JOBLEVEL_WINDOW)), stats_spot);
-        assert_eq!(detail(&mut app, PROFILE_ENTRY), stats_spot);
+        assert_eq!(
+            detail(&mut app, PROFILE_ENTRY),
+            (
+                Val::Px(150.0),
+                Val::Px(60.0),
+                Val::Px(f32::from(PROFILE_FRAME.2))
+            )
+        );
     }
 }

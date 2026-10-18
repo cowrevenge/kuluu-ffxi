@@ -23,10 +23,12 @@ menu layout, HUD timing, animation, camera feel, spell effects -- observe it in
 the real client, capture evidence, translate it into the remake, then `/verify`
 the remake against the same observation.
 
-Nothing here is tied to one machine. The client is a Windows program; the only
-question is what runs it and how you reach its window. One command surface
-covers every arrangement, so a recipe written on one host still reads on the
-others.
+The command surface is portable. Execution depends on the host runtime,
+display server, permissions, and configured client install.
+Use Wine on macOS. Use Wine or Proton on Linux, or native execution on Windows.
+Discover runner and install paths on the current host.
+Keep machine-specific paths in local profiles rather than shared instructions.
+The Linux and native Windows backends remain unverified against a running client.
 
 ## Recorded observations -- read before driving anything
 
@@ -129,7 +131,7 @@ the one for your host before debugging the tool:
 
 | Host | How the client runs | Reference | Status |
 |---|---|---|---|
-| macOS | Wine (FFXI-on-Mac, Whisky, CrossOver, plain wine) or a VM (Parallels, VMware, UTM) | [host-macos.md](references/host-macos.md) | verified |
+| macOS | Wine (FFXI-on-Mac, Whisky, CrossOver, plain wine) | [host-macos.md](references/host-macos.md) | verified within recorded host scope |
 | Windows | natively | [host-windows.md](references/host-windows.md) | written, unverified |
 | Linux | Wine, Proton (umu-run), Steam Deck | [host-linux.md](references/host-linux.md) | written, unverified |
 

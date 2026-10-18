@@ -1,17 +1,17 @@
 # Host: macOS
 
-Two arrangements run the client here, and `scripts/observe.sh` drives both
-through the same path: CGWindowList finds the window, `screencapture -l` takes
-its pixels, CGEvent posts input, Vision does OCR. Nothing talks to a guest
-agent, so the code does not care which arrangement you chose.
+Use Wine for client observation on macOS.
+Discover the runner on PATH or select the runner from an existing local profile.
+Keep the selected runner and Wine prefix together.
+`scripts/observe.sh` uses CGWindowList, `screencapture -l`, CGEvent, and Vision for the host operations.
+Check permissions with `scripts/observe.sh doctor` before driving a client.
 
 | Arrangement | What owns the window | Set up |
 |---|---|---|
 | **Wine** (no VM) | the Wine process, usually named `wine` | nothing, or `FFXI_OBSERVE_RUNNER=wine` for `launch` |
-| **VM** | the guest exe (Coherence) or the VM console | `FFXI_OBSERVE_VM_NAME='<vm name>'` |
 
-Wine is the lighter arrangement and the better default: no guest OS, no UAC, no
-Spaces fight, and the client window behaves like any other macOS window.
+No named VM or external volume is a prerequisite.
+The backend retains optional VM support for an explicit user request.
 
 ## Host permissions -- the two silent failures
 
@@ -110,9 +110,10 @@ Four Wine-specific traps:
   concluding the launch failed, and suppress the Mono/Gecko installer prompts
   with `WINEDLLOVERRIDES="mscoree,mshtml="` when scripting a bootstrap.
 
-## VM (Parallels, VMware, UTM)
+## Optional VM support (explicit user request)
 
-A VM costs a guest OS and its consent prompts, and buys exact Windows behavior.
+Use this section only when the user explicitly requests an existing VM.
+The default observation procedure uses Wine.
 Set `FFXI_OBSERVE_VM_NAME` so a console window titled after the VM can be
 matched when the game window itself is not separately visible.
 

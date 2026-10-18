@@ -1,6 +1,9 @@
 # LSB dev stack: bring-up and environment gotchas
 
-The stack is five docker containers under colima:
+This reference describes five configured Docker containers under Colima.
+The helper assumes this arrangement. It is not a portable server installer.
+On another host, inspect available runtimes and server configuration before using these commands.
+Use an applicable existing stack when these prerequisites are absent.
 
 | Container | Role | Host port |
 |---|---|---|
@@ -48,10 +51,11 @@ docker exec server-database-1 mariadb -uxiadmin -ppassword xidb -e "..."
 
 ## Failure modes (all observed, all documented fixes)
 
-- **colima dead / one-way UDP / login stuck at "Authenticating"** — the
-  external Sidecar drive slept and virtiofs went stale. Fix: `colima restart`,
-  then `docker start server-map-1 server-world-1`. Symptom variant: map UDP
-  exchanges the login burst then goes silent both ways.
+- **Colima unavailable, one-way UDP, or login stuck at "Authenticating"** —
+  inspect runtime status, mount availability, container state, and forwarding logs.
+  A stale shared filesystem is one possible cause.
+  Record the actual diagnostic before selecting a repair.
+  A shared VM restart interrupts its other services. Obtain applicable authority before restarting it.
 - **Map UDP must stay published `127.0.0.1:54230/udp`** — publishing on
   0.0.0.0 hits a lima forwarding race. Check with `docker port server-map-1`.
 - **Ghost sessions after killing a client** — the next lobby login times out

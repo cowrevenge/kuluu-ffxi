@@ -433,16 +433,13 @@ impl Plugin for HudPlugin {
                 .after(menu::refresh_dynamic_menu_rows),
         );
 
-        // Owner ruling 2026-10-19: the dedicated statcom2 window, then the end-of-frame
-        // enforcement + forensics sample — last among the menu systems, so the frame's
-        // final word on visibility is "commands surfaces are coded hidden while Status is
-        // open", however any earlier system left them.
+        // The end-of-frame forensic sample (owner debug 2026-10-19): runs last among the
+        // menu systems and names every visible UI text node while a Status flow is open,
+        // so any stray drawer identifies itself in the log. The dedicated statcom2 copy
+        // it once shadowed was removed same day (owner: "that menu should not exist here").
         app.add_systems(
             Update,
-            (
-                menu::update_status_list_window,
-                menu::ui_window_forensics.after(menu::update_menu_stack_windows),
-            ),
+            (menu::ui_window_forensics.after(menu::update_menu_stack_windows),),
         );
 
         app.add_systems(

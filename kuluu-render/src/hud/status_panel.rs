@@ -897,19 +897,23 @@ pub fn spawn_status_panel(mut commands: Commands) {
             // Matches the panel's own fill exactly — same chrome color, one border row.
             BackgroundColor(theme::FRAME_BG),
         ));
+        // Stretched across the panel's content box and centered by Taffy itself — the
+        // earlier hand-computed `caption_left` drifted with any metric gap between
+        // `text_width_px` and the real glyph advance (owner 2026-10-19: "its not center
+        // on the top line correctly").
         p.spawn((
             StatusCaption,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::ZERO,
                 left: Val::ZERO,
-                padding: UiRect::all(Val::Px(PERSONA_CAPTION_PAD_PX)),
+                right: Val::ZERO,
                 ..default()
             },
             Text::new(STATUS_CAPTION_TEXT),
             TextLayout {
+                justify: bevy::text::Justify::Center,
                 linebreak: LineBreak::NoWrap,
-                ..default()
             },
             style::text_font(PERSONA_ROW_FONT_PX),
             bevy::text::LineHeight::default(),
@@ -1113,15 +1117,10 @@ pub fn update_persona_frame(
     let pitch_px = layout
         .line_pitch
         .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
-    // Across: measured centering — a Text component draws at its own origin, so no
-    // container justify can center it (a Percent+justify box left it hugging the edge).
+    // The word itself is centered by Taffy (the caption box stretches left→right).
+    // Only the mask strip needs a measured width — one border row of panel fill, as wide
+    // as the glyphs plus air, placed at the content box's middle.
     let caption_inner = layout.width - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
-    // The node carries the mask padding around its glyphs, so the word's origin sits one
-    // pad in from the centered box edge.
-    let caption_left = PERSONA_PAD_X_PX
-        + (caption_inner - crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px))
-            / 2.0
-        - PERSONA_CAPTION_PAD_PX;
     for (mut node, mut font, mut pitch) in caption_q.iter_mut() {
         let size = bevy::text::FontSize::Px(layout.row_font_px);
         if font.font_size != size {
@@ -1132,16 +1131,14 @@ pub fn update_persona_frame(
         if node.top != want_top {
             node.top = want_top;
         }
-        let want_left = Val::Px(caption_left);
-        if node.left != want_left {
-            node.left = want_left;
-        }
     }
     // The strip behind the word: panel fill, one border row tall, wide enough for the
     // glyphs plus their air — it breaks the frame line where the caption sits (retail's
     // gap in the top border) and nothing else. No box.
     let mask_width = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, layout.row_font_px)
         + 2.0 * PERSONA_CAPTION_PAD_PX;
+    // Centered strip: the content box's middle minus half its width.
+    let caption_left = (caption_inner - mask_width) / 2.0;
     for mut mask in mask_q.iter_mut() {
         let want_left = Val::Px(caption_left);
         if mask.left != want_left {
@@ -2037,24 +2034,25 @@ mod tests {
             "lifted over the frame edge: {:?}",
             node.top
         );
-        // Across the panel by measurement (no record installed → fallback width): the word's
-        // center sits on the frame column's center.
+        // Centering law (owner 2026-10-19): the caption box stretches across the panel's
+        // content box and Taffy centers the word — never a hand-computed left offset.
+        assert_eq!(node.left, Val::ZERO);
+        assert_eq!(
+            node.right,
+            Val::ZERO,
+            "the box spans the panel so justify can center the word"
+        );
+        // The strip sits under the glyphs: same measured width as before, centered on the
+        // content box's middle.
         let inner = PANEL_WIDTH_PX - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX);
         let text_w = crate::ui_font::text_width_px(STATUS_CAPTION_TEXT, PERSONA_ROW_FONT_PX);
-        let want_left = PERSONA_PAD_X_PX + (inner - text_w) / 2.0 - PERSONA_CAPTION_PAD_PX;
+        let want_mask_w = text_w + 2.0 * PERSONA_CAPTION_PAD_PX;
+        let want_mask_left = (inner - want_mask_w) / 2.0;
         assert!(
-            matches!(node.left, Val::Px(l) if (l - want_left).abs() < 0.5),
-            "centered on the frame: left {:?}, want {want_left}",
-            node.left
-        );
-        // The strip sits exactly under the glyphs — same origin as the caption node and
-        // wide enough for the word plus one pad of air.
-        assert!(
-            matches!(mask.left, Val::Px(l) if (l - want_left).abs() < 0.5),
-            "strip origin on the caption: {:?}",
+            matches!(mask.left, Val::Px(l) if (l - want_mask_left).abs() < 0.5),
+            "strip centered on the content box: left {:?}, want {want_mask_left}",
             mask.left
         );
-        let want_mask_w = text_w + 2.0 * PERSONA_CAPTION_PAD_PX;
         assert!(
             matches!(mask.width, Val::Px(w) if (w - want_mask_w).abs() < 1.0),
             "strip covers the glyphs plus air: {:?}",

@@ -496,25 +496,9 @@ fn arrange_command(request: kuluu_render::myroom_arrange::ArrangeRequest) -> Age
     }
 }
 
-/// While a DISPLAY-ONLY statcom2 companion tops the stack, it must not hold
-/// the keys — they stay on the selector underneath (focus law, vault
-/// main_menu.md §59: display-only windows are skipped; only these six are,
-/// per the FFXiMain.dll retail-2026-09 detail table behind RVA 0x148D00).
-/// Returns the index of the Status level to drive instead.
+/// The Status level to drive while a display-only detail tops the stack.
 fn statcom_selector_below(stack: &MenuStack) -> Option<usize> {
-    let n = stack.levels.len();
-    if n < 2 {
-        return None;
-    }
-    let top = stack.levels[n - 1].kind;
-    let MenuKind::StatusDetail { entry } = top else {
-        return None;
-    };
-    let entry_def = kuluu_render::hud::status_panel::STATUS_ENTRIES.get(usize::from(entry))?;
-    if !kuluu_render::hud::status_panel::status_detail_display_only(entry_def.kind) {
-        return None;
-    }
-    (stack.levels[n - 2].kind == MenuKind::Status).then_some(n - 2)
+    kuluu_render::hud::status_panel::status_selector_under_detail(stack)
 }
 
 /// Confirm the entry under the cursor. Retail lists Use for every item and

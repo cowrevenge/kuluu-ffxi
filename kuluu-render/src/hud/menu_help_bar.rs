@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use crate::hud::item_detail::{ItemMenuFocus, SortOptionId};
 use crate::hud::menu::{self, DynamicMenu, DynamicMenuAction};
 use crate::hud::style::{self, theme};
-use crate::input_mode::{InputMode, MenuKind, PassiveCursorFocus};
+use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack, PassiveCursorFocus};
 
 #[derive(Component)]
 pub struct MenuHelpBar;
@@ -335,6 +335,7 @@ pub fn update_menu_help_bar(
         ),
     >,
     mut pane_switch_q: Query<&mut Node, (With<MenuHelpPaneSwitch>, Without<MenuHelpBar>)>,
+    config_rows: Res<menu::ConfigDatRows>,
 ) {
     let Ok(mut node) = bar_q.single_mut() else {
         return;
@@ -344,7 +345,7 @@ pub fn update_menu_help_bar(
     // after a drill the right column, and the parent again once focus toggles.
     let (content, is_menu) = match &*mode {
         InputMode::Menu(stack) => (
-            stack.active_level().map(|l| {
+            focused_level(stack).map(|l| {
                 if let MenuKind::Arrange(window) = l.kind {
                     return BarContent {
                         title: dynamic.arrange.help_title(),
@@ -370,7 +371,8 @@ pub fn update_menu_help_bar(
                             Some((used, capacity)) => format!("{used}/{capacity}"),
                             None => String::new(),
                         },
-                        hint: entry_help(l.kind, l.cursor, &dynamic),
+                        hint: dat_row_help(l.kind, l.cursor, &config_rows)
+                            .unwrap_or_else(|| entry_help(l.kind, l.cursor, &dynamic)),
                     },
                 }
             }),
@@ -474,6 +476,34 @@ pub fn update_menu_help_bar(
             **text = content.hint;
         }
     }
+}
+
+/// The level holding the keys: a display-only Status detail on top leaves them on the selector
+/// under it (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
+fn focused_level(stack: &MenuStack) -> Option<&MenuLevel> {
+    if stack.active_level_index() + 1 == stack.levels.len() {
+        if let Some(index) = crate::hud::status_panel::status_selector_under_detail(stack) {
+            return stack.levels.get(index);
+        }
+    }
+    stack.active_level()
+}
+
+/// The DAT item a window's cursor row is, for windows whose rows are their record's items.
+fn dat_row_item_id(kind: MenuKind, cursor: usize) -> Option<i16> {
+    match kind {
+        MenuKind::Status => crate::hud::status_panel::STATCOM2_DISPLAY_ITEM_IDS
+            .get(cursor)
+            .copied(),
+        _ => None,
+    }
+}
+
+/// The help line the record gives the row under the cursor; `None` keeps kuluu's own line.
+fn dat_row_help(kind: MenuKind, cursor: usize, rows: &menu::ConfigDatRows) -> Option<String> {
+    let item_id = dat_row_item_id(kind, cursor)?;
+    rows.row_help(menu::registry_window(kind)?, item_id)
+        .map(str::to_string)
 }
 
 struct BarContent {
@@ -582,7 +612,8 @@ mod tests {
             .init_resource::<crate::hud::check_view::CheckTarget>()
             .init_resource::<crate::hud::auction::AuctionScreenState>()
             .init_resource::<crate::hud::auction::AuctionSellInventory>()
-            .init_resource::<crate::hud::shop::ShopScreenState>();
+            .init_resource::<crate::hud::shop::ShopScreenState>()
+            .init_resource::<menu::ConfigDatRows>();
 
         let scene = SceneState {
             snapshot: SceneSnapshot {
@@ -665,6 +696,85 @@ mod tests {
             entry_help(MenuKind::EmoteList, 0, &dynamic),
             "Select an emote."
         );
+    }
+
+    /// With Status focused the help line is the record's help text of the row under the cursor,
+    /// also while a display-only detail sits on top; rows without one keep kuluu's line.
+    #[test]
+    fn status_help_line_follows_the_focused_row() {
+        use crate::hud::status_panel::{STATCOM2_DISPLAY_ITEM_IDS, STATUS_ENTRIES};
+        use crate::input_mode::{MenuLevel, MenuStack};
+        const HELPED_ROW: usize = 2;
+        let mut rows = menu::ConfigDatRows::default();
+        rows.row_help.insert(
+            menu::STATUS_SELECTOR_WINDOW.into(),
+            [
+                (STATCOM2_DISPLAY_ITEM_IDS[0], "first row help".to_string()),
+                (
+                    STATCOM2_DISPLAY_ITEM_IDS[HELPED_ROW],
+                    "third row help".to_string(),
+                ),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            dat_row_help(MenuKind::Status, 0, &rows).as_deref(),
+            Some("first row help")
+        );
+        assert_eq!(
+            dat_row_help(MenuKind::Status, HELPED_ROW, &rows).as_deref(),
+            Some("third row help")
+        );
+        assert_eq!(dat_row_help(MenuKind::Status, 1, &rows), None);
+        assert_eq!(
+            dat_row_help(MenuKind::Status, 0, &menu::ConfigDatRows::default()),
+            None,
+            "no install: kuluu's own line"
+        );
+
+        let mut stack = MenuStack::root();
+        stack
+            .levels
+            .push(MenuLevel::new(MenuKind::Status, HELPED_ROW));
+        let profile = STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::Profile)
+            .unwrap();
+        stack.levels.push(MenuLevel::new(
+            MenuKind::StatusDetail {
+                entry: profile as u8,
+            },
+            0,
+        ));
+        let focused = focused_level(&stack).expect("a focused level");
+        assert_eq!(
+            (focused.kind, focused.cursor),
+            (MenuKind::Status, HELPED_ROW),
+            "the display-only detail leaves the keys on Status"
+        );
+
+        let mut app = App::new();
+        app.init_resource::<DynamicMenu>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<ItemMenuFocus>()
+            .init_resource::<crate::hud::check_view::CheckTarget>()
+            .init_resource::<crate::hud::auction::AuctionScreenState>()
+            .init_resource::<crate::hud::auction::AuctionSellInventory>()
+            .init_resource::<crate::hud::shop::ShopScreenState>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .insert_resource(rows)
+            .insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_menu_help_bar);
+        app.add_systems(Update, update_menu_help_bar);
+        app.update();
+        let hint = app
+            .world_mut()
+            .query_filtered::<&Text, With<MenuHelpHint>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(hint, "third row help");
     }
 
     #[test]

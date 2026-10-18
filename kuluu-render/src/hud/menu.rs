@@ -2028,9 +2028,17 @@ pub struct ConfigDatRows {
     /// addendum 27). Empty until load. Bead kuluu-o9qt7.35.
     pub currency_labels_1: Vec<Option<String>>,
     pub currency_labels_2: Vec<Option<String>>,
+    /// Each window's row help lines by DAT item id: the item's `textA` description from GetText
+    /// table 0x0E. Windows whose rows kuluu labels from `textA` (the Config family) carry none.
+    pub row_help: std::collections::BTreeMap<String, std::collections::BTreeMap<i16, String>>,
 }
 
 impl ConfigDatRows {
+    /// The help line of `window`'s item `item_id`, when its record carries one.
+    pub fn row_help(&self, window: &str, item_id: i16) -> Option<&str> {
+        self.row_help.get(window)?.get(&item_id).map(String::as_str)
+    }
+
     pub fn window_frame(&self, name: &str) -> Option<(f32, f32, f32)> {
         self.frames
             .get(name)
@@ -2235,6 +2243,27 @@ impl ConfigDatRows {
         }
         self.frames = frames;
         self.frame_extents = frame_extents;
+        let labelled_from_text_a: std::collections::BTreeSet<&str> =
+            config_window_names().collect();
+        let mut row_help = std::collections::BTreeMap::new();
+        for (name, window) in &windows {
+            if labelled_from_text_a.contains(name.as_str()) {
+                continue;
+            }
+            let helps: std::collections::BTreeMap<i16, String> = window
+                .live_items()
+                .into_iter()
+                .filter_map(|item| {
+                    let id = usize::try_from(item.text_a_id?).ok()?;
+                    let text = catalog.as_ref()?.text(id)?;
+                    Some((item.id, text.to_string()))
+                })
+                .collect();
+            if !helps.is_empty() {
+                row_help.insert(name.clone(), helps);
+            }
+        }
+        self.row_help = row_help;
         // …and the door row's two captions, which live in this same catalog (id pair above).
         let mut captions_pair: [Option<String>; 2] = [None, None];
         for (slot, id) in [

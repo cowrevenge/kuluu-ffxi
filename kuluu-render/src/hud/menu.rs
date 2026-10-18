@@ -6628,15 +6628,24 @@ fn dynamic_rows_for(
         // 27, bead kuluu-o9qt7.35) — same DAT record roomlist's confirm question reads.
         MenuKind::StatusDetail { entry } => {
             config_rows.ensure_loaded(dat_root.as_ref().and_then(|r| r.get()).map(|v| &**v));
+            // The three skill entries carry retail's blue paint per line (bit-15 of the
+            // 0x062 word, `.text 0x148564`); the mask walks the same rows as the lines.
+            let entry_idx = usize::from(entry);
+            let capped = crate::hud::status_panel::status_detail_capped(entry_idx, snap);
             crate::hud::status_panel::status_detail_lines(
-                usize::from(entry),
+                entry_idx,
                 snap,
                 &config_rows.currency_labels_1,
                 &config_rows.currency_labels_2,
             )
             .into_iter()
-            .map(|label| DynamicMenuRow {
-                tint: None,
+            .enumerate()
+            .map(|(idx, label)| DynamicMenuRow {
+                tint: capped
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(false)
+                    .then_some(MenuRowTint::SkillCapped),
                 label,
                 action: DynamicMenuAction::DisplayInfo,
             })
@@ -6997,6 +7006,9 @@ pub enum MenuRowTint {
     /// A furniture list row for a piece placed on this floor
     /// ([`ffxi_dat::furniture_arrange::LIST_PLACED_TINT`]).
     FurniturePlaced,
+    /// A skill line whose s2c 0x062 word carries the bit-15 cap flag — retail paints it
+    /// ARGB 0x802060A0 instead of grey (`.text FFXiMain.dll retail-2026-09 0x148564`).
+    SkillCapped,
 }
 
 /// The slots `.text FFXiMain.dll retail-2026-09 0x131FA0` walks when looking for an already-
@@ -7837,6 +7849,9 @@ fn menu_row_color(gated: bool, tint: Option<MenuRowTint>, lit_cursor: bool) -> C
             let [r, g, b, a] = ffxi_dat::furniture_arrange::LIST_PLACED_TINT;
             crate::hud::unity_fp::retail_text_color(crate::hud::unity_fp::retail_argb(a, r, g, b))
         }
+        Some(MenuRowTint::SkillCapped) => {
+            crate::hud::unity_fp::retail_text_color(crate::hud::unity_fp::ARGB_CAPPED)
+        }
         None if lit_cursor => theme::CURSOR,
         None => theme::TEXT,
     }
@@ -8597,6 +8612,20 @@ pub fn view_house_blocked(zone_id: Option<u16>, self_in_mog_house: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bit-15 skill line maps to retail's blue 0x802060A0 and survives the gate order.
+    #[test]
+    fn capped_skill_row_paints_retail_blue() {
+        assert_eq!(
+            menu_row_color(false, Some(MenuRowTint::SkillCapped), false),
+            crate::hud::unity_fp::retail_text_color(crate::hud::unity_fp::ARGB_CAPPED)
+        );
+        // A disabled row stays grey even with the tint — same order as equip's law.
+        assert_eq!(
+            menu_row_color(true, Some(MenuRowTint::SkillCapped), false),
+            theme::TEXT_DISABLED
+        );
+    }
 
     #[test]
     fn action_recast_remaining_gates_on_cooldown_abilities() {

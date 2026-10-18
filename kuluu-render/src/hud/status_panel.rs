@@ -1414,6 +1414,26 @@ pub fn currency_detail_rows(
         .collect()
 }
 
+/// The blue-paint flag aligned 1:1 with `status_detail_lines`' output for the three
+/// skill entries — both walk `skill_detail_rows`, so the indices match by construction.
+/// Every other entry yields an empty mask (`.text FFXiMain.dll retail-2026-09 0x148564`).
+pub fn status_detail_capped(entry_idx: usize, snap: &kuluu_snapshot::SceneSnapshot) -> Vec<bool> {
+    let Some(entry) = STATUS_ENTRIES.get(entry_idx) else {
+        return Vec::new();
+    };
+    use ffxi_proto::decode::CharSkillLevels;
+    let family = match entry.kind {
+        StatusEntryKind::CombatSkill => SkillFamily::Noncraft(CharSkillLevels::COMBAT_SKILL_RANGE),
+        StatusEntryKind::MagicSkill => SkillFamily::Noncraft(CharSkillLevels::MAGIC_SKILL_RANGE),
+        StatusEntryKind::CraftSkill => SkillFamily::Craft,
+        _ => return Vec::new(),
+    };
+    skill_detail_rows(snap, family)
+        .into_iter()
+        .map(|row| row.capped)
+        .collect()
+}
+
 /// Which family of the 0x062 table a Status skill window shows. Combat and magic
 /// share one encoding (level in the low 15 bits, hidden only at exactly 0x8000)
 /// and the two-column layout; craft hides on 0xFFFF instead and packs level+rank,
@@ -1505,14 +1525,17 @@ pub fn skill_detail_rows(
             let left = &visible[row];
             let right = visible.get(row + rows);
             match right {
-                Some((right_text, _)) => SkillDetailRow {
+                // One text node per display line, so the blue-paint flag is the pair's:
+                // a bit-15 word in either column lights kuluu's whole row (retail tints
+                // each entry — `.text 0x148564`; merged-line honesty).
+                Some((right_text, right_capped)) => SkillDetailRow {
                     text: format!(
                         "{:<left_width$}  {}",
                         left.0,
                         right_text,
                         left_width = left_width + 2
                     ),
-                    capped: left.1,
+                    capped: left.1 || *right_capped,
                 },
                 None => SkillDetailRow {
                     text: left.0.clone(),
@@ -2399,6 +2422,34 @@ mod tests {
             "both levels survive on one line: {}",
             capped[0].text
         );
+    }
+
+    /// One text node per display line means a right-column bit-15 word lights the
+    /// whole row's blue paint too (retail tints each entry; kuluu merged the pair).
+    #[test]
+    fn a_right_column_capped_word_lights_its_display_row() {
+        use ffxi_proto::decode::CharSkillLevels;
+        let snap = snap_with_skills(&[(4, 88), (5, CharSkillLevels::SKILL_CAP_BIT | 140)], false);
+        let rows = skill_detail_rows(&snap, SkillFamily::Noncraft(4..=5));
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].text.contains("301"), "range starts at id 4");
+        assert!(rows[0].capped, "right-column bit-15 propagates");
+    }
+
+    /// The tint mask walks the same rows as the drawn lines — aligned by construction.
+    #[test]
+    fn detail_capped_mask_aligns_with_detail_lines() {
+        use ffxi_proto::decode::CharSkillLevels;
+        let snap = snap_with_skills(&[(1, 301), (2, CharSkillLevels::SKILL_CAP_BIT | 75)], false);
+        let combat_entry = STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == StatusEntryKind::CombatSkill)
+            .unwrap();
+        let mask = status_detail_capped(combat_entry, &snap);
+        let lines = status_detail_lines(combat_entry, &snap, &[], &[]);
+        assert!(!lines.is_empty());
+        assert_eq!(mask.len(), lines.len(), "one flag per drawn line");
+        assert!(mask.iter().any(|c| *c), "the capped id is flagged");
     }
 
     /// Craft hides on its own sentinel, unpacks level+rank from the word, and never

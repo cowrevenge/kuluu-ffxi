@@ -246,12 +246,14 @@ pub const PERSONA_WINDOW: &str = "persona";
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md: newest on top).
 pub const PERSONA_Z: i32 = style::WINDOW_Z + 1;
 
-/// Name, main job, sub job, iLv/Su, HP, MP and TP, ahead of the attribute rows.
+/// Name, main job, sub job, ILv/Su, HP, MP and TP, ahead of the attribute rows.
 const PERSONA_HEAD_ROWS: usize = 7;
 pub const PERSONA_ROW_COUNT: usize = PERSONA_HEAD_ROWS + PRIMARY_ATTRS.len();
 
 pub const LEVEL_LABEL: &str = "Lv";
-pub const ITEM_LEVEL_LABEL: &str = "iLv";
+/// Retail draws this label verbatim from its image (FFXiMain.dll retail-2026-09 drawn raw
+/// at `.text 0x14725C`, string literal `ILv`): capital I.
+pub const ITEM_LEVEL_LABEL: &str = "ILv";
 pub const SUPERIOR_LEVEL_LABEL: &str = "Su";
 pub const HP_LABEL: &str = "HP";
 pub const MP_LABEL: &str = "MP";
@@ -326,7 +328,8 @@ pub struct PersonaRow {
     pub index: usize,
 }
 
-/// The green attribute bonus after a persona row's base value.
+/// The signed adjustment span after a persona row's base value — green above zero and
+/// red below (colour pushes at FFXiMain.dll retail-2026-09 `.text 0x147530` and `.text 0x14754C`).
 #[derive(Component)]
 pub struct PersonaBonus {
     pub index: usize,
@@ -334,16 +337,34 @@ pub struct PersonaBonus {
 
 pub const PRIMARY_ATTRS: &[&str] = &["STR", "DEX", "VIT", "AGI", "INT", "MND", "CHR"];
 
-/// One persona row: its text and, on an attribute row, the nonzero bonus.
+/// One persona row: its text and, on an attribute row, the nonzero signed adjustment
+/// (the CLISTATUS `bp_adj` word; vendor/server/src/map/packets/s2c/0x061_clistatus.h).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonaLine {
     pub text: String,
-    pub bonus: Option<String>,
+    pub bonus: Option<i16>,
 }
 
 impl PersonaLine {
     fn plain(text: String) -> Self {
         Self { text, bonus: None }
+    }
+}
+
+/// Retail appends a positive adjustment as " +%d" and a negative one as " %d", the minus
+/// coming from the value (FFXiMain.dll retail-2026-09 branch at `.text 0x14751B`, format
+/// literals `.rdata 0x3715C0` and `.rdata 0x36C00C`); zero adds no span at all.
+pub fn persona_bonus_text(bonus: i16) -> String {
+    format!(" {bonus:+}")
+}
+
+/// Positive adjustments draw green, negative red (colour pushes at FFXiMain.dll
+/// retail-2026-09 `.text 0x147530` and `.text 0x14754C`).
+pub fn persona_bonus_color(bonus: i16) -> Color {
+    if bonus > 0 {
+        theme::ATTR_ADJUST_UP
+    } else {
+        theme::ATTR_ADJUST_DOWN
     }
 }
 
@@ -412,7 +433,7 @@ pub fn persona_layout(
 }
 
 /// Persona's rows: name, `Lv <n> <Main Job>`, `Lv <n> <Sub Job>` only with a sub job,
-/// `iLv <x>/ Su <y>`, HP and MP as current/max, TP, then each attribute's base with its bonus.
+/// `ILv <x>/ Su <y>`, HP and MP as current/max, TP, then each attribute's base with its adjustment.
 pub fn persona_lines(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<PersonaLine> {
     let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     let stats = snap.stats.as_ref();
@@ -460,7 +481,7 @@ pub fn persona_lines(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<PersonaLine> {
                 let bonus = s.bonus.get(attr_index).copied().unwrap_or(0);
                 PersonaLine {
                     text: format!("{name:<4}{base:>4}"),
-                    bonus: (bonus != 0).then(|| format!(" {bonus:+}")),
+                    bonus: (bonus != 0).then_some(bonus),
                 }
             }
             None => PersonaLine::plain(format!("{name:<4}{UNKNOWN_VALUE:>4}")),
@@ -563,7 +584,7 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 TextSpan::new(""),
                 style::text_font(layout.font_px(index)),
                 bevy::text::LineHeight::default(),
-                TextColor(theme::GOOD),
+                TextColor(theme::ATTR_ADJUST_UP),
             ));
         }
     });
@@ -628,7 +649,7 @@ pub fn update_persona_frame(
 ) {
     let widest = persona_lines(&state.snapshot)
         .iter()
-        .map(|line| line.text.len() + line.bonus.as_ref().map_or(0, String::len))
+        .map(|line| line.text.len() + line.bonus.map_or(0, |b| persona_bonus_text(b).len()))
         .max()
         .unwrap_or(0);
     let layout = persona_layout(config_rows.record_frame(PERSONA_WINDOW).as_ref(), widest);
@@ -669,7 +690,7 @@ pub fn update_status_panel(
         (&PersonaRow, &mut Text, &mut Node),
         (Without<StatusLevelText>, Without<StatusLeftStack>),
     >,
-    mut bonus_q: Query<(&PersonaBonus, &mut TextSpan)>,
+    mut bonus_q: Query<(&PersonaBonus, &mut TextSpan, &mut TextColor)>,
 ) {
     let Ok(mut stack_node) = stack_q.single_mut() else {
         return;
@@ -700,13 +721,14 @@ pub fn update_status_panel(
             **text = want.to_string();
         }
     }
-    for (bonus, mut span) in bonus_q.iter_mut() {
-        let want = lines
-            .get(bonus.index)
-            .and_then(|l| l.bonus.as_deref())
-            .unwrap_or("");
+    for (bonus, mut span, mut color) in bonus_q.iter_mut() {
+        let line_bonus = lines.get(bonus.index).and_then(|l| l.bonus);
+        let want = line_bonus.map_or_else(String::new, persona_bonus_text);
         if span.as_str() != want {
-            **span = want.to_string();
+            **span = want;
+        }
+        if let Some(value) = line_bonus {
+            color.set_if_neq(TextColor(persona_bonus_color(value)));
         }
     }
 
@@ -1253,8 +1275,8 @@ mod tests {
         snap
     }
 
-    /// Two job lines (the sub only with a sub job), one iLv/Su row, HP/MP/TP each on their own
-    /// row, and each attribute's base with its nonzero bonus.
+    /// Two job lines (the sub only with a sub job), one ILv/Su row, HP/MP/TP each on their own
+    /// row, and each attribute's base with its nonzero adjustment.
     #[test]
     fn persona_rows_match_retail_layout() {
         const SUB_JOB: u8 = 1;
@@ -1271,7 +1293,7 @@ mod tests {
                 "Cowrevenge",
                 main.as_str(),
                 sub.as_str(),
-                "iLv ---/ Su 0",
+                "ILv ---/ Su 0",
                 "HP 232/232",
                 "MP 98/98",
                 "TP 525",
@@ -1280,22 +1302,23 @@ mod tests {
         assert_eq!(lines[PERSONA_HEAD_ROWS].text, "STR   17");
         assert_eq!(lines[PERSONA_HEAD_ROWS].bonus, None);
         assert_eq!(lines[PERSONA_HEAD_ROWS + 1].text, "DEX   16");
-        assert_eq!(lines[PERSONA_HEAD_ROWS + 1].bonus.as_deref(), Some(" +6"));
-        assert_eq!(lines[PERSONA_ROW_COUNT - 1].bonus.as_deref(), Some(" -1"));
+        assert_eq!(lines[PERSONA_HEAD_ROWS + 1].bonus, Some(6));
+        assert_eq!(lines[PERSONA_ROW_COUNT - 1].bonus, Some(-1));
 
         let solo = persona_lines(&persona_snapshot(0));
         assert_eq!(solo.len(), PERSONA_ROW_COUNT - 1, "no sub job, no sub line");
-        assert_eq!(solo[2].text, "iLv ---/ Su 0");
+        assert_eq!(solo[2].text, "ILv ---/ Su 0");
 
         let mut geared = persona_snapshot(0);
         if let Some(stats) = geared.stats.as_mut() {
             stats.item_level = 119;
             stats.su_lv = 3;
         }
-        assert_eq!(persona_lines(&geared)[2].text, "iLv 119/ Su 3");
+        assert_eq!(persona_lines(&geared)[2].text, "ILv 119/ Su 3");
     }
 
-    /// The bonus span shows only the nonzero bonus, and rows past the line count hide.
+    /// The bonus span shows only the nonzero adjustment — green above zero, red below — and
+    /// rows past the line count hide.
     #[test]
     fn persona_rows_draw_into_their_text_and_bonus_span() {
         use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
@@ -1315,16 +1338,22 @@ mod tests {
         rows.sort_by_key(|r| r.0);
         assert_eq!(rows[0].1, "Cowrevenge");
         assert_eq!(rows[PERSONA_ROW_COUNT - 1].2, Display::None, "no sub job");
-        let mut spans: Vec<(usize, String)> = world
-            .query::<(&PersonaBonus, &TextSpan)>()
+        let mut spans: Vec<(usize, String, Color)> = world
+            .query::<(&PersonaBonus, &TextSpan, &TextColor)>()
             .iter(world)
-            .map(|(b, span)| (b.index, span.0.clone()))
+            .map(|(b, span, color)| (b.index, span.0.clone(), color.0))
             .collect();
         spans.sort_by_key(|s| s.0);
         // Without a sub line the attribute rows start one row early, so DEX sits here.
         let dex_row = PERSONA_HEAD_ROWS;
         assert_eq!(spans[dex_row].1, " +6");
+        assert_eq!(spans[dex_row].2, theme::ATTR_ADJUST_UP);
         assert_eq!(spans[dex_row - 1].1, "");
+        let chr = &spans[PERSONA_HEAD_ROWS + PRIMARY_ATTRS.len() - 2];
+        assert_eq!(
+            (chr.0, chr.1.as_str(), chr.2),
+            (dex_row + 5, " -1", theme::ATTR_ADJUST_DOWN)
+        );
     }
 
     /// The `level` box sits at its own record frame once the install supplies one and stays

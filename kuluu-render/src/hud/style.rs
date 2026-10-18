@@ -54,6 +54,12 @@ pub mod theme {
     /// (FFXiMain.dll retail-2026-09 `.text 0x1D6A1A`), and the same halving covers the
     /// `statcom2` rows disabled at open (`.text 0x148B50`). Half of TEXT.
     pub const TEXT_DISABLED: Color = Color::srgb(0.455, 0.46, 0.475);
+    /// A persona attribute row's positive adjustment span: retail pushes the raw ARGB
+    /// 0x80408040 when `bp_adj` is above zero (FFXiMain.dll retail-2026-09 `.text 0x147530`).
+    pub const ATTR_ADJUST_UP: Color = Color::srgb(0.251, 0.502, 0.251);
+    /// A persona attribute row's negative adjustment span — retail pushes ARGB
+    /// 0x80804040 when `bp_adj` is below zero (FFXiMain.dll retail-2026-09 `.text 0x14754C`).
+    pub const ATTR_ADJUST_DOWN: Color = Color::srgb(0.502, 0.251, 0.251);
     /// An item row wearable right now. Retail's per-row colour resolvers paint ARGB
     /// 0x80909040 when the equip legality check answers true (FFXiMain.dll retail-2026-09
     /// `.text 0x1DE18D`, repeated at `.text 0x20F788` and `.text 0x1EC8DA`).

@@ -235,6 +235,18 @@ const PERSONA_BORDER_PX: f32 = 1.0;
 const PERSONA_ROW_GAP_PX: f32 = 2.0;
 const PERSONA_NAME_FONT_PX: f32 = 14.0;
 const PERSONA_ROW_FONT_PX: f32 = 13.0;
+/// Persona's column widths as percentages of the row (label · right-set value · slash
+/// slot · max/Su); the bonus column takes what is left after them.
+const PERSONA_LABEL_COL_PCT: f32 = 28.0;
+const PERSONA_VALUE_COL_PCT: f32 = 30.0;
+const PERSONA_SLASH_COL_PCT: f32 = 5.0;
+const PERSONA_MAX_COL_PCT: f32 = 30.0;
+/// The air retail leaves between the persona blocks [name/job/ILv] · [HP/MP/TP] ·
+/// attributes — screenshot-measured [O].
+pub const PERSONA_BLOCK_GAP_PX: f32 = 7.0;
+/// ILv and TP rows are in the set for every snapshot, so the count of block gaps is fixed
+/// and the fitted pitch can subtract them from the frame's inner height.
+const PERSONA_BLOCK_GAPS: usize = 2;
 
 /// Main menu Status code-moves `persona` to (16, 16)
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).
@@ -308,11 +320,10 @@ pub enum LevelLine {
 pub struct StatusExpFill;
 
 // Gauge geometry measured off the owner's retail screenshot of `menu    level  `
-// (frame x=16 y=208 w=112 h=88): one centered row ≈72px across — two blue end caps
-// around a grey track with a salmon fill over it.
+// (frame x=16 y=208 w=112 h=88): two blue end caps around a grey track that grows to
+// every width between them, with a salmon fill over it from the left.
 const LEVEL_GAUGE_CAP_WIDTH_PX: f32 = 3.0;
 const LEVEL_GAUGE_CAP_HEIGHT_PX: f32 = 8.0;
-const LEVEL_GAUGE_TRACK_WIDTH_PX: f32 = 66.0;
 const LEVEL_GAUGE_TRACK_HEIGHT_PX: f32 = 6.0;
 /// The EXP label sits further right than NEXTLevel in the retail box.
 pub const LEVEL_EXP_LABEL_INDENT_PX: f32 = 14.0;
@@ -373,32 +384,126 @@ pub fn status_selector_under_detail(stack: &crate::input_mode::MenuStack) -> Opt
     (stack.levels[n - 2].kind == MenuKind::Status).then_some(n - 2)
 }
 
-/// One persona row by draw position; `index` runs over [`PERSONA_ROW_COUNT`].
+/// One persona row wrapper by draw position; `index` runs over [`PERSONA_ROW_COUNT`].
+/// The row is a flex line of five [`PersonaCell`] columns.
 #[derive(Component)]
 pub struct PersonaRow {
     pub index: usize,
 }
 
-/// The signed adjustment span after a persona row's base value — green above zero and
-/// red below (colour pushes at FFXiMain.dll retail-2026-09 `.text 0x147530` and `.text 0x14754C`).
-#[derive(Component)]
-pub struct PersonaBonus {
-    pub index: usize,
+/// One column of the persona table. Retail draws every row across the same columns —
+/// label, value right-aligned into one numeric column that meets the shared `/`, the slash
+/// slot, then max/`Su <n>`, and the signed adjustment in its own column after that
+/// (owner ruling 2026-10-18: "HP, MP and ILv on the /", "the STR to CHR values are
+/// right-aligned in one column, and the green +n gets its own column after that"). An
+/// empty cell renders nothing.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonaCol {
+    Label,
+    /// Right-aligned before the slash: HP/MP current, ILv, TP, attribute base.
+    V1,
+    Slash,
+    /// After the slash: HP/MP max, `Su <n>`.
+    V2,
+    Bonus,
 }
+
+pub const PERSONA_COLS: [PersonaCol; 5] = [
+    PersonaCol::Label,
+    PersonaCol::V1,
+    PersonaCol::Slash,
+    PersonaCol::V2,
+    PersonaCol::Bonus,
+];
+
+/// One persona table cell: row `index` at column [`PersonaCol`].
+#[derive(Component)]
+pub struct PersonaCell {
+    pub index: usize,
+    pub col: PersonaCol,
+}
+
+/// The panel's title, centered on the window's top border (owner ruling 2026-10-18:
+/// "Retail centers it on the persona window's top border").
+#[derive(Component)]
+pub struct StatusCaption;
+
+/// The `level` box gauge track: a grey bar growing to every width between its caps, under
+/// the fill (owner ruling 2026-10-18: "a full-width grey track with a red fill and blue
+/// end caps").
+#[derive(Component)]
+pub struct StatusExpTrack;
 
 pub const PRIMARY_ATTRS: &[&str] = &["STR", "DEX", "VIT", "AGI", "INT", "MND", "CHR"];
 
-/// One persona row: its text and, on an attribute row, the nonzero signed adjustment
-/// (the CLISTATUS `bp_adj` word; vendor/server/src/map/packets/s2c/0x061_clistatus.h).
+/// One persona row in retail's column table. Retail aligns numbers in columns — the
+/// HP/MP/ILv values meet at a shared `/` column (owner ruling 2026-10-18: "retail lines
+/// up HP, MP and ILv on the /"), attribute bases right-align into one column, and the green
+/// adjustment sits in its own column after it. Cells render as fixed-percentage columns; an
+/// empty cell renders nothing. The bonus is the CLISTATUS `bp_adj` word;
+/// vendor/server/src/map/packets/s2c/0x061_clistatus.h.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersonaLine {
-    pub text: String,
+    pub kind: PersonaRowKind,
+    /// Full-text rows (name, job) fill this and leave the value cells empty.
+    pub label: String,
+    /// Right-aligned before the slash column (HP/MP current, ILv).
+    pub v1: String,
+    /// The shared `/` glyph — only on lines that carry a ratio.
+    pub slash: bool,
+    /// Left cell after the slash (max value; for ILv it carries `Su <n>` as retail draws it).
+    pub v2: String,
     pub bonus: Option<i16>,
 }
 
+/// Which block of the persona table a row belongs to — drives both column layout and the
+/// grouped spacing retail shows between blocks (name/job/ILv · HP/MP/TP · attributes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersonaRowKind {
+    Name,
+    Job,
+    Ilv,
+    Hp,
+    Mp,
+    Tp,
+    Attr(usize),
+}
+
 impl PersonaLine {
-    fn plain(text: String) -> Self {
-        Self { text, bonus: None }
+    fn plain(kind: PersonaRowKind, label: String) -> Self {
+        Self {
+            kind,
+            label,
+            v1: String::new(),
+            slash: false,
+            v2: String::new(),
+            bonus: None,
+        }
+    }
+
+    fn pair(kind: PersonaRowKind, label: String, cur: String, max: String) -> Self {
+        Self {
+            kind,
+            label,
+            v1: cur,
+            slash: true,
+            v2: max,
+            bonus: None,
+        }
+    }
+
+    /// The row joined into one string, for tests and diagnostics.
+    pub fn display_text(&self) -> String {
+        let mut out = self.label.clone();
+        if !self.v1.is_empty() || self.slash {
+            out.push(' ');
+            out.push_str(&self.v1);
+        }
+        if self.slash {
+            out.push('/');
+            out.push_str(&self.v2);
+        }
+        out
     }
 }
 
@@ -466,7 +571,11 @@ pub fn persona_layout(
             ..PersonaLayout::FALLBACK
         };
     };
-    let inner_height = (height - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX)).max(0.0);
+    // The block gaps spend frame height too, or the fitted pitch plus margins overflows it.
+    let inner_height = (height
+        - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX)
+        - PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX)
+        .max(0.0);
     let inner_width = (frame.width - 2.0 * (PERSONA_PAD_X_PX + PERSONA_BORDER_PX)).max(0.0);
     let pitch = inner_height / PERSONA_ROW_COUNT as f32;
     let height_fit = pitch / crate::ui_font::line_height_px(1.0);
@@ -489,54 +598,76 @@ pub fn persona_lines(snap: &kuluu_snapshot::SceneSnapshot) -> Vec<PersonaLine> {
     let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     let stats = snap.stats.as_ref();
     let mut lines = vec![PersonaLine::plain(
+        PersonaRowKind::Name,
         me.and_then(|m| m.name.clone())
             .or_else(|| snap.char_name.clone())
             .unwrap_or_else(|| UNKNOWN_VALUE.to_string()),
     )];
     match me {
         Some(m) => {
-            lines.push(PersonaLine::plain(job_line(m.main_job, m.main_job_lv)));
+            lines.push(PersonaLine::plain(
+                PersonaRowKind::Job,
+                job_line(m.main_job, m.main_job_lv),
+            ));
             if m.sub_job != 0 {
-                lines.push(PersonaLine::plain(job_line(m.sub_job, m.sub_job_lv)));
+                lines.push(PersonaLine::plain(
+                    PersonaRowKind::Job,
+                    job_line(m.sub_job, m.sub_job_lv),
+                ));
             }
         }
-        None => lines.push(PersonaLine::plain(format!("{LEVEL_LABEL} {UNKNOWN_VALUE}"))),
+        None => lines.push(PersonaLine::plain(
+            PersonaRowKind::Job,
+            format!("{LEVEL_LABEL} {UNKNOWN_VALUE}"),
+        )),
     }
     let item_level = stats
         .filter(|s| s.item_level > 0)
         .map_or_else(|| UNKNOWN_VALUE.to_string(), |s| s.item_level.to_string());
     let superior = stats.map_or_else(|| UNKNOWN_VALUE.to_string(), |s| s.su_lv.to_string());
-    lines.push(PersonaLine::plain(format!(
-        "{ITEM_LEVEL_LABEL} {item_level}/ {SUPERIOR_LEVEL_LABEL} {superior}"
-    )));
+    // Retail draws the ILv ratio on the same slash column as HP/MP, with `Su <n>` after it.
+    lines.push(PersonaLine::pair(
+        PersonaRowKind::Ilv,
+        ITEM_LEVEL_LABEL.to_string(),
+        item_level.clone(),
+        format!(" {SUPERIOR_LEVEL_LABEL} {superior}"),
+    ));
     let current =
         |value: Option<u32>| value.map_or_else(|| UNKNOWN_VALUE.to_string(), |v| v.to_string());
-    lines.push(PersonaLine::plain(format!(
-        "{HP_LABEL} {}/{}",
+    lines.push(PersonaLine::pair(
+        PersonaRowKind::Hp,
+        HP_LABEL.to_string(),
         current(me.map(|m| m.hp)),
-        current(stats.map(|s| s.hp_max))
-    )));
-    lines.push(PersonaLine::plain(format!(
-        "{MP_LABEL} {}/{}",
+        current(stats.map(|s| s.hp_max)),
+    ));
+    lines.push(PersonaLine::pair(
+        PersonaRowKind::Mp,
+        MP_LABEL.to_string(),
         current(me.map(|m| m.mp)),
-        current(stats.map(|s| s.mp_max))
-    )));
-    lines.push(PersonaLine::plain(format!(
-        "{TP_LABEL} {}",
-        current(me.map(|m| m.tp))
-    )));
+        current(stats.map(|s| s.mp_max)),
+    ));
+    // Retail stacks TP's single number in the same right-set column as every other value.
+    let mut tp = PersonaLine::plain(PersonaRowKind::Tp, TP_LABEL.to_string());
+    tp.v1 = current(me.map(|m| m.tp));
+    lines.push(tp);
     for (attr_index, name) in PRIMARY_ATTRS.iter().enumerate() {
-        lines.push(match stats {
+        let line = match stats {
             Some(s) => {
                 let base = attr_value(s, attr_index).unwrap_or(0);
                 let bonus = s.bonus.get(attr_index).copied().unwrap_or(0);
-                PersonaLine {
-                    text: format!("{name:<4}{base:>4}"),
-                    bonus: (bonus != 0).then_some(bonus),
-                }
+                let mut l = PersonaLine::plain(PersonaRowKind::Attr(attr_index), name.to_string());
+                // Retail right-aligns the attribute base into the shared value column.
+                l.v1 = base.to_string();
+                l.bonus = (bonus != 0).then_some(bonus);
+                l
             }
-            None => PersonaLine::plain(format!("{name:<4}{UNKNOWN_VALUE:>4}")),
-        });
+            None => {
+                let mut l = PersonaLine::plain(PersonaRowKind::Attr(attr_index), name.to_string());
+                l.v1 = UNKNOWN_VALUE.to_string();
+                l
+            }
+        };
+        lines.push(line);
     }
     lines
 }
@@ -582,7 +713,6 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(PERSONA_ROW_GAP_PX),
                 flex_shrink: 0.0,
-                overflow: Overflow::clip(),
                 ..default()
             },
             BackgroundColor(theme::FRAME_BG),
@@ -621,11 +751,12 @@ pub fn spawn_status_panel(mut commands: Commands) {
             spawn_level_line(b, LevelLine::ExpValue, "", value_row_node());
             spawn_level_line(b, LevelLine::NextLabel, "", Node::default());
             spawn_level_line(b, LevelLine::NextValue, "", value_row_node());
-            // The experience gauge: blue caps hugging a grey track, salmon fill from
-            // the left — geometry and colors measured off the retail box [O].
+            // The experience gauge spans the box: blue caps at both ends of a grey
+            // track that grows between them, salmon fill over it from the left
+            // (owner ruling 2026-10-18; colors measured off the retail box [O]).
             b.spawn(Node {
                 width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             })
             .with_children(|g| {
@@ -637,11 +768,15 @@ pub fn spawn_status_panel(mut commands: Commands) {
                     },
                     BackgroundColor(LEVEL_GAUGE_CAP_COLOR),
                 ));
-                g.spawn(Node {
-                    width: Val::Px(LEVEL_GAUGE_TRACK_WIDTH_PX),
-                    height: Val::Px(LEVEL_GAUGE_TRACK_HEIGHT_PX),
-                    ..default()
-                })
+                g.spawn((
+                    StatusExpTrack,
+                    Node {
+                        flex_grow: 1.0,
+                        height: Val::Px(LEVEL_GAUGE_TRACK_HEIGHT_PX),
+                        ..default()
+                    },
+                    BackgroundColor(LEVEL_GAUGE_TRACK_COLOR),
+                ))
                 .with_child((
                     StatusExpFill,
                     Node {
@@ -663,34 +798,85 @@ pub fn spawn_status_panel(mut commands: Commands) {
         });
     });
     commands.entity(panel).with_children(|p| {
+        let layout = PersonaLayout::FALLBACK;
         for index in 0..PERSONA_ROW_COUNT {
-            let layout = PersonaLayout::FALLBACK;
-            let color = if index == 0 {
+            let row_color = if index == 0 {
                 theme::TITLE
             } else {
                 theme::TEXT
             };
             p.spawn((
                 PersonaRow { index },
-                Node::default(),
-                Text::new(""),
-                TextLayout {
-                    linebreak: LineBreak::NoWrap,
+                Node {
+                    width: Val::Percent(100.0),
                     ..default()
                 },
-                style::text_font(layout.font_px(index)),
-                bevy::text::LineHeight::default(),
-                TextColor(color),
             ))
-            .with_child((
-                PersonaBonus { index },
-                TextSpan::new(""),
-                style::text_font(layout.font_px(index)),
-                bevy::text::LineHeight::default(),
-                TextColor(theme::ATTR_ADJUST_UP),
-            ));
+            .with_children(|r| {
+                for col in PERSONA_COLS {
+                    let cell = (
+                        PersonaCell { index, col },
+                        Text::new(""),
+                        TextLayout {
+                            linebreak: LineBreak::NoWrap,
+                            ..default()
+                        },
+                        style::text_font(layout.font_px(index)),
+                        bevy::text::LineHeight::default(),
+                        TextColor(row_color),
+                    );
+                    match col {
+                        // A node never right-aligns its own text — the value column keeps a
+                        // FlexEnd wrapper, the same trick the `level` box rows use.
+                        PersonaCol::V1 => {
+                            r.spawn(Node {
+                                width: Val::Percent(PERSONA_VALUE_COL_PCT),
+                                justify_content: JustifyContent::FlexEnd,
+                                ..default()
+                            })
+                            .with_child(cell);
+                        }
+                        _ => {
+                            r.spawn((persona_cell_node(col), cell));
+                        }
+                    }
+                }
+            });
         }
+        // The title rides the window's top border, centered; `update_persona_frame`
+        // lifts it to straddle the frame edge.
+        p.spawn((
+            StatusCaption,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::ZERO,
+                left: Val::ZERO,
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Text::new("Status"),
+            TextLayout {
+                linebreak: LineBreak::NoWrap,
+                ..default()
+            },
+            style::text_font(PERSONA_ROW_FONT_PX),
+            bevy::text::LineHeight::default(),
+            TextColor(theme::TITLE),
+        ));
     });
+}
+
+/// The fixed column grid for a persona cell that is a direct row child; the right-set
+/// V1 lives inside its wrapper and takes the wrapper's share.
+fn persona_cell_node(col: PersonaCol) -> Node {
+    let width = match col {
+        PersonaCol::Label => Val::Percent(PERSONA_LABEL_COL_PCT),
+        PersonaCol::V1 | PersonaCol::Bonus => Val::Auto,
+        PersonaCol::Slash => Val::Percent(PERSONA_SLASH_COL_PCT),
+        PersonaCol::V2 => Val::Percent(PERSONA_MAX_COL_PCT),
+    };
+    Node { width, ..default() }
 }
 
 /// The `level` box body as the wire reports it (values from s2c 0x061 — no wire value,
@@ -806,19 +992,21 @@ pub fn update_status_level_box(
 pub fn update_persona_frame(
     config_rows: Res<crate::hud::menu::ConfigDatRows>,
     state: Res<SceneState>,
-    mut panel_q: Query<&mut Node, With<StatusPanel>>,
-    mut row_q: Query<
-        (&PersonaRow, &mut TextFont, &mut bevy::text::LineHeight),
-        Without<PersonaBonus>,
+    mut panel_q: Query<&mut Node, (With<StatusPanel>, Without<StatusCaption>)>,
+    mut cell_q: Query<
+        (&PersonaCell, &mut TextFont, &mut bevy::text::LineHeight),
+        Without<StatusCaption>,
     >,
-    mut bonus_q: Query<
-        (&PersonaBonus, &mut TextFont, &mut bevy::text::LineHeight),
-        Without<PersonaRow>,
+    mut caption_q: Query<
+        (&mut Node, &mut TextFont, &mut bevy::text::LineHeight),
+        (With<StatusCaption>, Without<PersonaCell>),
     >,
 ) {
     let widest = persona_lines(&state.snapshot)
         .iter()
-        .map(|line| line.text.len() + line.bonus.map_or(0, |b| persona_bonus_text(b).len()))
+        .map(|line| {
+            line.display_text().len() + line.bonus.map_or(0, |b| persona_bonus_text(b).len())
+        })
         .max()
         .unwrap_or(0);
     let layout = persona_layout(config_rows.record_frame(PERSONA_WINDOW).as_ref(), widest);
@@ -832,19 +1020,27 @@ pub fn update_persona_frame(
     let line_height = layout
         .line_pitch
         .map_or_else(bevy::text::LineHeight::default, bevy::text::LineHeight::Px);
-    for (row, mut font, mut pitch) in row_q.iter_mut() {
-        let size = bevy::text::FontSize::Px(layout.font_px(row.index));
+    for (cell, mut font, mut pitch) in cell_q.iter_mut() {
+        let size = bevy::text::FontSize::Px(layout.font_px(cell.index));
         if font.font_size != size {
             font.font_size = size;
         }
         pitch.set_if_neq(line_height);
     }
-    for (bonus, mut font, mut pitch) in bonus_q.iter_mut() {
-        let size = bevy::text::FontSize::Px(layout.font_px(bonus.index));
+    // Half the line height sits above the frame edge, centered on it like retail's title.
+    let pitch_px = layout
+        .line_pitch
+        .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
+    for (mut node, mut font, mut pitch) in caption_q.iter_mut() {
+        let size = bevy::text::FontSize::Px(layout.row_font_px);
         if font.font_size != size {
             font.font_size = size;
         }
         pitch.set_if_neq(line_height);
+        let want_top = Val::Px(-pitch_px / 2.0);
+        if node.top != want_top {
+            node.top = want_top;
+        }
     }
 }
 
@@ -854,7 +1050,7 @@ pub fn update_status_panel(
     mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
     // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text/&mut Node query here
     // must exclude every other marker in the system.
-    mut level_line_q: Query<(&StatusLevelLine, &mut Text), Without<PersonaRow>>,
+    mut level_line_q: Query<(&StatusLevelLine, &mut Text), Without<PersonaCell>>,
     mut fill_q: Query<
         &mut Node,
         (
@@ -865,14 +1061,14 @@ pub fn update_status_panel(
         ),
     >,
     mut row_q: Query<
-        (&PersonaRow, &mut Text, &mut Node),
+        (&PersonaRow, &mut Node),
         (
             Without<StatusLevelLine>,
             Without<StatusExpFill>,
             Without<StatusLeftStack>,
         ),
     >,
-    mut bonus_q: Query<(&PersonaBonus, &mut TextSpan, &mut TextColor)>,
+    mut cell_q: Query<(&PersonaCell, &mut Text, &mut TextColor), Without<StatusLevelLine>>,
 ) {
     let Ok(mut stack_node) = stack_q.single_mut() else {
         return;
@@ -891,7 +1087,7 @@ pub fn update_status_panel(
 
     let snap = &state.snapshot;
     let lines = persona_lines(snap);
-    for (row, mut text, mut node) in row_q.iter_mut() {
+    for (row, mut node) in row_q.iter_mut() {
         let line = lines.get(row.index);
         let want_display = if line.is_some() {
             Display::Flex
@@ -901,19 +1097,49 @@ pub fn update_status_panel(
         if node.display != want_display {
             node.display = want_display;
         }
-        let want = line.map_or("", |l| l.text.as_str());
+        // Retail groups the table into [name/job/ILv] · [HP/MP/TP] · attributes; the air
+        // lands as a margin under the block's last row, whichever slot that is this snapshot.
+        let grouped = matches!(
+            line.map(|l| l.kind),
+            Some(PersonaRowKind::Ilv) | Some(PersonaRowKind::Tp)
+        );
+        let want_margin_bottom = if grouped {
+            Val::Px(PERSONA_BLOCK_GAP_PX)
+        } else {
+            Val::ZERO
+        };
+        if node.margin.bottom != want_margin_bottom {
+            node.margin.bottom = want_margin_bottom;
+        }
+    }
+    for (cell, mut text, mut color) in cell_q.iter_mut() {
+        let line = lines.get(cell.index);
+        let bonus_text;
+        let want = match cell.col {
+            PersonaCol::Label => line.map_or("", |l| l.label.as_str()),
+            PersonaCol::V1 => line.map_or("", |l| l.v1.as_str()),
+            PersonaCol::Slash => {
+                if line.is_some_and(|l| l.slash) {
+                    "/"
+                } else {
+                    ""
+                }
+            }
+            PersonaCol::V2 => line.map_or("", |l| l.v2.as_str()),
+            PersonaCol::Bonus => {
+                bonus_text = line
+                    .and_then(|l| l.bonus)
+                    .map_or_else(String::new, persona_bonus_text);
+                bonus_text.as_str()
+            }
+        };
         if text.as_str() != want {
             **text = want.to_string();
         }
-    }
-    for (bonus, mut span, mut color) in bonus_q.iter_mut() {
-        let line_bonus = lines.get(bonus.index).and_then(|l| l.bonus);
-        let want = line_bonus.map_or_else(String::new, persona_bonus_text);
-        if span.as_str() != want {
-            **span = want;
-        }
-        if let Some(value) = line_bonus {
-            color.set_if_neq(TextColor(persona_bonus_color(value)));
+        if cell.col == PersonaCol::Bonus {
+            if let Some(value) = line.and_then(|l| l.bonus) {
+                color.set_if_neq(TextColor(persona_bonus_color(value)));
+            }
         }
     }
 
@@ -1394,16 +1620,16 @@ mod tests {
         let inner = f32::from(RECORD_HEIGHT) - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX);
         let world = app.world_mut();
         let rows: Vec<(f32, bevy::text::LineHeight)> = world
-            .query::<(&PersonaRow, &TextFont, &bevy::text::LineHeight)>()
+            .query::<(&PersonaCell, &TextFont, &bevy::text::LineHeight)>()
             .iter(world)
             .map(|(_, font, pitch)| {
                 let bevy::text::FontSize::Px(px) = font.font_size else {
-                    panic!("persona rows size in px");
+                    panic!("persona cells size in px");
                 };
                 (px, *pitch)
             })
             .collect();
-        assert_eq!(rows.len(), PERSONA_ROW_COUNT);
+        assert_eq!(rows.len(), PERSONA_ROW_COUNT * PERSONA_COLS.len());
         for (font_px, pitch) in rows {
             let bevy::text::LineHeight::Px(pitch) = pitch else {
                 panic!("fitted rows carry an explicit pitch");
@@ -1483,44 +1709,48 @@ mod tests {
         let job = |id: u8| ffxi_vocab::job_names::lookup(u16::from(id)).unwrap();
         let snap = persona_snapshot(SUB_JOB);
         let lines = persona_lines(&snap);
-        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(lines.len(), PERSONA_ROW_COUNT);
         let main = format!("Lv 14 {}", job(16));
         let sub = format!("Lv 7 {}", job(SUB_JOB));
+        let want: [&str; PERSONA_HEAD_ROWS] = [
+            "Cowrevenge",
+            &main,
+            &sub,
+            "ILv ---/ Su 0",
+            "HP 232/232",
+            "MP 98/98",
+            "TP 525",
+        ];
+        for (i, want) in want.into_iter().enumerate() {
+            assert_eq!(lines[i].display_text(), want, "row {i}");
+        }
         assert_eq!(
-            texts[..PERSONA_HEAD_ROWS],
-            [
-                "Cowrevenge",
-                main.as_str(),
-                sub.as_str(),
-                "ILv ---/ Su 0",
-                "HP 232/232",
-                "MP 98/98",
-                "TP 525",
-            ]
+            lines[PERSONA_HEAD_ROWS].display_text(),
+            "STR 17",
+            "the column table right-sets the base; joined view keeps one space"
         );
-        assert_eq!(lines[PERSONA_HEAD_ROWS].text, "STR   17");
         assert_eq!(lines[PERSONA_HEAD_ROWS].bonus, None);
-        assert_eq!(lines[PERSONA_HEAD_ROWS + 1].text, "DEX   16");
+        assert_eq!(lines[PERSONA_HEAD_ROWS + 1].display_text(), "DEX 16");
         assert_eq!(lines[PERSONA_HEAD_ROWS + 1].bonus, Some(6));
         assert_eq!(lines[PERSONA_ROW_COUNT - 1].bonus, Some(-1));
 
         let solo = persona_lines(&persona_snapshot(0));
         assert_eq!(solo.len(), PERSONA_ROW_COUNT - 1, "no sub job, no sub line");
-        assert_eq!(solo[2].text, "ILv ---/ Su 0");
+        assert_eq!(solo[2].display_text(), "ILv ---/ Su 0");
 
         let mut geared = persona_snapshot(0);
         if let Some(stats) = geared.stats.as_mut() {
             stats.item_level = 119;
             stats.su_lv = 3;
         }
-        assert_eq!(persona_lines(&geared)[2].text, "ILv 119/ Su 3");
+        assert_eq!(persona_lines(&geared)[2].display_text(), "ILv 119/ Su 3");
     }
 
-    /// The bonus span shows only the nonzero adjustment — green above zero, red below — and
-    /// rows past the line count hide.
+    /// Every cell of the column table draws its own part — label, right-set value, shared
+    /// slash, max/Su — the bonus column shows only the nonzero adjustment (green above zero,
+    /// red below), and rows past the line count hide.
     #[test]
-    fn persona_rows_draw_into_their_text_and_bonus_span() {
+    fn persona_rows_fill_their_retail_cells() {
         use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
         let mut app = persona_app();
         app.add_systems(bevy::app::Update, update_status_panel);
@@ -1529,31 +1759,149 @@ mod tests {
         app.insert_resource(InputMode::Menu(stack));
         app.world_mut().resource_mut::<SceneState>().snapshot = persona_snapshot(0);
         app.update();
+
         let world = app.world_mut();
-        let mut rows: Vec<(usize, String, Display)> = world
-            .query::<(&PersonaRow, &Text, &Node)>()
+        let mut hidden: Vec<usize> = world
+            .query::<(&PersonaRow, &Node)>()
             .iter(world)
-            .map(|(row, text, node)| (row.index, text.0.clone(), node.display))
+            .filter(|(_, node)| node.display == Display::None)
+            .map(|(row, _)| row.index)
             .collect();
-        rows.sort_by_key(|r| r.0);
-        assert_eq!(rows[0].1, "Cowrevenge");
-        assert_eq!(rows[PERSONA_ROW_COUNT - 1].2, Display::None, "no sub job");
-        let mut spans: Vec<(usize, String, Color)> = world
-            .query::<(&PersonaBonus, &TextSpan, &TextColor)>()
-            .iter(world)
-            .map(|(b, span, color)| (b.index, span.0.clone(), color.0))
-            .collect();
-        spans.sort_by_key(|s| s.0);
-        // Without a sub line the attribute rows start one row early, so DEX sits here.
-        let dex_row = PERSONA_HEAD_ROWS;
-        assert_eq!(spans[dex_row].1, " +6");
-        assert_eq!(spans[dex_row].2, theme::ATTR_ADJUST_UP);
-        assert_eq!(spans[dex_row - 1].1, "");
-        let chr = &spans[PERSONA_HEAD_ROWS + PRIMARY_ATTRS.len() - 2];
+        hidden.sort_unstable();
         assert_eq!(
-            (chr.0, chr.1.as_str(), chr.2),
-            (dex_row + 5, " -1", theme::ATTR_ADJUST_DOWN)
+            hidden,
+            [PERSONA_ROW_COUNT - 1],
+            "no sub job leaves one slot free"
         );
+
+        let mut cells: Vec<(usize, PersonaCol, String, Color)> = world
+            .query::<(&PersonaCell, &Text, &TextColor)>()
+            .iter(world)
+            .map(|(cell, text, color)| (cell.index, cell.col, text.as_str().to_string(), color.0))
+            .collect();
+        cells.sort_by_key(|c| (c.0, PERSONA_COLS.iter().position(|p| *p == c.1).unwrap()));
+        let at = |index: usize, col: PersonaCol| -> (String, Color) {
+            cells
+                .iter()
+                .find(|c| c.0 == index && c.1 == col)
+                .map(|c| (c.2.clone(), c.3))
+                .expect("every row spawns every column")
+        };
+
+        // Without the sub line ILv is row 2 and HP row 3.
+        assert_eq!(at(0, PersonaCol::Label).0, "Cowrevenge");
+        assert_eq!(
+            (
+                at(2, PersonaCol::Label).0.as_str(),
+                at(2, PersonaCol::V1).0.as_str(),
+                at(2, PersonaCol::Slash).0.as_str(),
+                at(2, PersonaCol::V2).0.as_str()
+            ),
+            ("ILv", "---", "/", " Su 0")
+        );
+        assert_eq!(
+            (
+                at(3, PersonaCol::Label).0.as_str(),
+                at(3, PersonaCol::V1).0.as_str(),
+                at(3, PersonaCol::Slash).0.as_str(),
+                at(3, PersonaCol::V2).0.as_str()
+            ),
+            ("HP", "232", "/", "232"),
+            "the numbers meet the shared slash column"
+        );
+        assert_eq!(
+            (
+                at(5, PersonaCol::Label).0.as_str(),
+                at(5, PersonaCol::V1).0.as_str(),
+                at(5, PersonaCol::Slash).0.as_str()
+            ),
+            ("TP", "525", ""),
+            "TP's lone number stacks in the value column with no slash"
+        );
+
+        // Without a sub line the attribute rows start one row early, so STR is 6 and DEX 7.
+        assert_eq!(at(6, PersonaCol::V1).0, "17");
+        assert_eq!(at(6, PersonaCol::Bonus), (String::new(), theme::TEXT));
+        assert_eq!(
+            at(7, PersonaCol::Bonus),
+            (" +6".to_string(), theme::ATTR_ADJUST_UP)
+        );
+        // CHR is line 13 of the 13-line snapshot — slot PERSONA_ROW_COUNT-1 stays empty.
+        assert_eq!(at(PERSONA_ROW_COUNT - 2, PersonaCol::V1).0, "0");
+        assert_eq!(
+            at(PERSONA_ROW_COUNT - 2, PersonaCol::Bonus),
+            (" -1".to_string(), theme::ATTR_ADJUST_DOWN),
+            "CHR carries the negative adjustment"
+        );
+    }
+
+    /// Retail groups the table [name/job/ILv] · [HP/MP/TP] · attributes; the air is a margin
+    /// under whichever slot holds ILv and TP in this snapshot.
+    #[test]
+    fn persona_blocks_breathe_after_the_ilv_and_tp_rows() {
+        use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
+        let mut app = persona_app();
+        app.add_systems(bevy::app::Update, update_status_panel);
+        let mut stack = MenuStack::root();
+        stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
+        app.insert_resource(InputMode::Menu(stack));
+        // With a sub job ILv sits at row 3 and TP at row 6.
+        app.world_mut().resource_mut::<SceneState>().snapshot = persona_snapshot(1);
+        app.update();
+        let world = app.world_mut();
+        let mut margins: Vec<(usize, Val)> = world
+            .query::<(&PersonaRow, &Node)>()
+            .iter(world)
+            .map(|(row, node)| (row.index, node.margin.bottom))
+            .collect();
+        margins.sort_by_key(|m| m.0);
+        assert_eq!(margins.len(), PERSONA_ROW_COUNT);
+        assert_eq!(margins[3].1, Val::Px(PERSONA_BLOCK_GAP_PX), "after ILv");
+        assert_eq!(margins[6].1, Val::Px(PERSONA_BLOCK_GAP_PX), "after TP");
+        for (index, margin) in margins.iter().take(PERSONA_ROW_COUNT) {
+            if *index != 3 && *index != 6 {
+                assert_eq!(*margin, Val::ZERO, "row {index} keeps the plain pitch");
+            }
+        }
+    }
+
+    /// The panel title rides the persona panel, absolutely placed and centered, lifted half
+    /// its line height to straddle the frame's top edge (owner ruling 2026-10-18: "Retail
+    /// centers it on the persona window's top border").
+    #[test]
+    fn status_caption_straddles_the_panel_top_border() {
+        let mut app = persona_app();
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(Entity, &Node, &Text), With<StatusCaption>>();
+        let (caption, node, text) = q.single(world).expect("one caption");
+        assert_eq!(text.as_str(), "Status");
+        assert_eq!(node.position_type, PositionType::Absolute);
+        assert_eq!(node.justify_content, JustifyContent::Center);
+        assert!(
+            matches!(node.top, Val::Px(top) if top < 0.0),
+            "lifted over the frame edge: {:?}",
+            node.top
+        );
+        let child_of = world.get::<ChildOf>(caption).expect("caption is parented");
+        assert!(
+            world.get::<StatusPanel>(child_of.parent()).is_some(),
+            "the caption rides the persona panel, hiding with it"
+        );
+    }
+
+    /// The `level` box gauge track grows to fill everything between its blue caps and is grey
+    /// behind the salmon fill (owner ruling 2026-10-18: fixed-width floated tracks "fall apart").
+    #[test]
+    fn exp_gauge_track_is_full_width_and_grey() {
+        let mut app = persona_app();
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(&Node, &BackgroundColor), With<StatusExpTrack>>();
+        let (node, bg) = q.single(world).expect("one gauge track");
+        assert!(
+            node.flex_grow > 0.0,
+            "the track takes the whole span between caps"
+        );
+        assert_eq!(bg.0, LEVEL_GAUGE_TRACK_COLOR);
     }
 
     /// Owner ruling 2026-10-18 (retail screenshots): every Status detail lands on the stats

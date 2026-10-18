@@ -2001,6 +2001,12 @@ pub struct ConfigDatRows {
     pub frames: std::collections::BTreeMap<String, (i16, i16, i16)>,
     /// Each record frame's height and anchor byte, keyed like [`Self::frames`].
     pub frame_extents: std::collections::BTreeMap<String, (i16, u8)>,
+    /// Every menu record's item blocks in file order as `(x, y, width)` inside the record
+    /// frame — row placement IS DAT data too. A window whose rows count matches its item
+    /// slots draws them at their slot rects (the 22-slot `joblevel`/`masterle` pair renders
+    /// two columns of 11 that way); windows with no blocks (`btlskill`, the skill lists) keep
+    /// kuluu's flow layout.
+    pub row_xyw: std::collections::BTreeMap<String, Vec<(i16, i16, i16)>>,
     /// The myroom door row's two visible captions: closed at
     /// [`ffxi_dat::menu_windows::MOGHOUSE_DOOR_CAPTION_CLOSED_ID`] and open at
     /// `.._OPEN_ID`, both from the caption catalog (index 0 = shut, 1 = open). Retail rewrites the
@@ -2237,14 +2243,24 @@ impl ConfigDatRows {
         self.item_counts = item_counts;
         let mut frames = std::collections::BTreeMap::new();
         let mut frame_extents = std::collections::BTreeMap::new();
+        let mut row_xyw = std::collections::BTreeMap::new();
         for (name, window) in &windows {
             if let Some(frame) = &window.frame {
                 frames.insert(name.clone(), (frame.x, frame.y, frame.width));
                 frame_extents.insert(name.clone(), (frame.height, frame.anchor));
             }
+            let slots: Vec<(i16, i16, i16)> = window
+                .live_items()
+                .into_iter()
+                .map(|item| (item.x, item.y, item.width))
+                .collect();
+            if !slots.is_empty() {
+                row_xyw.insert(name.clone(), slots);
+            }
         }
         self.frames = frames;
         self.frame_extents = frame_extents;
+        self.row_xyw = row_xyw;
         let labelled_from_text_a: std::collections::BTreeSet<&str> =
             config_window_names().collect();
         let mut row_help = std::collections::BTreeMap::new();
@@ -8174,7 +8190,20 @@ pub fn update_status_detail_window(
         node.top = Val::Px(SIDE_Y);
         node.width = Val::Px(SIDE_W);
     }
-    node.height = Val::Auto;
+    // A window whose visible rows count equals its DAT item-slot count draws each row at its
+    // slot rect — that is what makes `joblevel`/`masterle` render retail's two columns of 11
+    // (slots at x 8 and 134, y pitch 14) inside the record-height box. Slots are read never
+    // transcribed; without an install match kuluu keeps its flow layout and content height.
+    let slots = config_rows.row_xyw.get(window_name).cloned();
+    let rows_len = dynamic.rows.len();
+    let slot_layout = slots.as_ref().filter(|s| s.len() == rows_len);
+    node.height = match (slot_layout, config_rows.record_frame(window_name)) {
+        (Some(_), Some(frame)) => match frame.height {
+            Some(height) => Val::Px(height),
+            None => Val::Auto,
+        },
+        _ => Val::Auto,
+    };
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
@@ -8196,6 +8225,18 @@ pub fn update_status_detail_window(
         };
         if **text != row.label {
             **text = row.label.clone();
+        }
+        if let Some(slots) = slot_layout.and_then(|s| s.get(line.slot)) {
+            // Slot coords are record-frame relative; the window's own 1px chrome border is
+            // subtracted because Taffy resolves absolute children at the padding edge.
+            const CHROME_BORDER_PX: f32 = 1.0;
+            let (x, y, width) = (f32::from(slots.0), f32::from(slots.1), f32::from(slots.2));
+            line_node.position_type = PositionType::Absolute;
+            line_node.left = Val::Px(x - CHROME_BORDER_PX);
+            line_node.top = Val::Px(y - CHROME_BORDER_PX);
+            line_node.width = Val::Px(width.max(1.0));
+        } else {
+            line_node.position_type = PositionType::Relative;
         }
         if line_node.display != Display::Flex {
             line_node.display = Display::Flex;
@@ -9106,6 +9147,88 @@ mod tests {
         );
         let (mirror, _, _) = companion_frame_visible(&mut app);
         assert!(!mirror, "and no Commands mirror beside it either");
+    }
+
+    /// The `joblevel`/`masterle` record carries 22 item slots in two columns of 11 (x 8 and
+    /// 134); once kuluu's row count equals the slot count each row lands on its own slot rect
+    /// inside the record-height box — retail's two-column job list, read from the DAT.
+    #[test]
+    fn joblevel_rows_land_on_their_dat_item_slots() {
+        use crate::hud::network_status::NetStatusVisible;
+        use crate::snapshot::SceneState;
+
+        let mut app = App::new();
+        app.init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<NetStatusVisible>()
+            .init_resource::<SceneState>()
+            .init_resource::<DynamicMenu>()
+            .init_resource::<ConfigDatRows>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
+        let job_idx = crate::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::JobLevels)
+            .expect("Job Levels is a Status row") as u8;
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            rows.loaded = true;
+            rows.frames.insert("joblevel".into(), (130, 48, 252));
+            rows.frame_extents
+                .insert("joblevel".into(), (182, FRAME_ANCHOR_NONE));
+            let mut slots = Vec::new();
+            for column in 0..2usize {
+                for row in 0..11 {
+                    slots.push((if column == 0 { 8 } else { 134 }, 19 + 14 * row as i16, 112));
+                }
+            }
+            rows.row_xyw.insert("joblevel".into(), slots);
+        }
+        {
+            let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+            d.rows = (0..22)
+                .map(|i| DynamicMenuRow {
+                    tint: None,
+                    label: format!("job {i}"),
+                    action: DynamicMenuAction::DisplayInfo,
+                })
+                .collect();
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::StatusDetail { entry: job_idx });
+        app.insert_resource(InputMode::Menu(stack));
+        app.add_systems(Startup, spawn_status_detail_window);
+        app.add_systems(Update, update_status_detail_window);
+        app.update();
+        app.update();
+
+        let node = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailWindow>>()
+            .single(app.world())
+            .expect("the detail window");
+        assert_eq!(node.left, Val::Px(130.0), "the record frame's x");
+        assert_eq!(node.height, Val::Px(182.0), "the record height box");
+
+        let mut placed: Vec<(usize, Val, Val)> = app
+            .world_mut()
+            .query::<(&StatusDetailLine, &Node)>()
+            .iter(app.world())
+            .filter(|(_, n)| {
+                n.display != Display::None && n.position_type == PositionType::Absolute
+            })
+            .map(|(line, n)| (line.slot, n.left, n.top))
+            .collect();
+        placed.sort_by_key(|(slot, _, _)| *slot);
+        assert_eq!(placed.len(), 22, "every row is on a slot");
+        // Slot coords minus the window's own chrome border.
+        assert_eq!((placed[0].1, placed[0].2), (Val::Px(7.0), Val::Px(18.0)));
+        assert_eq!(
+            (placed[11].1, placed[11].2),
+            (Val::Px(133.0), Val::Px(18.0)),
+            "the twelfth row starts the second column"
+        );
     }
 
     /// The second-window law (vault main_menu.md §59 addendum 11): every

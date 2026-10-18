@@ -5389,12 +5389,14 @@ pub fn spawn_main_menu(mut commands: Commands) {
 /// The `statcom2` list window: the command band's exact spot (the DAT places statcom2 over
 /// menuwind at (384,48,w112)), titled with the word the band carries, one row per entry.
 pub fn spawn_status_list_window(parent: &mut ChildSpawnerCommands) {
-    let (mut node, bg, border) = style::window_frame();
+    let (mut node, mut bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
     node.left = Val::Px(crate::hud::menu_help_bar::BAR_LEFT);
     node.top = Val::Px(crate::hud::menu_help_bar::BAR_TOP);
     node.width = Val::Px(crate::hud::menu_help_bar::TITLE_BOX_W);
     node.display = Display::None;
+    // Opaque like retail's windows — whatever sits behind the Commands spot must not show.
+    bg.0 = theme::MAP_BACKING;
     parent
         .spawn((StatusListWindow, node, bg, border))
         .with_children(|w| {
@@ -7571,20 +7573,6 @@ pub fn update_main_menu(
             return;
         }
     };
-    // Owner ruling 2026-10-19: while the Status flow is open the commands surfaces are
-    // coded hidden here (not by paint), and statcom2 draws exclusively through its own
-    // window (`spawn_status_list_window`) — one owner per surface.
-    if crate::hud::status_panel::status_flow_open(&mode) {
-        hide(&mut node);
-        for (mut pane_node, _, _) in pane_q.iter_mut() {
-            hide(&mut pane_node);
-        }
-        for (_, comp, mut row_node, _, _, _) in row_q.iter_mut() {
-            let _ = comp;
-            hide(&mut row_node);
-        }
-        return;
-    }
     let Some(top_kind) = stack.current().map(|l| l.kind) else {
         hide(&mut node);
         return;
@@ -7601,13 +7589,7 @@ pub fn update_main_menu(
     let want_width = pane_width_for(top_kind);
     let layout = menu_stack_layout(stack, &config_rows);
     let Some((view_index, view_seat)) = layout.focused() else {
-        // No pane seat this frame (e.g. the Status flow replaced the selector): hide the
-        // panes too, or their stale rows keep drawing under whatever covers them — the
-        // "commands menu still visible behind Status" ghost (owner ruling 2026-10-19).
         hide(&mut node);
-        for (mut pane_node, _, _) in pane_q.iter_mut() {
-            hide(&mut pane_node);
-        }
         return;
     };
     for (mut pane_node, mut z_index, computed) in pane_q.iter_mut() {
@@ -7874,32 +7856,10 @@ pub(crate) fn ui_window_forensics(
         &GlobalTransform,
         &ComputedNode,
     )>,
-    menu_surface_q: Query<
-        Entity,
-        Or<(
-            With<MainMenu>,
-            With<MainMenuPane>,
-            With<MainMenuRow>,
-            With<MenuStackWindow>,
-            With<CompanionRow>,
-        )>,
-    >,
-    mut node_q: Query<&mut Node>,
+    title_box_q: Query<Entity, With<crate::hud::menu_help_bar::MenuHelpTitleBox>>,
+    node_q: Query<&mut Node>,
 ) {
-    // End-of-frame enforcement (owner ruling 2026-10-19): while the Status flow is open
-    // every shared menu surface — root, selector panes, stacked windows — is coded away
-    // each frame however any earlier system left it. Only `StatusListWindow` and the
-    // self-drawing status widgets may show.
-    if crate::hud::status_panel::status_flow_open(&mode) {
-        for entity in menu_surface_q.iter() {
-            let Ok(mut node) = node_q.get_mut(entity) else {
-                continue;
-            };
-            if node.display != Display::None {
-                node.display = Display::None;
-            }
-        }
-    }
+    let _ = (&title_box_q, &node_q);
     if !crate::hud::status_panel::status_flow_open(&mode) {
         return;
     }
@@ -8102,7 +8062,9 @@ pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
 ];
 
 pub fn spawn_status_detail_window(mut commands: Commands) {
-    let (mut node, bg, border) = style::window_frame();
+    let (mut node, mut bg, border) = style::window_frame();
+    // Solid like retail's: the stats column behind a left-side detail must not show through.
+    bg.0 = theme::MAP_BACKING;
     node.position_type = PositionType::Absolute;
     node.left = Val::Px(130.0);
     node.top = Val::Px(48.0);
@@ -9026,42 +8988,38 @@ mod tests {
         assert!(!visible, "no selector to mirror under a depth-1 stack");
     }
 
-    /// Owner ruling 2026-10-19: while ANY Status-flow level is open, every shared menu
-    /// surface (root, selector panes, stacked windows) ends the frame coded hidden —
-    /// however any earlier system left it. No more stale Commands copy behind Status.
-    #[test]
-    fn commands_surfaces_end_hidden_while_status_is_open() {
-        let mut app = root_menu_app(0);
-        let mut stack = MenuStack::root();
-        stack.push(MenuKind::Status);
-        app.insert_resource(InputMode::Menu(stack));
-        // Sanity: before the Status frame runs its systems, depth-1 panes still show.
-        assert!(!visible_rows(&mut app).is_empty());
-        app.add_systems(
-            Update,
-            (
-                update_main_menu,
-                update_menu_stack_windows,
-                ui_window_forensics.after(update_menu_stack_windows),
-            ),
-        );
-        for _ in 0..3 {
-            app.update();
-        }
-        let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
-        assert!(
-            q.iter(app.world()).all(|(_, n)| n.display == Display::None),
-            "every selector pane is coded hidden while the Status flow is open"
-        );
-        let mut root_q = app.world_mut().query_filtered::<&Node, With<MainMenu>>();
-        assert_eq!(root_q.single(app.world()).unwrap().display, Display::None);
-    }
-
-    /// The cover law (vault main_menu.md §59 addendum 10): statcom2's record
+    /// Owner ruling 2026-10-19 (corrected twice over): the Status flow NEVER hides the
+    /// commands windows — they stay drawn and clickable. What yields is only the bar's
+    /// far-left title box ("all you need to hide is the far left side of the top command
+    /// bar"). The cover law (vault main_menu.md §59 addendum 10): statcom2's record
     /// frame `(384,48,w112,h218)` sits exactly over menuwind's — retail draws
     /// the list ON the Command spot and nothing else beside it. kuluu shows the
     /// thirteen rows on their dedicated window at that spot; no Commands surface
     /// draws (owner ruling 2026-10-19: coded hidden), with no mirrored frame.
+    /// Owner ruling 2026-10-19 (corrected): a Status flow hides NOTHING but the bar's
+    /// far-left title box - every commands window stays drawn and clickable while open.
+    #[test]
+    fn status_flow_leaves_the_commands_windows_up() {
+        let mut app = root_menu_app(0);
+        assert!(
+            !visible_rows(&mut app).is_empty(),
+            "root menu up to begin with"
+        );
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        app.insert_resource(InputMode::Menu(stack));
+        for _ in 0..2 {
+            app.update();
+        }
+        let mut pane_q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+        assert!(
+            pane_q
+                .iter(app.world())
+                .any(|(_, n)| n.display != Display::None),
+            "the commands window is never hidden by the Status flow"
+        );
+    }
+
     #[test]
     fn status_list_covers_the_command_spot_without_a_mirror() {
         let mut app = root_menu_app(0);

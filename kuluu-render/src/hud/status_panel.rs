@@ -735,7 +735,10 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 flex_shrink: 0.0,
                 ..default()
             },
-            BackgroundColor(theme::FRAME_BG),
+            // Retail's status windows are solid paint — what sits behind them never shows
+            // (owner ruling 2026-10-19: "whats behind it to not show"). Opaque like the map
+            // law already established for surfaces over the world.
+            BackgroundColor(theme::MAP_BACKING),
             BorderColor::all(theme::FRAME_EDGE),
         ))
         .id();
@@ -751,7 +754,7 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 row_gap: Val::Px(1.0),
                 ..default()
             },
-            BackgroundColor(theme::FRAME_BG),
+            BackgroundColor(theme::MAP_BACKING),
             BorderColor::all(theme::FRAME_EDGE),
         ))
         .with_children(|b| {
@@ -882,8 +885,9 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 padding: UiRect::all(Val::Px(PERSONA_CAPTION_PAD_PX)),
                 ..default()
             },
-            // Opaque mask behind the word so the frame's top edge never crosses it.
-            BackgroundColor(theme::FRAME_BG),
+            // Opaque mask behind the word so the frame's top edge never crosses it;
+            // matches the panel's solid fill exactly.
+            BackgroundColor(theme::MAP_BACKING),
             Text::new(STATUS_CAPTION_TEXT),
             TextLayout {
                 linebreak: LineBreak::NoWrap,
@@ -1931,7 +1935,11 @@ mod tests {
             world.query_filtered::<(Entity, &Node, &Text, &BackgroundColor), With<StatusCaption>>();
         let (caption, node, text, bg) = q.single(world).expect("one caption");
         assert_eq!(text.as_str(), "Status");
-        assert_eq!(bg.0, theme::FRAME_BG, "opaque mask behind the word");
+        assert_eq!(
+            bg.0,
+            theme::MAP_BACKING,
+            "opaque mask matching the solid panel fill"
+        );
         assert_eq!(node.position_type, PositionType::Absolute);
         assert!(
             matches!(node.top, Val::Px(top) if top < 0.0),

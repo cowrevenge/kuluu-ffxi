@@ -29,6 +29,13 @@ pub struct MenuHelpHint;
 #[derive(Component)]
 pub struct MenuHelpPaneSwitch;
 
+/// The bar's far-left title-box NODE — the "Status" word's framed segment. While any
+/// Status-flow window is open this segment alone hides (owner ruling 2026-10-19,
+/// corrected: "all you need to hide is the far left side of the top command bar" —
+/// the menus themselves stay drawn and clickable).
+#[derive(Component)]
+pub struct MenuHelpTitleBox;
+
 /// Split part two — the framed segment holding counter, help line and the right-edge labels. (Split parts: owner ruling 2026-10-18.)
 #[derive(Component)]
 pub struct MenuHelpRightPart;
@@ -93,6 +100,7 @@ pub fn spawn_menu_help_bar(mut commands: Commands) {
         .with_children(|p| {
             // Split part one — the title box, framed and filled on its own.
             p.spawn((
+                MenuHelpTitleBox,
                 Node {
                     width: Val::Px(TITLE_BOX_W),
                     flex_shrink: 0.0,
@@ -370,11 +378,23 @@ pub fn update_menu_help_bar(
     >,
     // Pairwise-disjoint Node queries per the B0001 law.
     mut pane_switch_q: Query<&mut Node, (With<MenuHelpPaneSwitch>, Without<MenuHelpBar>)>,
+    mut title_box_q: Query<
+        &mut Node,
+        (
+            With<MenuHelpTitleBox>,
+            Without<MenuHelpBar>,
+            Without<MenuHelpPaneSwitch>,
+        ),
+    >,
     config_rows: Res<menu::ConfigDatRows>,
 ) {
     let Ok(mut node) = bar_q.single_mut() else {
         return;
     };
+
+    // Owner ruling 2026-10-19 (x2 corrected): the ONLY thing a status flow hides is this
+    // far-left title-box segment — its spot belongs to whichever status window is open.
+    // The commands windows themselves stay drawn and clickable, always.
 
     // Owner ruling 2026-10-18 ("that's how the system works"): while the Status FLOW is open —
     // list or any sub-menu — its word never stands in the top bar; the status windows carry
@@ -386,6 +406,17 @@ pub fn update_menu_help_bar(
 
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
+    for mut box_node in title_box_q.iter_mut() {
+        let want = if status_word_hidden {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if box_node.display != want {
+            box_node.display = want;
+        }
+    }
+
     let (content, is_menu) = match &*mode {
         InputMode::Menu(stack) => (
             focused_level(stack).map(|l| {
@@ -869,6 +900,21 @@ mod tests {
         stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
         app.insert_resource(InputMode::Menu(stack.clone()));
         assert_eq!(title_of(&mut app), "", "the flow itself hides the word");
+
+        // Owner ruling 2026-10-19 (corrected): not just the word — the whole far-left
+        // title-box segment is coded hidden while any status window holds its spot.
+        let box_display = |app: &mut App| {
+            app.world_mut()
+                .query_filtered::<&Node, With<MenuHelpTitleBox>>()
+                .single(app.world())
+                .map(|n| n.display)
+                .unwrap_or(Display::Flex)
+        };
+        assert_eq!(
+            box_display(&mut app),
+            Display::None,
+            "the title-box segment hides with the word"
+        );
 
         let mut with_detail = stack.clone();
         with_detail

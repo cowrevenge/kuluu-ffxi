@@ -40,6 +40,12 @@ pub const BAR_HEIGHT: f32 = 26.0;
 /// Retail frames the active menu title in its own boxed segment, flush left.
 const TITLE_BOX_W: f32 = 118.0;
 
+/// Bottom-left corner of the help line box, the bar segment right of the title box: windows
+/// that hang under the help line anchor here.
+pub fn help_line_bottom_left() -> Vec2 {
+    Vec2::new(TITLE_BOX_W, BAR_HEIGHT)
+}
+
 /// Single-line text that truncates instead of wrapping when the bar is narrow.
 fn text_nowrap() -> TextLayout {
     TextLayout {
@@ -775,6 +781,30 @@ mod tests {
             .0
             .clone();
         assert_eq!(hint, "third row help");
+    }
+
+    /// The help line box starts where the title box ends and its bottom is the bar's.
+    #[test]
+    fn help_line_corner_matches_the_spawned_bar() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.run_system_once(spawn_menu_help_bar).unwrap();
+        let bar_height = world
+            .query_filtered::<&Node, With<MenuHelpBar>>()
+            .single(&world)
+            .unwrap()
+            .height;
+        let title_parent = world
+            .query_filtered::<&ChildOf, With<MenuHelpTitle>>()
+            .single(&world)
+            .unwrap()
+            .parent();
+        let title_box_width = world.get::<Node>(title_parent).unwrap().width;
+        let corner = help_line_bottom_left();
+        assert_eq!(
+            (title_box_width, bar_height),
+            (Val::Px(corner.x), Val::Px(corner.y))
+        );
     }
 
     #[test]

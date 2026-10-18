@@ -136,6 +136,14 @@ const ROW_CLEARANCE_PX: f32 = 2.0;
 
 pub const ICONS_PER_ROW: usize = 16;
 
+/// Retail hangs the icon row under the help line box from its left edge, this far below it.
+const GAP_BELOW_HELP_LINE_PX: f32 = 6.0;
+
+/// The icon row's top-left corner, from the help line box's rectangle.
+pub fn ribbon_origin() -> Vec2 {
+    crate::hud::menu_help_bar::help_line_bottom_left() + Vec2::new(0.0, GAP_BELOW_HELP_LINE_PX)
+}
+
 #[cfg(feature = "enhanced-buff-timers")]
 use timers::{cell_pitch_px, timer_line_px};
 
@@ -155,6 +163,7 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
     let icon_gap = pitch - ICON_SIZE_PX;
     let timer_line = timer_line_px();
     let row_width = ICONS_PER_ROW as f32 * pitch;
+    let origin = ribbon_origin();
 
     commands
         .spawn((
@@ -162,10 +171,8 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
             StatusRibbon,
             Node {
                 position_type: PositionType::Absolute,
-
-                // Below the menu help bar so chips never overlap it when open.
-                top: Val::Px(crate::hud::menu_help_bar::BAR_HEIGHT + 6.0),
-                left: Val::Px(8.0),
+                top: Val::Px(origin.y),
+                left: Val::Px(origin.x),
                 width: Val::Px(row_width),
                 flex_direction: FlexDirection::Row,
                 flex_wrap: FlexWrap::Wrap,
@@ -773,6 +780,32 @@ mod tests {
             texts.len(),
             MAX_VISIBLE,
             "only the icon-id fallback text belongs under a chip"
+        );
+    }
+
+    /// The icon row hangs from the help line box: its left edge, the gap below its bottom.
+    #[test]
+    fn ribbon_hangs_under_the_help_line_box() {
+        use bevy::ecs::system::RunSystemOnce;
+        let anchor = crate::hud::menu_help_bar::help_line_bottom_left();
+        let origin = ribbon_origin();
+        assert_eq!(origin.x, anchor.x, "starts at the help line's left edge");
+        assert_eq!(origin.y, anchor.y + GAP_BELOW_HELP_LINE_PX);
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>();
+        app.world_mut()
+            .run_system_once(spawn_status_ribbon)
+            .unwrap();
+        let world = app.world_mut();
+        let ribbon = world
+            .query_filtered::<&Node, With<StatusRibbon>>()
+            .single(world)
+            .expect("ribbon spawned")
+            .clone();
+        assert_eq!(
+            (ribbon.left, ribbon.top),
+            (Val::Px(origin.x), Val::Px(origin.y))
         );
     }
 

@@ -7941,6 +7941,20 @@ pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
     Some("fp_cat"),
 ];
 
+/// True while the focused Status detail's own record frame sits in the persona column: retail
+/// opens those windows exactly on top of the stats panel — same spot, and the panel is hidden
+/// behind them for as long as they last (the measured install records read x=16 y=48 w=366 for
+/// evitem/merit2ca/fp_cat). The x=130 family opens beside it instead. Window placement IS DAT
+/// data; nothing here is eyeballed.
+pub fn status_detail_covers_stats_panel(rows: &ConfigDatRows, entry: usize) -> bool {
+    STATUS_DETAIL_WINDOW_NAMES
+        .get(entry)
+        .copied()
+        .flatten()
+        .and_then(|name| rows.window_frame(name))
+        .is_some_and(|(x, _, _)| x == crate::hud::status_panel::PERSONA_STATUS_LEFT)
+}
+
 pub fn spawn_status_detail_window(mut commands: Commands) {
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
@@ -7951,6 +7965,9 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
     commands
         .spawn((
             crate::components::InGameEntity,
+            // Above the persona stack (PERSONA_Z) so a detail opened on the stats panel's spot
+            // draws over it — newest on top per the stacking law.
+            bevy::ui::GlobalZIndex(crate::hud::status_panel::PERSONA_Z + 1),
             StatusDetailWindow,
             node,
             bg,
@@ -8063,13 +8080,14 @@ pub fn update_status_detail_window(
         .copied()
         .flatten()
         .unwrap_or("profile");
-    let frame = config_rows.window_frame(name);
-    if let Some((x, y)) = status_code_move(name).or(frame.map(|(x, y, _)| (x, y))) {
+    let frame = config_rows.record_frame(name);
+    if let Some((x, y)) = status_code_move(name).or(frame.map(|f| (f.x, f.y))) {
         node.left = Val::Px(x);
         node.top = Val::Px(y);
     }
-    if let Some((_, _, w)) = frame {
-        node.width = Val::Px(w);
+    if let Some(frame) = frame {
+        node.width = Val::Px(frame.width);
+        node.height = frame.height.map_or(Val::Auto, |h| Val::Px(h.max(0.0)));
     }
     if node.display != Display::Flex {
         node.display = Display::Flex;

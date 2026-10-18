@@ -288,6 +288,21 @@ pub struct StatusLevelBox;
 #[derive(Component)]
 pub struct StatusLevelText;
 
+/// While a Status detail whose own record sits in the persona column is focused, the stats
+/// panel is replaced — same spot, hidden behind that window (`status_detail_covers_stats_panel`).
+fn stats_panel_covered(
+    mode: &crate::input_mode::InputMode,
+    rows: &crate::hud::menu::ConfigDatRows,
+) -> bool {
+    let crate::input_mode::InputMode::Menu(stack) = mode else {
+        return false;
+    };
+    stack.current().is_some_and(|l| {
+        matches!(l.kind, crate::input_mode::MenuKind::StatusDetail { entry }
+            if crate::hud::menu::status_detail_covers_stats_panel(rows, usize::from(entry)))
+    })
+}
+
 /// True while the stack holds statcom2 or one of its detail windows — retail
 /// opens persona + level WITH the list and cascades them closed together, so
 /// kuluu shows both panels for exactly as long as a `Status`/detail frame is open.
@@ -682,6 +697,7 @@ pub fn update_persona_frame(
 pub fn update_status_panel(
     mode: Res<crate::input_mode::InputMode>,
     state: Res<SceneState>,
+    config_rows: Res<crate::hud::menu::ConfigDatRows>,
     mut stack_q: Query<&mut Node, With<StatusLeftStack>>,
     // Pairwise-disjoint per the cycle-57 B0001 law: every &mut Text query here
     // must exclude every other marker in the system.
@@ -696,11 +712,14 @@ pub fn update_status_panel(
         return;
     };
     let open = status_flow_open(&mode);
-    if !open && stack_node.display != Display::None {
+    // A wide detail replaces the panel: retail keeps neither persona nor its level box
+    // visible under one.
+    let covered = stats_panel_covered(&mode, &config_rows);
+    if (!open || covered) && stack_node.display != Display::None {
         stack_node.display = Display::None;
         return;
     }
-    if open && stack_node.display == Display::None {
+    if open && !covered && stack_node.display == Display::None {
         stack_node.display = Display::Flex;
     }
 
@@ -1105,6 +1124,7 @@ mod tests {
         app.add_systems(bevy::app::Update, update_status_panel);
         app.insert_resource(crate::input_mode::InputMode::default());
         app.insert_resource(SceneState::default());
+        app.init_resource::<crate::hud::menu::ConfigDatRows>();
         // No entities: the system returns early, but the queries are already
         // registered — a B0001 conflict panics inside this same call.
         app.update();
@@ -1354,6 +1374,72 @@ mod tests {
             (chr.0, chr.1.as_str(), chr.2),
             (dex_row + 5, " -1", theme::ATTR_ADJUST_DOWN)
         );
+    }
+
+    /// A detail whose record sits in the persona column replaces the stats panel at its own spot:
+    /// while it holds focus both persona and the level box are hidden. Frame values here are the
+    /// ones measured from the install through `dat-menu-window-print` (profile/btlskill x=130,
+    /// evitem x=16 y=48 w=366) — placement stays DAT-driven at runtime.
+    #[test]
+    fn stats_column_details_replace_the_panel_beside_ones_do_not() {
+        use bevy::app::App;
+
+        use crate::hud::menu::{status_detail_covers_stats_panel, ConfigDatRows};
+        use crate::input_mode::{InputMode, MenuKind, MenuLevel, MenuStack};
+
+        let display_with = |entry: Option<u8>| -> Display {
+            let mut app = App::new();
+            app.init_resource::<SceneState>();
+            let mut rows = ConfigDatRows::default();
+            for (name, frame) in [
+                ("profile", (130i16, 48i16, 252i16)),
+                ("btlskill", (130i16, 48i16, 252i16)),
+                ("evitem", (16i16, 48i16, 366i16)),
+            ] {
+                rows.frames.insert(name.to_string(), frame);
+            }
+            app.insert_resource(rows);
+            app.add_systems(bevy::app::Startup, spawn_status_panel);
+            app.add_systems(bevy::app::Update, update_status_panel);
+            let mut stack = MenuStack::root();
+            stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
+            if let Some(entry) = entry {
+                stack
+                    .levels
+                    .push(MenuLevel::new(MenuKind::StatusDetail { entry }, 0));
+            }
+            app.insert_resource(InputMode::Menu(stack));
+            for _ in 0..2 {
+                app.update();
+            }
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Node, With<StatusLeftStack>>()
+                .single(world)
+                .expect("one Status host")
+                .display
+        };
+
+        assert_eq!(display_with(None), Display::Flex);
+        assert_eq!(display_with(Some(0)), Display::Flex, "profile sits beside");
+        assert_eq!(display_with(Some(3)), Display::Flex, "btlskill sits beside");
+        assert_eq!(
+            display_with(Some(6)),
+            Display::None,
+            "Key Items' evitem record (x=16) replaces the panel spot"
+        );
+
+        let mut rows = ConfigDatRows::default();
+        for (name, frame) in [
+            ("profile", (130i16, 48i16, 252i16)),
+            ("btlskill", (130i16, 48i16, 252i16)),
+            ("evitem", (16i16, 48i16, 366i16)),
+        ] {
+            rows.frames.insert(name.to_string(), frame);
+        }
+        assert!(status_detail_covers_stats_panel(&rows, 6));
+        assert!(!status_detail_covers_stats_panel(&rows, 0));
+        assert!(!status_detail_covers_stats_panel(&rows, 3));
     }
 
     /// The `level` box sits at its own record frame once the install supplies one and stays

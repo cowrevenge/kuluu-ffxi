@@ -347,6 +347,12 @@ pub fn update_menu_help_bar(
         return;
     };
 
+    // Owner ruling 2026-10-18: while a Status SUB-menu is open the word "Status" is hidden
+    // in the top bar — the detail window owns that corner of the screen. The list itself,
+    // focused, keeps the word.
+    let status_word_hidden = matches!(&*mode, InputMode::Menu(stack)
+        if stack.current().is_some_and(|lv| matches!(lv.kind, MenuKind::StatusDetail { .. })));
+
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
     let (content, is_menu) = match &*mode {
@@ -372,7 +378,11 @@ pub fn update_menu_help_bar(
                         }
                     }
                     None => BarContent {
-                        title: help_bar_title(l.kind).to_string(),
+                        title: if status_word_hidden {
+                            String::new()
+                        } else {
+                            help_bar_title(l.kind).to_string()
+                        },
                         counter: match bag_counter(l.kind, &scene.snapshot, active_bag.0) {
                             Some((used, capacity)) => format!("{used}/{capacity}"),
                             None => String::new(),
@@ -781,6 +791,53 @@ mod tests {
             .0
             .clone();
         assert_eq!(hint, "third row help");
+    }
+
+    /// Owner ruling 2026-10-18: with a Status sub-menu (detail window) open, the word
+    /// "Status" in the top bar is hidden; closing the detail brings it back.
+    #[test]
+    fn status_word_hides_while_a_status_sub_menu_is_open() {
+        use crate::input_mode::{MenuLevel, MenuStack};
+
+        let mut app = App::new();
+        app.init_resource::<DynamicMenu>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<ItemMenuFocus>()
+            .init_resource::<crate::hud::check_view::CheckTarget>()
+            .init_resource::<crate::hud::auction::AuctionScreenState>()
+            .init_resource::<crate::hud::auction::AuctionSellInventory>()
+            .init_resource::<crate::hud::shop::ShopScreenState>()
+            .init_resource::<menu::ConfigDatRows>()
+            .init_resource::<crate::snapshot::SceneState>();
+        app.add_systems(Startup, spawn_menu_help_bar);
+        app.add_systems(Update, update_menu_help_bar);
+
+        let title_of = |app: &mut App| -> String {
+            for _ in 0..2 {
+                app.update();
+            }
+            app.world_mut()
+                .query_filtered::<&Text, With<MenuHelpTitle>>()
+                .single(app.world())
+                .unwrap()
+                .0
+                .clone()
+        };
+
+        let mut stack = MenuStack::root();
+        stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
+        app.insert_resource(InputMode::Menu(stack.clone()));
+        assert_eq!(title_of(&mut app), "Status", "the list keeps the word");
+
+        let mut with_detail = stack.clone();
+        with_detail
+            .levels
+            .push(MenuLevel::new(MenuKind::StatusDetail { entry: 0 }, 0));
+        app.insert_resource(InputMode::Menu(with_detail));
+        assert_eq!(title_of(&mut app), "", "sub-menu open hides the word");
+
+        app.insert_resource(InputMode::Menu(stack));
+        assert_eq!(title_of(&mut app), "Status", "closed: the word is back");
     }
 
     /// The help line box starts where the title box ends and its bottom is the bar's.

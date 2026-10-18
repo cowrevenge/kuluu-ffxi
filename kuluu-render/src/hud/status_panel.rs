@@ -742,10 +742,10 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 flex_shrink: 0.0,
                 ..default()
             },
-            // Retail's status windows are solid paint — what sits behind them never shows
-            // (owner ruling 2026-10-19: "whats behind it to not show"). Opaque like the map
-            // law already established for surfaces over the world.
-            BackgroundColor(theme::MAP_BACKING),
+            // The standard window chrome (owner x4, 2026-10-19: "why did you randomly
+            // change the background alpha?"). Occlusion of what sits behind comes from
+            // draw order and coding stray rows hidden, not from a different fill.
+            BackgroundColor(theme::FRAME_BG),
             BorderColor::all(theme::FRAME_EDGE),
         ))
         .id();
@@ -761,7 +761,7 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 row_gap: Val::Px(1.0),
                 ..default()
             },
-            BackgroundColor(theme::MAP_BACKING),
+            BackgroundColor(theme::FRAME_BG),
             BorderColor::all(theme::FRAME_EDGE),
         ))
         .with_children(|b| {
@@ -894,7 +894,8 @@ pub fn spawn_status_panel(mut commands: Commands) {
                 height: Val::Px(PERSONA_BORDER_PX),
                 ..default()
             },
-            BackgroundColor(theme::MAP_BACKING),
+            // Matches the panel's own fill exactly — same chrome color, one border row.
+            BackgroundColor(theme::FRAME_BG),
         ));
         p.spawn((
             StatusCaption,

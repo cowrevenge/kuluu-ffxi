@@ -5389,14 +5389,12 @@ pub fn spawn_main_menu(mut commands: Commands) {
 /// The `statcom2` list window: the command band's exact spot (the DAT places statcom2 over
 /// menuwind at (384,48,w112)), titled with the word the band carries, one row per entry.
 pub fn spawn_status_list_window(parent: &mut ChildSpawnerCommands) {
-    let (mut node, mut bg, border) = style::window_frame();
+    let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
     node.left = Val::Px(crate::hud::menu_help_bar::BAR_LEFT);
     node.top = Val::Px(crate::hud::menu_help_bar::BAR_TOP);
     node.width = Val::Px(crate::hud::menu_help_bar::TITLE_BOX_W);
     node.display = Display::None;
-    // Opaque like retail's windows — whatever sits behind the Commands spot must not show.
-    bg.0 = theme::MAP_BACKING;
     parent
         .spawn((StatusListWindow, node, bg, border))
         .with_children(|w| {
@@ -8011,6 +8009,13 @@ pub fn update_menu_stack_windows(
     }
     for (row, mut node, mut text, mut color) in row_q.iter_mut() {
         let Some(open) = shown.get(row.window) else {
+            // The window surface hides as one node but the rows are separate entities —
+            // code them hidden too (C85-95 law). Skipping here is what left stale
+            // labels floating over the world behind other windows (owner 2026-10-19:
+            // "why are there hidden words behind the menu??").
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
             continue;
         };
         let idx = open.start + row.slot;
@@ -8077,9 +8082,9 @@ pub const STATUS_DETAIL_WINDOW_NAMES: [Option<&str>; 13] = [
 ];
 
 pub fn spawn_status_detail_window(mut commands: Commands) {
-    let (mut node, mut bg, border) = style::window_frame();
-    // Solid like retail's: the stats column behind a left-side detail must not show through.
-    bg.0 = theme::MAP_BACKING;
+    // Standard window chrome, untouched (owner x4): occlusion is draw order plus
+    // coding stray surfaces/rows hidden — not a different fill alpha.
+    let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
     node.left = Val::Px(130.0);
     node.top = Val::Px(48.0);
@@ -9582,6 +9587,38 @@ mod tests {
             !rows.is_empty(),
             "the mirrored selector still lists its page"
         );
+    }
+
+    /// A hidden surface's rows are separate nodes and must be coded hidden with it —
+    /// skipping them is what left stale labels floating behind other windows (owner
+    /// 2026-10-19: "why are there hidden words behind the menu??"; C85-95 law).
+    #[test]
+    fn unshown_stack_window_rows_are_coded_hidden() {
+        let mut stack = MenuStack::root();
+        // The Status flow filters non-status levels out of `shown`, so Root's surface hides.
+        stack.push(MenuKind::Status);
+        let mut app = stack_app(stack, &[]);
+        for _ in 0..2 {
+            app.update();
+        }
+        let hidden: Vec<usize> = app
+            .world_mut()
+            .query::<(&MenuStackWindow, &Node)>()
+            .iter(app.world())
+            .filter(|(_, node)| node.display == Display::None)
+            .map(|(window, _)| window.slot)
+            .collect();
+        assert!(
+            !hidden.is_empty(),
+            "the Status flow leaves at least one stack surface hidden"
+        );
+        let strays = app
+            .world_mut()
+            .query::<(&MenuStackWindowRow, &Node)>()
+            .iter(app.world())
+            .filter(|(row, node)| hidden.contains(&row.window) && node.display != Display::None)
+            .count();
+        assert_eq!(strays, 0, "no row draws for a window that does not");
     }
 
     fn stack_app(stack: MenuStack, frames: &[(&str, (i16, i16, i16, i16), u8)]) -> App {

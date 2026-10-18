@@ -7791,6 +7791,59 @@ fn menu_row_color(gated: bool, tint: Option<MenuRowTint>, lit_cursor: bool) -> C
     }
 }
 
+/// Owner debug 2026-10-19: the reported "menu still visible behind Status" draws pixels no
+/// static pass over kuluu's windows reproduces — unit probes with live DAT frames show every
+/// menu surface Display::None while the flow is open. This samples once a second while any
+/// Status-flow window is open and logs EVERY visible UI text node with its position, so the
+/// live log names the window that ghosts in regardless of which system draws it.
+pub(crate) fn ui_window_forensics(
+    mode: Res<InputMode>,
+    mut tick: Local<u32>,
+    text_q: Query<(
+        &Text,
+        Option<&GlobalZIndex>,
+        &GlobalTransform,
+        &ComputedNode,
+    )>,
+) {
+    if !crate::hud::status_panel::status_flow_open(&mode) {
+        return;
+    }
+    *tick = tick.wrapping_add(1);
+    if !(*tick).is_multiple_of(60) {
+        return;
+    }
+    for (text, z, transform, computed) in text_q.iter() {
+        let s = computed.size();
+        if s.x.min(s.y) < 0.5 {
+            continue;
+        }
+        let mut first_line: String = text
+            .as_str()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(42)
+            .collect();
+        if first_line.is_empty() {
+            continue;
+        }
+        if text.as_str().contains('\n') {
+            first_line.push('~');
+        }
+        let p = transform.translation();
+        info!(
+            "[hud] z={:>4} pos=({:.0},{:.0}) size=({:.0}x{:.0}) {first_line:?}",
+            z.copied().unwrap_or(bevy::ui::GlobalZIndex(0)).0,
+            p.x,
+            p.y,
+            s.x,
+            s.y
+        );
+    }
+}
+
 /// Draws the open windows under the focused one that sit at their own record frames, each with
 /// its own rows and cursor, newer ones on top
 /// (.agents/skills/retail-observe/references/2026-10-15-menu-window-stacking.md).

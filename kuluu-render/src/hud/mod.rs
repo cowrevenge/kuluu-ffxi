@@ -433,6 +433,14 @@ impl Plugin for HudPlugin {
                 .after(menu::refresh_dynamic_menu_rows),
         );
 
+        // Owner debug 2026-10-19: window forensics sample — runs after every per-window
+        // update so it reports the frame's final visibility, once a second while the
+        // Status flow is open.
+        app.add_systems(
+            Update,
+            menu::ui_window_forensics.after(menu::update_menu_stack_windows),
+        );
+
         app.add_systems(
             Update,
             panel_column::layout_panel_column_system

@@ -39,6 +39,41 @@ pub struct MmbHandleCache {
     >,
 }
 
+impl MmbLoadQueue {
+    /// Whether a queued zone placement still sits inside `radius_sq` of `from`.
+    /// Placements beyond the load radius stay queued until the view approaches
+    /// them, so this false means everything the current view would show has been
+    /// spawned.
+    pub fn pending_within(&self, from: Vec3, radius_sq: f32) -> bool {
+        self.pending
+            .iter()
+            .any(|req| is_zone_placement(req) && mmb_dist_sq_xz(req, from) <= radius_sq)
+    }
+}
+
+/// Loads every queued zone placement whatever its distance from the view. The
+/// launcher screens run their stream with this on so "loaded" means the whole
+/// block: the veil lifts once, onto a complete background, and never mid-stream.
+#[derive(Resource, Default)]
+pub struct StreamEverything(pub bool);
+
+/// How far and how wide the stream reaches. Grouped because the streaming system
+/// already carries a full complement of parameters, and callers name this one in
+/// schedule ordering.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MmbStreamGate<'w> {
+    pub draw: Res<'w, crate::dat_mzb::DrawDistance>,
+    pub everything: Res<'w, StreamEverything>,
+}
+
+impl MmbLoadQueue {
+    /// Whether any zone placement is still waiting to spawn. The launcher's
+    /// loading states watch this rather than a distance-bounded subset.
+    pub fn has_pending_zone_placements(&self) -> bool {
+        self.pending.iter().any(is_zone_placement)
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct MmbLoadQueue {
     pub pending: std::collections::VecDeque<LoadMmbRequest>,
@@ -78,11 +113,47 @@ pub struct MmbParseCache {
     pub by_asset: std::collections::HashMap<(u32, usize), Option<LoadedMmb>>,
 }
 
+/// Upload one file's decoded textures and return the pool entry its placements
+/// resolve through. Split out so a zone can be warmed before it is ever drawn.
+pub fn pool_loaded_textures(
+    loaded: &LoadedMmb,
+    texture_count: usize,
+    quality: TextureQuality,
+    images: &mut Assets<Image>,
+) -> (
+    std::collections::HashMap<String, Handle<Image>>,
+    Option<Handle<Image>>,
+    std::collections::HashMap<QualifiedTextureName, Handle<Image>>,
+) {
+    let mut by_name: std::collections::HashMap<String, Handle<Image>> =
+        std::collections::HashMap::with_capacity(texture_count);
+    let mut first: Option<Handle<Image>> = None;
+    let mut by_raw_name: std::collections::HashMap<QualifiedTextureName, Handle<Image>> =
+        std::collections::HashMap::with_capacity(texture_count);
+    for nt in &loaded.textures {
+        let mut image = decoded_texture_to_image(&nt.texture, quality);
+        image.asset_usage = RenderAssetUsages::RENDER_WORLD;
+        let handle = images.add(image);
+        if first.is_none() {
+            first = Some(handle.clone());
+        }
+        if let Some(raw_name) = nt.raw_name {
+            by_raw_name
+                .entry(raw_name)
+                .or_insert_with(|| handle.clone());
+        }
+        if !nt.name.is_empty() {
+            by_name.insert(nt.name.clone(), handle);
+        }
+    }
+    (by_name, first, by_raw_name)
+}
+
 /// Release the decoded texels every cached chunk of `file_id` holds, once that
 /// file's `MmbTexPools` entry owns the uploaded handles. A file's Img chunks are
 /// collected into *every* chunk's `LoadedMmb`, so the cache otherwise keeps one
 /// full copy of the file's texture set per cached chunk index.
-fn drop_pooled_textures(cache: &mut MmbParseCache, file_id: u32) {
+pub fn drop_pooled_textures(cache: &mut MmbParseCache, file_id: u32) {
     for ((fid, _), entry) in cache.by_asset.iter_mut() {
         if *fid != file_id {
             continue;
@@ -284,6 +355,7 @@ impl Plugin for DatOverlayPlugin {
             .init_resource::<crate::sub_area_activation::SubAreaActivation>()
             .init_resource::<MmbHandleCache>()
             .init_resource::<MmbLoadQueue>()
+            .init_resource::<StreamEverything>()
             .init_resource::<MmbParseCache>()
             .init_resource::<MmbLoadInFlight>()
             .init_resource::<MmbTexPools>()
@@ -510,8 +582,8 @@ pub fn process_load_mmb_requests(
     mut parse_cache: ResMut<MmbParseCache>,
     mut tex_pools_res: ResMut<MmbTexPools>,
     settings: Res<GraphicsSettings>,
-    draw: Res<crate::dat_mzb::DrawDistance>,
-    self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
+    gate: MmbStreamGate<'_>,
+    anchor: crate::dat_mzb::ZoneViewAnchor<'_, '_>,
     mut in_flight: ResMut<MmbLoadInFlight>,
     actor_root: Res<crate::ffxi_actor_render::ActorDatRoot>,
 ) {
@@ -542,12 +614,18 @@ pub fn process_load_mmb_requests(
         return;
     }
 
-    let self_pos = self_q.single().ok().map(|t| t.translation());
+    let (self_pos, follows_character) = match anchor.stream() {
+        Some((pos, character)) => (Some(pos), character),
+        None => (None, false),
+    };
+    // An attract-mode view has nothing waiting behind it: its stream is a
+    // background job, and the screens in front of it keep their frame rate.
+    let background_stream = self_pos.is_some() && !follows_character;
     if !mmb_repass_needed(
         new_events,
         parse_completed,
         queue.budget_deferred,
-        draw.is_changed(),
+        gate.draw.is_changed(),
         queue.last_eval_pos,
         self_pos,
     ) {
@@ -561,8 +639,11 @@ pub fn process_load_mmb_requests(
             mmb_load_order_key(a, self_pos).total_cmp(&mmb_load_order_key(b, self_pos))
         });
     }
-    let load_radius = draw.world * crate::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
+    let load_radius = gate.draw.world * crate::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
     let load_radius_sq = load_radius * load_radius;
+    // Full-load mode keeps every placement in play instead of holding the far
+    // ones back until the view approaches.
+    let gate_placements_by_distance = !gate.everything.0;
 
     let mut mmb_logged: std::collections::HashSet<(u32, usize)> = std::collections::HashSet::new();
 
@@ -585,19 +666,41 @@ pub fn process_load_mmb_requests(
     };
 
     const MMB_SPAWN_BUDGET: usize = 96;
+    /// A background stream takes a fraction of the frame's model files.
+    const BACKGROUND_SPAWN_BUDGET: usize = 24;
+    /// The count budget cannot bound a file carrying dozens of textures, so the
+    /// background stream also stops at a wall-clock slice.
+    const BACKGROUND_STREAM_SLICE_MS: u128 = 3;
     const HEAVY: usize = 8;
     const MMB_MAX_INFLIGHT: usize = 64;
+    let spawn_budget = if background_stream {
+        BACKGROUND_SPAWN_BUDGET
+    } else {
+        MMB_SPAWN_BUDGET
+    };
+    let frame_started = std::time::Instant::now();
     let mut spawned = 0usize;
     let mut newly_pooled: Vec<u32> = Vec::new();
     let mut retained: std::collections::VecDeque<LoadMmbRequest> =
         std::collections::VecDeque::with_capacity(queue.pending.len());
 
     while let Some(req) = queue.pending.pop_front() {
-        if let Some(self_pos) = self_pos {
-            if is_zone_placement(&req) && mmb_dist_sq_xz(&req, self_pos) > load_radius_sq {
-                retained.push_back(req);
-                retained.append(&mut queue.pending);
-                break;
+        if background_stream
+            && spawned > 0
+            && frame_started.elapsed().as_millis() >= BACKGROUND_STREAM_SLICE_MS
+        {
+            queue.budget_deferred = true;
+            retained.push_back(req);
+            retained.append(&mut queue.pending);
+            break;
+        }
+        if gate_placements_by_distance {
+            if let Some(self_pos) = self_pos {
+                if is_zone_placement(&req) && mmb_dist_sq_xz(&req, self_pos) > load_radius_sq {
+                    retained.push_back(req);
+                    retained.append(&mut queue.pending);
+                    break;
+                }
             }
         }
 
@@ -630,7 +733,7 @@ pub fn process_load_mmb_requests(
 
                 let pool_exists = tex_pools_res.by_file.contains_key(&req.file_id);
                 let cost = if pool_exists { 1 } else { HEAVY };
-                if spawned > 0 && spawned + cost > MMB_SPAWN_BUDGET {
+                if spawned > 0 && spawned + cost > spawn_budget {
                     queue.budget_deferred = true;
                     retained.push_back(req);
                     continue;
@@ -643,30 +746,7 @@ pub fn process_load_mmb_requests(
                     anisotropy: settings.texture_filtering.anisotropy(),
                 };
                 let pool = tex_pools_res.by_file.entry(req.file_id).or_insert_with(|| {
-                    let mut by_name: std::collections::HashMap<String, Handle<Image>> =
-                        std::collections::HashMap::with_capacity(texture_count);
-                    let mut first: Option<Handle<Image>> = None;
-                    let mut by_raw_name: std::collections::HashMap<
-                        QualifiedTextureName,
-                        Handle<Image>,
-                    > = std::collections::HashMap::with_capacity(texture_count);
-                    for nt in &loaded.textures {
-                        let mut image = decoded_texture_to_image(&nt.texture, quality);
-                        image.asset_usage = RenderAssetUsages::RENDER_WORLD;
-                        let handle = images.add(image);
-                        if first.is_none() {
-                            first = Some(handle.clone());
-                        }
-                        if let Some(raw_name) = nt.raw_name {
-                            by_raw_name
-                                .entry(raw_name)
-                                .or_insert_with(|| handle.clone());
-                        }
-                        if !nt.name.is_empty() {
-                            by_name.insert(nt.name.clone(), handle);
-                        }
-                    }
-                    (by_name, first, by_raw_name)
+                    pool_loaded_textures(loaded, texture_count, quality, &mut images)
                 });
                 let tex_by_name = &pool.0;
                 let first_texture = pool.1.clone();
@@ -998,6 +1078,13 @@ pub fn process_load_mmb_requests(
                 }
             }
             None => {
+                let at_parse_cap = !in_flight.tasks.contains_key(&asset)
+                    && in_flight.tasks.len() >= MMB_MAX_INFLIGHT;
+                if at_parse_cap {
+                    // The cap defers the parse, not just this frame's pass; without
+                    // a repass signal the tail of the queue would never drain.
+                    queue.budget_deferred = true;
+                }
                 if !in_flight.tasks.contains_key(&asset) && in_flight.tasks.len() < MMB_MAX_INFLIGHT
                 {
                     let pool = AsyncComputeTaskPool::get();

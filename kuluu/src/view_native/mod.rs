@@ -15,6 +15,7 @@ pub fn animtest_knobs() -> Option<serde_json::Value> {
 
 mod app_icon;
 pub mod auto_target;
+mod backdrop_preload;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
@@ -337,6 +338,9 @@ pub struct NativeRunArgs {
 
     /// Start muted (`play --mute`).
     pub mute: bool,
+
+    /// `-cpu-mode`: the launcher screens stream no zone behind them.
+    pub cpu_mode: bool,
 }
 
 /// Builds and runs the native app.
@@ -369,6 +373,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         relay_listen,
         unfocused,
         mute,
+        cpu_mode,
         #[cfg(unix)]
         agent_listen,
         dat_root,
@@ -617,7 +622,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         app.insert_resource(launcher_ui::CliOverridesPresent);
     }
 
-    launcher_ui::register(&mut app, &server, auth, lobby, defaults, runtime);
+    launcher_ui::register(&mut app, &server, auth, lobby, defaults, runtime, !cpu_mode);
 
     app.add_systems(OnEnter(AppPhase::Connecting), bridge_connecting);
 
@@ -752,7 +757,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         HudPlugin,
         MousePlugin,
         navmesh_overlay::NavmeshOverlayPlugin,
-        launcher_backdrop::LauncherBackdropPlugin,
+        launcher_backdrop::LauncherBackdropPlugin {
+            background: !cpu_mode,
+        },
         zone_transition::ZoneTransitionOverlayPlugin,
     ))
     .insert_resource(ZoneNameResolver::new(kuluu_nav::zone_name))

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use kuluu_render::SceneState;
 use kuluu_session::lobby_client::CharSlot;
 
+use super::backdrop_preload::{self, BackdropPreloads};
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 use super::launcher_ui::{char_list::CharCursor, CharListData};
 use super::AppPhase;
@@ -22,9 +23,15 @@ pub struct BackdropCamera;
 #[derive(Component)]
 pub(crate) struct BackdropScoped;
 
+/// How long the character list's cursor has to rest on one entry before its zone
+/// replaces the backdrop. Sweeping a list otherwise queues a full retire and
+/// reload per keypress.
+const HOVER_DWELL_SECS: f32 = 0.4;
+
 #[derive(Resource, Default)]
-struct PendingBackdropSwap {
-    target: Option<u16>,
+struct BackdropHoverDwell {
+    zone: Option<u16>,
+    held: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -72,6 +79,9 @@ const FADE_OUT_SECS: f32 = 0.25;
 
 const FADE_HOLD_SECS: f32 = 0.40;
 const FADE_IN_SECS: f32 = 0.35;
+/// The Hold waits for the cut-to block to finish loading; this only stops a
+/// stream that wedges from holding black forever.
+const HOLD_MAX_SECS: f32 = 45.0;
 
 const FADE_COLOR: Color = Color::srgb(0.04, 0.04, 0.05);
 
@@ -108,20 +118,147 @@ struct BackdropFadeQuad;
 #[derive(Resource)]
 struct BackdropFadeMaterial(Handle<StandardMaterial>);
 
-pub struct LauncherBackdropPlugin;
+/// Startup order for the launcher screens: black plus a corner loader while the
+/// zone streams in behind it, then one fade onto a scene that can already answer
+/// input. Streaming in the screen's own frame leaves it no frames to take input
+/// in; lifting the veil mid-stream instead reveals half a background.
+#[derive(Resource)]
+struct StartupStage {
+    phase: StartupPhase,
+    elapsed: f32,
+}
+
+impl Default for StartupStage {
+    fn default() -> Self {
+        Self {
+            phase: StartupPhase::HoldingScreens,
+            elapsed: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StartupPhase {
+    /// Black veil while the screens behind it are built and given their frames.
+    HoldingScreens,
+    /// Background streaming. The veil is now behind the screens, so they are read
+    /// and clicked against black while the 3D loads behind them.
+    LoadingBackground,
+    /// Veil fading out to put the loaded scene behind the screens.
+    Revealing,
+    Done,
+}
+
+impl StartupStage {
+    fn backdrop_allowed(&self) -> bool {
+        !matches!(self.phase, StartupPhase::HoldingScreens)
+    }
+}
+
+/// Black hold long enough for the screens to be laid out and drawn once before
+/// anything is streamed.
+const SCREEN_HOLD_SECS: f32 = 0.25;
+const VEIL_FADE_SECS: f32 = 0.45;
+const LOADER_DOTS_PER_SEC: f32 = 2.0;
+
+/// The launcher's backdrop stream is a full load: every placement in the
+/// block lands before a loading state counts as done, instead of only what sits
+/// inside the draw distance. Bounded per frame by the background budget, so it
+/// still leaves the screens their input.
+fn sync_backdrop_stream_mode(
+    background: Res<LauncherBackgroundEnabled>,
+    stage: Res<StartupStage>,
+    fade: Res<BackdropFade>,
+    mut everything: ResMut<kuluu_render::dat_mmb::StreamEverything>,
+) {
+    let full =
+        background.0 && !(matches!(stage.phase, StartupPhase::HoldingScreens) || fade.is_idle());
+    if everything.0 != full {
+        everything.0 = full;
+    }
+}
+
+/// The veil covers the screens for its opening beat, then drops under every
+/// launcher screen (`launcher_ui::footer` sits at 5) so only the 3D scene stays
+/// behind it.
+const STARTUP_VEIL_COVER_Z: i32 = 8;
+const STARTUP_VEIL_BEHIND_UI_Z: i32 = -1;
+const STARTUP_LOADER_Z: i32 = 9;
+const LOADER_FONT_PX: f32 = 12.0;
+/// Clears the launcher footer strip (`launcher_ui::footer::FOOTER_HEIGHT_PX`).
+const LOADER_BOTTOM_INSET_PX: f32 = 44.0;
+const LOADER_SIDE_INSET_PX: f32 = 16.0;
+
+/// The dots live in a box already wide enough for all of them, so the word
+/// before them never shifts as they come and go.
+const LOADER_DOTS_SLOT_PX: f32 = 18.0;
+
+const VEIL_COLOR: Color = Color::BLACK;
+const LOADER_TEXT: &str = "Loading background";
+const LOADER_DOTS: [&str; 4] = ["", ".", "..", "..."];
+const LOADER_TEXT_COLOR: Color = Color::srgb(0.62, 0.66, 0.70);
+
+#[derive(Component)]
+struct StartupVeil;
+
+/// The corner loader's root node: word plus a fixed-width slot for the dots.
+#[derive(Component)]
+struct StartupLoaderRoot;
+
+#[derive(Component)]
+struct StartupLoaderDots;
+
+/// `-cpu-mode` registers the backdrop with `background: false`: the screens stay
+/// on their own and no zone is streamed for them.
+#[derive(Resource, Clone, Copy)]
+pub struct LauncherBackgroundEnabled(pub bool);
+
+pub struct LauncherBackdropPlugin {
+    pub background: bool,
+}
 
 impl Plugin for LauncherBackdropPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(LauncherBackdropZone(DEFAULT_BACKDROP_ZONE))
-            .init_resource::<PendingBackdropSwap>()
+        app.insert_resource(LauncherBackgroundEnabled(self.background))
+            .insert_resource(LauncherBackdropZone(DEFAULT_BACKDROP_ZONE))
+            .init_resource::<BackdropHoverDwell>()
             .init_resource::<BackdropFade>()
             .init_resource::<BackdropFlight>()
+            .init_resource::<StartupStage>()
+            .init_resource::<BackdropPreloads>()
+            .init_resource::<kuluu_render::dat_mmb::StreamEverything>()
             .insert_resource(ClearColor(Color::NONE))
-            .add_systems(OnEnter(AppPhase::Launcher), spawn_backdrop_camera)
-            .add_systems(OnExit(AppPhase::Launcher), despawn_backdrop_camera)
+            .add_systems(
+                OnEnter(AppPhase::Launcher),
+                (spawn_startup_stage, spawn_backdrop_camera).chain(),
+            )
+            .add_systems(
+                OnExit(AppPhase::Launcher),
+                (
+                    despawn_startup_stage,
+                    forget_backdrop_preloads,
+                    despawn_backdrop_camera,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 (
+                    refresh_backdrop_preload_targets,
+                    backdrop_preload::preload_backdrop_zones,
+                )
+                    .chain()
+                    // Whatever the cursor will want next is warmed only with what
+                    // the visible stream leaves over.
+                    .after(kuluu_render::dat_mmb::process_load_mmb_requests)
+                    .run_if(in_state(AppPhase::Launcher)),
+            )
+            .add_systems(
+                Update,
+                (
+                    sync_backdrop_stream_mode,
+                    advance_startup_stage,
+                    update_startup_loader,
                     update_backdrop_from_selection,
                     drive_backdrop_fade,
                     drive_backdrop_flight,
@@ -131,6 +268,159 @@ impl Plugin for LauncherBackdropPlugin {
                     .chain()
                     .run_if(in_state(AppPhase::Launcher)),
             );
+    }
+}
+
+fn spawn_startup_stage(mut commands: Commands, background: Res<LauncherBackgroundEnabled>) {
+    // Nothing is streamed under `-cpu-mode`, so there is nothing to veil for.
+    if !background.0 {
+        commands.insert_resource(StartupStage {
+            phase: StartupPhase::Done,
+            elapsed: 0.0,
+        });
+        return;
+    }
+    commands.insert_resource(StartupStage::default());
+    commands.spawn((
+        StartupVeil,
+        GlobalZIndex(STARTUP_VEIL_COVER_Z),
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(VEIL_COLOR),
+    ));
+    let loader = commands
+        .spawn((
+            StartupLoaderRoot,
+            GlobalZIndex(STARTUP_LOADER_Z),
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(LOADER_BOTTOM_INSET_PX),
+                right: Val::Px(LOADER_SIDE_INSET_PX),
+                ..default()
+            },
+            TextColor(LOADER_TEXT_COLOR),
+        ))
+        .id();
+    commands.entity(loader).with_children(|loader| {
+        loader.spawn((
+            Text::new(LOADER_TEXT),
+            TextFont::from_font_size(LOADER_FONT_PX),
+        ));
+        // Fixed width: the dots that appear and vanish inside it cannot push
+        // anything else along.
+        loader.spawn((Node {
+            width: Val::Px(LOADER_DOTS_SLOT_PX),
+            ..default()
+        },));
+        loader.spawn((
+            StartupLoaderDots,
+            Text::new(LOADER_DOTS[0]),
+            TextFont::from_font_size(LOADER_FONT_PX),
+        ));
+    });
+}
+
+fn despawn_startup_stage(
+    mut commands: Commands,
+    q_veil: Query<Entity, With<StartupVeil>>,
+    q_loader: Query<Entity, With<StartupLoaderRoot>>,
+) {
+    for e in q_veil.iter() {
+        commands.entity(e).try_despawn();
+    }
+    // The loader's dots are its children, so this one takes the subtree.
+    for e in q_loader.iter() {
+        commands.entity(e).despawn();
+    }
+    commands.remove_resource::<StartupStage>();
+}
+
+/// The veil holds until the zone floor has landed, so what gets revealed is a
+/// scene that can answer input rather than one still being built under the
+/// cursor. `main_zone_floor_ready` is the same signal the in-game loading
+/// overlay reads.
+fn advance_startup_stage(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut stage: ResMut<StartupStage>,
+    mut q_veil: Query<(Entity, &mut BackgroundColor), With<StartupVeil>>,
+    mut q_veil_z: Query<&mut GlobalZIndex, With<StartupVeil>>,
+    q_loader: Query<Entity, With<StartupLoaderRoot>>,
+    scene: Res<SceneState>,
+    last_auto_loaded: Res<kuluu_render::dat_mzb::LastAutoLoadedZone>,
+    mzb_in_flight: Res<kuluu_render::dat_mzb::LoadMzbInFlight>,
+    mmb_queue: Res<kuluu_render::dat_mmb::MmbLoadQueue>,
+    mmb_parses: Res<kuluu_render::dat_mmb::MmbLoadInFlight>,
+) {
+    let dt = time.delta_secs();
+    match stage.phase {
+        StartupPhase::HoldingScreens => {
+            stage.elapsed += dt;
+            if stage.elapsed < SCREEN_HOLD_SECS {
+                return;
+            }
+            stage.phase = StartupPhase::LoadingBackground;
+            // From here the screens are foreground: only the 3D scene stays
+            // covered, so input and rendering of the UI keep running normally.
+            if let Ok(mut z) = q_veil_z.single_mut() {
+                z.0 = STARTUP_VEIL_BEHIND_UI_Z;
+            }
+        }
+        StartupPhase::LoadingBackground => {
+            // The mirror writes the zone when this phase unlocks it, and that
+            // write is what makes a floor something to wait for.
+            let floored = scene.snapshot.zone_id.is_some()
+                && kuluu_render::dat_mzb::main_zone_floor_ready(
+                    &scene.snapshot,
+                    &last_auto_loaded,
+                    &mzb_in_flight,
+                );
+            // The floor alone is not a loaded background: every placement the
+            // block queues has to have spawned and parsed before anything shows.
+            let models_up = mmb_parses.tasks.is_empty() && !mmb_queue.has_pending_zone_placements();
+            if floored && models_up {
+                stage.phase = StartupPhase::Revealing;
+                stage.elapsed = 0.0;
+            }
+        }
+        StartupPhase::Revealing => {
+            stage.elapsed += dt;
+            let progress = (stage.elapsed / VEIL_FADE_SECS).clamp(0.0, 1.0);
+            let Ok((veil, mut bg)) = q_veil.single_mut() else {
+                stage.phase = StartupPhase::Done;
+                return;
+            };
+            if progress < 1.0 {
+                bg.0 = VEIL_COLOR.with_alpha(1.0 - progress);
+                return;
+            }
+            commands.entity(veil).try_despawn();
+            for e in q_loader.iter() {
+                commands.entity(e).despawn();
+            }
+            stage.phase = StartupPhase::Done;
+        }
+        StartupPhase::Done => {}
+    }
+}
+
+fn update_startup_loader(
+    stage: Res<StartupStage>,
+    time: Res<Time>,
+    mut q_dots: Query<&mut Text, With<StartupLoaderDots>>,
+) {
+    if matches!(stage.phase, StartupPhase::Done) {
+        return;
+    }
+    let dot = ((time.elapsed_secs() * LOADER_DOTS_PER_SEC) as usize) % LOADER_DOTS.len();
+    let want = LOADER_DOTS[dot];
+    for mut text in q_dots.iter_mut() {
+        if text.as_str() != want {
+            *text = Text::new(want);
+        }
     }
 }
 
@@ -200,6 +490,8 @@ fn despawn_backdrop_camera(mut commands: Commands, q: Query<Entity, With<Backdro
 // The AnimationTest box owns the world while open (its teardown restores the default zone), so
 // the mirror stands down instead of reloading the block under it.
 fn mirror_backdrop_to_scene_state(
+    background: Res<LauncherBackgroundEnabled>,
+    stage: Res<StartupStage>,
     zone: Res<LauncherBackdropZone>,
     mut scene: ResMut<SceneState>,
     #[cfg(feature = "debug-animation_room")] q_box: Query<
@@ -209,6 +501,11 @@ fn mirror_backdrop_to_scene_state(
 ) {
     #[cfg(feature = "debug-animation_room")]
     if q_box.iter().next().is_some() {
+        return;
+    }
+    // Writing the zone here is what starts the DAT stream behind it: never under
+    // `-cpu-mode`, and not until the screens have had their own frames.
+    if !background.0 || !stage.backdrop_allowed() {
         return;
     }
     let desired = Some(zone.0);
@@ -239,29 +536,74 @@ pub(crate) fn despawn_backdrop_core(
 fn update_backdrop_from_selection(
     cursor: Option<Res<CharCursor>>,
     chars: Res<CharListData>,
-    mut pending: ResMut<PendingBackdropSwap>,
     zone: Res<LauncherBackdropZone>,
     mut fade: ResMut<BackdropFade>,
+    time: Res<Time>,
+    mut dwell: ResMut<BackdropHoverDwell>,
 ) {
     let hovered: Option<u16> = cursor
         .as_deref()
         .and_then(|c| chars.0.get(c.0))
         .and_then(slot_zone_for_backdrop);
-    pending.target = hovered;
+    let wanted = hovered.filter(|hovered| *hovered != zone.0);
 
-    if !fade.is_idle() {
+    match wanted {
+        Some(target) if dwell.zone == Some(target) => dwell.held += time.delta_secs(),
+        target => {
+            dwell.zone = target;
+            dwell.held = 0.0;
+        }
+    }
+
+    if !fade.is_idle() || wanted.is_none() || dwell.held < HOVER_DWELL_SECS {
         return;
     }
-    let Some(target) = hovered else {
+    let Some(target) = wanted else {
         return;
     };
-    if target == zone.0 {
-        return;
-    }
+    dwell.zone = None;
+    dwell.held = 0.0;
+
+    // Always through black: a flip that skipped the veil would spawn its whole
+    // prop set inside one frame, which is exactly the hitch this avoids. A
+    // warmed zone just clears the hold in frames instead of seconds.
     *fade = BackdropFade::FadingOut {
         cut: FadeCut::Zone(target),
         elapsed: 0.0,
     };
+}
+
+/// After the first backdrop has landed, every other zone on the character list
+/// is warmed complete in the background, so its flip clears the black hold in
+/// frames instead of streaming from cold.
+fn refresh_backdrop_preload_targets(
+    stage: Res<StartupStage>,
+    chars: Option<Res<CharListData>>,
+    background: Res<LauncherBackgroundEnabled>,
+    zone: Res<LauncherBackdropZone>,
+    mut preloads: ResMut<BackdropPreloads>,
+) {
+    if !background.0 || !matches!(stage.phase, StartupPhase::Done) {
+        return;
+    }
+    let Some(chars) = chars else {
+        return;
+    };
+    let current = ffxi_dat::zone_dat::zone_id_to_mzb_file_id(zone.0);
+    preloads.set_targets(
+        chars
+            .0
+            .iter()
+            .filter_map(slot_zone_for_backdrop)
+            .filter(|slot_zone| *slot_zone != zone.0)
+            .filter_map(ffxi_dat::zone_dat::zone_id_to_mzb_file_id)
+            .filter(|file_id| Some(*file_id) != current)
+            .collect(),
+    );
+}
+
+fn forget_backdrop_preloads(mut preloads: ResMut<BackdropPreloads>) {
+    preloads.forget_all();
 }
 
 fn drive_backdrop_fade(
@@ -269,7 +611,8 @@ fn drive_backdrop_fade(
     mut fade: ResMut<BackdropFade>,
     mut zone: ResMut<LauncherBackdropZone>,
     mut flight: ResMut<BackdropFlight>,
-    pending: Res<PendingBackdropSwap>,
+    mmb_queue: Res<kuluu_render::dat_mmb::MmbLoadQueue>,
+    mmb_parses: Res<kuluu_render::dat_mmb::MmbLoadInFlight>,
 ) {
     let dt = time.delta_secs();
     *fade = match *fade {
@@ -288,24 +631,24 @@ fn drive_backdrop_fade(
                 BackdropFade::FadingOut { cut, elapsed: next }
             }
         }
+        // Black until the cut-to block has nothing left to load; a timer alone
+        // would lift onto half a zone again.
         BackdropFade::Holding { elapsed } => {
             let next = elapsed + dt;
-            if next >= FADE_HOLD_SECS {
+            let work_left = !mmb_parses.tasks.is_empty() || mmb_queue.has_pending_zone_placements();
+            if (!work_left && next >= FADE_HOLD_SECS) || next >= HOLD_MAX_SECS {
                 BackdropFade::FadingIn { elapsed: 0.0 }
             } else {
                 BackdropFade::Holding { elapsed: next }
             }
         }
+        // Always lands Idle; a hover still standing elsewhere is re-decided by
+        // `update_backdrop_from_selection` from the latest cursor, so no live
+        // re-cut here to fight it.
         BackdropFade::FadingIn { elapsed } => {
             let next = elapsed + dt;
             if next >= FADE_IN_SECS {
-                match pending.target {
-                    Some(target) if target != zone.0 => BackdropFade::FadingOut {
-                        cut: FadeCut::Zone(target),
-                        elapsed: 0.0,
-                    },
-                    _ => BackdropFade::Idle,
-                }
+                BackdropFade::Idle
             } else {
                 BackdropFade::FadingIn { elapsed: next }
             }

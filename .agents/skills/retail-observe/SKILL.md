@@ -106,6 +106,7 @@ doctor         prerequisites, permissions, and whether a client window resolves
 targets        every window this host reports -- find yours here, don't guess
 status/window  which window resolved as the client, and its geometry
 show           raise/focus it
+wine-key key [seconds]  send a key through AutoHotkey in the Wine prefix
 capture [out]  screenshot the client window, cropped, with its scale factor
 ocr            capture + OCR: TEXT<TAB>x<TAB>y in window units
 keys           the logical key names and what each does in game
@@ -167,6 +168,12 @@ The human does two things: **answer consent prompts** (UAC, a macOS permission
 sheet, polkit) and **enter account credentials for a server they do not own**.
 The agent does everything else -- window wrangling, launcher, lobby, character
 select, navigation, menu driving, capture, and the code work.
+
+Check the active session for approval before requesting it again.
+Record the approved action and its scope in the active bead.
+Reuse approval for the same unchanged prompt when the harness permits it.
+Follow any harness requirement for fresh confirmation on a new acceptance.
+Do not infer approval for unrelated agreements or system permissions.
 
 `click-text` enforces the first half: it refuses outright while a consent
 dialog is on screen, on every host, so no drive loop can talk itself into

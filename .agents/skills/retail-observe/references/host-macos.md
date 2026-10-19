@@ -72,14 +72,38 @@ What was verified on this host (macOS 26, Apple Silicon, Homebrew `wine-stable`
   -- so the default `FINAL FANTASY` title match finds the game with no config;
 - `screencapture -l` captures the Wine window correctly, including the 2x Retina
   scale factor that `capture` reports;
-- **focused CGEvent keys and `type` reach the Win32 app**, and so does `--bg`
-  (`CGEventPostToPid`) -- unfocused posting works under Wine, unlike some VM
-  builds;
+- CGEvent input worked in a Win32 test application. This does not prove FFXI
+  accepts the same input. Use the Wine keyboard procedure below if FFXI ignores it;
 - **OCR coordinates land where they should**: `click-text` on a word moved the
   app's caret into that word, which is the end-to-end check of the
   pixel-to-point conversion;
 - `System Events` lists the GUI process as `wine`, which is how `show` focuses
   it when the window's owning pid is a child process it cannot address.
+
+### Wine keyboard input
+
+If host input does not reach FFXI, use AutoHotkey inside the same Wine prefix.
+This method does not require the Wine window to expose accessibility elements.
+Use an official AutoHotkey v2 executable.
+Set `FFXI_OBSERVE_AHK` to its absolute path.
+The helper uses the Win32 key codes in `keys.tsv`.
+
+```bash
+export WINEPREFIX=/path/to/prefix
+export FFXI_OBSERVE_RUNNER=/path/to/wine
+export FFXI_OBSERVE_AHK=/path/to/AutoHotkey64.exe
+scripts/observe.sh wine-key enter 0.2
+scripts/observe.sh capture /tmp/ffxi-after.png
+```
+
+The helper requires one matching Wine window.
+It activates that window inside Wine before sending the key.
+Inspect the next capture to verify the result.
+Windows activation does not prove that macOS foreground focus stays unchanged.
+Do not claim background input support without a separate focus test.
+
+On 2026-10-19, AutoHotkey v2.0.30 confirmed character selection in the FFXI client under Wine.
+The macOS CGEvent input methods did not change that screen.
 
 Four Wine-specific traps:
 

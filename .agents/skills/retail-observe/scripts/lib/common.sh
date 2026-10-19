@@ -90,6 +90,24 @@ lookup_key() {
   return 1
 }
 
+wine_key() {
+  local name=${1:-} duration=${2:-0.05} code runner ahk ahk_windows hold_ms
+  local max_hold_seconds=60
+  [ -n "${FFXI_OBSERVE_AHK:-}" ] || die "set FFXI_OBSERVE_AHK to the AutoHotkey executable"
+  [ -f "$FFXI_OBSERVE_AHK" ] && [ -r "$FFXI_OBSERVE_AHK" ] || die "AutoHotkey executable is not a readable file: $FFXI_OBSERVE_AHK"
+  code=$(awk -F'\t' -v k="$name" '$1 == k {print $4; exit}' "$KEYS_TSV")
+  [ -n "$code" ] || die "unknown logical key '$name' — \`observe.sh keys\` lists the logical keys"
+  [[ $duration =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "duration must be a number from 0 to ${max_hold_seconds} seconds"
+  awk -v d="$duration" -v m="$max_hold_seconds" 'BEGIN {exit !(d >= 0 && d <= m)}' || die "duration must be a number from 0 to ${max_hold_seconds} seconds"
+  runner=$(command -v -- "$RUNNER" 2>/dev/null) || die "RUNNER must name one executable path"
+  [ -x "$runner" ] || die "RUNNER must name one executable path"
+  hold_ms=$(awk -v d="$duration" 'BEGIN {printf "%.0f", d * 1000}')
+  ahk="$SCRIPT_DIR/lib/wine-key.ahk"
+  ahk_windows=$("$runner" winepath.exe -w "$ahk") || die "Wine could not convert the AutoHotkey script path"
+  ahk_windows=${ahk_windows%$'\r'}
+  "$runner" "$FFXI_OBSERVE_AHK" "$ahk_windows" "$WINDOW_TITLE" "$code" "$hold_ms"
+}
+
 # Unknown names pass through so a key the table does not cover yet is still
 # reachable with a raw host code — but say so, because that is unportable.
 key_code() {

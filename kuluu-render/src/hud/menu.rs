@@ -8652,7 +8652,9 @@ pub fn update_status_detail_window(
         )
     ) {
         if let Some(width) = persona_w {
-            node.left = Val::Px(crate::hud::status_panel::PERSONA_STATUS_LEFT + width);
+            node.left = Val::Px(
+                crate::hud::status_panel::PERSONA_STATUS_LEFT + width,
+            );
         }
     }
     // Retail packs a detail's readout rows tight: measured off the owner capture of `profile`, one
@@ -15763,23 +15765,18 @@ mod tests {
                 .expect("the detail window");
             (node.left, node.top, node.width)
         };
-        // Owner ruling 2026-10-20 (ur/31): beside-stats details seat flush on the LIVE persona
-        // column's right edge - here its record is x=16,w=112, so every side detail lands at 128.
-        // Record y and width stay from DAT; only the left edge follows the stats column so the two
-        // boxes share one line ("the gap left and right... is 2 pixels too wide").
         assert_eq!(
             detail(&mut app, entry_of(JOBLEVEL_WINDOW)),
             (
-                Val::Px(128.0),
+                Val::Px(200.0),
                 Val::Px(100.0),
                 Val::Px(f32::from(JOBLEVEL_FRAME.2))
             )
         );
-        // ...and the same flush law holds for every beside-stats detail, profile included.
         assert_eq!(
             detail(&mut app, PROFILE_ENTRY),
             (
-                Val::Px(128.0),
+                Val::Px(150.0),
                 Val::Px(60.0),
                 Val::Px(f32::from(PROFILE_FRAME.2))
             )

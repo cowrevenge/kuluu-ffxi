@@ -8826,6 +8826,13 @@ pub fn update_status_detail_window(
         (start, cursor)
     });
     if currency_view.is_some() && rows_len > 0 {
+        // ur/52: "the box is not full size" - the flow chrome collapsed short of the eight
+        // visible rows, so they trailed past the frame. Pin the window to a page: its own
+        // caption row plus `CURRENCY_VISIBLE_ROWS` line boxes top and bottom.
+        let page_h = crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
+            * (CURRENCY_VISIBLE_ROWS as f32 + 1.0/* in-box title */)
+            + MENU_BORDER_PX * 2.0;
+        node.height = Val::Px(page_h);
         // Currency values ride the window's right margin, same law as craft's `(level)`.
         let edge_chars = match node.width {
             Val::Px(width) => Some(

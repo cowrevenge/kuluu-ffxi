@@ -8291,8 +8291,10 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
     // coding stray surfaces/rows hidden — not a different fill alpha.
     let (mut node, bg, border) = style::window_frame();
     node.position_type = PositionType::Absolute;
+    // The same seat `update_status_detail_window` re-asserts: beside the stats column, hanging
+    // at the command bar's bottom-left anchor (2026-10-20 owner ruling, capture ur/29).
     node.left = Val::Px(130.0);
-    node.top = Val::Px(48.0);
+    node.top = Val::Px(crate::hud::menu_help_bar::help_line_bottom_left().y);
     node.width = Val::Px(252.0);
     node.display = Display::None;
     commands
@@ -9699,10 +9701,15 @@ mod tests {
             }
         }
         assert!(visible, "the detail draws as its own framed window");
-        // No install record readable here → the side-window fallback beside stats.
+        // No install record readable here → the side-window fallback beside stats, hanging at
+        // the command bar's bottom-left anchor - flush like every other window under that bar
+        // (owner ruling 2026-10-20, capture ur/29).
         assert_eq!(
             (left, top),
-            (Val::Px(130.0), Val::Px(48.0)),
+            (
+                Val::Px(130.0),
+                Val::Px(crate::hud::menu_help_bar::help_line_bottom_left().y)
+            ),
             "beside the stats column, over the Status-caption strip"
         );
         assert_eq!(

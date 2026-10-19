@@ -8830,27 +8830,28 @@ pub fn update_status_detail_window(
         (start, cursor)
     });
     if currency_view.is_some() && rows_len > 0 {
-        // ur/52+54: the page is exactly eight line boxes - no caption row inside. ur/55:
-        // that pin clipped the eighth row because the text nodes' own flow boxes run taller
-        // than this estimate, so it becomes a FLOOR: short pages hold full height, and if the
-        // measured rows need more the frame grows instead of cutting them off.
-        let page_h = crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
-            * CURRENCY_VISIBLE_ROWS as f32
-            + MENU_BORDER_PX * 2.0;
-        node.min_height = Val::Px(page_h);
-        // ur/54: the values column must not park on a far margin of an over-wide box, and
-        // ur/55: "right center the counter" - it rides the window's right margin with a
-        // clearance mirroring the rows' left inset, same law craft got (ur/50).
-        const CURRENCY_RIGHT_CLEARANCE_PX: f32 = 8.0;
-        let edge_chars = match node.width {
+        // ur/52+54: the page is exactly eight line boxes - no caption row inside. Each shown
+        // row node wears that exact height below (`currency_page_row_h`), so this pin and the
+        // sum of its rows can never disagree again (ur/55: a pinned box whose children were
+        // taller spilled past the bottom frame).
+        node.height =
+            Val::Px(currency_page_row_h() * CURRENCY_VISIBLE_ROWS as f32 + MENU_BORDER_PX * 2.0);
+        // ur/55: "right center the counter" - values ride the window's right margin (ur/50
+        // law). ur/56 pin: `edge` counts the row string's TOTAL characters, and a line still
+        // splits at whitespace once it outgrows its node's inner box even with
+        // LineBreak::NoWrap - that setting only kills mid-word character breaks - so the edge
+        // is measured against the INNER width (borders and chrome padding off), never the
+        // outer one: 45 chars over a 366 px record spilled ~8 px past the text box onto the
+        // frame, wrapping every row to two lines and doubling the page's pitch.
+        let inner_chars = match node.width {
             Val::Px(width) => Some(
-                ((width - MENU_BORDER_PX * 2.0 - CURRENCY_RIGHT_CLEARANCE_PX)
+                ((width - MENU_BORDER_PX * 2.0 - style::WINDOW_PAD_X_PX * 2.0)
                     / crate::ui_font::text_width_px("0", STATUS_DETAIL_ROW_FONT_PX))
                     as usize,
             ),
             _ => None,
         };
-        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, edge_chars);
+        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, inner_chars);
     }
     for (line, mut text, text_color, mut line_node) in line_q.iter_mut() {
         let row_index = match currency_view {
@@ -8888,16 +8889,21 @@ pub fn update_status_detail_window(
                 color.0 = want;
             }
         }
-        // The gauge row carries no text, and an empty text node measures nothing: without a height
-        // of its own the following row slides up under the bar (owner capture 2026-10-19, green
-        // arrow). It still needs the line box it replaced.
-        if row.label.is_empty() {
-            let want_height = Val::Px(crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX));
-            if line_node.height != want_height {
-                line_node.height = want_height;
-            }
-        } else if line_node.height != Val::Auto {
-            line_node.height = Val::Auto;
+        // A Currencies page is eight fixed line boxes (ur/56): each shown row takes exactly
+        // the height the window was pinned with, so no text measurement can drift the column
+        // out from under the frame.
+        let want_height = if currency_view.is_some() {
+            Val::Px(currency_page_row_h())
+        } else if row.label.is_empty() {
+            // The gauge row carries no text, and an empty text node measures nothing: without a
+            // height of its own the following row slides up under the bar (owner capture
+            // 2026-10-19, green arrow). It still needs the line box it replaced.
+            Val::Px(crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX))
+        } else {
+            Val::Auto
+        };
+        if line_node.height != want_height {
+            line_node.height = want_height;
         }
         if let Some(slot) = row_slots.as_ref().and_then(|v| v.get(line.slot)).copied() {
             // Slot coords are record-frame relative; the window's own 1px chrome border is
@@ -8988,6 +8994,13 @@ pub fn update_status_detail_window(
             fill_node.width = want_width;
         }
     }
+}
+
+/// The line box a Currencies page row fills (ur/56): both the window's eight-row pin and
+/// every shown line node take exactly this, so the sum of the rows is the frame by
+/// construction - no text-measurement pass can outgrow or drift under it either way.
+fn currency_page_row_h() -> f32 {
+    crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
 }
 
 /// Row slots and box height for the skill detail windows from the openers' law above: two
@@ -16101,6 +16114,96 @@ mod tests {
                 Val::Px(f32::from(PROFILE_FRAME.2))
             )
         );
+    }
+
+    /// Owner rulings 2026-10-20 (captures ur/55-56): "right center the counter", and the
+    /// eight-row page must stay inside its own frame. The window pin is `currency_page_row_h`
+    /// times eight plus chrome, and every shown row node WEARS that same height, so the rows
+    /// sum to the box by construction; and no displayed string may outgrow the inner width -
+    /// a soft-wrapped row doubles its pitch and spills past the fill (ur/56).
+    #[test]
+    fn currency_pages_pin_eight_line_boxes_and_fit_their_rows() {
+        let entry = crate::hud::status_panel::STATUS_ENTRIES
+            .iter()
+            .position(|e| e.kind == crate::hud::status_panel::StatusEntryKind::Currencies)
+            .expect("Currencies is a Status row") as u8;
+        let mut app = App::new();
+        app.init_resource::<ConfigDatRows>()
+            .init_resource::<DynamicMenu>()
+            .add_systems(Startup, spawn_status_detail_window)
+            .add_systems(Update, update_status_detail_window);
+        {
+            let mut rows = app.world_mut().resource_mut::<ConfigDatRows>();
+            // The install record his capture draws from: `evitem` at (16,48) 366 wide.
+            rows.frames.insert("evitem".into(), (16, 48, 366));
+        }
+        {
+            let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+            d.rows = [
+                "Conquest Points (San d'Oria) 0",
+                "Conquest Points (Bastok) 0",
+                "Beastmen's Seals Stored 128",
+                "Kindred's Crests Stored 0",
+                "High Kindred's Crests Stored 0",
+                "Sacred Kindred's Crests Stored 0",
+            ]
+            .into_iter()
+            .map(|label| DynamicMenuRow {
+                tint: None,
+                label: label.to_string(),
+                action: DynamicMenuAction::DisplayInfo,
+            })
+            .collect();
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::StatusDetail { entry });
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        app.update();
+
+        let row_h = currency_page_row_h();
+        let node = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailWindow>>()
+            .single(app.world())
+            .expect("the detail window");
+        assert_eq!(
+            node.width,
+            Val::Px(366.0),
+            "the seat is his evitem record width"
+        );
+        assert_eq!(
+            node.height,
+            Val::Px(row_h * 8.0 + MENU_BORDER_PX * 2.0),
+            "a page is exactly eight line boxes"
+        );
+        let inner_w = 366.0 - MENU_BORDER_PX * 2.0 - style::WINDOW_PAD_X_PX * 2.0;
+        let mut shown: Vec<(String, Val)> = app
+            .world_mut()
+            .query::<(&StatusDetailLine, &Text, &Node)>()
+            .iter(app.world())
+            .filter(|(_, _, n)| n.display != Display::None)
+            .map(|(_, t, n)| (t.as_str().to_string(), n.height))
+            .collect();
+        shown.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(shown.len(), 6, "one node per row on the first page");
+        for (label, height) in &shown {
+            assert_eq!(
+                *height,
+                Val::Px(row_h),
+                "row `{label}` wears the pinned line box"
+            );
+            assert!(
+                crate::ui_font::text_width_px(label.as_str(), STATUS_DETAIL_ROW_FONT_PX) <= inner_w,
+                "`{label}` would outgrow its node and soft-wrap onto a second line (ur/56)"
+            );
+        }
+        let digits_right = shown
+            .iter()
+            .filter(|(label, _)| label.ends_with('0') || label.ends_with('8'))
+            .count();
+        assert_eq!(digits_right, 6, "every value rides the column edge");
     }
 
     /// Owner ruling 2026-10-20 (ur/33): Job Levels draws retail's TWO-COLUMN grid without

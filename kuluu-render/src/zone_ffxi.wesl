@@ -2,6 +2,7 @@ import bevy_pbr::render::{
     mesh_functions,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
+    pbr_lighting::getRangeFalloff,
     view_transformations::position_world_to_clip,
 };
 import kuluu_render::directional_shadow::directional_shadow_factor;
@@ -144,7 +145,8 @@ fn shadowed_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag: vec2<f32>) -> vec
         let denom = a.x + a.y * dist + a.z * dist * dist;
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
         let shadow = point_shadow_factor(p, n, points.positions[i].xyz, frag);
-        rgb += shadow * nl * points.colors[i].rgb / max(denom, 1e-5);
+        let range_fade = getRangeFalloff(dist * dist, 1.0 / (range * range));
+        rgb += range_fade * shadow * nl * points.colors[i].rgb / max(denom, 1e-5);
     }
     return rgb;
 }

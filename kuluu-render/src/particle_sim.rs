@@ -263,6 +263,15 @@ pub(crate) fn is_lamp_halo_def(def: &ParticleGeneratorDef) -> bool {
 }
 
 const WALL_WASH_MESH_ID: [u8; 4] = *b"ligh";
+const PORT_LAMP_GLOW_MESH_ID: [u8; 4] = *b"lt  ";
+
+pub(crate) fn is_lamp_glow_def(def: &ParticleGeneratorDef) -> bool {
+    is_lamp_halo_def(def)
+        || (matches!(def.mesh_id, WALL_WASH_MESH_ID | PORT_LAMP_GLOW_MESH_ID)
+            && def.auto_run
+            && def.mesh_kind == ParticleMeshKind::SpriteSheet
+            && def.blend == ffxi_dat::particle_gen::ParticleBlend::Additive)
+}
 
 pub(crate) fn is_wall_wash_def(def: &ParticleGeneratorDef) -> bool {
     def.mesh_id == WALL_WASH_MESH_ID

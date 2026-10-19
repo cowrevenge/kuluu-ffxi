@@ -5,8 +5,9 @@ use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, CompareFunction, DepthBiasState, DepthStencilState, RenderPipelineDescriptor,
-    ShaderType, SpecializedMeshPipelineError, StencilFaceState, StencilState, TextureFormat,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, CompareFunction, DepthBiasState,
+    DepthStencilState, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    StencilFaceState, StencilState, TextureFormat,
 };
 use bevy::shader::ShaderRef;
 
@@ -113,17 +114,21 @@ pub struct FfxiParticleMaterial {
     // element_sort.rs — added to the view distance in the transparent sort.
     pub sort_bias: f32,
     pub depth_write: bool,
+    lamp_glow: bool,
+    soft_glow: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FfxiParticleMaterialKey {
     pub depth_write: bool,
+    soft_glow: bool,
 }
 
 impl From<&FfxiParticleMaterial> for FfxiParticleMaterialKey {
     fn from(m: &FfxiParticleMaterial) -> Self {
         Self {
             depth_write: m.depth_write,
+            soft_glow: m.soft_glow,
         }
     }
 }
@@ -155,6 +160,7 @@ impl FfxiParticleMaterial {
             // frame to frame and dance under/over one another as the camera moves.
             material.sort_bias = crate::element_sort::pinned_order_bias(dat_offset);
         }
+        material.lamp_glow = crate::particle_sim::is_lamp_glow_def(def);
         material
     }
 
@@ -186,6 +192,8 @@ impl FfxiParticleMaterial {
             alpha_mode,
             sort_bias,
             depth_write,
+            lamp_glow: false,
+            soft_glow: false,
         }
     }
 }
@@ -218,6 +226,20 @@ impl Material for FfxiParticleMaterial {
         // CMoElem::PrepDX sets D3DRS_CULLMODE to D3DCULL_NONE for every particle element
         // (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::PrepDX).
         descriptor.primitive.cull_mode = None;
+        if key.bind_group_data.soft_glow {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("SOFT_LAMP_GLOW".into());
+                for target in fragment.targets.iter_mut().flatten() {
+                    if let Some(blend) = target.blend.as_mut() {
+                        blend.color = BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::OneMinusSrc,
+                            operation: BlendOperation::Add,
+                        };
+                    }
+                }
+            }
+        }
         // MaterialPlugin pipelines ship no depth-stencil state, and wgpu builds a pipeline with
         // none as NO depth test at all — every additive element painted over the walls. State is
         // explicit here: compare GreaterEqual matches bevy_pbr's 3D pipeline (reversed-Z view
@@ -242,16 +264,90 @@ impl Material for FfxiParticleMaterial {
 
 pub struct FfxiParticleMaterialPlugin;
 
+fn update_lamp_glow_blending(
+    settings: Option<Res<crate::graphics_settings::GraphicsSettings>>,
+    mut materials: ResMut<Assets<FfxiParticleMaterial>>,
+) {
+    let enhanced = settings.is_some_and(|s| s.dynamic_lights.point_shadows_enabled());
+    let changes: Vec<_> = materials
+        .iter()
+        .filter_map(|(id, material)| {
+            let soft_glow = enhanced && material.lamp_glow;
+            (material.soft_glow != soft_glow).then_some((id, soft_glow))
+        })
+        .collect();
+    for (id, soft_glow) in changes {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.soft_glow = soft_glow;
+        }
+    }
+}
+
 impl Plugin for FfxiParticleMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "ffxi_particle.wesl");
-        app.add_plugins(MaterialPlugin::<FfxiParticleMaterial>::default());
+        app.add_plugins(MaterialPlugin::<FfxiParticleMaterial>::default())
+            .add_systems(PostUpdate, update_lamp_glow_blending);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhanced_glow_tracks_settings_and_new_materials() {
+        use crate::graphics_settings::{DynamicLights, GraphicsSettings};
+
+        let mut app = App::new();
+        app.init_resource::<Assets<FfxiParticleMaterial>>()
+            .init_resource::<GraphicsSettings>()
+            .add_systems(Update, update_lamp_glow_blending);
+        let make_material = |lamp_glow| {
+            let mut material = FfxiParticleMaterial::new(
+                D3mBlendMode::Additive,
+                None,
+                ParticleFog::Off,
+                0.0,
+                false,
+                D3mDrawPath::D3m,
+                false,
+            );
+            material.lamp_glow = lamp_glow;
+            material
+        };
+        let (lamp, effect) = {
+            let mut materials = app
+                .world_mut()
+                .resource_mut::<Assets<FfxiParticleMaterial>>();
+            (
+                materials.add(make_material(true)),
+                materials.add(make_material(false)),
+            )
+        };
+        for mode in [
+            DynamicLights::Enhanced,
+            DynamicLights::Vanilla,
+            DynamicLights::Off,
+        ] {
+            app.world_mut()
+                .resource_mut::<GraphicsSettings>()
+                .dynamic_lights = mode;
+            let new_lamp = app
+                .world_mut()
+                .resource_mut::<Assets<FfxiParticleMaterial>>()
+                .add(make_material(true));
+            app.update();
+            let materials = app.world().resource::<Assets<FfxiParticleMaterial>>();
+            for handle in [&lamp, &new_lamp] {
+                assert_eq!(
+                    materials.get(handle).unwrap().soft_glow,
+                    mode.point_shadows_enabled()
+                );
+            }
+            assert!(!materials.get(&effect).unwrap().soft_glow);
+        }
+    }
 
     // Bevy resolves Add and Premultiplied to one BlendState and distinguishes them only by
     // what the fragment shader emits, so the premultiply selector has to track alpha_mode.

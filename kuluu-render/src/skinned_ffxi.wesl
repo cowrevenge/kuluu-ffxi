@@ -7,6 +7,7 @@ import bevy_pbr::render::{
 };
 import kuluu_render::directional_shadow::directional_shadow_factor;
 import kuluu_render::point_shadow::point_shadow_factor;
+import bevy_pbr::render::pbr_lighting::getRangeFalloff;
 @if(DISTANCE_FOG)
 import bevy_pbr::render::fog as fog_fns;
 
@@ -205,7 +206,8 @@ fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale
                 // zone_ffxi.wesl so the shadow reads the same on the character and the deck.
                 var shadow = 1.0;
                 if (point_shadows) {
-                    shadow = point_shadow_factor(p, n, skins[si].lighting.point_pos[i].xyz, frag_coord);
+                    shadow = point_shadow_factor(p, n, skins[si].lighting.point_pos[i].xyz, frag_coord)
+                        * getRangeFalloff(dist * dist, 1.0 / (range * range));
                 }
                 rgb += shadow * nl * dist_factor * skins[si].lighting.point_color[i].rgb;
             }

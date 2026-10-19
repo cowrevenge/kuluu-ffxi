@@ -215,6 +215,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = apply_element_fog(core, in.world_position.xyz, data.params.y);
 
     if data.params.x == PREMULTIPLY_ADD {
+        @if(SOFT_LAMP_GLOW)
+        return vec4<f32>(color.rgb * color.a / (vec3<f32>(1.0) + color.rgb * color.a), 0.0);
+        @if(!SOFT_LAMP_GLOW)
         return vec4<f32>(color.rgb * color.a, 0.0);
     }
     if data.params.x == PREMULTIPLY_MULTIPLY {

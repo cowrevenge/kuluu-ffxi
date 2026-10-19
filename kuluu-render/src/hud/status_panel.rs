@@ -329,6 +329,12 @@ pub struct StatusExpFill;
 const LEVEL_GAUGE_CAP_WIDTH_PX: f32 = 3.0;
 const LEVEL_GAUGE_CAP_HEIGHT_PX: f32 = 8.0;
 const LEVEL_GAUGE_TRACK_HEIGHT_PX: f32 = 6.0;
+/// Air under the gauge's bottom edge, owned BY THE GAUGE ROW (margin), not by the box.
+/// Owner ruling 2026-10-20 (capture ur/24): "the extra edges of XP bar are still not being
+/// counted in height properly" - with zero box padding the caps' last pixel row landed ON the
+/// frame line. The clearance is part of what the gauge itself measures, so the auto-height box
+/// counts it while keeping no bottom padding of its own (the no-padding law stays on every box).
+const LEVEL_GAUGE_BOTTOM_CLEARANCE_PX: f32 = 6.0;
 /// The EXP label sits further right than NEXTLevel in the retail box.
 pub const LEVEL_EXP_LABEL_INDENT_PX: f32 = 14.0;
 /// Retail values end short of the column's right edge, over the gauge's tail.
@@ -758,8 +764,9 @@ pub fn spawn_status_panel(mut commands: Commands) {
             StatusLevelBox,
             Node {
                 width: Val::Px(PANEL_WIDTH_PX),
-                // Owner ruling 2026-10-20: no padding at the bottom of these boxes - the gauge
-                // ends at the box's border, top and side air unchanged.
+                // Owner ruling 2026-10-20: no padding at the bottom of these boxes, top and side
+                // air unchanged. The gauge still clears the frame - that clearance belongs to the
+                // gauge row's own margin (`LEVEL_GAUGE_BOTTOM_CLEARANCE_PX`), never to the box.
                 padding: UiRect {
                     left: Val::Px(10.0),
                     right: Val::Px(10.0),
@@ -797,6 +804,10 @@ pub fn spawn_status_panel(mut commands: Commands) {
             b.spawn(Node {
                 width: Val::Percent(100.0),
                 align_items: AlignItems::Center,
+                // The gauge row carries the air under its own bottom edge so the caps' extra
+                // edges count into the box's measured height instead of sitting on the border
+                // (owner ruling 2026-10-20; capture ur/24).
+                margin: UiRect::bottom(Val::Px(LEVEL_GAUGE_BOTTOM_CLEARANCE_PX)),
                 ..default()
             })
             .with_children(|g| {
@@ -2315,6 +2326,27 @@ mod tests {
             "the track takes the whole span between caps"
         );
         assert_eq!(bg.0, LEVEL_GAUGE_TRACK_COLOR);
+    }
+
+    /// The gauge row reserves the air under its own bottom edge (owner ruling 2026-10-20,
+    /// capture ur/24: "the extra edges of XP bar are still not being counted in height
+    /// properly") - with no padding on the box, the caps' overhang must be part of what layout
+    /// measures for the gauge itself, or its last pixel row lands on the frame line.
+    #[test]
+    fn exp_gauge_row_carries_its_under_edge_footprint() {
+        let mut app = persona_app();
+        let world = app.world_mut();
+        let row_entity = world
+            .query_filtered::<&ChildOf, With<StatusExpTrack>>()
+            .single(world)
+            .expect("one gauge track")
+            .parent();
+        let row = world.get::<Node>(row_entity).expect("gauge row node");
+        assert_eq!(
+            row.margin.bottom,
+            Val::Px(LEVEL_GAUGE_BOTTOM_CLEARANCE_PX),
+            "the gauge row owns the clearance under its caps"
+        );
     }
 
     /// Retail law (DAT records + owner screenshots 2026-10-19): side details — Profile,

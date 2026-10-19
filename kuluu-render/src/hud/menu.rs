@@ -8830,14 +8830,27 @@ pub fn update_status_detail_window(
         (start, cursor)
     });
     if currency_view.is_some() && rows_len > 0 {
-        // ur/52+54: the page is exactly eight line boxes - no caption row inside.
+        // ur/52+54: the page is exactly eight line boxes - no caption row inside. ur/55:
+        // that pin clipped the eighth row because the text nodes' own flow boxes run taller
+        // than this estimate, so it becomes a FLOOR: short pages hold full height, and if the
+        // measured rows need more the frame grows instead of cutting them off.
         let page_h = crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
             * CURRENCY_VISIBLE_ROWS as f32
             + MENU_BORDER_PX * 2.0;
-        node.height = Val::Px(page_h);
-        // ur/54: "the space is about twice and big as it shoudl be" - values follow the longest
-        // label with a single-space gap, not a column parked on the window's far margin.
-        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, None);
+        node.min_height = Val::Px(page_h);
+        // ur/54: the values column must not park on a far margin of an over-wide box, and
+        // ur/55: "right center the counter" - it rides the window's right margin with a
+        // clearance mirroring the rows' left inset, same law craft got (ur/50).
+        const CURRENCY_RIGHT_CLEARANCE_PX: f32 = 8.0;
+        let edge_chars = match node.width {
+            Val::Px(width) => Some(
+                ((width - MENU_BORDER_PX * 2.0 - CURRENCY_RIGHT_CLEARANCE_PX)
+                    / crate::ui_font::text_width_px("0", STATUS_DETAIL_ROW_FONT_PX))
+                    as usize,
+            ),
+            _ => None,
+        };
+        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, edge_chars);
     }
     for (line, mut text, text_color, mut line_node) in line_q.iter_mut() {
         let row_index = match currency_view {

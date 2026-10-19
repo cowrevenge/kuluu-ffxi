@@ -772,7 +772,13 @@ pub(crate) fn update_item_scrollbar(
     };
     let total = list_rows(&state.snapshot, screen_mode, active_bag.0, &sort).len();
     if let (Ok(mut track), Ok(mut thumb)) = (track_q.single_mut(), thumb_q.single_mut()) {
-        list_view::apply_scrollbar(&mut track, &mut thumb, viewport.start, total);
+        list_view::apply_scrollbar(
+            &mut track,
+            &mut thumb,
+            viewport.start,
+            total,
+            list_view::LIST_ROWS,
+        );
     }
 }
 

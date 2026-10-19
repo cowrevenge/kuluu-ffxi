@@ -8258,6 +8258,15 @@ pub struct StatusDetailLine {
     pub slot: usize,
 }
 
+/// ur/57 ("needs a scrollbar on the right side"): the slim right-edge bar that reports where
+/// a Currencies page sits in its list. Shared `list_view` furniture, anchored inside this
+/// window's right chrome edge and driven by the same viewport the rows follow.
+#[derive(Component)]
+pub struct StatusDetailScrollTrack;
+
+#[derive(Component)]
+pub struct StatusDetailScrollThumb;
+
 /// The conquest-rank gauge the Profile window draws under its `Rank:` row. Retail shows a pale-blue
 /// bar with end caps one line below that row, starting under the label printed beside the rank
 /// (owner capture 2026-10-19). It mirrors persona's experience gauge in shape and colour, whose
@@ -8368,6 +8377,13 @@ pub fn spawn_status_detail_window(mut commands: Commands) {
                     BackgroundColor(Color::NONE),
                 ));
             }
+            // ur/57: right-edge scrollbar for a Currencies page whose list outgrows the eight
+            // rows; hidden until then.
+            crate::hud::list_view::spawn_scrollbar(
+                w,
+                StatusDetailScrollTrack,
+                StatusDetailScrollThumb,
+            );
             // The rank gauge, sized and placed by `update_status_detail_window`. Absolute so it
             // never takes a line of the row flow: the empty spacer row Profile emits holds its slot.
             w.spawn((
@@ -8440,7 +8456,14 @@ pub fn update_status_detail_window(
     // Details wear their name in the REGULAR cut at row size (owner ruling 2026-10-20, ur/36),
     // so this is the same face every other text in the box draws with - not the selector's italic.
     ui_font: Option<Res<crate::ui_font::UiFont>>,
-    mut frame_q: Query<&mut Node, With<StatusDetailWindow>>,
+    mut frame_q: Query<
+        &mut Node,
+        (
+            With<StatusDetailWindow>,
+            Without<StatusDetailScrollTrack>,
+            Without<StatusDetailScrollThumb>,
+        ),
+    >,
     // The caption band's two parts in one pass: whichever node also carries the Text is the word.
     mut band_q: Query<
         (&mut Node, Option<&mut Text>, Option<&mut TextFont>),
@@ -8450,6 +8473,8 @@ pub fn update_status_detail_window(
             Without<StatusDetailLine>,
             Without<StatusDetailRankBar>,
             Without<StatusDetailRankFill>,
+            Without<StatusDetailScrollTrack>,
+            Without<StatusDetailScrollThumb>,
             Without<crate::hud::status_panel::StatusPanel>,
         ),
     >,
@@ -8465,6 +8490,8 @@ pub fn update_status_detail_window(
             Without<StatusDetailWindow>,
             Without<StatusDetailRankBar>,
             Without<StatusDetailRankFill>,
+            Without<StatusDetailScrollTrack>,
+            Without<StatusDetailScrollThumb>,
             Without<crate::hud::status_panel::StatusPanel>,
         ),
     >,
@@ -8477,6 +8504,8 @@ pub fn update_status_detail_window(
             Without<StatusDetailTitle>,
             Without<StatusDetailTitleMask>,
             Without<StatusDetailRankFill>,
+            Without<StatusDetailScrollTrack>,
+            Without<StatusDetailScrollThumb>,
             Without<crate::hud::status_panel::StatusPanel>,
         ),
     >,
@@ -8489,7 +8518,37 @@ pub fn update_status_detail_window(
             Without<StatusDetailTitle>,
             Without<StatusDetailTitleMask>,
             Without<StatusDetailRankBar>,
+            Without<StatusDetailScrollTrack>,
+            Without<StatusDetailScrollThumb>,
             Without<crate::hud::status_panel::StatusPanel>,
+        ),
+    >,
+    // ur/57: the right-edge scrollbar pair for a Currencies page, driven at the foot of
+    // this system from the same viewport the rows follow.
+    mut scroll_track_q: Query<
+        &mut Node,
+        (
+            With<StatusDetailScrollTrack>,
+            Without<StatusDetailWindow>,
+            Without<StatusDetailTitle>,
+            Without<StatusDetailTitleMask>,
+            Without<StatusDetailLine>,
+            Without<StatusDetailRankBar>,
+            Without<StatusDetailRankFill>,
+            Without<StatusDetailScrollThumb>,
+        ),
+    >,
+    mut scroll_thumb_q: Query<
+        &mut Node,
+        (
+            With<StatusDetailScrollThumb>,
+            Without<StatusDetailWindow>,
+            Without<StatusDetailTitle>,
+            Without<StatusDetailTitleMask>,
+            Without<StatusDetailLine>,
+            Without<StatusDetailRankBar>,
+            Without<StatusDetailRankFill>,
+            Without<StatusDetailScrollTrack>,
         ),
     >,
     mut persona_width_q: Query<
@@ -8503,6 +8562,8 @@ pub fn update_status_detail_window(
                 Without<StatusDetailLine>,
                 Without<StatusDetailRankBar>,
                 Without<StatusDetailRankFill>,
+                Without<StatusDetailScrollTrack>,
+                Without<StatusDetailScrollThumb>,
             ),
         ),
     >,
@@ -8541,6 +8602,11 @@ pub fn update_status_detail_window(
             for mut bar_node in bar_q.iter_mut() {
                 if bar_node.display != Display::None {
                     bar_node.display = Display::None;
+                }
+            }
+            for mut track in scroll_track_q.iter_mut() {
+                if track.display != Display::None {
+                    track.display = Display::None;
                 }
             }
             return;
@@ -8919,6 +8985,39 @@ pub fn update_status_detail_window(
         }
         if line_node.display != Display::Flex {
             line_node.display = Display::Flex;
+        }
+    }
+
+    // ur/57 ("needs a srollbar on the right side"): the Currencies pages report where their
+    // page sits in the list through shared `list_view` furniture - a slim track stretched along
+    // the fill's whole right edge inside the chrome border, thumb sized to the page's share of
+    // the rows. A list that fits its eight rows shows no bar.
+    if let (Ok(mut track), Ok(mut thumb)) =
+        (scroll_track_q.single_mut(), scroll_thumb_q.single_mut())
+    {
+        track.position_type = PositionType::Absolute;
+        // Anchored on the right/bottom edges so it does not matter whether this window's
+        // padding box starts at the border or a padding inlay: flush inside the chrome, top
+        // to bottom of the fill.
+        track.left = Val::Auto;
+        track.right = Val::Px(MENU_BORDER_PX);
+        track.top = Val::Px(0.0);
+        track.bottom = Val::Px(0.0);
+        match currency_view {
+            Some((start, _)) if rows_len > CURRENCY_VISIBLE_ROWS => {
+                crate::hud::list_view::apply_scrollbar(
+                    &mut track,
+                    &mut thumb,
+                    start,
+                    rows_len,
+                    CURRENCY_VISIBLE_ROWS,
+                );
+            }
+            _ => {
+                if track.display != Display::None {
+                    track.display = Display::None;
+                }
+            }
         }
     }
 
@@ -16204,6 +16303,56 @@ mod tests {
             .filter(|(label, _)| label.ends_with('0') || label.ends_with('8'))
             .count();
         assert_eq!(digits_right, 6, "every value rides the column edge");
+        let track = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailScrollTrack>>()
+            .single(app.world())
+            .expect("the spawned scrollbar track");
+        assert_eq!(track.display, Display::None, "a list of six fits its page");
+
+        // ur/57 ("needs a srollbar on the right side"): once the list outgrows one page the
+        // bar appears, thumb sized to the page's share and sitting where the page sits.
+        {
+            let mut d = app.world_mut().resource_mut::<DynamicMenu>();
+            d.rows = (0..12)
+                .map(|i| DynamicMenuRow {
+                    tint: None,
+                    label: format!("Kindred's Crests Stored {i} 0"),
+                    action: DynamicMenuAction::DisplayInfo,
+                })
+                .collect();
+        }
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Status);
+        stack.push(MenuKind::StatusDetail { entry });
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        app.update();
+        let track = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailScrollTrack>>()
+            .single(app.world())
+            .expect("the spawned scrollbar track");
+        assert_eq!(
+            track.display,
+            Display::Flex,
+            "twelve rows report a scrollable page"
+        );
+        assert_eq!((track.top, track.bottom), (Val::Px(0.0), Val::Px(0.0)));
+        let thumb = app
+            .world_mut()
+            .query_filtered::<&Node, With<StatusDetailScrollThumb>>()
+            .single(app.world())
+            .expect("the spawned scrollbar thumb");
+        let (Val::Percent(top), Val::Percent(height)) = (thumb.top, thumb.height) else {
+            panic!("thumb geometry is reported as percentages of the track");
+        };
+        assert!((top - 0.0).abs() < 0.01, "the first page rides at the top");
+        let want = 100.0 * 8.0 / 12.0;
+        assert!(
+            (height - want).abs() < 0.01,
+            "eight of twelve rows visible: got {height}%"
+        );
     }
 
     /// Owner ruling 2026-10-20 (ur/33): Job Levels draws retail's TWO-COLUMN grid without

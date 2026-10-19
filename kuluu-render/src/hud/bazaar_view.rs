@@ -426,6 +426,7 @@ pub(crate) fn update_bazaar_scrollbar(
             &mut thumb,
             screen.viewport.start,
             view.items.len(),
+            list_view::LIST_ROWS,
         );
     }
 }

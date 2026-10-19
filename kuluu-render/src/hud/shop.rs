@@ -902,7 +902,13 @@ pub(crate) fn update_shop_scrollbar(
     }
     let total = rows_for(screen.mode, &state.snapshot).len();
     if let (Ok(mut track), Ok(mut thumb)) = (track_q.single_mut(), thumb_q.single_mut()) {
-        list_view::apply_scrollbar(&mut track, &mut thumb, screen.viewport.start, total);
+        list_view::apply_scrollbar(
+            &mut track,
+            &mut thumb,
+            screen.viewport.start,
+            total,
+            list_view::LIST_ROWS,
+        );
     }
 }
 

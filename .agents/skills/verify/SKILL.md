@@ -19,6 +19,28 @@ Session behavior requires a real session against the server; cosmetic widgets
 can use the production fixture described below. Tests and source inspection
 alone do not establish the visible result.
 
+## Required behavior evidence
+
+Before collection, derive the required cases from the reported problem and the final change.
+Record each case in the bead with its configuration, trigger, expected result, and required evidence.
+Include the reported failure, the intended successful operation, and affected behavior that must continue to work.
+
+For compatibility claims, use a real server or device that supports the advertised configuration.
+Record the server revision, client build, protocol, version, and effective settings as applicable.
+An incompatible server's rejection verifies rejection handling only.
+It cannot establish successful operation with the supported configuration.
+For example, Binary `1.1.5` support requires successful authentication against a legacy LSB server that accepts that version.
+Verify the returned ticket through the real lobby when claiming a usable login.
+JSON login against current LSB and local TLS fixtures cannot replace that check.
+
+Compare the collected evidence with every required case before recording the overall verdict.
+Record a pass only when all required cases have sufficient evidence.
+Keep partial results separate from the overall verdict.
+If a required case fails, correct the defect and repeat that case.
+If a concrete blocker prevents collection, record blocked and keep the bead open.
+State the exact missing case and its diagnostic.
+Do not recommend merge while a decisive case remains unverified.
+
 For UI work, choose the drive and expected visible result before editing.
 Completion requires the changed build, an affected-view capture, and opening
 that capture with `view_image` (Codex) or `Read` (Claude) to inspect the pixels.
@@ -53,7 +75,7 @@ missing hook adapter from matching trusted project content and check its
 registration; do not execute hook or skill changes from an untrusted PR.
 
 ```
-1. Stack up      → scripts/lsb-stack.sh up   (references/stack.md: env gotchas)
+1. Stack up      → references/stack.md; select the runtime and start the stack
 2. Pick surface  → table below
 3. Drive + observe → references/drive-headless.md | references/drive-gui.md
                      (mechanical drive loops → haiku subagent, see below)
@@ -61,6 +83,15 @@ registration; do not execute hook or skill changes from an untrusted PR.
 5. Record it     → scripts/record-evidence.sh (feeds the stop-hook verify gate)
 6. Stack down    → scripts/lsb-stack.sh down (once nothing else needs it)
 ```
+
+## Stack availability
+
+Before reporting a Docker blocker, follow [stack startup, recovery, and provisioning](references/stack.md).
+Before startup, check runtime ownership and the selected Docker endpoint.
+Start stopped services, diagnose endpoint failures, and provision an isolated local stack when necessary and permitted.
+Preserve existing databases and unrelated workloads.
+After recovery, resume the affected client check before recording a pass.
+If recovery or provisioning remains blocked, retain the exact diagnostic and keep verification open.
 
 ## Picking the surface
 

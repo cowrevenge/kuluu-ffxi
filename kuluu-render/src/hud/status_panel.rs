@@ -1113,26 +1113,14 @@ pub fn update_persona_frame(
     for mut node in panel_q.iter_mut() {
         let mut want = node.clone();
         want.width = Val::Px(layout.width);
-        // Owner ruling 2026-10-20: remove the padding at the bottom of these boxes. The stats
-        // panel keeps no padding under its last row, and takes only as much height as the rows it
-        // actually draws - a thirteen-row character used to end in a band of empty blue above the
-        // bottom border (owner capture 2026-10-20, far-left arrow). The fitted pitch stays law.
+        // Owner ruling 2026-10-20: no padding at the bottom of these boxes. Height is deliberately
+        // NOT computed here (an earlier attempt pinned `border + top pad + gaps + pitch x rows`):
+        // Taffy lays the rows out a touch taller than that arithmetic assumes, and once the old
+        // slack was gone the overflow showed up as CHR crossing the bottom border (owner capture,
+        // red arrows). One source of truth - Taffy measures, so flow children are inside by
+        // construction; short characters simply end higher. Width stays from the record.
         want.padding.bottom = Val::ZERO;
-        want.height = match (layout.height, layout.line_pitch) {
-            (Some(_h), Some(pitch)) => {
-                let visible_rows = persona_lines(&state.snapshot).len().min(PERSONA_ROW_COUNT);
-                // border + top padding · block gaps · one fitted pitch per drawn row · bottom
-                // border. No bottom pad, no undrawn rows' worth of height.
-                Val::Px(
-                    2.0 * PERSONA_BORDER_PX
-                        + PERSONA_PAD_Y_PX
-                        + PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX
-                        + pitch * visible_rows as f32,
-                )
-            }
-            (Some(h), None) => Val::Px(h),
-            _ => Val::Auto,
-        };
+        want.height = Val::Auto;
         want.row_gap = Val::Px(layout.row_gap);
         node.set_if_neq(want);
     }
@@ -1880,9 +1868,9 @@ mod tests {
             .clone()
     }
 
-    /// Persona takes width from its record frame, fits the pitch to that frame, and (owner
-    /// 2026-10-20) spends only its drawn rows on height with no bottom padding; without an install
-    /// it keeps kuluu's own panel.
+    /// Persona takes width from its record frame and fits the pitch to that frame, but lets layout
+    /// measure its height (owner 2026-10-20: pinned arithmetic laid CHR across the border once the
+    /// bottom padding went); without an install it keeps kuluu's own panel.
     #[test]
     fn persona_takes_its_rectangle_from_its_record_frame() {
         let mut app = persona_app();
@@ -1912,27 +1900,13 @@ mod tests {
         }
         app.update();
         let placed = persona_node(&mut app);
-        // Height law (owner 2026-10-20): borders + top padding + the two block gaps + one fitted
-        // pitch per drawn row; nothing under the last row.
-        let inner_full = f32::from(RECORD_HEIGHT)
-            - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX)
-            - PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX;
-        let pitch = inner_full / PERSONA_ROW_COUNT as f32;
-        let visible = persona_lines(&app.world().resource::<SceneState>().snapshot).len();
-        assert!((1..=PERSONA_ROW_COUNT).contains(&visible));
+        // Height law (owner 2026-10-20): Taffy measures the box - never arithmetic pinning, which
+        // laid CHR across the border once there was no slack under it. No bottom padding at all.
         assert_eq!(placed.padding.bottom, Val::ZERO);
         assert_eq!(
             (placed.width, placed.height),
-            (
-                Val::Px(f32::from(RECORD_WIDTH)),
-                Val::Px(
-                    2.0 * PERSONA_BORDER_PX
-                        + PERSONA_PAD_Y_PX
-                        + PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX
-                        + pitch * visible as f32,
-                ),
-            ),
-            "width from the record; height spent on drawn rows with no bottom padding"
+            (Val::Px(f32::from(RECORD_WIDTH)), Val::Auto),
+            "width from the record; height measured by layout, never computed"
         );
 
         let inner = f32::from(RECORD_HEIGHT) - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX);

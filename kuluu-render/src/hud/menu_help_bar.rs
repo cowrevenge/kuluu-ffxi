@@ -371,6 +371,9 @@ pub fn update_menu_help_bar(
             With<MenuHelpCounter>,
             Without<MenuHelpTitle>,
             Without<MenuHelpHint>,
+            // B0001 law of this system: pairwise-disjoint `&mut Node` access.
+            Without<MenuHelpBar>,
+            Without<MenuHelpPaneSwitch>,
         ),
     >,
     mut hint_q: Query<
@@ -557,7 +560,7 @@ pub fn update_menu_help_bar(
         // than every other window - an empty counter kept its flex slot, so the segment's
         // column gap added a phantom inset before it. An absent counter takes no slot; this is
         // the counter node, not the title box (whose slot must stay, x3 ruling of 2026-10-19).
-        let want = if content.counter.is_empty() {
+        let want = if text.is_empty() {
             Display::None
         } else {
             Display::Flex

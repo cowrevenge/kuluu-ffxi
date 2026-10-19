@@ -8622,9 +8622,7 @@ pub fn update_status_detail_window(
         let want_top = if want_title.is_empty() {
             Val::ZERO
         } else {
-            Val::Px(
-                crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0 - MENU_BORDER_PX / 2.0,
-            )
+            Val::Px(crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0 - MENU_BORDER_PX / 2.0)
         };
         if node.padding.top != want_top {
             node.padding.top = want_top;

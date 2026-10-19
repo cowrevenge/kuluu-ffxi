@@ -247,8 +247,12 @@ def jev_decide(config, image, character):
     image = image.expanduser().resolve()
     png_size(image)
     with tempfile.TemporaryDirectory() as temporary:
+        source = Path(temporary) / 'source.png'
+        source_data = image.read_bytes()
+        source_hash = hashlib.sha256(source_data).hexdigest()
+        source.write_bytes(source_data)
         resized = Path(temporary) / 'screen.png'
-        run(['sips', '-Z', MAX_IMAGE_EDGE, image, '--out', resized], capture_output=True)
+        run(['sips', '-Z', MAX_IMAGE_EDGE, source, '--out', resized], capture_output=True)
         if min(png_size(resized)) < MIN_IMAGE_EDGE:
             raise ValueError('The image is too small for Jev. Each edge must be at least 280 pixels.')
         image_data = resized.read_bytes()
@@ -282,10 +286,14 @@ def jev_decide(config, image, character):
             result = json.load(response)
     except urllib.error.HTTPError as error:
         raise ValueError(f'Jev returned HTTP {error.code}. No input was sent.') from None
-    answers = result.get('answers', {})
-    if answers.get('next_key', {}).get('choice') not in ('enter', 'wait', 'stop'):
+    if not isinstance(result, dict) or not isinstance(result.get('answers'), dict):
+        raise ValueError('Jev returned an invalid answer structure. No input was sent.')
+    answers = result['answers']
+    if any(not isinstance(answers.get(field), dict) for field in ('screen', 'next_key')):
+        raise ValueError('Jev returned an invalid answer structure. No input was sent.')
+    if answers['next_key'].get('choice') not in ('enter', 'wait', 'stop'):
         raise ValueError('Jev returned an unsupported decision. No input was sent.')
-    output = dict(image=str(image), image_sha256=digest(image),
+    output = dict(image=str(image), image_sha256=source_hash,
                   submitted_sha256=hashlib.sha256(image_data).hexdigest(),
                   seconds=round(time.monotonic() - started, 3), response=result)
     target = image.with_suffix('.jev.json')
@@ -334,7 +342,7 @@ def decide(config, args):
                 raise ValueError('Vision was selected.')
             result = jev_decide(config, image, args.character)
             answers = result['response']['answers']
-            decision = dict(image_sha256=digest(image), screen=answers['screen']['choice'],
+            decision = dict(image_sha256=result['image_sha256'], screen=answers['screen']['choice'],
                             next_key=answers['next_key']['choice'],
                             confidence=min(answers['screen']['confidence'], answers['next_key']['confidence']))
             validate_decision(decision, image)

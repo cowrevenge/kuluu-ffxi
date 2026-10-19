@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import base64
+import hashlib
 import io
 import contextlib
 import os
@@ -73,8 +75,57 @@ class MacosPackageTests(unittest.TestCase):
                 self.assertEqual(result['image_sha256'], m.digest(self.image))
                 self.assertIn('schema', result)
 
+    def resize_stub(self, arguments, **kwargs):
+        Path(arguments[-1]).write_bytes(Path(arguments[3]).read_bytes())
+
+    def test_malformed_jev_json_requests_vision(self):
+        payloads = [None, [], {'answers': None}, {'answers': []},
+                    {'answers': {'next_key': None}}, {'answers': {'screen': [], 'next_key': {}}}]
+        config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
+        for payload in payloads:
+            with self.subTest(payload=payload), patch.object(m, 'run', side_effect=self.resize_stub), \
+                    patch.object(m, 'credential', return_value='test'), \
+                    patch.object(m.urllib.request, 'urlopen', return_value=io.StringIO(json.dumps(payload))):
+                m.decide(config, self.args)
+                result = json.loads(self.image.with_suffix('.decision.json').read_text())
+                self.assertEqual(result['status'], 'needs_vision')
+
+    def test_capture_replacement_cannot_relabel_an_old_decision(self):
+        original = self.image.read_bytes()
+        submitted = []
+        def response(request, **kwargs):
+            body = json.loads(request.data)
+            submitted.append(base64.b64decode(body['assets']['game-screen']['data_base64']))
+            self.image.write_bytes(original + b'new frame')
+            return io.StringIO(json.dumps({'answers': {
+                'screen': {'choice': 'character_select', 'confidence': 1},
+                'next_key': {'choice': 'enter', 'confidence': 1}}}))
+        config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
+        with patch.object(m, 'run', side_effect=self.resize_stub), \
+                patch.object(m, 'credential', return_value='test'), \
+                patch.object(m.urllib.request, 'urlopen', side_effect=response):
+            m.decide(config, self.args)
+        result = json.loads(self.image.with_suffix('.decision.json').read_text())
+        self.assertEqual(submitted, [original])
+        self.assertEqual(result['status'], 'needs_vision')
+        raw = json.loads(self.image.with_suffix('.jev.json').read_text())
+        self.assertEqual(raw['image_sha256'], hashlib.sha256(original).hexdigest())
+        self.assertNotEqual(raw['image_sha256'], result['image_sha256'])
+
+    def test_valid_jev_response_keeps_its_capture_hash(self):
+        payload = {'answers': {'screen': {'choice': 'gameplay', 'confidence': 1},
+                               'next_key': {'choice': 'stop', 'confidence': 1}}}
+        config = dict(jev_model=m.JEV_MODEL, jev_key_file='/not-read')
+        with patch.object(m, 'run', side_effect=self.resize_stub), \
+                patch.object(m, 'credential', return_value='test'), \
+                patch.object(m.urllib.request, 'urlopen', return_value=io.StringIO(json.dumps(payload))):
+            m.decide(config, self.args)
+        result = json.loads(self.image.with_suffix('.decision.json').read_text())
+        self.assertEqual(result['provider'], 'jev')
+        self.assertEqual(result['decision']['image_sha256'], m.digest(self.image))
+
     def test_low_confidence_jev_answer_requests_vision(self):
-        response = dict(seconds=.1, response=dict(answers={
+        response = dict(seconds=.1, image_sha256=m.digest(self.image), response=dict(answers={
             'screen': dict(choice='gameplay', confidence=.7),
             'next_key': dict(choice='stop', confidence=1)}))
         with patch.object(m, 'jev_decide', return_value=response):

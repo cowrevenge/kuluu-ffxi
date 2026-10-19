@@ -8647,9 +8647,16 @@ pub fn update_status_detail_window(
             }),
             STATUS_DETAIL_ROW_FONT_PX,
         ) + 20.0;
-        let fit =
-            (16.0 + col_w(0, half) + 12.0 + col_w(half.min(rows_len), rows_len) + MENU_BORDER_PX)
-                .max(wide);
+        // Owner ruling 2026-10-20 (ur/43): the last column's digits must not sit on the frame -
+        // leave a right clearance mirroring the left inset after measuring.
+        const ROSTER_RIGHT_CLEARANCE_PX: f32 = 8.0;
+        let fit = (16.0
+            + col_w(0, half)
+            + 12.0
+            + col_w(half.min(rows_len), rows_len)
+            + ROSTER_RIGHT_CLEARANCE_PX
+            + MENU_BORDER_PX)
+            .max(wide);
         // The fit wins even where an install supplies the record frame: this branch is the
         // fallback-drawn two-column mode itself, and its whole width is the dead air of ur/38.
         // Owner ruling 2026-10-20 (ur/42): the box gets the width the padded columns actually
@@ -8931,9 +8938,30 @@ fn skill_window_layout(rows_len: usize, two_columns: bool) -> (Option<Vec<(i16, 
 /// Digits reserve at least two slots (ur/39 "lets assume 2 digits always for space"); rows that
 /// do not end in a separated number pass through untouched.
 fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<String> {
-    let split_num = |label: &str| -> Option<(String, String)> {
+    let split_num = |label: &str| -> Option<(String, String, bool)> {
         let chars: Vec<char> = label.chars().collect();
         let n = chars.len();
+        // Craft's trailing `(level)` group (owner capture ur/45): the parens are kept and
+        // only the digits inside them take the column padding.
+        if n >= 3 && chars[n - 1] == ')' {
+            let mut d = n - 1;
+            while d > 0 && chars[d - 1].is_ascii_digit() {
+                d -= 1;
+            }
+            let open =
+                d >= 2 && chars[d - 1] == '(' && chars[..d - 1].iter().any(|c| c.is_whitespace());
+            if open {
+                let num = chars[d..n - 1].iter().collect::<String>();
+                if !num.is_empty() {
+                    let stem = chars[..d - 1]
+                        .iter()
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string();
+                    return Some((stem, num, true));
+                }
+            }
+        }
         let mut i = n;
         while i > 0 && chars[i - 1].is_ascii_digit() {
             i -= 1;
@@ -8947,29 +8975,36 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
         let num = chars[i..].iter().collect::<String>();
         // The stem keeps no trailing whitespace of its own; the gap is (re)drawn below.
         let stem = chars[..i].iter().collect::<String>().trim_end().to_string();
-        Some((stem, num))
+        Some((stem, num, false))
     };
     let digit_w = (from..to)
-        .filter_map(|k| split_num(rows[k].label.as_str()).map(|(_, n)| n.chars().count()))
+        .filter_map(|k| split_num(rows[k].label.as_str()).map(|(_, n, _)| n.chars().count()))
         .max()
         .unwrap_or(0)
         .max(2);
-    // The shared right edge in chars: the widest stem plus its gap plus its digits wins.
+    // The shared right edge in chars: the widest stem plus its gap plus its digits wins
+    // (the parens ride along outside it, so craft's `)`s line up too).
     let edge = (from..to).fold(0usize, |acc, k| {
-        let Some((stem, num)) = split_num(rows[k].label.as_str()) else {
+        let Some((stem, num, paren)) = split_num(rows[k].label.as_str()) else {
             return acc;
         };
-        acc.max(stem.chars().count() + 1 + num.chars().count().max(digit_w))
+        let tail = num.chars().count().max(digit_w) + usize::from(paren) * 2;
+        acc.max(stem.chars().count() + 1 + tail)
     });
     (from..to)
         .map(|k| {
             let label = rows[k].label.as_str();
-            let Some((stem, num)) = split_num(label) else {
+            let Some((stem, num, paren)) = split_num(label) else {
                 return label.to_string();
             };
             let token_w = num.chars().count().max(digit_w);
-            let gap = (edge - stem.chars().count() - token_w).max(1);
-            format!("{stem}{}{num:>token_w$}", " ".repeat(gap))
+            let parens = usize::from(paren) * 2;
+            let gap = (edge - stem.chars().count() - token_w - parens).max(1);
+            if paren {
+                format!("{stem}{}({num:>token_w$})", " ".repeat(gap))
+            } else {
+                format!("{stem}{}{num:>token_w$}", " ".repeat(gap))
+            }
         })
         .collect()
 }
@@ -16065,6 +16100,13 @@ mod tests {
             padded[3], "(no such skill yet)",
             "non-number rows pass through"
         );
+
+        // Craft's `(level)` group right-aligns too (ur/45): parens share the edge, digits
+        // inside them keep the two-slot minimum.
+        let craft = vec![row("Fishing Amateur (7)"), row("Bonecraft Journeyman (10)")];
+        let padded = pad_column_numbers(&craft);
+        assert_eq!(padded[0], "Fishing Amateur      ( 7)");
+        assert_eq!(padded[1], "Bonecraft Journeyman (10)");
     }
 
     /// The rank gauge law (owner capture 2026-10-19): the Profile window fills the empty row under

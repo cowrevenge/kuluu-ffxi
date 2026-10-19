@@ -1735,10 +1735,14 @@ pub fn skill_detail_rows(
                 }
             }
             SkillFamily::Craft => {
-                // Craft shows the level only: the rank half of the word indexes the
-                // client's rank glyphs, which are DAT art rather than text.
+                // Retail's craft rows read `name  rank word  (level)` - the middle column is the
+                // rank the SERVER put in the packet word's low 5 bits, mapped through LSB's own
+                // xi.craftRank ladder below (owner captures ur/44-45: kuluu showed no middle).
                 if let Some(row) = ffxi_proto::decode::CharSkillLevels::craft_row(word) {
-                    visible.push((format!("{label} {}", row.level), row.capped));
+                    visible.push((
+                        format!("{label} {} ({})", craft_rank_word(row.rank), row.level),
+                        row.capped,
+                    ));
                 }
             }
         }
@@ -1753,6 +1757,34 @@ pub fn skill_detail_rows(
         .into_iter()
         .map(|(text, capped)| SkillDetailRow { text, capped })
         .collect()
+}
+
+/// The craft rank words LSB itself defines for the packet's low-5-bit rank index,
+/// in ladder order (vendor/server/scripts/enum/craft_rank.lua `xi.craftRank`). Index
+/// out of range renders no word rather than inventing one.
+fn craft_rank_word(rank: u8) -> &'static str {
+    const CRAFT_RANK_WORDS: [&str; 16] = [
+        "Amateur",
+        "Recruit",
+        "Initiate",
+        "Novice",
+        "Apprentice",
+        "Journeyman",
+        "Craftsman",
+        "Artisan",
+        "Adept",
+        "Veteran",
+        "Expert",
+        "Authority",
+        "Luminary",
+        "Master",
+        "Grandmaster",
+        "Legend",
+    ];
+    CRAFT_RANK_WORDS
+        .get(usize::from(rank))
+        .copied()
+        .unwrap_or("")
 }
 
 /// The id→name table is compile-time vocab (ids are stable); an unknown id still
@@ -2836,13 +2868,24 @@ mod tests {
         // The one packed word unpacks to its level; the others read as level 0.
         let packed = rows.iter().filter(|r| r.text.contains("122")).count();
         assert_eq!(packed, 1, "exactly one row carries the packed word");
+        // Retail's craft triple (owner captures ur/44-45): name · rank word from the packet
+        // nibble · (level). The packed seed word carries rank 6 = xi.craftRank CRAFTSMAN.
+        let smithy = rows
+            .iter()
+            .find(|r| r.text.contains("122"))
+            .expect("the packed craft row");
+        assert!(
+            smithy.text.contains("Craftsman") && smithy.text.ends_with("(122)"),
+            "rank word and parenthesised level: {}",
+            smithy.text
+        );
         let fished = rows
             .iter()
             .find(|r| r.text.starts_with("Fishing"))
             .expect("id 48 is Fishing");
         assert!(
-            fished.text.ends_with('0'),
-            "an untrained craft shows its zero level: {}",
+            fished.text.ends_with("Amateur (0)"),
+            "an untrained craft still shows retail's rank column: {}",
             fished.text
         );
         // One column: no line ever holds two entries, so nothing gets the pairing

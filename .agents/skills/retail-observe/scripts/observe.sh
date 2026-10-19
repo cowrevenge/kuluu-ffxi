@@ -170,11 +170,6 @@ case $cmd in
     host_key "$code" "$dur"
     ;;
 
-  wine-key)
-    [ "$HOST" = macos ] || [ "$HOST" = linux ] || die "wine-key requires a macOS or Linux host"
-    wine_key "${1:-}" "${2:-0.05}"
-    ;;
-
   type)
     text=${1:?usage: observe.sh type <text>}
     [ -n "${BG:-}" ] && warn "type uses focused input even under --bg; raising the client anyway"

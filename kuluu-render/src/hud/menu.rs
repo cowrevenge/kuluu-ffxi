@@ -8694,10 +8694,8 @@ pub fn update_status_detail_window(
             }
             if title_inside_box {
                 // In-box: absolute below the padding edge; no centering, no band-top math.
-                let (inbox_left, inbox_top) = (
-                    Val::Px(INBOX_TITLE_LEFT_PX),
-                    Val::Px(INBOX_TITLE_TOP_PX),
-                );
+                let (inbox_left, inbox_top) =
+                    (Val::Px(INBOX_TITLE_LEFT_PX), Val::Px(INBOX_TITLE_TOP_PX));
                 if band_node.left != inbox_left {
                     band_node.left = inbox_left;
                 }

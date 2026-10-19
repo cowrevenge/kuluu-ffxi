@@ -42,8 +42,10 @@ pub struct MenuHelpTitleBox;
 #[derive(Component)]
 pub struct MenuHelpRightPart;
 
-/// The visible gap between the band's two split parts.
-const BAR_SEGMENT_GAP_PX: f32 = 4.0;
+/// The visible gap between the band's two split parts. Owner ruling 2026-10-20 (captures
+/// ur/29-31): this was 4, which parked the help segment's left frame at x=132 - 2 px off the
+/// column line (x=130) every detail window hangs on. 2 makes bar and windows share one line.
+const BAR_SEGMENT_GAP_PX: f32 = 2.0;
 
 const PANE_SWITCH_HINT: &str = "- : page";
 

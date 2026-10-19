@@ -8719,7 +8719,11 @@ pub fn update_status_detail_window(
     // at all - which also eats the band's air that read as "way too much padding on top". The
     // Status selector pane itself keeps its own treatment; only these child menus changed.
     let want_title = match entry_kind {
-        Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
+        // ur/54: the currency windows carry no word inside either - their name lives in the
+        // top-left box of the help bar, nowhere else.
+        Some(crate::hud::status_panel::StatusEntryKind::Profile)
+        | Some(crate::hud::status_panel::StatusEntryKind::Currencies)
+        | Some(crate::hud::status_panel::StatusEntryKind::Currencies2) => String::new(),
         _ => menu_title(MenuKind::StatusDetail {
             entry: u8::try_from(idx).unwrap_or(u8::MAX),
         })
@@ -8826,23 +8830,14 @@ pub fn update_status_detail_window(
         (start, cursor)
     });
     if currency_view.is_some() && rows_len > 0 {
-        // ur/52: "the box is not full size" - the flow chrome collapsed short of the eight
-        // visible rows, so they trailed past the frame. Pin the window to a page: its own
-        // caption row plus `CURRENCY_VISIBLE_ROWS` line boxes top and bottom.
+        // ur/52+54: the page is exactly eight line boxes - no caption row inside.
         let page_h = crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX)
-            * (CURRENCY_VISIBLE_ROWS as f32 + 1.0/* in-box title */)
+            * CURRENCY_VISIBLE_ROWS as f32
             + MENU_BORDER_PX * 2.0;
         node.height = Val::Px(page_h);
-        // Currency values ride the window's right margin, same law as craft's `(level)`.
-        let edge_chars = match node.width {
-            Val::Px(width) => Some(
-                ((width - MENU_BORDER_PX * 2.0 - 8.0)
-                    / crate::ui_font::text_width_px("0", STATUS_DETAIL_ROW_FONT_PX))
-                    as usize,
-            ),
-            _ => None,
-        };
-        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, edge_chars);
+        // ur/54: "the space is about twice and big as it shoudl be" - values follow the longest
+        // label with a single-space gap, not a column parked on the window's far margin.
+        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, None);
     }
     for (line, mut text, text_color, mut line_node) in line_q.iter_mut() {
         let row_index = match currency_view {

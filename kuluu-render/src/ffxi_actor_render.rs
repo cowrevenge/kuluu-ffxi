@@ -7338,13 +7338,18 @@ mod pose_resolution_tests {
 
     #[test]
     fn axis_disp_pairs_each_axis_with_its_own() {
+        const IDENTITY_TOLERANCE_DEG: f32 = 1e-6;
+        const QUARTER_TURN_TOLERANCE_DEG: f32 = 1e-3;
         let identity = axis_disp(&Mat4::IDENTITY, &Mat4::IDENTITY);
-        assert!(identity <= 1e-6, "identity measured {identity} deg");
+        assert!(
+            identity <= IDENTITY_TOLERANCE_DEG,
+            "identity measured {identity} deg"
+        );
         let quarter_turn_about_x = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
         let two_axes_at_right_angles = std::f32::consts::FRAC_PI_2.to_degrees() * 2.0 / 3.0;
         let measured = axis_disp(&Mat4::IDENTITY, &quarter_turn_about_x);
         assert!(
-            (measured - two_axes_at_right_angles).abs() < 1e-3,
+            (measured - two_axes_at_right_angles).abs() < QUARTER_TURN_TOLERANCE_DEG,
             "expected {two_axes_at_right_angles} deg, measured {measured}"
         );
     }

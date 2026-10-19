@@ -148,6 +148,22 @@ docker --context "$lsb_context" compose --project-name "$lsb_project" --file "$l
 Keep credentials out of published logs and repository files.
 Use the [character provisioning guidance](../SKILL.md#character-strategy) for a local test account and character.
 
+## Legacy authentication
+
+Use a matching historical source revision when the supported protocol predates the current server image.
+Revision `bcc057220b6068b33590a4b76e1dd64bcac0ca70` accepts Binary `1.1.x` and contains the reported old-loader log.
+Keep its SQL files and database tools with that revision.
+Initialize a separate database; do not downgrade a current database.
+
+Build the historical `xi_connect` target for authentication and the matching lobby handlers.
+Publish its authentication, view, and data TCP ports on loopback.
+An authentication and character-list check does not require a map server or navmeshes.
+Pass the selected ports, `--auth-flavor binary`, and `--xiloader-version 1.1.5` to the changed Kuluu executable.
+Verify account creation, successful login, and the real lobby character-list response.
+A fresh account with an empty character list can establish ticket acceptance.
+Keep JSON rejection and incompatible-version checks separate from that success case.
+Retain the server revision, build recipe, effective settings, and sanitized client/server results.
+
 ## Readiness and stopping conditions
 
 Check database health, initialization results, server logs, and published TCP and UDP ports.

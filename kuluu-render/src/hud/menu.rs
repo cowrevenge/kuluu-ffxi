@@ -15776,7 +15776,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<GraphicsSettings>()
             .init_resource::<crate::hud::HudPanels>()
-            .init_resource::<NetStatusVisible>()
+            .init_resource::<crate::hud::network_status::NetStatusVisible>()
             .init_resource::<SceneState>()
             .init_resource::<DynamicMenu>()
             .init_resource::<ConfigDatRows>();
@@ -15788,14 +15788,16 @@ mod tests {
             .expect("Job Levels is a Status row") as u8;
         {
             let mut d = app.world_mut().resource_mut::<DynamicMenu>();
-            d.rows = ["WAR 30", "MNK 1", "WHM 1", "BLM 1", "RDM 1", "THF 1", "BST 1"]
-                .into_iter()
-                .map(|label| DynamicMenuRow {
-                    tint: None,
-                    label: label.to_string(),
-                    action: DynamicMenuAction::DisplayInfo,
-                })
-                .collect();
+            d.rows = [
+                "WAR 30", "MNK 1", "WHM 1", "BLM 1", "RDM 1", "THF 1", "BST 1",
+            ]
+            .into_iter()
+            .map(|label| DynamicMenuRow {
+                tint: None,
+                label: label.to_string(),
+                action: DynamicMenuAction::DisplayInfo,
+            })
+            .collect();
         }
         let mut stack = MenuStack::root();
         stack.push(MenuKind::Status);
@@ -15819,7 +15821,11 @@ mod tests {
         assert_eq!(placed.len(), 7, "every roster row is placed on the grid");
         // Column one takes rows 1-4 (first-half-left fill); column two starts at row 5.
         assert_eq!((placed[0].1, placed[0].2), (Val::Px(7.0), Val::Px(18.0)));
-        assert_eq!(placed[3].1, Val::Px(7.0), "row four still closes column one");
+        assert_eq!(
+            placed[3].1,
+            Val::Px(7.0),
+            "row four still closes column one"
+        );
         assert_eq!(
             (placed[4].1, placed[4].2),
             (Val::Px(133.0), Val::Px(18.0)),

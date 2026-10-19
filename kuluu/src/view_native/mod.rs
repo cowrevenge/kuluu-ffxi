@@ -1,18 +1,3 @@
-#[cfg(feature = "debug-animation_room")]
-pub mod animation_test_scene;
-
-/// This build's animation-room drive surface, for the key-drive knob query. None means the room is
-/// not compiled in — the listener answers that explicitly rather than leaving a driver guessing.
-#[cfg(feature = "debug-animation_room")]
-pub fn animtest_knobs() -> Option<serde_json::Value> {
-    Some(animation_test_scene::knob_report())
-}
-
-#[cfg(not(feature = "debug-animation_room"))]
-pub fn animtest_knobs() -> Option<serde_json::Value> {
-    None
-}
-
 mod app_icon;
 pub mod auto_target;
 pub mod bridge;
@@ -737,11 +722,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         store: graphics_store_obj,
     });
     app.insert_resource(crate::marker_store::load_or_default());
-
-    // The room's systems and resources must stay out of a default build entirely: an unregistered
-    // plugin is inert, but registering it puts tester state into every session.
-    #[cfg(feature = "debug-animation_room")]
-    app.add_plugins(animation_test_scene::AnimationTestScenePlugin);
 
     app.add_plugins((
         ViewerCorePlugin::<NativeSource>::default(),

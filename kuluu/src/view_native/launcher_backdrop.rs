@@ -197,20 +197,7 @@ fn despawn_backdrop_camera(mut commands: Commands, q: Query<Entity, With<Backdro
     despawn_backdrop_core(&mut commands, &q);
 }
 
-// The AnimationTest box owns the world while open (its teardown restores the default zone), so
-// the mirror stands down instead of reloading the block under it.
-fn mirror_backdrop_to_scene_state(
-    zone: Res<LauncherBackdropZone>,
-    mut scene: ResMut<SceneState>,
-    #[cfg(feature = "debug-animation_room")] q_box: Query<
-        (),
-        With<super::animation_test_scene::TestSceneScoped>,
-    >,
-) {
-    #[cfg(feature = "debug-animation_room")]
-    if q_box.iter().next().is_some() {
-        return;
-    }
+fn mirror_backdrop_to_scene_state(zone: Res<LauncherBackdropZone>, mut scene: ResMut<SceneState>) {
     let desired = Some(zone.0);
     if scene.snapshot.zone_id == desired {
         return;
@@ -218,11 +205,6 @@ fn mirror_backdrop_to_scene_state(
     scene.snapshot.zone_id = desired;
 }
 
-// Also the AnimationTest box's unload: the render-side backdrop goes down while the box is open
-// (its order-0 window camera collides with the box's operator marker). Zone state stays
-// untouched: clearing the snapshot would trip the auto-load teardown (despawn + MMB queue clear)
-// mid-session and case loads depend on that bookkeeping; hiding the standing zone block is the
-// test scene's own sweep.
 pub(crate) fn despawn_backdrop_core(
     commands: &mut Commands,
     q_scoped: &Query<Entity, With<BackdropScoped>>,

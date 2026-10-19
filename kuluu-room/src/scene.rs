@@ -1,9 +1,3 @@
-//! Pre-server animation test box (dev-only, no session layer). A chip in the launcher corner
-//! loads a small scene — carrion worm left, sworded Hume right, both from retail DATs — plus a
-//! panel that fires ROM/0/0.DAT's dam0 cascade through kuluu-render's production routine,
-//! particle and audio systems. Every press logs its path (what dam0 picked, which stages ran)
-//! to this window AND stderr so both sides see it.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -81,9 +75,6 @@ const LAMP_HALOS_OFF_ENV: &str = "ANIMTEST_LAMP_HALOS_OFF";
 const WALL_GLOW_OFF_ENV: &str = "ANIMTEST_WALL_GLOW_OFF";
 const LAMP_ALPHA_ENV: &str = "ANIMTEST_LAMP_ALPHA";
 
-/// Every environment knob the room reads, described the way a driver needs it. `kuluu animtest
-/// --knobs` and the key-drive knob query print this table; a read site that invents a name missing
-/// from it fails `every_env_read_is_a_listed_knob`, so nothing outside this file keeps a copy.
 pub const ENV_KNOBS: &[(&str, &str)] = &[
     (
         ZONE_ID_ENV,
@@ -139,8 +130,6 @@ pub const ENV_KNOBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The room's own drive surface: what it can fire, what it reads from the environment, and how its
-/// auto-fire clock is spaced. Printed by `kuluu animtest --knobs` and by a key-drive knob query.
 pub fn knob_report() -> serde_json::Value {
     serde_json::json!({
         "surface": "animation_room",
@@ -382,15 +371,14 @@ struct PendingCase(Option<Case>);
 
 // run_pending_case sits at bevy's 16-parameter system ceiling (the ZoneLoadParams bundle is
 // what keeps it there), so the shot rides a resource a dedicated two-param system consumes.
-fn fire_pending_shot(
-    mut shot: ResMut<PendingShot>,
-    mut requests: MessageWriter<super::screenshot::ScreenshotRequest>,
-) {
+fn fire_pending_shot(mut shot: ResMut<PendingShot>, mut commands: Commands) {
     let Some(path) = shot.0.take() else {
         return;
     };
     eprintln!("[animationtest] screenshot -> {}", path.display());
-    requests.write(super::screenshot::ScreenshotRequest { path });
+    commands
+        .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+        .observe(bevy::render::view::screenshot::save_to_disk(path));
 }
 
 /// Worm death bookkeeping: dhit runs the `dead` fall-over, then hides the model.
@@ -428,7 +416,7 @@ struct DrawnCheck {
 
 /// Everything the test scene spawns (3D + UI), so teardown takes it all down at once.
 #[derive(Component)]
-pub(crate) struct TestSceneScoped;
+struct TestSceneScoped;
 
 /// The sun, moon and fog the room's own setup_world call spawns. They carry InGameEntity, which
 /// only OnExit(InGame) sweeps, so the room takes them down itself; they stay out of
@@ -444,10 +432,12 @@ struct HiddenByTestBox;
 #[derive(Resource)]
 struct AmbientBeforeRoom(Option<bevy::light::GlobalAmbientLight>);
 
-/// Set by the launcher's AnimationTest titlebar button (gated on the
-/// `debug-animation_room` feature); consumed by handle_toggle.
-#[derive(Resource, Default)]
-pub(crate) struct PendingToggle(pub bool);
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RoomState {
+    #[default]
+    Running,
+    Closed,
+}
 
 // ANIMTEST_AUTO schedule: the first case fires after the actors have loaded, then one per
 // spacing — long enough for each effect's particles to live out their life between shots.
@@ -478,13 +468,9 @@ fn parse_auto_cases(raw: &str) -> Vec<Case> {
     cases
 }
 
-// True while a real zone block is loaded into the box: zone_backdrop_visibility exists to
-// hide the launcher backdrop's own geometry and would swallow the test zone too, and the test
-// floor hides under it.
 #[derive(Resource, Default)]
 struct TestZoneActive(bool);
 
-/// The flat test floor; hidden once a real zone loads under it (standalone tester parity).
 #[derive(Component)]
 struct TestFloor;
 
@@ -498,13 +484,8 @@ struct PendingShot(Option<std::path::PathBuf>);
 #[derive(Resource, Default)]
 struct LampRoomActive(bool);
 
-// The Enhanced half of the user's graphics settings (`dynamic_lights` = Lamps + Shadows makes each
-// DAT lamp a real Bevy PointLight with cube shadow maps and flicker; volumetric fog scatters over
-// the whole frame), neither of which exists in retail. Neither belongs under a lamp capture, so
-// this checkbox (and the lamp-room seed) suppresses them and restores exactly what it replaced on
-// un-suppress or teardown. GraphicsPersistSuspended keeps the suppressed values off disk.
 #[derive(Resource, Default)]
-pub struct ShadowsOff(pub bool);
+struct ShadowsOff(bool);
 
 #[derive(Component)]
 struct ShadowsCheckbox;
@@ -604,7 +585,6 @@ struct WashSliderLabel;
 struct ZoneLoadParams<'w> {
     load_tx: MessageWriter<'w, LoadMzbRequest>,
     last_zone: ResMut<'w, LastAutoLoadedZone>,
-    backdrop_zone: ResMut<'w, super::launcher_backdrop::LauncherBackdropZone>,
     sky_fx: ResMut<'w, kuluu_render::sun_moon::SkyFxOverride>,
     lamps_off: ResMut<'w, kuluu_render::particle_sim::LampHalosOff>,
     wall_glow_off: ResMut<'w, kuluu_render::particle_sim::WallWashOff>,
@@ -629,7 +609,6 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<WormState>()
             .init_resource::<TestHp>()
             .init_resource::<CaseLock>()
-            .init_resource::<PendingToggle>()
             .init_resource::<TestZoneActive>()
             .init_resource::<PendingShot>()
             .init_resource::<ShadowsOff>()
@@ -638,9 +617,7 @@ impl Plugin for AnimationTestScenePlugin {
             .init_resource::<kuluu_render::particle_sim::LampHalosOff>()
             .init_resource::<kuluu_render::particle_sim::WallWashOff>()
             .init_resource::<LampRoomActive>()
-            .init_resource::<crate::graphics_store::GraphicsPersistSuspended>();
-        // ANIMTEST_AUTO=nhit,chit,... — fire the named cases on a fixed clock with no input
-        // (standalone tester parity); opening the box too, so the whole run is hands-free.
+            .init_state::<RoomState>();
         let auto_cases = env_set(AUTO_CASES_ENV)
             .map(|raw| parse_auto_cases(&raw))
             .unwrap_or_default();
@@ -653,21 +630,21 @@ impl Plugin for AnimationTestScenePlugin {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            app.world_mut().resource_mut::<PendingToggle>().0 = true;
         }
         app.insert_resource(AutoFire {
             queue: std::collections::VecDeque::from(auto_cases),
             next_at: Some(Instant::now() + Duration::from_secs_f32(AUTO_FIRST_DELAY_SECS)),
         });
-        app.add_systems(OnExit(super::AppPhase::Launcher), tear_down_test_scene)
+        app.add_systems(OnEnter(RoomState::Running), open_room)
+            .add_systems(OnExit(RoomState::Running), tear_down_test_scene)
+            .add_systems(OnEnter(RoomState::Closed), exit_room)
             .add_systems(
                 Update,
-                sync_shadow_override.run_if(in_state(super::AppPhase::Launcher)),
+                sync_shadow_override.run_if(in_state(RoomState::Running)),
             )
             .add_systems(
                 Update,
                 (
-                    handle_toggle,
                     handle_close_press,
                     auto_fire_cases,
                     handle_case_presses,
@@ -685,7 +662,7 @@ impl Plugin for AnimationTestScenePlugin {
                     sync_log_text,
                 )
                     .chain()
-                    .run_if(in_state(super::AppPhase::Launcher)),
+                    .run_if(in_state(RoomState::Running)),
             )
             // The checkbox/slider systems live outside the chained group — adding them there
             // would cross bevy's 17-element tuple ceiling for one add_systems call.
@@ -698,70 +675,13 @@ impl Plugin for AnimationTestScenePlugin {
                     toggle_wall_glow_checkbox,
                     drive_wash_alpha_slider,
                 )
-                    .run_if(in_state(super::AppPhase::Launcher)),
-            )
-            // Last (post command-flush): the box's own spawn is deferred, so this is the earliest
-            // point that sees it — no frame of launcher-camera coexistence.
-            .add_systems(
-                bevy::prelude::Last,
-                apply_test_unload.run_if(in_state(super::AppPhase::Launcher)),
+                    .run_if(in_state(RoomState::Running)),
             );
     }
 }
 
-// The box owns the screen while it is up: unload (not just hide) the launcher render camera and
-// the backdrop so nothing loaded sits behind the test scene; closing the box restores both.
-// Level-triggered (runs in Last, after the frame's command flush) because the box's own spawn is
-// deferred — Update-side systems can't see it on its opening frame.
-fn apply_test_unload(
-    q_box: Query<(), With<TestSceneScoped>>,
-    q_launch_cam: Query<Entity, With<super::launcher_ui::LauncherCamera>>,
-    q_backdrop: Query<Entity, With<super::launcher_backdrop::BackdropScoped>>,
-    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
-    mut commands: Commands,
-    mut log: ResMut<TestLog>,
-    mut was_open: Local<bool>,
-) {
-    let open = q_box.iter().next().is_some();
-    if !open {
-        *was_open = false;
-        return;
-    }
-    set_launcher_ui_visibility(&mut commands, &q_ui, false);
-    for e in q_launch_cam.iter() {
-        commands.entity(e).try_despawn();
-    }
-    // Idempotent once unloaded: empty scoped query, remove_resource is a silent no-op.
-    super::launcher_backdrop::despawn_backdrop_core(&mut commands, &q_backdrop);
-    if !*was_open {
-        log_line(&mut log, "launcher + backdrop unloaded".into());
-    }
-    *was_open = true;
-}
-
-fn set_launcher_ui_visibility(
-    commands: &mut Commands,
-    q_ui: &Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
-    visible: bool,
-) {
-    for (e, parent) in q_ui.iter() {
-        if parent.is_some() {
-            continue;
-        }
-        let vis = if visible {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        commands.entity(e).insert(vis);
-    }
-}
-
-fn handle_toggle(
-    mut pending: ResMut<PendingToggle>,
+fn open_room(
     mut drawn_check: ResMut<DrawnCheck>,
-    q_scoped: Query<Entity, With<TestSceneScoped>>,
-    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -772,30 +692,10 @@ fn handle_toggle(
     mut log: ResMut<TestLog>,
     mut hp: ResMut<TestHp>,
 ) {
-    if !pending.0 {
-        return;
-    }
-    pending.0 = false;
-
-    if q_scoped.iter().next().is_some() {
-        tear_down(
-            &mut commands,
-            &q_scoped,
-            &q_ui,
-            &mut tracked,
-            &mut scene,
-            &mut meshes,
-            &mut materials,
-            true,
-        );
-        log_line(&mut log, "scene down".into());
-        return;
-    }
-
     let Some(dat_root) = actor_root.0.as_ref() else {
         log_line(
             &mut log,
-            "no retail install wired - pick one in Settings first".into(),
+            "no retail install found - use kuluu install or set FFXI_DAT_PATH".into(),
         );
         return;
     };
@@ -826,10 +726,6 @@ fn handle_toggle(
         &mut drawn_check,
     );
 
-    // Hide the launcher menu while the box is up; the X button (or leaving the Launcher phase)
-    // restores it.
-    set_launcher_ui_visibility(&mut commands, &q_ui, false);
-
     // poll_load_actor_tasks parks tasks without EntityMesh, and the Update chain that resource
     // unlocks (sync_entities_system & co.) reads the world resources setup_world inserts on
     // InGame entry — so run it here: real orb meshes/materials for the wire placeholders.
@@ -846,6 +742,11 @@ fn run_room_world_setup(world: &mut World) {
         eprintln!("[animationtest] setup_world failed: {e}");
         return;
     }
+    let ambient = world.resource::<bevy::light::GlobalAmbientLight>().clone();
+    // No launcher zone exists to initialize the weather system's ambient light.
+    let mut weather = world.resource_mut::<kuluu_render::weather_fx::ActiveWeatherModifier>();
+    weather.base_ambient_color = ambient.color;
+    weather.base_ambient_brightness = ambient.brightness;
     let spawned: Vec<Entity> = world
         .query_filtered::<Entity, With<InGameEntity>>()
         .iter(world)
@@ -858,32 +759,18 @@ fn run_room_world_setup(world: &mut World) {
 
 fn handle_close_press(
     q_close: Query<&Interaction, (With<CloseBox>, With<bevy::ui::widget::Button>)>,
-    q_scoped: Query<Entity, With<TestSceneScoped>>,
-    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut tracked: ResMut<TrackedEntities>,
-    mut scene: ResMut<SceneState>,
-    mut log: ResMut<TestLog>,
+    mut next: ResMut<NextState<RoomState>>,
 ) {
-    let Ok(interaction) = q_close.single() else {
-        return;
-    };
-    if !matches!(interaction, Interaction::Pressed) {
-        return;
+    if q_close
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        next.set(RoomState::Closed);
     }
-    tear_down(
-        &mut commands,
-        &q_scoped,
-        &q_ui,
-        &mut tracked,
-        &mut scene,
-        &mut meshes,
-        &mut materials,
-        true,
-    );
-    log_line(&mut log, "scene down".into());
+}
+
+fn exit_room(mut exit: MessageWriter<bevy::app::AppExit>) {
+    exit.write(bevy::app::AppExit::Success);
 }
 
 fn activate_test_scene(
@@ -897,8 +784,6 @@ fn activate_test_scene(
     log: &mut TestLog,
     check: &mut DrawnCheck,
 ) {
-    // Camera + light + ground. The camera clears its own color so the launcher backdrop zone
-    // does not show around the test floor.
     commands.spawn((
         TestSceneScoped,
         // Marker routes camera-relative systems at this eye: track_weather_particles rewrites
@@ -907,8 +792,6 @@ fn activate_test_scene(
         // spawns OnEnter(InGame)), so the box is the sole marker while open.
         kuluu_render::camera::OperatorCamera,
         Camera3d::default(),
-        // Order 3: above the launcher backdrop (-2) and any default-order (gizmo) camera;
-        // 1-2 are the in-game nameplate overlay/composite slots.
         Camera {
             order: 3,
             clear_color: ClearColorConfig::Custom(Color::BLACK),
@@ -1046,7 +929,6 @@ fn activate_test_scene(
 
     spawn_panel(commands);
 
-    // X in the top-right corner closes the box back to the launcher menu.
     commands
         .spawn((
             TestSceneScoped,
@@ -2163,7 +2045,6 @@ fn load_test_zone(
     if zone.last_zone.file_id == Some(mzb_file) {
         return false;
     }
-    *zone.backdrop_zone = super::launcher_backdrop::LauncherBackdropZone(zone_id);
     scene.snapshot.zone_id = Some(zone_id);
     zone.last_zone.file_id = Some(mzb_file);
     zone.load_tx.write(LoadMzbRequest {
@@ -2437,9 +2318,6 @@ fn toggle_wall_glow_checkbox(
     *bg = BackgroundColor(Color::srgb(0.16, 0.2, 0.3));
 }
 
-// Apply/restore the suppression itself, decoupled from the checkbox so the lamp-room seed and a
-// launcher teardown take the same path. `settings.volumetric_fog` only ever takes effect at camera
-// spawn (camera.rs), so live suppression removes the stashed component and restore re-inserts it.
 fn apply_shadow_override(
     shadows: bool,
     settings: &mut kuluu_render::graphics_settings::GraphicsSettings,
@@ -2488,7 +2366,6 @@ fn sync_shadow_override(
     mut settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
     mut saved: ResMut<ShadowOverrides>,
     mut commands: Commands,
-    mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
     cam_q: Query<
         (Entity, Option<&bevy::light::VolumetricFog>),
         With<kuluu_render::camera::OperatorCamera>,
@@ -2511,7 +2388,6 @@ fn sync_shadow_override(
         live_fog,
     );
     // The override (and the restore's write-back of the user's own values) stay off-disk.
-    persist_gate.0 = saved.0.is_some();
 }
 
 fn drive_lamp_alpha_slider(
@@ -2582,11 +2458,6 @@ fn drive_wash_alpha_slider(
     }
 }
 
-// The launcher backdrop mirrors a live zone into the same world space; its meshes carry
-// InGameEntity and would show through around the test floor. While the box is up, hide every
-// InGameEntity not under it — effect particles are children of the test actors, so they stay.
-// Only what this sweep hid is restored, once, when it stands down: other systems own the
-// visibility of everything else (sun/moon discs, MMB LOD chunks, collision-mode geometry).
 fn zone_backdrop_visibility(
     mut commands: Commands,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
@@ -2659,19 +2530,11 @@ fn sync_log_text(log: Res<TestLog>, mut node: Query<&mut Text, With<LogText>>) {
     }
 }
 
-// `restore_launcher` respawns the launcher camera and backdrop the open unloaded. Only the
-// in-Launcher close paths pass true: on phase exit the launcher's own OnExit despawns have
-// already run their queries, so a respawn there would leak both cameras and the backdrop light
-// into the session, and OnEnter(Launcher) spawns fresh ones on re-entry anyway.
 fn tear_down(
     commands: &mut Commands,
     q_scoped: &Query<Entity, With<TestSceneScoped>>,
-    q_ui: &Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     tracked: &mut TrackedEntities,
     scene: &mut SceneState,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-    restore_launcher: bool,
 ) {
     // Restore-gate: phase exit runs this with no box ever up; only a real open unloads things.
     let was_open = q_scoped.iter().next().is_some();
@@ -2699,9 +2562,6 @@ fn tear_down(
     });
     commands.insert_resource(VfxTrace(false));
     commands.insert_resource(TestZoneActive(false));
-    // The lamp-room clock hold is normally released by `arm_lamp_room` reacting to this flag, but a
-    // phase exit stops Update before that edge is observed, so hand the clock and the slider values
-    // back here rather than depending on one more Launcher frame.
     commands.queue(|world: &mut World| {
         if world
             .get_resource::<LampRoomActive>()
@@ -2727,33 +2587,19 @@ fn tear_down(
     // generator reads authored alpha again.
     commands.remove_resource::<kuluu_render::particle_sim::TestAlphaOverride>();
 
-    // Resetting shadows to "on" makes `sync_shadow_override` restore whatever the suppression
-    // replaced on its next pass (still in Launcher either way); leaving the Launcher phase itself
-    // is covered by `tear_down_test_scene` applying it directly, as Update stops running there.
     commands.insert_resource(ShadowsOff(false));
     // Night-fx kill switches too: leaving the box means authored sky behaviour again (the fog
     // suppressor re-inserts what it stashed when this flips back to all-off).
     commands.insert_resource(kuluu_render::sun_moon::SkyFxOverride::default());
     commands.insert_resource(kuluu_render::particle_sim::LampHalosOff(false));
     commands.insert_resource(kuluu_render::particle_sim::WallWashOff(false));
-    commands.insert_resource(super::launcher_backdrop::LauncherBackdropZone(
-        super::launcher_backdrop::DEFAULT_BACKDROP_ZONE,
-    ));
     for e in q_scoped.iter() {
         // try_despawn: despawn() is recursive, so a parent earlier in the query may have
         // already freed this entity.
         commands.entity(e).try_despawn();
     }
-    set_launcher_ui_visibility(commands, q_ui, true);
     if was_open {
-        // The launcher has no weather of its own; LoadWeather's value must not outlive the box.
         scene.snapshot.weather = None;
-    }
-    // Zone state was left standing on open, so the standing zone block is already in place for
-    // the mirror; only the render camera and backdrop entities come back.
-    if was_open && restore_launcher {
-        super::launcher_ui::spawn_launcher_camera_core(&mut *commands);
-        super::launcher_backdrop::spawn_backdrop_core(commands, &mut *meshes, &mut *materials);
     }
     tracked.by_id.remove(&WORM_ID);
     tracked.by_id.remove(&HUME_ID);
@@ -2766,39 +2612,21 @@ fn tear_down(
 fn tear_down_test_scene(
     mut commands: Commands,
     q_scoped: Query<Entity, With<TestSceneScoped>>,
-    q_ui: Query<(Entity, Option<&ChildOf>), (With<Node>, Without<TestSceneScoped>)>,
     mut tracked: ResMut<TrackedEntities>,
     mut scene: ResMut<SceneState>,
     mut graphics_settings: ResMut<kuluu_render::graphics_settings::GraphicsSettings>,
     mut overrides: ResMut<ShadowOverrides>,
-    mut persist_gate: ResMut<crate::graphics_store::GraphicsPersistSuspended>,
     cam_q: Query<Entity, With<kuluu_render::camera::OperatorCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Update (and so `sync_shadow_override`) stops running once the Launcher phase ends: hand
-    // any live suppression back before dropping the scene. Re-inserting needs no live-fog read:
-    // the snapshot already holds the component.
-    let camera = cam_q.iter().next();
     apply_shadow_override(
         false,
         &mut graphics_settings,
         &mut overrides.0,
         &mut commands,
-        camera,
+        cam_q.iter().next(),
         None,
     );
-    persist_gate.0 = false;
-    tear_down(
-        &mut commands,
-        &q_scoped,
-        &q_ui,
-        &mut tracked,
-        &mut scene,
-        &mut meshes,
-        &mut materials,
-        false,
-    );
+    tear_down(&mut commands, &q_scoped, &mut tracked, &mut scene);
 }
 
 #[cfg(test)]
@@ -2809,10 +2637,9 @@ mod tests {
     };
 
     #[test]
-    fn room_without_install_preserves_launcher() {
+    fn room_without_install_does_not_spawn_actors() {
         let mut app = App::new();
-        app.insert_resource(PendingToggle(true))
-            .init_resource::<DrawnCheck>()
+        app.init_resource::<DrawnCheck>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<kuluu_render::moon_material::MoonMaterial>>()
@@ -2824,7 +2651,7 @@ mod tests {
             .insert_resource(ActionDatRoot(None))
             .init_resource::<TestLog>()
             .init_resource::<TestHp>()
-            .add_systems(Update, handle_toggle);
+            .add_systems(Update, open_room);
         let launcher = app
             .world_mut()
             .spawn((Node::default(), Visibility::Inherited))
@@ -2892,8 +2719,8 @@ mod tests {
         app.init_resource::<TrackedEntities>()
             .init_resource::<SceneState>()
             .init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
+            .init_resource::<kuluu_render::weather_fx::ActiveWeatherModifier>()
             .init_resource::<ShadowOverrides>()
-            .init_resource::<crate::graphics_store::GraphicsPersistSuspended>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<TestLog>();
@@ -2908,32 +2735,41 @@ mod tests {
     }
 
     #[test]
-    fn launcher_exit_with_the_room_open_restores_no_launcher_entities() {
+    fn closing_the_room_removes_its_entities() {
         let mut app = teardown_app();
         app.add_systems(Update, tear_down_test_scene);
         app.world_mut().spawn(TestSceneScoped);
         app.update();
-        assert_eq!(
-            count::<With<super::super::launcher_ui::LauncherCamera>>(&mut app),
-            0
-        );
-        assert_eq!(
-            count::<With<super::super::launcher_backdrop::BackdropScoped>>(&mut app),
-            0
-        );
         assert_eq!(count::<With<TestSceneScoped>>(&mut app), 0);
     }
 
     fn close_app() -> App {
         let mut app = teardown_app();
-        app.add_systems(Update, handle_close_press);
+        app.add_systems(Update, tear_down_test_scene);
         app.world_mut()
             .spawn((CloseBox, bevy::ui::widget::Button, Interaction::Pressed));
         app
     }
 
     #[test]
-    fn closing_the_room_restores_the_launcher_and_disarms_tracing() {
+    fn close_button_exits_after_cleanup() {
+        let mut app = teardown_app();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<RoomState>()
+            .add_systems(Update, handle_close_press)
+            .add_systems(OnExit(RoomState::Running), tear_down_test_scene)
+            .add_systems(OnEnter(RoomState::Closed), exit_room);
+        app.world_mut().spawn(TestSceneScoped);
+        app.world_mut()
+            .spawn((CloseBox, bevy::ui::widget::Button, Interaction::Pressed));
+        app.update();
+        app.update();
+        assert_eq!(count::<With<TestSceneScoped>>(&mut app), 0);
+        assert_eq!(app.should_exit(), Some(bevy::app::AppExit::Success));
+    }
+
+    #[test]
+    fn closing_the_room_disarms_tracing() {
         let mut app = close_app();
         app.insert_resource(VfxTrace(true));
         app.world_mut().spawn(TestSceneScoped);
@@ -2949,11 +2785,28 @@ mod tests {
             .snapshot
             .weather
             .is_none());
-        assert_eq!(
-            count::<With<super::super::launcher_ui::LauncherCamera>>(&mut app),
-            1
-        );
-        assert!(count::<With<super::super::launcher_backdrop::BackdropScoped>>(&mut app) > 0);
+    }
+
+    #[test]
+    fn room_keeps_ambient_light_without_a_launcher_zone() {
+        let mut app = teardown_app();
+        app.init_resource::<Assets<kuluu_render::moon_material::MoonMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<kuluu_render::hud::HudPanels>()
+            .add_systems(
+                Update,
+                kuluu_render::weather_fx::apply_weather_to_ambient_and_fog_system,
+            );
+        run_room_world_setup(app.world_mut());
+        let initial = app
+            .world()
+            .resource::<bevy::light::GlobalAmbientLight>()
+            .clone();
+        app.update();
+        let actual = app.world().resource::<bevy::light::GlobalAmbientLight>();
+        assert!(actual.brightness > 0.0);
+        assert_eq!(actual.brightness, initial.brightness);
+        assert_eq!(actual.color.to_linear(), initial.color.to_linear());
     }
 
     #[test]
@@ -3031,45 +2884,6 @@ mod tests {
     }
 
     #[test]
-    fn room_keeps_rebuilt_launcher_ui_hidden() {
-        let mut app = App::new();
-        app.init_resource::<TestLog>()
-            .add_systems(Last, apply_test_unload);
-        let room = app
-            .world_mut()
-            .spawn((TestSceneScoped, Node::default(), Visibility::Inherited))
-            .id();
-        let original = app
-            .world_mut()
-            .spawn((Node::default(), Visibility::Hidden))
-            .id();
-        app.update();
-        app.world_mut().despawn(original);
-        let rebuilt = app
-            .world_mut()
-            .spawn((Node::default(), Visibility::Inherited))
-            .id();
-        app.update();
-        assert_eq!(
-            app.world().entity(rebuilt).get::<Visibility>(),
-            Some(&Visibility::Hidden)
-        );
-        assert_eq!(
-            app.world().entity(room).get::<Visibility>(),
-            Some(&Visibility::Inherited)
-        );
-        app.world_mut().despawn(room);
-        app.world_mut()
-            .entity_mut(rebuilt)
-            .insert(Visibility::Inherited);
-        app.update();
-        assert_eq!(
-            app.world().entity(rebuilt).get::<Visibility>(),
-            Some(&Visibility::Inherited)
-        );
-    }
-
-    #[test]
     fn room_exit_discards_unexpired_distortion() {
         use kuluu_render::distortion_pass::{ActiveDistortion, LiveField};
         use std::time::Instant;
@@ -3079,7 +2893,6 @@ mod tests {
             .init_resource::<SceneState>()
             .init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
             .init_resource::<ShadowOverrides>()
-            .init_resource::<crate::graphics_store::GraphicsPersistSuspended>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .insert_resource({
@@ -3103,11 +2916,8 @@ mod tests {
         assert!(app.world().resource::<ActiveDistortion>().fields.is_empty());
     }
 
-    // Everything the box borrows from production has to come back on launcher exit: the alpha kill
-    // switch removed, the game clock thawed even though `arm_lamp_room` never sees the flag flip, and
-    // both lighting sliders at their authored values.
     #[test]
-    fn launcher_exit_returns_everything_the_box_borrowed() {
+    fn room_exit_restores_renderer_defaults() {
         let mut sim = ParticleSimulator::default();
         sim.set_lamp_halos_lift(0.0);
         sim.set_wash_alpha_lift(0.0);
@@ -3123,7 +2933,6 @@ mod tests {
             .init_resource::<SceneState>()
             .init_resource::<kuluu_render::graphics_settings::GraphicsSettings>()
             .init_resource::<ShadowOverrides>()
-            .init_resource::<crate::graphics_store::GraphicsPersistSuspended>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .insert_resource(sim)
@@ -3172,7 +2981,10 @@ mod tests {
     fn every_env_read_is_a_listed_knob() {
         // Read sites name their variable as a string literal only in its `const *_ENV` definition,
         // so any literal that is not table-backed means the report has gone stale.
-        let source = include_str!("./animation_test_scene.rs");
+        let source = include_str!("./scene.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
         let unlisted: Vec<&str> = source
             .split('"')
             .filter(|token| token.starts_with("ANIMTEST_"))

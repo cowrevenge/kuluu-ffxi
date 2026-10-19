@@ -311,6 +311,9 @@ fn main() {
             // they do in the client. Only the simulator's two systems are pulled in — the
             // rest of SchedulerRuntimePlugin wants a live session's resources.
             .init_resource::<kuluu_render::particle_sim::ParticleSimulator>()
+            .init_resource::<kuluu_render::distortion_pass::ActiveDistortion>()
+            .add_message::<kuluu_render::scheduler_runtime::ParticleSpawnTrace>()
+            .add_message::<kuluu_render::audio::SfxEvent>()
             .add_systems(
                 Update,
                 (

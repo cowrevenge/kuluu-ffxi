@@ -1,5 +1,5 @@
+use bevy::platform::time::Instant;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -25,7 +25,7 @@ use ffxi_dat::scheduler::{StageKind, NO_LOCAL_DIR};
 // exposes standard attributes at fixed shader locations (bevy_pbr render/mesh.rs
 // MeshPipeline::specialize — position 0, normal 1, uv 2, uv_b 3, tangent 4, color 5), and a
 // custom attribute id never reaches the vertex buffer layout. TANGENT is the one standard
-// vec4 slot these meshes do not otherwise use; ffxi_particle.wgsl reads it at location 4.
+// vec4 slot these meshes do not otherwise use; ffxi_particle.wesl reads it at location 4.
 
 // CPU particle simulation. research/xim ParticleGenerator + Particle: a Particle stage (0x02)
 // spawns a `LiveGenerator` that streams billboard particles over its window, each integrating
@@ -210,7 +210,7 @@ struct SpriteTemplate {
     colors: Vec<Vec4>,
 }
 
-// The fixed-function colour tables live in ffxi_particle.wgsl (per stage, with D3D8 saturation
+// The fixed-function colour tables live in ffxi_particle.wesl (per stage, with D3D8 saturation
 // after every op): CMoD3m.cpp's TSS blocks for the D3m path (NonZeroTwoTSS textured default,
 // NonZeroOneTSS when renderStateFlags 0x1000 drops the texture alpha, ZeroOneTSS untextured) and
 // ZoneRenderer.cpp DoD3mDraw's tables for MMB meshes. The path selects which table; nothing is
@@ -3020,7 +3020,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     // of the 0x16 base (research/xim ParticleInitializers.kt ColorVarianceSetup — the shipped
     // alpha byte is always 0 and the engine's alpha comes from the 0x16 base / alpha track).
     // Both are raw D3DCOLOR bytes/255: sum in that space. The PS2 half-scale doubling happens
-    // in the fixed-function stages (ffxi_particle.wgsl), so nothing rescales here.
+    // in the fixed-function stages (ffxi_particle.wesl), so nothing rescales here.
     let mut rgb = Vec3::from_slice(&g.def.init_color[..3]);
     if let Some(var) = g.def.color_variance {
         rgb += Vec3::new(
@@ -3843,7 +3843,7 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
             positions.push((draw.world + oriented).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
             // The template colour is stage 0's D argument verbatim (D3m/sheet: /128-normalised,
-            // MMB: raw byte/255); the per-particle F rides its own attribute. ffxi_particle.wgsl
+            // MMB: raw byte/255); the per-particle F rides its own attribute. ffxi_particle.wesl
             // runs the selected table against both, so nothing is folded in here.
             colors.push(vertex.to_array());
             factors.push(draw.factor_rgb.extend(draw.factor_alpha).to_array());
@@ -5229,7 +5229,7 @@ mod tests {
         }
     }
 
-    // ffxi_particle.wgsl runs retail's fixed-function tables per stage with D3D8 saturation
+    // ffxi_particle.wesl runs retail's fixed-function tables per stage with D3D8 saturation
     // after every op; this mirror reproduces that math in Rust so the canonical values are
     // pinned without a GPU. The WGSL is the source of truth — keep the two in lockstep.
     mod stage_chain {
@@ -5238,7 +5238,7 @@ mod tests {
         const STAGE_MODULATE_2X: f32 = 2.0;
         const STAGE_MODULATE_4X: f32 = 4.0;
 
-        // Mirror of ffxi_particle.wgsl fragment(): d is the template colour (D3m/sheet stored
+        // Mirror of ffxi_particle.wesl fragment(): d is the template colour (D3m/sheet stored
         // /128, MMB raw byte/255), texel the sampled T (white on untextured paths), f the
         // per-particle factor in raw byte/255. DoD3mDraw's textured table modulates TEXTURE
         // against CURRENT with a4 set and against TFACTOR with it clear, stage 1 taking the
@@ -7533,7 +7533,7 @@ mod tests {
     // The sun/moon domes are untextured meshes whose whole shape is a vertex-alpha ramp (128 at
     // the centre to 0 at the rim). Folding the per-particle factor into that colour on the CPU
     // flattens the ramp; the mesh carries D (template, verbatim) and F (factor) as separate
-    // attributes and ffxi_particle.wgsl runs the table against both. Nothing is rescaled here:
+    // attributes and ffxi_particle.wesl runs the table against both. Nothing is rescaled here:
     // F.a is def()'s raw init alpha byte (0.5), held for the whole life — independent of
     // progress, on every draw path.
     #[test]

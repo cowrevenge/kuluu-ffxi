@@ -1416,7 +1416,7 @@ impl JointBoundsAccum {
 
 // Re-expresses bevy_mesh-0.19.0/src/skinning.rs:120-171 (SkinnedMeshBounds::
 // from_mesh) for the FFXI dual-influence stream: p0/p1 are joint-local
-// positions pre-scaled by their weight (skinned_ffxi.wgsl header), so the
+// positions pre-scaled by their weight (skinned_ffxi.wesl header), so the
 // weight divides back out to recover the unweighted point each joint box must
 // bound. The skinned position is a convex combination of the two
 // joint-transformed points, so the union of transformed boxes bounds every pose.
@@ -2576,7 +2576,7 @@ fn build_actor_children(
             .spawn((
                 Mesh3d(mesh_handle.clone()),
                 MeshMaterial3d(mat),
-                MeshTag(instance_slot),
+                MeshTag::new(instance_slot),
                 FfxiInstanceSlot(instance_slot),
                 Transform::default(),
                 FfxiActorMeshChild,
@@ -5500,7 +5500,7 @@ pub fn tick_morph_in(
 }
 
 pub fn finish_actor_reveal(
-    trigger: On<Discard, crate::components::MorphIn>,
+    trigger: On<Discard<crate::components::MorphIn>>,
     q: Query<&crate::components::MorphIn>,
     actors: Query<(&FfxiRenderActor, &Children)>,
     mut materials: Query<(&ActorFadeMaterial, &mut MeshMaterial3d<FfxiSkinnedMaterial>)>,

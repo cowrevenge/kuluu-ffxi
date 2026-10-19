@@ -1,3 +1,4 @@
+use bevy::picking::hover::Hovered;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -194,7 +195,7 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
                     ImageNode::new(placeholder.clone()),
                     BackgroundColor(Color::NONE),
                     BorderColor::all(Color::NONE),
-                    Interaction::default(),
+                    Hovered::default(),
                 ))
                 .with_children(|chip| {
                     chip.spawn((
@@ -581,7 +582,9 @@ pub mod tooltip {
     pub fn update_buff_tooltip(
         state: Res<SceneState>,
         pointer: Res<MousePointer>,
-        chips: Query<(&StatusChip, &Interaction)>,
+        chips: Query<(Entity, &StatusChip, &Hovered)>,
+        pointers: Option<Res<bevy::picking::events::PointerState>>,
+        parents: Query<&ChildOf>,
         mut card_q: Query<&mut Node, With<BuffTooltip>>,
         mut text_q: Query<&mut Text, With<BuffTooltipText>>,
     ) {
@@ -592,8 +595,13 @@ pub mod tooltip {
         let icons = &state.snapshot.status_icons;
         let hovered_icon = chips
             .iter()
-            .find(|(_, i)| matches!(i, Interaction::Hovered | Interaction::Pressed))
-            .and_then(|(chip, _)| icons.get(chip.slot).copied());
+            .find(|(entity, _, hovered)| {
+                hovered.0
+                    || pointers.as_ref().is_some_and(|pointers| {
+                        crate::cursor::primary_pointer_is_held(*entity, pointers, &parents)
+                    })
+            })
+            .and_then(|(_, chip, _)| icons.get(chip.slot).copied());
 
         let name = hovered_icon.and_then(ffxi_vocab::status_names::lookup);
         let Some(name) = name else {

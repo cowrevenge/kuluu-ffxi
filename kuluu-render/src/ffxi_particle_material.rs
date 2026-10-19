@@ -16,14 +16,14 @@ use crate::dat_d3m::D3mBlendMode;
 use crate::element_sort::transparent_sort_bias;
 use crate::particle_sim::{ignores_texture_alpha, D3mDrawPath};
 
-// `ffxi_particle.wgsl`'s `PREMULTIPLY_*`: which premultiply the blend state this alpha mode
+// `ffxi_particle.wesl`'s `PREMULTIPLY_*`: which premultiply the blend state this alpha mode
 // resolves to expects. Bevy applies these inside `pbr_functions::premultiply_alpha`, which
 // only the StandardMaterial shader calls, so a custom fragment shader owes them itself.
 const PREMULTIPLY_NONE: f32 = 0.0;
 const PREMULTIPLY_ADD: f32 = 1.0;
 const PREMULTIPLY_MULTIPLY: f32 = 2.0;
 
-/// `ffxi_particle.wgsl`'s `FOG_*`: params.y selects the element's distance fog.
+/// `ffxi_particle.wesl`'s `FOG_*`: params.y selects the element's distance fog.
 const FOG_OFF: f32 = 0.0;
 const FOG_ZONE: f32 = 1.0;
 const FOG_BLACK: f32 = 2.0;
@@ -32,7 +32,7 @@ const FOG_BLACK: f32 = 2.0;
 // fog colour for black, so its far-off elements fade out instead of adding the horizon tint.
 const FOG_BLACK_BLEND_BYTE: u8 = 0x48;
 
-// `ffxi_particle.wgsl`'s PATH_*: which fixed-function table the element rides. The tables
+// `ffxi_particle.wesl`'s PATH_*: which fixed-function table the element rides. The tables
 // differ per mesh source (CMoD3m.cpp TSS blocks vs ZoneRenderer.cpp DoD3mDraw), not per
 // generator, so the selector is a property of the resolved draw path.
 const PATH_D3M_TEXTURED: f32 = 0.0;
@@ -194,11 +194,11 @@ impl Material for FfxiParticleMaterial {
     // A custom @vertex stage: the per-particle factor rides the TANGENT slot (location 4),
     // which the default mesh vertex function does not forward.
     fn vertex_shader() -> ShaderRef {
-        "embedded://kuluu_render/ffxi_particle.wgsl".into()
+        "embedded://kuluu_render/ffxi_particle.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://kuluu_render/ffxi_particle.wgsl".into()
+        "embedded://kuluu_render/ffxi_particle.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -244,7 +244,7 @@ pub struct FfxiParticleMaterialPlugin;
 
 impl Plugin for FfxiParticleMaterialPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "ffxi_particle.wgsl");
+        embedded_asset!(app, "ffxi_particle.wesl");
         app.add_plugins(MaterialPlugin::<FfxiParticleMaterial>::default());
     }
 }

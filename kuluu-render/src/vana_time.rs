@@ -1,4 +1,5 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use bevy::platform::time::Instant;
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 use kuluu_snapshot::ViewerEvent;

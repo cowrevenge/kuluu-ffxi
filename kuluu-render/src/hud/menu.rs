@@ -1,4 +1,7 @@
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::ui_widgets::Button;
 
 use crate::graphics_settings::{
     config_rows, dlss_config_rows, graphics_rows, GraphicsField, GraphicsSection, GraphicsSettings,
@@ -762,6 +765,7 @@ fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
                 c.spawn((
                     MainMenuRow { slot },
                     Button,
+                    Hovered::default(),
                     Text::new(""),
                     text_nowrap(),
                     style::text_font(14.0),
@@ -1428,7 +1432,7 @@ pub fn menu_mouse_hover_system(
     mut mode: ResMut<InputMode>,
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
-    rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
+    rows: Query<(&Hovered, &MainMenuRow), Changed<Hovered>>,
 ) {
     let InputMode::Menu(stack) = &mut *mode else {
         return;
@@ -1438,7 +1442,7 @@ pub fn menu_mouse_hover_system(
     };
     let kind = stack.levels[level_idx].kind;
     for (interaction, row) in &rows {
-        if !matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
+        if !interaction.0 {
             continue;
         }
         let cursor = stack.levels[level_idx].cursor;
@@ -1459,9 +1463,12 @@ pub fn menu_mouse_click_system(
     mode: Res<InputMode>,
     settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
-    rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
+    rows: Query<&MainMenuRow>,
     mut out: MessageWriter<MenuRowActivated>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &rows, &parents);
     let InputMode::Menu(stack) = &*mode else {
         return;
     };
@@ -1469,10 +1476,7 @@ pub fn menu_mouse_click_system(
         return;
     };
     let kind = level.kind;
-    for (interaction, row) in &rows {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for row in pressed_rows {
         let (total, viewport_start) =
             resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
         let window = visible_window(kind, total);

@@ -413,11 +413,19 @@ pub fn update_menu_help_bar(
     if stack.levels.iter().any(|lv| {
         matches!(lv.kind, MenuKind::Status | MenuKind::StatusDetail { .. })
     }));
+    // Owner ruling 2026-10-20 (ur/51): the Currencies windows are the exception - retail
+    // shows the small framed title box up there (`Currencies`) beside the help sentence, so
+    // while one of them is focused that box stays visible and carries its word.
+    let currency_detail_open = matches!(&*mode, InputMode::Menu(stack)
+    if stack.current().is_some_and(|lv| {
+        matches!(lv.kind, MenuKind::StatusDetail { entry }
+            if crate::hud::menu::is_currency_detail(Some(entry)))
+    }));
 
     // The help line follows the active pane's level: at Root the left column,
     // after a drill the right column, and the parent again once focus toggles.
     for mut visibility in title_box_q.iter_mut() {
-        let want = if status_word_hidden {
+        let want = if status_word_hidden && !currency_detail_open {
             Visibility::Hidden
         } else {
             Visibility::Visible
@@ -450,7 +458,7 @@ pub fn update_menu_help_bar(
                         }
                     }
                     None => BarContent {
-                        title: if status_word_hidden {
+                        title: if status_word_hidden && !currency_detail_open {
                             String::new()
                         } else {
                             help_bar_title(l.kind).to_string()

@@ -1273,6 +1273,8 @@ pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) 
 /// ride the item_screen panel; everything else the generic panel.
 pub fn list_page_rows(kind: MenuKind) -> usize {
     match kind {
+        // ur/51: a Currencies page is exactly the eight visible rows.
+        MenuKind::StatusDetail { entry } if is_currency_detail(Some(entry)) => 8,
         MenuKind::Items | MenuKind::UsableItems => crate::hud::item_screen::ITEM_LIST_ROWS,
         _ => crate::hud::unity_fp::unity_fp_page_rows(kind)
             .or_else(|| crate::hud::merit_windows::visible_list_rows(kind))
@@ -1291,10 +1293,20 @@ pub fn page_cursor(cursor: usize, entry_count: usize, rows: usize, forward: bool
     }
 }
 
-/// The label at a cursor slot. Dynamic menus read the live row; every other
-/// menu reads `static_entries`, which is empty for the section-derived pages
-/// (Config/Graphics/GraphicsDlss) — callers that need those rows use
-/// `entries_for`, which resolves them through `settings_rows`.
+/// True when the Status detail under this level is one of the two Currencies lists (ur/51).
+pub fn is_currency_detail(entry: Option<u8>) -> bool {
+    matches!(
+        entry.and_then(|e| crate::hud::status_panel::STATUS_ENTRIES
+            .get(usize::from(e))
+            .map(|row| row.kind)),
+        Some(crate::hud::status_panel::StatusEntryKind::Currencies)
+            | Some(crate::hud::status_panel::StatusEntryKind::Currencies2)
+    )
+}
+
+/// The label at a cursor slot. Dynamic menus read the live row; every other menu reads
+/// `static_entries`, which is empty for the section-derived pages (Config/Graphics/
+/// GraphicsDlss) — callers that need those rows use `entries_for` through `settings_rows`.
 pub fn entry_label(kind: MenuKind, idx: usize, dynamic: &DynamicMenu) -> &str {
     if is_dynamic(kind) {
         if dynamic.rows.is_empty() {
@@ -8442,7 +8454,12 @@ pub fn update_status_detail_window(
         ),
     >,
     mut line_q: Query<
-        (&StatusDetailLine, &mut Text, &mut Node),
+        (
+            &StatusDetailLine,
+            &mut Text,
+            Option<&mut TextColor>,
+            &mut Node,
+        ),
         (
             Without<StatusDetailTitle>,
             Without<StatusDetailWindow>,
@@ -8516,7 +8533,7 @@ pub fn update_status_detail_window(
                     node.display = Display::None;
                 }
             }
-            for (_, _, mut line_node) in line_q.iter_mut() {
+            for (_, _, _, mut line_node) in line_q.iter_mut() {
                 if line_node.display != Display::None {
                     line_node.display = Display::None;
                 }
@@ -8671,22 +8688,20 @@ pub fn update_status_detail_window(
         entry_kind,
         Some(crate::hud::status_panel::StatusEntryKind::CraftSkill)
     ) {
-        // One column, same right-aligned numbers law (ur/41), and fitted like its two-column
-        // siblings so the third `(level)` column sits on a real right margin (ur/49).
-        roster_display = pad_column_numbers(&dynamic.rows);
+        // One column with the right-aligned numbers law (ur/41); the box keeps its seat width
+        // and the `(level)` column is pushed to sit ON that window's right margin - owner ruling
+        // 2026-10-20 (ur/50): "the (0) is STILL not pushed to the right side".
+        const CRAFT_RIGHT_CLEARANCE_PX: f32 = 6.0;
+        let pad_edge_chars = match node.width {
+            Val::Px(width) => Some(
+                ((width - MENU_BORDER_PX * 2.0 - CRAFT_RIGHT_CLEARANCE_PX)
+                    / crate::ui_font::text_width_px("0", STATUS_DETAIL_ROW_FONT_PX))
+                    as usize,
+            ),
+            _ => None,
+        };
+        roster_display = pad_column_numbers_edge(&dynamic.rows, pad_edge_chars);
         let (layout, height) = skill_window_layout(rows_len, false);
-        const CRAFT_RIGHT_CLEARANCE_PX: f32 = 8.0;
-        if rows_len > 0 {
-            let widest = roster_display
-                .iter()
-                .map(|label| {
-                    crate::ui_font::text_width_px(label.as_str(), STATUS_DETAIL_ROW_FONT_PX)
-                })
-                .fold(0.0f32, f32::max);
-            node.width = Val::Px(
-                (16.0 + widest + CRAFT_RIGHT_CLEARANCE_PX + MENU_BORDER_PX).clamp(96.0, 460.0),
-            );
-        }
         (layout, Val::Px(height))
     } else {
         // Owner ruling 2026-10-20: remove the padding at the bottom of these boxes. A detail with
@@ -8790,8 +8805,53 @@ pub fn update_status_detail_window(
             band_node.top = inbox_top;
         }
     }
-    for (line, mut text, mut line_node) in line_q.iter_mut() {
-        let Some(row) = dynamic.rows.get(line.slot) else {
+    // Owner ruling 2026-10-20 (ur/51): each Currencies list is a SCROLLABLE window of eight
+    // visible rows with the cursor on one - never the tall spill that let stale lines ghost
+    // over the list. The pool's first `CURRENCY_VISIBLE_ROWS` nodes render the page around the
+    // detail level's own cursor, which the generic list nav already drives.
+    const CURRENCY_VISIBLE_ROWS: usize = 8;
+    let currency_view = matches!(
+        entry_kind,
+        Some(crate::hud::status_panel::StatusEntryKind::Currencies)
+            | Some(crate::hud::status_panel::StatusEntryKind::Currencies2)
+    )
+    .then(|| {
+        let total = dynamic.rows.len();
+        let cursor = match &*mode {
+            InputMode::Menu(stack) => stack.current().map(|level| level.cursor).unwrap_or(0),
+            _ => 0,
+        };
+        let cursor = cursor.min(total.saturating_sub(1));
+        let start = (cursor / CURRENCY_VISIBLE_ROWS) * CURRENCY_VISIBLE_ROWS;
+        (start, cursor)
+    });
+    if currency_view.is_some() && rows_len > 0 {
+        // Currency values ride the window's right margin, same law as craft's `(level)`.
+        let edge_chars = match node.width {
+            Val::Px(width) => Some(
+                ((width - MENU_BORDER_PX * 2.0 - 8.0)
+                    / crate::ui_font::text_width_px("0", STATUS_DETAIL_ROW_FONT_PX))
+                    as usize,
+            ),
+            _ => None,
+        };
+        roster_display = pad_numbers_column(&dynamic.rows, 0, rows_len, edge_chars);
+    }
+    for (line, mut text, text_color, mut line_node) in line_q.iter_mut() {
+        let row_index = match currency_view {
+            Some((start, _)) => {
+                if line.slot < CURRENCY_VISIBLE_ROWS && start + line.slot < dynamic.rows.len() {
+                    start + line.slot
+                } else {
+                    if line_node.display != Display::None {
+                        line_node.display = Display::None;
+                    }
+                    continue;
+                }
+            }
+            None => line.slot,
+        };
+        let Some(row) = dynamic.rows.get(row_index) else {
             if line_node.display != Display::None {
                 line_node.display = Display::None;
             }
@@ -8800,11 +8860,18 @@ pub fn update_status_detail_window(
         // Roster windows show the column-padded label (right-aligned numbers, ur/41); everyone
         // else draws their raw row text.
         let shown: &str = roster_display
-            .get(line.slot)
+            .get(row_index)
             .map(String::as_str)
             .unwrap_or(row.label.as_str());
         if text.as_str() != shown {
             **text = shown.to_string();
+        }
+        // The currency page carries a real cursor (ur/51, retail shows the triangle row).
+        if let (Some((_, cursor)), Some(mut color)) = (currency_view, text_color) {
+            let want = menu_row_color(false, row.tint, row_index == cursor);
+            if color.0 != want {
+                color.0 = want;
+            }
         }
         // The gauge row carries no text, and an empty text node measures nothing: without a height
         // of its own the following row slides up under the bar (owner capture 2026-10-19, green
@@ -8949,8 +9016,14 @@ fn skill_window_layout(rows_len: usize, two_columns: bool) -> (Option<Vec<(i16, 
 /// digit lands on the column's shared right edge: names stay flush left, only spaces sit between,
 /// and numbers line up. The HUD font is monospace, so char-count padding places them exactly.
 /// Digits reserve at least two slots (ur/39 "lets assume 2 digits always for space"); rows that
-/// do not end in a separated number pass through untouched.
-fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<String> {
+/// do not end in a separated number pass through untouched. `min_edge_chars` lifts the edge
+/// (craft rides its level column on the window's right margin, ur/50).
+fn pad_numbers_column(
+    rows: &[DynamicMenuRow],
+    from: usize,
+    to: usize,
+    min_edge_chars: Option<usize>,
+) -> Vec<String> {
     let split_num = |label: &str| -> Option<(String, String, bool)> {
         let chars: Vec<char> = label.chars().collect();
         let n = chars.len();
@@ -9034,6 +9107,7 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
             acc.max(stem.chars().count() + 1 + num.chars().count().max(digit_w))
         }
     });
+    let edge = edge.max(min_edge_chars.unwrap_or(0));
     (from..to)
         .map(|k| {
             let label = rows[k].label.as_str();
@@ -9059,15 +9133,22 @@ fn pad_numbers_column(rows: &[DynamicMenuRow], from: usize, to: usize) -> Vec<St
 /// The one-column law: the whole list is a single column.
 fn pad_column_numbers(rows: &[DynamicMenuRow]) -> Vec<String> {
     let n = rows.len();
-    pad_numbers_column(rows, 0, n)
+    pad_numbers_column(rows, 0, n, None)
+}
+
+/// Craft's variant (ur/50): the shared right edge is lifted to `min_edge_chars` so the `(level)`
+/// column rides on the WINDOW's right margin, not just past the longest row.
+fn pad_column_numbers_edge(rows: &[DynamicMenuRow], min_edge_chars: Option<usize>) -> Vec<String> {
+    let n = rows.len();
+    pad_numbers_column(rows, 0, n, min_edge_chars)
 }
 
 /// Same law per half of the two-column grid - each half's edge is its own so column one is
 /// never stretched for column two's sake. Returns slot-indexed strings (first half then second).
 fn pad_column_numbers_split(rows: &[DynamicMenuRow], first_half: usize) -> Vec<String> {
     let first_half = first_half.min(rows.len());
-    let mut out = pad_numbers_column(rows, 0, first_half);
-    out.extend(pad_numbers_column(rows, first_half, rows.len()));
+    let mut out = pad_numbers_column(rows, 0, first_half, None);
+    out.extend(pad_numbers_column(rows, first_half, rows.len(), None));
     out
 }
 

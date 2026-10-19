@@ -8602,6 +8602,13 @@ pub fn update_status_detail_window(
     if node.padding.bottom != Val::ZERO {
         node.padding.bottom = Val::ZERO;
     }
+    // Owner ruling 2026-10-20 (capture ur/26): top padding goes as well - "remove the top
+    // padding on all, we dont want wasted space up top". Only flow-layout details (Auto height);
+    // DAT-slot and skill windows keep their record padding because Taffy resolves their absolute
+    // slot rows at the padding edge, so removing it there would shift retail's recorded geometry.
+    if matches!(window_height, Val::Auto) && node.padding.top != Val::ZERO {
+        node.padding.top = Val::ZERO;
+    }
     // Retail packs a detail's readout rows tight: measured off the owner capture of `profile`, one
     // line to the next is ~16 px against this family's 15.2 px line box, so the chrome's 2 px row
     // gap would push every window past its record height.
@@ -8750,7 +8757,14 @@ pub fn update_status_detail_window(
         };
     let left = style::WINDOW_PAD_X_PX + indent;
     let width = (outer_width - MENU_BORDER_PX - style::WINDOW_PAD_X_PX - left).max(16.0);
-    let top = style::WINDOW_PAD_Y_PX
+    // The gauge hangs from the flow, so it starts at whatever top inset the window actually
+    // wears - 2026-10-20 zeroed that padding (owner ruling), and hard-coding WINDOW_PAD_Y_PX
+    // here would leave the bar floating a padding's height above its row.
+    let flow_top = match node.padding.top {
+        Val::Px(inset) => inset,
+        _ => 0.0,
+    };
+    let top = flow_top
         + (rank_index + 1) as f32 * row_pitch
         + (crate::ui_font::line_height_px(STATUS_DETAIL_ROW_FONT_PX) - RANK_BAR_CAP_HEIGHT_PX)
             / 2.0;

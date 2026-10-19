@@ -335,6 +335,10 @@ const LEVEL_GAUGE_TRACK_HEIGHT_PX: f32 = 6.0;
 /// frame line. The clearance is part of what the gauge itself measures, so the auto-height box
 /// counts it while keeping no bottom padding of its own (the no-padding law stays on every box).
 const LEVEL_GAUGE_BOTTOM_CLEARANCE_PX: f32 = 6.0;
+/// How far each value row is pulled up toward its label (owner ruling 2026-10-20, capture
+/// ur/26: "the row spacing after EXP and NEXTLevel - so numbers closer to their labels"). A
+/// negative top margin shortens only the label→value gap; every other flow gap is untouched.
+const LEVEL_VALUE_PULL_UP_PX: f32 = 4.0;
 /// The EXP label sits further right than NEXTLevel in the retail box.
 pub const LEVEL_EXP_LABEL_INDENT_PX: f32 = 14.0;
 /// Retail values end short of the column's right edge, over the gauge's tail.
@@ -764,13 +768,15 @@ pub fn spawn_status_panel(mut commands: Commands) {
             StatusLevelBox,
             Node {
                 width: Val::Px(PANEL_WIDTH_PX),
-                // Owner ruling 2026-10-20: no padding at the bottom of these boxes, top and side
-                // air unchanged. The gauge still clears the frame - that clearance belongs to the
-                // gauge row's own margin (`LEVEL_GAUGE_BOTTOM_CLEARANCE_PX`), never to the box.
+                // Owner rulings 2026-10-20: no padding at the bottom AND none at the top of
+                // these boxes ("remove the top padding on all - we dont want wasted space up
+                // top"); only side air remains. The gauge still clears the frame - that clearance
+                // belongs to the gauge row's own margin (`LEVEL_GAUGE_BOTTOM_CLEARANCE_PX`),
+                // never to the box.
                 padding: UiRect {
                     left: Val::Px(10.0),
                     right: Val::Px(10.0),
-                    top: Val::Px(6.0),
+                    top: Val::ZERO,
                     bottom: Val::ZERO,
                 },
                 border: UiRect::all(Val::Px(1.0)),
@@ -1051,6 +1057,9 @@ fn value_row_node() -> Node {
         width: Val::Percent(100.0),
         justify_content: JustifyContent::FlexEnd,
         padding: UiRect::right(Val::Px(LEVEL_VALUE_INSET_END_PX)),
+        // Pull each number up against its label (owner ruling 2026-10-20); the following row
+        // keeps its normal gap, so only the pair tightens.
+        margin: UiRect::top(Val::Px(-LEVEL_VALUE_PULL_UP_PX)),
         ..default()
     }
 }
@@ -1131,6 +1140,9 @@ pub fn update_persona_frame(
         // red arrows). One source of truth - Taffy measures, so flow children are inside by
         // construction; short characters simply end higher. Width stays from the record.
         want.padding.bottom = Val::ZERO;
+        // Owner ruling 2026-10-20 (capture ur/26): top padding goes too - "we dont want wasted
+        // space up top". The caption keeps riding the frame line regardless; only the rows shift.
+        want.padding.top = Val::ZERO;
         want.height = Val::Auto;
         want.row_gap = Val::Px(layout.row_gap);
         node.set_if_neq(want);
@@ -1912,8 +1924,10 @@ mod tests {
         app.update();
         let placed = persona_node(&mut app);
         // Height law (owner 2026-10-20): Taffy measures the box - never arithmetic pinning, which
-        // laid CHR across the border once there was no slack under it. No bottom padding at all.
+        // laid CHR across the border once there was no slack under it. No padding top or bottom at
+        // all ("remove the top padding on all", capture ur/26).
         assert_eq!(placed.padding.bottom, Val::ZERO);
+        assert_eq!(placed.padding.top, Val::ZERO);
         assert_eq!(
             (placed.width, placed.height),
             (Val::Px(f32::from(RECORD_WIDTH)), Val::Auto),
@@ -2328,6 +2342,34 @@ mod tests {
         assert_eq!(bg.0, LEVEL_GAUGE_TRACK_COLOR);
     }
 
+    /// Each value row is pulled up against its own label (owner ruling 2026-10-20, capture
+    /// ur/26: "the row spacing after EXP and NEXTLevel - so numbers closer to their labels").
+    /// Only the pair gaps shrink; heading and labels wear no top margin.
+    #[test]
+    fn level_values_pull_up_to_their_labels() {
+        let mut app = persona_app();
+        let world = app.world_mut();
+        let mut q = world.query::<(&StatusLevelLine, &ChildOf)>();
+        let mut pulled = 0;
+        for (line, child_of) in q.iter(world) {
+            let wrapper = world
+                .get::<Node>(child_of.parent())
+                .expect("row wrapper node");
+            match line.0 {
+                LevelLine::ExpValue | LevelLine::NextValue => {
+                    pulled += 1;
+                    assert_eq!(
+                        wrapper.margin.top,
+                        Val::Px(-LEVEL_VALUE_PULL_UP_PX),
+                        "the number hugs its label"
+                    );
+                }
+                _ => assert_eq!(wrapper.margin.top, Val::ZERO, "only value rows are pulled"),
+            }
+        }
+        assert_eq!(pulled, 2, "both EXP and NEXTLevel values pull up");
+    }
+
     /// The gauge row reserves the air under its own bottom edge (owner ruling 2026-10-20,
     /// capture ur/24: "the extra edges of XP bar are still not being counted in height
     /// properly") - with no padding on the box, the caps' overhang must be part of what layout
@@ -2435,6 +2477,12 @@ mod tests {
         app.update();
 
         let stacked = level_box(&mut app);
+        // No chrome padding top or bottom (owner rulings 2026-10-20, capture ur/26): the box
+        // wears side air only; the gauge carries its own under-edge clearance.
+        assert_eq!(
+            (stacked.padding.top, stacked.padding.bottom),
+            (Val::ZERO, Val::ZERO)
+        );
         assert_eq!(
             stacked.position_type,
             PositionType::Relative,

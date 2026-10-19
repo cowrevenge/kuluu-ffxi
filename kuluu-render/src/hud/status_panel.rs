@@ -1130,6 +1130,15 @@ pub fn update_persona_frame(
         .max()
         .unwrap_or(0);
     let layout = persona_layout(config_rows.record_frame(PERSONA_WINDOW).as_ref(), widest);
+    // The caption's given height (owner ruling 2026-10-20, capture ur/27: "the tiny 'status' on
+    // top of window should have given height to prevent word overlapping"): the word box is this
+    // tall and straddles the frame line, so half minus a border hangs into the content area.
+    // The panel reserves exactly that band as its top inset - rows start at the word's bottom
+    // edge by construction, never under it. It is derived from the caption, not chrome padding.
+    let pitch_px = layout
+        .line_pitch
+        .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
+    let caption_reserve_px = pitch_px / 2.0 - PERSONA_BORDER_PX / 2.0;
     for mut node in panel_q.iter_mut() {
         let mut want = node.clone();
         want.width = Val::Px(layout.width);
@@ -1140,9 +1149,9 @@ pub fn update_persona_frame(
         // red arrows). One source of truth - Taffy measures, so flow children are inside by
         // construction; short characters simply end higher. Width stays from the record.
         want.padding.bottom = Val::ZERO;
-        // Owner ruling 2026-10-20 (capture ur/26): top padding goes too - "we dont want wasted
-        // space up top". The caption keeps riding the frame line regardless; only the rows shift.
-        want.padding.top = Val::ZERO;
+        // Owner rulings 2026-10-20: chrome top padding gone (ur/26), but the row zone still
+        // reserves the caption's hanging half so "Status" can never overlap row 1 (ur/27).
+        want.padding.top = Val::Px(caption_reserve_px);
         want.height = Val::Auto;
         want.row_gap = Val::Px(layout.row_gap);
         node.set_if_neq(want);
@@ -1158,9 +1167,6 @@ pub fn update_persona_frame(
         pitch.set_if_neq(line_height);
     }
     // Half the line height sits above the frame edge, centered on it like retail's title.
-    let pitch_px = layout
-        .line_pitch
-        .unwrap_or_else(|| crate::ui_font::line_height_px(layout.row_font_px));
     // Absolute children are inset from the padding box, so half the panel's width for
     // centering spans them is its width minus BOTH borders — not the content width inside
     // the padding. Subtracting `PERSONA_PAD_X_PX` as well (as this did) measured against a
@@ -1189,6 +1195,12 @@ pub fn update_persona_frame(
             }
         }
         pitch.set_if_neq(line_height);
+        // The word wears its given height, matching the box layout already measures for it
+        // (owner ruling 2026-10-20); `caption_reserve_px` above is drawn from this same number.
+        let want_height = Val::Px(pitch_px);
+        if node.height != want_height {
+            node.height = want_height;
+        }
         // Half a border further down than the old half-pitch lift: centred on the frame
         // line itself, so no sliver of it shows above or below the glyphs.
         let want_top = Val::Px(-pitch_px / 2.0 - PERSONA_BORDER_PX / 2.0);
@@ -1924,10 +1936,20 @@ mod tests {
         app.update();
         let placed = persona_node(&mut app);
         // Height law (owner 2026-10-20): Taffy measures the box - never arithmetic pinning, which
-        // laid CHR across the border once there was no slack under it. No padding top or bottom at
-        // all ("remove the top padding on all", capture ur/26).
+        // laid CHR across the border once there was no slack under it. No bottom padding; chrome
+        // top padding gone too ("remove the top padding on all", ur/26) - but NOT a hair more:
+        // the top inset is exactly the caption's hanging half (its given height, ur/27), which
+        // for this record is fitted pitch / 2 - border / 2.
         assert_eq!(placed.padding.bottom, Val::ZERO);
-        assert_eq!(placed.padding.top, Val::ZERO);
+        let inner_full = f32::from(RECORD_HEIGHT)
+            - 2.0 * (PERSONA_PAD_Y_PX + PERSONA_BORDER_PX)
+            - PERSONA_BLOCK_GAPS as f32 * PERSONA_BLOCK_GAP_PX;
+        let pitch = inner_full / PERSONA_ROW_COUNT as f32;
+        assert!(
+            matches!(placed.padding.top, Val::Px(top) if (top - (pitch / 2.0 - PERSONA_BORDER_PX / 2.0)).abs() < 0.01),
+            "the row zone reserves the caption's hanging half, nothing more: {:?}",
+            placed.padding.top
+        );
         assert_eq!(
             (placed.width, placed.height),
             (Val::Px(f32::from(RECORD_WIDTH)), Val::Auto),
@@ -2220,6 +2242,15 @@ mod tests {
             matches!(node.top, Val::Px(top) if top < 0.0),
             "lifted over the frame edge: {:?}",
             node.top
+        );
+        // Given height (owner ruling 2026-10-20, capture ur/27: "should have give height to
+        // prevent word overlapping") - explicit line box, from which the panel's top row
+        // reservation is drawn.
+        let want_h = crate::ui_font::line_height_px(PERSONA_ROW_FONT_PX);
+        assert!(
+            matches!(node.height, Val::Px(h) if (h - want_h).abs() < 0.01),
+            "the caption wears its given height: {:?}",
+            node.height
         );
         // Centering law (owner 2026-10-19): word and strip share one middle — that of the
         // band absolute children measure across, i.e. the panel minus its two borders, NOT

@@ -364,8 +364,9 @@ pub fn update_menu_help_bar(
             Without<MenuHelpHint>,
         ),
     >,
+    // The node rides along so an empty counter can give up its flex slot (see the write below).
     mut counter_q: Query<
-        &mut Text,
+        (&mut Text, &mut Node),
         (
             With<MenuHelpCounter>,
             Without<MenuHelpTitle>,
@@ -548,9 +549,21 @@ pub fn update_menu_help_bar(
         }
     }
 
-    if let Ok(mut text) = counter_q.single_mut() {
+    if let Ok((mut text, mut counter_node)) = counter_q.single_mut() {
         if **text != content.counter {
             **text = content.counter;
+        }
+        // Owner ruling 2026-10-20 (capture ur/27): the help word sat with a larger start gap
+        // than every other window - an empty counter kept its flex slot, so the segment's
+        // column gap added a phantom inset before it. An absent counter takes no slot; this is
+        // the counter node, not the title box (whose slot must stay, x3 ruling of 2026-10-19).
+        let want = if content.counter.is_empty() {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if counter_node.display != want {
+            counter_node.display = want;
         }
     }
 
@@ -1024,6 +1037,54 @@ mod tests {
             title_of(&mut app),
             menu::menu_title(MenuKind::Items),
             "flow closed: words work again"
+        );
+    }
+
+    /// Owner ruling 2026-10-20 (capture ur/27): with no counter to show, the counter node gives
+    /// up its flex slot - otherwise the segment's column gap adds a phantom inset and the help
+    /// word starts further right than every other window's text.
+    #[test]
+    fn empty_counter_gives_up_its_flex_slot() {
+        use crate::input_mode::{MenuLevel, MenuStack};
+
+        let mut app = App::new();
+        app.init_resource::<DynamicMenu>()
+            .init_resource::<crate::hud::item_screen::ItemScreenContainer>()
+            .init_resource::<ItemMenuFocus>()
+            .init_resource::<crate::hud::check_view::CheckTarget>()
+            .init_resource::<crate::hud::auction::AuctionScreenState>()
+            .init_resource::<crate::hud::auction::AuctionSellInventory>()
+            .init_resource::<crate::hud::shop::ShopScreenState>()
+            .init_resource::<menu::ConfigDatRows>()
+            .init_resource::<crate::snapshot::SceneState>();
+        app.add_systems(Startup, spawn_menu_help_bar);
+        app.add_systems(Update, update_menu_help_bar);
+
+        let mut stack = MenuStack::root();
+        stack.levels.push(MenuLevel::new(MenuKind::Status, 0));
+        app.insert_resource(InputMode::Menu(stack));
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let counter_text = app
+            .world_mut()
+            .query_filtered::<&Text, With<MenuHelpCounter>>()
+            .single(app.world())
+            .unwrap()
+            .as_str()
+            .to_string();
+        assert!(counter_text.is_empty(), "the status flow shows no counter");
+        let display = app
+            .world_mut()
+            .query_filtered::<&Node, With<MenuHelpCounter>>()
+            .single(app.world())
+            .unwrap()
+            .display;
+        assert_eq!(
+            display,
+            Display::None,
+            "no counter: no slot, so the help word sits at plain padding like other windows"
         );
     }
 

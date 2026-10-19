@@ -8598,16 +8598,37 @@ pub fn update_status_detail_window(
         // blue below the readout; that pin is gone.
         (None, Val::Auto)
     };
+    // Owner ruling 2026-10-19: the title belongs in the bar across the top of the screen (the help
+    // line reads `Title: <worn title>`), not on this window's own border. Profile keeps no caption
+    // there at all, because its first row inside the box is the `Profile` header itself; every
+    // other detail still wears its record name.
+    let want_title = match entry_kind {
+        Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
+        _ => menu_title(MenuKind::StatusDetail {
+            entry: u8::try_from(idx).unwrap_or(u8::MAX),
+        })
+        .to_string(),
+    };
     node.height = window_height;
     if node.padding.bottom != Val::ZERO {
         node.padding.bottom = Val::ZERO;
     }
-    // Owner ruling 2026-10-20 (capture ur/26): top padding goes as well - "remove the top
-    // padding on all, we dont want wasted space up top". Only flow-layout details (Auto height);
-    // DAT-slot and skill windows keep their record padding because Taffy resolves their absolute
-    // slot rows at the padding edge, so removing it there would shift retail's recorded geometry.
-    if matches!(window_height, Val::Auto) && node.padding.top != Val::ZERO {
-        node.padding.top = Val::ZERO;
+    // Owner rulings 2026-10-20 (captures ur/26-27): chrome top padding goes from flow-layout
+    // details - but a window whose own title word straddles the frame line reserves that word's
+    // hanging half (its given height, `title_band`'s geometry), so no row can ever sit under it.
+    // Only Auto-height details; DAT-slot and skill windows keep their record padding because
+    // Taffy resolves their absolute slot rows at the padding edge.
+    if matches!(window_height, Val::Auto) {
+        let want_top = if want_title.is_empty() {
+            Val::ZERO
+        } else {
+            Val::Px(
+                crate::ui_font::line_height_px(MENU_TITLE_FONT_PX) / 2.0 - MENU_BORDER_PX / 2.0,
+            )
+        };
+        if node.padding.top != want_top {
+            node.padding.top = want_top;
+        }
     }
     // Retail packs a detail's readout rows tight: measured off the owner capture of `profile`, one
     // line to the next is ~16 px against this family's 15.2 px line box, so the chrome's 2 px row
@@ -8616,17 +8637,6 @@ pub fn update_status_detail_window(
     if node.display != Display::Flex {
         node.display = Display::Flex;
     }
-    // Owner ruling 2026-10-19: the title belongs in the bar across the top of the screen (the help
-    // line reads `Title: <worn title>`), not on this window's own border. Profile keeps no caption
-    // there at all, because its first row inside the box is the `Profile` header itself; every other
-    // detail still wears its record name.
-    let want_title = match entry_kind {
-        Some(crate::hud::status_panel::StatusEntryKind::Profile) => String::new(),
-        _ => menu_title(MenuKind::StatusDetail {
-            entry: u8::try_from(idx).unwrap_or(u8::MAX),
-        })
-        .to_string(),
-    };
     // The caption band, placed from the width this system just pinned, so it never waits a frame for
     // layout to measure. Same law as `place_menu_title_bands` gives the selector pane.
     let outer_width = match node.width {

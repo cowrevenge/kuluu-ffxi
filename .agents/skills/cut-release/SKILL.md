@@ -33,6 +33,9 @@ part of this release or they are not — decide *with the user*, don't quietly
 sweep them in. In a tree that mixes another session's edits, stage only your own
 hunks (`git add -p`); never `git add -A`.
 
+Use `release/vX.Y.Z` for release branches.
+When the user requests all main changes, include both main histories and tracked local edits.
+
 Pick the version from what's actually in the range:
 
 ```bash

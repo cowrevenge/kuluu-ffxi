@@ -1,6 +1,9 @@
 use bevy::input::mouse::MouseWheel;
+use bevy::picking::events::PointerPress;
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
+use bevy::ui_widgets::Button;
 use kuluu_snapshot::{ChatChannel, ChatLine, ChatSpanKind};
 
 use crate::graphics_settings::{ChatLayout, GraphicsSettings};
@@ -307,6 +310,7 @@ pub fn spawn_chat_tab_bar_as_child(p: &mut ChildSpawnerCommands) {
 fn spawn_auto_switch_toggle(p: &mut ChildSpawnerCommands) {
     p.spawn((
         Button,
+        Hovered::default(),
         ChatAutoSwitchToggle,
         Node {
             padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
@@ -336,6 +340,7 @@ fn spawn_tab_button(p: &mut ChildSpawnerCommands, kind: ChatKind, label: &str, i
     };
     p.spawn((
         Button,
+        Hovered::default(),
         ChatTabButton { kind },
         Node {
             padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
@@ -785,11 +790,14 @@ pub fn chat_wheel_scroll_system(
 }
 
 pub fn chat_tab_click_system(
-    interactions: Query<(&Interaction, &ChatTabButton), Changed<Interaction>>,
+    interactions: Query<&ChatTabButton>,
     mut active: ResMut<ActiveChatTab>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
-    for (interaction, button) in &interactions {
-        if *interaction == Interaction::Pressed && active.0 != button.kind {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &interactions, &parents);
+    for button in pressed_rows {
+        if active.0 != button.kind {
             active.0 = button.kind;
         }
     }
@@ -948,11 +956,14 @@ fn horizontal_chat_layout(layout: ChatLayout, width: f32) -> bool {
 }
 
 pub fn chat_auto_switch_click_system(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<ChatAutoSwitchToggle>)>,
+    interactions: Query<&ChatAutoSwitchToggle>,
     mut auto: ResMut<ChatAutoSwitch>,
+    mut presses: MessageReader<PointerPress>,
+    parents: Query<&ChildOf>,
 ) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
+    let pressed_rows = super::primary_pressed_rows(&mut presses, &interactions, &parents);
+    for _ in pressed_rows {
+        {
             auto.0 = !auto.0;
         }
     }

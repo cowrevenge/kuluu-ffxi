@@ -173,12 +173,10 @@ bevy = { workspace = true, optional = true, features = [
     # primitives + `ValueChange` event), but we list both so a future split
     # doesn't silently lose widget support.
     "bevy_feathers",
+    "bevy_scene",
     "bevy_ui_widgets",
 ] }
-# Frame-rate limiter for the native window. The 0.21.x req is satisfied by
-# the workspace [patch.crates-io] git pin (upstream's Bevy 0.19 migration PR,
-# which keeps the 0.21.0 crate version); see kuluu-u11r.
-# `default-features = false` strips the debug overlay we don't need.
+# The workspace patch in vendor/bevy_framepace supports Bevy 0.20.
 bevy_framepace = { version = "0.22", optional = true, default-features = false }
 # System clipboard. Used by `//copy` to push recent system-toast lines to
 # the OS clipboard. Optional + gated on `native-window` because the

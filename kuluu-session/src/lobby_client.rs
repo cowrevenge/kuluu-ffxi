@@ -433,6 +433,7 @@ impl LobbyHandle {
         }
         tracing::info!("lobby: 0x02 ack received");
 
+        let key3 = self.wire.map_key_seed(key3);
         let req_a2 = build_data_a2(&key3);
         self.data.write_all(&req_a2).await?;
         self.data.flush().await?;
@@ -1182,7 +1183,10 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn lsb_wire(session_hash: [u8; 16]) -> LobbyWire {
-        LobbyWire::LandSandBoat { session_hash }
+        LobbyWire::LandSandBoat {
+            session_hash,
+            md5_key: 0,
+        }
     }
 
     fn pol_session() -> AuthSession {
@@ -1209,6 +1213,10 @@ mod tests {
     const ROSTER_CHAR_NAME: &str = "Bravo";
     const SESSION_HASH: [u8; 16] = [0x5A; 16];
     const KEY3: [u8; 20] = [0x11; 20];
+    const EXPECTED_MAP_SEED: [u8; 20] = [
+        0xda, 0x3e, 0x47, 0xef, 0xef, 0x64, 0x09, 0x70, 0x73, 0x0e, 0x56, 0xd1, 0xaa, 0x4a, 0xa9,
+        0xc1, 0x55, 0xe0, 0x5d, 0xad,
+    ];
     const HANDOFF_SERVER_IP: u32 = 0x0100_007F;
     const HANDOFF_SERVER_PORT: u16 = ffxi_proto::map::MAP_PORT;
     const DATA_ACK_SELECT: [u8; 5] = [DATA_RESP_SELECT_ACK, 0, 0, 0, 0];
@@ -1524,6 +1532,7 @@ mod tests {
     fn lsb_sessions_leave_the_auth_code_zero() {
         let wire = LobbyWire::LandSandBoat {
             session_hash: SESSION_HASH,
+            md5_key: 0,
         };
         let buf = build_lobby_login(&wire, "30230905_0", 0);
         assert_eq!(&buf[12..28], &SESSION_HASH);
@@ -1649,6 +1658,7 @@ mod tests {
         data.write_all(&DATA_ACK_SELECT).await.ok()?;
         let mut req_handoff = [0u8; IXFF_HEADER_SIZE];
         data.read_exact(&mut req_handoff).await.ok()?;
+        assert_eq!(&req_handoff[1..21], &EXPECTED_MAP_SEED);
         view.write_all(&next_login_packet(
             select_char_id(&select),
             ROSTER_CHAR_NAME,
@@ -1687,6 +1697,7 @@ mod tests {
             .expect("handshake");
         assert_eq!(handoff.char_id, ROSTER_CHAR_ID);
         assert_eq!(handoff.server_port, HANDOFF_SERVER_PORT);
+        assert_eq!(handoff.session_key_seed, EXPECTED_MAP_SEED);
 
         let select = server
             .await
@@ -1729,6 +1740,7 @@ mod tests {
         let chars = [slot(1, "Alpha"), slot(ROSTER_CHAR_ID, ROSTER_CHAR_NAME)];
         let mut wire = LobbyWire::LandSandBoat {
             session_hash: SESSION_HASH,
+            md5_key: 0,
         };
         let packet = build_view_select_by_id(&chars, ROSTER_CHAR_ID, &mut wire).unwrap();
         assert_eq!(&packet[12..28], &SESSION_HASH);
@@ -1743,6 +1755,7 @@ mod tests {
         let chars = [slot(1, "Alpha"), slot(2, "Bravo")];
         let mut wire = LobbyWire::LandSandBoat {
             session_hash: SESSION_HASH,
+            md5_key: 0,
         };
         let err = build_view_select_by_id(&chars, 9, &mut wire)
             .unwrap_err()

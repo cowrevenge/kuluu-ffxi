@@ -3,15 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
     check_scrape_count, parse_cpp_enum_class, parse_lua_indexed_pair_table, parse_sql_insert_rows,
-    parse_u16_pair_rows, parse_u32_pair_rows, parse_xi_ident_table, parse_yaml,
-    parse_yaml_enum_values, prettify_snake_case, rust_string_literal, split_sql_fields,
-    split_sql_tuple, write_u16_table, write_u16_u16_table, write_u16_u32_table, write_u16_u8_table,
-    zone_data_files, Yaml,
+    parse_u16_pair_rows, parse_u32_pair_rows, parse_yaml, parse_yaml_enum_values,
+    prettify_snake_case, rust_string_literal, split_sql_fields, split_sql_tuple, write_u16_table,
+    write_u16_u16_table, write_u16_u32_table, write_u16_u8_table, zone_data_files, Yaml,
 };
 
 const LSB_MSG_BASIC_H: &str = "../vendor/server/src/map/enums/msg_basic.h";
 const LSB_MSG_LUA: &str = "../vendor/server/scripts/enum/msg.lua";
-const LSB_KEY_ITEM_LUA: &str = "../vendor/server/scripts/enum/key_item.lua";
+const LSB_KEY_ITEM_YAML: &str = "../vendor/server/data/enums/key_item.yaml";
 const LSB_JOB_NAME_LUA: &str = "../vendor/server/scripts/enum/job_name.lua";
 const LSB_SPELL_LIST_SQL: &str = "../vendor/server/sql/spell_list.sql";
 const LSB_ABILITIES_SQL: &str = "../vendor/server/sql/abilities.sql";
@@ -74,7 +73,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={LSB_MSG_BASIC_H}");
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
-    println!("cargo:rerun-if-changed={LSB_KEY_ITEM_LUA}");
+    println!("cargo:rerun-if-changed={LSB_KEY_ITEM_YAML}");
     println!("cargo:rerun-if-changed={LSB_JOB_NAME_LUA}");
     println!("cargo:rerun-if-changed={LSB_SPELL_LIST_SQL}");
     println!("cargo:rerun-if-changed={LSB_ABILITIES_SQL}");
@@ -171,18 +170,21 @@ fn main() -> Result<()> {
         floor::STATUS_EFFECT,
     )?;
 
-    let key_item_src = fs::read_to_string(LSB_KEY_ITEM_LUA)
-        .with_context(|| format!("reading {LSB_KEY_ITEM_LUA}"))?;
-    let key_item_entries = parse_xi_ident_table(&key_item_src, "xi.keyItem")?;
+    let key_item_src = fs::read_to_string(LSB_KEY_ITEM_YAML)
+        .with_context(|| format!("reading {LSB_KEY_ITEM_YAML}"))?;
+    let key_item_entries: Vec<_> = parse_yaml_enum_values(&key_item_src)?
+        .into_iter()
+        .map(|(name, id)| (id, prettify_snake_case(&name)))
+        .collect();
     write_u16_table(
         &out_dir.join("key_item_names_table.rs"),
         "KEY_ITEM_NAMES",
-        LSB_KEY_ITEM_LUA,
+        LSB_KEY_ITEM_YAML,
         &key_item_entries,
     )?;
     check_scrape_count(
         "key_item entries",
-        LSB_KEY_ITEM_LUA,
+        LSB_KEY_ITEM_YAML,
         key_item_entries.len(),
         floor::KEY_ITEM,
     )?;

@@ -84,6 +84,9 @@ registration; do not execute hook or skill changes from an untrusted PR.
 6. Stack down    → scripts/lsb-stack.sh down (once nothing else needs it)
 ```
 
+For zone and actor image-target captures, use the [capture example guidance](references/drive-gui.md#image-target-capture-examples).
+These examples run hidden by default. Use `--preview` to show the rendered scene when the user wants a desktop view.
+
 ## Stack availability
 
 Before reporting a Docker blocker, follow [stack startup, recovery, and provisioning](references/stack.md).

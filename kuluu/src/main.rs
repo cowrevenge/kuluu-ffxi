@@ -371,7 +371,6 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                         let initial_state = session::InitialState {
                             auth: session,
                             handoff,
-                            key3,
                         };
                         (u, p, slot.char_id, slot.name, initial_state)
                     }

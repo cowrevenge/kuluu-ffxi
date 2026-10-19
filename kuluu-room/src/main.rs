@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bevy::prelude::*;
 use clap::Parser;
 use kuluu_render::source::SceneSource;
@@ -56,7 +56,8 @@ fn main() -> Result<()> {
     let root = if args.no_install {
         None
     } else {
-        Some(Arc::new(ffxi_dat::DatRoot::from_env_or_default().context(
+        Some(Arc::new(anyhow::Context::context(
+            ffxi_dat::DatRoot::from_env_or_default(),
             "Select an install with `kuluu install use NAME`, or set FFXI_DAT_PATH.",
         )?))
     };

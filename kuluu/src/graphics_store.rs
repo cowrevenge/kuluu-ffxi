@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bevy::prelude::*;
+use bevy::prelude::{DetectChanges, Local, Res, Resource};
 use kuluu_render::GraphicsSettings;
 
 #[derive(Resource, Debug, Clone)]
@@ -266,6 +266,7 @@ pub fn persist_graphics_on_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::*;
     use kuluu_render::{GraphicsField, MinimapRadar, QualityPreset};
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -8635,6 +8635,28 @@ pub fn update_status_detail_window(
             node.padding.top = want_top;
         }
     }
+    // Owner ruling 2026-10-20 (capture ur/31, on the gap between the stats column and this one):
+    // "the gap left and right... is 2 pixels too wide" - beside-stats details seat off the LIVE
+    // persona column's right edge, so the two boxes always share one line whatever the installed
+    // persona width is (with the retail record that lands them at 16+112=128, killing kuluu's
+    // stray 2 px of air). Left-column replacers keep their own record x; DAT data stays untouched.
+    if matches!(
+        entry_kind,
+        Some(
+            crate::hud::status_panel::StatusEntryKind::Profile
+                | crate::hud::status_panel::StatusEntryKind::JobLevels
+                | crate::hud::status_panel::StatusEntryKind::MasterLevels
+                | crate::hud::status_panel::StatusEntryKind::CombatSkill
+                | crate::hud::status_panel::StatusEntryKind::MagicSkill
+                | crate::hud::status_panel::StatusEntryKind::CraftSkill,
+        )
+    ) {
+        if let Some(width) = persona_w {
+            node.left = Val::Px(
+                crate::hud::status_panel::PERSONA_STATUS_LEFT + width,
+            );
+        }
+    }
     // Retail packs a detail's readout rows tight: measured off the owner capture of `profile`, one
     // line to the next is ~16 px against this family's 15.2 px line box, so the chrome's 2 px row
     // gap would push every window past its record height.
